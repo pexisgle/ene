@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use ene_plugin_proto::{
-    CallContext, DeferredOutcome, DeferredStatus, IpcStream, PluginCapabilities, PluginIpcRequest,
-    PluginIpcResponse, SandboxConfigData, ToolError, ToolResult, VersionRange,
-    read_plugin_response, write_plugin_request,
+    CallContext, ConfigFieldError, ConfigOption, DeferredOutcome, DeferredStatus, IpcStream,
+    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError,
+    ToolResult, VersionRange, read_plugin_response, write_plugin_request,
 };
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
@@ -56,6 +56,12 @@ pub enum SetConfigOutcome {
     CachedOnly,
 }
 
+/// Protocol version at which the dynamic-config message family was introduced
+/// (same generation as [`SET_CONFIG_MIN_VERSION`]). Hosts still require the
+/// matching [`PluginCapabilities`] flags before sending, so older v5 binaries
+/// that lack the variants are never addressed.
+const DYNAMIC_CONFIG_MIN_VERSION: u32 = 5;
+
 /// Shared routing state for the single reader task.
 ///
 /// Every incoming [`PluginIpcResponse`] is dispatched here by the reader task
@@ -76,6 +82,9 @@ struct Router {
     /// drained by [`IpcPluginConnection::poll_deferred`] so a completion that
     /// arrived while the connection was idle is still delivered.
     deferred: parking_lot::Mutex<HashMap<String, Result<ToolResult, ToolError>>>,
+    /// Latest `ConfigSchemaChanged` push, if any has arrived since the last
+    /// [`IpcPluginConnection::take_config_schema_changed`] call.
+    schema_changed: parking_lot::Mutex<Option<(Option<serde_json::Value>, u32)>>,
 }
 
 impl Router {
@@ -84,6 +93,7 @@ impl Router {
             waiters: parking_lot::Mutex::new(HashMap::new()),
             streams: parking_lot::Mutex::new(HashMap::new()),
             deferred: parking_lot::Mutex::new(HashMap::new()),
+            schema_changed: parking_lot::Mutex::new(None),
         }
     }
 
@@ -96,6 +106,13 @@ impl Router {
             // Push: cache the deferred completion for later retrieval.
             PluginIpcResponse::DeferredCompleted { task_id, result } => {
                 self.deferred.lock().insert(task_id.clone(), result.clone());
+            }
+            // Push: retain the latest schema change (UI may poll later).
+            PluginIpcResponse::ConfigSchemaChanged {
+                schema,
+                config_version,
+            } => {
+                *self.schema_changed.lock() = Some((schema.clone(), *config_version));
             }
             // Stream: forward to the per-request stream channel.
             PluginIpcResponse::StreamChunk { request_id, .. }
@@ -128,18 +145,22 @@ impl Router {
 
 /// Extracts the `request_id` from a response variant, if it carries one.
 ///
-/// Push messages ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted))
-/// and [`HandshakeAck`](PluginIpcResponse::HandshakeAck) carry no
-/// `request_id` and return `None`.
+/// Push messages ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted),
+/// [`ConfigSchemaChanged`](PluginIpcResponse::ConfigSchemaChanged)) and
+/// [`HandshakeAck`](PluginIpcResponse::HandshakeAck) carry no `request_id`
+/// and return `None`.
 fn response_request_id(resp: &PluginIpcResponse) -> Option<&str> {
     match resp {
-        PluginIpcResponse::HandshakeAck { .. } | PluginIpcResponse::DeferredCompleted { .. } => {
-            None
-        }
+        PluginIpcResponse::HandshakeAck { .. }
+        | PluginIpcResponse::DeferredCompleted { .. }
+        | PluginIpcResponse::ConfigSchemaChanged { .. } => None,
         PluginIpcResponse::Ack { request_id }
         | PluginIpcResponse::Pong { request_id }
         | PluginIpcResponse::ConfigSchema { request_id, .. }
         | PluginIpcResponse::ConfigApplied { request_id }
+        | PluginIpcResponse::ConfigOptions { request_id, .. }
+        | PluginIpcResponse::ConfigValidated { request_id, .. }
+        | PluginIpcResponse::ConfigMigrated { request_id, .. }
         | PluginIpcResponse::Error { request_id, .. }
         | PluginIpcResponse::Tools { request_id, .. }
         | PluginIpcResponse::CallResult { request_id, .. }
@@ -450,6 +471,28 @@ impl IpcPluginConnection {
         self.negotiated_version() >= SET_CONFIG_MIN_VERSION
     }
 
+    /// Returns whether the peer can handle [`PluginIpcRequest::ListConfigOptions`].
+    ///
+    /// Requires protocol ≥ v5 **and**
+    /// [`PluginCapabilities::supports_list_config_options`]. Older v5 binaries
+    /// that omit the flag (serde default `false`) are never sent the variant.
+    pub fn supports_list_config_options(&self) -> bool {
+        self.negotiated_version() >= DYNAMIC_CONFIG_MIN_VERSION
+            && self.capabilities().supports_list_config_options
+    }
+
+    /// Returns whether the peer can handle [`PluginIpcRequest::ValidateConfig`].
+    pub fn supports_validate_config(&self) -> bool {
+        self.negotiated_version() >= DYNAMIC_CONFIG_MIN_VERSION
+            && self.capabilities().supports_validate_config
+    }
+
+    /// Returns whether the peer can handle [`PluginIpcRequest::MigrateConfig`].
+    pub fn supports_migrate_config(&self) -> bool {
+        self.negotiated_version() >= DYNAMIC_CONFIG_MIN_VERSION
+            && self.capabilities().supports_migrate_config
+    }
+
     /// Sends a `ListTools` request and returns the actual tool specs.
     pub async fn list_tools(&self) -> Result<Vec<ene_plugin_proto::ToolSpec>, PluginHostError> {
         let resp = self
@@ -469,24 +512,151 @@ impl IpcPluginConnection {
     /// Requests the plugin's config JSON Schema for schema-aware redaction of
     /// host log output.
     ///
-    /// Returns `None` when the plugin advertises no schema, or sends `null` or
-    /// an empty object; callers then fall back to the schema-independent
-    /// redaction ([`crate::redact::redact_config_unschematized`]).
+    /// Safe to call repeatedly (runtime re-fetch). Returns `None` when the
+    /// plugin advertises no schema, or sends `null` or an empty object;
+    /// callers then fall back to the schema-independent redaction
+    /// ([`crate::redact::redact_config_unschematized`]).
     pub async fn config_schema(&self) -> Result<Option<serde_json::Value>, PluginHostError> {
+        Ok(self.config_schema_with_version().await?.0)
+    }
+
+    /// Like [`config_schema`](Self::config_schema), but also returns the
+    /// plugin's current `config_version` (0 when unversioned / omitted).
+    pub async fn config_schema_with_version(
+        &self,
+    ) -> Result<(Option<serde_json::Value>, u32), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::GetConfigSchema {
                 request_id: String::new(),
             })
             .await?;
         match resp {
-            PluginIpcResponse::ConfigSchema { schema, .. } => Ok(schema.filter(|s| {
-                !s.is_null() && !matches!(s, serde_json::Value::Object(o) if o.is_empty())
-            })),
+            PluginIpcResponse::ConfigSchema {
+                schema,
+                config_version,
+                ..
+            } => Ok((
+                schema.filter(|s| {
+                    !s.is_null() && !matches!(s, serde_json::Value::Object(o) if o.is_empty())
+                }),
+                config_version,
+            )),
             PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to GetConfigSchema: {other:?}"
             ))),
         }
+    }
+
+    /// Lists dynamic options for a config path, or an empty list when the
+    /// peer does not advertise [`supports_list_config_options`](Self::supports_list_config_options)
+    /// (static-schema degrade path).
+    pub async fn list_config_options(
+        &self,
+        path: &str,
+    ) -> Result<Vec<ConfigOption>, PluginHostError> {
+        if !self.supports_list_config_options() {
+            tracing::debug!(
+                component = "IpcPluginConnection",
+                negotiated_version = self.negotiated_version(),
+                path,
+                "plugin does not support ListConfigOptions; returning empty options"
+            );
+            return Ok(Vec::new());
+        }
+        let resp = self
+            .do_request(PluginIpcRequest::ListConfigOptions {
+                request_id: String::new(),
+                path: path.to_string(),
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::ConfigOptions { options, .. } => Ok(options),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to ListConfigOptions: {other:?}"
+            ))),
+        }
+    }
+
+    /// Validates a config value via the plugin, or returns `Ok(vec![])`
+    /// (no plugin-side errors) when the peer does not advertise
+    /// [`supports_validate_config`](Self::supports_validate_config).
+    ///
+    /// Callers that need schema validation for unsupported peers should run
+    /// host-side JSON Schema validation themselves.
+    pub async fn validate_config(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<ConfigFieldError>, PluginHostError> {
+        if !self.supports_validate_config() {
+            tracing::debug!(
+                component = "IpcPluginConnection",
+                negotiated_version = self.negotiated_version(),
+                "plugin does not support ValidateConfig; host should use JSON Schema"
+            );
+            return Ok(Vec::new());
+        }
+        let resp = self
+            .do_request(PluginIpcRequest::ValidateConfig {
+                request_id: String::new(),
+                value: value.clone(),
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::ConfigValidated { errors, .. } => Ok(errors),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to ValidateConfig: {other:?}"
+            ))),
+        }
+    }
+
+    /// Migrates a stored config blob, or returns the input unchanged when the
+    /// peer does not advertise [`supports_migrate_config`](Self::supports_migrate_config).
+    ///
+    /// The returned tuple is `(migrated_value, config_version)`.
+    pub async fn migrate_config(
+        &self,
+        from_version: u32,
+        value: serde_json::Value,
+    ) -> Result<(serde_json::Value, u32), PluginHostError> {
+        if !self.supports_migrate_config() {
+            tracing::debug!(
+                component = "IpcPluginConnection",
+                negotiated_version = self.negotiated_version(),
+                from_version,
+                "plugin does not support MigrateConfig; returning value unchanged"
+            );
+            return Ok((value, from_version));
+        }
+        let resp = self
+            .do_request(PluginIpcRequest::MigrateConfig {
+                request_id: String::new(),
+                from_version,
+                value,
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::ConfigMigrated {
+                value,
+                config_version,
+                ..
+            } => Ok((value, config_version)),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to MigrateConfig: {other:?}"
+            ))),
+        }
+    }
+
+    /// Takes the latest [`PluginIpcResponse::ConfigSchemaChanged`] push, if
+    /// any has arrived since the previous take.
+    ///
+    /// Returns `(schema, config_version)`. Analogous to the deferred-completion
+    /// cache used by [`poll_deferred`](Self::poll_deferred).
+    pub fn take_config_schema_changed(&self) -> Option<(Option<serde_json::Value>, u32)> {
+        self.router.schema_changed.lock().take()
     }
 
     /// Sends a `Ping` and waits for `Pong` within [`PING_TIMEOUT`].
@@ -1076,6 +1246,15 @@ impl IpcPluginConnection {
             | PluginIpcRequest::SetConfig {
                 request_id: rid, ..
             }
+            | PluginIpcRequest::ListConfigOptions {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::ValidateConfig {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::MigrateConfig {
+                request_id: rid, ..
+            }
             | PluginIpcRequest::Ping { request_id: rid } => {
                 *rid = request_id.to_string();
             }
@@ -1153,6 +1332,9 @@ impl IpcPluginConnection {
             | PluginIpcRequest::SynthesizeSpeech { request_id, .. }
             | PluginIpcRequest::TranscribeAudio { request_id, .. }
             | PluginIpcRequest::SetConfig { request_id, .. }
+            | PluginIpcRequest::ListConfigOptions { request_id, .. }
+            | PluginIpcRequest::ValidateConfig { request_id, .. }
+            | PluginIpcRequest::MigrateConfig { request_id, .. }
             | PluginIpcRequest::Ping { request_id } => Some(request_id.as_str()),
             PluginIpcRequest::Handshake { .. } | PluginIpcRequest::Shutdown => None,
         }
@@ -1470,6 +1652,19 @@ mod tests {
                 request_id: String::new(),
                 config: serde_json::json!({}),
                 profiles: None,
+            },
+            PluginIpcRequest::ListConfigOptions {
+                request_id: String::new(),
+                path: "voice".into(),
+            },
+            PluginIpcRequest::ValidateConfig {
+                request_id: String::new(),
+                value: serde_json::json!({}),
+            },
+            PluginIpcRequest::MigrateConfig {
+                request_id: String::new(),
+                from_version: 0,
+                value: serde_json::json!({}),
             },
         ]
     }

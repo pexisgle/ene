@@ -5,7 +5,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::PluginHostError;
-use ene_plugin_proto::{CallContext, DeferredStatus, ToolRagProfile, ToolResult, ToolSpec};
+use ene_plugin_proto::{
+    CallContext, ConfigFieldError, ConfigOption, DeferredStatus, ToolRagProfile, ToolResult,
+    ToolSpec,
+};
 
 /// Result of a deferred (background) tool call.
 ///
@@ -137,6 +140,34 @@ pub trait ToolRegistry: Send + Sync {
 
     /// Returns the JSON Schema for the configuration this tool accepts.
     async fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Lists dynamic config options for `path`, or an empty list when unsupported.
+    async fn list_config_options(&self, _path: &str) -> Result<Vec<ConfigOption>, PluginHostError> {
+        Ok(Vec::new())
+    }
+
+    /// Plugin-delegated config validation; empty errors when unsupported
+    /// (caller should fall back to host JSON Schema validation).
+    async fn validate_config(
+        &self,
+        _value: &serde_json::Value,
+    ) -> Result<Vec<ConfigFieldError>, PluginHostError> {
+        Ok(Vec::new())
+    }
+
+    /// Migrates a stored config blob, or returns it unchanged when unsupported.
+    async fn migrate_config(
+        &self,
+        from_version: u32,
+        value: serde_json::Value,
+    ) -> Result<(serde_json::Value, u32), PluginHostError> {
+        Ok((value, from_version))
+    }
+
+    /// Takes a pending runtime schema-change push, if any.
+    fn take_config_schema_changed(&self) -> Option<(Option<serde_json::Value>, u32)> {
         None
     }
 }
@@ -453,6 +484,53 @@ impl ToolRegistry for CompositeToolRegistry {
         for registry in &registries {
             if let Some(schema) = registry.config_schema().await {
                 return Some(schema);
+            }
+        }
+        None
+    }
+
+    async fn list_config_options(&self, path: &str) -> Result<Vec<ConfigOption>, PluginHostError> {
+        let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
+        for registry in &registries {
+            let options = registry.list_config_options(path).await?;
+            if !options.is_empty() {
+                return Ok(options);
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    async fn validate_config(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<ConfigFieldError>, PluginHostError> {
+        let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
+        for registry in &registries {
+            let errors = registry.validate_config(value).await?;
+            if !errors.is_empty() {
+                return Ok(errors);
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    async fn migrate_config(
+        &self,
+        from_version: u32,
+        value: serde_json::Value,
+    ) -> Result<(serde_json::Value, u32), PluginHostError> {
+        let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
+        let Some(registry) = registries.first() else {
+            return Ok((value, from_version));
+        };
+        registry.migrate_config(from_version, value).await
+    }
+
+    fn take_config_schema_changed(&self) -> Option<(Option<serde_json::Value>, u32)> {
+        let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
+        for registry in &registries {
+            if let Some(changed) = registry.take_config_schema_changed() {
+                return Some(changed);
             }
         }
         None

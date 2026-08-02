@@ -172,6 +172,7 @@ async fn dispatch_mock(
                     llm_providers: vec![],
                     tts_providers: vec![],
                     stt_providers: vec![],
+                    ..PluginCapabilities::default()
                 },
             }
         }
@@ -318,10 +319,158 @@ async fn dispatch_mock(
             s.plugin_profiles = profiles.or_else(|| Some(serde_json::json!({})));
             PluginIpcResponse::ConfigApplied { request_id }
         }
+        // Default mock does not advertise dynamic-config capabilities; these
+        // arms exist so a mis-gated host send fails loudly in tests.
+        PluginIpcRequest::ListConfigOptions { request_id, .. }
+        | PluginIpcRequest::ValidateConfig { request_id, .. }
+        | PluginIpcRequest::MigrateConfig { request_id, .. } => PluginIpcResponse::Error {
+            request_id,
+            message: "dynamic config not enabled on default mock".to_string(),
+        },
         _ => PluginIpcResponse::Error {
             request_id: String::new(),
             message: "unsupported request in mock".to_string(),
         },
+    }
+}
+
+/// Mock that advertises and implements the dynamic-config IPC surface.
+async fn run_dynamic_config_mock(socket_path: PathBuf, state: Arc<Mutex<MockState>>) {
+    cleanup_path(&socket_path);
+    let mut listener = IpcListener::bind(&socket_path).expect("failed to bind dynamic mock");
+    let our_range = VersionRange {
+        min: PLUGIN_IPC_PROTOCOL_VERSION,
+        max: PLUGIN_IPC_PROTOCOL_VERSION,
+    };
+
+    loop {
+        let Ok(mut stream) = listener.accept().await else {
+            break;
+        };
+        let state = Arc::clone(&state);
+
+        loop {
+            let Ok(Some(req)) = read_plugin_request(&mut stream).await else {
+                break;
+            };
+
+            // Emit a schema-changed push ahead of ListTools so the host
+            // router cache can be exercised like DeferredCompleted.
+            let emit_schema_push = matches!(&req, PluginIpcRequest::ListTools { .. });
+
+            let resp = match req {
+                PluginIpcRequest::Handshake {
+                    version: host_range,
+                    plugin_config,
+                    plugin_profiles,
+                    ..
+                } => match our_range.negotiate(&host_range) {
+                    None => PluginIpcResponse::Error {
+                        request_id: String::new(),
+                        message: "version mismatch".into(),
+                    },
+                    Some(negotiated) => {
+                        {
+                            let mut s = state.lock().await;
+                            s.plugin_config = plugin_config;
+                            s.plugin_profiles = plugin_profiles;
+                        }
+                        PluginIpcResponse::HandshakeAck {
+                            version: negotiated,
+                            capabilities: PluginCapabilities {
+                                tools: 1,
+                                supports_list_config_options: true,
+                                supports_validate_config: true,
+                                supports_migrate_config: true,
+                                config_version: 2,
+                                ..PluginCapabilities::default()
+                            },
+                        }
+                    }
+                },
+                PluginIpcRequest::ListTools { request_id } => PluginIpcResponse::Tools {
+                    request_id,
+                    tools: vec![ToolSpec::new(
+                        ToolName::new("mock.echo"),
+                        "Echoes arguments back.",
+                        serde_json::json!({}),
+                    )],
+                },
+                PluginIpcRequest::GetConfigSchema { request_id } => {
+                    PluginIpcResponse::ConfigSchema {
+                        request_id,
+                        schema: Some(serde_json::json!({"type": "object"})),
+                        config_version: 2,
+                    }
+                }
+                PluginIpcRequest::ListConfigOptions { request_id, path } => {
+                    let options = if path == "voice" {
+                        vec![ene_plugin_proto::ConfigOption {
+                            value: serde_json::json!("alloy"),
+                            label: "Alloy".into(),
+                            group: None,
+                        }]
+                    } else {
+                        vec![]
+                    };
+                    PluginIpcResponse::ConfigOptions {
+                        request_id,
+                        options,
+                    }
+                }
+                PluginIpcRequest::ValidateConfig { request_id, value } => {
+                    let errors = if value.get("voice").is_none() {
+                        vec![ene_plugin_proto::ConfigFieldError {
+                            field_path: "voice".into(),
+                            message: "required".into(),
+                        }]
+                    } else {
+                        vec![]
+                    };
+                    PluginIpcResponse::ConfigValidated { request_id, errors }
+                }
+                PluginIpcRequest::MigrateConfig {
+                    request_id,
+                    from_version,
+                    value,
+                } => {
+                    let mut migrated = value;
+                    if from_version < 2
+                        && let Some(obj) = migrated.as_object_mut()
+                        && let Some(speaker) = obj.remove("speaker")
+                    {
+                        obj.insert("voice".into(), speaker);
+                    }
+                    PluginIpcResponse::ConfigMigrated {
+                        request_id,
+                        value: migrated,
+                        config_version: 2,
+                    }
+                }
+                PluginIpcRequest::Ping { request_id } => PluginIpcResponse::Pong { request_id },
+                PluginIpcRequest::Shutdown => PluginIpcResponse::Ack {
+                    request_id: String::new(),
+                },
+                other => PluginIpcResponse::Error {
+                    request_id: String::new(),
+                    message: format!("unsupported in dynamic mock: {other:?}"),
+                },
+            };
+
+            if emit_schema_push {
+                let push = PluginIpcResponse::ConfigSchemaChanged {
+                    schema: Some(serde_json::json!({"type": "object", "title": "live"})),
+                    config_version: 2,
+                };
+                if write_plugin_response(&mut stream, &push).await.is_err() {
+                    break;
+                }
+            }
+
+            if write_plugin_response(&mut stream, &resp).await.is_err() {
+                break;
+            }
+        }
     }
 }
 
@@ -476,6 +625,7 @@ async fn dispatch_concurrent_mock(
                     llm_providers: vec![],
                     tts_providers: vec![],
                     stt_providers: vec![],
+                    ..PluginCapabilities::default()
                 },
             }
         }
@@ -1547,6 +1697,127 @@ async fn concurrent_transport_failures_coalesce_into_one_reconnect() {
         r2.expect("call b must succeed after coalesced reconnect")
             .text_for_llm(),
         "b"
+    );
+
+    cleanup_path(&socket_path);
+}
+
+// ── Test: Dynamic config IPC (issue #314) ────────────────────────────────
+
+#[tokio::test]
+async fn dynamic_config_happy_path_and_schema_changed_push() {
+    let socket_path = test_socket_path("dynamic-config");
+    let state = Arc::new(Mutex::new(MockState::default()));
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        run_dynamic_config_mock(server_path, server_state).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
+    )
+    .await
+    .expect("handshake should succeed");
+
+    assert!(conn.supports_list_config_options());
+    assert!(conn.supports_validate_config());
+    assert!(conn.supports_migrate_config());
+    assert_eq!(conn.capabilities().config_version, 2);
+
+    let options = conn
+        .list_config_options("voice")
+        .await
+        .expect("list_config_options");
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].label, "Alloy");
+
+    let errors = conn
+        .validate_config(&serde_json::json!({}))
+        .await
+        .expect("validate_config");
+    assert_eq!(errors.len(), 1);
+
+    let (migrated, version) = conn
+        .migrate_config(1, serde_json::json!({"speaker": "alloy"}))
+        .await
+        .expect("migrate_config");
+    assert_eq!(migrated, serde_json::json!({"voice": "alloy"}));
+    assert_eq!(version, 2);
+
+    // ListTools triggers a ConfigSchemaChanged push ahead of Tools.
+    conn.list_tools().await.expect("list_tools");
+    let (schema, ver) = conn
+        .take_config_schema_changed()
+        .expect("schema change push must be cached");
+    assert_eq!(
+        schema.as_ref().and_then(|s| s.get("title")),
+        Some(&serde_json::json!("live"))
+    );
+    assert_eq!(ver, 2);
+    assert!(conn.take_config_schema_changed().is_none());
+
+    drop(state);
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn dynamic_config_degrades_when_capabilities_absent() {
+    // Default mock negotiates v5 but omits dynamic-config capability flags
+    // (serde defaults) — host must not send the new variants.
+    let (conn, _state, socket_path) = spawn_and_connect("dynamic-degrade-caps").await;
+
+    assert!(conn.supports_set_config());
+    assert!(!conn.supports_list_config_options());
+    assert!(!conn.supports_validate_config());
+    assert!(!conn.supports_migrate_config());
+
+    assert!(
+        conn.list_config_options("voice")
+            .await
+            .expect("degrade list")
+            .is_empty()
+    );
+    assert!(
+        conn.validate_config(&serde_json::json!({"k": 1}))
+            .await
+            .expect("degrade validate")
+            .is_empty()
+    );
+    let (value, ver) = conn
+        .migrate_config(1, serde_json::json!({"k": 1}))
+        .await
+        .expect("degrade migrate");
+    assert_eq!(value, serde_json::json!({"k": 1}));
+    assert_eq!(ver, 1);
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn dynamic_config_degrades_on_n_minus_one_plugin() {
+    let old_plugin_range = VersionRange {
+        min: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+        max: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+    };
+    let (result, socket_path) =
+        try_connect_with_plugin_version("dynamic-old", old_plugin_range).await;
+    let conn = result.expect("N-1 handshake should succeed");
+
+    assert!(!conn.supports_list_config_options());
+    assert!(!conn.supports_validate_config());
+    assert!(!conn.supports_migrate_config());
+    assert!(
+        conn.list_config_options("voice")
+            .await
+            .expect("N-1 list degrade")
+            .is_empty()
     );
 
     cleanup_path(&socket_path);

@@ -284,6 +284,7 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             PluginIpcResponse::ConfigSchema {
                 request_id: request_id.clone(),
                 schema,
+                config_version: 0,
             }
         }
         PluginIpcRequest::ListTools { request_id } => PluginIpcResponse::Tools {
@@ -915,7 +916,9 @@ async fn server_config_schema() {
     )
     .await;
     match resp {
-        PluginIpcResponse::ConfigSchema { request_id, schema } => {
+        PluginIpcResponse::ConfigSchema {
+            request_id, schema, ..
+        } => {
             assert_eq!(request_id, "req-1");
             let schema = schema.expect("schema should be present");
             assert_eq!(schema["type"], "object");

@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 /// - `tools` → merged into the composite tool registry
 /// - `llm_providers` → registered as `LlmProviderFactory` entries
 /// - `tts_providers` / `stt_providers` → reserved for future use
+/// - dynamic-config flags → gate `ListConfigOptions` / `ValidateConfig` /
+///   `MigrateConfig` (protocol v5+) so older v5 binaries that lack those
+///   variants are never sent them
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginCapabilities {
     /// Number of tools this plugin provides (call `ListTools` for specs).
@@ -31,6 +34,35 @@ pub struct PluginCapabilities {
     /// STT providers (reserved for future use).
     #[serde(default)]
     pub stt_providers: Vec<SttProviderSpec>,
+
+    /// Whether the plugin handles [`crate::PluginIpcRequest::ListConfigOptions`].
+    ///
+    /// Absent on older binaries (`#[serde(default)]` → `false`); the host
+    /// then skips the IPC and degrades to static schema only.
+    #[serde(default)]
+    pub supports_list_config_options: bool,
+
+    /// Whether the plugin handles [`crate::PluginIpcRequest::ValidateConfig`].
+    ///
+    /// Absent on older binaries (`#[serde(default)]` → `false`); the host
+    /// then validates with JSON Schema locally instead of delegating.
+    #[serde(default)]
+    pub supports_validate_config: bool,
+
+    /// Whether the plugin handles [`crate::PluginIpcRequest::MigrateConfig`].
+    ///
+    /// Absent on older binaries (`#[serde(default)]` → `false`); the host
+    /// then skips migration.
+    #[serde(default)]
+    pub supports_migrate_config: bool,
+
+    /// Current configuration schema version this plugin expects.
+    ///
+    /// `0` (default) means the plugin does not version its config. When the
+    /// host's stored version is older, it may call `MigrateConfig` if
+    /// [`supports_migrate_config`](Self::supports_migrate_config) is set.
+    #[serde(default)]
+    pub config_version: u32,
 }
 
 /// Specification of an LLM provider exposed by a plugin.
@@ -177,6 +209,10 @@ mod tests {
         assert!(caps.llm_providers.is_empty());
         assert!(caps.tts_providers.is_empty());
         assert!(caps.stt_providers.is_empty());
+        assert!(!caps.supports_list_config_options);
+        assert!(!caps.supports_validate_config);
+        assert!(!caps.supports_migrate_config);
+        assert_eq!(caps.config_version, 0);
     }
 
     #[test]
@@ -196,10 +232,24 @@ mod tests {
             }],
             tts_providers: vec![],
             stt_providers: vec![],
+            supports_list_config_options: true,
+            supports_validate_config: true,
+            supports_migrate_config: true,
+            config_version: 2,
         };
         let json = serde_json::to_string(&caps).unwrap();
         let deser: PluginCapabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(caps, deser);
+    }
+
+    #[test]
+    fn capabilities_missing_dynamic_config_flags_default_false() {
+        let json = r#"{"tools":1}"#;
+        let caps: PluginCapabilities = serde_json::from_str(json).unwrap();
+        assert!(!caps.supports_list_config_options);
+        assert!(!caps.supports_validate_config);
+        assert!(!caps.supports_migrate_config);
+        assert_eq!(caps.config_version, 0);
     }
 
     #[test]
