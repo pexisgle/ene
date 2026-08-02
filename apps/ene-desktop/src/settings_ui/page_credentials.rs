@@ -85,11 +85,10 @@ fn render_row(
         ui.label(format!(
             "{}  |  {}",
             status,
-            row.expires_at
-                .map(|t| format!("{} UTC", t.format("%Y-%m-%d %H:%M:%S")))
-                .unwrap_or_else(
-                    || fl!(crate::i18n::loader(), "credentials-expiry-none").to_string()
-                )
+            row.expires_at.map_or_else(
+                || fl!(crate::i18n::loader(), "credentials-expiry-none").to_string(),
+                |t| format!("{} UTC", t.format("%Y-%m-%d %H:%M:%S"))
+            )
         ));
         ui.horizontal(|ui| {
             if ui
@@ -123,7 +122,7 @@ fn credential_kind_label(row: &CredentialInfo) -> String {
 }
 
 fn authorize(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity, id: String) {
-    let result = ai.authorize_credential_blocking(id).map(|_| ());
+    let result = ai.authorize_credential_blocking(id);
     set_message(world, ui_entity, result);
 }
 

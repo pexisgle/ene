@@ -501,8 +501,8 @@ mod tests {
         // awaiting must complete instead of waiting on the refresh's lock.
         // The mock parks inside `refresh` until the store has run.
         struct ParkingRefresher {
-            started: tokio::sync::oneshot::Sender<()>,
-            resume: tokio::sync::oneshot::Receiver<()>,
+            started: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            resume: parking_lot::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
         }
         #[async_trait]
         impl TokenRefresher for ParkingRefresher {
@@ -511,8 +511,12 @@ mod tests {
                 _id: &str,
                 _current: &CredentialStore,
             ) -> Result<CredentialStore, ConnectorError> {
-                let _ = self.started.send(());
-                let _ = self.resume.await;
+                if let Some(started) = self.started.lock().take() {
+                    let _ = started.send(());
+                }
+                if let Some(resume) = self.resume.lock().take() {
+                    let _ = resume.await;
+                }
                 Ok(CredentialStore::oauth2(
                     "fresh-token",
                     None::<&str>,
@@ -526,8 +530,8 @@ mod tests {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
         let refresher = Arc::new(ParkingRefresher {
-            started: started_tx,
-            resume: resume_rx,
+            started: parking_lot::Mutex::new(Some(started_tx)),
+            resume: parking_lot::Mutex::new(Some(resume_rx)),
         });
         let vault = Arc::new(
             CredentialVault::new(vec![VaultEntry::new("google.calendar", store)])

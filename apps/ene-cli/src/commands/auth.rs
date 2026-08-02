@@ -44,9 +44,10 @@ impl CliCommand for AuthCommand {
                         style::header(&row.id),
                         kind_label(row),
                         if row.stored { "stored" } else { "declared" },
-                        row.expires_at
-                            .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                            .unwrap_or_else(|| "never".to_string()),
+                        row.expires_at.map_or_else(
+                            || "never".to_string(),
+                            |t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                        ),
                     );
                 }
                 Ok(CommandOutcome::Continue)
@@ -86,9 +87,10 @@ impl CliCommand for AuthCommand {
                                 row.id,
                                 kind_label(row),
                                 status,
-                                row.expires_at
-                                    .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                                    .unwrap_or_else(|| "never".to_string())
+                                row.expires_at.map_or_else(
+                                    || "never".to_string(),
+                                    |t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                                )
                             ))
                         );
                     }
