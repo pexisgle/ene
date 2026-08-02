@@ -679,20 +679,40 @@ mod tests {
     #[tokio::test]
     async fn anthropic_http_caller_builds_auth_injected_client() {
         let ctx = test_ctx();
+        // A tiny local HTTP sink that records whether the auth header arrived.
+        // reqwest applies the client's default headers at execute time, so the
+        // header is observable only on the wire.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind sink");
+        let addr = listener.local_addr().expect("addr");
+        let header_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let header_seen_clone = Arc::clone(&header_seen);
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            if let Ok(n) = std::io::Read::read(&mut stream, &mut buf) {
+                let request = String::from_utf8_lossy(&buf[..n]);
+                if request.contains("x-api-key: sk-ant-mock-host") {
+                    header_seen_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            let _ = std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+            );
+        });
+
         let caller = anthropic_http_caller(&ctx).await.expect("build caller");
-        // The client carries the resolved key as its x-api-key default header.
-        let request = caller
-            .client()
-            .get(ANTHROPIC_API_URL)
-            .build()
-            .expect("build request");
-        let header = request
-            .headers()
-            .get("x-api-key")
-            .expect("auth header")
-            .to_str()
-            .expect("header value");
-        assert_eq!(header, "sk-ant-mock-host");
+        let response = caller
+            .execute(caller.client().post(format!("http://{addr}")).body("{}"))
+            .await
+            .expect("execute");
+        assert!(response.status().is_success());
+        assert!(
+            header_seen.load(std::sync::atomic::Ordering::Relaxed),
+            "x-api-key header must be sent with the request"
+        );
     }
 
     #[tokio::test]
