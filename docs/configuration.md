@@ -233,10 +233,15 @@ with zero query relevance. `access_boost_half_life_days` (default `14.0`, matchi
 fade in the quality factor — independent of `default_forgetting_half_life_days`
 (content forgetting / recency).
 
-`mind.emotion.classifier_language` (default `"en"`) selects the prompt-library
-language used for the affect classifier and the cognitive output contract, and
-drives the deterministic pattern pack (forget regexes and recall-intent keyword
-lists). The user-facing LLM instruction
+`mind.language` (default: resolved from the system locale, `"en"` unless the
+primary language code is `ja`) is the app-wide language for cognitive prompts
+and deterministic patterns: the affect classifier, cognitive output contract,
+compression summarizer, recall-intent keyword lists, and memory-extraction
+patterns all follow it unless their per-task override is set.
+`mind.emotion.classifier_language` and `mind.context.compression_language`
+override it per task; empty (the default) means inherit `mind.language`.
+Memory extraction follows `mind.language` directly and no longer reads the
+classifier setting. The user-facing LLM instruction
 strings are loaded at runtime from `assets/lang/{lang}/prompts.json` and the
 deterministic patterns from `assets/lang/{lang}/patterns.json`; when a
 pack is absent the build falls back to a compile-time embedded pack for the

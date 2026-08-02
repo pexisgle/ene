@@ -883,6 +883,7 @@ impl CharacterSettings {
         };
         self.with_config_mut(|c| {
             if let Ok(mut mind) = c.get_section::<ene_mind::MindConfig>() {
+                mind.language = lang.into();
                 mind.emotion.classifier_language = lang.into();
                 drop(c.set_section(&mind));
             }

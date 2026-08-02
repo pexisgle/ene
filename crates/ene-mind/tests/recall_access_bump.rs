@@ -95,6 +95,7 @@ async fn insert_memory(
 /// needs its defaults.
 fn test_config() -> MindConfig {
     MindConfig {
+        language: "en".into(),
         context: ContextConfig::default(),
         ..MindConfig::default()
     }

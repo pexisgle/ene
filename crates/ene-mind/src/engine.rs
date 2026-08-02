@@ -443,7 +443,7 @@ impl CognitionEngine {
         // interruption; `None` (legacy/test callers) injects nothing.
         let interruption_note = prefetch.interruption_note.flatten();
 
-        let prompts = PromptLibrary::load(&ctx.config.emotion.classifier_language);
+        let prompts = PromptLibrary::load(ctx.config.resolved_classifier_language());
         let char_name = ctx.card.data.get_character_name();
         let platform_contract = Some(
             prompts
@@ -482,7 +482,7 @@ impl CognitionEngine {
             user_persona,
             compression_pending: ctx.compression_pending,
             user_input: ctx.user_input.to_string(),
-            lang: ctx.config.emotion.classifier_language.clone(),
+            lang: ctx.config.resolved_classifier_language().to_owned(),
             now: None,
         };
 

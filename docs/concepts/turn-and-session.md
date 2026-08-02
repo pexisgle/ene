@@ -207,10 +207,13 @@ are trimmed.
 The user-facing LLM instruction strings (system framing, emotion rules,
 summarizer and extractor prompts, split reasons, and so on) are not hard-coded.
 `ene-config`'s `PromptLibrary` loads them at runtime from a per-language JSON
-pack at `assets/lang/{lang}/prompts.json`, selected by the `mind.emotion.classifier_language`
-setting. This keeps prompt text editable without recompiling, and adding a
-language is a matter of dropping in a new `assets/lang/{lang}/` directory — no
-Rust code change to the loading path is required.
+pack at `assets/lang/{lang}/prompts.json`, selected by the app-wide
+`mind.language` setting (per-task overrides:
+`mind.emotion.classifier_language` for classifier/cognitive prompts,
+`mind.context.compression_language` for the summarizer — empty inherits
+`mind.language`). This keeps prompt text editable without recompiling, and
+adding a language is a matter of dropping in a new `assets/lang/{lang}/`
+directory — no Rust code change to the loading path is required.
 
 When a runtime pack is missing or unreadable (unit tests, CI, or a stripped
 install), `PromptLibrary` falls back to a compile-time embedded pack. Only the
@@ -222,7 +225,8 @@ identical.
 
 Deterministic memory heuristics use the same pack layout: `ene-config`'s
 `PatternLibrary` loads per-language data from `assets/lang/{lang}/patterns.json`,
-selected by the same `mind.emotion.classifier_language` setting. The pack holds
+selected by `mind.language` (memory extraction is deliberately independent of
+the classifier setting). The pack holds
 the forget-detection regexes *and* the recall-intent keyword lists (episodic /
 preference / relationship / affective / procedure hints). Adding a
 language is therefore a data-only change (drop in a `patterns.json`), and a

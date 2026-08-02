@@ -17,6 +17,12 @@ ene_config::define_config!(
     /// Controls context budget, memory extraction/retention, emotion processing,
     /// character compilation, and proactive companion speech.
     pub struct MindConfig {
+        /// App-wide language for cognitive prompts and deterministic patterns
+        /// (`en` or `ja`). Empty (the default) resolves to the system locale
+        /// on first use; per-task overrides (`emotion.classifier_language`,
+        /// `context.compression_language`) inherit the resolved value.
+        pub language: String,
+
         /// Context and token budget management.
         #[serde(skip_deserializing, default, skip_serializing)]
         #[schemars(skip)]
@@ -45,6 +51,73 @@ ene_config::define_config!(
         pub session: SessionConfig,
     }
 );
+
+/// System-locale default for an unset [`MindConfig::language`], resolved once
+/// and cached: a primary language code of `ja` selects Japanese, everything
+/// else (including absent locale, `C.UTF-8`, `en-US`, `fr`) falls back to
+/// English so CI stays deterministic.
+static SYSTEM_LANGUAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn system_language() -> &'static str {
+    SYSTEM_LANGUAGE
+        .get_or_init(|| resolve_system_language(sys_locale::get_locale().as_deref()))
+        .as_str()
+}
+
+/// Maps an optional OS locale string to the app-wide default language.
+///
+/// Only a primary subtag of `ja` selects Japanese; every other value keeps the
+/// English default. Kept pure so tests can pin the locale without touching
+/// process-global environment variables.
+fn resolve_system_language(locale: Option<&str>) -> String {
+    match locale.map(ene_config::resolve_language_alias).as_deref() {
+        Some("ja") => "ja".to_string(),
+        _ => "en".to_string(),
+    }
+}
+
+impl MindConfig {
+    /// Effective app-wide language: explicit [`MindConfig::language`] when
+    /// set, else the system-locale default.
+    pub fn resolved_language(&self) -> &str {
+        if self.language.is_empty() {
+            system_language()
+        } else {
+            &self.language
+        }
+    }
+
+    /// Effective language for the affect classifier and cognitive output
+    /// contract prompts: the per-task override when set, else the app-wide
+    /// [`MindConfig::resolved_language`].
+    pub fn resolved_classifier_language(&self) -> &str {
+        if self.emotion.classifier_language.is_empty() {
+            self.resolved_language()
+        } else {
+            &self.emotion.classifier_language
+        }
+    }
+
+    /// Effective language for compression summarization: the per-task
+    /// override when set, else the app-wide [`MindConfig::resolved_language`].
+    pub fn resolved_compression_language(&self) -> &str {
+        if self.context.compression_language.is_empty() {
+            self.resolved_language()
+        } else {
+            &self.context.compression_language
+        }
+    }
+
+    /// `context` with the compression language materialized, so the
+    /// summarizer observes the inherited app-wide language without knowing
+    /// about the override chain.
+    pub fn resolved_context_config(&self) -> ContextConfig {
+        let mut cfg = self.context.clone();
+        self.resolved_compression_language()
+            .clone_into(&mut cfg.compression_language);
+        cfg
+    }
+}
 
 // ────────────────────────────────────────────
 // Sub-sections
@@ -88,7 +161,8 @@ pub struct ContextConfig {
     pub arc_span_threshold: usize,
     /// Timeout in seconds for a single compression summarization call.
     pub compression_timeout_secs: u64,
-    /// Prompt library language for compression summarizer (`en` or `ja`).
+    /// Prompt library language for compression summarizer. Empty (the
+    /// default) inherits [`MindConfig::language`].
     pub compression_language: String,
 }
 
@@ -102,7 +176,7 @@ impl Default for ContextConfig {
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
             compression_timeout_secs: 60,
-            compression_language: "en".into(),
+            compression_language: String::new(),
         }
     }
 }
@@ -534,7 +608,8 @@ pub struct EmotionConfig {
     )]
     #[schemars(skip)]
     pub classifier_min_confidence: f32,
-    /// Prompt library language for affect classifier and cognitive output contract (`en` or `ja`).
+    /// Prompt library language for affect classifier and cognitive output
+    /// contract. Empty (the default) inherits [`MindConfig::language`].
     pub classifier_language: String,
 }
 
@@ -547,7 +622,7 @@ impl Default for EmotionConfig {
             llm_can_propose_expression: true,
             classifier_timeout_secs: crate::emotion::classifier::DEFAULT_CLASSIFIER_TIMEOUT_SECS,
             classifier_min_confidence: 0.5,
-            classifier_language: "en".into(),
+            classifier_language: String::new(),
         }
     }
 }
@@ -1427,7 +1502,42 @@ mod tests {
         let cfg: EmotionConfig = serde_json::from_str(r#"{"enabled":false}"#).expect("deserialize");
         assert!(!cfg.enabled);
         assert!((cfg.decay_half_life_minutes - 30.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.classifier_language, "en");
+        assert!(cfg.classifier_language.is_empty());
+    }
+
+    #[test]
+    fn resolve_system_language_selects_ja_only_for_japanese_locale() {
+        assert_eq!(resolve_system_language(Some("ja_JP.UTF-8")), "ja");
+        assert_eq!(resolve_system_language(Some("JA")), "ja");
+        assert_eq!(resolve_system_language(Some("ja-JP")), "ja");
+        assert_eq!(resolve_system_language(Some("en-US")), "en");
+        assert_eq!(resolve_system_language(Some("fr_FR.UTF-8")), "en");
+        assert_eq!(resolve_system_language(Some("C.UTF-8")), "en");
+        assert_eq!(resolve_system_language(None), "en");
+    }
+
+    #[test]
+    fn mind_language_unset_resolves_from_system_locale() {
+        let cfg = MindConfig::default();
+        assert!(cfg.language.is_empty());
+        assert_eq!(cfg.resolved_language(), system_language());
+        assert_eq!(cfg.resolved_classifier_language(), system_language());
+        assert_eq!(cfg.resolved_compression_language(), system_language());
+    }
+
+    #[test]
+    fn resolved_language_overrides_inherit_mind_language() {
+        let mut cfg = MindConfig {
+            language: "ja".into(),
+            ..MindConfig::default()
+        };
+        assert_eq!(cfg.resolved_classifier_language(), "ja");
+        assert_eq!(cfg.resolved_compression_language(), "ja");
+        cfg.emotion.classifier_language = "en".into();
+        cfg.context.compression_language = "en".into();
+        assert_eq!(cfg.resolved_classifier_language(), "en");
+        assert_eq!(cfg.resolved_compression_language(), "en");
+        assert_eq!(cfg.resolved_context_config().compression_language, "en");
     }
 
     #[test]

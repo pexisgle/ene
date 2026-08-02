@@ -75,7 +75,7 @@ impl MemoryWriter {
         input: &PostTurnInput<'_>,
         providers: MemoryWriteProviders<'_>,
     ) -> Result<usize, CognitionError> {
-        let locale = locale_from_classifier_language(&config.emotion.classifier_language);
+        let locale = candidate::Locale::resolve(config.resolved_language());
         let turn = candidate::TurnInput {
             user_message: input.turn.user_message,
             assistant_message: input.turn.assistant_message,
@@ -481,14 +481,6 @@ fn sanitize_ref(raw: &str) -> String {
     }
 }
 
-/// Resolves the configured classifier language to a [`candidate::Locale`]
-/// carrying the primary language code (case-insensitive, primary subtag,
-/// `"jp"` → `"ja"`). The deterministic extractor loads forget patterns for the
-/// code and falls back to English patterns when no pack exists for it.
-fn locale_from_classifier_language(lang: &str) -> candidate::Locale {
-    candidate::Locale::resolve(lang)
-}
-
 #[derive(Default)]
 struct ArbiterOutcomeSummary {
     persisted: usize,
@@ -652,15 +644,15 @@ mod tests {
     }
 
     #[test]
-    fn locale_from_classifier_language_resolves_primary_code() {
-        assert_eq!(locale_from_classifier_language("ja").code(), "ja");
-        assert_eq!(locale_from_classifier_language("JA").code(), "ja");
-        assert_eq!(locale_from_classifier_language("ja-JP").code(), "ja");
-        assert_eq!(locale_from_classifier_language("jp").code(), "ja");
-        assert_eq!(locale_from_classifier_language("en").code(), "en");
+    fn locale_resolves_primary_code() {
+        assert_eq!(candidate::Locale::resolve("ja").code(), "ja");
+        assert_eq!(candidate::Locale::resolve("JA").code(), "ja");
+        assert_eq!(candidate::Locale::resolve("ja-JP").code(), "ja");
+        assert_eq!(candidate::Locale::resolve("jp").code(), "ja");
+        assert_eq!(candidate::Locale::resolve("en").code(), "en");
         // Unknown languages resolve to their own code and fall back to English
         // patterns in the deterministic extractor.
-        assert_eq!(locale_from_classifier_language("zh").code(), "zh");
+        assert_eq!(candidate::Locale::resolve("zh").code(), "zh");
     }
 
     #[tokio::test]
@@ -720,8 +712,10 @@ mod tests {
         // remember has no deterministic fallback, so only the LLM item
         // should be persisted.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.emotion.classifier_language = "en".into();
+        let config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
 
         let json = r#"{
             "candidates": [{
@@ -777,8 +771,10 @@ mod tests {
         // pattern; remember is now LLM-owned, so nothing persists when
         // the LLM returns no candidates and no forget was requested.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.emotion.classifier_language = "en".into();
+        let config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
 
         let provider = MockProvider::new(r#"{"candidates": []}"#);
         let affect = AffectState::neutral("ene");
@@ -817,8 +813,10 @@ mod tests {
     #[tokio::test]
     async fn llm_empty_does_not_persist_soft_signals_without_remember() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.emotion.classifier_language = "en".into();
+        let config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
 
         let provider = MockProvider::new(r#"{"candidates": []}"#);
         let affect = AffectState::neutral("ene");
@@ -857,8 +855,10 @@ mod tests {
     #[tokio::test]
     async fn llm_success_persists_llm_candidates() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.emotion.classifier_language = "en".into();
+        let config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
 
         let json = r#"{
             "candidates": [{
@@ -914,8 +914,10 @@ mod tests {
         // remember is now LLM-owned, so nothing persists on failure
         // unless a forget was requested.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.emotion.classifier_language = "en".into();
+        let config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
 
         let provider = FailingProvider;
         let affect = AffectState::neutral("ene");
@@ -954,8 +956,10 @@ mod tests {
     #[tokio::test]
     async fn no_llm_provider_persists_nothing_without_forget() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.emotion.classifier_language = "en".into();
+        let config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
 
         let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
@@ -987,8 +991,10 @@ mod tests {
         // Forget reliability is preserved without an LLM: the deterministic
         // forget safety net must mark the target deleted (existing guarantee).
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.emotion.classifier_language = "en".into();
+        let config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
 
         let existing_id = store
             .insert_typed_memory(&NewMemoryItem {
@@ -1046,12 +1052,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zh_classifier_language_falls_back_to_english_forget_patterns() {
+    async fn zh_language_falls_back_to_english_forget_patterns() {
         // "zh" has no pattern pack; the deterministic extractor falls back to
         // English patterns, so forget still works for zh users.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.emotion.classifier_language = "zh".into();
+        let config = MindConfig {
+            language: "zh".into(),
+            ..MindConfig::default()
+        };
 
         let existing_id = store
             .insert_typed_memory(&NewMemoryItem {
@@ -1119,8 +1127,10 @@ mod tests {
     #[tokio::test]
     async fn forget_safety_net_applies_when_llm_owns_turn() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.emotion.classifier_language = "en".into();
+        let config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
 
         let existing_id = store
             .insert_typed_memory(&NewMemoryItem {
