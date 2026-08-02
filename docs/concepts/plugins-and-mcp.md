@@ -35,7 +35,7 @@ Plugins communicate over `stdin`/`stdout` using **IPC Protocol v5**:
 - **Handshake Negotiation**: The host sends `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`, i.e. `VersionRange { min: 4, max: 5 }` — not a single pinned value. The plugin intersects that range with its own supported range via `VersionRange::negotiate` and responds with `HandshakeAck { version, capabilities: PluginCapabilities }`, where `version` is the highest version common to both sides.
 - **Handshake Timeout**: The host bounds how long it waits for the `HandshakeAck` (`plugins.handshake_timeout_ms`, default 10 s). A plugin that accepts the socket but never replies fails the handshake with `PluginHostError::HandshakeFailed` instead of blocking startup of the remaining plugins. Plugin authors must answer the handshake promptly and defer heavy initialization (model loading, etc.) until afterwards — see `run_plugin_server` in `ene-plugin`.
 - **Request Correlation**: All async requests and responses include a mandatory `request_id` (`Uuid`).
-- **Capabilities**: Plugins advertise supported capabilities (`tools`, `llm_providers`, `stt_providers`, `tts_providers`), each provider spec also declaring a `concurrency: ConcurrencyHint` (see [§3](#3-provider-concurrency-concurrencyhint)).
+- **Capabilities**: Plugins advertise supported capabilities (`tools`, `llm_providers`, `stt_providers`, `tts_providers`), each provider spec also declaring a `concurrency: ConcurrencyHint` and a `resource: ResourceClass` (see [§3](#3-provider-concurrency-concurrencyhint)).
 
 ### Versioning policy (N-1 backward compatibility)
 
@@ -85,6 +85,8 @@ The field is `#[serde(default)]`, like every other field added to this wire prot
 
 `ene-plugin-host`'s `IpcLlmProvider` (`crates/ene-plugin-host/src/ipc_provider.rs`) enforces the declared hint with a `ConcurrencyLimiter`: a `tokio::sync::Semaphore` sized to `max_in_flight`, plus up to `queue_depth` callers allowed to wait for a permit. A request beyond both bounds fails fast with `LlmProviderError::Busy` rather than growing the wait queue without limit — the same fail-fast-over-queue-forever discipline `ene-infer` applies on the local-inference side, applied here at the plugin IPC boundary. The limiter is built once per (plugin, provider kind) in `IpcLlmProviderFactory` and shared across every provider instance created for that pair, since a fresh `IpcLlmProvider` is built per call. For a streaming request, the acquired permit is held for the stream's entire lifetime and releases automatically when the stream is dropped — whether it completed naturally or was cancelled mid-flight.
 
+Behind the limiter sits a second gate: the declared [`ResourceClass`](#resourceclass-declaring-the-physical-resource)'s process-wide budget, shared with every local engine on the same resource. The host acquires that class's permit *before* sending a request and holds it for the whole call (or stream), so a plugin crash cannot leak it — the permit lives in the host process and its drop glue releases it regardless of how the request ended. The limiter runs first so its `queue_depth` fail-fast stays ahead of any resource wait.
+
 ### Local-inference plugin authors: the same discipline, in-process
 
 `ConcurrencyHint` only bounds how many requests the *host* sends to a plugin at once. A plugin that does its own local inference (llama.cpp, whisper.cpp, a local TTS engine) still has to get concurrency right *inside its own process* — the host cannot see or control how that plugin's code juggles the jobs once they arrive. For that, depend on `ene-plugin`'s `prelude` module, which re-exports `ene-infer`'s worker-thread framework (`EngineConfig`, `EngineError`, `EngineHandle`, `JobContext`, `LocalModel`, `StopReason`) alongside the usual plugin-authoring types:
@@ -112,9 +114,40 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 
 `EngineHandle` owns the model on a dedicated worker thread, runs jobs off a bounded queue that fails fast (`EngineError::Busy`) instead of growing without limit, and recovers from a panicking job by rebuilding the model — the same guarantees the host itself relies on, reached with one `use` line instead of hand-rolled `spawn_blocking`/`block_in_place` concurrency that would just relocate the bug across the process boundary.
 
-### ResourceClass: the in-process admission key is a wire type
+### ResourceClass: declaring the physical resource
 
-The in-process admission budget that serializes local engines contending on the same physical resource (same GPU device, the shared CPU class, or the network-attached class) keys on a `ResourceClass` enum — `Gpu { device: u32 }` / `Cpu` / `Network` — defined in `ene-plugin-proto`'s `capabilities.rs` alongside `ConcurrencyHint`. In-process engines use it as `ene_ai::ResourceClass`; the follow-up host-side resource admission work wires it into the plugin capability specs so a plugin can declare which physical resources it uses, making this the same type on both sides of the boundary rather than a second definition (#319).
+Every provider spec — `LlmProviderSpec`, `TtsProviderSpec`, `SttProviderSpec` — carries a `resource: ResourceClass` field, the physical resource the provider's jobs contend on:
+
+```rust
+pub enum ResourceClass {
+    /// A specific GPU device index (as used by `with_main_gpu(n)`).
+    Gpu { device: u32 },
+    /// CPU-bound inference — shared by every CPU-bound engine.
+    Cpu,
+    /// A network-attached engine that does not consume host GPU/CPU capacity.
+    Network,
+}
+```
+
+The wire form is the externally tagged serde representation: `"Cpu"`, `"Network"`, or `{"Gpu":{"device":0}}`.
+
+The field is `#[serde(default)]` like every other field added since v3, and `ResourceClass::default()` is **`Network`** — the class whose jobs do not consume host GPU/CPU capacity. This is the safe default for a plugin that does not declare a class (an older binary, or a cloud proxy whose author did not think about resources): an undeclaring cloud plugin sharing `Cpu` with whisper/Kokoro would artificially throttle local inference, and no device index is a safe `Gpu` default. **A plugin whose jobs *do* consume host capacity — above all a GPU plugin — must declare its class explicitly.** The built-in Anthropic plugin declares `Network` for this reason (see below).
+
+#### Host-side admission (execution control)
+
+`IpcLlmProvider` acquires the declared class's permit from `ene_ai::ResourceRegistry` — the host process's single admission authority — after the limiter and before the request is sent. This is the *same* registry the in-process local engines (`ene-ai-local`'s llama.cpp, whisper, Kokoro, ...) acquire from, keyed on the same `ResourceClass` values, so:
+
+- **Different plugins declaring the same class share one budget.** Two GPU plugins declaring `Gpu { device: 0 }` are serialized against each other just as a GPU plugin and a local model on device 0 are.
+- **A plugin crash cannot leak a permit.** The plugin process holds no semaphore; the permit lives in the host, and its drop glue releases it on every exit path (completion, cancellation, error, connection loss, plugin crash).
+- The host **does not send** a request until the class has a free permit — no IPC round-trip, no lease protocol.
+
+The order is deliberate: the limiter's `queue_depth` fail-fast runs first, so an overloaded plugin is rejected immediately rather than parking on a GPU semaphore; resource waits are then bounded to `max_in_flight + queue_depth` per plugin.
+
+#### Behavior note: the Anthropic plugin's effective concurrency is now 8 → 4
+
+The built-in Anthropic plugin declares `concurrency: max_in_flight: 8` *and* `resource: Network`. The `Network` class's default budget is **4** permits (host-wide, shared with any other network-attached engine). The resource gate now caps the plugin's effective concurrency at `min(8, 4)` = **4 simultaneous requests** (there is currently no other `Network`-class engine). For a single user this is a deliberate, small cost of admission control: the per-class budgets are configurable via `ResourceBudgets` / `ResourceRegistry::configure_all` for operators who need more headroom.
+
+Per-class budgets today: `Gpu` = 1, `Cpu` = `available_parallelism()`, `Network` = 4. VRAM *residency* tracking (which plugin has a model loaded on which device, and eviction when the budget is exceeded) is a separate concept — see the resource registry docs in `ene-ai`; the host-side residency work is tracked separately and is not part of the current wiring.
 
 ---
 

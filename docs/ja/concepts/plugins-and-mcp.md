@@ -35,7 +35,7 @@ Ene ホストアプリケーション (ene-runtime)
 - **ハンドシェイクネゴシエーション**: ホストは `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`、すなわち単一の固定値ではなく `VersionRange { min: 4, max: 5 }` を送信します。プラグインは `VersionRange::negotiate` でその範囲と自身がサポートする範囲の共通部分を取り、両者に共通する最大バージョンを `HandshakeAck { version, capabilities: PluginCapabilities }` として返します。
 - **ハンドシェイクタイムアウト**: ホストは `HandshakeAck` の待ち時間に上限を設けています（`plugins.handshake_timeout_ms`、既定 10 秒）。ソケットを accept しながら応答しないプラグインは、残りのプラグインの起動をブロックする代わりに `PluginHostError::HandshakeFailed` でハンドシェイクに失敗します。プラグイン作者はハンドシェイクに即応答し、重い初期化（モデル読み込み等）はその後へ遅延させる必要があります——`ene-plugin` の `run_plugin_server` を参照してください。
 - **リクエスト相関**: 非同期リクエストおよびレスポンスはすべて必須の `request_id` (`Uuid`) を保持します。
-- **ケーパビリティ**: プラグインはサポートする機能 (`tools`, `llm_providers`, `stt_providers`, `tts_providers`) を宣伝し、各プロバイダ仕様はさらに `concurrency: ConcurrencyHint` を宣言します ([§3](#3-プロバイダの並行度-concurrencyhint) 参照)。
+- **ケーパビリティ**: プラグインはサポートする機能 (`tools`, `llm_providers`, `stt_providers`, `tts_providers`) を宣伝し、各プロバイダ仕様はさらに `concurrency: ConcurrencyHint` と `resource: ResourceClass` を宣言します ([§3](#3-プロバイダの並行度-concurrencyhint) 参照)。
 
 ### バージョニングポリシー（N-1 後方互換）
 
@@ -85,6 +85,8 @@ fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
 
 `ene-plugin-host` の `IpcLlmProvider` (`crates/ene-plugin-host/src/ipc_provider.rs`) は、宣言されたヒントを `ConcurrencyLimiter` で強制します: `max_in_flight` にサイズを合わせた `tokio::sync::Semaphore` と、パーミットを待てる呼び出し元を最大 `queue_depth` 件まで許容する仕組みです。両方の上限を超えたリクエストは、待ちキューを無制限に伸ばすのではなく `LlmProviderError::Busy` で即座に失敗します——`ene-infer` がローカル推論側で適用しているのと同じ「無限にキューイングするより早く失敗させる」規律を、プラグイン IPC 境界にも適用したものです。このリミッタは (プラグイン, プロバイダ種別) のペアごとに `IpcLlmProviderFactory` の中で一度だけ構築され、そのペアに対して以降作成されるすべてのプロバイダインスタンスで共有されます。呼び出しのたびに新しい `IpcLlmProvider` が作られるためです。ストリーミングリクエストの場合、取得したパーミットはストリームの生存期間中ずっと保持され、ストリームが自然に完了したか途中でキャンセルされたかにかかわらず、ストリームが drop された時点で自動的に解放されます。
 
+このリミッタの背後には第2のゲートがあります: 宣言された [`ResourceClass`](#resourceclass-物理リソースの申告) のプロセス全体予算で、同じリソースを使うすべてのローカルエンジンと共有されます。ホストはリクエストを**送る前に**そのクラスのパーミットを取得し、呼び出し（またはストリーム）全体にわたって保持します。パーミットはホストプロセス内にあり、drop glue がリクエストの終わり方（完了・キャンセル・エラー・接続断・プラグインクラッシュ）にかかわらず解放するため、プラグインのクラッシュではリークしません。リミッタを先に通すことで、その `queue_depth` による fail-fast がリソース待ちより先に発火します。
+
 ### ローカル推論プラグイン作者向け: プロセス内でも同じ規律を
 
 `ConcurrencyHint` が制限できるのは「ホスト」がプラグインに対して一度に送るリクエスト数だけです。自前でローカル推論を行うプラグイン (llama.cpp、whisper.cpp、ローカル TTS エンジンなど) は、それでも「自分自身のプロセス内」で並行性を正しく扱う必要があります——ホストは、そのプラグインのコードが到着したジョブをどう捌くかを見ることも制御することもできません。そのために、`ene-plugin` の `prelude` モジュールに依存してください。これは `ene-infer` のワーカースレッドフレームワーク (`EngineConfig`、`EngineError`、`EngineHandle`、`JobContext`、`LocalModel`、`StopReason`) を、通常のプラグイン作成用の型と並べて再エクスポートしています。
@@ -112,9 +114,40 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 
 `EngineHandle` は専用のワーカースレッド上でモデルを所有し、無制限に増え続けるのではなく境界のあるキューから即座に失敗する (`EngineError::Busy`) ジョブ実行を行い、パニックしたジョブからはモデルを再構築して復旧します——ホスト自身が依拠しているのと同じ保証を、`use` 一行で得られます。これがなければ、自前で書いた `spawn_blocking`/`block_in_place` による並行処理は、結局プロセス境界の向こう側にバグを移すだけになってしまいます。
 
-### ResourceClass: プロセス内入場制御のキーがワイヤ型になる
+### ResourceClass: 物理リソースの申告
 
-同一の物理リソース（同じ GPU デバイス、共有の CPU クラス、ネットワーク接続クラス）を奪い合うローカルエンジンを直列化するプロセス内入場予算は、`ResourceClass` enum——`Gpu { device: u32 }` / `Cpu` / `Network`——をキーにしています。この enum は `ConcurrencyHint` と同じく `ene-plugin-proto` の `capabilities.rs` に定義され、プロセス内エンジンは `ene_ai::ResourceClass` として利用します。ホスト側リソース入場制御の後続作業では、これをプラグインの能力仕様に配線し、プラグインが自身の使用する物理リソースを申告できるようにします——境界の両側で同じ型を使い、二重定義を避けるためです (#319)。
+各プロバイダ仕様——`LlmProviderSpec`、`TtsProviderSpec`、`SttProviderSpec`——は `resource: ResourceClass` フィールドを持ちます。これはプロバイダのジョブが奪い合う物理リソースです:
+
+```rust
+pub enum ResourceClass {
+    /// 特定の GPU デバイスインデックス (`with_main_gpu(n)` と同じ)。
+    Gpu { device: u32 },
+    /// CPU 推論——すべての CPU エンジンで共有される。
+    Cpu,
+    /// ネットワーク接続型エンジン。ホストの GPU/CPU 容量を消費しない。
+    Network,
+}
+```
+
+ワイヤ形式は外部タグ付き serde 表現です: `"Cpu"`、`"Network"`、または `{"Gpu":{"device":0}}`。
+
+このフィールドは v3 以降に追加された他のすべてのフィールドと同様に `#[serde(default)]` であり、`ResourceClass::default()` は **`Network`** です——ホストの GPU/CPU 容量を消費しないクラスです。これはクラスを申告しないプラグイン（古いバイナリ、またはリソースについて考えていないクラウドプロキシ）にとって安全なデフォルトです: 申告漏れのクラウドプラグインが `Cpu` を whisper/Kokoro と共有するとローカル推論を人為的に絞るし、安全な `Gpu` デフォルトは存在しないからです。**ジョブがホストの容量を消費するプラグイン——とりわけ GPU を使うプラグイン——は必ず明示的にクラスを申告してください。** 組み込みの Anthropic プラグインはこの理由から `Network` を宣言しています（後述）。
+
+#### ホスト側入場制御（実行スロット制御）
+
+`IpcLlmProvider` は、リミッタの次に、宣言されたクラスのパーミットを `ene_ai::ResourceRegistry`——ホストプロセスの単一の入場権威——から取得し、それからリクエストを送信します。これはプロセス内ローカルエンジン（`ene-ai-local` の llama.cpp、whisper、Kokoro など）が取得する**同じ**レジストリであり、同じ `ResourceClass` 値でキー付けされています。つまり:
+
+- **同じクラスを申告した異なるプラグインは予算を共有します。** `Gpu { device: 0 }` を申告した2つの GPU プラグインは、GPU プラグインとデバイス0上のローカルモデルと同じように相互に直列化されます。
+- **プラグインのクラッシュで permit はリークしません。** プラグインプロセスはセマフォを持ちません。permit はホスト内にあり、その drop glue がすべての終了経路（完了・キャンセル・エラー・接続断・プラグインクラッシュ）で解放します。
+- ホストはクラスの permit が空くまでリクエストを**送りません**——IPC ラウンドトリップもリースプロトコルもありません。
+
+順序は意図的です: リミッタの `queue_depth` による fail-fast が先に走るため、過負荷のプラグインは GPU セマフォで待たされる代わりに即座に拒否されます。リソース待ちはプラグインごとに `max_in_flight + queue_depth` に有界化されます。
+
+#### 挙動変更の注記: Anthropic プラグインの実質同時実行が 8 → 4 に
+
+組み込みの Anthropic プラグインは `concurrency: max_in_flight: 8` **かつ** `resource: Network` を宣言しています。`Network` クラスのデフォルト予算は **4** permits です（ホスト全体で、他のネットワーク接続エンジンと共有）。リソースゲートにより、このプラグインの実質同時実行は `min(8, 4)` = **4 同時リクエスト**に上限が掛かります（現在 `Network` クラスを使うエンジンは他にありません）。シングルユーザーにとってこれは入場制御の意図的な小さなコストです。クラス別予算は `ResourceBudgets` / `ResourceRegistry::configure_all` で設定でき、より多くのヘッドルームが必要な運用者は変更できます。
+
+現在のクラス別予算: `Gpu` = 1、`Cpu` = `available_parallelism()`、`Network` = 4。VRAM **residency** 追跡（どのプラグインがどのデバイスにモデルを載せているか、超過時にアンロード要求する仕組み）は別概念です——`ene-ai` のリソースレジストリのドキュメントを参照してください。ホスト側 residency 実装は別トラックで追跡されており、現在の配線には含まれません。
 
 ---
 
