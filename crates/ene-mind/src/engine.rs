@@ -425,9 +425,7 @@ impl CognitionEngine {
         // Affect is from before this user utterance (decay / prior-turn
         // classifier). Same-turn reaction belongs in the model's reply.
         let affect_summary = Some(format!(
-            "mood={}; valence={:.2}; arousal={:.2}\n\
-             Note: this affect state does not yet reflect the current user utterance; \
-             react to that utterance naturally in your reply.",
+            "mood={}; valence={:.2}; arousal={:.2}",
             affect.mood_label, affect.valence, affect.arousal
         ));
 
@@ -476,6 +474,7 @@ impl CognitionEngine {
             recalled,
             commitments,
             affect_summary,
+            character_state_note: Some(prompts.system().affect_pre_utterance_note.clone()),
             scene_summary,
             history,
             output_contract: ctx.post_history_block.map(str::to_string),

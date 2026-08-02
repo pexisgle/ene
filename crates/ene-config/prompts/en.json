@@ -1,6 +1,7 @@
 {
   "system": {
     "mascot_context_path": "en/system/mascot_context.md",
+    "affect_pre_utterance_note_path": "en/system/affect_pre_utterance_note.md",
     "behavior_rules_header": "## Behavior Rules",
     "character_header": "## Character",
     "personality_header": "### Personality",

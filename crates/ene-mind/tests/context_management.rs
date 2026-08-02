@@ -115,6 +115,7 @@ fn pack_prompt_counts_history_toward_total_budget() {
             recalled: vec![],
             commitments: vec![],
             affect_summary: None,
+            character_state_note: None,
             scene_summary: None,
             history: vec![
                 ene_mind::HistoryEntry {
@@ -184,6 +185,7 @@ fn base_pack_input() -> PackInput {
         recalled: vec![],
         commitments: vec![],
         affect_summary: None,
+        character_state_note: None,
         scene_summary: None,
         history: vec![],
         output_contract: None,

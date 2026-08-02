@@ -124,6 +124,8 @@ struct RawPromptLibraryData {
 pub struct SystemPrompts {
     /// Mascot roleplay framing.
     pub mascot_context: String,
+    /// Localized instruction appended to the CharacterState section scaffold.
+    pub affect_pre_utterance_note: String,
     /// Header for rules list.
     pub behavior_rules_header: String,
     /// Header for character identity.
@@ -145,6 +147,7 @@ pub struct SystemPrompts {
 )]
 struct RawSystemPrompts {
     mascot_context_path: String,
+    affect_pre_utterance_note_path: String,
     behavior_rules_header: String,
     character_header: String,
     personality_header: String,
@@ -542,6 +545,13 @@ macro_rules! embedded_pack {
                 "/prompts/",
                 $lang,
                 "/system/mascot_context.md"
+            ))
+            .to_string(),
+            affect_pre_utterance_note: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/prompts/",
+                $lang,
+                "/system/affect_pre_utterance_note.md"
             ))
             .to_string(),
             behavior_rules_header: raw.system.behavior_rules_header,

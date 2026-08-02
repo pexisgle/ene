@@ -121,6 +121,9 @@ pub struct PromptSection {
     pub kind: PromptSectionKind,
     /// Rendered section body (without heading).
     pub content: String,
+    /// Localized instruction appended below the body; not counted in the
+    /// section's token estimate so a budget drop discards it with the section.
+    pub note: Option<String>,
     /// Whether the section is required and must not be dropped.
     pub required: bool,
     /// Authoritative count of discrete items this section carries (recalled
@@ -137,6 +140,7 @@ impl PromptSection {
             kind,
             required: kind.is_required(),
             content,
+            note: None,
             item_count: 0,
         }
     }
@@ -155,14 +159,20 @@ impl PromptSection {
         self.item_count = 0;
     }
 
-    /// Render the section for the system block (heading + body).
+    /// Render the section for the system block (heading + body + note).
     pub fn render_system_block(&self) -> Option<String> {
         if self.content.trim().is_empty() {
             return None;
         }
+        let body = match &self.note {
+            Some(note) if !note.trim().is_empty() => {
+                format!("{}\n{}", self.content.trim(), note.trim())
+            }
+            _ => self.content.clone(),
+        };
         match self.kind.heading() {
-            Some(heading) => Some(format!("{heading}\n{}", self.content.trim())),
-            None => Some(self.content.clone()),
+            Some(heading) => Some(format!("{heading}\n{}", body.trim())),
+            None => Some(body),
         }
     }
 }
