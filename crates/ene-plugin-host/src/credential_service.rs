@@ -241,11 +241,21 @@ mod tests {
     use super::*;
     use ene_connector::CredentialStore;
     use ene_connector::vault::VaultEntry;
+    use ene_plugin_proto::transport::IpcListener;
     use ene_plugin_proto::{
         read_credential_response, read_host_service_response, write_credential_request,
     };
 
     const SECRET: &str = "super-secret-api-key";
+
+    /// Unique suffix per test: `#[tokio::test]` bodies run concurrently, and
+    /// two listeners on the same socket path would collide at bind time.
+    static SOCKET_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn test_socket_path(tag: &str) -> std::path::PathBuf {
+        let n = SOCKET_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("ene-cred-{tag}-{}-{n}.sock", std::process::id()))
+    }
 
     fn vault() -> Arc<CredentialVault> {
         let vault = CredentialVault::new(vec![VaultEntry::new(
@@ -265,10 +275,15 @@ mod tests {
         )])
     }
 
-    /// Opens a credential session over a duplex pair, returning the
+    /// Opens a credential session over a real socket pair, returning the
     /// client-side stream after the `OpenAck` is observed.
     async fn open_session(passenger: Arc<CredentialPassenger>, token: &str) -> IpcStream {
-        let (client, server_stream) = tokio::io::duplex(4096);
+        let path = test_socket_path("session");
+        let mut listener = IpcListener::bind(&path).expect("bind listener");
+        let mut client = IpcStream::connect(&path).await.expect("connect");
+        let (server_stream, _) = listener.accept().await.expect("accept");
+        drop(listener);
+        ene_plugin_proto::transport::cleanup_path(&path);
         tokio::spawn({
             let passenger = Arc::clone(&passenger);
             async move {
@@ -325,7 +340,12 @@ mod tests {
             vault(),
             registrations("ene-cred-good"),
         ));
-        let (mut client, server_stream) = tokio::io::duplex(4096);
+        let path = test_socket_path("reject");
+        let mut listener = IpcListener::bind(&path).expect("bind listener");
+        let mut client = IpcStream::connect(&path).await.expect("connect");
+        let (server_stream, _) = listener.accept().await.expect("accept");
+        drop(listener);
+        ene_plugin_proto::transport::cleanup_path(&path);
         tokio::spawn({
             let passenger = Arc::clone(&passenger);
             async move {

@@ -355,7 +355,7 @@ mod tests {
             if let Some(request) = read_credential_request(&mut stream)
                 .await
                 .expect("read request")
-                && let CredentialRequest::Resolve { id } = request
+                && let CredentialRequest::Resolve { id: _ } = request
             {
                 let response = CredentialResponse::Resolved {
                     credential: ene_plugin_proto::ResolvedCredential::ApiKey {
