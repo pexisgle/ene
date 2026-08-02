@@ -556,8 +556,11 @@ impl ToolRegistry for PluginToolRegistry {
     async fn validate_config(
         &self,
         value: &serde_json::Value,
-    ) -> Result<Vec<ene_plugin_proto::ConfigFieldError>, PluginHostError> {
-        self.conn.validate_config(value).await
+    ) -> Result<Option<Vec<ene_plugin_proto::ConfigFieldError>>, PluginHostError> {
+        if !self.conn.supports_validate_config() {
+            return Ok(None);
+        }
+        self.conn.validate_config(value).await.map(Some)
     }
 
     async fn migrate_config(
@@ -568,8 +571,10 @@ impl ToolRegistry for PluginToolRegistry {
         self.conn.migrate_config(from_version, value).await
     }
 
-    fn take_config_schema_changed(&self) -> Option<(Option<serde_json::Value>, u32)> {
-        self.conn.take_config_schema_changed()
+    fn take_config_schema_changed(&self) -> Option<(String, Option<serde_json::Value>, u32)> {
+        self.conn
+            .take_config_schema_changed()
+            .map(|(schema, version)| (self.plugin_name.clone(), schema, version))
     }
 }
 

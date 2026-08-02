@@ -84,6 +84,10 @@ struct Router {
     deferred: parking_lot::Mutex<HashMap<String, Result<ToolResult, ToolError>>>,
     /// Latest `ConfigSchemaChanged` push, if any has arrived since the last
     /// [`IpcPluginConnection::take_config_schema_changed`] call.
+    ///
+    /// The stored value is the LATEST push, not a history — a second
+    /// `ConfigSchemaChanged` before a poll overwrites the first;
+    /// `config_version` is the latest value, not a sequence.
     schema_changed: parking_lot::Mutex<Option<(Option<serde_json::Value>, u32)>>,
 }
 
@@ -653,8 +657,11 @@ impl IpcPluginConnection {
     /// Takes the latest [`PluginIpcResponse::ConfigSchemaChanged`] push, if
     /// any has arrived since the previous take.
     ///
-    /// Returns `(schema, config_version)`. Analogous to the deferred-completion
-    /// cache used by [`poll_deferred`](Self::poll_deferred).
+    /// Returns `(schema, config_version)`. The stored value is the LATEST
+    /// push, not a history — a second `ConfigSchemaChanged` before a poll
+    /// overwrites the first, so `config_version` is the latest value, not a
+    /// sequence. Analogous to the deferred-completion cache used by
+    /// [`poll_deferred`](Self::poll_deferred).
     pub fn take_config_schema_changed(&self) -> Option<(Option<serde_json::Value>, u32)> {
         self.router.schema_changed.lock().take()
     }
