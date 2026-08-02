@@ -768,7 +768,7 @@ mod tests {
                 }
                 HostAction::Invalidate(ids) => {
                     let resp = CredentialResponse::Invalidated {
-                        ids: ids.iter().map(str::to_string).collect(),
+                        ids: ids.iter().copied().map(str::to_string).collect(),
                     };
                     if write_credential_response(&mut stream, &resp).await.is_err() {
                         return;
