@@ -281,7 +281,7 @@ mod tests {
         let path = test_socket_path("session");
         let mut listener = IpcListener::bind(&path).expect("bind listener");
         let mut client = IpcStream::connect(&path).await.expect("connect");
-        let (server_stream, _) = listener.accept().await.expect("accept");
+        let server_stream = listener.accept().await.expect("accept");
         drop(listener);
         ene_plugin_proto::transport::cleanup_path(&path);
         tokio::spawn({
@@ -343,7 +343,7 @@ mod tests {
         let path = test_socket_path("reject");
         let mut listener = IpcListener::bind(&path).expect("bind listener");
         let mut client = IpcStream::connect(&path).await.expect("connect");
-        let (server_stream, _) = listener.accept().await.expect("accept");
+        let server_stream = listener.accept().await.expect("accept");
         drop(listener);
         ene_plugin_proto::transport::cleanup_path(&path);
         tokio::spawn({
