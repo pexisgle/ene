@@ -149,12 +149,10 @@ impl CognitionEngine {
 
             let mut turn_input = TurnAffectInput {
                 state: &mut affect,
-                user_message: ctx.user_input,
                 elapsed_since_update: elapsed,
                 recent_turn_count,
                 classifier_proposal: None,
                 classifier_min_confidence: ctx.config.emotion.classifier_min_confidence,
-                llm_only: false,
             };
 
             // Consume a pending post-turn classifier proposal from the previous turn.
@@ -424,8 +422,12 @@ impl CognitionEngine {
             .await
         };
 
+        // Affect is from before this user utterance (decay / prior-turn
+        // classifier). Same-turn reaction belongs in the model's reply.
         let affect_summary = Some(format!(
-            "mood={}; valence={:.2}; arousal={:.2}",
+            "mood={}; valence={:.2}; arousal={:.2}\n\
+             Note: this affect state does not yet reflect the current user utterance; \
+             react to that utterance naturally in your reply.",
             affect.mood_label, affect.valence, affect.arousal
         ));
 

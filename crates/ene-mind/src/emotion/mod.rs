@@ -1,8 +1,12 @@
-//! Emotion Engine: deterministic affect computation + optional LLM classifier.
+//! Emotion Engine: decay, conversation fatigue, optional LLM classifier merge.
+//!
+//! Same-turn reaction to the user utterance is left to the chat model. Affect
+//! at prompt-build time is pre–current-utterance (decay + prior-turn classifier
+//! + fatigue). Post-turn classification updates state for the next turn.
 
-mod appraisal;
 pub mod classifier;
 mod decay;
+mod fatigue;
 pub mod types;
 
 pub use types::{
@@ -13,14 +17,14 @@ use ene_core::AffectState;
 
 use crate::config::EmotionConfig;
 
-use self::appraisal::apply_appraisal;
 use self::decay::apply_decay;
+use self::fatigue::apply_conversation_fatigue;
 
-/// Emotion Engine: deterministic + optional LLM affect computation.
+/// Emotion Engine: decay + fatigue + optional LLM affect computation.
 pub struct EmotionEngine;
 
 impl EmotionEngine {
-    /// Update affect state for the current turn: decay, appraisal, optional classifier merge.
+    /// Update affect state for the current turn: decay, fatigue, optional classifier merge.
     pub fn update_turn(
         &self,
         config: &EmotionConfig,
@@ -36,12 +40,8 @@ impl EmotionEngine {
             reasons.push(reason);
         }
 
-        if !input.llm_only {
-            reasons.extend(apply_appraisal(
-                input.state,
-                input.user_message,
-                input.recent_turn_count,
-            ));
+        if let Some(reason) = apply_conversation_fatigue(input.state, input.recent_turn_count) {
+            reasons.push(reason);
         }
 
         if let Some(proposal) = &input.classifier_proposal
@@ -216,12 +216,10 @@ mod tests {
             state.valence = 0.2;
             let mut input = TurnAffectInput {
                 state: &mut state,
-                user_message: "Thank you!",
                 elapsed_since_update: Duration::from_mins(1),
                 recent_turn_count: 4,
                 classifier_proposal: None,
                 classifier_min_confidence: 0.5,
-                llm_only: false,
             };
             engine.update_turn(&config, &mut input);
             state
@@ -235,21 +233,30 @@ mod tests {
     }
 
     #[test]
-    fn values_clamp_after_extreme_input() {
+    fn values_clamp_after_extreme_classifier() {
         let config = EmotionConfig::default();
         let engine = EmotionEngine;
         let mut state = AffectState::neutral("ene");
         state.valence = 0.95;
 
-        let insult = "I hate you, you're stupid and useless!!!";
+        let proposal = AffectProposal {
+            user_emotion: "angry".into(),
+            user_intent: "insult".into(),
+            valence: -2.0,
+            arousal: 2.0,
+            irritation: 2.0,
+            affinity: -2.0,
+            recommended_expression: "angry".into(),
+            confidence: 1.0,
+            reason: "extreme".into(),
+        };
+
         let mut input = TurnAffectInput {
             state: &mut state,
-            user_message: insult,
             elapsed_since_update: Duration::ZERO,
             recent_turn_count: 2,
-            classifier_proposal: None,
+            classifier_proposal: Some(proposal),
             classifier_min_confidence: 0.5,
-            llm_only: false,
         };
         engine.update_turn(&config, &mut input);
 
