@@ -8,7 +8,9 @@
 
 use std::collections::HashMap;
 
-use ene_plugin_proto::{ConcurrencyHint, ResourceClass};
+// Canonical in `ene-plugin-proto`; re-exported so `descriptor::ResourceClass`
+// and the `ene_ai::*` paths stay stable while the definition lives on the wire.
+pub use ene_plugin_proto::ResourceClass;
 
 /// Stable identifier for one loaded engine instance (e.g. `"llama-cpp-chat"`,
 /// `"whisper-base"`). Used in tracing spans and error messages; not
@@ -118,6 +120,53 @@ const _: () = assert!(
     "CapabilitySet's u16 backing store overflows"
 );
 
+/// How eagerly an engine's worker should be sized.
+///
+/// Advisory metadata, not itself enforced by this crate: a single
+/// [`ene_infer::EngineHandle`] is architecturally single-flight (exactly one
+/// dedicated worker thread), so `max_in_flight` above 1 is a signal for a
+/// *future* orchestration layer that would spawn multiple worker handles for
+/// the same engine and route between them — no such layer exists yet.
+/// `queue_depth` maps directly onto [`ene_infer::EngineConfig::queue_depth`]
+/// when a caller constructs the underlying handle.
+#[derive(Debug, Clone, Copy)]
+pub struct ConcurrencyHint {
+    /// Advisory: how many jobs for this engine should be allowed to run at
+    /// once. Not enforced by a single [`ene_infer::EngineHandle`] today.
+    pub max_in_flight: usize,
+    /// Suggested [`ene_infer::EngineConfig::queue_depth`] for this engine.
+    pub queue_depth: usize,
+}
+
+impl Default for ConcurrencyHint {
+    /// `max_in_flight: 1, queue_depth: 2` — the conservative default for a
+    /// local model whose author has not thought about concurrency at all.
+    fn default() -> Self {
+        Self {
+            max_in_flight: 1,
+            queue_depth: 2,
+        }
+    }
+}
+
+impl From<ene_plugin_proto::ConcurrencyHint> for ConcurrencyHint {
+    fn from(value: ene_plugin_proto::ConcurrencyHint) -> Self {
+        Self {
+            max_in_flight: value.max_in_flight as usize,
+            queue_depth: value.queue_depth as usize,
+        }
+    }
+}
+
+impl From<ConcurrencyHint> for ene_plugin_proto::ConcurrencyHint {
+    fn from(value: ConcurrencyHint) -> Self {
+        Self {
+            max_in_flight: u32::try_from(value.max_in_flight).unwrap_or(u32::MAX),
+            queue_depth: u32::try_from(value.queue_depth).unwrap_or(u32::MAX),
+        }
+    }
+}
+
 /// Declared capability, concurrency, and resource metadata for one engine.
 #[derive(Debug, Clone)]
 pub struct EngineDescriptor {
@@ -126,15 +175,6 @@ pub struct EngineDescriptor {
     /// What this engine can do.
     pub capabilities: CapabilitySet,
     /// Advisory concurrency sizing.
-    ///
-    /// Advisory only, not enforced by this crate: a single
-    /// [`ene_infer::EngineHandle`] is architecturally single-flight (exactly
-    /// one dedicated worker thread), so `max_in_flight` above 1 is a signal
-    /// for a *future* orchestration layer that would spawn multiple worker
-    /// handles for the same engine and route between them — no such layer
-    /// exists yet. `queue_depth` maps directly onto
-    /// [`ene_infer::EngineConfig::queue_depth`] when a caller constructs the
-    /// underlying handle.
     pub concurrency: ConcurrencyHint,
     /// The physical resource this engine's jobs contend on — the key
     /// [`crate::engine_adapter::resource::ResourceRegistry`] uses to share an
@@ -196,7 +236,9 @@ impl ResourceBudgets {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capability, CapabilitySet, EngineDescriptor, EngineId, ResourceClass};
+    use super::{
+        Capability, CapabilitySet, ConcurrencyHint, EngineDescriptor, EngineId, ResourceClass,
+    };
 
     #[test]
     fn capability_set_contains_only_added() {
@@ -215,6 +257,13 @@ mod tests {
         assert!(set.contains(Capability::Stt));
         assert!(set.contains(Capability::Streaming));
         assert!(!set.contains(Capability::Tts));
+    }
+
+    #[test]
+    fn concurrency_hint_default_is_conservative() {
+        let hint = ConcurrencyHint::default();
+        assert_eq!(hint.max_in_flight, 1);
+        assert_eq!(hint.queue_depth, 2);
     }
 
     #[test]
