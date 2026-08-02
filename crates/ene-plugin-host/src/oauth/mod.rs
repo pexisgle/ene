@@ -366,7 +366,7 @@ impl OAuthFlowManager {
             &endpoints.scopes,
             &redirect_uri,
         )?;
-        self.open_browser(&auth_url)?;
+        self.open_browser(&auth_url).await?;
         let (code, _) = server.wait_for_callback(&state, FLOW_TIMEOUT).await?;
         let tokens = exchange::exchange_code(
             &self.http,
@@ -389,7 +389,7 @@ impl OAuthFlowManager {
         Ok(())
     }
 
-    fn open_browser(&self, url: &str) -> Result<(), FlowError> {
+    async fn open_browser(&self, url: &str) -> Result<(), FlowError> {
         let url = url.to_string();
         let opener = Arc::clone(&self.browser);
         // webbrowser::open blocks on a spawned helper; run it off the async

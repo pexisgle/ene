@@ -41,6 +41,7 @@ base64 = { workspace = true, features = ["std"] }
 rand = { workspace = true }
 httparse = { workspace = true }
 webbrowser = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
