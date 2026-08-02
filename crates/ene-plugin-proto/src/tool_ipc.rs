@@ -374,6 +374,7 @@ mod tests {
             enabled: true,
             allowed_directories: vec![],
             writable_directories: vec![],
+            host_service_socket: None,
             db_socket: None,
             db_auth_token: None,
             ..SandboxConfigData::default()

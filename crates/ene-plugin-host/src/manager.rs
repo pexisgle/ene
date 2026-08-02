@@ -1135,12 +1135,25 @@ impl PluginHostManager {
         let mut sandbox = ene_plugin_proto::SandboxConfigData::default();
         if let Some(token) = &db_token {
             sandbox.db_auth_token = Some(token.clone());
-            #[cfg(unix)]
-            {
-                let db_socket =
-                    ene_config::paths::tool_socket_dir().join(format!("ene-db-{name}.sock"));
-                sandbox.db_socket = Some(db_socket.to_string_lossy().to_string());
-            }
+            let host_socket = {
+                #[cfg(unix)]
+                {
+                    ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
+                }
+                #[cfg(windows)]
+                {
+                    PathBuf::from(r"\\.\pipe\ene-host-service")
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
+                }
+            };
+            let host_socket = host_socket.to_string_lossy().to_string();
+            sandbox.host_service_socket = Some(host_socket.clone());
+            // Compatibility alias: plugins that only read `db_socket` still
+            // reach the shared host-service endpoint.
+            sandbox.db_socket = Some(host_socket);
         }
 
         let mut child = build_plugin_command(&binary_path, &socket_path, &env_passthrough)

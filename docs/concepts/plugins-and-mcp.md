@@ -120,8 +120,8 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 |---|---|---|---|
 | `ene-plugin-app` | `app.*` | System application launcher & window control | No |
 | `ene-plugin-browser` | `browser.*` | Headless Chrome/CDP web browser automation | Yes (Session store) |
-| `ene-plugin-fs` | `fs.*` | Sandboxed filesystem operations with undo ledger | Yes (DB IPC socket) |
-| `ene-plugin-utility` | `utility.*` | Calculator, datetime, active todo list manager | Yes (DB IPC socket) |
+| `ene-plugin-fs` | `fs.*` | Sandboxed filesystem operations with undo ledger | Yes (host-service `db`) |
+| `ene-plugin-utility` | `utility.*` | Calculator, datetime, active todo list manager | Yes (host-service `db`) |
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 
@@ -133,8 +133,14 @@ automatically on fresh installs.
 ## 5. Tool Database Schema Declaration & Evolution
 
 Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`) persist their
-data into the host's `memory.db` through a per-tool DB IPC server
-(`ene-store`'s `db_server` module). A plugin never issues DDL directly: it
+data into the host's `memory.db` through the shared **host-service** socket
+(`ene-host-service.sock` / named pipe). The first framed message opens a
+passenger service with a pre-shared token; today only `db` is implemented
+(`ene-store`'s `host_service` + `db_server`). Reserved ids (`assets`,
+`capability`, `credential`) are rejected until implemented. All plugins share
+this one socket, so namespace isolation rests on the per-plugin auth token
+alone — the per-plugin socket path layer is gone. A plugin never
+issues DDL directly: it
 declares its tables, columns, and indexes with a `DeclareSchema` request, and
 the host creates and owns the physical tables. Every table name must start
 with the plugin's prefix (`fs_`, `utility_`), and every index name must carry

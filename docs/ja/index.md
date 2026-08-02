@@ -46,7 +46,7 @@ Ene ワークスペース
 │   ├── ene-plugin-proto   (IPC ワイヤープロトコル v4 定義)
 │   ├── ene-plugin         (プラグイン開発 SDK & アダプタファサード)
 │   ├── ene-plugin-host    (プラグインプロセス管理 & スーパーバイザ)
-│   ├── ene-plugin-db      (プラグイン用状態保持 DB IPC クライアント)
+│   ├── ene-plugin-db      (プラグイン用ホストサービス `db` クライアント)
 │   └── ene-tool-macros    (ツールアクション用 Proc-macro)
 └── プロセス外プラグイン
     ├── plugins/provider/* (プロバイダプラグイン: anthropic)

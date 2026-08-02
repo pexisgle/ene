@@ -494,6 +494,10 @@ mod tests {
     use super::*;
     use ene_plugin_db::{DbRequest, DbResponse};
     use ene_plugin_proto::transport::{IpcListener, IpcStream, cleanup_path};
+    use ene_plugin_proto::{
+        HostServiceId, HostServiceRequest, HostServiceResponse, read_host_service_request,
+        write_host_service_response,
+    };
     use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -639,6 +643,20 @@ mod tests {
                 let Ok(mut stream) = listener.accept().await else {
                     break;
                 };
+                match read_host_service_request(&mut stream).await {
+                    Ok(Some(HostServiceRequest::Open {
+                        service: HostServiceId::Db,
+                        ..
+                    })) => {
+                        if write_host_service_response(&mut stream, &HostServiceResponse::OpenAck)
+                            .await
+                            .is_err()
+                        {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
                 loop {
                     let Some(req) = read_framed(&mut stream).await else {
                         break;

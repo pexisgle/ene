@@ -120,7 +120,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 - **Handshake Negotiation**: Version negotiation via `VersionRange { min: 4, max: 4 }`. The host sends supported range; plugin responds with negotiated version in `HandshakeAck`.
 - **Request Correlation**: All non-streaming and streaming IPC messages carry a mandatory `request_id` (`Uuid`).
 - **Capabilities Declaration**: `PluginCapabilities` advertises available `tools`, `llm_providers`, `stt_providers`, `tts_providers`.
-- **Stateful Tool DB Proxy**: Stateful tools connect to host's UDS socket via `ene-plugin-db` for isolated `todo.db` and `undo.db` storage.
+- **Host-service `db` passenger**: Stateful tools open the shared host-service socket via `ene-plugin-db` and perform prefix-isolated CRUD inside the host's `memory.db`. All plugins share this single socket, so namespace isolation rests on the per-plugin auth token alone (the per-plugin socket path layer is gone).
 
 ---
 
@@ -128,7 +128,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 
 | Crate | Responsibility |
 |---|---|
-| `ene-runtime` | Actor-based runtime facade, turn manager, event bus (chat/audio/lifecycle channels), DB IPC socket server |
+| `ene-runtime` | Actor-based runtime facade, turn manager, event bus (chat/audio/lifecycle channels), host-service acceptor |
 | `ene-mind` | Session manager, prompt packing, affect (PAD model), memory recall, proactive speech, performance arbitration |
 | `ene-store` | SQLite / SeaORM database entities, migrations, vector recall (`sqlite-vec`), commitment ledger |
 | `ene-core` | Persistence-agnostic domain vocabulary (`AffectState`, typed-memory kinds/statuses/queries, commitment ledger types) and the `MemoryPort` trait abstraction |
