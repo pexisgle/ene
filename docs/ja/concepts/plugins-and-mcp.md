@@ -138,6 +138,9 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 事前共有トークン付きの乗客サービスを開き、現状実装されているのは `db`
 のみです (`ene-store` の `host_service` + `db_server`)。予約 ID
 (`assets` / `capability` / `credential`) は実装まで拒否されます。
+全プラグインがこの単一ソケットを共有するため、ネームスペースの隔離は
+プラグインごとの認証トークンのみに依存します (プラグインごとのソケット
+パス層は廃止されました)。
 プラグインが直接 DDL を発行することはありません。`DeclareSchema`
 リクエストでテーブル・列・インデックスを宣言し、ホストが物理テーブルを
 作成・所有します。すべてのテーブル名はプラグインのプレフィックス

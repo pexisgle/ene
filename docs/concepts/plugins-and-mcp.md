@@ -137,7 +137,9 @@ data into the host's `memory.db` through the shared **host-service** socket
 (`ene-host-service.sock` / named pipe). The first framed message opens a
 passenger service with a pre-shared token; today only `db` is implemented
 (`ene-store`'s `host_service` + `db_server`). Reserved ids (`assets`,
-`capability`, `credential`) are rejected until implemented. A plugin never
+`capability`, `credential`) are rejected until implemented. All plugins share
+this one socket, so namespace isolation rests on the per-plugin auth token
+alone — the per-plugin socket path layer is gone. A plugin never
 issues DDL directly: it
 declares its tables, columns, and indexes with a `DeclareSchema` request, and
 the host creates and owns the physical tables. Every table name must start

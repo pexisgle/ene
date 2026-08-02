@@ -214,6 +214,10 @@ pub(super) struct TurnActor {
     /// sync when the plugin host is restarted so shutdown aborts the live
     /// bridge rather than a stale one.
     health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Shared handle to the host-service accept loop. Kept in sync when the
+    /// plugin host is restarted so reconfiguration aborts the live acceptor
+    /// before the shared socket path is rebound.
+    host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Mailbox-free shared actor state: card name (shared with
     /// [`crate::query::candidates::MemoryCandidateHandle`]),
     /// session id / started-at / turn count, config, and the loaded card.
@@ -252,6 +256,7 @@ impl TurnActor {
         plugin_tool_registries: Vec<Arc<dyn ToolRegistry>>,
         plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
         health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+        host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
         shared_state: Arc<SharedActorState>,
     ) -> Self {
         let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
@@ -318,6 +323,7 @@ impl TurnActor {
             plugin_tool_registries,
             plugin_host,
             health_bridge_handle,
+            host_service_handle,
             shared: shared_state,
         }
     }
@@ -767,9 +773,8 @@ impl TurnActor {
     ///   still use last-writer-wins registration for the same provider kind;
     ///   conditional deregistration avoids removing a replacement owned by a
     ///   different host.
-    /// - The host-service acceptor spawned for the previous host is not torn
-    ///   down; the new acceptor rebinds the shared socket path (the stale
-    ///   socket file is removed before re-binding), so at most one live
+    /// - The host-service acceptor spawned for the previous host is aborted
+    ///   before the new one binds the shared socket path, so at most one live
     ///   listener serves plugins.
     fn spawn_reconfigure_plugin_host(&mut self) {
         if !admit_task(
@@ -790,6 +795,7 @@ impl TurnActor {
         let memory_store = self.concrete_store.clone();
         let plugin_host = Arc::clone(&self.plugin_host);
         let health_bridge_handle = Arc::clone(&self.health_bridge_handle);
+        let host_service_handle = Arc::clone(&self.host_service_handle);
         let diag_tx = self.diag_tx.clone();
         let cmd_tx = self.cmd_tx.clone();
 
@@ -799,6 +805,7 @@ impl TurnActor {
                 memory_store,
                 plugin_host,
                 health_bridge_handle,
+                host_service_handle,
                 diag_tx,
                 cmd_tx,
             )
@@ -2404,15 +2411,17 @@ fn stale_llm_factory_names(
 /// Background plugin host reconfiguration.
 ///
 /// Performs the heavy I/O (host shutdown, DB IPC spawn, host start, health
-/// bridge) off the actor loop. Updates the shared `plugin_host` and
-/// `health_bridge_handle` mutexes directly, then sends
-/// [`EneCommand::PluginHostReconfigured`] back through the mailbox so the
-/// actor can update its own `registry` and `plugin_tool_registries` fields.
+/// bridge) off the actor loop. Updates the shared `plugin_host`,
+/// `health_bridge_handle`, and `host_service_handle` mutexes directly, then
+/// sends [`EneCommand::PluginHostReconfigured`] back through the mailbox so
+/// the actor can update its own `registry` and `plugin_tool_registries`
+/// fields.
 async fn reconfigure_plugin_host_bg(
     config: EneConfig,
     memory_store: Option<Arc<ene_store::MemoryStore>>,
     plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
     health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     diag_tx: broadcast::Sender<DiagnosticEvent>,
     cmd_tx: mpsc::UnboundedSender<EneCommand>,
 ) {
@@ -2439,9 +2448,20 @@ async fn reconfigure_plugin_host_bg(
         factories
     };
 
+    // Abort the previous host-service accept loop before rebinding the shared
+    // socket path, or the stale listener keeps serving an unlinked socket
+    // (unix) and the Windows rebind fails while the old pipe instance lives.
+    if let Some(handle) = host_service_handle.lock().await.take() {
+        handle.abort();
+    }
+
     let db_tokens = match spawn_db_ipc_servers(&config, memory_store.as_ref()) {
-        Ok(tokens) => tokens,
+        Ok((tokens, new_handle)) => {
+            *host_service_handle.lock().await = new_handle;
+            tokens
+        }
         Err(e) => {
+            *host_service_handle.lock().await = None;
             tracing::warn!(
                 component = "TurnActor",
                 error = %e,
@@ -2975,13 +2995,18 @@ fn plugin_config_blob_updates(
 /// keying tokens off config would orphan registrations (config key with no
 /// matching binary) or starve plugins of tokens (binary with no config
 /// entry). Mirroring the manager's discovery here keeps the two sets aligned.
+///
+/// The returned `JoinHandle` owns the accept loop; the caller must abort it
+/// before re-spawning (reconfiguration) or on shutdown so the old listener
+/// does not keep serving an unlinked socket (unix) or block the pipe rebind
+/// (Windows).
 pub(super) fn spawn_db_ipc_servers(
     config: &EneConfig,
     memory_store: Option<&Arc<ene_store::MemoryStore>>,
-) -> Result<HashMap<String, String>, EneRuntimeError> {
+) -> Result<(HashMap<String, String>, Option<tokio::task::JoinHandle<()>>), EneRuntimeError> {
     let mut db_tokens = HashMap::new();
     let Some(store) = memory_store else {
-        return Ok(db_tokens);
+        return Ok((db_tokens, None));
     };
 
     #[cfg(any(unix, windows))]
@@ -2993,7 +3018,7 @@ pub(super) fn spawn_db_ipc_servers(
         // When the plugin system is disabled the host manager spawns nothing,
         // so no host-service acceptor is needed.
         if !plugin_config.enabled {
-            return Ok(db_tokens);
+            return Ok((db_tokens, None));
         }
 
         let db = store.connection().clone();
@@ -3004,6 +3029,21 @@ pub(super) fn spawn_db_ipc_servers(
                 message: format!("Failed to create socket dir: {e}"),
             })
         })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // 0o700 on the parent dir makes the bind→chmod window on the socket
+            // file unreachable from other users (the socket exists with umask-based
+            // perms for the few syscalls between bind and set_permissions).
+            if let Err(e) =
+                std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700))
+            {
+                return Err(EneRuntimeError::Tool(PluginHostError::ExecutionFailed {
+                    message: format!("Failed to tighten tool socket dir permissions: {e}"),
+                }));
+            }
+        }
 
         let mut db_plugins = HashMap::new();
 
@@ -3060,17 +3100,24 @@ pub(super) fn spawn_db_ipc_servers(
             );
         }
 
+        // No DB plugins → no need to bind the shared endpoint.
+        if db_plugins.is_empty() {
+            return Ok((db_tokens, None));
+        }
+
         let socket_path = host_service_socket_path();
         let server = HostServiceServer::new(db, socket_path, db_plugins);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(e) = server.run().await {
                 tracing::error!(error = %e, "Host service server error");
             }
         });
+
+        return Ok((db_tokens, Some(handle)));
     }
 
-    Ok(db_tokens)
+    Ok((db_tokens, None))
 }
 
 /// Discovers plugin binary names by scanning the builtin and user plugin

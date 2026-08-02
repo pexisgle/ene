@@ -14,6 +14,7 @@ pub enum DbRequest {
     /// Production clients authenticate via the host-service `Open` gate
     /// before sending any [`DbRequest`]. This variant remains for the
     /// standalone `DbIpcServer::run` accept path used in tests.
+    // TODO: drop DbIpcServer::run and DbRequest::Handshake once no shipped plugin binary reads sandbox.db_socket
     Handshake {
         /// Pre-shared auth token issued by the host for this plugin.
         token: String,
@@ -264,6 +265,8 @@ pub enum DbErrorCode {
     /// (`plugins.list.<name>.db_quota_mb`). Reads and deletes are still
     /// permitted so the plugin can free space.
     QuotaExceeded,
+    /// The requested operation or service is not implemented by the host.
+    Unsupported,
     /// An internal server error occurred.
     Internal,
     /// An error code this build does not know about (emitted by a newer
@@ -282,6 +285,7 @@ impl std::fmt::Display for DbErrorCode {
             Self::InvalidFilter => write!(f, "INVALID_FILTER"),
             Self::SchemaConflict => write!(f, "SCHEMA_CONFLICT"),
             Self::QuotaExceeded => write!(f, "QUOTA_EXCEEDED"),
+            Self::Unsupported => write!(f, "UNSUPPORTED"),
             Self::Unknown => write!(f, "UNKNOWN"),
             Self::Internal => write!(f, "INTERNAL"),
         }

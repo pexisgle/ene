@@ -80,6 +80,12 @@ pub enum DbError {
         /// Human-readable error message.
         message: String,
     },
+    /// The requested operation is not implemented by the host.
+    #[error("unsupported: {message}")]
+    Unsupported {
+        /// Human-readable error message.
+        message: String,
+    },
     /// An internal server error occurred.
     #[error("internal server error: {message}")]
     Internal {
@@ -175,9 +181,8 @@ impl DbClient {
             Some(HostServiceResponse::OpenAck) => Ok(()),
             Some(HostServiceResponse::Error { code, message }) => Err(DbError::Auth {
                 code: match code {
-                    HostServiceErrorCode::AuthRejected | HostServiceErrorCode::UnknownService => {
-                        DbErrorCode::PermissionDenied
-                    }
+                    HostServiceErrorCode::UnknownService => DbErrorCode::Unsupported,
+                    HostServiceErrorCode::AuthRejected => DbErrorCode::PermissionDenied,
                     HostServiceErrorCode::Internal => DbErrorCode::Internal,
                 },
                 message,
@@ -234,6 +239,7 @@ impl DbClient {
                 DbErrorCode::InvalidFilter => DbError::InvalidFilter { message },
                 DbErrorCode::SchemaConflict => DbError::SchemaConflict { message },
                 DbErrorCode::QuotaExceeded => DbError::QuotaExceeded { message },
+                DbErrorCode::Unsupported => DbError::Unsupported { message },
                 DbErrorCode::Unknown => DbError::Unknown { message },
                 DbErrorCode::Internal => DbError::Internal { message },
             };
@@ -463,6 +469,7 @@ mod tests {
             (DbErrorCode::TypeMismatch, "Type Mismatch message"),
             (DbErrorCode::InvalidFilter, "Invalid Filter message"),
             (DbErrorCode::SchemaConflict, "Schema Conflict message"),
+            (DbErrorCode::Unsupported, "Unsupported message"),
             (DbErrorCode::Internal, "Internal message"),
         ];
 
@@ -491,6 +498,9 @@ mod tests {
                     }
                     (DbErrorCode::SchemaConflict, DbError::SchemaConflict { message }) => {
                         assert_eq!(message, "Schema Conflict message");
+                    }
+                    (DbErrorCode::Unsupported, DbError::Unsupported { message }) => {
+                        assert_eq!(message, "Unsupported message");
                     }
                     (DbErrorCode::Internal, DbError::Internal { message }) => {
                         assert_eq!(message, "Internal message");

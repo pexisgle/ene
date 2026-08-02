@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ene_plugin_db::{DbErrorCode, DbRequest, DbResponse};
 use ene_plugin_proto::{
@@ -32,6 +32,45 @@ pub struct DbPluginRegistration {
     pub quota_bytes: Option<u64>,
 }
 
+/// Tracks rejected `Open`/handshake attempts so brute-force probing of the
+/// shared socket cannot flood the log while the cumulative count stays
+/// measurable.
+struct OpenFailureTracker {
+    count: u64,
+    last_logged: Option<std::time::Instant>,
+}
+
+impl Default for OpenFailureTracker {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            last_logged: None,
+        }
+    }
+}
+
+impl OpenFailureTracker {
+    fn new() -> Self {
+        Self::default()
+    }
+    /// Records one rejection; returns `true` when the caller should log it
+    /// (at most once per second).
+    fn record(&mut self) -> bool {
+        self.count = self.count.saturating_add(1);
+        let now = std::time::Instant::now();
+        let should_log = self
+            .last_logged
+            .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(1));
+        if should_log {
+            self.last_logged = Some(now);
+        }
+        should_log
+    }
+    fn count(&self) -> u64 {
+        self.count
+    }
+}
+
 /// Shared host-service listener that multiplexes passenger services.
 pub struct HostServiceServer {
     socket_path: PathBuf,
@@ -40,6 +79,7 @@ pub struct HostServiceServer {
     /// derived from this map so a shared socket cannot forge another
     /// plugin's namespace.
     db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
+    failed_opens: Arc<Mutex<OpenFailureTracker>>,
 }
 
 impl HostServiceServer {
@@ -53,6 +93,7 @@ impl HostServiceServer {
             socket_path,
             db,
             db_plugins: Arc::new(db_plugins),
+            failed_opens: Arc::new(Mutex::new(OpenFailureTracker::new())),
         }
     }
 
@@ -107,9 +148,11 @@ impl HostServiceServer {
 
             let db = self.db.clone();
             let db_plugins = Arc::clone(&self.db_plugins);
+            let failed_opens = Arc::clone(&self.failed_opens);
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(stream, db, db_plugins).await {
+                if let Err(e) = Self::handle_connection(stream, db, db_plugins, failed_opens).await
+                {
                     error!(error = %e, "Host service connection error");
                 }
             });
@@ -120,6 +163,7 @@ impl HostServiceServer {
         mut stream: ene_plugin_proto::transport::IpcStream,
         db: DatabaseConnection,
         db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
+        failed_opens: Arc<Mutex<OpenFailureTracker>>,
     ) -> Result<(), DbServerError> {
         // Read the first frame manually so a legacy `DbRequest::Handshake`
         // can be recognized after `HostServiceRequest::Open` deserialization
@@ -148,7 +192,7 @@ impl HostServiceServer {
             }
 
             let Some(reg) = db_plugins.get(&token).cloned() else {
-                warn!("Host service Open rejected: unknown token");
+                Self::log_rejected_open(&failed_opens, "Host service Open rejected: unknown token");
                 write_host_service_response(
                     &mut stream,
                     &HostServiceResponse::Error {
@@ -176,7 +220,10 @@ impl HostServiceServer {
         // through the same token → registration map.
         if let Ok(DbRequest::Handshake { token }) = serde_json::from_slice(&frame) {
             let Some(reg) = db_plugins.get(&token).cloned() else {
-                warn!("Host service legacy handshake rejected: unknown token");
+                Self::log_rejected_open(
+                    &failed_opens,
+                    "Host service legacy handshake rejected: unknown token",
+                );
                 DbIpcServer::send_response(
                     &mut stream,
                     &DbResponse::Error {
@@ -200,6 +247,25 @@ impl HostServiceServer {
 
         warn!("Host service connection sent an unrecognized first frame");
         Ok(())
+    }
+
+    /// Logs a rejected `Open`/handshake at `warn` at most once per second,
+    /// falling back to `debug` for the rejections in between so brute-force
+    /// probing of the shared socket cannot flood the log while the cumulative
+    /// attempt count stays measurable.
+    fn log_rejected_open(failed_opens: &Arc<Mutex<OpenFailureTracker>>, message: &str) {
+        let (should_log, attempts) = {
+            let mut tracker = failed_opens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let should_log = tracker.record();
+            (should_log, tracker.count())
+        };
+        if should_log {
+            warn!(attempts, "{message}");
+        } else {
+            debug!(attempts, "{message}");
+        }
     }
 }
 
