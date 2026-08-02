@@ -784,8 +784,8 @@ mod admission_gate_tests {
         assert!(matches!(err, LlmProviderError::Busy { .. }));
 
         drop(resource_hold);
-        let (_permit, _resource_permit) = task.await.unwrap().unwrap();
-        drop((_permit, _resource_permit));
+        let (permit, resource_permit) = task.await.unwrap().unwrap();
+        drop((permit, resource_permit));
 
         // Both permits are back: the resource class refilled and the limiter
         // admits a new caller — the drop-glue released both on every path.

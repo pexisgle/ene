@@ -2276,6 +2276,11 @@ async fn plugin_crash_releases_held_resource_permit() {
     let (conn, state, path) = connect_crash_mock("res-crash").await;
     let provider = build_provider(conn, "plugin", class, &config);
 
+    let task = tokio::spawn(async move {
+        let result = provider.chat_completion(&[], None).await;
+        (result, provider)
+    });
+
     // The request reaches the crashing plugin, so the host holds the permit
     // while the call is in flight.
     wait_for_chat_completions(&state, 1).await;
@@ -2285,7 +2290,7 @@ async fn plugin_crash_releases_held_resource_permit() {
         "the permit must be held while the request is in flight"
     );
 
-    let result = provider.chat_completion(&[], None).await;
+    let (result, _provider) = task.await.expect("the call task must not panic");
     assert!(
         result.is_err(),
         "a plugin that crashed mid-request must fail the call"
