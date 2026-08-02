@@ -192,19 +192,16 @@ impl CredentialVault {
     /// Resolves a credential, refreshing it when expired and a refresher is
     /// installed, or failing with [`ConnectorError::RefreshRequired`].
     pub fn resolve(&self, id: &str) -> Result<CredentialStore, ConnectorError> {
-        let store = match self.entries.read().get(id).cloned() {
-            Some(store) => store,
-            None => return Err(ConnectorError::credential_missing(id, id, None)),
+        let Some(store) = self.entries.read().get(id).cloned() else {
+            return Err(ConnectorError::credential_missing(id, id, None));
         };
         if store.is_expired() {
             let Some(refresher) = &self.refresher else {
                 return Err(ConnectorError::refresh_required(id));
             };
-            let refreshed = refresher.refresh(id, &store)?;
-            self.entries
-                .write()
-                .insert(id.to_string(), refreshed.clone());
-            return Ok(refreshed);
+            let fresh = refresher.refresh(id, &store)?;
+            self.entries.write().insert(id.to_string(), fresh.clone());
+            return Ok(fresh);
         }
         Ok(store)
     }

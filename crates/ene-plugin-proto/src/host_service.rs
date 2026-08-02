@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub use crate::frame::MAX_FRAMED_MESSAGE_SIZE as HOST_SERVICE_MAX_MESSAGE_SIZE;
 
 /// Identifies a service multiplexed on the host-service socket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostServiceId {
     /// Typed CRUD against the host `memory.db` (`ene-plugin-db`).
