@@ -67,6 +67,8 @@ reqwest = { version = "0.13", default-features = false }
 scraper = "0.27"
 quick-xml = { version = "0.41", features = ["serialize"] }
 url = "2"
+httparse = "1.10.1"
+webbrowser = "1.2.1"
 
 # ── IPC / Tool System ──
 proc-macro2 = "1"

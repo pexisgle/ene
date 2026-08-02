@@ -63,6 +63,9 @@ pub enum CredentialKind {
     },
     /// An `OAuth2` flow driven by the host.
     OAuth2 {
+        /// Public client identifier the authorization server requires even
+        /// for PKCE flows (a desktop app ships no client secret).
+        client_id: String,
         /// Permission scopes requested during consent.
         scopes: Vec<String>,
         /// Authorization endpoint for the consent redirect.
@@ -224,6 +227,13 @@ pub fn parse_credentials(schema: &Value) -> CredentialParse {
                 }
             }
             Some("oauth2") => {
+                let Some(client_id) = entry.get("client_id").and_then(Value::as_str) else {
+                    rejected.push(RejectedCredential {
+                        id: Some(raw_id.clone()),
+                        reason: CredentialRejection::MissingOauth2Field("client_id"),
+                    });
+                    continue;
+                };
                 let Some(auth_url) = entry.get("auth_url").and_then(Value::as_str) else {
                     rejected.push(RejectedCredential {
                         id: Some(raw_id.clone()),
@@ -239,6 +249,7 @@ pub fn parse_credentials(schema: &Value) -> CredentialParse {
                     continue;
                 };
                 CredentialKind::OAuth2 {
+                    client_id: client_id.to_owned(),
                     scopes: entry
                         .get("scopes")
                         .and_then(Value::as_array)
@@ -427,6 +438,7 @@ mod tests {
             "x-ene-credentials": [{
                 "id": "google.calendar",
                 "kind": "oauth2",
+                "client_id": "1234.apps.googleusercontent.com",
                 "scopes": ["https://www.googleapis.com/auth/calendar.readonly"],
                 "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
                 "token_url": "https://oauth2.googleapis.com/token"
@@ -439,10 +451,12 @@ mod tests {
         assert!(decl.shared);
         match &decl.kind {
             CredentialKind::OAuth2 {
+                client_id,
                 scopes,
                 auth_url,
                 token_url,
             } => {
+                assert_eq!(client_id, "1234.apps.googleusercontent.com");
                 assert_eq!(scopes.len(), 1);
                 assert_eq!(
                     scopes[0],
@@ -560,8 +574,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_oauth2_missing_required_urls() {
-        let base = serde_json::json!({ "id": "google.calendar", "kind": "oauth2" });
+    fn rejects_oauth2_missing_required_fields() {
+        let mut missing_client_id = serde_json::json!({
+            "id": "google.calendar", "kind": "oauth2",
+            "auth_url": "https://a", "token_url": "https://t"
+        });
+        missing_client_id["client_id"] = serde_json::json!("1234.apps.googleusercontent.com");
+        let parse = parse_declarations(&serde_json::json!({
+            "x-ene-credentials": [missing_client_id]
+        }));
+        assert!(parse.declarations.is_empty());
+        assert_eq!(
+            parse.rejected[0].reason,
+            CredentialRejection::MissingOauth2Field("client_id")
+        );
+
+        let base = serde_json::json!({
+            "id": "google.calendar", "kind": "oauth2",
+            "client_id": "1234.apps.googleusercontent.com"
+        });
         let mut missing_auth = base.clone();
         missing_auth["token_url"] = serde_json::json!("https://t");
         let mut missing_token = base;

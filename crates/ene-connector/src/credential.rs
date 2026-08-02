@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::time::Duration;
 
 /// An in-memory credential, held securely and redacted on display/serialize.
 ///
@@ -85,6 +86,21 @@ impl CredentialStore {
     pub fn is_expired(&self) -> bool {
         match self {
             Self::OAuth2 { expires_at, .. } => expires_at.is_some_and(|t| t < Utc::now()),
+            _ => false,
+        }
+    }
+
+    /// Returns `true` when an `OAuth2` credential expires within `within`.
+    ///
+    /// The lead time lets a refresher re-issue the token *before* it lapses
+    /// instead of discovering the expiry mid-request. Credentials without an
+    /// expiry (and non-`OAuth2` variants) are never considered imminent.
+    #[must_use]
+    pub fn expires_within(&self, within: Duration) -> bool {
+        match self {
+            Self::OAuth2 { expires_at, .. } => expires_at.is_some_and(|t| {
+                t <= Utc::now() + chrono::Duration::from_std(within).unwrap_or_default()
+            }),
             _ => false,
         }
     }
@@ -394,5 +410,27 @@ mod tests {
 
         let api_key = CredentialStore::from_api_key("key");
         assert!(!api_key.is_expired());
+    }
+
+    #[test]
+    fn expires_within_detects_imminent_expiry() {
+        use std::time::Duration;
+
+        let soon = Utc::now() + chrono::Duration::seconds(30);
+        let imminent = CredentialStore::oauth2("token", None::<&str>, Some(soon));
+        assert!(imminent.expires_within(Duration::from_secs(60)));
+
+        let later = Utc::now() + chrono::Duration::minutes(10);
+        let distant = CredentialStore::oauth2("token", None::<&str>, Some(later));
+        assert!(!distant.expires_within(Duration::from_secs(60)));
+
+        let expired = CredentialStore::oauth2("token", None::<&str>, Some(Utc::now()));
+        assert!(expired.expires_within(Duration::from_secs(60)));
+
+        let no_expiry = CredentialStore::oauth2("token", None::<&str>, None);
+        assert!(!no_expiry.expires_within(Duration::from_secs(60)));
+
+        let api_key = CredentialStore::from_api_key("key");
+        assert!(!api_key.expires_within(Duration::from_secs(60)));
     }
 }

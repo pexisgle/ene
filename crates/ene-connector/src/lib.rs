@@ -52,7 +52,10 @@ pub use declaration::{
 };
 pub use error::ConnectorError;
 pub use identity::{ConnectorId, ConnectorIdentity, CredentialId, PermissionScope};
-pub use vault::{AuditEntry, CredentialAuditLog, CredentialVault, TokenRefresher, VaultEntry};
+pub use vault::{
+    AuditEntry, CredentialAuditLog, CredentialSummaryKind, CredentialVault, REFRESH_LEAD_TIME,
+    TokenRefresher, VaultEntry, VaultEntrySummary,
+};
 
 /// Convenience re-exports of the crate's public API.
 pub mod prelude {
@@ -65,6 +68,7 @@ pub mod prelude {
     pub use crate::error::ConnectorError;
     pub use crate::identity::{ConnectorId, ConnectorIdentity, CredentialId, PermissionScope};
     pub use crate::vault::{
-        AuditEntry, CredentialAuditLog, CredentialVault, TokenRefresher, VaultEntry,
+        AuditEntry, CredentialAuditLog, CredentialSummaryKind, CredentialVault, REFRESH_LEAD_TIME,
+        TokenRefresher, VaultEntry, VaultEntrySummary,
     };
 }
