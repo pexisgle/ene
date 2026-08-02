@@ -27,6 +27,9 @@ use crate::settings::CharacterSettings;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 
+/// Highlight color for asset-missing warnings; single place to retheme.
+pub(crate) const WARNING_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 160, 60);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PageKind {
     #[default]

@@ -542,7 +542,6 @@ impl CharacterSettings {
                 initial_config,
             ))),
         };
-        settings.clamp_runtime_values();
         settings.load_from_file();
         settings
     }
@@ -560,8 +559,14 @@ impl CharacterSettings {
     }
 
     /// Relative path of the selected (or overridden) motion, if any.
+    ///
+    /// The motion override is character-scoped by the UI, so it is ignored
+    /// when no character entry exists rather than pointing at a file that
+    /// cannot play.
     pub fn current_motion(&self) -> Option<&str> {
-        if let Some(ref override_path) = self.character_state.motion_override {
+        if self.current_entry().is_some()
+            && let Some(ref override_path) = self.character_state.motion_override
+        {
             return Some(override_path.as_str());
         }
         self.current_entry()

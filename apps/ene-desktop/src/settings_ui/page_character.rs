@@ -4,6 +4,7 @@
 //! animation play/pause, four numeric rows for the look-at / scale
 //! / X / Y / Z parameters, six manual expression-test buttons, and
 //! (Linux only) the debug overlay + mask downsample cycle rows.
+use super::WARNING_COLOR;
 use super::input::SettingsInputState;
 use super::widgets::{SettingsAction, apply_action};
 use crate::ai_bridge::AiBridge;
@@ -299,20 +300,20 @@ fn render_numeric_row<F, C>(
 fn render_asset_warnings(ui: &mut egui::Ui, settings: &CharacterSettings) {
     let Some(entry) = settings.current_entry() else {
         ui.colored_label(
-            egui::Color32::from_rgb(220, 160, 60),
+            WARNING_COLOR,
             i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-none-selected"),
         );
         return;
     };
     if entry.vrm_paths.is_empty() {
         ui.colored_label(
-            egui::Color32::from_rgb(220, 160, 60),
+            WARNING_COLOR,
             i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-missing-vrm"),
         );
     }
     if entry.motion_paths.is_empty() {
         ui.colored_label(
-            egui::Color32::from_rgb(220, 160, 60),
+            WARNING_COLOR,
             i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-missing-motion"),
         );
     }
@@ -327,7 +328,16 @@ fn format_character_label(settings: &CharacterSettings) -> String {
             total,
             entry.name
         ),
-        None => format!("[0/{total}] —"),
+        None => {
+            // Only reachable when every entry was removed; an out-of-range
+            // index is clamped before this point, so total > 0 with no entry
+            // is dead.
+            if total == 0 {
+                "[0/0] —".to_string()
+            } else {
+                format!("[0/{total}] —")
+            }
+        }
     }
 }
 

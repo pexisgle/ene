@@ -3,6 +3,7 @@
 //! Allows viewing and editing the local `character.json` (`CCv3` format)
 //! in a dedicated settings tab. Supports validate, save, and reload.
 
+use super::WARNING_COLOR;
 use super::widgets::{SettingsAction, apply_action};
 use crate::ai_bridge::AiBridge;
 use crate::component::ui::UiStateComponent;
@@ -21,7 +22,7 @@ pub fn render(
 ) {
     let Some(card_rel) = settings.current_character_card() else {
         ui.colored_label(
-            egui::Color32::from_rgb(220, 160, 60),
+            WARNING_COLOR,
             i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-none-selected"),
         );
         return;
