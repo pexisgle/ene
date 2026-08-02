@@ -1,4 +1,5 @@
 mod affect;
+mod auth;
 mod card;
 mod clear;
 mod commitments;
@@ -64,6 +65,7 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &commitments::CommitmentsCommand as &dyn CliCommand,
     &session::SessionCommand as &dyn CliCommand,
     &permissions::PermissionsCommand as &dyn CliCommand,
+    &auth::AuthCommand as &dyn CliCommand,
     &doctor::DoctorCommand as &dyn CliCommand,
     &store::StoreCommand as &dyn CliCommand,
 ];

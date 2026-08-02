@@ -324,6 +324,26 @@ permissions-action-error = Failed
 permissions-refresh-ok = Permission list refreshed
 permissions-refresh-error = Failed to refresh permissions
 
+# Credentials (interim page)
+credentials = Credentials
+credentials-title = Credentials
+credentials-hint = Authorize OAuth services and revoke stored credentials.
+credentials-refresh = Refresh
+credentials-empty = No credentials are stored or declared.
+credentials-status-ok = Authorized
+credentials-status-expired = Expired — refresh may be required
+credentials-status-missing = Not authorized
+credentials-expiry-none = No expiry
+credentials-kind-oauth2 = OAuth2
+credentials-kind-api-key = API key
+credentials-kind-none = None
+credentials-authorize = Authorize
+credentials-revoke = Revoke
+credentials-action-ok = Done
+credentials-action-error = Failed
+credentials-refresh-ok = Credential list refreshed
+credentials-refresh-error = Failed to refresh credentials
+
 # Sessions
 sessions = Sessions
 sessions-title = Sessions

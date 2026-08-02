@@ -7,6 +7,7 @@ pub mod input;
 pub mod page_ai;
 pub mod page_character;
 pub mod page_character_editor;
+pub mod page_credentials;
 pub mod page_debug;
 pub mod page_features;
 pub mod page_graphics;
@@ -42,6 +43,9 @@ pub enum PageKind {
     Features,
     Memory,
     Permissions,
+    /// Stored OAuth/API credentials (interim page; superseded by the
+    /// schema-driven settings UI).
+    Credentials,
     Sessions,
     Debug,
 }
@@ -265,6 +269,7 @@ impl SettingsUi {
                 PageKind::Features,
                 PageKind::Memory,
                 PageKind::Permissions,
+                PageKind::Credentials,
                 PageKind::Sessions,
                 PageKind::Debug,
             ] {
@@ -287,6 +292,9 @@ impl SettingsUi {
                     PageKind::Memory => i18n_embed_fl::fl!(crate::i18n::loader(), "memory"),
                     PageKind::Permissions => {
                         i18n_embed_fl::fl!(crate::i18n::loader(), "permissions")
+                    }
+                    PageKind::Credentials => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "credentials")
                     }
                     PageKind::Sessions => i18n_embed_fl::fl!(crate::i18n::loader(), "sessions"),
                 };
@@ -330,6 +338,7 @@ impl SettingsUi {
             PageKind::Features => page_features::render(ui, settings, ai, world),
             PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
             PageKind::Permissions => page_permissions::render(ui, ai, world, ui_entity),
+            PageKind::Credentials => page_credentials::render(ui, ai, world, ui_entity),
             PageKind::Sessions => page_sessions::render(ui, ai, world, ui_entity),
             PageKind::Debug => {
                 page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);

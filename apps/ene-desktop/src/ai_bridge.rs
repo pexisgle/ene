@@ -261,6 +261,26 @@ impl AiBridge {
         Ok(self.block_on_timeout(self.handle.reset_all_permissions())??)
     }
 
+    /// List stored credentials as non-secret summaries. Blocks the calling
+    /// thread while the actor answers; intended for the Credentials
+    /// settings page.
+    pub fn list_credentials_blocking(
+        &self,
+    ) -> Result<Vec<ene_plugin_host::oauth::CredentialInfo>, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.list_credentials())??)
+    }
+
+    /// Revoke stored credentials by storage key, returning how many entries
+    /// the persistence file dropped.
+    pub fn revoke_credential_blocking(&self, ids: Vec<String>) -> Result<usize, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.revoke_credential(ids))??)
+    }
+
+    /// Start the OAuth authorization flow for a credential id (out-of-band).
+    pub fn authorize_credential_blocking(&self, id: String) -> Result<(), AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.authorize_credential(id))??)
+    }
+
     /// Undo the most recent reversible tool operation. Blocks the
     /// calling thread while the actor answers.
     pub fn undo_blocking(&self) -> Result<ene_runtime::UndoReport, AiBridgeError> {

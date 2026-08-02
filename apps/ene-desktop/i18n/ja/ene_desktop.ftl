@@ -324,6 +324,26 @@ permissions-action-error = 失敗
 permissions-refresh-ok = 権限一覧を更新しました
 permissions-refresh-error = 権限一覧の更新に失敗しました
 
+# Credentials (暫定ページ)
+credentials = 資格情報
+credentials-title = 資格情報
+credentials-hint = OAuth サービスを認可し、保存済みの資格情報を取り消します。
+credentials-refresh = 更新
+credentials-empty = 保存または宣言された資格情報はありません。
+credentials-status-ok = 認可済み
+credentials-status-expired = 期限切れ — 更新が必要かもしれません
+credentials-status-missing = 未認可
+credentials-expiry-none = 期限なし
+credentials-kind-oauth2 = OAuth2
+credentials-kind-api-key = API キー
+credentials-kind-none = なし
+credentials-authorize = 認可
+credentials-revoke = 取り消し
+credentials-action-ok = 完了
+credentials-action-error = 失敗
+credentials-refresh-ok = 資格情報一覧を更新しました
+credentials-refresh-error = 資格情報一覧の更新に失敗しました
+
 # Sessions
 sessions = セッション
 sessions-title = セッション

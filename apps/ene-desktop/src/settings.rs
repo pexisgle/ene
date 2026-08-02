@@ -321,6 +321,11 @@ pub struct UiState {
     /// Refreshed after every decision / revocation.
     pub permission_grants: Vec<ene_runtime::PermissionScope>,
     pub permission_message: Option<String>,
+    /// Non-secret credential summaries for the Credentials settings page.
+    /// Lazy-loaded the first time the page is shown and refreshed after
+    /// every authorize / revoke action.
+    pub credential_rows: Vec<ene_plugin_host::oauth::CredentialInfo>,
+    pub credential_message: Option<String>,
     /// Cached session metadata rows for the sessions page.
     /// Lazy-loaded the first time the page is shown and refreshed
     /// after every archive / import action. Rendered directly from the
