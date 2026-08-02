@@ -705,9 +705,11 @@ mod tests {
         Arc::new(|url: &str| {
             let url = url.to_string();
             std::thread::spawn(move || {
-                let location = match extract_location(&http_get(&url)) {
-                    Ok(location) => location,
-                    Err(_) => return,
+                let Ok(response) = http_get(&url) else {
+                    return;
+                };
+                let Ok(location) = extract_location(&response) else {
+                    return;
                 };
                 let _ = http_get(&location);
             });
@@ -780,9 +782,11 @@ mod tests {
             browser_opens.fetch_add(1, Ordering::SeqCst);
             let url = url.to_string();
             std::thread::spawn(move || {
-                let location = match extract_location(&http_get(&url)) {
-                    Ok(location) => location,
-                    Err(_) => return,
+                let Ok(response) = http_get(&url) else {
+                    return;
+                };
+                let Ok(location) = extract_location(&response) else {
+                    return;
                 };
                 let _ = http_get(&location);
             });
