@@ -33,23 +33,38 @@ jobs:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
-          tool-cache: false
-          android: true
+          tool-cache: true
+          android: false
           dotnet: true
           haskell: true
           large-packages: false
           docker-images: true
           swap-storage: false
       - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake clang mold libssl-dev \
+            libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
+            libwayland-dev libxkbcommon-dev libgtk-3-dev \
+            libvulkan-dev libgbm-dev libegl1-mesa-dev libxcb1-dev \
+            glslc spirv-headers
+      - name: Prepare build environment
+        run: |
+          echo "LIBCLANG_PATH=/usr/lib/llvm-$(clang --version | sed -nE 's/.*clang version ([0-9]+)\..*/\1/p')/lib" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
-          cmd-format: "nix develop --command {0}"
           # Failed runs must not persist partial caches.
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run clippy
-        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: Tests
@@ -59,22 +74,35 @@ jobs:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
-          tool-cache: false
-          android: true
+          tool-cache: true
+          android: false
           dotnet: true
           haskell: true
           large-packages: false
           docker-images: true
           swap-storage: false
       - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake clang mold libssl-dev \
+            libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
+            libwayland-dev libxkbcommon-dev libgtk-3-dev \
+            libvulkan-dev libgbm-dev libegl1-mesa-dev libxcb1-dev \
+            glslc spirv-headers
+      - name: Prepare build environment
+        run: |
+          echo "LIBCLANG_PATH=/usr/lib/llvm-$(clang --version | sed -nE 's/.*clang version ([0-9]+)\..*/\1/p')/lib" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
-          cmd-format: "nix develop --command {0}"
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
-        run: nix develop --command cargo test --workspace
+        run: cargo test --workspace
 
   docs:
     name: Doc build
@@ -84,18 +112,31 @@ jobs:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
-          tool-cache: false
-          android: true
+          tool-cache: true
+          android: false
           dotnet: true
           haskell: true
           large-packages: false
           docker-images: true
           swap-storage: false
       - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake clang mold libssl-dev \
+            libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
+            libwayland-dev libxkbcommon-dev libgtk-3-dev \
+            libvulkan-dev libgbm-dev libegl1-mesa-dev libxcb1-dev \
+            glslc spirv-headers
+      - name: Prepare build environment
+        run: |
+          echo "LIBCLANG_PATH=/usr/lib/llvm-$(clang --version | sed -nE 's/.*clang version ([0-9]+)\..*/\1/p')/lib" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
-          cmd-format: "nix develop --command {0}"
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Not run with RUSTDOCFLAGS=-D warnings: many crates already carry
@@ -104,7 +145,7 @@ jobs:
       # errors here would fail CI on unrelated debt instead of catching new
       # breakage. See the #273 PR description for the follow-up.
       - name: Build docs
-        run: nix develop --command cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps
 
   # Keep the two newest rust-cache generations per job, run after the
   # caching jobs save theirs.
