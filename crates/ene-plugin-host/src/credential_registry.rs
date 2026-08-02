@@ -113,7 +113,7 @@ fn warn_rejected_credential(plugin: &str, rejected: &RejectedCredential) {
                 component = "PluginHostManager",
                 plugin = %plugin,
                 credential_id = %credential_id,
-                "Ignoring credential declaration: header.format must contain the {value} placeholder"
+                "Ignoring credential declaration: header.format must contain the {{value}} placeholder"
             );
         }
         CredentialRejection::DuplicateId => {

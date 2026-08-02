@@ -147,31 +147,25 @@ pub fn parse_credentials(schema: &Value) -> CredentialParse {
             continue;
         };
 
-        let raw_id = match entry.get("id") {
-            Some(Value::String(s)) => s.clone(),
-            _ => {
-                rejected.push(RejectedCredential {
-                    id: None,
-                    reason: CredentialRejection::InvalidId,
-                });
-                continue;
-            }
+        let Some(Value::String(raw_id)) = entry.get("id") else {
+            rejected.push(RejectedCredential {
+                id: None,
+                reason: CredentialRejection::InvalidId,
+            });
+            continue;
         };
 
-        let id = match CredentialId::try_new(raw_id.clone()) {
-            Ok(id) => id,
-            Err(_) => {
-                rejected.push(RejectedCredential {
-                    id: Some(raw_id),
-                    reason: CredentialRejection::InvalidId,
-                });
-                continue;
-            }
+        let Ok(id) = CredentialId::try_new(raw_id.clone()) else {
+            rejected.push(RejectedCredential {
+                id: Some(raw_id.clone()),
+                reason: CredentialRejection::InvalidId,
+            });
+            continue;
         };
 
         if declarations.iter().any(|d| d.id == id) {
             rejected.push(RejectedCredential {
-                id: Some(raw_id),
+                id: Some(raw_id.clone()),
                 reason: CredentialRejection::DuplicateId,
             });
             continue;
@@ -184,7 +178,7 @@ pub fn parse_credentials(schema: &Value) -> CredentialParse {
                     && !header.format.contains(VALUE_PLACEHOLDER)
                 {
                     rejected.push(RejectedCredential {
-                        id: Some(raw_id),
+                        id: Some(raw_id.clone()),
                         reason: CredentialRejection::HeaderMissingPlaceholder,
                     });
                     continue;
@@ -200,14 +194,14 @@ pub fn parse_credentials(schema: &Value) -> CredentialParse {
             Some("oauth2") => {
                 let Some(auth_url) = entry.get("auth_url").and_then(Value::as_str) else {
                     rejected.push(RejectedCredential {
-                        id: Some(raw_id),
+                        id: Some(raw_id.clone()),
                         reason: CredentialRejection::MissingOauth2Field("auth_url"),
                     });
                     continue;
                 };
                 let Some(token_url) = entry.get("token_url").and_then(Value::as_str) else {
                     rejected.push(RejectedCredential {
-                        id: Some(raw_id),
+                        id: Some(raw_id.clone()),
                         reason: CredentialRejection::MissingOauth2Field("token_url"),
                     });
                     continue;
@@ -230,7 +224,7 @@ pub fn parse_credentials(schema: &Value) -> CredentialParse {
             }
             _ => {
                 rejected.push(RejectedCredential {
-                    id: Some(raw_id),
+                    id: Some(raw_id.clone()),
                     reason: CredentialRejection::UnknownKind,
                 });
                 continue;
