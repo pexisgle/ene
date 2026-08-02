@@ -8,9 +8,6 @@ use super::types::AffectProposal;
 use crate::engine::ClassifierContext;
 use crate::error::CognitionError;
 
-/// Default `OpenRouter` model for post-turn affect classification.
-pub const DEFAULT_CLASSIFIER_MODEL: &str = "google/gemini-2.5-flash-lite";
-
 pub(crate) const DEFAULT_CLASSIFIER_TIMEOUT_SECS: u64 = 30;
 
 const STREAM_FALLBACK_MAX_TOKENS: u32 = 512;
@@ -77,8 +74,14 @@ pub async fn classify_for_config(
                 .map_err(ClassifierError::Provider)?;
             if let Some(override_model) = model_override.as_deref() {
                 resolved.model = override_model.to_string();
-            } else if resolved.model.is_empty() {
-                resolved.model = DEFAULT_CLASSIFIER_MODEL.to_string();
+            }
+            if resolved.model.trim().is_empty() {
+                return Err(ClassifierError::Provider(
+                    ene_ai::LlmProviderError::Provider(
+                        "affect classifier requires a model (set ai.tasks.classifier.model or ai.tasks.chat.model)"
+                            .to_string(),
+                    ),
+                ));
             }
             if let Some(max) = cap {
                 resolved.max_tokens = Some(max);
