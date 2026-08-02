@@ -533,14 +533,18 @@ impl EneHandle {
             None
         };
 
-        let (db_tokens, host_service_handle) =
-            actor::spawn_db_ipc_servers(&config, memory_store.as_ref())?;
+        let host_services = actor::spawn_host_services(&config, memory_store.as_ref())?;
+        let db_tokens = host_services.db_tokens;
+        let credential_tokens = host_services.credential_tokens;
+        let host_service_handle = host_services.handle;
 
         // Start the plugin host (discovers and launches v3 plugin binaries).
         // Non-fatal: on failure we log and continue with no plugin-provided
         // providers/tools, mirroring the tool host's empty-set fallback.
         let mut plugin_host =
-            match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
+            match ene_plugin_host::PluginHostManager::start(&config, db_tokens, credential_tokens)
+                .await
+            {
                 Ok(host) => {
                     for (kind, factory) in host.llm_factories() {
                         tracing::info!(

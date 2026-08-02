@@ -35,6 +35,10 @@ use crate::types::{RequestId, TurnId};
 use crate::vision::VisionPrepared;
 use ene_ai::{AiTaskKind, LlmProviderRegistry, create_task_chat_provider};
 use ene_config::EneConfig;
+#[cfg(any(unix, windows))]
+use ene_connector::CredentialStore;
+#[cfg(any(unix, windows))]
+use ene_connector::vault::{CredentialVault, VaultEntry};
 use ene_mind::commitments::CommitmentLedger;
 use ene_mind::{CardName, SessionId};
 use ene_mind::{
@@ -42,9 +46,13 @@ use ene_mind::{
     compression_has_usable_summary,
 };
 use ene_mind::{ConversationSession, EneSessionError};
+#[cfg(any(unix, windows))]
+use ene_plugin_host::credential_service::{CredentialPassenger, CredentialPluginRegistration};
 use ene_plugin_host::{
     CompositeToolRegistry, DisabledReason, PluginHealthEvent, PluginHostError, ToolRegistry,
 };
+#[cfg(any(unix, windows))]
+use ene_plugin_proto::{HostServiceId, HostServicePassenger};
 use ene_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
 #[cfg(any(unix, windows))]
 use ene_store::host_service::{DbPluginRegistration, HostServiceServer, host_service_socket_path};
@@ -55,9 +63,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// Global monotonic counter used to generate unique DB IPC auth tokens.
-/// Intentionally process-global: each `EneHandle::open` call increments
-/// the counter so concurrent handles never share a token.
+/// Global monotonic counter used to generate unique DB and credential IPC
+/// auth tokens. Intentionally process-global: each `EneHandle::open` call
+/// increments the counter so concurrent handles never share a token.
 static DB_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(super) struct TurnActor {
@@ -2455,10 +2463,10 @@ async fn reconfigure_plugin_host_bg(
         handle.abort();
     }
 
-    let db_tokens = match spawn_db_ipc_servers(&config, memory_store.as_ref()) {
-        Ok((tokens, new_handle)) => {
-            *host_service_handle.lock().await = new_handle;
-            tokens
+    let services = match spawn_host_services(&config, memory_store.as_ref()) {
+        Ok(services) => {
+            *host_service_handle.lock().await = services.handle;
+            services
         }
         Err(e) => {
             *host_service_handle.lock().await = None;
@@ -2466,16 +2474,28 @@ async fn reconfigure_plugin_host_bg(
                 component = "TurnActor",
                 error = %e,
                 "Failed to spawn host service during plugin reconfiguration; \
-                 continuing without plugin DB access"
+                 continuing without plugin DB/credential access"
             );
-            HashMap::new()
+            HostServices {
+                db_tokens: HashMap::new(),
+                credential_tokens: HashMap::new(),
+                handle: None,
+            }
         }
     };
+    let db_tokens = services.db_tokens;
+    let credential_tokens = services.credential_tokens;
 
     // Start the new host before removing old entries. A surviving provider
     // kind remains available until its replacement is registered, and stale
     // entries are removed only when the new host does not serve that kind.
-    let mut new_host = match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
+    let mut new_host = match ene_plugin_host::PluginHostManager::start(
+        &config,
+        db_tokens,
+        credential_tokens,
+    )
+    .await
+    {
         Ok(host) => Some(host),
         Err(e) => {
             tracing::warn!(
@@ -2981,18 +3001,26 @@ fn plugin_config_blob_updates(
     updates
 }
 
-/// Plugin DB auth tokens plus the host-service accept-loop handle.
+/// Plugin auth tokens plus the host-service accept-loop handle.
 ///
-/// The handle is `None` when no DB-capable plugin exists (no endpoint bound)
-/// and must be aborted before re-binding on reconfiguration or shutdown.
-pub(super) type DbIpcServers = (HashMap<String, String>, Option<tokio::task::JoinHandle<()>>);
+/// The handle is `None` when no plugin exists (no endpoint bound) and must be
+/// aborted before re-binding on reconfiguration or shutdown.
+pub(super) struct HostServices {
+    /// Plugin name → `db` auth token.
+    pub db_tokens: HashMap<String, String>,
+    /// Plugin name → `credential` auth token.
+    pub credential_tokens: HashMap<String, String>,
+    /// Accept-loop handle (`None` when no plugin to serve).
+    pub handle: Option<tokio::task::JoinHandle<()>>,
+}
 
-/// Spawns the shared host-service acceptor with a `db` passenger for each
-/// discovered tool plugin.
+/// Spawns the shared host-service acceptor with `db` and `credential`
+/// passengers for each discovered tool plugin.
 ///
-/// Returns a map of plugin name → auth token. The tokens are passed to
-/// [`ene_plugin_host::PluginHostManager::start`] which hands them to the
-/// tool binaries via `SandboxConfigData::db_auth_token`.
+/// Returns per-plugin auth tokens for both services. The tokens are passed to
+/// [`ene_plugin_host::PluginHostManager::start`] which hands them to the tool
+/// binaries via `SandboxConfigData::db_auth_token` /
+/// `credential_auth_token`.
 ///
 /// Token generation is driven by the **detected plugin set** (the binaries
 /// actually discovered on disk) rather than by `plugins.list` config keys.
@@ -3006,13 +3034,18 @@ pub(super) type DbIpcServers = (HashMap<String, String>, Option<tokio::task::Joi
 /// before re-spawning (reconfiguration) or on shutdown so the old listener
 /// does not keep serving an unlinked socket (unix) or block the pipe rebind
 /// (Windows).
-pub(super) fn spawn_db_ipc_servers(
+pub(super) fn spawn_host_services(
     config: &EneConfig,
     memory_store: Option<&Arc<ene_store::MemoryStore>>,
-) -> Result<DbIpcServers, EneRuntimeError> {
+) -> Result<HostServices, EneRuntimeError> {
     let mut db_tokens = HashMap::new();
+    let mut credential_tokens = HashMap::new();
     let Some(store) = memory_store else {
-        return Ok((db_tokens, None));
+        return Ok(HostServices {
+            db_tokens,
+            credential_tokens,
+            handle: None,
+        });
     };
 
     #[cfg(any(unix, windows))]
@@ -3024,7 +3057,11 @@ pub(super) fn spawn_db_ipc_servers(
         // When the plugin system is disabled the host manager spawns nothing,
         // so no host-service acceptor is needed.
         if !plugin_config.enabled {
-            return Ok((db_tokens, None));
+            return Ok(HostServices {
+                db_tokens,
+                credential_tokens,
+                handle: None,
+            });
         }
 
         let db = store.connection().clone();
@@ -3052,6 +3089,7 @@ pub(super) fn spawn_db_ipc_servers(
         }
 
         let mut db_plugins = HashMap::new();
+        let mut credential_registrations = HashMap::new();
 
         for name in discover_plugin_names() {
             // Skip plugins explicitly disabled in configuration, mirroring
@@ -3074,45 +3112,47 @@ pub(super) fn spawn_db_ipc_servers(
             };
             let quota_bytes = quota_mb.map(|mb| mb.saturating_mul(1024 * 1024));
 
-            // Generate a 128-bit pre-shared token for this tool's
-            // host-service `db` session. We use a 256-bit keystream from
-            // blake3 (already a dep) keyed by the current nanosecond
-            // timestamp + a monotonic counter. blake3 is a CSPRNG
-            // and the counter guarantees uniqueness across calls in
-            // the same nanosecond.
-            let counter = DB_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(
-                &chrono::Utc::now()
-                    .timestamp_nanos_opt()
-                    .unwrap_or(0)
-                    .to_le_bytes(),
-            );
-            hasher.update(&counter.to_le_bytes());
-            let mut token_out = [0u8; 16];
-            let mut reader = hasher.finalize_xof();
-            use std::io::Read;
-            drop(reader.read_exact(&mut token_out));
-            let auth_token = format!("ene-db-{:x}", u128::from_le_bytes(token_out));
-
-            db_tokens.insert(name.clone(), auth_token.clone());
+            let db_auth_token = generate_host_service_token("ene-db-");
+            db_tokens.insert(name.clone(), db_auth_token.clone());
             db_plugins.insert(
-                auth_token,
+                db_auth_token,
                 DbPluginRegistration {
                     tool_name: name.clone(),
                     prefix: format!("{name}_"),
                     quota_bytes,
                 },
             );
+
+            // A separate credential token keeps the two capabilities
+            // independent: DB access never implies credential access. Issued
+            // to every discovered plugin (like the db token) so undeclared
+            // plugins can still open the service and receive `ScopeDenied`.
+            let cred_auth_token = generate_host_service_token("ene-cred-");
+            credential_tokens.insert(name.clone(), cred_auth_token.clone());
+            credential_registrations.insert(
+                cred_auth_token,
+                CredentialPluginRegistration {
+                    plugin: name.clone(),
+                },
+            );
         }
 
-        // No DB plugins → no need to bind the shared endpoint.
+        // No plugins → no need to bind the shared endpoint.
         if db_plugins.is_empty() {
-            return Ok((db_tokens, None));
+            return Ok(HostServices {
+                db_tokens,
+                credential_tokens,
+                handle: None,
+            });
         }
+
+        let vault = Arc::new(build_credential_vault(config));
+        let passenger = Arc::new(CredentialPassenger::new(vault, credential_registrations));
+        let mut passengers: HashMap<HostServiceId, Arc<dyn HostServicePassenger>> = HashMap::new();
+        passengers.insert(HostServiceId::Credential, passenger);
 
         let socket_path = host_service_socket_path();
-        let server = HostServiceServer::new(db, socket_path, db_plugins);
+        let server = HostServiceServer::new(db, socket_path, db_plugins, passengers);
 
         let handle = tokio::spawn(async move {
             if let Err(e) = server.run().await {
@@ -3120,13 +3160,206 @@ pub(super) fn spawn_db_ipc_servers(
             }
         });
 
-        Ok((db_tokens, Some(handle)))
+        Ok(HostServices {
+            db_tokens,
+            credential_tokens,
+            handle: Some(handle),
+        })
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        Ok((db_tokens, None))
+        Ok(HostServices {
+            db_tokens,
+            credential_tokens,
+            handle: None,
+        })
     }
+}
+
+/// Generates a fresh 128-bit pre-shared host-service token.
+///
+/// Uses a 256-bit keystream from blake3 (already a dep) keyed by the current
+/// nanosecond timestamp + a monotonic counter. blake3 is a CSPRNG and the
+/// counter guarantees uniqueness across calls in the same nanosecond.
+#[cfg(any(unix, windows))]
+fn generate_host_service_token(prefix: &str) -> String {
+    let counter = DB_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(
+        &chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    hasher.update(&counter.to_le_bytes());
+    let mut token_out = [0u8; 16];
+    let mut reader = hasher.finalize_xof();
+    use std::io::Read;
+    drop(reader.read_exact(&mut token_out));
+    format!("{prefix}{:x}", u128::from_le_bytes(token_out))
+}
+
+/// Builds the credential vault from configuration.
+///
+/// Resolution precedence for each candidate id (every `plugins.list` and
+/// `ai.providers` name, deduplicated):
+/// 1. `plugins.list.<id>.config.api_key` (plain string or `{"source": ...}`).
+/// 2. `ai.providers.<id>.api_key` (typed `ApiKeyConfig`).
+/// 3. The `{ID}_API_KEY` environment variable.
+///
+/// This mirrors the resolution contract the anthropic plugin previously
+/// implemented in-process; the plugin-side copy is removed with the
+/// credential client API.
+///
+/// Each plugin's declared scope comes from the provisional
+/// `x-ene-credentials` entry key (fail-closed: malformed or absent → nothing
+/// allowed). The declaration is a single, replaceable seam — the formal
+/// typed declaration supersedes it.
+#[cfg(any(unix, windows))]
+fn build_credential_vault(config: &EneConfig) -> CredentialVault {
+    let plugin_config = config
+        .get_section::<ene_plugin_host::PluginConfig>()
+        .unwrap_or_default();
+    let ai_config = config.get_section::<ene_ai::AiConfig>().unwrap_or_default();
+
+    let mut ids: Vec<String> = plugin_config.list.keys().cloned().collect();
+    ids.extend(ai_config.providers.keys().cloned());
+    ids.sort();
+    ids.dedup();
+
+    let mut entries = Vec::new();
+    for id in &ids {
+        let plugin_entry = plugin_config.list.get(id);
+        let ai_def = ai_config.providers.get(id);
+        let Some(key) = resolve_credential_key(id, plugin_entry, ai_def) else {
+            continue;
+        };
+        entries.push(VaultEntry::new(
+            id.clone(),
+            CredentialStore::from_api_key(key),
+        ));
+    }
+
+    let vault = CredentialVault::new(entries);
+    for (name, entry) in &plugin_config.list {
+        vault.declare(name, declared_credential_ids(name, &entry.extra));
+    }
+    vault
+}
+
+#[cfg(any(unix, windows))]
+/// Resolves a credential key for `id` across the three configuration sources.
+fn resolve_credential_key(
+    id: &str,
+    plugin_entry: Option<&ene_plugin_host::PluginEntry>,
+    ai_def: Option<&ene_ai::AiProviderDef>,
+) -> Option<String> {
+    // 1. plugins.list.<id>.config.api_key (anthropic contract).
+    if let Some(entry) = plugin_entry
+        && let Some(key) = entry
+            .config
+            .get("api_key")
+            .and_then(|value| resolve_api_key_value(id, value))
+    {
+        return Some(key);
+    }
+    // 2. ai.providers.<id>.api_key (typed ApiKeyConfig).
+    if let Some(def) = ai_def {
+        let cfg = &def.api_key;
+        if cfg.source == "inline" && !cfg.inline.trim().is_empty() {
+            return Some(cfg.inline.trim().to_string());
+        }
+        if cfg.source == "env" {
+            let var = if cfg.env.trim().is_empty() {
+                env_var_for_id(id)
+            } else {
+                cfg.env.clone()
+            };
+            if let Ok(key) = std::env::var(&var)
+                && !key.trim().is_empty()
+            {
+                return Some(key.trim().to_string());
+            }
+        }
+    }
+    // 3. {ID}_API_KEY environment fallback.
+    std::env::var(env_var_for_id(id))
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+}
+
+#[cfg(any(unix, windows))]
+/// The environment variable name conventionally backing a credential id
+/// (e.g. `anthropic` → `ANTHROPIC_API_KEY`).
+fn env_var_for_id(id: &str) -> String {
+    format!("{}_API_KEY", id.to_uppercase().replace('-', "_"))
+}
+
+#[cfg(any(unix, windows))]
+/// Resolves a `plugins.list.<name>.config.api_key` value per the
+/// `{"source": ...}` contract: a plain string is used directly;
+/// `{"source": "inline", "inline": ...}` uses the inline value;
+/// `{"source": "env", "env": "VAR"}` reads the named environment variable
+/// (empty name → `{ID}_API_KEY`). Any other shape (including
+/// `{"source": "auto"}`) resolves to `None` so the caller falls through to
+/// the next source.
+fn resolve_api_key_value(id: &str, value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(key) if !key.trim().is_empty() => Some(key.trim().to_string()),
+        serde_json::Value::Object(obj) => {
+            let source = obj
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("auto");
+            match source {
+                "inline" => obj
+                    .get("inline")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_string),
+                "env" => {
+                    let var = obj
+                        .get("env")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map_or_else(|| env_var_for_id(id), str::to_string);
+                    std::env::var(var).ok().filter(|key| !key.is_empty())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(any(unix, windows))]
+/// Reads a plugin's declared credential scope from the provisional
+/// `x-ene-credentials` entry key (an array of ids). Malformed or absent
+/// values fail closed to an empty set. The typed declaration (config schema)
+/// replaces this as the single supply seam.
+fn declared_credential_ids(
+    plugin: &str,
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    let Some(value) = extra.get("x-ene-credentials") else {
+        return Vec::new();
+    };
+    let Some(ids) = value.as_array() else {
+        tracing::warn!(
+            component = "TurnActor",
+            plugin = %plugin,
+            "plugins.list.<name>.x-ene-credentials must be an array of \
+             credential ids; ignoring"
+        );
+        return Vec::new();
+    };
+    ids.iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect()
 }
 
 /// Discovers plugin binary names by scanning the builtin and user plugin
