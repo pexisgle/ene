@@ -76,8 +76,8 @@ pub use capabilities::{
 pub use error::PluginError;
 /// Plugin IPC message types, protocol version, and framing helpers.
 pub use ipc::{
-    PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION, PluginIpcRequest,
-    PluginIpcResponse, VersionRange, read_plugin_request, read_plugin_response,
+    ConfigFieldError, ConfigOption, PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION,
+    PluginIpcRequest, PluginIpcResponse, VersionRange, read_plugin_request, read_plugin_response,
     write_plugin_request, write_plugin_response,
 };
 /// Sandbox configuration data sent from the host.

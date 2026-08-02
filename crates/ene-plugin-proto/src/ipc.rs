@@ -73,6 +73,12 @@ impl VersionRange {
 /// v5 extends v4 with:
 /// - `SetConfig` / `ConfigApplied` for pushing updated plugin configuration
 ///   to a live plugin without restarting it
+/// - Dynamic config surface (same protocol generation; requires rebuilt
+///   plugins): `ListConfigOptions`, `ValidateConfig`, `MigrateConfig`, and
+///   the `ConfigSchemaChanged` push. Hosts gate these on
+///   `negotiated_version >= 5` **and** the matching
+///   [`PluginCapabilities`](crate::PluginCapabilities) flags (serde-default
+///   `false` on older v5 binaries that lack the variants).
 ///
 /// v4 extends v3 with:
 /// - `CancelStream` for explicit stream cancellation (from host to plugin)
@@ -124,6 +130,32 @@ pub const PLUGIN_IPC_MIN_SUPPORTED_VERSION: u32 = PLUGIN_IPC_PROTOCOL_VERSION - 
 /// Default audio format used when none is specified.
 fn default_audio_format() -> String {
     "wav".to_string()
+}
+
+/// One selectable option for a dynamic config field (e.g. a voice list).
+///
+/// Returned by [`PluginIpcRequest::ListConfigOptions`]. `value` is what the
+/// host writes into the config blob; `label` is UI-facing; `group` optionally
+/// buckets options (e.g. VOICEVOX speaker style families).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfigOption {
+    /// Value written into the config when this option is selected.
+    pub value: serde_json::Value,
+    /// Human-readable label for UI presentation.
+    pub label: String,
+    /// Optional grouping key for UI sections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+/// A field-level validation error returned by
+/// [`PluginIpcRequest::ValidateConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigFieldError {
+    /// JSON-pointer-style path to the offending field (e.g. `"mmproj_path"`).
+    pub field_path: String,
+    /// Human-readable error message suitable for form display.
+    pub message: String,
 }
 
 /// Plugin IPC request — host → plugin.
@@ -240,6 +272,48 @@ pub enum PluginIpcRequest {
         /// must replace any previously stored map (typically with `{}`).
         #[serde(default)]
         profiles: Option<serde_json::Value>,
+    },
+    /// List dynamic options for a config path (protocol v5+, capability-gated).
+    ///
+    /// Used when enum values cannot be baked into a static JSON Schema
+    /// (runtime engine speakers, remote voice catalogs, etc.). The host
+    /// sends this only when
+    /// [`PluginCapabilities::supports_list_config_options`] is set.
+    ListConfigOptions {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
+        /// Dot/JSON-pointer style path within the plugin config
+        /// (e.g. `"voice"` or `"speaker.id"`).
+        path: String,
+    },
+    /// Ask the plugin to validate a config value (protocol v5+, capability-gated).
+    ///
+    /// Covers cross-field rules JSON Schema cannot express. The host sends
+    /// this only when [`PluginCapabilities::supports_validate_config`] is set;
+    /// otherwise it falls back to local JSON Schema validation.
+    ValidateConfig {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
+        /// Candidate configuration JSON to validate.
+        value: serde_json::Value,
+    },
+    /// Ask the plugin to migrate a stored config blob (protocol v5+,
+    /// capability-gated).
+    ///
+    /// Sent when the host's stored `config_version` is older than the
+    /// plugin's advertised [`PluginCapabilities::config_version`]. The host
+    /// sends this only when [`PluginCapabilities::supports_migrate_config`]
+    /// is set; otherwise migration is skipped.
+    MigrateConfig {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
+        /// Version the stored blob was written under.
+        from_version: u32,
+        /// Stored configuration JSON to migrate.
+        value: serde_json::Value,
     },
     /// Cancel a deferred (background) task by id.
     CancelDeferred {
@@ -405,12 +479,60 @@ pub enum PluginIpcResponse {
         request_id: String,
         /// The schema, or `None` if not provided.
         schema: Option<serde_json::Value>,
+        /// Current config schema version (same meaning as
+        /// [`PluginCapabilities::config_version`]). Older plugins omit the
+        /// field; `#[serde(default)]` yields `0`.
+        #[serde(default)]
+        config_version: u32,
     },
     /// Acknowledgment that a [`PluginIpcRequest::SetConfig`] was applied.
     ConfigApplied {
         /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
+    },
+    /// Dynamic options for a config path.
+    ConfigOptions {
+        /// Request identifier correlating this response to the originating request.
+        #[serde(default)]
+        request_id: String,
+        /// Available options for the requested path.
+        options: Vec<ConfigOption>,
+    },
+    /// Result of plugin-delegated config validation.
+    ///
+    /// An empty `errors` list means the value is valid.
+    ConfigValidated {
+        /// Request identifier correlating this response to the originating request.
+        #[serde(default)]
+        request_id: String,
+        /// Field-level errors; empty means success.
+        #[serde(default)]
+        errors: Vec<ConfigFieldError>,
+    },
+    /// Result of a config migration.
+    ConfigMigrated {
+        /// Request identifier correlating this response to the originating request.
+        #[serde(default)]
+        request_id: String,
+        /// Migrated configuration JSON.
+        value: serde_json::Value,
+        /// Version the migrated blob now corresponds to.
+        #[serde(default)]
+        config_version: u32,
+    },
+    /// Push notification: the plugin's config schema changed at runtime.
+    ///
+    /// Routed like [`DeferredCompleted`](Self::DeferredCompleted) — no
+    /// `request_id`. The host caches the latest push so a UI poll can observe
+    /// it without an in-flight waiter. Callers may also re-fetch via
+    /// [`PluginIpcRequest::GetConfigSchema`].
+    ConfigSchemaChanged {
+        /// The updated schema, or `None` if the plugin cleared it.
+        schema: Option<serde_json::Value>,
+        /// Updated config schema version after the change.
+        #[serde(default)]
+        config_version: u32,
     },
     /// Error response.
     Error {
@@ -888,6 +1010,7 @@ mod tests {
                 }],
                 tts_providers: vec![],
                 stt_providers: vec![],
+                ..PluginCapabilities::default()
             },
         };
         let got = send_recv_response(&resp).await;
@@ -917,6 +1040,100 @@ mod tests {
         let resp = PluginIpcResponse::ConfigSchema {
             request_id: "req-1".into(),
             schema: Some(serde_json::json!({"type": "object", "properties": {}})),
+            config_version: 1,
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn response_config_schema_omitted_version_defaults_to_zero() {
+        let json = r#"{"ConfigSchema":{"request_id":"r1","schema":null}}"#;
+        let resp: PluginIpcResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            resp,
+            PluginIpcResponse::ConfigSchema {
+                request_id: "r1".into(),
+                schema: None,
+                config_version: 0,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn request_list_config_options_roundtrip() {
+        let req = PluginIpcRequest::ListConfigOptions {
+            request_id: "req-opt".into(),
+            path: "voice".into(),
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn response_config_options_roundtrip() {
+        let resp = PluginIpcResponse::ConfigOptions {
+            request_id: "req-opt".into(),
+            options: vec![ConfigOption {
+                value: serde_json::json!("alloy"),
+                label: "Alloy".into(),
+                group: Some("openai".into()),
+            }],
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn request_validate_config_roundtrip() {
+        let req = PluginIpcRequest::ValidateConfig {
+            request_id: "req-val".into(),
+            value: serde_json::json!({"voice": "alloy"}),
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn response_config_validated_roundtrip() {
+        let resp = PluginIpcResponse::ConfigValidated {
+            request_id: "req-val".into(),
+            errors: vec![ConfigFieldError {
+                field_path: "mmproj_path".into(),
+                message: "required when multimodal model is selected".into(),
+            }],
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn request_migrate_config_roundtrip() {
+        let req = PluginIpcRequest::MigrateConfig {
+            request_id: "req-mig".into(),
+            from_version: 1,
+            value: serde_json::json!({"speaker": 1}),
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn response_config_migrated_roundtrip() {
+        let resp = PluginIpcResponse::ConfigMigrated {
+            request_id: "req-mig".into(),
+            value: serde_json::json!({"speaker": {"id": 1}}),
+            config_version: 2,
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn response_config_schema_changed_roundtrip() {
+        let resp = PluginIpcResponse::ConfigSchemaChanged {
+            schema: Some(serde_json::json!({"type": "object"})),
+            config_version: 3,
         };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);

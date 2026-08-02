@@ -125,6 +125,213 @@ impl PluginDispatch {
             .or_else(|| self.tts.as_ref().and_then(|t| t.config_schema()))
             .or_else(|| self.stt.as_ref().and_then(|s| s.config_schema()))
     }
+
+    /// Highest non-zero `config_version` among registered trait objects.
+    fn config_version(&self) -> u32 {
+        [
+            self.tool.as_ref().map(|t| t.config_version()),
+            self.llm.as_ref().map(|l| l.config_version()),
+            self.embed.as_ref().map(|e| e.config_version()),
+            self.tts.as_ref().map(|t| t.config_version()),
+            self.stt.as_ref().map(|s| s.config_version()),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0)
+    }
+
+    fn supports_list_config_options(&self) -> bool {
+        self.tool
+            .as_ref()
+            .is_some_and(|t| t.supports_list_config_options())
+            || self
+                .llm
+                .as_ref()
+                .is_some_and(|l| l.supports_list_config_options())
+            || self
+                .embed
+                .as_ref()
+                .is_some_and(|e| e.supports_list_config_options())
+            || self
+                .tts
+                .as_ref()
+                .is_some_and(|t| t.supports_list_config_options())
+            || self
+                .stt
+                .as_ref()
+                .is_some_and(|s| s.supports_list_config_options())
+    }
+
+    fn supports_validate_config(&self) -> bool {
+        self.tool
+            .as_ref()
+            .is_some_and(|t| t.supports_validate_config())
+            || self
+                .llm
+                .as_ref()
+                .is_some_and(|l| l.supports_validate_config())
+            || self
+                .embed
+                .as_ref()
+                .is_some_and(|e| e.supports_validate_config())
+            || self
+                .tts
+                .as_ref()
+                .is_some_and(|t| t.supports_validate_config())
+            || self
+                .stt
+                .as_ref()
+                .is_some_and(|s| s.supports_validate_config())
+    }
+
+    fn supports_migrate_config(&self) -> bool {
+        self.tool
+            .as_ref()
+            .is_some_and(|t| t.supports_migrate_config())
+            || self
+                .llm
+                .as_ref()
+                .is_some_and(|l| l.supports_migrate_config())
+            || self
+                .embed
+                .as_ref()
+                .is_some_and(|e| e.supports_migrate_config())
+            || self
+                .tts
+                .as_ref()
+                .is_some_and(|t| t.supports_migrate_config())
+            || self
+                .stt
+                .as_ref()
+                .is_some_and(|s| s.supports_migrate_config())
+    }
+
+    /// First trait object that advertises list-options support handles the path.
+    fn list_config_options(&self, path: &str) -> Vec<ene_plugin_proto::ConfigOption> {
+        if let Some(tool) = &self.tool
+            && tool.supports_list_config_options()
+        {
+            return tool.list_config_options(path);
+        }
+        if let Some(llm) = &self.llm
+            && llm.supports_list_config_options()
+        {
+            return llm.list_config_options(path);
+        }
+        if let Some(embed) = &self.embed
+            && embed.supports_list_config_options()
+        {
+            return embed.list_config_options(path);
+        }
+        if let Some(tts) = &self.tts
+            && tts.supports_list_config_options()
+        {
+            return tts.list_config_options(path);
+        }
+        if let Some(stt) = &self.stt
+            && stt.supports_list_config_options()
+        {
+            return stt.list_config_options(path);
+        }
+        Vec::new()
+    }
+
+    fn validate_config(
+        &self,
+        value: &serde_json::Value,
+    ) -> Vec<ene_plugin_proto::ConfigFieldError> {
+        if let Some(tool) = &self.tool
+            && tool.supports_validate_config()
+        {
+            return tool.validate_config(value);
+        }
+        if let Some(llm) = &self.llm
+            && llm.supports_validate_config()
+        {
+            return llm.validate_config(value);
+        }
+        if let Some(embed) = &self.embed
+            && embed.supports_validate_config()
+        {
+            return embed.validate_config(value);
+        }
+        if let Some(tts) = &self.tts
+            && tts.supports_validate_config()
+        {
+            return tts.validate_config(value);
+        }
+        if let Some(stt) = &self.stt
+            && stt.supports_validate_config()
+        {
+            return stt.validate_config(value);
+        }
+        Vec::new()
+    }
+
+    fn migrate_config(
+        &self,
+        from_version: u32,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if let Some(tool) = &self.tool
+            && tool.supports_migrate_config()
+        {
+            return tool.migrate_config(from_version, value);
+        }
+        if let Some(llm) = &self.llm
+            && llm.supports_migrate_config()
+        {
+            return llm.migrate_config(from_version, value);
+        }
+        if let Some(embed) = &self.embed
+            && embed.supports_migrate_config()
+        {
+            return embed.migrate_config(from_version, value);
+        }
+        if let Some(tts) = &self.tts
+            && tts.supports_migrate_config()
+        {
+            return tts.migrate_config(from_version, value);
+        }
+        if let Some(stt) = &self.stt
+            && stt.supports_migrate_config()
+        {
+            return stt.migrate_config(from_version, value);
+        }
+        Ok(value)
+    }
+
+    /// Drain the first pending schema-change notification across traits.
+    fn drain_config_schema_change(&self) -> Option<(serde_json::Value, u32)> {
+        let drain = |schema: Option<serde_json::Value>, version: u32| schema.map(|s| (s, version));
+        if let Some(tool) = &self.tool
+            && let Some(out) = drain(tool.drain_config_schema_change(), tool.config_version())
+        {
+            return Some(out);
+        }
+        if let Some(llm) = &self.llm
+            && let Some(out) = drain(llm.drain_config_schema_change(), llm.config_version())
+        {
+            return Some(out);
+        }
+        if let Some(embed) = &self.embed
+            && let Some(out) = drain(embed.drain_config_schema_change(), embed.config_version())
+        {
+            return Some(out);
+        }
+        if let Some(tts) = &self.tts
+            && let Some(out) = drain(tts.drain_config_schema_change(), tts.config_version())
+        {
+            return Some(out);
+        }
+        if let Some(stt) = &self.stt
+            && let Some(out) = drain(stt.drain_config_schema_change(), stt.config_version())
+        {
+            return Some(out);
+        }
+        None
+    }
 }
 
 /// Starts a plugin as an IPC server.
@@ -326,8 +533,8 @@ async fn write_loop<W: tokio::io::AsyncWrite + Unpin>(
     }
 }
 
-/// Spawns a task that periodically drains deferred task completions from the
-/// tool plugin and pushes them to the host over `tx` (Cr-5).
+/// Spawns a task that periodically drains deferred task completions and
+/// config-schema-change notifications, pushing them to the host over `tx`.
 fn spawn_deferred_drain(
     dispatch: Arc<PluginDispatch>,
     tx: mpsc::Sender<PluginIpcResponse>,
@@ -337,11 +544,19 @@ fn spawn_deferred_drain(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            let Some(tool) = &dispatch.tool else {
-                continue;
-            };
-            for (task_id, result) in tool.drain_deferred_completions() {
-                let resp = PluginIpcResponse::DeferredCompleted { task_id, result };
+            if let Some(tool) = &dispatch.tool {
+                for (task_id, result) in tool.drain_deferred_completions() {
+                    let resp = PluginIpcResponse::DeferredCompleted { task_id, result };
+                    if tx.send(resp).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            if let Some((schema, config_version)) = dispatch.drain_config_schema_change() {
+                let resp = PluginIpcResponse::ConfigSchemaChanged {
+                    schema: Some(schema),
+                    config_version,
+                };
                 if tx.send(resp).await.is_err() {
                     return;
                 }
@@ -539,6 +754,34 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
         PluginIpcRequest::GetConfigSchema { request_id } => PluginIpcResponse::ConfigSchema {
             request_id: request_id.clone(),
             schema: dispatch.config_schema(),
+            config_version: dispatch.config_version(),
+        },
+        PluginIpcRequest::ListConfigOptions { request_id, path } => {
+            PluginIpcResponse::ConfigOptions {
+                request_id: request_id.clone(),
+                options: dispatch.list_config_options(path),
+            }
+        }
+        PluginIpcRequest::ValidateConfig { request_id, value } => {
+            PluginIpcResponse::ConfigValidated {
+                request_id: request_id.clone(),
+                errors: dispatch.validate_config(value),
+            }
+        }
+        PluginIpcRequest::MigrateConfig {
+            request_id,
+            from_version,
+            value,
+        } => match dispatch.migrate_config(*from_version, value.clone()) {
+            Ok(migrated) => PluginIpcResponse::ConfigMigrated {
+                request_id: request_id.clone(),
+                value: migrated,
+                config_version: dispatch.config_version(),
+            },
+            Err(message) => PluginIpcResponse::Error {
+                request_id: request_id.clone(),
+                message,
+            },
         },
         PluginIpcRequest::ListTools { request_id } => PluginIpcResponse::Tools {
             request_id: request_id.clone(),
@@ -921,6 +1164,10 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
             .stt
             .as_ref()
             .map_or(Vec::new(), |s| s.stt_capabilities()),
+        supports_list_config_options: dispatch.supports_list_config_options(),
+        supports_validate_config: dispatch.supports_validate_config(),
+        supports_migrate_config: dispatch.supports_migrate_config(),
+        config_version: dispatch.config_version(),
     }
 }
 
@@ -1487,7 +1734,9 @@ mod tests {
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
-            PluginIpcResponse::ConfigSchema { request_id, schema } => {
+            PluginIpcResponse::ConfigSchema {
+                request_id, schema, ..
+            } => {
                 assert_eq!(request_id, "req-1");
                 assert!(schema.is_some());
             }
@@ -1503,7 +1752,9 @@ mod tests {
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
-            PluginIpcResponse::ConfigSchema { request_id, schema } => {
+            PluginIpcResponse::ConfigSchema {
+                request_id, schema, ..
+            } => {
                 assert_eq!(request_id, "req-1");
                 assert!(schema.is_none());
             }
@@ -1684,7 +1935,9 @@ mod tests {
         )
         .await;
         match resp {
-            PluginIpcResponse::ConfigSchema { request_id, schema } => {
+            PluginIpcResponse::ConfigSchema {
+                request_id, schema, ..
+            } => {
                 assert_eq!(request_id, "req-1");
                 let schema = schema.expect("LLM plugin must advertise a schema");
                 assert_eq!(
@@ -1694,6 +1947,184 @@ mod tests {
             }
             other => panic!("expected ConfigSchema, got {other:?}"),
         }
+    }
+
+    /// Plugin that opts into the full dynamic-config surface for dispatch tests.
+    struct DynamicConfigPlugin {
+        pending_schema: std::sync::Mutex<Option<serde_json::Value>>,
+    }
+
+    impl DynamicConfigPlugin {
+        fn new() -> Self {
+            Self {
+                pending_schema: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmPlugin for DynamicConfigPlugin {
+        fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+            Vec::new()
+        }
+    }
+
+    impl ConfigurablePlugin for DynamicConfigPlugin {
+        fn config_schema(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({"type": "object", "properties": {"voice": {"type": "string"}}}))
+        }
+
+        fn config_version(&self) -> u32 {
+            2
+        }
+
+        fn supports_list_config_options(&self) -> bool {
+            true
+        }
+
+        fn supports_validate_config(&self) -> bool {
+            true
+        }
+
+        fn supports_migrate_config(&self) -> bool {
+            true
+        }
+
+        fn list_config_options(&self, path: &str) -> Vec<ene_plugin_proto::ConfigOption> {
+            if path == "voice" {
+                vec![ene_plugin_proto::ConfigOption {
+                    value: serde_json::json!("alloy"),
+                    label: "Alloy".into(),
+                    group: None,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn validate_config(
+            &self,
+            value: &serde_json::Value,
+        ) -> Vec<ene_plugin_proto::ConfigFieldError> {
+            if value.get("voice").is_none() {
+                vec![ene_plugin_proto::ConfigFieldError {
+                    field_path: "voice".into(),
+                    message: "required".into(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn migrate_config(
+            &self,
+            from_version: u32,
+            value: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            if from_version >= 2 {
+                return Ok(value);
+            }
+            let mut obj = match value {
+                serde_json::Value::Object(map) => map,
+                other => return Ok(other),
+            };
+            if let Some(speaker) = obj.remove("speaker") {
+                obj.insert("voice".into(), speaker);
+            }
+            Ok(serde_json::Value::Object(obj))
+        }
+
+        fn drain_config_schema_change(&self) -> Option<serde_json::Value> {
+            self.pending_schema.lock().unwrap().take()
+        }
+    }
+
+    fn dynamic_dispatch(plugin: Arc<DynamicConfigPlugin>) -> PluginDispatch {
+        PluginDispatch {
+            tool: None,
+            llm: Some(plugin as Arc<dyn LlmPlugin>),
+            embed: None,
+            tts: None,
+            stt: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_list_validate_migrate_config() {
+        let dispatch = dynamic_dispatch(Arc::new(DynamicConfigPlugin::new()));
+
+        let options = dispatch_request(
+            &dispatch,
+            &PluginIpcRequest::ListConfigOptions {
+                request_id: "o".into(),
+                path: "voice".into(),
+            },
+        )
+        .await;
+        match options {
+            PluginIpcResponse::ConfigOptions { options, .. } => {
+                assert_eq!(options.len(), 1);
+                assert_eq!(options[0].label, "Alloy");
+            }
+            other => panic!("expected ConfigOptions, got {other:?}"),
+        }
+
+        let validated = dispatch_request(
+            &dispatch,
+            &PluginIpcRequest::ValidateConfig {
+                request_id: "v".into(),
+                value: serde_json::json!({}),
+            },
+        )
+        .await;
+        match validated {
+            PluginIpcResponse::ConfigValidated { errors, .. } => {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].field_path, "voice");
+            }
+            other => panic!("expected ConfigValidated, got {other:?}"),
+        }
+
+        let migrated = dispatch_request(
+            &dispatch,
+            &PluginIpcRequest::MigrateConfig {
+                request_id: "m".into(),
+                from_version: 1,
+                value: serde_json::json!({"speaker": "alloy"}),
+            },
+        )
+        .await;
+        match migrated {
+            PluginIpcResponse::ConfigMigrated {
+                value,
+                config_version,
+                ..
+            } => {
+                assert_eq!(value, serde_json::json!({"voice": "alloy"}));
+                assert_eq!(config_version, 2);
+            }
+            other => panic!("expected ConfigMigrated, got {other:?}"),
+        }
+
+        let caps = collect_capabilities(&dispatch);
+        assert!(caps.supports_list_config_options);
+        assert!(caps.supports_validate_config);
+        assert!(caps.supports_migrate_config);
+        assert_eq!(caps.config_version, 2);
+    }
+
+    #[tokio::test]
+    async fn drain_config_schema_change_surfaces_pending_schema() {
+        let plugin = Arc::new(DynamicConfigPlugin::new());
+        *plugin.pending_schema.lock().unwrap() =
+            Some(serde_json::json!({"type": "object", "title": "live"}));
+        let dispatch = dynamic_dispatch(Arc::clone(&plugin));
+        let (schema, version) = dispatch
+            .drain_config_schema_change()
+            .expect("pending schema change");
+        assert_eq!(schema["title"], "live");
+        assert_eq!(version, 2);
+        assert!(dispatch.drain_config_schema_change().is_none());
     }
 
     #[tokio::test]

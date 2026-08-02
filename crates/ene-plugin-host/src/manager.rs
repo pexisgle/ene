@@ -530,6 +530,52 @@ impl ToolRegistry for PluginToolRegistry {
             );
         }
     }
+
+    async fn config_schema(&self) -> Option<serde_json::Value> {
+        match self.conn.config_schema().await {
+            Ok(schema) => schema,
+            Err(e) => {
+                tracing::warn!(
+                    component = "PluginHostManager",
+                    plugin = %self.plugin_name,
+                    error = %e,
+                    "Failed to fetch config schema"
+                );
+                None
+            }
+        }
+    }
+
+    async fn list_config_options(
+        &self,
+        path: &str,
+    ) -> Result<Vec<ene_plugin_proto::ConfigOption>, PluginHostError> {
+        self.conn.list_config_options(path).await
+    }
+
+    async fn validate_config(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Option<Vec<ene_plugin_proto::ConfigFieldError>>, PluginHostError> {
+        if !self.conn.supports_validate_config() {
+            return Ok(None);
+        }
+        self.conn.validate_config(value).await.map(Some)
+    }
+
+    async fn migrate_config(
+        &self,
+        from_version: u32,
+        value: serde_json::Value,
+    ) -> Result<(serde_json::Value, u32), PluginHostError> {
+        self.conn.migrate_config(from_version, value).await
+    }
+
+    fn take_config_schema_changed(&self) -> Option<(String, Option<serde_json::Value>, u32)> {
+        self.conn
+            .take_config_schema_changed()
+            .map(|(schema, version)| (self.plugin_name.clone(), schema, version))
+    }
 }
 
 /// The factory aliases below are shared with the runtime health bridge so it
@@ -2012,6 +2058,7 @@ mod tests {
                                     llm_providers: Vec::new(),
                                     tts_providers: Vec::new(),
                                     stt_providers: Vec::new(),
+                                    ..PluginCapabilities::default()
                                 },
                             },
                             PluginIpcRequest::Ping { request_id } => {
@@ -2070,6 +2117,7 @@ mod tests {
                                     llm_providers: Vec::new(),
                                     tts_providers: Vec::new(),
                                     stt_providers: Vec::new(),
+                                    ..PluginCapabilities::default()
                                 },
                             },
                         )

@@ -45,7 +45,7 @@ Ene ホストアプリケーション (ene-runtime)
 - プラグインバイナリ側は範囲をサポートする必要はなく、自身がビルドされたバージョンを `VersionRange { min: N, max: N }` として申告してよいです。互換性を維持する責務はホスト側に集約されており、個々のプラグイン作者に強制されません。
 - **プロトコルバージョンのバンプ**: `PLUGIN_IPC_PROTOCOL_VERSION` を上げる際は `PLUGIN_IPC_MIN_SUPPORTED_VERSION` も同じ数だけ繰り上げ、最も古いサポート対象バージョンのサポートを打ち切ります。
 - **バンプが必要なケース**: 既存メッセージの意味変更、必須フィールドの追加、enum variant の削除・リネームの場合のみです。新しいフィールドは `#[serde(default)]` を使うことで、バージョンバンプなしに新旧のピア間で互換性を保てます。
-- **機能ゲート**: ホストはネゴシエート済みバージョンを `ene-plugin-host` の `IpcPluginConnection` に保持し、`negotiated_version()` で参照できます。最小サポートバージョンより後に追加されたメッセージに依存する挙動はこれをもとにゲートすべきです。たとえば `supports_set_config()` は v5 で追加された `PluginIpcRequest::SetConfig` をゲートしており、v4 のプラグインには理解できないメッセージを送らず、ローカルキャッシュのみ更新して次回再接続ハンドシェイクで新しい設定を届けます。
+- **機能ゲート**: ホストはネゴシエート済みバージョンを `ene-plugin-host` の `IpcPluginConnection` に保持し、`negotiated_version()` で参照できます。最小サポートバージョンより後に追加されたメッセージに依存する挙動はこれをもとにゲートすべきです。たとえば `supports_set_config()` は v5 で追加された `PluginIpcRequest::SetConfig` をゲートしており、v4 のプラグインには理解できないメッセージを送らず、ローカルキャッシュのみ更新して次回再接続ハンドシェイクで新しい設定を届けます。動的設定メッセージ（`ListConfigOptions`、`ValidateConfig`、`MigrateConfig`）はプロトコル ≥ v5 **かつ** 対応する `PluginCapabilities` フラグ（`supports_list_config_options` など。当該 variant を知らない古い v5 バイナリでは serde デフォルトの `false`）が必要です。
 - **ネゴシエーション失敗の診断**: プラグインが提示する範囲とホストのサポート範囲が重ならない場合、プラグイン側の `HandshakeAck` エラーおよびホスト側の `PluginHostError::HandshakeFailed` / `ProtocolMismatch` はいずれも双方の範囲を明記します（例: "host supports 4..=5, plugin supports 3..=3"）。これにより、単なる汎用的なハンドシェイク失敗ではなく、プラグインバイナリの再ビルドが必要であることが開発者に伝わります。
 
 ---
@@ -308,6 +308,8 @@ MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passt
 ネストした `config` オブジェクト内にホスト予約キー（`enable`、`checksum`）を置かないでください——`plugins.list.<name>` のエントリフィールドと衝突します。ホストは配信ブロブにこれらのキーが含まれる場合に警告します。
 
 プラグインは `config_schema()` で受け付ける設定の JSON Schema を広告します。そのスキーマで `x-ene-secret: true` とマークされたフィールドは、UI でマスクされる予定で、ホストのログからは redact されます（正確な形は [`configuration.md`](../ja/configuration.md) を参照）。
+
+`GetConfigSchema` は実行時に再取得できます。外部エンジン接続後に初めて選択肢が分かるプラグインは、`DeferredCompleted` と同様にルーティングされる `ConfigSchemaChanged` を push できます。オプトインの capability フラグにより `ListConfigOptions`（動的 enum）、`ValidateConfig`（フィールド横断エラー）、`MigrateConfig`（`config_version` 自己移行）が有効になります。フラグを省略したピアは静的スキーマ + ホスト側 JSON Schema 検証のみに degrade し、マイグレーションは行いません。これらの API の UI 配線はここでは対象外です。
 
 ### バイナリチェックサム検証 (TOFU)
 

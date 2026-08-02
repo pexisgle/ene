@@ -45,7 +45,7 @@ Tool and provider plugins ship as independent out-of-process binaries. Bumping `
 - A plugin binary is not required to support a range — it may keep declaring `VersionRange { min: N, max: N }` for whatever version it was built against. The compatibility responsibility is concentrated in the host, not pushed onto every plugin author.
 - **Bumping the protocol version**: when `PLUGIN_IPC_PROTOCOL_VERSION` is bumped, `PLUGIN_IPC_MIN_SUPPORTED_VERSION` must be bumped by the same amount, dropping support for the oldest previously-supported version.
 - **When a bump is required**: only for changing the meaning of an existing message, adding a required field, or removing/renaming an enum variant. New fields should use `#[serde(default)]` so older/newer peers stay wire-compatible without a version bump.
-- **Feature gating**: the host stores the negotiated version on `IpcPluginConnection` (`ene-plugin-host`) and exposes it via `negotiated_version()`. Behavior that depends on a message introduced after the minimum supported version should gate on it — e.g. `supports_set_config()` gates `PluginIpcRequest::SetConfig` (introduced in v5) so a v4 plugin isn't sent a message it cannot deserialize; the host still updates its local cache so the next reconnect handshake delivers the fresh config.
+- **Feature gating**: the host stores the negotiated version on `IpcPluginConnection` (`ene-plugin-host`) and exposes it via `negotiated_version()`. Behavior that depends on a message introduced after the minimum supported version should gate on it — e.g. `supports_set_config()` gates `PluginIpcRequest::SetConfig` (introduced in v5) so a v4 plugin isn't sent a message it cannot deserialize; the host still updates its local cache so the next reconnect handshake delivers the fresh config. Dynamic-config messages (`ListConfigOptions`, `ValidateConfig`, `MigrateConfig`) also require protocol ≥ v5 **and** the matching `PluginCapabilities` flags (`supports_list_config_options`, etc.; serde-default `false` on older v5 binaries that lack those variants).
 - **Negotiation failure diagnostics**: when a plugin's proposed range and the host's supported range do not overlap, the plugin's `HandshakeAck` error and the host's `PluginHostError::HandshakeFailed` / `ProtocolMismatch` both name the ranges on both sides (e.g. "host supports 4..=5, plugin supports 3..=3"), so a developer can tell the plugin binary needs rebuilding rather than seeing a generic handshake failure.
 
 ---
@@ -326,6 +326,14 @@ A plugin advertises the JSON Schema its config accepts via
 `config_schema()`. Fields marked `x-ene-secret: true` in that schema will be
 masked in the UI (planned) and redacted from host logs (see
 [`configuration.md`](../configuration.md) for the exact shape).
+
+`GetConfigSchema` may be re-fetched at runtime. Plugins that discover options
+only after connecting to an external engine can push
+`ConfigSchemaChanged` (routed like `DeferredCompleted`). Opt-in capability
+flags unlock `ListConfigOptions` (dynamic enums), `ValidateConfig`
+(cross-field errors), and `MigrateConfig` (`config_version` self-migration).
+Peers that omit the flags degrade to static schema + host JSON Schema
+validation with no migration. UI wiring for these APIs is out of scope here.
 
 ### Binary checksum verification (TOFU)
 
