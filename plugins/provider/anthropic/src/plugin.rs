@@ -7,13 +7,12 @@
 //! whose input schema matches the requested schema.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use ene_plugin::{
-    ConcurrencyHint, LlmPlugin, LlmProviderSpec, PluginCompletion, PluginError, PluginStream,
-    PluginStreamChunk, TokenUsage,
+    ClientOptions, ConcurrencyHint, LlmPlugin, LlmProviderSpec, PluginCompletion, PluginContext,
+    PluginError, PluginStream, PluginStreamChunk, TimeoutPolicy, TokenUsage,
 };
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
@@ -30,30 +29,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Total timeout for a single HTTP request (covers streamed bodies).
 const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// Shared HTTP client, built once with timeouts and reused for all requests.
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-/// Configuration delivered by the host at handshake time
-/// (`plugins.list.anthropic.config`), stored per process.
-///
-/// `Mutex` (rather than `OnceLock`) so tests can reset it between cases; in
-/// production the handshake is a one-shot and reconnects resend the same
-/// blob, so last-writer-wins is equivalent.
-static PLUGIN_CONFIG: Mutex<Option<Value>> = Mutex::new(None);
-
 /// Anthropic Claude plugin providing streaming and non-streaming chat
 /// completions via the Anthropic Messages API.
 pub(crate) struct AnthropicPlugin;
 
 impl ene_plugin::ConfigurablePlugin for AnthropicPlugin {
-    /// Receives the plugin configuration blob from the host at handshake
-    /// time (currently the `api_key`, per the `{"source": ...}` contract).
-    fn set_config(&self, config: &Value) {
-        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
-    }
-
     /// Advertises the config schema; `api_key` is marked `x-ene-secret: true`
-    /// so the host masks/redacts it.
+    /// so the host masks/redacts it. The key itself now resolves through the
+    /// host's credential service, not from this blob.
     fn config_schema(&self) -> Option<Value> {
         Some(json!({
             "type": "object",
@@ -85,95 +68,20 @@ impl ene_plugin::ConfigurablePlugin for AnthropicPlugin {
     }
 }
 
-/// Returns the shared HTTP client, building it on first use.
-fn http_client() -> Result<&'static reqwest::Client, PluginError> {
-    if let Some(client) = HTTP_CLIENT.get() {
-        return Ok(client);
-    }
-    let client = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| PluginError::provider(format!("failed to build HTTP client: {e}")))?;
-    // A racing task may have initialized first; either client is equivalent.
-    drop(HTTP_CLIENT.set(client));
-    HTTP_CLIENT
-        .get()
-        .ok_or_else(|| PluginError::provider("HTTP client initialization failed"))
-}
-
-/// Resolves a single `api_key` value per the `{"source": ...}` contract.
+/// Returns a credentialed HTTP caller for the Anthropic API.
 ///
-/// Accepted shapes for `value`:
-/// 1. A plain JSON string — used directly.
-/// 2. `{"source": "inline", "inline": "..."}` — the inline value.
-/// 3. `{"source": "env", "env": "VAR"}` — the named environment variable
-///    (defaults to `ANTHROPIC_API_KEY` when `env` is empty).
-/// 4. Anything else (including `{"source": "auto"}`) — `None`, so the caller
-///    falls back to the process environment.
-fn resolve_key_value(value: &Value) -> Option<String> {
-    match value {
-        Value::String(key) if !key.trim().is_empty() => Some(key.trim().to_string()),
-        Value::Object(obj) => {
-            let source = obj.get("source").and_then(Value::as_str).unwrap_or("auto");
-            match source {
-                "inline" => obj
-                    .get("inline")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|key| !key.is_empty())
-                    .map(str::to_string),
-                "env" => {
-                    let var_name = obj
-                        .get("env")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or("ANTHROPIC_API_KEY");
-                    std::env::var(var_name).ok().filter(|key| !key.is_empty())
-                }
-                // "auto" (or unrecognized) falls through to the caller's
-                // process-env fallback.
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Resolves the effective API key for a request.
-///
-/// Precedence:
-/// 1. The config delivered by the host at handshake time via
-///    [`ConfigurablePlugin::set_config`] (`plugins.list.anthropic.config`),
-///    resolved with the same `{"source": ...}` contract.
-/// 2. The per-request `config` argument (`ai.providers.<name>.api_key`).
-/// 3. The `ANTHROPIC_API_KEY` environment variable.
-fn resolve_api_key(config: &Value) -> Result<String, PluginError> {
-    let host_config = PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner);
-    resolve_api_key_with_host(host_config.as_ref(), config)
-}
-
-/// The precedence logic behind [`resolve_api_key`], parameterized over the
-/// host-delivered config so tests can exercise it deterministically.
-fn resolve_api_key_with_host(
-    host_config: Option<&Value>,
-    config: &Value,
-) -> Result<String, PluginError> {
-    if let Some(key) = host_config
-        .and_then(|cfg| cfg.get("api_key"))
-        .and_then(resolve_key_value)
-    {
-        return Ok(key);
-    }
-    if let Some(key) = config.get("api_key").and_then(resolve_key_value) {
-        return Ok(key);
-    }
-    std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-        PluginError::provider(
-            "no API key found: set api_key, api_key.inline, api_key.env, or ANTHROPIC_API_KEY",
+/// The auth header is injected from the host's `anthropic` credential
+/// (api_key), and the client preserves the plugin's original timeouts.
+async fn anthropic_http_caller(ctx: &PluginContext) -> Result<ene_plugin::HttpCaller, PluginError> {
+    ctx.credentials()
+        .http_client_with(
+            "anthropic",
+            ClientOptions {
+                timeout: TimeoutPolicy::new(REQUEST_TIMEOUT, CONNECT_TIMEOUT),
+                ..ClientOptions::default()
+            },
         )
-    })
+        .await
 }
 
 /// Builds the Anthropic Messages API request body.
@@ -320,8 +228,9 @@ impl LlmPlugin for AnthropicPlugin {
 
     async fn create_chat_stream(
         &self,
+        ctx: &PluginContext,
         kind: &str,
-        config: Value,
+        _config: Value,
         model: String,
         max_tokens: Option<u32>,
         messages: Vec<Value>,
@@ -331,17 +240,18 @@ impl LlmPlugin for AnthropicPlugin {
             return Err(PluginError::not_supported(format!("provider kind: {kind}")));
         }
 
-        let api_key = resolve_api_key(&config)?;
+        let caller = anthropic_http_caller(ctx).await?;
         let body = build_request_body(&model, max_tokens, &messages, &tools, true, None);
 
-        let response = http_client()?
-            .post(ANTHROPIC_API_URL)
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| PluginError::provider(format!("HTTP request failed: {e}")))?;
+        let response = caller
+            .execute(
+                caller
+                    .client()
+                    .post(ANTHROPIC_API_URL)
+                    .header("anthropic-version", ANTHROPIC_VERSION)
+                    .json(&body),
+            )
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -359,8 +269,9 @@ impl LlmPlugin for AnthropicPlugin {
 
     async fn chat_completion(
         &self,
+        ctx: &PluginContext,
         kind: &str,
-        config: Value,
+        _config: Value,
         model: String,
         max_tokens: Option<u32>,
         messages: Vec<Value>,
@@ -370,7 +281,7 @@ impl LlmPlugin for AnthropicPlugin {
             return Err(PluginError::not_supported(format!("provider kind: {kind}")));
         }
 
-        let api_key = resolve_api_key(&config)?;
+        let caller = anthropic_http_caller(ctx).await?;
         let forced_tool = json_schema
             .as_ref()
             .map(schema_to_forced_tool)
@@ -384,14 +295,15 @@ impl LlmPlugin for AnthropicPlugin {
             forced_tool.as_ref(),
         );
 
-        let response = http_client()?
-            .post(ANTHROPIC_API_URL)
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| PluginError::provider(format!("HTTP request failed: {e}")))?;
+        let response = caller
+            .execute(
+                caller
+                    .client()
+                    .post(ANTHROPIC_API_URL)
+                    .header("anthropic-version", ANTHROPIC_VERSION)
+                    .json(&body),
+            )
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -672,168 +584,126 @@ fn process_sse_event(
     reason = "test assertions index into known-length vectors"
 )]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     use super::*;
     use ene_plugin::ConfigurablePlugin;
+    use ene_plugin::{CredentialClient, PluginContext};
+    use ene_plugin_proto::transport::IpcListener;
+    use ene_plugin_proto::{
+        CredentialErrorCode, CredentialRequest, CredentialResponse, HostServiceId,
+        HostServiceRequest, HostServiceResponse, ResolvedCredential, WireSecret,
+        read_credential_request, read_host_service_request, write_credential_response,
+        write_host_service_response,
+    };
 
-    /// Serializes tests that read or mutate the process environment:
-    /// `set_var`/`remove_var` are process-global and would otherwise race
-    /// with concurrent env reads in other tests.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    static SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    /// Serializes tests that read or write the process-wide `PLUGIN_CONFIG`
-    /// static (every `resolve_api_key` call reads it, and
-    /// `set_config_stores_key_used_by_resolve` writes it). Without this the
-    /// write test can race concurrent readers under parallel test threads.
-    static TEST_SERIAL: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn resolve_api_key_plain_string() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = json!({"api_key": "sk-ant-plain-789"});
-        let key = resolve_api_key(&config).unwrap();
-        assert_eq!(key, "sk-ant-plain-789");
-    }
-
-    #[test]
-    fn resolve_api_key_plain_string_empty_falls_through() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = json!({"api_key": ""});
-        // An empty string must not be used as the key; resolution falls
-        // through to ANTHROPIC_API_KEY (which may or may not be set).
-        if let Ok(key) = resolve_api_key(&config) {
-            assert!(!key.is_empty());
-        }
-    }
-
-    #[test]
-    fn resolve_api_key_inline() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = json!({"api_key": {"source": "inline", "inline": "sk-ant-test-123"}});
-        let key = resolve_api_key(&config).unwrap();
-        assert_eq!(key, "sk-ant-test-123");
-    }
-
-    #[test]
-    fn resolve_api_key_inline_empty_falls_through() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = json!({"api_key": {"source": "inline", "inline": ""}});
-        // Should fall through to ANTHROPIC_API_KEY (which may or may not be set).
-        let result = resolve_api_key(&config);
-        // We can't assert success/failure without controlling the env, but
-        // it should not return the empty string.
-        if let Ok(key) = result {
-            assert!(!key.is_empty());
-        }
-    }
-
-    #[test]
-    fn resolve_api_key_from_env_var() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
-        // SAFETY: Test-only env var mutation, serialized by `ENV_MUTEX`.
-        unsafe {
-            std::env::set_var("ENE_TEST_ANTHROPIC_KEY", "sk-env-test-456");
-        }
-        let config = json!({"api_key": {"source": "env", "env": "ENE_TEST_ANTHROPIC_KEY"}});
-        let key = resolve_api_key(&config).unwrap();
-        assert_eq!(key, "sk-env-test-456");
-        // SAFETY: Test-only cleanup, serialized by `ENV_MUTEX`.
-        unsafe {
-            std::env::remove_var("ENE_TEST_ANTHROPIC_KEY");
-        }
-    }
-
-    #[test]
-    fn resolve_api_key_auto_source_uses_env_fallback() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
-        let original = std::env::var("ANTHROPIC_API_KEY").ok();
-        // SAFETY: Test-only env var mutation, serialized by `ENV_MUTEX`.
-        unsafe {
-            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-auto-000");
-        }
-
-        let config = json!({"api_key": {"source": "auto"}});
-        assert_eq!(resolve_api_key(&config).unwrap(), "sk-ant-auto-000");
-        // A missing api_key entry also falls back to the environment.
-        assert_eq!(resolve_api_key(&json!({})).unwrap(), "sk-ant-auto-000");
-
-        if let Some(value) = original {
-            // SAFETY: Test-only env restore, serialized by `ENV_MUTEX`.
-            unsafe {
-                std::env::set_var("ANTHROPIC_API_KEY", value);
+    /// Runs a minimal in-process credential host that answers `Resolve` with a
+    /// fixed key, so the plugin's new resolution path is exercised end-to-end
+    /// without real credentials.
+    async fn spawn_mock_credential_host() -> (String, String) {
+        let n = SOCKET_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ene-anthropic-cred-test-{}-{n}.sock",
+            std::process::id()
+        ));
+        let mut listener = IpcListener::bind(&path).expect("bind listener");
+        let token = "ene-cred-anthropic-test".to_string();
+        tokio::spawn(async move {
+            let Ok(mut stream) = listener.accept().await else {
+                return;
+            };
+            let Ok(Some(req)) = read_host_service_request(&mut stream).await else {
+                return;
+            };
+            if !matches!(
+                req,
+                HostServiceRequest::Open {
+                    service: HostServiceId::Credential,
+                    ..
+                }
+            ) {
+                return;
             }
-        } else {
-            // SAFETY: Test-only env restore, serialized by `ENV_MUTEX`.
-            unsafe {
-                std::env::remove_var("ANTHROPIC_API_KEY");
+            drop(write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await);
+            loop {
+                let Ok(Some(request)) = read_credential_request(&mut stream).await else {
+                    break;
+                };
+                let resp = match request {
+                    CredentialRequest::Resolve { id } if id == "anthropic" => {
+                        CredentialResponse::Resolved {
+                            credential: ResolvedCredential::ApiKey {
+                                key: WireSecret::new("sk-ant-mock-host"),
+                            },
+                        }
+                    }
+                    _ => CredentialResponse::Error {
+                        code: CredentialErrorCode::Missing {
+                            label: "missing".into(),
+                            help_url: None,
+                        },
+                        message: "credential not configured".into(),
+                    },
+                };
+                if write_credential_response(&mut stream, &resp).await.is_err() {
+                    break;
+                }
             }
-        }
+        });
+        (path.to_string_lossy().to_string(), token)
     }
 
-    #[test]
-    fn resolve_api_key_no_config_no_env_fails() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = json!({});
-        // Without ANTHROPIC_API_KEY set, this should fail.
-        // (If the env var happens to be set in CI, this test still passes
-        // because we only check the error case when it's absent.)
-        if std::env::var("ANTHROPIC_API_KEY").is_err() {
-            assert!(resolve_api_key(&config).is_err());
-        }
+    /// Builds a context whose credential client points at the mock host.
+    async fn test_ctx() -> PluginContext {
+        let (path, token) = spawn_mock_credential_host().await;
+        let client = CredentialClient::new();
+        client.set_endpoint(path, token);
+        PluginContext::new(client)
     }
 
-    #[test]
-    fn host_config_key_wins_over_request_config() {
-        // A key delivered via set_config (host config) must take
-        // precedence over the per-request provider_config.
-        let host = json!({"api_key": "sk-host-wins"});
-        let request = json!({"api_key": "sk-request-loses"});
-        assert_eq!(
-            resolve_api_key_with_host(Some(&host), &request).unwrap(),
-            "sk-host-wins"
-        );
+    #[tokio::test]
+    async fn api_key_injected_from_mock_credential_host() {
+        let ctx = test_ctx().await;
+        let key = ctx
+            .credentials()
+            .api_key("anthropic")
+            .await
+            .expect("resolve");
+        assert_eq!(key.expose_secret(), "sk-ant-mock-host");
+        // The redaction contract holds on the plugin-facing secret type.
+        assert!(!format!("{key:?}").contains("sk-ant-mock-host"));
     }
 
-    #[test]
-    fn host_config_supports_inline_shape() {
-        // The host blob can use the same {"source": "inline", ...} contract.
-        let host = json!({"api_key": {"source": "inline", "inline": "sk-host-inline"}});
-        let request = json!({});
-        assert_eq!(
-            resolve_api_key_with_host(Some(&host), &request).unwrap(),
-            "sk-host-inline"
-        );
+    #[tokio::test]
+    async fn anthropic_http_caller_builds_auth_injected_client() {
+        let ctx = test_ctx().await;
+        let caller = anthropic_http_caller(&ctx).await.expect("build caller");
+        // The client carries the resolved key as its x-api-key default header.
+        let header = caller
+            .client()
+            .get(ANTHROPIC_API_URL)
+            .build()
+            .expect("build request")
+            .headers()
+            .get("x-api-key")
+            .expect("auth header")
+            .to_str()
+            .expect("header value");
+        assert_eq!(header, "sk-ant-mock-host");
     }
 
-    #[test]
-    fn missing_host_key_falls_back_to_request_config() {
-        let host = json!({"base_url": "https://example.com"});
-        let request = json!({"api_key": "sk-request-fallback"});
-        assert_eq!(
-            resolve_api_key_with_host(Some(&host), &request).unwrap(),
-            "sk-request-fallback"
-        );
-    }
-
-    #[test]
-    fn set_config_stores_key_used_by_resolve() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        // The static is process-wide; clear it around the case so this test
-        // cannot leak into (or be affected by) the other resolve_api_key tests.
-        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        AnthropicPlugin.set_config(&json!({"api_key": "sk-via-set-config"}));
-        assert_eq!(
-            resolve_api_key(&json!({})).unwrap(),
-            "sk-via-set-config",
-            "key delivered via set_config must be used by request resolution"
-        );
-        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    #[tokio::test]
+    async fn missing_credential_maps_to_structured_error() {
+        let ctx = test_ctx().await;
+        let err = ctx
+            .credentials()
+            .api_key("google.calendar")
+            .await
+            .expect_err("missing credential");
+        assert!(matches!(err, PluginError::CredentialMissing { .. }));
+        assert!(!err.to_string().contains("sk-ant-mock-host"));
     }
 
     #[test]
