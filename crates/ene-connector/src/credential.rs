@@ -418,19 +418,19 @@ mod tests {
 
         let soon = Utc::now() + chrono::Duration::seconds(30);
         let imminent = CredentialStore::oauth2("token", None::<&str>, Some(soon));
-        assert!(imminent.expires_within(Duration::from_secs(60)));
+        assert!(imminent.expires_within(Duration::from_mins(1)));
 
         let later = Utc::now() + chrono::Duration::minutes(10);
         let distant = CredentialStore::oauth2("token", None::<&str>, Some(later));
-        assert!(!distant.expires_within(Duration::from_secs(60)));
+        assert!(!distant.expires_within(Duration::from_mins(1)));
 
         let expired = CredentialStore::oauth2("token", None::<&str>, Some(Utc::now()));
-        assert!(expired.expires_within(Duration::from_secs(60)));
+        assert!(expired.expires_within(Duration::from_mins(1)));
 
         let no_expiry = CredentialStore::oauth2("token", None::<&str>, None);
-        assert!(!no_expiry.expires_within(Duration::from_secs(60)));
+        assert!(!no_expiry.expires_within(Duration::from_mins(1)));
 
         let api_key = CredentialStore::from_api_key("key");
-        assert!(!api_key.expires_within(Duration::from_secs(60)));
+        assert!(!api_key.expires_within(Duration::from_mins(1)));
     }
 }

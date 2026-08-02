@@ -511,11 +511,15 @@ mod tests {
                 _id: &str,
                 _current: &CredentialStore,
             ) -> Result<CredentialStore, ConnectorError> {
-                if let Some(started) = self.started.lock().take() {
-                    let _ = started.send(());
+                let started = self.started.lock().take();
+                if let Some(started) = started {
+                    drop(started.send(()));
                 }
-                if let Some(resume) = self.resume.lock().take() {
-                    let _ = resume.await;
+                // Drop the guard before awaiting so no lock is held across
+                // the park.
+                let resume = self.resume.lock().take();
+                if let Some(resume) = resume {
+                    drop(resume.await);
                 }
                 Ok(CredentialStore::oauth2(
                     "fresh-token",

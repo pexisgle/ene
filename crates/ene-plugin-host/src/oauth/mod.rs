@@ -725,8 +725,8 @@ mod tests {
         let stored = vault.resolve("google.calendar").await.unwrap();
         assert_eq!(stored.access_token(), Some("mock-access"));
         assert_eq!(stored.refresh_token(), Some("mock-refresh"));
-        let persisted = persister.load();
-        assert!(persisted.contains_key("google.calendar"));
+        let saved = persister.load();
+        assert!(saved.contains_key("google.calendar"));
     }
 
     #[tokio::test]
