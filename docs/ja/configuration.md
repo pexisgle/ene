@@ -166,17 +166,8 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
         "window_title_level": "app_only"
       }
     },
-    "memory": {
-      "recall_min_score": 0.10,
-      "recall_similarity_threshold": 0.35,
-      "commitment_boost": 0.25,
-      "access_boost_half_life_days": 14.0,
-      "commitment_title_similarity_threshold": 0.82,
-      "contradiction_title_similarity_threshold": 0.82,
-      "min_confidence_to_persist": 0.65,
-      "supersede_confidence_delta": 0.05,
-      "semantic_similarity_threshold": 0.85,
-      "dispute_confidence_gap": 0.15
+    "memory_limits": {
+      "commitment_active_match_limit": 4096
     }
   }
 }
@@ -242,10 +233,18 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 [ターン・セッション](concepts/turn-and-session.md) §3 を参照してください。
 
 コミットメント台帳は、着信したコミットメントをタイトル埋め込みの類似度でアクティブな
-コミットメントと照合します (#387)。`commitment_title_similarity_threshold`（デフォルト
+コミットメントと照合します。`commitment_title_similarity_threshold`（デフォルト
 `0.82`）はコサイン類似度の閾値で、これを上回ると言い回しの異なる約束は二重登録ではなく
 既存コミットメントの更新（supersede）として扱われます。埋め込みプロバイダーが未設定の
 場合、台帳は正規化タイトルの完全一致にフォールバックし、この閾値は使用されません。
+照合は適用バッチごとにアクティブな台帳行をメモリへ読み込みます。
+`mind.memory_limits.commitment_active_match_limit`（デフォルト `4096`）がその件数の上限で、現実的な
+同時アクティブ約束数をはるかに上回る値とし、台帳が肥大化した場合のメモリと埋め込み
+計算を抑えます。返却件数がちょうど上限と一致すると台帳は切り捨てを警告します。
+照合漏れが疑われる場合は `mind.memory_limits.commitment_active_match_limit`（または
+`ENE_MIND__MEMORY_LIMITS__COMMITMENT_ACTIVE_MATCH_LIMIT`）を引き上げてください。
+これがオペレーターが設定できる唯一のメモリ項目です。`mind.memory.*` のその他の
+挙動はコード既定値（`MindMemoryConfig`）のままです。
 
 メモリー調停器（arbiter）は、着信した候補が同じ種別の既存記憶と矛盾するかどうかを、
 *タイトル埋め込みの類似度* で判定します (#351)。`contradiction_title_similarity_threshold`
@@ -254,10 +253,10 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 無関係な重複として永続化される代わりに矛盾検査の対象となります。埋め込みプロバイダーが
 未設定の場合、調停器は正規化タイトルの完全一致にフォールバックし、この閾値は使用されません。
 
-メモリー調停器の 4 つの判定閾値は、すべて `mind.memory.*` で設定できます (#352)。
-これらは合わせて、着信した候補をいつ永続化するか、いつ既存の矛盾する記憶を
-*上書き（supersede）* するか、いつ既存記憶を *係争中（disputed）* とマークするか、
-そしていつ判定をユーザー確認へ回すかを決めます：
+メモリー調停器の 4 つの判定閾値は `MindMemoryConfig` でコード既定（code default）であり、
+設定からは変更できません (#352)。これらは合わせて、着信した候補をいつ永続化するか、
+いつ既存の矛盾する記憶を *上書き（supersede）* するか、いつ既存記憶を
+*係争中（disputed）* とマークするか、そしていつ判定をユーザー確認へ回すかを決めます：
 
 | 設定 | 既定 | 意味 |
 |---|---|---|
