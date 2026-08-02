@@ -99,7 +99,8 @@ impl CapabilityRegistry {
     /// only hard ones gate the plugin).
     #[must_use]
     pub fn unmet_requires(&self, plugin: &str) -> Vec<RequiredCapability> {
-        let Some(entries) = self.requires.read().get(plugin) else {
+        let requires = self.requires.read();
+        let Some(entries) = requires.get(plugin) else {
             return Vec::new();
         };
         entries
