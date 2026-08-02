@@ -57,6 +57,7 @@ jobs:
         run: |
           echo "LIBCLANG_PATH=/usr/lib/llvm-$(clang --version | sed -nE 's/.*clang version ([0-9]+)\..*/\1/p')/lib" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           # Failed runs must not persist partial caches.
@@ -95,6 +96,7 @@ jobs:
         run: |
           echo "LIBCLANG_PATH=/usr/lib/llvm-$(clang --version | sed -nE 's/.*clang version ([0-9]+)\..*/\1/p')/lib" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: false
@@ -132,6 +134,7 @@ jobs:
         run: |
           echo "LIBCLANG_PATH=/usr/lib/llvm-$(clang --version | sed -nE 's/.*clang version ([0-9]+)\..*/\1/p')/lib" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: false
