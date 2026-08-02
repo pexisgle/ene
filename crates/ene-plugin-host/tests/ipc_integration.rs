@@ -13,9 +13,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-use ene_connector::declaration::{CredentialRejection, ScopeDecision, parse_credentials};
+use ene_connector::capability::CapabilityId;
+use ene_connector::declaration::{
+    CapabilityRejection, CredentialRejection, ScopeDecision, parse_capabilities, parse_credentials,
+};
 use ene_connector::identity::CredentialId;
-use ene_plugin_host::{CredentialRegistry, IpcPluginConnection, PluginHostError};
+use ene_plugin_host::{
+    CapabilityRegistry, CredentialRegistry, IpcPluginConnection, PluginHostError,
+};
 use ene_plugin_proto::{
     CallContext, DeferredStatus, IpcListener, PLUGIN_IPC_MIN_SUPPORTED_VERSION,
     PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest, PluginIpcResponse,
@@ -2098,4 +2103,216 @@ async fn plugin_without_declarations_registers_empty_set() {
     );
 
     cleanup_path(&socket_path);
+}
+
+// ── Test: x-ene-capabilities declaration registration & resolution ───────
+
+/// Connects a capabilities mock (the same generic schema-serving mock the
+/// credentials tests use) and returns the connection plus socket path.
+async fn spawn_capabilities_and_connect(
+    name: &str,
+    schema: serde_json::Value,
+) -> (IpcPluginConnection, PathBuf) {
+    let socket_path = test_socket_path(name);
+    let state = Arc::new(Mutex::new(MockState::default()));
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        run_credentials_mock(server_path, server_state, schema).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
+    )
+    .await
+    .expect("handshake should succeed");
+
+    (conn, socket_path)
+}
+
+#[tokio::test]
+async fn capabilities_declared_in_schema_are_registered() {
+    let (conn, socket_path) = spawn_capabilities_and_connect(
+        "capabilities-valid",
+        serde_json::json!({
+            "type": "object",
+            "x-ene-capabilities": {
+                "provides": ["tts/synthesize@1"],
+                "requires": ["g2p/ja@^1?", "onnx-runner@^1"]
+            }
+        }),
+    )
+    .await;
+
+    // The schema travels over IPC as an opaque blob; the host-side
+    // registration path parses it and records the declarations.
+    let schema = conn
+        .config_schema()
+        .await
+        .expect("config_schema")
+        .expect("schema must be present");
+
+    let registry = CapabilityRegistry::new();
+    registry.register_from_schema("mock", Some(&schema));
+
+    let tts = CapabilityId::try_new("tts/synthesize").expect("valid capability id");
+    assert_eq!(
+        registry.resolve(&tts, &"^1".parse().expect("valid version req")),
+        Some("mock".to_string())
+    );
+    // `onnx-runner` is a hard requirement with no provider; `g2p/ja` is soft
+    // and also unmet — both surface, but only the hard one gates startup.
+    let unmet = registry.unmet_requires("mock");
+    assert_eq!(unmet.len(), 2);
+    assert!(
+        unmet
+            .iter()
+            .any(|r| r.name.as_str() == "onnx-runner" && !r.soft)
+    );
+    assert!(unmet.iter().any(|r| r.name.as_str() == "g2p/ja" && r.soft));
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn invalid_capability_entries_are_dropped_while_plugin_stays_up() {
+    let (conn, socket_path) = spawn_capabilities_and_connect(
+        "capabilities-mixed",
+        serde_json::json!({
+            "type": "object",
+            "x-ene-capabilities": {
+                "provides": [
+                    "tts/synthesize@1",
+                    "bad name@1",
+                    "no-version",
+                    "soft-on-provides@1?",
+                    "tts/synthesize@2"
+                ],
+                "requires": ["g2p/ja@^1", "bad@not-a-range", "g2p/ja@^2"]
+            }
+        }),
+    )
+    .await;
+
+    let schema = conn
+        .config_schema()
+        .await
+        .expect("config_schema")
+        .expect("schema must be present");
+
+    // Only the well-formed entries survive parsing; each bad entry is
+    // reported with the reason that fits it.
+    let parse = parse_capabilities(&schema);
+    assert_eq!(parse.provides.len(), 1);
+    assert_eq!(parse.provides[0].name.as_str(), "tts/synthesize");
+    assert_eq!(parse.requires.len(), 1);
+    assert_eq!(parse.requires[0].name.as_str(), "g2p/ja");
+    assert!(
+        parse
+            .rejected
+            .iter()
+            .any(|r| r.reason == CapabilityRejection::InvalidName)
+    );
+    assert!(
+        parse
+            .rejected
+            .iter()
+            .any(|r| r.reason == CapabilityRejection::MissingVersion)
+    );
+    assert!(
+        parse
+            .rejected
+            .iter()
+            .any(|r| r.reason == CapabilityRejection::SoftMarkerPosition)
+    );
+    assert!(
+        parse
+            .rejected
+            .iter()
+            .any(|r| r.reason == CapabilityRejection::MalformedVersion)
+    );
+    assert!(
+        parse
+            .rejected
+            .iter()
+            .any(|r| r.reason == CapabilityRejection::Duplicate)
+    );
+
+    let registry = CapabilityRegistry::new();
+    registry.register_from_schema("mock", Some(&schema));
+    let tts = CapabilityId::try_new("tts/synthesize").expect("valid capability id");
+    assert_eq!(
+        registry.resolve(&tts, &"^1".parse().expect("valid version req")),
+        Some("mock".to_string())
+    );
+    // The single kept `requires` entry has no provider and is hard.
+    let unmet = registry.unmet_requires("mock");
+    assert_eq!(unmet.len(), 1);
+    assert_eq!(unmet[0].name.as_str(), "g2p/ja");
+    assert!(!unmet[0].soft);
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn capabilities_resolve_across_provider_and_consumer_plugins() {
+    // Two plugins over real IPC: the consumer's hard requirement is
+    // satisfied by the provider, and its soft requirement is unmet.
+    let (provider_conn, provider_path) = spawn_capabilities_and_connect(
+        "capabilities-provider",
+        serde_json::json!({
+            "x-ene-capabilities": { "provides": ["g2p/ja@2.1.0", "gguf-runner@1.2.3"] }
+        }),
+    )
+    .await;
+    let (consumer_conn, consumer_path) = spawn_capabilities_and_connect(
+        "capabilities-consumer",
+        serde_json::json!({
+            "x-ene-capabilities": { "requires": ["g2p/ja@^1", "onnx-runner@^1?"] }
+        }),
+    )
+    .await;
+
+    let provider_schema = provider_conn
+        .config_schema()
+        .await
+        .expect("config_schema")
+        .expect("schema must be present");
+    let consumer_schema = consumer_conn
+        .config_schema()
+        .await
+        .expect("config_schema")
+        .expect("schema must be present");
+
+    let registry = CapabilityRegistry::new();
+    registry.register_from_schema("provider", Some(&provider_schema));
+    registry.register_from_schema("consumer", Some(&consumer_schema));
+
+    let g2p = CapabilityId::try_new("g2p/ja").expect("valid capability id");
+    let gguf = CapabilityId::try_new("gguf-runner").expect("valid capability id");
+    // Hard requirement resolves to the provider plugin.
+    assert_eq!(
+        registry.resolve(&g2p, &"^1".parse().expect("valid version req")),
+        Some("provider".to_string())
+    );
+    assert_eq!(
+        registry.resolve(&gguf, &"^1".parse().expect("valid version req")),
+        Some("provider".to_string())
+    );
+    // Unmet requirements are exactly the soft `onnx-runner` one.
+    let unmet = registry.unmet_requires("consumer");
+    assert_eq!(unmet.len(), 1);
+    assert_eq!(unmet[0].name.as_str(), "onnx-runner");
+    assert!(unmet[0].soft);
+    // The provider plugin itself has no unmet requirements.
+    assert!(registry.unmet_requires("provider").is_empty());
+
+    cleanup_path(&provider_path);
+    cleanup_path(&consumer_path);
 }
