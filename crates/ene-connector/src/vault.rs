@@ -351,9 +351,9 @@ mod tests {
     #[derive(Default)]
     struct CountingRefresher {
         calls: parking_lot::Mutex<usize>,
-        /// When set, the refresher returns this error instead of a token.
-        fail: Option<ConnectorError>,
-        refresh_token: Option<String>,
+        /// When set, the refresher answers `RefreshRequired` for this key
+        /// instead of a token.
+        fail_with: Option<String>,
     }
 
     #[async_trait]
@@ -364,8 +364,8 @@ mod tests {
             current: &CredentialStore,
         ) -> Result<CredentialStore, ConnectorError> {
             *self.calls.lock() += 1;
-            if let Some(err) = &self.fail {
-                return Err(err.clone());
+            if let Some(id) = &self.fail_with {
+                return Err(ConnectorError::refresh_required(id));
             }
             let fresh = current.refresh_token().map(str::to_owned);
             Ok(CredentialStore::oauth2(
@@ -426,8 +426,9 @@ mod tests {
         let past = Utc::now() - chrono::Duration::hours(1);
         let store = CredentialStore::oauth2("expired", Some("refresh-tok"), Some(past));
         let refresher = Arc::new(CountingRefresher::default());
+        let vault_refresher: Arc<dyn TokenRefresher> = Arc::clone(&refresher);
         let vault = CredentialVault::new(vec![VaultEntry::new("google.calendar", store)])
-            .with_refresher(Arc::clone(&refresher));
+            .with_refresher(vault_refresher);
         let resolved = vault.resolve("google.calendar").await.unwrap();
         assert_eq!(resolved.access_token(), Some("fresh-token"));
         assert_eq!(*refresher.calls.lock(), 1);
@@ -448,8 +449,9 @@ mod tests {
         let soon = Utc::now() + chrono::Duration::seconds(30);
         let store = CredentialStore::oauth2("about-to-expire", Some("refresh-tok"), Some(soon));
         let refresher = Arc::new(CountingRefresher::default());
+        let vault_refresher: Arc<dyn TokenRefresher> = Arc::clone(&refresher);
         let vault = CredentialVault::new(vec![VaultEntry::new("google.calendar", store)])
-            .with_refresher(Arc::clone(&refresher));
+            .with_refresher(vault_refresher);
         let resolved = vault.resolve("google.calendar").await.unwrap();
         assert_eq!(resolved.access_token(), Some("fresh-token"));
         assert_eq!(*refresher.calls.lock(), 1);
@@ -460,11 +462,12 @@ mod tests {
         let past = Utc::now() - chrono::Duration::hours(1);
         let store = CredentialStore::oauth2("expired", Some("refresh-tok"), Some(past));
         let refresher = Arc::new(CountingRefresher {
-            fail: Some(ConnectorError::refresh_required("google.calendar")),
+            fail_with: Some("google.calendar".to_string()),
             ..Default::default()
         });
+        let vault_refresher: Arc<dyn TokenRefresher> = Arc::clone(&refresher);
         let vault = CredentialVault::new(vec![VaultEntry::new("google.calendar", store)])
-            .with_refresher(Arc::clone(&refresher));
+            .with_refresher(vault_refresher);
         let err = vault.resolve("google.calendar").await.unwrap_err();
         assert!(matches!(err, ConnectorError::RefreshRequired(_)));
         // The entry survives so a later successful refresh can replace it.
@@ -524,9 +527,10 @@ mod tests {
             started: started_tx,
             resume: resume_rx,
         });
+        let vault_refresher: Arc<dyn TokenRefresher> = Arc::clone(&refresher);
         let vault = Arc::new(
             CredentialVault::new(vec![VaultEntry::new("google.calendar", store)])
-                .with_refresher(Arc::clone(&refresher)),
+                .with_refresher(vault_refresher),
         );
         let vault_for_refresh = Arc::clone(&vault);
         let refresh_task =

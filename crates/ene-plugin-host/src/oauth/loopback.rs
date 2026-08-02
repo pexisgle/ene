@@ -79,16 +79,14 @@ impl LoopbackServer {
                     Err(_) => return Err(FlowError::Timeout),
                 };
 
-            let request =
-                match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request(&mut socket)).await {
-                    Ok(Ok(request)) => request,
-                    // A socket that stalls or sends garbage is dropped and
-                    // the flow keeps listening for the real callback.
-                    Ok(Err(())) | Err(_) => {
-                        respond(&mut socket, 400).await;
-                        continue;
-                    }
-                };
+            let Ok(Ok(request)) =
+                tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request(&mut socket)).await
+            else {
+                // A socket that stalls or sends garbage is dropped and the
+                // flow keeps listening for the real callback.
+                respond(&mut socket, 400).await;
+                continue;
+            };
 
             let Some(callback) = parse_callback(&request) else {
                 respond(&mut socket, 404).await;

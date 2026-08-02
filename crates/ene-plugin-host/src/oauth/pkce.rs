@@ -1,4 +1,4 @@
-//! PKCE (RFC 7636) verifier / challenge generation for the authorization flow.
+//! `PKCE` (RFC 7636) verifier / challenge generation for the authorization flow.
 
 use base64::Engine;
 use sha2::{Digest, Sha256};
@@ -19,7 +19,7 @@ pub fn verifier() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Derives the S256 code challenge for a verifier.
+/// Derives the `S256` code challenge for a verifier.
 ///
 /// Plain (`plain`) challenges are deliberately unsupported: they leak the
 /// verifier over the authorization redirect.

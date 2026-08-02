@@ -1,7 +1,7 @@
-//! Host-owned OAuth2 authorization flows (Authorization Code + PKCE).
+//! Host-owned `OAuth2` authorization flows (Authorization Code + PKCE).
 //!
 //! [`OAuthFlowManager`] runs the browser/redirect/token-exchange flow end to
-//! end: it mints a PKCE verifier, binds an ephemeral loopback listener, opens
+//! end: it mints a `PKCE` verifier, binds an ephemeral loopback listener, opens
 //! the authorization URL in the system browser, exchanges the returned code,
 //! and stores the resulting token set in the vault and the credential
 //! persistence file. Completion — success or failure — is pushed to every
@@ -428,7 +428,7 @@ fn oauth2_endpoints(
     })
 }
 
-/// Builds the authorization URL with the PKCE challenge and CSRF state.
+/// Builds the authorization URL with the `PKCE` challenge and CSRF state.
 fn build_authorize_url(
     base: &str,
     client_id: &str,
@@ -468,7 +468,7 @@ mod tests {
 
     /// Minimal OAuth authorization server for flow tests:
     /// `/authorize` redirects to the flow's loopback callback, `/token`
-    /// issues tokens and verifies the PKCE verifier against the challenge
+    /// issues tokens and verifies the `PKCE` verifier against the challenge
     /// it saw on `/authorize`.
     struct MockAuthServer {
         addr: String,

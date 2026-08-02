@@ -64,7 +64,7 @@ pub enum CredentialKind {
     /// An `OAuth2` flow driven by the host.
     OAuth2 {
         /// Public client identifier the authorization server requires even
-        /// for PKCE flows (a desktop app ships no client secret).
+        /// for `PKCE` flows (a desktop app ships no client secret).
         client_id: String,
         /// Permission scopes requested during consent.
         scopes: Vec<String>,
