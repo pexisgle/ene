@@ -47,7 +47,7 @@ Ene ワークスペース
 │   ├── ene-plugin         (プラグイン開発 SDK & アダプタファサード)
 │   ├── ene-plugin-host    (プラグインプロセス管理 & スーパーバイザ)
 │   ├── ene-plugin-db      (プラグイン用ホストサービス `db` クライアント)
-│   └── ene-tool-macros    (ツールアクション用 Proc-macro)
+│   └── ene-plugin-macros  (プラグイン用 Proc-macro)
 └── プロセス外プラグイン
     ├── plugins/provider/* (プロバイダプラグイン: anthropic)
     └── plugins/tool/*     (ツールプラグイン: app, browser, fs, utility, web)

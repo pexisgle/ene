@@ -59,7 +59,7 @@ flowchart TD
   Store --> PluginDb[crates/ene-plugin-db]
 
   Tool[crates/ene-plugin] --> Proto
-  Tool --> Macros[crates/ene-tool-macros]
+  Tool --> Macros[crates/ene-plugin-macros]
 
   ToolHost -.spawns IPC.-> Anthropic[plugins/provider/anthropic]
   ToolHost -.spawns IPC.-> ToolApp[plugins/tool/app]
@@ -140,7 +140,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-plugin-proto` | IPC Protocol v4 wire messages, versioning, framing, tool types |
 | `ene-plugin` | Plugin authoring SDK: `ToolPlugin`/`LlmPlugin` facade, `ToolAction`/`ActionSetProvider`, prelude |
 | `ene-plugin-db` | Typed IPC client for stateful plugin database operations |
-| `ene-tool-macros` | Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
+| `ene-plugin-macros` | Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
 | `ene-rag` | RAG policy layer: memory recall scoring/decay, tool selection and reranking (absorbed the former `ene-tool-rag`) |
 | `ene-vrm` | VRM 1.0 avatar loading and wgpu renderer |
 | `ene-config` | Configuration loading, settings schema, character card definitions |

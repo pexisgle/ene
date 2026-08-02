@@ -47,7 +47,7 @@ Ene Workspace
 │   ├── ene-plugin         (Plugin authoring SDK & adapter facade)
 │   ├── ene-plugin-host    (Plugin process manager & supervisor)
 │   ├── ene-plugin-db      (Plugin host-service `db` client)
-│   └── ene-tool-macros    (Proc-macros for tool actions)
+│   └── ene-plugin-macros  (Proc-macros for plugins)
 └── Out-of-Process Plugins
     ├── plugins/provider/* (Provider plugins: anthropic)
     └── plugins/tool/*     (Tool plugins: app, browser, fs, utility, web)

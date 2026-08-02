@@ -426,7 +426,7 @@ HTTP の MCP エンドポイント (`transport.type = "http"`) は、接続を�
 
 ## 8. カスタムツールプラグインの開発
 
-開発者は `ene-plugin` の `#[derive(ToolAction)]`（`ene-tool-macros` 経由）とサーバーエントリポイントを使用して独自のツールプラグインを作成できます。以下は説明用のスケッチです — 実際にコンパイルが通る現行パターンは `plugins/tool/*` 配下の既存プラグイン (例: `plugins/tool/app/src/main.rs`) や `cargo doc -p ene-tool-macros --open` を参照してください：
+開発者は `ene-plugin` の `#[derive(ToolAction)]`（`ene-plugin-macros` 経由）とサーバーエントリポイントを使用して独自のツールプラグインを作成できます。以下は説明用のスケッチです — 実際にコンパイルが通る現行パターンは `plugins/tool/*` 配下の既存プラグイン (例: `plugins/tool/app/src/main.rs`) や `cargo doc -p ene-plugin-macros --open` を参照してください：
 
 ```rust,ignore
 use ene_plugin::prelude::*;

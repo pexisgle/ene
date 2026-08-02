@@ -2658,8 +2658,8 @@ dependencies = [
  "async-trait",
  "base64 0.23.0",
  "ene-infer",
+ "ene-plugin-macros",
  "ene-plugin-proto",
- "ene-tool-macros",
  "parking_lot",
  "schemars",
  "serde",
@@ -2928,7 +2928,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-tool-macros"
+name = "ene-plugin-macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
