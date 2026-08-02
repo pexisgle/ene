@@ -1955,6 +1955,7 @@ async fn credentials_declared_in_schema_are_registered() {
                   "header": { "name": "x-api-key", "format": "{value}" },
                   "env_fallback": "ANTHROPIC_API_KEY" },
                 { "id": "google.calendar", "kind": "oauth2",
+                  "client_id": "1234.apps.googleusercontent.com",
                   "scopes": ["https://www.googleapis.com/auth/calendar.readonly"],
                   "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
                   "token_url": "https://oauth2.googleapis.com/token" }
@@ -2008,7 +2009,7 @@ async fn invalid_credential_entries_are_dropped_while_plugin_stays_up() {
                 { "id": "anthropic", "kind": "api_key",
                   "header": { "name": "x-api-key", "format": "{value}" } },
                 { "id": "bad kind", "kind": "api_key" },
-                { "id": "missing.token", "kind": "oauth2", "auth_url": "https://a" },
+                { "id": "missing.token", "kind": "oauth2", "client_id": "client-id", "auth_url": "https://a" },
                 { "id": "no.placeholder", "kind": "api_key",
                   "header": { "name": "x-api-key", "format": "literal" } }
             ]
