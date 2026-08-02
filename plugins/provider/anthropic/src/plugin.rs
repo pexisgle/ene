@@ -12,7 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ene_plugin::{
     ClientOptions, ConcurrencyHint, LlmPlugin, LlmProviderSpec, PluginCompletion, PluginContext,
-    PluginError, PluginStream, PluginStreamChunk, TimeoutPolicy, TokenUsage,
+    PluginError, PluginStream, PluginStreamChunk, RetryPolicy, TimeoutPolicy, TokenUsage,
 };
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
@@ -36,10 +36,21 @@ pub(crate) struct AnthropicPlugin;
 impl ene_plugin::ConfigurablePlugin for AnthropicPlugin {
     /// Advertises the config schema; `api_key` is marked `x-ene-secret: true`
     /// so the host masks/redacts it. The key itself now resolves through the
-    /// host's credential service, not from this blob.
+    /// host's credential service, not from this blob — the declaration below
+    /// is what lets a default-config user (the plugin stays `enable: true`)
+    /// clear the host's scope gate and resolve the `anthropic` credential.
     fn config_schema(&self) -> Option<Value> {
         Some(json!({
             "type": "object",
+            "x-ene-credentials": [{
+                "id": "anthropic",
+                "kind": "api_key",
+                "required": true,
+                "header": { "name": "x-api-key", "format": "{value}" },
+                "env_fallback": "ANTHROPIC_API_KEY",
+                "label": "Anthropic API Key",
+                "help_url": "https://console.anthropic.com/settings/keys"
+            }],
             "properties": {
                 "api_key": {
                     "oneOf": [
@@ -71,14 +82,20 @@ impl ene_plugin::ConfigurablePlugin for AnthropicPlugin {
 /// Returns a credentialed HTTP caller for the Anthropic API.
 ///
 /// The auth header is injected from the host's `anthropic` credential
-/// (`api_key`), and the client preserves the plugin's original timeouts.
+/// (`api_key`), and the client preserves the plugin's original timeouts and
+/// single-shot behavior: retries are disabled (`max_retries: 0`) exactly as
+/// the pre-credential client behaved, so a failing request surfaces to the
+/// caller rather than being retried on 429/5xx.
 async fn anthropic_http_caller(ctx: &PluginContext) -> Result<ene_plugin::HttpCaller, PluginError> {
     ctx.credentials()
         .http_client_with(
             "anthropic",
             ClientOptions {
                 timeout: TimeoutPolicy::new(REQUEST_TIMEOUT, CONNECT_TIMEOUT),
-                ..ClientOptions::default()
+                retry: RetryPolicy {
+                    max_retries: 0,
+                    ..RetryPolicy::default()
+                },
             },
         )
         .await

@@ -705,6 +705,11 @@ let resp = caller
 overrides the default header derivation; `None` (the default) picks `x-api-key`
 or `Bearer` from the resolved credential kind.
 
+The bundled anthropic provider keeps its pre-credential single-shot behavior:
+it passes `ClientOptions { retry: RetryPolicy { max_retries: 0, .. }, .. }`,
+so a failing request surfaces to the caller instead of being retried on
+429/5xx. Plugins that want retries opt in explicitly via `ClientOptions`.
+
 ### Error mapping
 
 The host's structured error codes surface as typed `PluginError` variants:

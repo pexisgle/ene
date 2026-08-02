@@ -32,6 +32,11 @@ use crate::policy::{RateLimiter, RetryPolicy, TimeoutPolicy};
 /// re-resolves through the host.
 const API_KEY_CACHE_TTL: Duration = Duration::from_mins(1);
 
+/// How long a request waits for its response before the session is discarded
+/// and the next attempt reconnects. Bounds the single-flight wait so a
+/// stalled or dead host can never hang the caller.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// A secret returned to plugin code.
 ///
 /// Wraps [`SecretString`] (zeroed on drop) and adds a `Serialize` impl that
@@ -78,10 +83,16 @@ enum CredentialKind {
 }
 
 /// A cached resolved credential with its freshness deadline.
+///
+/// `epoch` is the connection generation the value was resolved through (see
+/// [`CredentialConnection::epoch`]). Entries are served only while that
+/// generation is current, so an invalidation or reconnect makes every older
+/// entry ineligible without the client having to enumerate ids.
 struct CachedCredential {
     kind: CredentialKind,
     value: CredentialSecret,
     deadline: Instant,
+    epoch: u64,
 }
 
 /// Endpoint parameters learned at handshake time.
@@ -105,6 +116,13 @@ struct CredentialConnection {
     /// Set to `false` when the reader task exits (session died); requests
     /// then reconnect.
     alive: std::sync::atomic::AtomicBool,
+    /// Connection generation: assigned from the client's counter at creation
+    /// and bumped by the reader on every `Invalidated` frame. Cache entries
+    /// carry the generation they were resolved under, and a fetch only
+    /// caches when the generation did not change while it was in flight — so
+    /// a value resolved before an invalidation is never resurrected into the
+    /// cache after the cache was cleared.
+    epoch: std::sync::atomic::AtomicU64,
 }
 
 /// Client for the host's `credential` service.
@@ -118,6 +136,15 @@ pub struct CredentialClient {
     params: Mutex<Option<CredentialParams>>,
     conn: tokio::sync::Mutex<Option<Arc<CredentialConnection>>>,
     cache: Arc<Mutex<HashMap<String, CachedCredential>>>,
+    /// Monotonic source of connection generations, so a fresh connection is
+    /// never mistaken for a dead one that reused the same epoch value.
+    next_epoch: std::sync::atomic::AtomicU64,
+    /// Client-side cache TTL for API-key credentials (Bearers use their
+    /// `expires_at` when present). Overridable in tests.
+    cache_ttl: Duration,
+    /// Per-request response timeout (see [`RESPONSE_TIMEOUT`]). Overridable
+    /// in tests.
+    response_timeout: Duration,
 }
 
 impl fmt::Debug for CredentialClient {
@@ -141,6 +168,9 @@ impl CredentialClient {
             params: Mutex::new(None),
             conn: tokio::sync::Mutex::new(None),
             cache: Arc::new(Mutex::new(HashMap::new())),
+            next_epoch: std::sync::atomic::AtomicU64::new(0),
+            cache_ttl: API_KEY_CACHE_TTL,
+            response_timeout: RESPONSE_TIMEOUT,
         }
     }
 
@@ -184,7 +214,7 @@ impl CredentialClient {
     /// answers pending immediately and the credential arrives via a later
     /// invalidation.
     pub async fn request_authorization(&self, id: &str) -> Result<(), PluginError> {
-        let resp = self
+        let (resp, _epoch) = self
             .request(&CredentialRequest::RequestAuthorization { id: id.to_string() })
             .await?;
         match resp {
@@ -286,20 +316,25 @@ impl CredentialClient {
         &self,
         id: &str,
     ) -> Result<(CredentialKind, CredentialSecret), PluginError> {
-        if let Some(entry) = self.cache_get(id) {
+        // The current connection generation scopes every cache lookup: an
+        // entry is served only while the generation it was resolved under is
+        // still current, so a reconnect never hands out a pre-reconnect
+        // snapshot.
+        let epoch_before = self.current_epoch().await;
+        if let Some(entry) = self.cache_get(id, epoch_before) {
             return Ok(entry);
         }
-        let resolved = self.fetch(id).await?;
+        let (resolved, epoch_after) = self.fetch(id).await?;
         let (kind, secret, deadline) = match resolved {
             ResolvedCredential::ApiKey { key } => (
                 CredentialKind::ApiKey,
                 CredentialSecret::new(key.expose().to_owned()),
-                Instant::now() + API_KEY_CACHE_TTL,
+                Instant::now() + self.cache_ttl,
             ),
             ResolvedCredential::Bearer { token, expires_at } => {
                 let secret = CredentialSecret::new(token.expose().to_owned());
                 let deadline = expires_at.map_or_else(
-                    || Instant::now() + API_KEY_CACHE_TTL,
+                    || Instant::now() + self.cache_ttl,
                     |expiry| {
                         let remaining = expiry
                             .signed_duration_since(Utc::now())
@@ -311,17 +346,34 @@ impl CredentialClient {
                 (CredentialKind::Bearer, secret, deadline)
             }
         };
-        self.cache_insert(id, kind, secret.clone(), deadline);
+        // Only cache when the reader's generation is unchanged from the fetch
+        // start: an `Invalidated` frame processed in between means the
+        // resolved value is already stale, and caching it would resurrect a
+        // credential the host just revoked.
+        if epoch_before == epoch_after {
+            self.cache_insert(id, kind, secret.clone(), deadline, epoch_after);
+        }
         Ok((kind, secret))
     }
 
-    /// Fetches a credential from the host (bypassing the cache).
-    async fn fetch(&self, id: &str) -> Result<ResolvedCredential, PluginError> {
-        let resp = self
+    /// Returns the epoch of the live connection, opening one when none
+    /// exists (so the first fetch's "before" value equals the connection it
+    /// will resolve through). `0` when the endpoint is unavailable.
+    async fn current_epoch(&self) -> u64 {
+        match self.ensure_connected().await {
+            Ok(conn) => conn.epoch.load(std::sync::atomic::Ordering::Relaxed),
+            Err(_) => 0,
+        }
+    }
+
+    /// Fetches a credential from the host (bypassing the cache), returning
+    /// the connection generation it was resolved through.
+    async fn fetch(&self, id: &str) -> Result<(ResolvedCredential, u64), PluginError> {
+        let (resp, epoch) = self
             .request(&CredentialRequest::Resolve { id: id.to_string() })
             .await?;
         match resp {
-            CredentialResponse::Resolved { credential } => Ok(credential),
+            CredentialResponse::Resolved { credential } => Ok((credential, epoch)),
             CredentialResponse::Error { code, message } => {
                 Err(map_request_error(id, code, message))
             }
@@ -332,10 +384,21 @@ impl CredentialClient {
     }
 
     /// Sends one request over the connection, reconnecting once when the
-    /// session has died.
-    async fn request(&self, req: &CredentialRequest) -> Result<CredentialResponse, PluginError> {
+    /// session has died or the host does not answer in time.
+    ///
+    /// Returns the response together with the connection generation it was
+    /// delivered under, so callers can detect an invalidation that raced the
+    /// request.
+    async fn request(
+        &self,
+        req: &CredentialRequest,
+    ) -> Result<(CredentialResponse, u64), PluginError> {
         for _ in 0..2 {
             let conn = self.ensure_connected().await?;
+            // Single-flight wire protocol: the flight lock serializes
+            // requests on a connection and stays held across the bounded
+            // response wait so no second request can overwrite the pending
+            // response slot. `self.response_timeout` bounds the hold.
             let flight = conn.flight.lock().await;
             let (tx, rx) = oneshot::channel();
             *conn.pending.lock() = Some(tx);
@@ -348,11 +411,20 @@ impl CredentialClient {
                 self.conn.lock().await.take();
                 continue;
             }
-            if let Ok(resp) = rx.await {
-                return Ok(resp);
+            match tokio::time::timeout(self.response_timeout, rx).await {
+                Ok(Ok(resp)) => {
+                    return Ok((resp, conn.epoch.load(std::sync::atomic::Ordering::Relaxed)));
+                }
+                // Reader exited (sender dropped) or host stalled: discard the
+                // session so the next attempt reconnects instead of retrying
+                // on a dead stream.
+                Ok(Err(_)) | Err(_) => {
+                    drop(flight);
+                    conn.alive
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    self.conn.lock().await.take();
+                }
             }
-            drop(flight);
-            self.conn.lock().await.take();
         }
         Err(PluginError::transport("credential service connection lost"))
     }
@@ -417,6 +489,11 @@ impl CredentialClient {
             flight: tokio::sync::Mutex::new(()),
             pending: Mutex::new(None),
             alive: std::sync::atomic::AtomicBool::new(true),
+            epoch: std::sync::atomic::AtomicU64::new(
+                self.next_epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1,
+            ),
         });
         tokio::spawn({
             let conn = Arc::clone(&conn);
@@ -428,10 +505,11 @@ impl CredentialClient {
         Ok(conn)
     }
 
-    fn cache_get(&self, id: &str) -> Option<(CredentialKind, CredentialSecret)> {
+    fn cache_get(&self, id: &str, epoch: u64) -> Option<(CredentialKind, CredentialSecret)> {
         let guard = self.cache.lock();
         guard.get(id).and_then(|entry| {
-            (entry.deadline > Instant::now()).then(|| (entry.kind, entry.value.clone()))
+            (entry.deadline > Instant::now() && entry.epoch == epoch)
+                .then(|| (entry.kind, entry.value.clone()))
         })
     }
 
@@ -441,6 +519,7 @@ impl CredentialClient {
         kind: CredentialKind,
         value: CredentialSecret,
         deadline: Instant,
+        epoch: u64,
     ) {
         self.cache.lock().insert(
             id.to_string(),
@@ -448,6 +527,7 @@ impl CredentialClient {
                 kind,
                 value,
                 deadline,
+                epoch,
             },
         );
     }
@@ -465,6 +545,11 @@ async fn credential_reader_loop(
     loop {
         match read_credential_response(&mut reader).await {
             Ok(Some(CredentialResponse::Invalidated { ids })) => {
+                // A revocation/rotation supersedes any in-flight resolution:
+                // bump the generation so `resolve_secret` skips caching a
+                // value resolved before this frame, and drop the entries.
+                conn.epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut guard = cache.lock();
                 for id in ids {
                     guard.remove(&id);
@@ -478,6 +563,10 @@ async fn credential_reader_loop(
             Ok(None) | Err(_) => break,
         }
     }
+    // Drop the pending response slot so an in-flight request's oneshot
+    // resolves (Err) instead of hanging forever on a session whose reader is
+    // gone.
+    drop(conn.pending.lock().take());
     conn.alive
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
@@ -631,6 +720,104 @@ mod tests {
 
     static SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+    /// One step a scripted mock host performs on a session after `OpenAck`.
+    enum HostAction {
+        /// Read the next `Resolve` and answer it with this key.
+        Answer(&'static str),
+        /// Push an `Invalidated` frame for the given ids.
+        Invalidate(&'static [&'static str]),
+        /// Read the next request and never answer it, then close the stream
+        /// (the session's reader dies without a response).
+        SwallowOne,
+        /// Read the next request and never answer it, keeping the connection
+        /// open so the client's response timeout (not an EOF) must fire.
+        Stall,
+    }
+
+    /// Drives one accepted credential session with `actions`; returns when
+    /// the list is exhausted or the peer closes.
+    async fn run_scripted_session(
+        mut stream: ene_plugin_proto::transport::IpcStream,
+        actions: Vec<HostAction>,
+    ) {
+        let Ok(Some(HostServiceRequest::Open {
+            service: HostServiceId::Credential,
+            ..
+        })) = read_host_service_request(&mut stream).await
+        else {
+            return;
+        };
+        if write_host_service_response(&mut stream, &HostServiceResponse::OpenAck)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        for action in actions {
+            match action {
+                HostAction::Answer(key) => {
+                    let Ok(Some(CredentialRequest::Resolve { .. })) =
+                        read_credential_request(&mut stream).await
+                    else {
+                        return;
+                    };
+                    let resp = CredentialResponse::Resolved {
+                        credential: ResolvedCredential::ApiKey {
+                            key: ene_plugin_proto::WireSecret::new(key),
+                        },
+                    };
+                    if write_credential_response(&mut stream, &resp).await.is_err() {
+                        return;
+                    }
+                }
+                HostAction::Invalidate(ids) => {
+                    let resp = CredentialResponse::Invalidated {
+                        ids: ids.iter().map(|id| id.to_string()).collect(),
+                    };
+                    if write_credential_response(&mut stream, &resp).await.is_err() {
+                        return;
+                    }
+                }
+                HostAction::SwallowOne => {
+                    drop(read_credential_request(&mut stream).await);
+                }
+                HostAction::Stall => {
+                    drop(read_credential_request(&mut stream).await);
+                    // Keep the socket open; the client's response timeout is
+                    // what must break the wait, not this task.
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            }
+        }
+    }
+
+    /// Runs a scripted credential host over a real socket: one concurrent
+    /// session handler per script, all driven after `OpenAck` (any token is
+    /// accepted).
+    fn spawn_scripted_host(scripts: Vec<Vec<HostAction>>) -> (String, String) {
+        let n = SOCKET_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ene-cred-client-test-{}-{n}.sock",
+            std::process::id()
+        ));
+        let mut listener = IpcListener::bind(&path).expect("bind listener");
+        let token = "ene-cred-test-token".to_string();
+        tokio::spawn(async move {
+            let mut handlers = Vec::new();
+            for actions in scripts {
+                let Ok(stream) = listener.accept().await else {
+                    break;
+                };
+                handlers.push(tokio::spawn(run_scripted_session(stream, actions)));
+            }
+            for handler in handlers {
+                let _ = handler.await;
+            }
+            drop(listener);
+        });
+        (path.to_string_lossy().to_string(), token)
+    }
+
     /// Runs a minimal in-process credential host over a real socket: accepts
     /// one connection, answers `Open` with a fixed token, and serves `Resolve`
     /// with a fixed API key.
@@ -736,5 +923,100 @@ mod tests {
             .request_authorization("anthropic")
             .await
             .expect("pending accepted");
+    }
+
+    #[tokio::test]
+    async fn invalidated_frame_drops_the_cached_entry() {
+        let (path, token) = spawn_scripted_host(vec![vec![
+            HostAction::Answer("sk-first"),
+            HostAction::Invalidate(&["anthropic"]),
+            HostAction::Answer("sk-second"),
+        ]]);
+        let client = CredentialClient::new();
+        client.set_endpoint(path, token);
+
+        let first = client.api_key("anthropic").await.expect("first resolve");
+        assert_eq!(first.expose_secret(), "sk-first");
+        // Let the reader process the pushed invalidation before resolving
+        // again; the host then answers a fresh value.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let second = client.api_key("anthropic").await.expect("second resolve");
+        assert_eq!(
+            second.expose_secret(),
+            "sk-second",
+            "Invalidated must drop the cached entry so the host is re-queried"
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_reader_does_not_hang_and_reconnects() {
+        // Connection 1 swallows the request and closes without answering
+        // (reader death mid-flight); connection 2 serves normally. The first
+        // attempt must not hang forever on the missing response.
+        let (path, token) = spawn_scripted_host(vec![
+            vec![HostAction::SwallowOne],
+            vec![HostAction::Answer("sk-after-reconnect")],
+        ]);
+        let client = CredentialClient::new();
+        client.set_endpoint(path, token);
+
+        let key = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.api_key("anthropic"),
+        )
+        .await
+        .expect("request must not hang")
+        .expect("resolve after reconnect");
+        assert_eq!(key.expose_secret(), "sk-after-reconnect");
+    }
+
+    #[tokio::test]
+    async fn cached_entry_expires_after_ttl() {
+        let (path, token) = spawn_scripted_host(vec![vec![
+            HostAction::Answer("sk-one"),
+            HostAction::Answer("sk-two"),
+        ]]);
+        let client = CredentialClient::new();
+        client.cache_ttl = std::time::Duration::from_millis(100);
+        client.set_endpoint(path, token);
+
+        let first = client.api_key("anthropic").await.expect("first resolve");
+        assert_eq!(first.expose_secret(), "sk-one");
+        let cached = client.api_key("anthropic").await.expect("cached hit");
+        assert_eq!(
+            cached.expose_secret(),
+            "sk-one",
+            "the second resolve must come from the cache, not the host"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let refetched = client.api_key("anthropic").await.expect("post-ttl resolve");
+        assert_eq!(
+            refetched.expose_secret(),
+            "sk-two",
+            "an expired entry must be re-resolved through the host"
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_host_times_out_and_reconnects() {
+        // Connection 1 reads the request and never answers while keeping the
+        // socket open, so the client's response timeout (not an EOF) must
+        // break the wait; connection 2 serves normally.
+        let (path, token) = spawn_scripted_host(vec![
+            vec![HostAction::Stall],
+            vec![HostAction::Answer("sk-after-timeout")],
+        ]);
+        let client = CredentialClient::new();
+        client.response_timeout = std::time::Duration::from_millis(100);
+        client.set_endpoint(path, token);
+
+        let key = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.api_key("anthropic"),
+        )
+        .await
+        .expect("request must not hang")
+        .expect("resolve after reconnect");
+        assert_eq!(key.expose_secret(), "sk-after-timeout");
     }
 }

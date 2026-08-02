@@ -668,6 +668,11 @@ let resp = caller
 `ClientOptions::auth` はデフォルトのヘッダ導出を上書きします (`None` が既定で、
 解決した資格情報の種類から `x-api-key` / `Bearer` を選びます)。
 
+同梱の anthropic プロバイダは資格情報導入前と同じ単発挙動を維持します:
+`ClientOptions { retry: RetryPolicy { max_retries: 0, .. }, .. }` を渡すため、
+失敗したリクエストは 429/5xx でリトライされず呼び出し元に返ります。リトライ
+したいプラグインは `ClientOptions` で明示的に有効化してください。
+
 ### エラー対応
 
 ホストの構造化エラーコードは型付き `PluginError` バリアントになります:
