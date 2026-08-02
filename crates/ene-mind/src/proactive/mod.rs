@@ -161,6 +161,9 @@ impl ProactiveDecision {
 }
 
 /// Why a proactive decision was skipped or silenced.
+///
+/// A `None` `skip` means the decision led to speaking; every non-speech path
+/// yields one of these variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProactiveSkipReason {
     /// Feature disabled in config.
@@ -171,6 +174,8 @@ pub enum ProactiveSkipReason {
     DecisionFailed(String),
     /// Model returned `should_speak` but confidence was too low.
     BelowConfidence,
+    /// Model returned `should_speak: false` — it judged speaking unnecessary.
+    ModelDeclined,
 }
 
 impl fmt::Display for ProactiveSkipReason {
@@ -180,6 +185,7 @@ impl fmt::Display for ProactiveSkipReason {
             Self::Gate(reason) => write!(f, "gate: {reason}"),
             Self::DecisionFailed(error) => write!(f, "decision failed: {error}"),
             Self::BelowConfidence => write!(f, "below confidence"),
+            Self::ModelDeclined => write!(f, "model declined"),
         }
     }
 }
@@ -332,11 +338,11 @@ pub async fn decide_proactive_speech(
         decision.screen_digest.clear();
     }
     if !decision.allows_generation(config.decision.min_confidence) {
-        let skip = if decision.should_speak {
-            Some(ProactiveSkipReason::BelowConfidence)
+        let skip = Some(if decision.should_speak {
+            ProactiveSkipReason::BelowConfidence
         } else {
-            None
-        };
+            ProactiveSkipReason::ModelDeclined
+        });
         return ProactiveDecisionOutcome {
             decision,
             skip,
@@ -626,6 +632,12 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = capture.clone();
         let outcome = decide_proactive_speech(&config, &ctx, Some(provider), "en").await;
         assert!(outcome.llm_invoked);
+        assert_eq!(
+            outcome.skip,
+            Some(ProactiveSkipReason::ModelDeclined),
+            "should_speak=false must be reported as ModelDeclined"
+        );
+        assert_eq!(outcome.decision.reason, "quiet");
         let schema = capture
             .captured
             .lock()
@@ -635,5 +647,55 @@ mod tests {
         assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
         assert!(schema.get("properties").is_some());
         assert!(schema.get("schema").is_none());
+    }
+
+    #[tokio::test]
+    async fn model_decline_reports_model_declined_skip() {
+        let config = base_config();
+        let ctx = ProactiveContext {
+            history: vec![HistoryEntry {
+                role: Role::User,
+                content: "hey".into(),
+            }],
+            seconds_since_user_input: 200,
+            activity: Some(ActivitySnapshot {
+                idle_seconds: Some(200),
+                active_window_label: "Browser".into(),
+                recent_change: String::new(),
+            }),
+            screen_summary: None,
+            affect_summary: None,
+            commitments: vec![],
+            suppression: ProactiveSuppressionState {
+                seconds_since_user_input: 200,
+                seconds_since_proactive: 1000,
+                proactive_turns_this_session: 0,
+                user_turn_busy: false,
+            },
+        };
+        let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
+            body: r#"{"should_speak":false,"confidence":0.9,"reason":"quiet","topic_hint":"","urgency":"low"}"#.into(),
+        });
+        let outcome = decide_proactive_speech(&config, &ctx, Some(provider), "en").await;
+        assert!(outcome.llm_invoked);
+        assert!(
+            !outcome
+                .decision
+                .allows_generation(config.decision.min_confidence),
+            "should_speak=false blocks generation even at high confidence"
+        );
+        assert_eq!(
+            outcome.skip,
+            Some(ProactiveSkipReason::ModelDeclined),
+            "a model decline must be distinguishable from speaking (None)"
+        );
+    }
+
+    #[test]
+    fn model_declined_display_matches_runtime_fallback() {
+        assert_eq!(
+            ProactiveSkipReason::ModelDeclined.to_string(),
+            "model declined"
+        );
     }
 }
