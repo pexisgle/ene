@@ -485,7 +485,7 @@ mod tests {
                         break;
                     };
                     tokio::spawn(async move {
-                        let _ = serve_mock(socket).await;
+                        drop(serve_mock(socket).await);
                     });
                 }
             });
@@ -701,7 +701,7 @@ mod tests {
     /// immediately, mirroring a real browser: the flow must reach its accept
     /// loop before the callback arrives, otherwise opener and accept loop
     /// deadlock on each other.
-    fn redirecting_browser() -> Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync> {
+    fn redirecting_browser() -> Arc<BrowserOpener> {
         Arc::new(|url: &str| {
             let url = url.to_string();
             std::thread::spawn(move || {
@@ -711,7 +711,7 @@ mod tests {
                 let Ok(location) = extract_location(&response) else {
                     return;
                 };
-                let _ = http_get(&location);
+                drop(http_get(&location));
             });
             Ok(())
         })
@@ -752,7 +752,9 @@ mod tests {
             let redirect_uri = params.get("redirect_uri").ok_or("no redirect_uri")?;
             let redirect_uri = redirect_uri.clone();
             std::thread::spawn(move || {
-                let _ = http_get(&format!("{redirect_uri}?code=stolen&state=wrong-state"));
+                drop(http_get(&format!(
+                    "{redirect_uri}?code=stolen&state=wrong-state"
+                )));
             });
             Ok(())
         });
@@ -788,7 +790,7 @@ mod tests {
                 let Ok(location) = extract_location(&response) else {
                     return;
                 };
-                let _ = http_get(&location);
+                drop(http_get(&location));
             });
             Ok(())
         });
