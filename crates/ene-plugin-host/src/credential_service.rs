@@ -80,10 +80,7 @@ impl CredentialPassenger {
         loop {
             tokio::select! {
                 frame = read_credential_request(stream) => {
-                    let request = match frame {
-                        Ok(Some(request)) => request,
-                        Ok(None) | Err(_) => break,
-                    };
+                    let Ok(Some(request)) = frame else { break };
                     let response = self.handle_request(plugin, request);
                     if write_credential_response(stream, &response).await.is_err() {
                         break;
@@ -128,7 +125,7 @@ impl CredentialPassenger {
             CredentialRequest::RequestAuthorization { id } => {
                 if !self.vault.is_allowed(plugin, &id) {
                     self.vault.record_audit(plugin, &id, false);
-                    return self.scope_denied(plugin, &id);
+                    return Self::scope_denied(plugin, &id);
                 }
                 self.vault.record_audit(plugin, &id, true);
                 // Stub until the OAuth flow implements the browser/redirect
@@ -141,7 +138,7 @@ impl CredentialPassenger {
     fn resolve(&self, plugin: &str, id: &str) -> CredentialResponse {
         if !self.vault.is_allowed(plugin, id) {
             self.vault.record_audit(plugin, id, false);
-            return self.scope_denied(plugin, id);
+            return Self::scope_denied(plugin, id);
         }
         match self.vault.resolve(id) {
             Ok(store) => {
@@ -188,7 +185,7 @@ impl CredentialPassenger {
         }
     }
 
-    fn scope_denied(&self, plugin: &str, id: &str) -> CredentialResponse {
+    fn scope_denied(plugin: &str, id: &str) -> CredentialResponse {
         CredentialResponse::Error {
             code: CredentialErrorCode::ScopeDenied,
             message: format!("credential '{id}' is not declared for plugin '{plugin}'"),
