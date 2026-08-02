@@ -1,4 +1,4 @@
-//! Parsing and scoping of `x-ene-credentials` credential declarations.
+//! Parsing and scoping of plugin `x-` schema declarations.
 //!
 //! A plugin declares the credentials it needs at the top level of the JSON
 //! Schema returned by `config_schema()`:
@@ -13,12 +13,27 @@
 //! }
 //! ```
 //!
-//! [`parse_credentials`] validates each entry independently — a bad entry is
-//! reported and dropped, never the whole block — and [`resolve_scope`]
-//! answers whether a plugin may access a given credential id. Both are pure:
-//! the host drives the parsing and the credential service drives the scoping,
-//! so neither side re-implements the rules.
+//! It declares the capabilities it provides and requires the same way:
+//!
+//! ```json
+//! {
+//!   "type": "object",
+//!   "x-ene-capabilities": {
+//!     "provides": ["tts/synthesize@1", "gguf-runner@1.2.3"],
+//!     "requires": ["g2p/ja@^1", "onnx-runner@^1?"]
+//!   }
+//! }
+//! ```
+//!
+//! [`parse_credentials`] and [`parse_capabilities`] validate each entry
+//! independently — a bad entry is reported and dropped, never the whole
+//! block. [`resolve_scope`] answers whether a plugin may access a given
+//! credential id, and [`resolve_capability`] resolves a capability request
+//! against a set of providers. All are pure: the host drives the parsing and
+//! the runtime services drive resolution, so neither side re-implements the
+//! rules.
 
+use crate::capability::{CapabilityId, ProvidedCapability, RequiredCapability};
 use crate::identity::CredentialId;
 use serde_json::Value;
 
@@ -369,6 +384,252 @@ pub fn resolve_scope(
     ScopeDecision::Allowed {
         storage_key: format!("{plugin_name}:{id}"),
     }
+}
+
+// ── Capability declarations (`x-ene-capabilities`) ────────────────────────
+
+/// The JSON Schema keyword under which a plugin declares its capabilities.
+///
+/// Unlike [`CREDENTIALS_KEY`], the value is an object with two string arrays,
+/// `provides` and `requires`, each entry a single `name@version` / `name@range`
+/// string (a trailing `?` marks a `requires` entry as soft).
+pub const CAPABILITIES_KEY: &str = "x-ene-capabilities";
+
+/// Why a single capability declaration entry was rejected during parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityRejection {
+    /// The entry is not a string.
+    InvalidEntry,
+    /// The name portion is not a valid [`CapabilityId`](crate::CapabilityId).
+    InvalidName,
+    /// The entry has no `@` name/version separator.
+    MissingVersion,
+    /// The version (provides) or range (requires) is not valid semver, or
+    /// uses a pre-release / build-metadata form, which capability versions
+    /// deliberately ban (pre-release spelling would collide with the `?`
+    /// soft-requirement marker).
+    MalformedVersion,
+    /// A `?` appears in a position other than a single trailing soft marker
+    /// on a `requires` entry — embedded, repeated, or on a `provides` entry.
+    SoftMarkerPosition,
+    /// The name duplicates an earlier accepted entry in the same list.
+    Duplicate,
+}
+
+/// A declaration entry rejected during parsing, with enough context for the
+/// host to warn about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedCapability {
+    /// The raw entry string as written; `None` when the entry was not a
+    /// string at all.
+    pub entry: Option<String>,
+    /// Why the entry was rejected.
+    pub reason: CapabilityRejection,
+}
+
+/// The outcome of parsing a plugin's `x-ene-capabilities` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityParse {
+    /// Accepted `provides` entries, in declaration order (duplicates
+    /// resolved first-wins).
+    pub provides: Vec<ProvidedCapability>,
+    /// Accepted `requires` entries, in declaration order.
+    pub requires: Vec<RequiredCapability>,
+    /// Rejected entries, in declaration order.
+    pub rejected: Vec<RejectedCapability>,
+}
+
+/// Parses and validates the `x-ene-capabilities` block of a plugin's config
+/// schema.
+///
+/// Entries are validated independently: a bad entry lands in
+/// [`CapabilityParse::rejected`] and is dropped while valid entries are kept,
+/// so one malformed declaration never disables the rest. Duplicate names keep
+/// the first occurrence, within each of `provides` and `requires`
+/// separately (a name may appear in both lists — providing and requiring the
+/// same capability is not a conflict). A schema without `x-ene-capabilities`
+/// (or with a non-object value) yields an empty parse, not an error.
+#[must_use]
+pub fn parse_capabilities(schema: &Value) -> CapabilityParse {
+    let Some(block) = schema.get(CAPABILITIES_KEY).and_then(Value::as_object) else {
+        return CapabilityParse {
+            provides: Vec::new(),
+            requires: Vec::new(),
+            rejected: Vec::new(),
+        };
+    };
+
+    let mut parse = CapabilityParse {
+        provides: Vec::new(),
+        requires: Vec::new(),
+        rejected: Vec::new(),
+    };
+
+    if let Some(entries) = block.get("provides").and_then(Value::as_array) {
+        for entry in entries {
+            parse_provides_entry(entry, &mut parse);
+        }
+    }
+    if let Some(entries) = block.get("requires").and_then(Value::as_array) {
+        for entry in entries {
+            parse_requires_entry(entry, &mut parse);
+        }
+    }
+    parse
+}
+
+/// Parses one `provides` entry (`name@version`), appending to `parse`.
+///
+/// The version must be a concrete, pre-release-free semver version; the `?`
+/// soft marker is not defined for provides and is rejected (see
+/// [`CapabilityRejection::SoftMarkerPosition`]).
+fn parse_provides_entry(entry: &Value, parse: &mut CapabilityParse) {
+    let Some(raw) = entry.as_str() else {
+        parse.rejected.push(RejectedCapability {
+            entry: None,
+            reason: CapabilityRejection::InvalidEntry,
+        });
+        return;
+    };
+    let Some((name_raw, spec)) = raw.rsplit_once('@') else {
+        parse.rejected.push(RejectedCapability {
+            entry: Some(raw.to_string()),
+            reason: CapabilityRejection::MissingVersion,
+        });
+        return;
+    };
+    let Ok(name) = CapabilityId::try_new(name_raw) else {
+        parse.rejected.push(RejectedCapability {
+            entry: Some(raw.to_string()),
+            reason: CapabilityRejection::InvalidName,
+        });
+        return;
+    };
+    if spec.contains('?') {
+        parse.rejected.push(RejectedCapability {
+            entry: Some(raw.to_string()),
+            reason: CapabilityRejection::SoftMarkerPosition,
+        });
+        return;
+    }
+    // `semver::Version` requires all three components, but the declaration
+    // contract spells `@1` as `1.0.0` and `@1.2` as `1.2.0`.
+    let version = match semver::Version::parse(&normalize_version(spec)) {
+        Ok(v) if v.pre.is_empty() && v.build.is_empty() => v,
+        _ => {
+            parse.rejected.push(RejectedCapability {
+                entry: Some(raw.to_string()),
+                reason: CapabilityRejection::MalformedVersion,
+            });
+            return;
+        }
+    };
+    if parse.provides.iter().any(|p| p.name == name) {
+        parse.rejected.push(RejectedCapability {
+            entry: Some(raw.to_string()),
+            reason: CapabilityRejection::Duplicate,
+        });
+        return;
+    }
+    parse.provides.push(ProvidedCapability { name, version });
+}
+
+/// Expands a partial version spec (`1`, `1.2`) to a full `X.Y.Z` form so
+/// [`semver::Version`] accepts it. Specs already at three or more components
+/// are returned unchanged (and will fail [`semver::Version`]'s parser if
+/// malformed).
+fn normalize_version(spec: &str) -> String {
+    match spec.split('.').count() {
+        1 => format!("{spec}.0.0"),
+        2 => format!("{spec}.0"),
+        _ => spec.to_string(),
+    }
+}
+
+/// Parses one `requires` entry (`name@range`, optional trailing `?`),
+/// appending to `parse`.
+///
+/// A single trailing `?` marks the requirement as soft ([`RequiredCapability::soft`]);
+/// any other `?` position is rejected so pre-release-style spellings like
+/// `^1.0?beta` — which would otherwise collide with semver's pre-release
+/// grammar — cannot be misread as ranges.
+fn parse_requires_entry(entry: &Value, parse: &mut CapabilityParse) {
+    let Some(raw) = entry.as_str() else {
+        parse.rejected.push(RejectedCapability {
+            entry: None,
+            reason: CapabilityRejection::InvalidEntry,
+        });
+        return;
+    };
+    let Some((name_raw, spec_raw)) = raw.rsplit_once('@') else {
+        parse.rejected.push(RejectedCapability {
+            entry: Some(raw.to_string()),
+            reason: CapabilityRejection::MissingVersion,
+        });
+        return;
+    };
+    let Ok(name) = CapabilityId::try_new(name_raw) else {
+        parse.rejected.push(RejectedCapability {
+            entry: Some(raw.to_string()),
+            reason: CapabilityRejection::InvalidName,
+        });
+        return;
+    };
+    let (spec, soft) = spec_raw
+        .strip_suffix('?')
+        .map_or((spec_raw, false), |rest| (rest, true));
+    if spec.contains('?') {
+        parse.rejected.push(RejectedCapability {
+            entry: Some(raw.to_string()),
+            reason: CapabilityRejection::SoftMarkerPosition,
+        });
+        return;
+    }
+    let Ok(req) = semver::VersionReq::parse(spec) else {
+        parse.rejected.push(RejectedCapability {
+            entry: Some(raw.to_string()),
+            reason: CapabilityRejection::MalformedVersion,
+        });
+        return;
+    };
+    if req.comparators.iter().any(|c| !c.pre.is_empty()) {
+        parse.rejected.push(RejectedCapability {
+            entry: Some(raw.to_string()),
+            reason: CapabilityRejection::MalformedVersion,
+        });
+        return;
+    }
+    if parse.requires.iter().any(|r| r.name == name) {
+        parse.rejected.push(RejectedCapability {
+            entry: Some(raw.to_string()),
+            reason: CapabilityRejection::Duplicate,
+        });
+        return;
+    }
+    parse.requires.push(RequiredCapability { name, req, soft });
+}
+
+/// Resolves a capability request against a set of providers.
+///
+/// Returns the plugin name of a provider whose
+/// [`ProvidedCapability::name`] equals `name` and whose `version` satisfies
+/// `req`. When several providers match, the lexicographically smallest plugin
+/// name wins, so resolution is deterministic regardless of the hash-ordered
+/// `plugins.list` iteration order. The chosen *order* is deliberately not part
+/// of the API contract: callers may rely only on "a matching provider,
+/// deterministically selected". Returns `None` when no provider satisfies the
+/// request.
+#[must_use]
+pub fn resolve_capability<'a>(
+    providers: impl IntoIterator<Item = (&'a str, &'a ProvidedCapability)>,
+    name: &CapabilityId,
+    req: &semver::VersionReq,
+) -> Option<&'a str> {
+    providers
+        .into_iter()
+        .filter(|(_, cap)| cap.name == *name && req.matches(&cap.version))
+        .min_by_key(|(plugin, _)| *plugin)
+        .map(|(plugin, _)| plugin)
 }
 
 #[cfg(test)]
@@ -740,5 +1001,254 @@ mod tests {
             resolve_scope("plugin-a", &[], &other),
             ScopeDecision::Undeclared
         );
+    }
+
+    // ── Capability declaration parsing ────────────────────────────────────
+
+    fn parse_caps(schema: &Value) -> CapabilityParse {
+        parse_capabilities(schema)
+    }
+
+    #[test]
+    fn parses_provides_and_requires_with_soft_marker() {
+        let parse = parse_caps(&serde_json::json!({
+            "x-ene-capabilities": {
+                "provides": ["tts/synthesize@1", "gguf-runner@1.2.3"],
+                "requires": ["g2p/ja@^1", "onnx-runner@^1?"]
+            }
+        }));
+        assert!(parse.rejected.is_empty());
+        assert_eq!(parse.provides.len(), 2);
+        assert_eq!(parse.provides[0].name.as_str(), "tts/synthesize");
+        assert_eq!(parse.provides[0].version, semver::Version::new(1, 0, 0));
+        assert_eq!(parse.provides[1].name.as_str(), "gguf-runner");
+        assert_eq!(parse.provides[1].version, semver::Version::new(1, 2, 3));
+        assert_eq!(parse.requires.len(), 2);
+        assert_eq!(parse.requires[0].name.as_str(), "g2p/ja");
+        assert_eq!(
+            parse.requires[0].req,
+            "^1".parse::<semver::VersionReq>().unwrap()
+        );
+        assert!(!parse.requires[0].soft);
+        assert_eq!(parse.requires[1].name.as_str(), "onnx-runner");
+        assert!(parse.requires[1].soft);
+    }
+
+    #[test]
+    fn capability_version_accepts_shorthand_and_full_forms() {
+        let parse = parse_caps(&serde_json::json!({
+            "x-ene-capabilities": {
+                "provides": ["a@1", "b@1.2", "c@1.2.3"],
+                "requires": ["a@1", "b@^1.2", "c@>=1.0.0, <2"]
+            }
+        }));
+        assert!(parse.rejected.is_empty());
+        assert_eq!(parse.provides.len(), 3);
+        assert_eq!(parse.requires.len(), 3);
+    }
+
+    #[test]
+    fn rejects_invalid_entries_independently() {
+        let parse = parse_caps(&serde_json::json!({
+            "x-ene-capabilities": {
+                "provides": [
+                    "ok@1",
+                    "bad name@1",
+                    "no-version",
+                    "bad-version@not-a-version",
+                    "soft-on-provides@1?",
+                    "embedded@1?0",
+                    42
+                ],
+                "requires": [
+                    "ok@^1",
+                    "bad@^not-a-range",
+                    "pre@^1.0.0-beta",
+                    "embedded@^1.0?beta",
+                    "double@^1??",
+                    "soft-ok@^1?"
+                ]
+            }
+        }));
+        // Only the well-formed entries survive.
+        assert_eq!(parse.provides.len(), 1);
+        assert_eq!(parse.provides[0].name.as_str(), "ok");
+        assert_eq!(parse.requires.len(), 2);
+        assert_eq!(parse.requires[0].name.as_str(), "ok");
+        assert!(parse.requires[1].soft);
+        assert_eq!(parse.requires[1].name.as_str(), "soft-ok");
+
+        // Every bad entry is reported with the reason that fits it.
+        let reasons = |name: &str| -> CapabilityRejection {
+            parse
+                .rejected
+                .iter()
+                .find(|r| r.entry.as_deref() == Some(name))
+                .unwrap()
+                .reason
+                .clone()
+        };
+        assert_eq!(reasons("bad name@1"), CapabilityRejection::InvalidName);
+        assert_eq!(reasons("no-version"), CapabilityRejection::MissingVersion);
+        assert_eq!(
+            reasons("bad-version@not-a-version"),
+            CapabilityRejection::MalformedVersion
+        );
+        assert_eq!(
+            reasons("soft-on-provides@1?"),
+            CapabilityRejection::SoftMarkerPosition
+        );
+        assert_eq!(
+            reasons("embedded@1?0"),
+            CapabilityRejection::SoftMarkerPosition
+        );
+        assert_eq!(
+            reasons("bad@^not-a-range"),
+            CapabilityRejection::MalformedVersion
+        );
+        // Pre-release forms are banned: `^1.0.0-beta` parses as a range but
+        // carries pre-release syntax, and `^1.0?beta` collides with the `?`
+        // marker.
+        assert_eq!(
+            reasons("pre@^1.0.0-beta"),
+            CapabilityRejection::MalformedVersion
+        );
+        assert_eq!(
+            reasons("embedded@^1.0?beta"),
+            CapabilityRejection::SoftMarkerPosition
+        );
+        assert_eq!(
+            reasons("double@^1??"),
+            CapabilityRejection::SoftMarkerPosition
+        );
+        // Non-string entries are reported with no raw text.
+        assert_eq!(
+            parse
+                .rejected
+                .iter()
+                .find(|r| r.entry.is_none())
+                .unwrap()
+                .reason,
+            CapabilityRejection::InvalidEntry
+        );
+    }
+
+    #[test]
+    fn duplicate_capability_keeps_first_occurrence() {
+        let parse = parse_caps(&serde_json::json!({
+            "x-ene-capabilities": {
+                "provides": ["tts@1", "tts@2", "g2p@1"],
+                "requires": ["tts@^1", "tts@^2"]
+            }
+        }));
+        assert_eq!(parse.provides.len(), 2);
+        assert_eq!(parse.provides[0].version, semver::Version::new(1, 0, 0));
+        assert_eq!(parse.requires.len(), 1);
+        assert_eq!(
+            parse
+                .rejected
+                .iter()
+                .filter(|r| r.reason == CapabilityRejection::Duplicate)
+                .count(),
+            2
+        );
+        // Providing and requiring the same name is not a duplicate.
+        assert!(parse.provides.iter().any(|p| p.name.as_str() == "tts"));
+        assert!(parse.requires.iter().any(|r| r.name.as_str() == "tts"));
+    }
+
+    #[test]
+    fn schema_without_capabilities_yields_empty_parse() {
+        let parse = parse_caps(&serde_json::json!({
+            "type": "object",
+            "properties": { "voice": { "type": "string" } }
+        }));
+        assert!(parse.provides.is_empty());
+        assert!(parse.requires.is_empty());
+        assert!(parse.rejected.is_empty());
+    }
+
+    #[test]
+    fn non_object_or_unknown_capability_block_is_treated_as_absent() {
+        for block in [
+            serde_json::json!("not-an-object"),
+            serde_json::json!([{ "provides": ["x@1"] }]),
+            serde_json::json!({ "provides": "not-an-array" }),
+            serde_json::json!({ "wants": ["x@1"] }),
+        ] {
+            let parse = parse_caps(&serde_json::json!({ "x-ene-capabilities": block }));
+            assert!(parse.provides.is_empty());
+            assert!(parse.requires.is_empty());
+            assert!(parse.rejected.is_empty());
+        }
+    }
+
+    #[test]
+    fn resolve_capability_matches_exact_and_caret() {
+        let parse = parse_caps(&serde_json::json!({
+            "x-ene-capabilities": {
+                "provides": ["tts/synthesize@1", "g2p/ja@2.1.0"]
+            }
+        }));
+        let providers: Vec<(&str, &ProvidedCapability)> =
+            parse.provides.iter().map(|p| ("provider", p)).collect();
+        let tts = CapabilityId::try_new("tts/synthesize").unwrap();
+        let g2p = CapabilityId::try_new("g2p/ja").unwrap();
+        let onnx = CapabilityId::try_new("onnx-runner").unwrap();
+
+        // Exact and caret requirements match; a mismatched major does not.
+        assert_eq!(
+            resolve_capability(
+                providers.iter().copied(),
+                &tts,
+                &"1".parse::<semver::VersionReq>().unwrap()
+            ),
+            Some("provider")
+        );
+        assert_eq!(
+            resolve_capability(
+                providers.iter().copied(),
+                &g2p,
+                &"^2".parse::<semver::VersionReq>().unwrap()
+            ),
+            Some("provider")
+        );
+        assert_eq!(
+            resolve_capability(
+                providers.iter().copied(),
+                &g2p,
+                &"^3".parse::<semver::VersionReq>().unwrap()
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_capability(
+                providers.iter().copied(),
+                &onnx,
+                &"*".parse::<semver::VersionReq>().unwrap()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_capability_picks_lexicographically_smallest_plugin() {
+        // Two providers of the same capability; the deterministic choice is
+        // the alphabetically first plugin name regardless of input order.
+        let a = ProvidedCapability {
+            name: CapabilityId::try_new("gguf-runner").unwrap(),
+            version: semver::Version::new(1, 0, 0),
+        };
+        let b = ProvidedCapability {
+            name: CapabilityId::try_new("gguf-runner").unwrap(),
+            version: semver::Version::new(1, 0, 0),
+        };
+        let req = "1".parse::<semver::VersionReq>().unwrap();
+        let name = &a.name;
+        let providers = [("zeta", &a), ("alpha", &b)];
+        assert_eq!(resolve_capability(providers, name, &req), Some("alpha"));
+        // Reversing the iteration order changes nothing.
+        let providers = [("alpha", &b), ("zeta", &a)];
+        assert_eq!(resolve_capability(providers, name, &req), Some("alpha"));
     }
 }

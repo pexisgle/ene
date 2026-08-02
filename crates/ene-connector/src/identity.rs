@@ -11,8 +11,9 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Returns `true` when `c` is an accepted identifier character
-/// (`[A-Za-z0-9._-]`). Shared by [`ConnectorId`] and [`CredentialId`].
-const fn valid_id_char(c: u8) -> bool {
+/// (`[A-Za-z0-9._-]`). Shared by [`ConnectorId`], [`CredentialId`], and
+/// capability names.
+pub(crate) const fn valid_id_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-'
 }
 

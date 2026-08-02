@@ -22,6 +22,9 @@
 //! - [`ConnectorIdentity`] — display metadata for configuration UIs.
 //! - [`CredentialDeclaration`] / [`resolve_scope`] — parsing of a plugin's
 //!   `x-ene-credentials` declarations and scoped access resolution.
+//! - [`CapabilityId`] / [`ProvidedCapability`] / [`RequiredCapability`] /
+//!   [`parse_capabilities`] / [`resolve_capability`] — parsing of a plugin's
+//!   `x-ene-capabilities` declarations and deterministic provider resolution.
 //! - [`ConnectorError`] — unified error type.
 //!
 //! # Connection lifecycle lives elsewhere
@@ -35,15 +38,18 @@
     expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")
 )]
 
+pub mod capability;
 pub mod credential;
 pub mod declaration;
 pub mod error;
 pub mod identity;
 
+pub use capability::{CapabilityId, ProvidedCapability, RequiredCapability};
 pub use credential::{AccountCredentials, CredentialData, CredentialStore};
 pub use declaration::{
-    CredentialDeclaration, CredentialKind, CredentialParse, CredentialRejection, CredentialWarning,
-    DegradedCredential, HeaderSpec, RejectedCredential, ScopeDecision, parse_credentials,
+    CapabilityParse, CapabilityRejection, CredentialDeclaration, CredentialKind, CredentialParse,
+    CredentialRejection, CredentialWarning, DegradedCredential, HeaderSpec, RejectedCapability,
+    RejectedCredential, ScopeDecision, parse_capabilities, parse_credentials, resolve_capability,
     resolve_scope,
 };
 pub use error::ConnectorError;
@@ -51,11 +57,13 @@ pub use identity::{ConnectorId, ConnectorIdentity, CredentialId, PermissionScope
 
 /// Convenience re-exports of the crate's public API.
 pub mod prelude {
+    pub use crate::capability::{CapabilityId, ProvidedCapability, RequiredCapability};
     pub use crate::credential::{AccountCredentials, CredentialData, CredentialStore};
     pub use crate::declaration::{
-        CredentialDeclaration, CredentialKind, CredentialParse, CredentialRejection,
-        CredentialWarning, DegradedCredential, HeaderSpec, RejectedCredential, ScopeDecision,
-        parse_credentials, resolve_scope,
+        CapabilityParse, CapabilityRejection, CredentialDeclaration, CredentialKind,
+        CredentialParse, CredentialRejection, CredentialWarning, DegradedCredential, HeaderSpec,
+        RejectedCapability, RejectedCredential, ScopeDecision, parse_capabilities,
+        parse_credentials, resolve_capability, resolve_scope,
     };
     pub use crate::error::ConnectorError;
     pub use crate::identity::{ConnectorId, ConnectorIdentity, CredentialId, PermissionScope};
