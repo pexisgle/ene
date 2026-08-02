@@ -288,7 +288,7 @@ mod tests {
         tokio::spawn({
             let passenger = Arc::clone(&passenger);
             async move {
-                let _ = passenger.serve(server_stream, token).await;
+                passenger.serve(server_stream, token).await;
             }
         });
         let resp = read_host_service_response(&mut client)
@@ -351,7 +351,7 @@ mod tests {
         tokio::spawn({
             let passenger = Arc::clone(&passenger);
             async move {
-                let _ = passenger.serve(server_stream, bad_token).await;
+                passenger.serve(server_stream, bad_token).await;
             }
         });
         let resp = read_host_service_response(&mut client)
