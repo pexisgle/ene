@@ -1324,6 +1324,7 @@ mod tests {
     #[test]
     fn validate_proactive_intervals_flags_min_idle_shorter_than_interval() {
         let cfg = ProactiveConfig {
+            enabled: true,
             interval_seconds: 300,
             min_idle_seconds: 60,
             cooldown_seconds: 600,
@@ -1350,6 +1351,7 @@ mod tests {
     #[test]
     fn validate_proactive_intervals_flags_cooldown_shorter_than_interval() {
         let cfg = ProactiveConfig {
+            enabled: true,
             interval_seconds: 300,
             min_idle_seconds: 600,
             cooldown_seconds: 60,
