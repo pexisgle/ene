@@ -3232,7 +3232,7 @@ fn build_credential_vault(config: &EneConfig) -> CredentialVault {
     let mut entries = Vec::new();
     let mut resolved: HashSet<String> = HashSet::new();
     for id in &ids {
-        let Some(key) = resolve_credential_key(id, plugin_config, ai_config) else {
+        let Some(key) = resolve_credential_key(id, &plugin_config, &ai_config) else {
             continue;
         };
         entries.push(VaultEntry::new(
@@ -3247,7 +3247,7 @@ fn build_credential_vault(config: &EneConfig) -> CredentialVault {
         // Only ids the vault has nothing for are ever "missing", so the
         // operator sees which configuration path to fill in.
         if !resolved.contains(id) {
-            vault.set_hint(id, credential_missing_hint(id, plugin_config, ai_config));
+            vault.set_hint(id, credential_missing_hint(id, &ai_config));
         }
     }
     vault
@@ -3257,11 +3257,7 @@ fn build_credential_vault(config: &EneConfig) -> CredentialVault {
 /// Non-secret setup guidance for a missing credential: the configuration
 /// paths the runtime would consult, naming the concrete `ai.providers`
 /// alias when one matches by kind.
-fn credential_missing_hint(
-    id: &str,
-    plugin_config: &ene_plugin_host::PluginConfig,
-    ai_config: &ene_ai::AiConfig,
-) -> String {
+fn credential_missing_hint(id: &str, ai_config: &ene_ai::AiConfig) -> String {
     let alias = ai_config
         .providers
         .iter()

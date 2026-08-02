@@ -365,7 +365,7 @@ mod tests {
                 }]
             })),
         );
-        registry
+        Arc::new(registry)
     }
 
     fn vault() -> Arc<CredentialVault> {
@@ -555,7 +555,7 @@ mod tests {
                 ]
             })),
         );
-        let passenger = passenger(Arc::new(vault), registry, "ene-cred-good");
+        let passenger = passenger(Arc::new(vault), Arc::new(registry), "ene-cred-good");
         let mut client = open_session(Arc::clone(&passenger), "ene-cred-good").await;
         send_request(
             &mut client,
@@ -593,7 +593,7 @@ mod tests {
                 ]
             })),
         );
-        let passenger = passenger(vault(), registry, "ene-cred-good");
+        let passenger = passenger(vault(), Arc::new(registry), "ene-cred-good");
         let mut client = open_session(Arc::clone(&passenger), "ene-cred-good").await;
 
         // ScopeDenied (undeclared).
