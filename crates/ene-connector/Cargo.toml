@@ -19,6 +19,10 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
 serde_json = { workspace = true }
 
 [lints]
