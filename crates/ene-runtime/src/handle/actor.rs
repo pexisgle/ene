@@ -2463,10 +2463,10 @@ async fn reconfigure_plugin_host_bg(
         handle.abort();
     }
 
-    let services = match spawn_host_services(&config, memory_store.as_ref()) {
+    let (db_tokens, credential_tokens) = match spawn_host_services(&config, memory_store.as_ref()) {
         Ok(services) => {
             *host_service_handle.lock().await = services.handle;
-            services
+            (services.db_tokens, services.credential_tokens)
         }
         Err(e) => {
             *host_service_handle.lock().await = None;
@@ -2476,15 +2476,9 @@ async fn reconfigure_plugin_host_bg(
                 "Failed to spawn host service during plugin reconfiguration; \
                  continuing without plugin DB/credential access"
             );
-            HostServices {
-                db_tokens: HashMap::new(),
-                credential_tokens: HashMap::new(),
-                handle: None,
-            }
+            (HashMap::new(), HashMap::new())
         }
     };
-    let db_tokens = services.db_tokens;
-    let credential_tokens = services.credential_tokens;
 
     // Start the new host before removing old entries. A surviving provider
     // kind remains available until its replacement is registered, and stale
