@@ -484,9 +484,8 @@ mod tests {
                     let Ok((socket, _)) = listener.accept().await else {
                         break;
                     };
-                    let addr = addr.to_string();
                     tokio::spawn(async move {
-                        let _ = serve_mock(socket, &addr).await;
+                        let _ = serve_mock(socket).await;
                     });
                 }
             });
@@ -497,7 +496,7 @@ mod tests {
         }
     }
 
-    async fn serve_mock(mut socket: tokio::net::TcpStream, addr: &str) -> Result<(), String> {
+    async fn serve_mock(mut socket: tokio::net::TcpStream) -> Result<(), String> {
         let mut buf = Vec::new();
         let mut chunk = [0_u8; 2048];
         loop {
@@ -697,10 +696,21 @@ mod tests {
 
     /// Browser seam that follows the mock `/authorize` redirect into the
     /// flow's loopback callback.
+    ///
+    /// The dance runs on a background thread and the opener returns
+    /// immediately, mirroring a real browser: the flow must reach its accept
+    /// loop before the callback arrives, otherwise opener and accept loop
+    /// deadlock on each other.
     fn redirecting_browser() -> Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync> {
         Arc::new(|url: &str| {
-            let location = extract_location(&http_get(url)?)?;
-            let _ = http_get(&location)?;
+            let url = url.to_string();
+            std::thread::spawn(move || {
+                let location = match extract_location(&http_get(&url)) {
+                    Ok(location) => location,
+                    Err(_) => return,
+                };
+                let _ = http_get(&location);
+            });
             Ok(())
         })
     }
@@ -738,7 +748,10 @@ mod tests {
             let parsed = url::Url::parse(url).map_err(|e| e.to_string())?;
             let params: HashMap<String, String> = parsed.query_pairs().into_owned().collect();
             let redirect_uri = params.get("redirect_uri").ok_or("no redirect_uri")?;
-            let _ = http_get(&format!("{redirect_uri}?code=stolen&state=wrong-state"))?;
+            let redirect_uri = redirect_uri.clone();
+            std::thread::spawn(move || {
+                let _ = http_get(&format!("{redirect_uri}?code=stolen&state=wrong-state"));
+            });
             Ok(())
         });
         let flow = Arc::new(
@@ -765,8 +778,14 @@ mod tests {
         let browser_opens = Arc::clone(&opens);
         let browser = Arc::new(move |url: &str| -> Result<(), String> {
             browser_opens.fetch_add(1, Ordering::SeqCst);
-            let location = extract_location(&http_get(url)?)?;
-            let _ = http_get(&location)?;
+            let url = url.to_string();
+            std::thread::spawn(move || {
+                let location = match extract_location(&http_get(&url)) {
+                    Ok(location) => location,
+                    Err(_) => return,
+                };
+                let _ = http_get(&location);
+            });
             Ok(())
         });
         let flow = Arc::new(
@@ -821,12 +840,13 @@ mod tests {
                 .with_browser(Arc::new(|_| Ok(()))),
         );
         flow.start_authorization("mock", "google.calendar").unwrap();
-        // Step virtual time forward one second at a time; each advance lets
-        // the spawned flow task run until it parks on its accept timeout,
-        // and the advancing clock eventually fires that timeout.
+        // Step virtual time forward one second at a time; yield first so the
+        // spawned flow task can run and schedule its accept timeout, then
+        // advance to fire it.
         let mut elapsed = Duration::ZERO;
         let step = Duration::from_secs(1);
         while elapsed <= FLOW_TIMEOUT {
+            tokio::task::yield_now().await;
             tokio::time::advance(step).await;
             elapsed += step;
             if !flow.pending.lock().contains_key("google.calendar") {

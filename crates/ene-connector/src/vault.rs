@@ -513,7 +513,13 @@ mod tests {
             ) -> Result<CredentialStore, ConnectorError> {
                 let started = self.started.lock().take();
                 if let Some(started) = started {
-                    drop(started.send(()));
+                    // A oneshot send error is Copy (the unsent value); drop()
+                    // would trip dropping_copy_types, so bind-and-ignore.
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                    )]
+                    let _ = started.send(());
                 }
                 // Drop the guard before awaiting so no lock is held across
                 // the park.
@@ -550,6 +556,12 @@ mod tests {
             "google.calendar",
             CredentialStore::from_api_key("concurrent-key"),
         );
+        // A oneshot send error is Copy (the unsent value); drop() would trip
+        // dropping_copy_types, so bind-and-ignore.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+        )]
         let _ = resume_tx.send(());
         let resolved = refresh_task.await.unwrap().unwrap();
         assert_eq!(resolved.access_token(), Some("fresh-token"));

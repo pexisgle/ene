@@ -222,8 +222,9 @@ fn warn_degraded_credential(plugin: &str, degraded: &DegradedCredential) {
 
 #[cfg(test)]
 #[expect(
+    clippy::expect_used,
     clippy::unwrap_used,
-    reason = "tests use unwrap for concise failure messages"
+    reason = "tests use expect/unwrap for concise failure messages"
 )]
 mod tests {
     use super::*;
