@@ -3120,7 +3120,7 @@ pub(super) fn spawn_db_ipc_servers(
             }
         });
 
-        return Ok((db_tokens, Some(handle)));
+        Ok((db_tokens, Some(handle)))
     }
 
     #[cfg(not(any(unix, windows)))]
