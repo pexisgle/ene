@@ -8,7 +8,7 @@ mod parse;
 mod prompt;
 
 pub use gate::{GateRejectReason, evaluate_deterministic_gates};
-pub use parse::{decision_schema, decision_schema_object, parse_decision_json};
+pub use parse::{decision_schema_object, parse_decision_json};
 pub use prompt::build_decision_messages;
 
 use std::fmt;
@@ -299,7 +299,7 @@ pub async fn decide_proactive_speech(
     };
 
     let messages = build_decision_messages(context, prompt_language);
-    // Inner object only — OpenAI/OpenRouter wrap this as response_format themselves.
+    // Plain JSON Schema only — providers wrap this as response_format themselves.
     let schema = decision_schema_object();
     let timeout = Duration::from_secs(config.decision_timeout_seconds.max(1));
 
