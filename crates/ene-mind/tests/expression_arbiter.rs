@@ -37,6 +37,7 @@ fn resolves_expression_without_llm_token() {
         affect: &state,
         available: &available,
         llm_proposal: None,
+        explicit_proposal: false,
         previous_expression: "",
         elapsed_since_change: None,
         response_text: "I understand.",
@@ -44,7 +45,7 @@ fn resolves_expression_without_llm_token() {
     };
     let decision = arbiter.resolve(&config, &input);
     assert_eq!(decision.expression, "angry");
-    assert_eq!(decision.source, ExpressionSource::AffectMapping);
+    assert_eq!(decision.source, ExpressionSource::AffectFallback);
 }
 
 #[test]
@@ -60,6 +61,7 @@ fn hysteresis_prevents_rapid_expression_change() {
         affect: &state,
         available: &available,
         llm_proposal: None,
+        explicit_proposal: false,
         previous_expression: "sad",
         elapsed_since_change: Some(Duration::from_secs(1)),
         response_text: "",
@@ -95,6 +97,7 @@ fn classifier_hint_used_when_no_stream_token() {
         affect: &state,
         available: &available,
         llm_proposal: Some("happy"),
+        explicit_proposal: false,
         previous_expression: "",
         elapsed_since_change: None,
         response_text: "Wonderful!",
@@ -102,11 +105,11 @@ fn classifier_hint_used_when_no_stream_token() {
     };
     let decision = engine.resolve(&config, &input);
     assert_eq!(decision.expression, "happy");
-    assert_eq!(decision.source, ExpressionSource::LlmAdvisory);
+    assert_eq!(decision.source, ExpressionSource::Llm);
 }
 
 #[test]
-fn advisory_llm_does_not_override_strong_affect() {
+fn llm_proposal_wins_when_affect_disagrees() {
     let config = EmotionConfig::default();
     let arbiter = OutputArbiter;
     let mut state = AffectState::neutral("ene");
@@ -117,14 +120,39 @@ fn advisory_llm_does_not_override_strong_affect() {
         affect: &state,
         available: &available,
         llm_proposal: Some("happy"),
+        explicit_proposal: false,
         previous_expression: "",
         elapsed_since_change: None,
         response_text: "",
         irritation_spike: false,
     };
     let decision = arbiter.resolve(&config, &input);
-    assert_eq!(decision.expression, "angry");
-    assert_eq!(decision.source, ExpressionSource::AffectMapping);
+    assert_eq!(decision.expression, "happy");
+    assert_eq!(decision.source, ExpressionSource::Llm);
+}
+
+#[test]
+fn hysteresis_applies_to_llm_proposals_to_prevent_flicker() {
+    let config = EmotionConfig::default();
+    let arbiter = OutputArbiter;
+    let mut state = AffectState::neutral("ene");
+    state.valence = 0.6;
+    state.arousal = 0.3;
+    let available = default_expressions();
+
+    let input = ExpressionInput {
+        affect: &state,
+        available: &available,
+        llm_proposal: Some("angry"),
+        explicit_proposal: false,
+        previous_expression: "sad",
+        elapsed_since_change: Some(Duration::from_secs(1)),
+        response_text: "",
+        irritation_spike: false,
+    };
+    let decision = arbiter.resolve(&config, &input);
+    assert_eq!(decision.expression, "sad");
+    assert_eq!(decision.source, ExpressionSource::HysteresisHold);
 }
 
 #[test]

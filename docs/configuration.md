@@ -190,6 +190,12 @@ shed first. `mind.context.max_prompt_tokens` is an optional operator cap that
 shrinks the window as `min(advertised, max_prompt_tokens)`; omit it (the
 default) to let the prompt auto-follow the model's advertised context size.
 
+Expression markers from the chat model are canonical: when a turn emits an
+expression proposal it wins over affect-to-expression mapping, which remains
+the fallback when no marker arrives. Hysteresis applies to every source so
+rapid mid-turn markers cannot flicker the face; speech-timed expression changes
+are handled separately from this resolve path.
+
 The proactive activity observer captures the focused application to inform spontaneous
 speech. `mind.proactive.sources.window_title_level` controls how much of the focused
 window's title it reads (#378). It defaults to `app_only` (the app name only — the

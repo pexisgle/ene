@@ -12,10 +12,8 @@ pub use ene_config::MotionLayer;
 pub enum CueSource {
     /// Mapped from current affect state (PAD dimensions).
     Affect,
-    /// LLM marker token used as an advisory hint.
-    LlmAdvisory,
-    /// LLM marker token treated as a direct command.
-    LlmCommand,
+    /// LLM marker / expression proposal.
+    Llm,
     /// Previous expression held due to hysteresis.
     Hysteresis,
     /// Fallback to neutral or nearest supported expression.
@@ -27,8 +25,7 @@ impl CueSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Affect => "affect",
-            Self::LlmAdvisory => "llm_advisory",
-            Self::LlmCommand => "llm_command",
+            Self::Llm => "llm",
             Self::Hysteresis => "hysteresis",
             Self::Fallback => "fallback",
         }
@@ -38,9 +35,8 @@ impl CueSource {
 impl From<ExpressionSource> for CueSource {
     fn from(value: ExpressionSource) -> Self {
         match value {
-            ExpressionSource::AffectMapping => Self::Affect,
-            ExpressionSource::LlmAdvisory => Self::LlmAdvisory,
-            ExpressionSource::LlmCommand => Self::LlmCommand,
+            ExpressionSource::AffectFallback => Self::Affect,
+            ExpressionSource::Llm => Self::Llm,
             ExpressionSource::HysteresisHold => Self::Hysteresis,
             ExpressionSource::FallbackNeutral => Self::Fallback,
         }

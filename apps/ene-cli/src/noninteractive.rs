@@ -408,8 +408,7 @@ const fn perf_kind_label(kind: PerfKind) -> &'static str {
 const fn cue_source_label(source: CueSource) -> &'static str {
     match source {
         CueSource::Affect => "affect",
-        CueSource::LlmAdvisory => "llm_advisory",
-        CueSource::LlmCommand => "llm_command",
+        CueSource::Llm => "llm",
         CueSource::Hysteresis => "hysteresis",
         CueSource::Fallback => "fallback",
     }

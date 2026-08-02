@@ -518,14 +518,6 @@ pub struct EmotionConfig {
     )]
     #[schemars(skip)]
     pub llm_can_propose_expression: bool,
-    /// Treat LLM expression proposals as advisory only (not commands).
-    #[serde(
-        skip_deserializing,
-        default = "default_llm_expression_is_advisory",
-        skip_serializing
-    )]
-    #[schemars(skip)]
-    pub llm_expression_is_advisory: bool,
     /// Timeout in seconds for a single LLM affect-classifier call.
     #[serde(
         skip_deserializing,
@@ -553,7 +545,6 @@ impl Default for EmotionConfig {
             decay_half_life_minutes: 30.0,
             expression_hysteresis_seconds: 4.0,
             llm_can_propose_expression: true,
-            llm_expression_is_advisory: true,
             classifier_timeout_secs: crate::emotion::classifier::DEFAULT_CLASSIFIER_TIMEOUT_SECS,
             classifier_min_confidence: 0.5,
             classifier_language: "en".into(),
@@ -570,10 +561,6 @@ const fn default_expression_hysteresis_seconds() -> f64 {
 }
 
 const fn default_llm_can_propose_expression() -> bool {
-    true
-}
-
-const fn default_llm_expression_is_advisory() -> bool {
     true
 }
 
