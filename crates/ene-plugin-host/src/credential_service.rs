@@ -177,7 +177,7 @@ impl CredentialPassenger {
                 code: CredentialErrorCode::Missing { label, help_url },
                 message: format!("credential '{id}' is not configured"),
             },
-            Err(ConnectorError::RefreshRequired { id }) => CredentialResponse::Error {
+            Err(ConnectorError::RefreshRequired(id)) => CredentialResponse::Error {
                 code: CredentialErrorCode::RefreshRequired,
                 message: format!("credential '{id}' expired and needs re-authorization"),
             },
