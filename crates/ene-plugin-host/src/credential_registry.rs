@@ -135,14 +135,14 @@ fn warn_rejected_credential(plugin: &str, rejected: &RejectedCredential) {
 mod tests {
     use super::*;
 
-    fn json_credentials(entries: serde_json::Value) -> serde_json::Value {
+    fn json_credentials(entries: &serde_json::Value) -> serde_json::Value {
         serde_json::json!({ "x-ene-credentials": entries })
     }
 
     #[test]
     fn registers_only_valid_entries_and_skips_the_rest() {
         let registry = CredentialRegistry::new();
-        let schema = json_credentials(serde_json::json!([
+        let schema = json_credentials(&serde_json::json!([
             { "id": "anthropic", "kind": "api_key", "header": { "name": "x-api-key", "format": "{value}" } },
             { "id": "bad id", "kind": "api_key" },
             { "id": "google.calendar", "kind": "oauth2", "auth_url": "https://a", "token_url": "https://t" },
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn resolve_scope_uses_registered_declarations() {
         let registry = CredentialRegistry::new();
-        let schema = json_credentials(serde_json::json!([
+        let schema = json_credentials(&serde_json::json!([
             { "id": "shared.key", "kind": "api_key" },
             { "id": "private.key", "kind": "api_key", "shared": false }
         ]));
@@ -211,8 +211,8 @@ mod tests {
     #[test]
     fn re_register_replaces_previous_entry() {
         let registry = CredentialRegistry::new();
-        let first = json_credentials(serde_json::json!([{ "id": "a", "kind": "api_key" }]));
-        let second = json_credentials(serde_json::json!([{ "id": "b", "kind": "api_key" }]));
+        let first = json_credentials(&serde_json::json!([{ "id": "a", "kind": "api_key" }]));
+        let second = json_credentials(&serde_json::json!([{ "id": "b", "kind": "api_key" }]));
         registry.register_from_schema("mock", Some(&first));
         registry.register_from_schema("mock", Some(&second));
         let declarations = registry.declarations("mock");
