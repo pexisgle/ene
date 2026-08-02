@@ -172,6 +172,7 @@ Configures context-window packing, hybrid memory recall, emotion decay, characte
       "commitment_boost": 0.25,
       "access_boost_half_life_days": 14.0,
       "commitment_title_similarity_threshold": 0.82,
+      "commitment_active_match_limit": 4096,
       "contradiction_title_similarity_threshold": 0.82,
       "min_confidence_to_persist": 0.65,
       "supersede_confidence_delta": 0.05,
@@ -239,11 +240,18 @@ English. See
 [Turns & Sessions](concepts/turn-and-session.md) §3 for details.
 
 The commitment ledger matches incoming commitments against active ones by title
-embedding similarity (#387): `commitment_title_similarity_threshold` (default
-`0.82`) is the cosine-similarity cutoff above which a rephrased promise
-supersedes the existing commitment instead of being registered as a duplicate.
-With no embedding provider configured, the ledger falls back to exact
-normalized-title matching and this threshold is unused.
+embedding similarity: `commitment_title_similarity_threshold` (default `0.82`)
+is the cosine-similarity cutoff above which a rephrased promise supersedes the
+existing commitment instead of being registered as a duplicate. With no
+embedding provider configured, the ledger falls back to exact normalized-title
+matching and this threshold is unused. Matching still loads active ledger rows
+into memory once per apply batch; `commitment_active_match_limit` (default
+`4096`) caps that list — far above any plausible concurrent active-commitment
+count, bounding memory and embedding work if the ledger grows large. When a
+list returns exactly the limit the ledger warns that results may be truncated;
+raise `mind.memory.commitment_active_match_limit` (or
+`ENE_MIND__MEMORY__COMMITMENT_ACTIVE_MATCH_LIMIT`) if matching misses active
+commitments.
 
 The memory arbiter decides whether an incoming candidate contradicts an existing
 memory of the same kind by comparing the *similarity of their title embeddings*

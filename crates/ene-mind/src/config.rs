@@ -23,8 +23,6 @@ ene_config::define_config!(
         pub context: ContextConfig,
 
         /// Memory extraction, search, and retention settings.
-        #[serde(skip_deserializing, default, skip_serializing)]
-        #[schemars(skip)]
         pub memory: MindMemoryConfig,
 
         /// Emotion and expression processing settings.
@@ -247,6 +245,20 @@ pub struct MindMemoryConfig {
     /// title equality, so this threshold only applies on the embedding path.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub commitment_title_similarity_threshold: f32,
+    /// Maximum active ledger rows loaded for in-process title matching.
+    ///
+    /// Each apply batch lists up to this many active commitments and runs
+    /// embedding (or exact) title matching over that slice. The default (4096)
+    /// is far above any plausible concurrent active-commitment count for a
+    /// character/user pair; the cap bounds memory and embedding work if the
+    /// ledger ever grows large. Values below `1` are clamped to `1` on load so
+    /// a typo cannot silently disable matching. When a list returns exactly
+    /// this many rows the ledger warns that results may be truncated — raise
+    /// `mind.memory.commitment_active_match_limit` (or
+    /// `ENE_MIND__MEMORY__COMMITMENT_ACTIVE_MATCH_LIMIT`) if matching misses
+    /// active commitments.
+    #[serde(deserialize_with = "deserialize_positive_usize")]
+    pub commitment_active_match_limit: usize,
     /// Maximum pure-recent fallback candidates gathered during hybrid search.
     pub recent_fallback_limit: usize,
     /// Maximum unconfirmed pending candidates that compete in recall.
@@ -394,6 +406,7 @@ impl Default for MindMemoryConfig {
             hybrid_weights: ene_core::HybridSearchWeights::default(),
             commitment_boost: 0.25,
             commitment_title_similarity_threshold: 0.82,
+            commitment_active_match_limit: 4096,
             recent_fallback_limit: 5,
             recall_pending_candidate_limit: 3,
             journal_candidate_pool_size: 64,
@@ -1002,7 +1015,6 @@ const fn default_max_screen_summary_chars() -> usize {
     800
 }
 
-#[expect(dead_code, reason = "retained for future proactive schema fields")]
 fn deserialize_positive_usize<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
     D: ::ene_config::serde::Deserializer<'de>,
@@ -1137,6 +1149,17 @@ mod tests {
             serde_json::from_str(r#"{"contradiction_title_similarity_threshold": -0.3}"#)
                 .expect("deserialize");
         assert!(low.contradiction_title_similarity_threshold < f32::EPSILON);
+    }
+
+    #[test]
+    fn commitment_active_match_limit_zero_clamps_to_one() {
+        let cfg: MindMemoryConfig =
+            serde_json::from_str(r#"{"commitment_active_match_limit": 0}"#).expect("deserialize");
+        assert_eq!(cfg.commitment_active_match_limit, 1);
+        assert_eq!(
+            MindMemoryConfig::default().commitment_active_match_limit,
+            4096
+        );
     }
 
     #[test]

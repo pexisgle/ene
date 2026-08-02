@@ -28,11 +28,6 @@ use crate::memory_writer::candidate::MemoryCandidate;
 use crate::memory_writer::{AppliedDecision, ArbiterContext, MemoryArbiter};
 use crate::title_match::{TitleMatchMode, TitleMatcher};
 
-/// Maximum active commitments to consider for title-matching dedup / deletion.
-/// Set to 4096 — well above any plausible concurrent active‑commitment count.
-/// A warning is emitted when the cap is hit so operators can tune if needed.
-const MAX_ACTIVE_MATCH_CHECK: usize = 4096;
-
 /// Companion Commitment Ledger: promises, tasks, follow-ups.
 ///
 /// # No in-memory cache
@@ -58,7 +53,7 @@ pub struct CommitmentLedger;
 /// *similarity* rather than exact string equality. When `embedder` is
 /// `None`, matching degrades to the deterministic exact-title fallback so the
 /// ledger keeps working without an embedding model.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CommitmentSyncContext<'a> {
     /// Character identifier.
     pub character_id: &'a str,
@@ -70,6 +65,23 @@ pub struct CommitmentSyncContext<'a> {
     /// Minimum title-embedding cosine similarity for two commitments to be
     /// treated as the same one. Only consulted on the embedding path.
     pub title_similarity_threshold: f32,
+    /// Maximum active ledger rows loaded for title matching in one apply batch.
+    ///
+    /// Defaults to [`MindMemoryConfig::commitment_active_match_limit`](crate::config::MindMemoryConfig::commitment_active_match_limit)'s
+    /// default (`4096`).
+    pub active_match_limit: usize,
+}
+
+impl Default for CommitmentSyncContext<'_> {
+    fn default() -> Self {
+        Self {
+            character_id: "",
+            user_id: "",
+            embedder: None,
+            title_similarity_threshold: f32::default(),
+            active_match_limit: 4096,
+        }
+    }
 }
 
 impl std::fmt::Debug for CommitmentSyncContext<'_> {
@@ -82,6 +94,7 @@ impl std::fmt::Debug for CommitmentSyncContext<'_> {
                 "title_similarity_threshold",
                 &self.title_similarity_threshold,
             )
+            .field("active_match_limit", &self.active_match_limit)
             .finish()
     }
 }
@@ -108,7 +121,7 @@ impl CommitmentLedger {
         );
 
         // Read the active set once and mirror each write into it, rather than
-        // re-listing (up to `MAX_ACTIVE_MATCH_CHECK` rows) per candidate. A
+        // re-listing (up to `active_match_limit` rows) per candidate. A
         // candidate still sees what earlier candidates in the same batch did,
         // which is the only reason the read was inside the loop.
         let mut active = list_active_for_match(store, ctx).await?;
@@ -347,16 +360,20 @@ async fn list_active_for_match(
     store: &dyn MemoryPort,
     ctx: &CommitmentSyncContext<'_>,
 ) -> Result<Vec<Commitment>, CognitionError> {
+    let limit = ctx.active_match_limit.max(1);
     let active = store
-        .list_active_commitments(ctx.character_id, Some(ctx.user_id), MAX_ACTIVE_MATCH_CHECK)
+        .list_active_commitments(ctx.character_id, Some(ctx.user_id), limit)
         .await
         .map_err(CognitionError::MemoryPort)?;
 
-    if active.len() == MAX_ACTIVE_MATCH_CHECK {
+    if active.len() == limit {
         warn!(
             component = "CommitmentLedger",
-            limit = MAX_ACTIVE_MATCH_CHECK,
-            "list_active_commitments returned exactly the limit; results may be truncated"
+            limit,
+            "list_active_commitments returned exactly the limit; results may be truncated — \
+             raise mind.memory.commitment_active_match_limit \
+             (or ENE_MIND__MEMORY__COMMITMENT_ACTIVE_MATCH_LIMIT) if matching misses \
+             active commitments"
         );
     }
 
@@ -459,6 +476,7 @@ mod tests {
             user_id: "user1",
             embedder: Some(embedder),
             title_similarity_threshold: 0.8,
+            ..CommitmentSyncContext::default()
         }
     }
 
@@ -936,6 +954,7 @@ mod tests {
             user_id: "user1",
             embedder: Some(&embedder),
             title_similarity_threshold: 0.8,
+            ..CommitmentSyncContext::default()
         };
 
         CommitmentLedger::apply_commitment_candidates(
@@ -1058,6 +1077,81 @@ mod tests {
         assert!(
             titles.contains(&"design doc"),
             "a merely similar commitment must survive, got {titles:?}"
+        );
+    }
+
+    /// `list_active_commitments` returns dated rows before undated ones. With
+    /// `active_match_limit = 1`, only the dated row is loaded for matching, so
+    /// re-applying the truncated undated title inserts a duplicate instead of
+    /// superseding — proving the cap is live.
+    #[tokio::test]
+    async fn active_match_limit_truncates_older_undated_rows() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let undated_id = store
+            .insert_commitment(&NewCommitment {
+                character_id: "ene".to_string(),
+                user_id: "user1".to_string(),
+                title: "undated promise".to_string(),
+                description: "original undated".to_string(),
+                status: CommitmentStatus::Active,
+                due_at: None,
+                due_label: None,
+            })
+            .await
+            .unwrap();
+        store
+            .insert_commitment(&NewCommitment {
+                character_id: "ene".to_string(),
+                user_id: "user1".to_string(),
+                title: "dated promise".to_string(),
+                description: "has a due date".to_string(),
+                status: CommitmentStatus::Active,
+                due_at: Some(chrono::Utc::now() + chrono::Duration::days(1)),
+                due_label: Some("tomorrow".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let listed = store
+            .list_active_commitments("ene", Some("user1"), 1)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].title, "dated promise",
+            "dated rows must sort ahead of undated so limit=1 drops the undated title"
+        );
+
+        let ctx = CommitmentSyncContext {
+            character_id: "ene",
+            user_id: "user1",
+            active_match_limit: 1,
+            ..CommitmentSyncContext::default()
+        };
+        let ids = CommitmentLedger::apply_commitment_candidates(
+            &store,
+            &ctx,
+            &[commitment_candidate_titled(
+                "undated promise",
+                "should insert because the undated row was truncated",
+            )],
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_ne!(
+            ids[0], undated_id,
+            "truncated match set must not supersede the missing undated row"
+        );
+
+        let active = CommitmentLedger::list_active(&store, "ene", Some("user1"), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            active.len(),
+            3,
+            "truncated limit must allow a duplicate insert of the omitted title"
         );
     }
 }

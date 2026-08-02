@@ -229,6 +229,7 @@ impl MemoryWriter {
             user_id: input.user_id,
             embedder: providers.embedder,
             title_similarity_threshold: config.memory.commitment_title_similarity_threshold,
+            active_match_limit: config.memory.commitment_active_match_limit,
         };
         let mut outcome_summary = ArbiterOutcomeSummary::default();
         let reflection = config
