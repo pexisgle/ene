@@ -154,7 +154,9 @@ pub enum CredentialErrorCode {
     /// An internal host error occurred.
     Internal,
     /// The host returned an unknown code (forward compatibility for new
-    /// hosts talking to older clients).
+    /// hosts talking to older clients). Unknown tags deserialize to this
+    /// variant instead of failing.
+    #[serde(other)]
     Unknown,
 }
 
@@ -253,10 +255,10 @@ mod tests {
     }
 
     #[test]
-    fn unknown_error_code_roundtrips_as_string() {
+    fn unknown_error_code_deserializes_as_unknown() {
         // Forward compatibility: a new host can emit a code an old client has
-        // never seen; it must survive a serde round-trip losslessly.
-        let json = r#"{"code":"unknown","message":"boom"}"#;
+        // never seen; it must deserialize to Unknown instead of failing.
+        let json = r#"{"Error":{"code":"brand_new_code","message":"boom"}}"#;
         let resp: CredentialResponse = serde_json::from_str(json).unwrap();
         assert!(matches!(
             resp,
