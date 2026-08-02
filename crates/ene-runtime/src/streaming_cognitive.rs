@@ -1092,15 +1092,19 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                         for token in special_tokens {
                             accumulated_emotion_tokens.push(token.clone());
 
-                            // Expression markers are accumulated for end-of-turn
-                            // resolve_expression only. Motions / look_at / cancel
-                            // still use the mid-turn PerformanceArbiter.
+                            // When emotion is enabled, expression markers are
+                            // accumulated for end-of-turn resolve_expression
+                            // only (motions / look_at / cancel stay mid-turn).
+                            // When emotion is disabled, expression markers must
+                            // still surface via the mid-turn arbiter — otherwise
+                            // they are dropped entirely.
                             if let Some(cue) = ene_mind::parse_performance_marker(&token) {
-                                match cue.kind {
-                                    PerfKind::Expression => {}
-                                    PerfKind::Motion | PerfKind::LookAt | PerfKind::Cancel => {
-                                        perf_arbiter.accept(cue, CueSource::Llm);
-                                    }
+                                let accept_mid_turn = match cue.kind {
+                                    PerfKind::Expression => !mind.emotion.enabled,
+                                    PerfKind::Motion | PerfKind::LookAt | PerfKind::Cancel => true,
+                                };
+                                if accept_mid_turn {
+                                    perf_arbiter.accept(cue, CueSource::Llm);
                                 }
                             }
                         }
