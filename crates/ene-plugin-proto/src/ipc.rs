@@ -1006,6 +1006,7 @@ mod tests {
                     supports_streaming: true,
                     supports_vision: true,
                     concurrency: crate::capabilities::ConcurrencyHint::default(),
+                    resource: crate::capabilities::ResourceClass::Network,
                     context_window: None,
                 }],
                 tts_providers: vec![],

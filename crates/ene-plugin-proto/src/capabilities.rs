@@ -91,6 +91,19 @@ pub struct LlmProviderSpec {
     #[serde(default)]
     pub concurrency: ConcurrencyHint,
 
+    /// The physical resource this provider's jobs contend on — the key the
+    /// host's admission budget uses to share one semaphore across every
+    /// engine (local or plugin-provided) that declares the same class.
+    ///
+    /// A provider that does not declare one defaults to
+    /// [`ResourceClass::Network`] — the class that does not consume host
+    /// GPU/CPU capacity, so an undeclaring cloud proxy never competes with
+    /// local inference. **A provider that offloads to a host GPU must
+    /// declare [`ResourceClass::Gpu`] explicitly**; the default cannot
+    /// protect it.
+    #[serde(default)]
+    pub resource: ResourceClass,
+
     /// Maximum context window in tokens, if the provider knows it.
     ///
     /// This is the model's hard limit on `prompt + completion` tokens. The
@@ -126,6 +139,13 @@ pub struct TtsProviderSpec {
     /// docs for the rationale.
     #[serde(default)]
     pub concurrency: ConcurrencyHint,
+
+    /// The physical resource this provider's jobs contend on — see
+    /// [`LlmProviderSpec::resource`] for the contract (TTS providers are
+    /// reserved for future use; the field is declared now so the wire shape
+    /// matches LLM/STT).
+    #[serde(default)]
+    pub resource: ResourceClass,
 }
 
 /// Specification of an STT provider (reserved for future use).
@@ -149,6 +169,13 @@ pub struct SttProviderSpec {
     /// docs for the rationale.
     #[serde(default)]
     pub concurrency: ConcurrencyHint,
+
+    /// The physical resource this provider's jobs contend on — see
+    /// [`LlmProviderSpec::resource`] for the contract (STT providers are
+    /// reserved for future use; the field is declared now so the wire shape
+    /// matches LLM/TTS).
+    #[serde(default)]
+    pub resource: ResourceClass,
 }
 
 /// How many concurrent jobs a plugin-supplied provider (LLM, TTS, STT) can
@@ -228,6 +255,7 @@ mod tests {
                     max_in_flight: 4,
                     queue_depth: 8,
                 },
+                resource: ResourceClass::Network,
                 context_window: Some(200_000),
             }],
             tts_providers: vec![],
@@ -270,6 +298,7 @@ mod tests {
                 max_in_flight: 4,
                 queue_depth: 8,
             },
+            resource: ResourceClass::Gpu { device: 1 },
             context_window: Some(200_000),
         };
         let json = serde_json::to_string(&spec).unwrap();
@@ -284,6 +313,7 @@ mod tests {
             voices: vec!["alloy".into(), "nova".into()],
             formats: vec!["wav".into(), "mp3".into()],
             concurrency: ConcurrencyHint::default(),
+            resource: ResourceClass::Cpu,
         };
         let json = serde_json::to_string(&spec).unwrap();
         let deser: TtsProviderSpec = serde_json::from_str(&json).unwrap();
@@ -297,6 +327,7 @@ mod tests {
             models: vec!["whisper-1".into(), "large-v3".into()],
             formats: vec!["wav".into(), "ogg".into()],
             concurrency: ConcurrencyHint::default(),
+            resource: ResourceClass::Network,
         };
         let json = serde_json::to_string(&spec).unwrap();
         let deser: SttProviderSpec = serde_json::from_str(&json).unwrap();
@@ -347,6 +378,31 @@ mod tests {
         assert_eq!(spec.concurrency, ConcurrencyHint::default());
     }
 
+    /// Load-bearing contract: an unset `resource` field (as an old plugin
+    /// binary that predates the field would send) must deserialize to
+    /// [`ResourceClass::Network`] — the class that does not consume host
+    /// GPU/CPU capacity — not an error and not `Cpu`.
+    #[test]
+    fn llm_provider_spec_missing_resource_defaults_to_network() {
+        let json = r#"{"kind":"anthropic","supported_models":[],"supports_streaming":true,"supports_vision":false}"#;
+        let spec: LlmProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.resource, ResourceClass::Network);
+    }
+
+    #[test]
+    fn tts_provider_spec_missing_resource_defaults_to_network() {
+        let json = r#"{"kind":"voicevox","voices":[],"formats":[]}"#;
+        let spec: TtsProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.resource, ResourceClass::Network);
+    }
+
+    #[test]
+    fn stt_provider_spec_missing_resource_defaults_to_network() {
+        let json = r#"{"kind":"whisper","models":[],"formats":[]}"#;
+        let spec: SttProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.resource, ResourceClass::Network);
+    }
+
     #[test]
     fn concurrency_hint_default_is_serial() {
         let hint = ConcurrencyHint::default();
@@ -385,10 +441,12 @@ mod tests {
 /// concurrently at all) is an admission-layer decision, not part of this
 /// type.
 ///
-/// Wire note: not yet carried on any message. The externally tagged serde
-/// form (`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`) is the initial
-/// choice; re-confirm it when this type is first wired into a message (the
-/// follow-up host-side resource admission work) before it becomes load-bearing.
+/// Wire note: carried on [`LlmProviderSpec`] / [`TtsProviderSpec`] /
+/// [`SttProviderSpec`] since the host-side resource admission wiring; the
+/// externally tagged serde form (`"Cpu"` / `{"Gpu":{"device":0}}` /
+/// `"Network"`) is load-bearing now. Defaults to [`ResourceClass::Network`]
+/// when a spec omits the field, so older plugin binaries (which cannot
+/// declare a class) keep negotiating normally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ResourceClass {
     /// A specific GPU device index, as used by `with_main_gpu(n)` /
@@ -406,6 +464,22 @@ pub enum ResourceClass {
     /// HTTP/gRPC) that does not contend on host GPU/CPU capacity the same
     /// way.
     Network,
+}
+
+impl Default for ResourceClass {
+    /// [`ResourceClass::Network`] — the class whose jobs do not consume host
+    /// GPU/CPU capacity.
+    ///
+    /// This is the safe default for a provider spec that omits the field (an
+    /// older plugin binary, or a cloud proxy whose author did not think about
+    /// resources): an undeclaring cloud plugin sharing the `Cpu` budget with
+    /// whisper/Kokoro would artificially throttle local inference, and no
+    /// device index is a safe `Gpu` default (any concrete number can collide
+    /// with a real device). A plugin whose jobs *do* consume host capacity
+    /// must declare its class explicitly — see [`LlmProviderSpec::resource`].
+    fn default() -> Self {
+        Self::Network
+    }
 }
 
 #[cfg(test)]
@@ -439,6 +513,31 @@ mod resource_class_tests {
         assert_eq!(
             serde_json::to_string(&ResourceClass::Network).unwrap(),
             r#""Network""#
+        );
+    }
+
+    #[test]
+    fn resource_class_default_is_network() {
+        assert_eq!(ResourceClass::default(), ResourceClass::Network);
+    }
+
+    /// Confirms the externally tagged serde form is what goes on the wire
+    /// inside a provider spec — the shape the host and plugin both depend on.
+    #[test]
+    fn llm_provider_spec_resource_uses_external_tag_wire_form() {
+        let spec = LlmProviderSpec {
+            kind: "local".into(),
+            supported_models: vec![],
+            supports_streaming: true,
+            supports_vision: false,
+            concurrency: ConcurrencyHint::default(),
+            resource: ResourceClass::Gpu { device: 2 },
+            context_window: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            json.contains(r#""resource":{"Gpu":{"device":2}}"#),
+            "resource must serialize as the externally tagged form, got: {json}"
         );
     }
 
