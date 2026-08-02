@@ -10,7 +10,8 @@
 //! - `#[tool_action(args = ...)]` — fills `name()`/`definition()`/`rag_profile()`
 //!   forwarders on a hand-written `ToolAction` impl
 //! - `#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]` —
-//!   static `*_capabilities()` declarations from a `#[provider(...)]` attribute
+//!   static spec constructors (`llm_spec()` / `tts_spec()` / `stt_spec()`) and
+//!   per-trait kind consts from a `#[provider(...)]` attribute
 //!
 //! See `docs/reference/tools/derive-macro.md` for the full attribute reference.
 
@@ -670,4 +671,3 @@ fn emit_field(instr: &FieldInstr) -> TokenStream2 {
         }
     }
 }
-// MARKER_TEST_12345

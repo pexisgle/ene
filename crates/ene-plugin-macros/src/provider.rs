@@ -161,13 +161,15 @@ fn concurrency_expr(max_in_flight: Option<u32>, queue_depth: Option<u32>) -> Tok
     match (max_in_flight, queue_depth) {
         (None, None) => quote! { ::ene_plugin_proto::ConcurrencyHint::default() },
         (max, queue) => {
-            let max_in_flight = match max {
-                Some(n) => quote! { #n },
-                None => quote! { ::ene_plugin_proto::ConcurrencyHint::default().max_in_flight },
+            let max_in_flight = if let Some(n) = max {
+                quote! { #n }
+            } else {
+                quote! { ::ene_plugin_proto::ConcurrencyHint::default().max_in_flight }
             };
-            let queue_depth = match queue {
-                Some(n) => quote! { #n },
-                None => quote! { ::ene_plugin_proto::ConcurrencyHint::default().queue_depth },
+            let queue_depth = if let Some(n) = queue {
+                quote! { #n }
+            } else {
+                quote! { ::ene_plugin_proto::ConcurrencyHint::default().queue_depth }
             };
             quote! {
                 ::ene_plugin_proto::ConcurrencyHint {
@@ -201,9 +203,10 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
             let streaming = attrs.streaming;
             let vision = attrs.vision;
             let concurrency = concurrency_expr(attrs.max_in_flight, attrs.queue_depth);
-            let context_window = match attrs.context_window {
-                Some(n) => quote! { ::std::option::Option::Some(#n) },
-                None => quote! { ::std::option::Option::None },
+            let context_window = if let Some(n) = attrs.context_window {
+                quote! { ::std::option::Option::Some(#n) }
+            } else {
+                quote! { ::std::option::Option::None }
             };
             quote! {
                 pub fn #spec_method() -> ::ene_plugin_proto::LlmProviderSpec {
