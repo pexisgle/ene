@@ -79,6 +79,21 @@ pub enum PluginHealthEvent {
         /// Why the plugin was disabled.
         reason: DisabledReason,
     },
+    /// A plugin was not committed at startup because its required capabilities
+    /// are not provided by any running plugin.
+    ///
+    /// Emitted for **hard** requirements (`soft: false`) that no provider
+    /// satisfies. The plugin is shut down before supervision begins and never
+    /// contributes tools or LLM providers; the user must activate a provider
+    /// plugin and restart the host. A plugin whose only unmet requirements are
+    /// soft starts normally and falls back to its built-in implementation.
+    RequirementsUnmet {
+        /// Plugin name.
+        plugin: String,
+        /// The unmet requirements, formatted as `name@range` (a trailing `?`
+        /// marks a soft one), for diagnostics.
+        unmet: Vec<String>,
+    },
 }
 
 impl PluginHealthEvent {
@@ -91,7 +106,8 @@ impl PluginHealthEvent {
             | Self::Recovered { plugin }
             | Self::CircuitOpened { plugin, .. }
             | Self::CircuitClosed { plugin }
-            | Self::Disabled { plugin, .. } => plugin,
+            | Self::Disabled { plugin, .. }
+            | Self::RequirementsUnmet { plugin, .. } => plugin,
         }
     }
 }

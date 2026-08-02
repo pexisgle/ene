@@ -21,6 +21,7 @@ ene-config = { workspace = true }
 # parsing, resolve_scope). Connection lifecycle stays in this crate; the
 # dependency is deliberately limited to these types.
 ene-connector = { workspace = true }
+semver = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "time", "process", "sync", "rt", "macros"] }
 tokio-stream = { workspace = true }
 futures = { workspace = true }

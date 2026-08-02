@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use sha2::Digest;
 
+use crate::capability_registry::CapabilityRegistry;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::credential_registry::CredentialRegistry;
 use crate::error::PluginHostError;
@@ -29,8 +30,10 @@ use crate::ipc_plugin::IpcPluginConnection;
 use crate::mcp_config::McpTransport;
 use crate::mcp_registry::{McpToolRegistry, redacted_endpoint};
 use crate::tool_registry::{DeferredCallResult, ToolRegistry};
+use ene_connector::capability::{CapabilityId, ProvidedCapability, RequiredCapability};
 use ene_connector::declaration::{CredentialDeclaration, ScopeDecision};
 use ene_connector::identity::CredentialId;
+use semver::VersionReq;
 
 /// Maximum restarts allowed inside [`RESTART_WINDOW`] before a plugin is disabled.
 const MAX_RESTARTS: usize = 5;
@@ -217,6 +220,20 @@ impl Drop for SupervisedPlugin {
         drop(self.child.wait());
         ene_plugin_proto::cleanup_path(&self.socket_path);
     }
+}
+
+/// A successfully spawned plugin whose capability requirements have not yet
+/// been resolved.
+///
+/// [`start`](Self::start)'s first pass only spawns and collects these; the
+/// second pass either commits one (supervision + tool/LLM registration) or
+/// shuts it down when a hard `requires` entry is unmet by any other plugin.
+struct PendingPlugin {
+    name: String,
+    plugin: Arc<Mutex<SupervisedPlugin>>,
+    conn: Arc<IpcPluginConnection>,
+    /// The config schema fetched for redaction and declaration registration.
+    schema: Option<serde_json::Value>,
 }
 
 /// Pure-function form of the per-restart backoff delay.
@@ -618,6 +635,12 @@ pub struct PluginHostManager {
     /// connection registration; consumed by the credential service for
     /// request-time scope enforcement.
     credential_registry: CredentialRegistry,
+    /// Capability declarations parsed from each plugin's `x-ene-capabilities`
+    /// schema block at startup. Populated by [`start`](Self::start) before
+    /// requirement resolution; consumed via [`Self::resolve_capability`] and
+    /// [`Self::unmet_requires`] by the startup gate and the runtime-sharing
+    /// passenger slice.
+    capability_registry: CapabilityRegistry,
     /// One supervisor task per supervised plugin. Each task independently
     /// pings and restarts only its own plugin, so one plugin's restart
     /// backoff or reconnect can never stall monitoring of the others.
@@ -683,6 +706,7 @@ impl PluginHostManager {
                 llm_factories: HashMap::new(),
                 llm_factory_plugins: HashMap::new(),
                 credential_registry: CredentialRegistry::new(),
+                capability_registry: CapabilityRegistry::new(),
                 health_tasks: Vec::new(),
                 health_rx: None,
                 shutdown_on_drop: true,
@@ -702,6 +726,9 @@ impl PluginHostManager {
         // `Self` exists so the registration step is a `&self` method that unit
         // tests can drive without a plugin process.
         let mut credential_schemas: Vec<(String, Option<serde_json::Value>)> = Vec::new();
+        // Successfully spawned plugins awaiting capability-requirement
+        // resolution in pass 2 before they are committed.
+        let mut pending: Vec<PendingPlugin> = Vec::new();
 
         std::fs::create_dir_all(ene_config::plugin_socket_dir()).map_err(|e| {
             PluginHostError::ExecutionFailed {
@@ -802,86 +829,16 @@ impl PluginHostManager {
                         );
                     }
 
-                    // Collect the schema for credential declaration
-                    // registration, applied after the manager is assembled
-                    // (see `register_credential_schema`). Invalid entries are
-                    // warned about and dropped there; the plugin itself always
-                    // keeps running (a bad declaration only loses that
-                    // declaration).
-                    credential_schemas.push((name.clone(), schema));
-
-                    let caps = conn.capabilities();
-
-                    if caps.tools > 0 {
-                        // Retry once on failure; if it still fails, skip
-                        // registering the tool registry (don't silently
-                        // register empty tools). The plugin process itself is
-                        // still supervised so any LLM providers it offers keep
-                        // working.
-                        let tools = match conn.list_tools().await {
-                            Ok(tools) => Some(tools),
-                            Err(e) => {
-                                tracing::warn!(
-                                    component = "PluginHostManager",
-                                    plugin = %name,
-                                    error = %e,
-                                    "Failed to list tools for plugin; retrying once"
-                                );
-                                match conn.list_tools().await {
-                                    Ok(tools) => Some(tools),
-                                    Err(e) => {
-                                        tracing::error!(
-                                            component = "PluginHostManager",
-                                            plugin = %name,
-                                            error = %e,
-                                            "Failed to list tools for plugin after retry; \
-                                             skipping tool registry registration"
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                        };
-                        if let Some(tools) = tools {
-                            let registry = PluginToolRegistry {
-                                plugin_name: name.clone(),
-                                conn: Arc::clone(&conn),
-                                tools,
-                                breaker: parking_lot::Mutex::new(CircuitBreaker::default()),
-                                health_tx: Some(health_tx.clone()),
-                            };
-                            tool_registries.push(Arc::new(registry));
-                        }
-                    }
-
-                    for spec in &caps.llm_providers {
-                        if llm_factories.contains_key(&spec.kind) {
-                            tracing::warn!(
-                                component = "PluginHostManager",
-                                plugin = %name,
-                                kind = %spec.kind,
-                                "Duplicate LLM provider kind; skipping"
-                            );
-                            continue;
-                        }
-                        let factory = IpcLlmProviderFactory::new(
-                            spec.kind.clone(),
-                            Arc::clone(&conn),
-                            name.clone(),
-                            is_builtin_plugin(name),
-                            spec.context_window,
-                            spec.concurrency,
-                        );
-                        llm_factories.insert(
-                            spec.kind.clone(),
-                            Arc::new(factory) as Arc<dyn ene_ai::LlmProviderFactory>,
-                        );
-                        llm_factory_plugins.insert(spec.kind.clone(), name.clone());
-                    }
-
-                    supervised.push(plugin);
-                    connections.push(conn);
-                    names.push(name.clone());
+                    // Defer tool/LLM registration and supervision to pass 2:
+                    // capability `requires` resolution needs every plugin's
+                    // `provides`, so no plugin may commit before all schemas
+                    // are collected.
+                    pending.push(PendingPlugin {
+                        name: name.clone(),
+                        plugin,
+                        conn,
+                        schema,
+                    });
                 }
                 Err(e) => {
                     tracing::error!(
@@ -892,6 +849,128 @@ impl PluginHostManager {
                     );
                 }
             }
+        }
+
+        // Pass 2 — capability gate, then commit. Register every declaration
+        // first so each plugin's `requires` resolves against all providers
+        // (resolution happens exactly once, after all spawn attempts: a
+        // plugin that failed to spawn contributes no `provides`). A plugin
+        // whose hard requirements are unmet is shut down gracefully and kept
+        // out of supervision and contribution registration, with a health
+        // event for diagnostics; soft unmet requirements never gate.
+        let capability_registry = CapabilityRegistry::new();
+        for pending_plugin in &pending {
+            capability_registry
+                .register_from_schema(&pending_plugin.name, pending_plugin.schema.as_ref());
+        }
+        for pending_plugin in pending {
+            let name = pending_plugin.name.clone();
+            let unmet = capability_registry.unmet_requires(&name);
+            if unmet.iter().any(|r| !r.soft) {
+                // Graceful IPC shutdown first, then drop the child: dropping
+                // the last `Arc` runs `SupervisedPlugin::drop`, which kills,
+                // reaps, and cleans up the socket. `shutdown` is awaited (and
+                // internally timeout-bounded) like every other plugin teardown
+                // so a wedged peer cannot outlive its own shutdown frame.
+                pending_plugin.conn.shutdown().await;
+                drop(pending_plugin.plugin);
+                drop(health_tx.send(PluginHealthEvent::RequirementsUnmet {
+                    plugin: name.clone(),
+                    unmet: unmet.iter().map(ToString::to_string).collect(),
+                }));
+                let unmet_summary = unmet
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                tracing::warn!(
+                    component = "PluginHostManager",
+                    plugin = %name,
+                    unmet = %unmet_summary,
+                    "Plugin disabled at startup: required capabilities are not \
+                     provided by any running plugin"
+                );
+                continue;
+            }
+
+            // The schema fetched in pass 1 feeds the credential declaration
+            // registration below, applied after the manager is assembled (see
+            // `register_credential_schema`). Invalid entries are warned about
+            // and dropped there; the plugin itself always keeps running (a bad
+            // declaration only loses that declaration).
+            credential_schemas.push((name.clone(), pending_plugin.schema));
+
+            let caps = pending_plugin.conn.capabilities();
+
+            if caps.tools > 0 {
+                // Retry once on failure; if it still fails, skip registering
+                // the tool registry (don't silently register empty tools). The
+                // plugin process itself is still supervised so any LLM
+                // providers it offers keep working.
+                let tools = match pending_plugin.conn.list_tools().await {
+                    Ok(tools) => Some(tools),
+                    Err(e) => {
+                        tracing::warn!(
+                            component = "PluginHostManager",
+                            plugin = %name,
+                            error = %e,
+                            "Failed to list tools for plugin; retrying once"
+                        );
+                        match pending_plugin.conn.list_tools().await {
+                            Ok(tools) => Some(tools),
+                            Err(e) => {
+                                tracing::error!(
+                                    component = "PluginHostManager",
+                                    plugin = %name,
+                                    error = %e,
+                                    "Failed to list tools for plugin after retry; \
+                                     skipping tool registry registration"
+                                );
+                                None
+                            }
+                        }
+                    }
+                };
+                if let Some(tools) = tools {
+                    let registry = PluginToolRegistry {
+                        plugin_name: name.clone(),
+                        conn: Arc::clone(&pending_plugin.conn),
+                        tools,
+                        breaker: parking_lot::Mutex::new(CircuitBreaker::default()),
+                        health_tx: Some(health_tx.clone()),
+                    };
+                    tool_registries.push(Arc::new(registry));
+                }
+            }
+
+            for spec in &caps.llm_providers {
+                if llm_factories.contains_key(&spec.kind) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        kind = %spec.kind,
+                        "Duplicate LLM provider kind; skipping"
+                    );
+                    continue;
+                }
+                let factory = IpcLlmProviderFactory::new(
+                    spec.kind.clone(),
+                    Arc::clone(&pending_plugin.conn),
+                    name.clone(),
+                    is_builtin_plugin(&name),
+                    spec.context_window,
+                    spec.concurrency,
+                );
+                llm_factories.insert(
+                    spec.kind.clone(),
+                    Arc::new(factory) as Arc<dyn ene_ai::LlmProviderFactory>,
+                );
+                llm_factory_plugins.insert(spec.kind.clone(), name.clone());
+            }
+
+            supervised.push(pending_plugin.plugin);
+            connections.push(pending_plugin.conn);
+            names.push(name);
         }
 
         // Batch-persist TOFU checksums recorded during this startup.
@@ -1021,6 +1100,7 @@ impl PluginHostManager {
             llm_factories,
             llm_factory_plugins,
             credential_registry: CredentialRegistry::new(),
+            capability_registry,
             health_tasks,
             health_rx: Some(health_rx),
             shutdown_on_drop: true,
@@ -1095,6 +1175,42 @@ impl PluginHostManager {
     #[must_use]
     pub fn resolve_credential_scope(&self, plugin: &str, id: &CredentialId) -> ScopeDecision {
         self.credential_registry.resolve_scope(plugin, id)
+    }
+
+    /// Registers the capability declarations parsed from `schema` for
+    /// `plugin`, replacing any previous registration.
+    ///
+    /// [`start`](Self::start) applies this to every started plugin before
+    /// resolving requirements; kept as a `&self` method so the register →
+    /// resolve path is testable without a plugin process.
+    fn register_capability_schema(&self, plugin: &str, schema: Option<&serde_json::Value>) {
+        self.capability_registry
+            .register_from_schema(plugin, schema);
+    }
+
+    /// Returns the `(plugin, capability)` pairs that provide `name`.
+    #[must_use]
+    pub fn capability_providers(&self, name: &CapabilityId) -> Vec<(String, ProvidedCapability)> {
+        self.capability_registry.providers(name)
+    }
+
+    /// Resolves `req` for `name` to one provider's plugin name.
+    ///
+    /// The choice is deterministic (the lexicographically smallest matching
+    /// plugin) but that order is deliberately not part of the contract —
+    /// callers must treat the result as "some matching provider". Returns
+    /// `None` when no running plugin satisfies the request.
+    #[must_use]
+    pub fn resolve_capability(&self, name: &CapabilityId, req: &VersionReq) -> Option<String> {
+        self.capability_registry.resolve(name, req)
+    }
+
+    /// The `requires` entries of `plugin` that no running provider satisfies,
+    /// in declaration order. Soft entries are included; the caller decides
+    /// whether they matter (startup ignores them).
+    #[must_use]
+    pub fn unmet_requires(&self, plugin: &str) -> Vec<RequiredCapability> {
+        self.capability_registry.unmet_requires(plugin)
     }
 
     /// Controls whether Drop attempts best-effort shutdown.
@@ -1298,6 +1414,7 @@ impl PluginHostManager {
             llm_factories: HashMap::new(),
             llm_factory_plugins: HashMap::new(),
             credential_registry: CredentialRegistry::new(),
+            capability_registry: CapabilityRegistry::new(),
             health_tasks: Vec::new(),
             health_rx: None,
             shutdown_on_drop: false,
@@ -1891,6 +2008,38 @@ mod tests {
             manager.resolve_credential_scope("plugin-b", &anthropic),
             ScopeDecision::Undeclared
         );
+    }
+
+    #[test]
+    fn capability_registration_wiring_resolves_requires() {
+        // Drives the exact registration step `start()` applies per plugin
+        // (schema → `register_capability_schema` → resolve seams) without
+        // spawning a plugin process.
+        let manager = PluginHostManager::test_instance();
+        let provider = serde_json::json!({
+            "x-ene-capabilities": { "provides": ["g2p/ja@2.1.0"] }
+        });
+        let consumer = serde_json::json!({
+            "x-ene-capabilities": { "requires": ["g2p/ja@^1", "tts/synthesize@^1?"] }
+        });
+        manager.register_capability_schema("provider", Some(&provider));
+        manager.register_capability_schema("consumer", Some(&consumer));
+
+        let g2p = CapabilityId::try_new("g2p/ja").unwrap();
+        assert_eq!(
+            manager.resolve_capability(&g2p, &"^1".parse::<VersionReq>().unwrap()),
+            Some("provider".to_string())
+        );
+        // The consumer's `g2p/ja` requirement is satisfied; only the soft
+        // `tts/synthesize` requirement is unmet (and it does not gate).
+        let unmet = manager.unmet_requires("consumer");
+        assert_eq!(unmet.len(), 1);
+        assert_eq!(unmet[0].name.as_str(), "tts/synthesize");
+        assert!(unmet[0].soft);
+        assert!(manager.unmet_requires("provider").is_empty());
+        let providers = manager.capability_providers(&g2p);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].0, "provider");
     }
 
     #[test]

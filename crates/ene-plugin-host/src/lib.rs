@@ -32,6 +32,8 @@
 //!   [`IpcLlmProvider`] / [`IpcLlmProviderFactory`] implement.
 #![warn(missing_docs)]
 
+/// Host-side registry of per-plugin capability declarations.
+pub mod capability_registry;
 /// Per-plugin circuit breaker for consecutive-failure fail-fast.
 pub mod circuit_breaker;
 /// Plugin system configuration section.
@@ -59,6 +61,8 @@ pub mod redact;
 /// Tool registry trait, composite registry, and deferred call types.
 pub mod tool_registry;
 
+/// Host-side registry of per-plugin capability declarations.
+pub use capability_registry::CapabilityRegistry;
 /// Per-plugin circuit breaker.
 pub use circuit_breaker::{BreakerState, CircuitBreaker};
 /// Plugin system configuration.
