@@ -2088,7 +2088,7 @@ async fn plugin_without_declarations_registers_empty_set() {
     let schema = conn.config_schema().await.expect("config_schema");
 
     let registry = CredentialRegistry::new();
-    registry.register_from_schema("mock", schema.as_deref());
+    registry.register_from_schema("mock", schema.as_ref());
     assert!(registry.declarations("mock").is_empty());
 
     let id = CredentialId::try_new("anthropic").expect("valid credential id");
