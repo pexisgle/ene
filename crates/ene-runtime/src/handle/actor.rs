@@ -3301,7 +3301,9 @@ pub(super) fn spawn_host_services(
             credential_registrations,
         ));
         let oauth_flow = Arc::new(OAuthFlowManager::new(
-            Arc::clone(&credential_registry),
+            // The registry is moved here (its last use): refresher and
+            // passenger above only borrowed it.
+            credential_registry,
             Arc::clone(&vault),
             persister,
             passenger.invalidated_tx(),

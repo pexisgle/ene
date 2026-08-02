@@ -356,6 +356,12 @@ mod tests {
         fail_with: Option<String>,
     }
 
+    /// Coerces a concrete mock refresher to the trait object the vault holds,
+    /// keeping the concrete `Arc` alive for call-count assertions.
+    fn dyn_refresher<T: TokenRefresher + 'static>(r: Arc<T>) -> Arc<dyn TokenRefresher> {
+        r
+    }
+
     #[async_trait]
     impl TokenRefresher for CountingRefresher {
         async fn refresh(
@@ -426,9 +432,8 @@ mod tests {
         let past = Utc::now() - chrono::Duration::hours(1);
         let store = CredentialStore::oauth2("expired", Some("refresh-tok"), Some(past));
         let refresher = Arc::new(CountingRefresher::default());
-        let vault_refresher: Arc<dyn TokenRefresher> = Arc::clone(&refresher);
         let vault = CredentialVault::new(vec![VaultEntry::new("google.calendar", store)])
-            .with_refresher(vault_refresher);
+            .with_refresher(dyn_refresher(Arc::clone(&refresher)));
         let resolved = vault.resolve("google.calendar").await.unwrap();
         assert_eq!(resolved.access_token(), Some("fresh-token"));
         assert_eq!(*refresher.calls.lock(), 1);
@@ -449,9 +454,8 @@ mod tests {
         let soon = Utc::now() + chrono::Duration::seconds(30);
         let store = CredentialStore::oauth2("about-to-expire", Some("refresh-tok"), Some(soon));
         let refresher = Arc::new(CountingRefresher::default());
-        let vault_refresher: Arc<dyn TokenRefresher> = Arc::clone(&refresher);
         let vault = CredentialVault::new(vec![VaultEntry::new("google.calendar", store)])
-            .with_refresher(vault_refresher);
+            .with_refresher(dyn_refresher(Arc::clone(&refresher)));
         let resolved = vault.resolve("google.calendar").await.unwrap();
         assert_eq!(resolved.access_token(), Some("fresh-token"));
         assert_eq!(*refresher.calls.lock(), 1);
@@ -465,9 +469,8 @@ mod tests {
             fail_with: Some("google.calendar".to_string()),
             ..Default::default()
         });
-        let vault_refresher: Arc<dyn TokenRefresher> = Arc::clone(&refresher);
         let vault = CredentialVault::new(vec![VaultEntry::new("google.calendar", store)])
-            .with_refresher(vault_refresher);
+            .with_refresher(dyn_refresher(Arc::clone(&refresher)));
         let err = vault.resolve("google.calendar").await.unwrap_err();
         assert!(matches!(err, ConnectorError::RefreshRequired(_)));
         // The entry survives so a later successful refresh can replace it.
@@ -497,7 +500,6 @@ mod tests {
         // The lock-ordering invariant: a `store` issued while a refresh is
         // awaiting must complete instead of waiting on the refresh's lock.
         // The mock parks inside `refresh` until the store has run.
-        #[derive(Default)]
         struct ParkingRefresher {
             started: tokio::sync::oneshot::Sender<()>,
             resume: tokio::sync::oneshot::Receiver<()>,
@@ -527,10 +529,9 @@ mod tests {
             started: started_tx,
             resume: resume_rx,
         });
-        let vault_refresher: Arc<dyn TokenRefresher> = Arc::clone(&refresher);
         let vault = Arc::new(
             CredentialVault::new(vec![VaultEntry::new("google.calendar", store)])
-                .with_refresher(vault_refresher),
+                .with_refresher(dyn_refresher(Arc::clone(&refresher))),
         );
         let vault_for_refresh = Arc::clone(&vault);
         let refresh_task =
