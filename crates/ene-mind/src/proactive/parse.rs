@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 /// Plain JSON Schema for proactive decision structured output.
 #[must_use]
-pub fn decision_schema() -> Value {
+pub fn decision_schema_object() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -102,8 +102,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decision_schema_is_json_schema_root() {
-        let schema = decision_schema();
+    fn decision_schema_object_is_json_schema_root() {
+        let schema = decision_schema_object();
         assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
         assert!(schema.get("properties").is_some());
         assert!(schema.get("required").is_some());

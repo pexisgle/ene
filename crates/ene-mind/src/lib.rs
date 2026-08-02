@@ -140,7 +140,8 @@ pub use proactive::{
     ActivitySnapshot, GateRejectReason, ProactiveContext, ProactiveDecision,
     ProactiveDecisionOutcome, ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState,
     ProactiveUrgency, ScreenSummaryStatus, build_decision_messages, build_proactive_context,
-    decide_proactive_speech, decision_schema, evaluate_deterministic_gates, parse_decision_json,
+    decide_proactive_speech, decision_schema_object, evaluate_deterministic_gates,
+    parse_decision_json,
 };
 /// Prompt packet section types.
 #[doc(no_inline)]
