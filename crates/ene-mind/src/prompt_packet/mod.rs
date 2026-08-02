@@ -90,8 +90,13 @@ impl PromptPacket {
             parts: vec![UserMessagePart::Text { text: user_input }],
         });
 
-        let section_item_count =
-            |kind: PromptSectionKind| -> usize { self.section(kind).map_or(0, |s| s.item_count) };
+        let section_item_count = |kind: PromptSectionKind| -> usize {
+            if self.section_included(kind) {
+                self.section(kind).map_or(0, |s| s.item_count)
+            } else {
+                0
+            }
+        };
         let recalled_memory_count = section_item_count(PromptSectionKind::SemanticContext)
             .saturating_add(section_item_count(PromptSectionKind::UserProfile))
             .saturating_add(section_item_count(PromptSectionKind::EpisodicMemories));
@@ -581,6 +586,31 @@ mod tests {
         let packet = compose_test_packet(kernel, styles, &[], &[], None, vec![], None, "hi");
         let (_messages, meta) = packet.to_llm_messages();
         assert_eq!(meta.style_example_count, 1);
+    }
+
+    #[test]
+    fn blank_section_body_reports_zero_items() {
+        // A section whose body renders empty (whitespace-only) must not report
+        // its source item_count: meta counts describe what the model actually
+        // sees, and `render_system_block` omits such a section entirely.
+        let packet = PromptPacket {
+            sections: vec![
+                PromptSection::new(PromptSectionKind::IdentityKernel, "K".to_string()),
+                PromptSection::new(PromptSectionKind::StyleExamples, " \n ".to_string())
+                    .with_item_count(3),
+                PromptSection::new(PromptSectionKind::UserInput, "hi".to_string()),
+            ],
+            history: vec![],
+        };
+        let (messages, meta) = packet.to_llm_messages();
+        assert_eq!(meta.style_example_count, 0);
+        let LlmMessage::System { content } = &messages[0] else {
+            panic!("expected system");
+        };
+        assert!(
+            !content.contains("Style Examples"),
+            "blank style section must not be rendered: {content:?}"
+        );
     }
 
     fn sample_commitment(

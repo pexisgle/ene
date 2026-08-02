@@ -514,10 +514,9 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
             }
             let kind = sections[idx].kind;
             let removed_tokens = section_tokens_cache[idx];
-            sections[idx].content.clear();
             // Keep item_count in lockstep with the cleared body so meta counts
             // reflect survivors, not the pre-drop source length.
-            sections[idx].item_count = 0;
+            sections[idx].clear();
             section_tokens_cache[idx] = 0;
             dropped.push(kind);
             // Keep the survivor vectors in lockstep with the rendered sections:

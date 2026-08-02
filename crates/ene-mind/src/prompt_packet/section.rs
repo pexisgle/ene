@@ -126,7 +126,7 @@ pub struct PromptSection {
     /// Authoritative count of discrete items this section carries (recalled
     /// memories, style examples, …). Set from source data at build time and
     /// zeroed when packing clears the section — never derived from `content`.
-    pub item_count: usize,
+    pub(crate) item_count: usize,
 }
 
 impl PromptSection {
@@ -143,9 +143,16 @@ impl PromptSection {
 
     /// Set the authoritative item count carried by this section.
     #[must_use]
-    pub const fn with_item_count(mut self, item_count: usize) -> Self {
+    pub(crate) const fn with_item_count(mut self, item_count: usize) -> Self {
         self.item_count = item_count;
         self
+    }
+
+    /// Clears the body and resets `item_count` together so metadata cannot
+    /// diverge from the rendered output.
+    pub fn clear(&mut self) {
+        self.content.clear();
+        self.item_count = 0;
     }
 
     /// Render the section for the system block (heading + body).
