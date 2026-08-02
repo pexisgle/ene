@@ -96,6 +96,7 @@ async fn anthropic_http_caller(ctx: &PluginContext) -> Result<ene_plugin::HttpCa
                     max_retries: 0,
                     ..RetryPolicy::default()
                 },
+                ..ClientOptions::default()
             },
         )
         .await
