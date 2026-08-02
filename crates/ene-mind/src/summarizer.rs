@@ -309,10 +309,10 @@ mod tests {
             messages: &[ene_ai::LlmMessage],
             _json_schema: Option<serde_json::Value>,
         ) -> Result<ene_ai::LlmCompletion, ene_ai::LlmProviderError> {
-            if let Some(ene_ai::LlmMessage::System { content }) = messages.first() {
-                if let Ok(mut guard) = self.captured.lock() {
-                    guard.push(content.clone());
-                }
+            if let Some(ene_ai::LlmMessage::System { content }) = messages.first()
+                && let Ok(mut guard) = self.captured.lock()
+            {
+                guard.push(content.clone());
             }
             Ok(ene_ai::LlmCompletion::text_only(
                 r#"{"summary":"test","key_facts":[]}"#.to_string(),
