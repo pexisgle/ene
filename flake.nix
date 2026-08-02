@@ -33,9 +33,9 @@
 
         isLinux = lib.strings.hasInfix "linux" system;
 
-        # Shared shell for local/dev (`default`) and CI (`ci`).
-        # CI drops Windows cross, Chromium, sccache, and git-cliff so
-        # `nix develop` does not pull a multi-GB closure on every job.
+        # Shared shell for local/dev (`default`) and a slim variant (`ci`)
+        # without Windows cross, Chromium, sccache, and git-cliff. GitHub
+        # Actions provisions these dependencies via apt, not this shell.
         mkEneShell =
           {
             withCrossWindows ? false,
