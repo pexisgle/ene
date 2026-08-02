@@ -18,8 +18,7 @@ use ene_plugin_proto::transport::IpcStream;
 use ene_plugin_proto::{
     CredentialErrorCode, CredentialRequest, CredentialResponse, HostServiceErrorCode,
     HostServiceId, HostServiceRequest, HostServiceResponse, PluginError, ResolvedCredential,
-    read_credential_response, read_host_service_response, write_credential_request,
-    write_host_service_response,
+    read_credential_response, read_host_service_response, write_host_service_request,
 };
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
@@ -597,8 +596,11 @@ impl HttpCaller {
             .retry(
                 move |_attempt| {
                     let client = client.clone();
-                    let request = request.clone();
+                    let request = request.try_clone();
                     async move {
+                        let Some(request) = request else {
+                            return Err(PluginError::provider("request body is not cloneable"));
+                        };
                         match tokio::time::timeout(per_attempt, client.execute(request)).await {
                             Ok(Ok(resp)) => Ok(resp),
                             Ok(Err(e)) => {
@@ -623,6 +625,10 @@ impl HttpCaller {
 mod tests {
     use super::*;
     use ene_plugin_proto::transport::IpcListener;
+    use ene_plugin_proto::{
+        read_credential_request, read_host_service_request, write_credential_response,
+        write_host_service_response,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     static SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
