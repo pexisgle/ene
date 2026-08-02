@@ -19,6 +19,8 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::context::PluginContext;
+use crate::credentials::CredentialClient;
 use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin};
 
 /// How often an idle connection polls the tool plugin for deferred task
@@ -497,7 +499,12 @@ async fn handle_connection(
     // Periodic deferred-completion drainer (Cr-5 idle delivery).
     let drain_task = spawn_deferred_drain(Arc::clone(&dispatch), tx.clone());
 
-    let read_result = connection_read_loop(&dispatch, read_half, &tx, &streams, &shutdown).await;
+    // Per-connection plugin context: the credential client is configured at
+    // handshake time (the sandbox carries the endpoint) and used lazily.
+    let ctx = PluginContext::new(CredentialClient::new());
+
+    let read_result =
+        connection_read_loop(&dispatch, read_half, &ctx, &tx, &streams, &shutdown).await;
 
     // Tear down: cancel any in-flight streams, stop the drainer, then let the
     // writer flush remaining frames and finish once all senders are dropped.
@@ -591,6 +598,7 @@ fn spawn_deferred_drain(
 async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
     dispatch: &Arc<PluginDispatch>,
     mut reader: R,
+    ctx: &PluginContext,
     tx: &mpsc::Sender<PluginIpcResponse>,
     streams: &Arc<parking_lot::Mutex<HashMap<String, CancellationToken>>>,
     shutdown: &Arc<tokio::sync::Notify>,
@@ -617,12 +625,13 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
                 let token = CancellationToken::new();
                 streams.lock().insert(request_id.clone(), token.clone());
                 let dispatch = Arc::clone(dispatch);
+                let ctx = ctx.clone();
                 let req = req.clone();
                 let tx = tx.clone();
                 let streams = Arc::clone(streams);
                 let stream_id = request_id.clone();
                 tokio::spawn(async move {
-                    run_chat_stream(&dispatch, &req, tx, token).await;
+                    run_chat_stream(&dispatch, &ctx, &req, tx, token).await;
                     streams.lock().remove(&stream_id);
                 });
             }
@@ -657,9 +666,10 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             | PluginIpcRequest::TranscribeAudio { .. }
             | PluginIpcRequest::PollDeferred { .. }) => {
                 let dispatch = Arc::clone(dispatch);
+                let ctx = ctx.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let resp = dispatch_request(&dispatch, &long_running).await;
+                    let resp = dispatch_request(&dispatch, &ctx, &long_running).await;
                     drop(tx.send(resp).await);
                 });
             }
@@ -671,7 +681,7 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             // any later request that depends on them is dispatched, so they
             // cannot be reordered behind a spawned task.
             other => {
-                let resp = dispatch_request(dispatch, &other).await;
+                let resp = dispatch_request(dispatch, ctx, &other).await;
                 drop(tx.send(resp).await);
             }
         }
@@ -683,7 +693,11 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
     clippy::manual_let_else,
     reason = "match-based return is clearer for multi-branch dispatch with early returns"
 )]
-async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> PluginIpcResponse {
+async fn dispatch_request(
+    dispatch: &PluginDispatch,
+    ctx: &PluginContext,
+    req: &PluginIpcRequest,
+) -> PluginIpcResponse {
     match req {
         PluginIpcRequest::Handshake {
             version: host_range,
@@ -717,6 +731,15 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             };
             if let Some(tool) = &dispatch.tool {
                 tool.set_sandbox(sandbox);
+            }
+            // Point the credential client at the host's credential passenger.
+            // Older hosts never send a credential token; the client then fails
+            // resolutions with a "not configured" error instead of panicking.
+            if let (Some(socket), Some(token)) =
+                (&sandbox.host_service_socket, &sandbox.credential_auth_token)
+            {
+                ctx.credentials()
+                    .set_endpoint(socket.clone(), token.clone());
             }
             // Configuration is delivered to **every** registered trait
             // implementation (tool or provider), not just the tool plugin.
@@ -849,6 +872,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             };
             match llm
                 .chat_completion(
+                    ctx,
                     provider_kind,
                     provider_config.clone(),
                     model.clone(),
@@ -888,6 +912,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             };
             match embed
                 .embed_batch(
+                    ctx,
                     provider_kind,
                     provider_config.clone(),
                     model.clone(),
@@ -1055,6 +1080,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             };
             match tts
                 .synthesize(
+                    ctx,
                     provider_kind,
                     provider_config.clone(),
                     text.clone(),
@@ -1098,6 +1124,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             };
             match stt
                 .transcribe(
+                    ctx,
                     provider_kind,
                     provider_config.clone(),
                     audio_data,
@@ -1180,6 +1207,7 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
 /// waiting for it to drain.
 async fn run_chat_stream(
     dispatch: &PluginDispatch,
+    ctx: &PluginContext,
     req: &PluginIpcRequest,
     tx: mpsc::Sender<PluginIpcResponse>,
     cancel: CancellationToken,
@@ -1214,6 +1242,7 @@ async fn run_chat_stream(
 
     let stream = match llm
         .create_chat_stream(
+            ctx,
             provider_kind,
             provider_config.clone(),
             model.clone(),
@@ -1451,6 +1480,7 @@ mod tests {
 
         async fn create_chat_stream(
             &self,
+            _ctx: &PluginContext,
             _kind: &str,
             _config: serde_json::Value,
             _model: String,
@@ -1475,6 +1505,7 @@ mod tests {
 
         async fn chat_completion(
             &self,
+            _ctx: &PluginContext,
             _kind: &str,
             _config: serde_json::Value,
             _model: String,
@@ -1509,6 +1540,7 @@ mod tests {
 
         async fn create_chat_stream(
             &self,
+            _ctx: &PluginContext,
             _kind: &str,
             _config: serde_json::Value,
             _model: String,
@@ -1546,6 +1578,7 @@ mod tests {
 
         async fn synthesize(
             &self,
+            _ctx: &PluginContext,
             _kind: &str,
             _config: serde_json::Value,
             text: String,
@@ -1574,6 +1607,7 @@ mod tests {
 
         async fn transcribe(
             &self,
+            _ctx: &PluginContext,
             _kind: &str,
             _config: serde_json::Value,
             _audio_data: Vec<u8>,
@@ -1592,6 +1626,7 @@ mod tests {
     impl EmbedPlugin for MockEmbedPlugin {
         async fn embed_batch(
             &self,
+            _ctx: &PluginContext,
             _kind: &str,
             _config: serde_json::Value,
             _model: String,
@@ -1603,6 +1638,18 @@ mod tests {
     }
 
     impl ConfigurablePlugin for MockEmbedPlugin {}
+
+    /// A fresh context for tests; mock plugins never touch the credential
+    /// client, so the unconfigured default is all they need.
+    fn test_ctx() -> PluginContext {
+        PluginContext::new(CredentialClient::new())
+    }
+
+    /// Test wrapper: every dispatch test goes through a fresh context so the
+    /// production signature can require `&PluginContext`.
+    async fn test_dispatch(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> PluginIpcResponse {
+        dispatch_request(dispatch, &test_ctx(), req).await
+    }
 
     fn make_dispatch(tool: bool, llm: bool, embed: bool) -> PluginDispatch {
         PluginDispatch {
@@ -1646,7 +1693,7 @@ mod tests {
             plugin_config: Some(serde_json::json!({"key": "value"})),
             plugin_profiles: None,
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::HandshakeAck {
                 version,
@@ -1669,7 +1716,7 @@ mod tests {
             plugin_config: None,
             plugin_profiles: None,
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -1687,7 +1734,7 @@ mod tests {
             plugin_config: None,
             plugin_profiles: None,
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::HandshakeAck { version, .. } => {
                 assert_eq!(version, PLUGIN_IPC_PROTOCOL_VERSION);
@@ -1699,7 +1746,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_ping() {
         let dispatch = make_dispatch(false, false, false);
-        let resp = dispatch_request(
+        let resp = test_dispatch(
             &dispatch,
             &PluginIpcRequest::Ping {
                 request_id: "ping-1".into(),
@@ -1717,7 +1764,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_shutdown() {
         let dispatch = make_dispatch(false, false, false);
-        let resp = dispatch_request(&dispatch, &PluginIpcRequest::Shutdown).await;
+        let resp = test_dispatch(&dispatch, &PluginIpcRequest::Shutdown).await;
         assert_eq!(
             resp,
             PluginIpcResponse::Ack {
@@ -1732,7 +1779,7 @@ mod tests {
         let req = PluginIpcRequest::GetConfigSchema {
             request_id: "req-1".into(),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::ConfigSchema {
                 request_id, schema, ..
@@ -1750,7 +1797,7 @@ mod tests {
         let req = PluginIpcRequest::GetConfigSchema {
             request_id: "req-1".into(),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::ConfigSchema {
                 request_id, schema, ..
@@ -1827,7 +1874,7 @@ mod tests {
             plugin_config: Some(serde_json::json!({"api_key": {"source": "env"}})),
             plugin_profiles: Some(serde_json::json!({"default": {"voice": "af_heart"}})),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::HandshakeAck { .. }));
         assert_eq!(
             plugin.config.lock().unwrap().as_ref(),
@@ -1849,7 +1896,7 @@ mod tests {
             tts: None,
             stt: None,
         };
-        let resp = dispatch_request(
+        let resp = test_dispatch(
             &dispatch,
             &PluginIpcRequest::SetConfig {
                 request_id: "req-set".into(),
@@ -1884,7 +1931,7 @@ mod tests {
             tts: None,
             stt: None,
         };
-        let _ = dispatch_request(
+        let _ = test_dispatch(
             &dispatch,
             &PluginIpcRequest::SetConfig {
                 request_id: "req-set".into(),
@@ -1893,7 +1940,7 @@ mod tests {
             },
         )
         .await;
-        let resp = dispatch_request(
+        let resp = test_dispatch(
             &dispatch,
             &PluginIpcRequest::SetConfig {
                 request_id: "req-clear".into(),
@@ -1927,7 +1974,7 @@ mod tests {
             tts: None,
             stt: None,
         };
-        let resp = dispatch_request(
+        let resp = test_dispatch(
             &dispatch,
             &PluginIpcRequest::GetConfigSchema {
                 request_id: "req-1".into(),
@@ -2053,7 +2100,7 @@ mod tests {
     async fn dispatch_list_validate_migrate_config() {
         let dispatch = dynamic_dispatch(Arc::new(DynamicConfigPlugin::new()));
 
-        let options = dispatch_request(
+        let options = test_dispatch(
             &dispatch,
             &PluginIpcRequest::ListConfigOptions {
                 request_id: "o".into(),
@@ -2069,7 +2116,7 @@ mod tests {
             other => panic!("expected ConfigOptions, got {other:?}"),
         }
 
-        let validated = dispatch_request(
+        let validated = test_dispatch(
             &dispatch,
             &PluginIpcRequest::ValidateConfig {
                 request_id: "v".into(),
@@ -2085,7 +2132,7 @@ mod tests {
             other => panic!("expected ConfigValidated, got {other:?}"),
         }
 
-        let migrated = dispatch_request(
+        let migrated = test_dispatch(
             &dispatch,
             &PluginIpcRequest::MigrateConfig {
                 request_id: "m".into(),
@@ -2133,7 +2180,7 @@ mod tests {
         let req = PluginIpcRequest::ListTools {
             request_id: "req-1".into(),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::Tools { request_id, tools } => {
                 assert_eq!(request_id, "req-1");
@@ -2149,7 +2196,7 @@ mod tests {
         let req = PluginIpcRequest::ListTools {
             request_id: "req-1".into(),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::Tools { request_id, tools } => {
                 assert_eq!(request_id, "req-1");
@@ -2169,7 +2216,7 @@ mod tests {
             deferred: false,
             context: None,
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::CallResult { request_id, result } => {
                 assert_eq!(request_id, "req-1");
@@ -2189,7 +2236,7 @@ mod tests {
             deferred: false,
             context: None,
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::CallResult { request_id, result } => {
                 assert_eq!(request_id, "req-1");
@@ -2209,7 +2256,7 @@ mod tests {
             deferred: false,
             context: None,
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2223,7 +2270,7 @@ mod tests {
             deferred: true,
             context: None,
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::CallResult { request_id, result } => {
                 assert_eq!(request_id, "req-1");
@@ -2245,7 +2292,7 @@ mod tests {
             messages: vec![serde_json::json!({"role": "user", "content": "Hi"})],
             json_schema: None,
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::ChatCompletionResult {
                 request_id,
@@ -2272,7 +2319,7 @@ mod tests {
             messages: vec![],
             json_schema: None,
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2287,7 +2334,7 @@ mod tests {
             dimensions: Some(3),
             items: vec!["hello".into(), "world".into()],
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::EmbedBatchResult {
                 request_id,
@@ -2312,7 +2359,7 @@ mod tests {
             dimensions: None,
             items: vec![],
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2323,7 +2370,7 @@ mod tests {
             request_id: "req-1".into(),
             task_id: "task-1".into(),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::DeferredStatus {
                 request_id,
@@ -2367,7 +2414,7 @@ mod tests {
             },
         ];
         for req in &ack_requests {
-            let resp = dispatch_request(&dispatch, req).await;
+            let resp = test_dispatch(&dispatch, req).await;
             assert_eq!(
                 resp,
                 PluginIpcResponse::Ack {
@@ -2393,7 +2440,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<PluginIpcResponse>(64);
         let token = CancellationToken::new();
-        run_chat_stream(&dispatch, &req, tx, token).await;
+        run_chat_stream(&dispatch, &test_ctx(), &req, tx, token).await;
 
         let mut responses = Vec::new();
         while let Ok(resp) = rx.try_recv() {
@@ -2437,7 +2484,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<PluginIpcResponse>(64);
         let token = CancellationToken::new();
         token.cancel();
-        run_chat_stream(&dispatch, &req, tx, token).await;
+        run_chat_stream(&dispatch, &test_ctx(), &req, tx, token).await;
 
         let resp = rx.try_recv().unwrap();
         assert!(
@@ -2460,7 +2507,7 @@ mod tests {
             plugin_config: None,
             plugin_profiles: None,
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::HandshakeAck { capabilities, .. } => {
                 assert_eq!(capabilities.tools, 0);
@@ -2483,7 +2530,7 @@ mod tests {
             voice: "default".into(),
             format: "wav".into(),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::SpeechResult {
                 request_id,
@@ -2509,7 +2556,7 @@ mod tests {
             voice: "default".into(),
             format: "wav".into(),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2523,7 +2570,7 @@ mod tests {
             audio_base64: base64_encode(b"fake audio"),
             format: "wav".into(),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::TranscriptionResult { request_id, text } => {
                 assert_eq!(request_id, "req-stt-1");
@@ -2543,7 +2590,7 @@ mod tests {
             audio_base64: "AAAA".into(),
             format: "wav".into(),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2557,7 +2604,7 @@ mod tests {
             audio_base64: "!!!invalid base64!!!".into(),
             format: "wav".into(),
         };
-        let resp = dispatch_request(&dispatch, &req).await;
+        let resp = test_dispatch(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
