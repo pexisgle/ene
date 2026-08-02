@@ -3195,7 +3195,7 @@ pub(super) fn spawn_host_services(
 #[cfg(any(unix, windows))]
 fn generate_host_service_token(prefix: &str) -> String {
     let token: u128 = rand::random();
-    format!("{prefix}{:x}", token)
+    format!("{prefix}{token:x}")
 }
 
 /// Builds the credential vault from configuration.

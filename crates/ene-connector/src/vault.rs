@@ -312,17 +312,19 @@ mod tests {
 
     #[test]
     fn missing_credential_surfaces_setup_hint() {
-        let vault = vault_with(&[("anthropic", "sk-test")]);
+        let vault = vault_with(&[]);
         vault.set_hint(
             "anthropic",
             "set ai.providers.myanth.api_key (kind: anthropic)".to_string(),
         );
         let err = vault.resolve("anthropic").unwrap_err();
-        match err {
-            ConnectorError::CredentialMissing { label, .. } => {
-                assert!(label.contains("ai.providers.myanth.api_key"));
-            }
-            other => panic!("expected missing, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                &err,
+                ConnectorError::CredentialMissing { label, .. }
+                    if label.contains("ai.providers.myanth.api_key")
+            ),
+            "expected a guided missing error, got {err:?}"
+        );
     }
 }
