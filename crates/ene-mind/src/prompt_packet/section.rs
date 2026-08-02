@@ -148,11 +148,12 @@ impl PromptSection {
         self
     }
 
-    /// Clears the body and resets `item_count` together so metadata cannot
-    /// diverge from the rendered output.
+    /// Clears the body and resets `item_count` and `note` together so
+    /// metadata cannot diverge from the rendered output.
     pub fn clear(&mut self) {
         self.content.clear();
         self.item_count = 0;
+        self.note = None;
     }
 
     /// Render the section for the system block (heading + body + note).
