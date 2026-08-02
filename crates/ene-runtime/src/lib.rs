@@ -28,10 +28,14 @@
 
 /// Shared runtime bootstrap helpers (folded into [`EneHandle::open`]).
 pub mod bootstrap;
-/// Per-tool DB IPC server (re-exported from `ene-store`).
+/// DB IPC request handler (re-exported from `ene-store`).
 #[cfg(any(unix, windows))]
 #[doc(no_inline)]
 pub use ene_store::db_server;
+/// Multiplexed host-service acceptor (re-exported from `ene-store`).
+#[cfg(any(unix, windows))]
+#[doc(no_inline)]
+pub use ene_store::host_service;
 /// Opt-in diagnostics facade (pipeline detail, provider health, memory).
 ///
 /// Strictly observability — control operations (character swap,

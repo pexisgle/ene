@@ -2,7 +2,7 @@
 
 > **クレート**: `ene-runtime` | **役割**: アクターベースのホストファサード & ターンエンジン
 
-`ene-runtime` は Ene を組み込むアプリケーション (`ene-cli`, `ene-desktop`) のメインエントリポイントです。スレッドセーフなファサードである `EneHandle` を所有し、ターンの実行、プロンプト構築 (`ene-mind`)、記憶永続化 (`ene-store`)、プラグイン監視 (`ene-plugin-host`)、およびツール DB IPC ソケットサーバーを統合管理します。
+`ene-runtime` は Ene を組み込むアプリケーション (`ene-cli`, `ene-desktop`) のメインエントリポイントです。スレッドセーフなファサードである `EneHandle` を所有し、ターンの実行、プロンプト構築 (`ene-mind`)、記憶永続化 (`ene-store`)、プラグイン監視 (`ene-plugin-host`)、および共有ホストサービスアクセプタ (ステートフルツール向け `db` 乗客) を統合管理します。
 
 ---
 

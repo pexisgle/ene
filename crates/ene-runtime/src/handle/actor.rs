@@ -47,7 +47,7 @@ use ene_plugin_host::{
 };
 use ene_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
 #[cfg(any(unix, windows))]
-use ene_store::db_server::DbIpcServer;
+use ene_store::host_service::{DbPluginRegistration, HostServiceServer, host_service_socket_path};
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -767,10 +767,10 @@ impl TurnActor {
     ///   still use last-writer-wins registration for the same provider kind;
     ///   conditional deregistration avoids removing a replacement owned by a
     ///   different host.
-    /// - DB IPC servers spawned for the previous host are not torn down; the
-    ///   new set replaces them on the same per-plugin socket paths (the stale
-    ///   socket file is removed before re-binding), so at most one live server
-    ///   serves each plugin.
+    /// - The host-service acceptor spawned for the previous host is not torn
+    ///   down; the new acceptor rebinds the shared socket path (the stale
+    ///   socket file is removed before re-binding), so at most one live
+    ///   listener serves plugins.
     fn spawn_reconfigure_plugin_host(&mut self) {
         if !admit_task(
             &mut self.bg_command_tasks,
@@ -2445,7 +2445,7 @@ async fn reconfigure_plugin_host_bg(
             tracing::warn!(
                 component = "TurnActor",
                 error = %e,
-                "Failed to spawn DB IPC servers during plugin reconfiguration; \
+                "Failed to spawn host service during plugin reconfiguration; \
                  continuing without plugin DB access"
             );
             HashMap::new()
@@ -2961,7 +2961,8 @@ fn plugin_config_blob_updates(
     updates
 }
 
-/// Spawns per-tool DB IPC servers for tool plugins that need database access.
+/// Spawns the shared host-service acceptor with a `db` passenger for each
+/// discovered tool plugin.
 ///
 /// Returns a map of plugin name → auth token. The tokens are passed to
 /// [`ene_plugin_host::PluginHostManager::start`] which hands them to the
@@ -2971,7 +2972,7 @@ fn plugin_config_blob_updates(
 /// actually discovered on disk) rather than by `plugins.list` config keys.
 /// The host manager discovers plugins by scanning for `ene-plugin-{name}`
 /// binaries and only consults config to skip explicitly-disabled names, so
-/// keying tokens off config would orphan DB servers (config key with no
+/// keying tokens off config would orphan registrations (config key with no
 /// matching binary) or starve plugins of tokens (binary with no config
 /// entry). Mirroring the manager's discovery here keeps the two sets aligned.
 pub(super) fn spawn_db_ipc_servers(
@@ -2990,7 +2991,7 @@ pub(super) fn spawn_db_ipc_servers(
             .unwrap_or_default();
 
         // When the plugin system is disabled the host manager spawns nothing,
-        // so no DB servers are needed; spawning them anyway would orphan them.
+        // so no host-service acceptor is needed.
         if !plugin_config.enabled {
             return Ok(db_tokens);
         }
@@ -3003,6 +3004,8 @@ pub(super) fn spawn_db_ipc_servers(
                 message: format!("Failed to create socket dir: {e}"),
             })
         })?;
+
+        let mut db_plugins = HashMap::new();
 
         for name in discover_plugin_names() {
             // Skip plugins explicitly disabled in configuration, mirroring
@@ -3025,21 +3028,8 @@ pub(super) fn spawn_db_ipc_servers(
             };
             let quota_bytes = quota_mb.map(|mb| mb.saturating_mul(1024 * 1024));
 
-            let tool_name = name.clone();
-            let prefix = format!("{name}_");
-            let socket_path = {
-                #[cfg(unix)]
-                {
-                    socket_dir.join(format!("ene-db-{name}.sock"))
-                }
-                #[cfg(windows)]
-                {
-                    std::path::PathBuf::from(format!(r"\\.\pipe\ene-db-{}", name))
-                }
-            };
-
             // Generate a 128-bit pre-shared token for this tool's
-            // DB IPC connection. We use a 256-bit keystream from
+            // host-service `db` session. We use a 256-bit keystream from
             // blake3 (already a dep) keyed by the current nanosecond
             // timestamp + a monotonic counter. blake3 is a CSPRNG
             // and the counter guarantees uniqueness across calls in
@@ -3060,22 +3050,24 @@ pub(super) fn spawn_db_ipc_servers(
             let auth_token = format!("ene-db-{:x}", u128::from_le_bytes(token_out));
 
             db_tokens.insert(name.clone(), auth_token.clone());
-
-            let server = DbIpcServer::new(
-                db.clone(),
-                socket_path,
-                tool_name.clone(),
-                prefix,
+            db_plugins.insert(
                 auth_token,
-                quota_bytes,
+                DbPluginRegistration {
+                    tool_name: name.clone(),
+                    prefix: format!("{name}_"),
+                    quota_bytes,
+                },
             );
-
-            tokio::spawn(async move {
-                if let Err(e) = server.run().await {
-                    tracing::error!(tool = %tool_name, error = %e, "DB IPC server error");
-                }
-            });
         }
+
+        let socket_path = host_service_socket_path();
+        let server = HostServiceServer::new(db, socket_path, db_plugins);
+
+        tokio::spawn(async move {
+            if let Err(e) = server.run().await {
+                tracing::error!(error = %e, "Host service server error");
+            }
+        });
     }
 
     Ok(db_tokens)
@@ -3085,10 +3077,11 @@ pub(super) fn spawn_db_ipc_servers(
 /// directories for executables following the `ene-plugin-{name}` convention.
 ///
 /// This intentionally mirrors `ene_plugin_host::manager::discover_plugins`
-/// (which is private to that crate) so that DB token generation keys off the
-/// exact same set of plugins the host manager will actually spawn. Keeping the
-/// two discovery routines in lockstep is what prevents config-key ↔ binary-name
-/// mismatches from orphaning DB servers or starving plugins of tokens.
+/// (which is private to that crate) so that host-service token generation keys
+/// off the exact same set of plugins the host manager will actually spawn.
+/// Keeping the two discovery routines in lockstep is what prevents
+/// config-key ↔ binary-name mismatches from orphaning registrations or
+/// starving plugins of tokens.
 #[cfg(any(unix, windows))]
 fn discover_plugin_names() -> Vec<String> {
     let mut names = Vec::new();

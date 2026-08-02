@@ -46,7 +46,7 @@ Ene Workspace
 │   ├── ene-plugin-proto   (IPC wire protocol v4 definitions)
 │   ├── ene-plugin         (Plugin authoring SDK & adapter facade)
 │   ├── ene-plugin-host    (Plugin process manager & supervisor)
-│   ├── ene-plugin-db      (Plugin stateful DB IPC client)
+│   ├── ene-plugin-db      (Plugin host-service `db` client)
 │   └── ene-tool-macros    (Proc-macros for tool actions)
 └── Out-of-Process Plugins
     ├── plugins/provider/* (Provider plugins: anthropic)

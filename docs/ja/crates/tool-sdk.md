@@ -11,7 +11,7 @@
 ## アーキテクチャ境界
 
 - `ene-plugin` はツール開発サーフェス（`ToolAction`、`ActionSetProvider`、`prelude::tool`）を所有します。ワークスペース内の依存先は `ene-plugin-proto`（ワイヤプロトコル）、`ene-infer`（ローカル推論の規律）、`ene-tool-macros`（proc-macro derive）のみであり、それ以外は標準的な async/シリアライズ系エコシステムクレート（`tokio`、`tokio-stream`、`tokio-util`、`async-trait`、`schemars`、`serde`/`serde_json`、`tracing`、`thiserror`、`parking_lot`、`base64`）です。`ene-runtime`、`ene-mind`、`ene-store` には依存しません。
-- `ene-plugin-db` は状態を保持するツールバイナリ (例: ファイルシステムの Undo 履歴、TODO ストア) が使用する IPC *クライアント* です。独自のデータベース接続を開く代わりに、ホストの `db_server` (`ene-store` が所有) とソケット越しに通信します — 状態を保持するツールバイナリが2つ目の SQLite ライターになることはありません。
+- `ene-plugin-db` は状態を保持するツールバイナリ (例: ファイルシステムの Undo 履歴、TODO ストア) が使用する IPC *クライアント* です。独自のデータベース接続を開く代わりに、ホストサービス上の `db` 乗客 (`ene-store` が所有) を開きます — 状態を保持するツールバイナリが2つ目の SQLite ライターになることはありません。
 - `ene-tool-macros` は proc-macro のみのクレートです: `#[tool(...)]`/`#[arg(...)]` 属性からコンパイル時に `ToolSpec`/`ToolAction` のボイラープレートを生成し、それ自体のランタイムロジックは持ちません。生成コードは `::ene_plugin::` パスを参照します。
 - RAG によるツール選択はこれらの SDK クレートではなく `ene-rag` (`tool` モジュール) が所有します。詳細は [RAG ポリシー層](rag.md) を参照してください。
 

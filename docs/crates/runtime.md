@@ -2,7 +2,7 @@
 
 > **Crate**: `ene-runtime` | **Role**: Actor-based host facade & turn engine
 
-`ene-runtime` is the primary entry point for applications (`ene-cli`, `ene-desktop`) embedding Ene. It owns `EneHandle`, the thread-safe facade that coordinates turn execution, prompt composition (`ene-mind`), memory storage (`ene-store`), plugin supervision (`ene-plugin-host`), and the tool DB IPC socket server.
+`ene-runtime` is the primary entry point for applications (`ene-cli`, `ene-desktop`) embedding Ene. It owns `EneHandle`, the thread-safe facade that coordinates turn execution, prompt composition (`ene-mind`), memory storage (`ene-store`), plugin supervision (`ene-plugin-host`), and the shared host-service acceptor (with the `db` passenger for stateful tools).
 
 ---
 

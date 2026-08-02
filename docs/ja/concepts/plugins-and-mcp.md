@@ -120,8 +120,8 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 |---|---|---|---|
 | `ene-plugin-app` | `app.*` | システムアプリ起動・ウィンドウ制御 | いいえ |
 | `ene-plugin-browser` | `browser.*` | ヘッドリス Chrome/CDP ブラウザ自動化 | はい (セッションストア) |
-| `ene-plugin-fs` | `fs.*` | サンドボックス化ファイル操作 & Undo 履歴 | はい (DB IPC ソケット) |
-| `ene-plugin-utility` | `utility.*` | 電卓、日時、TODO リスト管理 | はい (DB IPC ソケット) |
+| `ene-plugin-fs` | `fs.*` | サンドボックス化ファイル操作 & Undo 履歴 | はい (ホストサービス `db`) |
+| `ene-plugin-utility` | `utility.*` | 電卓、日時、TODO リスト管理 | はい (ホストサービス `db`) |
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude プロバイダプラグイン | いいえ |
 
@@ -133,16 +133,19 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 ## 5. ツール DB スキーマの宣言と進化
 
 ステートフルなツールプラグイン (`ene-plugin-fs`、`ene-plugin-utility`) は、
-ツールごとの DB IPC サーバー (`ene-store` の `db_server` モジュール) を
-介してデータをホストの `memory.db` に永続化します。プラグインが直接 DDL
-を発行することはありません。`DeclareSchema` リクエストでテーブル・列・
-インデックスを宣言し、ホストが物理テーブルを作成・所有します。すべての
-テーブル名はプラグインのプレフィックス (`fs_`、`utility_`) で始まる必要が
-あり、すべてのインデックス名にもそのプレフィックスを含める必要があります
-(SQLite のインデックス名はデータベース全体で一つのネームスペースを共有する
-ため、プレフィックスのないインデックスは、将来コアのマイグレーションが必要と
-する名前を先取りできてしまいます)。後続のリクエストはすべて宣言に対して
-検証されます。
+共有**ホストサービス**ソケット (`ene-host-service.sock` / named pipe) を
+介してデータをホストの `memory.db` に永続化します。最初のフレームで
+事前共有トークン付きの乗客サービスを開き、現状実装されているのは `db`
+のみです (`ene-store` の `host_service` + `db_server`)。予約 ID
+(`assets` / `capability` / `credential`) は実装まで拒否されます。
+プラグインが直接 DDL を発行することはありません。`DeclareSchema`
+リクエストでテーブル・列・インデックスを宣言し、ホストが物理テーブルを
+作成・所有します。すべてのテーブル名はプラグインのプレフィックス
+(`fs_`、`utility_`) で始まる必要があり、すべてのインデックス名にもその
+プレフィックスを含める必要があります (SQLite のインデックス名は
+データベース全体で一つのネームスペースを共有するため、プレフィックスの
+ないインデックスは、将来コアのマイグレーションが必要とする名前を
+先取りできてしまいます)。後続のリクエストはすべて宣言に対して検証されます。
 
 ### フィンガープリントベースの変更検知
 
