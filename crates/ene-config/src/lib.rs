@@ -63,8 +63,8 @@ pub use paths::{
 };
 pub use patterns::PatternLibrary;
 pub use prompts::{
-    PromptLibrary, SUPPORTED_LANGUAGES, resolve_language_alias,
-    substitute as substitute_prompt_vars,
+    PromptLibrary, SUPPORTED_LANGUAGES, resolve_language_alias, resolve_system_language,
+    substitute as substitute_prompt_vars, system_language,
 };
 pub use resources::ensure_resource_dirs;
 pub use store::ConfigStore;

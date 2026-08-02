@@ -13,6 +13,7 @@ crate-type = ["lib"]
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+sys-locale = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }

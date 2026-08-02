@@ -961,7 +961,7 @@ impl TurnActor {
             .get_section::<ene_mind::MindConfig>()
             .map_or_else(
                 |_| "en".to_string(),
-                |m| m.emotion.classifier_language.clone(),
+                |m| m.resolved_classifier_language().to_owned(),
             );
 
         self.ensure_proactive_llm_non_blocking();
@@ -1117,7 +1117,7 @@ impl TurnActor {
         let (tx, rx) = oneshot::channel();
         self.proactive_decision_rx = Some(rx);
         let config = mind.proactive.clone();
-        let prompt_language = mind.emotion.classifier_language.clone();
+        let prompt_language = mind.resolved_classifier_language().to_owned();
         let handle = tokio::spawn(async move {
             let result = crate::proactive::run_decision_task(
                 config,
@@ -1195,7 +1195,7 @@ impl TurnActor {
             .unwrap_or_default();
         let hint = crate::proactive::proactive_generation_hint(
             &result.topic_hint,
-            &mind.emotion.classifier_language,
+            mind.resolved_classifier_language(),
         );
         let screen_image = self
             .config
@@ -2171,7 +2171,7 @@ impl TurnActor {
             turn_start,
             turn_end,
             level: CompressionLevel::Scene,
-            config: mind.context.clone(),
+            config: mind.resolved_context_config(),
             drop_leading: None,
         };
         let result = ene_mind::ContextManager::execute_manual(store, provider, input).await?;
@@ -2212,7 +2212,7 @@ impl TurnActor {
             return;
         };
         self.context.check_and_trigger(
-            &mind.context,
+            &mind.resolved_context_config(),
             turn_count,
             &history,
             self.session.memory.session_id.as_str(),
@@ -2321,7 +2321,7 @@ impl TurnActor {
             return;
         };
         self.context.check_and_trigger_retroactive(
-            &mind.context,
+            &mind.resolved_context_config(),
             turn_count,
             &history,
             boundary_score,
@@ -2349,7 +2349,7 @@ impl TurnActor {
             self.session.memory.session_id.to_string(),
             self.session.card_name().to_string(),
             self.config.user_name.clone(),
-            mind.context,
+            mind.resolved_context_config(),
         );
     }
 

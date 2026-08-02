@@ -68,7 +68,7 @@ pub async fn execute_hybrid_recall(
         scene_summary: None,
         affect: input.affect,
         commitments: &commitment_prompts,
-        language: &config.emotion.classifier_language,
+        language: config.resolved_classifier_language(),
         character_id: input.character_id,
         user_id: Some(input.user_id),
     };
@@ -286,7 +286,10 @@ mod tests {
             ..Default::default()
         });
 
-        let mut config = MindConfig::default();
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
         config.memory.recall_similarity_threshold = 0.0;
         config.memory.recall_min_score = 0.0;
 
@@ -365,7 +368,10 @@ mod tests {
         };
         insert_with_embedding(&store, &reflection, &embedding).await;
 
-        let mut config = MindConfig::default();
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
         config.memory.recall_similarity_threshold = 0.0;
         config.memory.recall_min_score = 0.0;
         config.memory.reflection.enabled = true;
@@ -444,7 +450,10 @@ mod tests {
         };
         insert_with_embedding(&store, &reflection, &embedding).await;
 
-        let mut config = MindConfig::default();
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
         config.memory.recall_similarity_threshold = 0.0;
         config.memory.recall_min_score = 0.0;
         config.memory.reflection.enabled = false;
@@ -521,7 +530,10 @@ mod tests {
             .await
             .unwrap();
 
-        let mut config = MindConfig::default();
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
         config.memory.recall_similarity_threshold = 0.0;
         config.memory.recall_min_score = 0.0;
 
@@ -589,7 +601,10 @@ mod tests {
                 .unwrap();
         }
 
-        let mut config = MindConfig::default();
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
         config.memory.recall_similarity_threshold = 0.0;
         config.memory.recall_min_score = 0.0;
         config.memory.recall_pending_candidate_limit = 1;
@@ -671,7 +686,10 @@ mod tests {
                 .unwrap();
         }
 
-        let mut config = MindConfig::default();
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
         config.memory.recall_similarity_threshold = 0.0;
         config.memory.recall_min_score = 0.0;
         config.memory.recall_pending_candidate_limit = 1;

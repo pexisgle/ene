@@ -67,6 +67,7 @@
     "mic_device": null
   },
   "mind": {
+    "language": "ja",
     "emotion": {
       "classifier_language": "ja",
       "enabled": true

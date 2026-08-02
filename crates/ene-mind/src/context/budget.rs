@@ -141,9 +141,9 @@ pub struct PackInput {
     pub compression_pending: bool,
     /// Current user input.
     pub user_input: String,
-    /// Section-renderer language (`classifier_language` from the mind config):
-    /// "ja" selects Japanese wording, anything else falls back to English —
-    /// used for e.g. commitment deadline expressions. Belongs in a
+    /// Section-renderer language (resolved classifier language from the mind
+    /// config): "ja" selects Japanese wording, anything else falls back to
+    /// English — used for e.g. commitment deadline expressions. Belongs in a
     /// language pack.
     pub lang: String,
     /// Reference instant for relative expressions such as commitment

@@ -370,7 +370,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     };
     let compose_query = recall_query;
 
-    let prompts = PromptLibrary::load(&mind.emotion.classifier_language);
+    let prompts = PromptLibrary::load(mind.resolved_classifier_language());
     let post_history_phi =
         build_cognitive_output_contract(&card, &prompts, mind.emotion.enabled, &user_name);
 
@@ -1366,7 +1366,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 && !assistant_content.trim().is_empty()
             {
                 let classifier_config = config.clone();
-                let classifier_lang = mind.emotion.classifier_language.clone();
+                let classifier_lang = mind.resolved_classifier_language().to_owned();
                 let classifier_timeout_secs = mind.emotion.classifier_timeout_secs;
                 let classifier_character_id = card_name.clone();
                 let classifier_user_id = user_name.clone();

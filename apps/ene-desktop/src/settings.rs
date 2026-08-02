@@ -876,6 +876,10 @@ impl CharacterSettings {
     }
 
     /// Keep cognitive prompt language aligned with the desktop UI language.
+    ///
+    /// Writes only `mind.language`; `emotion.classifier_language` is left
+    /// untouched so an explicit per-task override is respected and an unset
+    /// one keeps inheriting `mind.language`.
     pub fn sync_classifier_language_from_ui(&self) {
         let lang = match self.language() {
             Language::En => "en",
@@ -883,7 +887,7 @@ impl CharacterSettings {
         };
         self.with_config_mut(|c| {
             if let Ok(mut mind) = c.get_section::<ene_mind::MindConfig>() {
-                mind.emotion.classifier_language = lang.into();
+                mind.language = lang.into();
                 drop(c.set_section(&mind));
             }
         });

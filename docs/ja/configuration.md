@@ -223,10 +223,17 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 ブーストの減衰半減期を制御します。内容の忘却 / 新近性用の
 `default_forgetting_half_life_days` とは独立です。
 
-`mind.emotion.classifier_language`（デフォルト `"en"`）は、感情分類器と認知出力契約で
-使用されるプロンプトライブラリの言語を選択し、決定論的なパターンパック（忘却正規表現と
-想起意図キーワードリスト）も駆動します。
-ユーザー向け LLM 指示文字列は `assets/lang/{lang}/prompts.json` から、決定論的な
+`mind.language`（デフォルト: システムロケールから解決。プライマリ言語コードが `ja` の
+場合のみ `"ja"`、それ以外は `"en"`）は、認知プロンプトと決定論的パターンのアプリ全体の
+言語です。感情分類器・認知出力契約・圧縮要約・想起意図キーワード・記憶抽出パターンは、
+それぞれのタスク別 override が設定されていない限りこれに従います。
+`mind.language` を設定していない既存インストールでは、アップグレード後にプロンプトと
+分類器の言語が変わる可能性があります。デフォルトは以前は英語に固定されていましたが、
+現在はシステムロケールから導出されます（日本語システムでは `ja` になります）。
+`mind.emotion.classifier_language` と `mind.context.compression_language` はタスク別の
+override で、空（デフォルト）の場合は `mind.language` を継承します。記憶抽出は
+`mind.language` に直接従い、分類器設定を参照しません。ユーザー向け LLM 指示文字列は
+`assets/lang/{lang}/prompts.json` から、決定論的な
 パターンは `assets/lang/{lang}/patterns.json` から実行時にロードされます。その
 パックが存在しない場合、`ene_config::SUPPORTED_LANGUAGES`（`en`, `ja`）の言語に
 ついてはコンパイル時埋め込みパックへ、それ以外は英語へフォールバックします。詳細は

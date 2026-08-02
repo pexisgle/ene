@@ -151,13 +151,22 @@ async fn run_before_turn(
     engine.before_turn(ctx).await.unwrap()
 }
 
+/// Test config pinned to English so intent-keyword and prompt-language
+/// behaviour is independent of the machine locale.
+fn test_config() -> MindConfig {
+    MindConfig {
+        language: "en".into(),
+        ..MindConfig::default()
+    }
+}
+
 #[tokio::test]
 async fn scenario_recall_relevant_memory_not_irrelevant() {
     let store = MemoryStore::open_in_memory(4).await.unwrap();
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
-    let config = MindConfig::default();
+    let config = test_config();
     let card = eval_card();
 
     let tea = NewMemoryItem {
@@ -226,7 +235,7 @@ async fn scenario_identity_kernel_survives_long_history() {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
-    let config = MindConfig::default();
+    let config = test_config();
     let card = eval_card();
 
     let mut history = Vec::new();
@@ -299,6 +308,7 @@ async fn scenario_compression_pending_detaches_oldest_recent_exchange() {
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
     let config = MindConfig {
+        language: "en".into(),
         context: ContextConfig {
             recent_turns: 2, // recent window = 2 exchanges (4 messages)
             ..ContextConfig::default()
@@ -430,7 +440,7 @@ async fn scenario_explicit_forget_respected_by_recall() {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
-    let config = MindConfig::default();
+    let config = test_config();
     let card = eval_card();
 
     let item = NewMemoryItem {
@@ -488,7 +498,7 @@ async fn scenario_active_commitments_are_prompt_candidates() {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
-    let config = MindConfig::default();
+    let config = test_config();
     let card = eval_card();
 
     store
@@ -528,7 +538,7 @@ async fn scenario_affect_update_is_deterministic() {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
-    let config = MindConfig::default();
+    let config = test_config();
     let card = eval_card();
     let history = [HistoryEntry {
         role: ene_ai::Role::User,
@@ -574,7 +584,7 @@ async fn scenario_before_turn_does_not_block_on_classifier() {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(PanicLlm);
     let engine = CognitionEngine::new();
-    let config = MindConfig::default();
+    let config = test_config();
     let card = eval_card();
 
     let pre = run_before_turn(
@@ -600,7 +610,7 @@ async fn scenario_pending_classifier_proposal_applies_once() {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
-    let config = MindConfig::default();
+    let config = test_config();
     let card = eval_card();
     store
         .upsert_pending_affect_proposal(&PendingAffectProposal {
@@ -702,7 +712,7 @@ async fn scenario_stale_pending_classifier_proposal_is_dropped() {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
-    let config = MindConfig::default();
+    let config = test_config();
     let card = eval_card();
     store
         .upsert_pending_affect_proposal(&PendingAffectProposal {
@@ -770,7 +780,7 @@ async fn scenario_future_pending_classifier_proposal_is_dropped() {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
-    let config = MindConfig::default();
+    let config = test_config();
     let card = eval_card();
     store
         .upsert_pending_affect_proposal(&PendingAffectProposal {
