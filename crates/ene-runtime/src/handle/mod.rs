@@ -462,6 +462,10 @@ impl EneHandle {
 
         let mind = config.get_section::<ene_mind::MindConfig>()?;
 
+        // Startup validation: warn on mind-config timing relationships that
+        // are accepted but cannot fire sooner than the next poll tick.
+        ene_mind::warn_on_proactive_interval_issues(&mind.proactive);
+
         // Startup validation: warn when a configured context window is
         // too small for the prompt budget plus output reserve, since prompt
         // sections would otherwise be silently dropped every turn.
