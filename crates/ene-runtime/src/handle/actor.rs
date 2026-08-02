@@ -2981,6 +2981,12 @@ fn plugin_config_blob_updates(
     updates
 }
 
+/// Plugin DB auth tokens plus the host-service accept-loop handle.
+///
+/// The handle is `None` when no DB-capable plugin exists (no endpoint bound)
+/// and must be aborted before re-binding on reconfiguration or shutdown.
+pub(super) type DbIpcServers = (HashMap<String, String>, Option<tokio::task::JoinHandle<()>>);
+
 /// Spawns the shared host-service acceptor with a `db` passenger for each
 /// discovered tool plugin.
 ///
@@ -3003,7 +3009,7 @@ fn plugin_config_blob_updates(
 pub(super) fn spawn_db_ipc_servers(
     config: &EneConfig,
     memory_store: Option<&Arc<ene_store::MemoryStore>>,
-) -> Result<(HashMap<String, String>, Option<tokio::task::JoinHandle<()>>), EneRuntimeError> {
+) -> Result<DbIpcServers, EneRuntimeError> {
     let mut db_tokens = HashMap::new();
     let Some(store) = memory_store else {
         return Ok((db_tokens, None));
@@ -3117,7 +3123,10 @@ pub(super) fn spawn_db_ipc_servers(
         return Ok((db_tokens, Some(handle)));
     }
 
-    Ok((db_tokens, None))
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok((db_tokens, None))
+    }
 }
 
 /// Discovers plugin binary names by scanning the builtin and user plugin
