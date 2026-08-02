@@ -30,42 +30,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      - name: Free disk space
-        run: |
-          # The runner image leaves ~25GiB free on /, which a full workspace
-          # target dir plus the cargo registry can exhaust. Detached because
-          # nothing before cargo needs the space and a foreground delete costs
-          # 45-90s per job; the paths are unused by every step here, so no
-          # later step can race a half-deleted tree.
-          sudo bash -c 'nohup rm -rf \
-            /usr/local/lib/android \
-            /usr/share/dotnet \
-            /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL \
-            >/dev/null 2>&1 &'
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Install native dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config cmake clang mold libssl-dev \
-            libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
-            libwayland-dev libxkbcommon-dev libgtk-3-dev \
-            libvulkan-dev libgbm-dev libegl1-mesa-dev libxcb1-dev \
-            glslc spirv-headers
-      - name: Prepare build environment
-        run: |
-          echo "LIBCLANG_PATH=/usr/lib/llvm-$(clang --version | sed -nE 's/.*clang version ([0-9]+)\..*/\1/p')/lib" >> "$GITHUB_ENV"
-          echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Failed runs must not persist partial caches.
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/rust-build-env
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -74,34 +43,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      - name: Free disk space
-        run: |
-          sudo bash -c 'nohup rm -rf \
-            /usr/local/lib/android \
-            /usr/share/dotnet \
-            /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL \
-            >/dev/null 2>&1 &'
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install native dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config cmake clang mold libssl-dev \
-            libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
-            libwayland-dev libxkbcommon-dev libgtk-3-dev \
-            libvulkan-dev libgbm-dev libegl1-mesa-dev libxcb1-dev \
-            glslc spirv-headers
-      - name: Prepare build environment
-        run: |
-          echo "LIBCLANG_PATH=/usr/lib/llvm-$(clang --version | sed -nE 's/.*clang version ([0-9]+)\..*/\1/p')/lib" >> "$GITHUB_ENV"
-          echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/rust-build-env
       - name: Run tests
         run: cargo test --workspace
 
@@ -110,34 +54,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Free disk space
-        run: |
-          sudo bash -c 'nohup rm -rf \
-            /usr/local/lib/android \
-            /usr/share/dotnet \
-            /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL \
-            >/dev/null 2>&1 &'
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install native dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config cmake clang mold libssl-dev \
-            libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
-            libwayland-dev libxkbcommon-dev libgtk-3-dev \
-            libvulkan-dev libgbm-dev libegl1-mesa-dev libxcb1-dev \
-            glslc spirv-headers
-      - name: Prepare build environment
-        run: |
-          echo "LIBCLANG_PATH=/usr/lib/llvm-$(clang --version | sed -nE 's/.*clang version ([0-9]+)\..*/\1/p')/lib" >> "$GITHUB_ENV"
-          echo "CARGO_BUILD_RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-          echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/rust-build-env
       # Not run with RUSTDOCFLAGS=-D warnings: many crates already carry
       # pre-existing broken-intra-doc-link warnings unrelated to #273 (e.g.
       # ene-ai, ene-voice, apps/ene-desktop). Turning warnings into hard

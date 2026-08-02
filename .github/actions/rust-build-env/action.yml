@@ -1,0 +1,53 @@
+name: Rust build environment
+description: Install the native build dependencies and restore the cargo cache.
+
+runs:
+  using: composite
+  steps:
+    # apt runs detached so the cargo cache download overlaps with it. Nothing
+    # between here and the wait step touches the installed packages.
+    - name: Start native dependency install
+      shell: bash
+      run: |
+        cat > "$RUNNER_TEMP/install-native-deps.sh" <<'SCRIPT'
+        #!/usr/bin/env bash
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          pkg-config cmake clang mold libssl-dev \
+          libasound2-dev libdbus-1-dev libpipewire-0.3-dev libclang-dev \
+          libwayland-dev libxkbcommon-dev libgtk-3-dev \
+          libvulkan-dev libgbm-dev libegl1-mesa-dev libxcb1-dev \
+          glslc spirv-headers
+        SCRIPT
+        chmod +x "$RUNNER_TEMP/install-native-deps.sh"
+        nohup bash -c '
+          "$RUNNER_TEMP/install-native-deps.sh" > "$RUNNER_TEMP/native-deps.log" 2>&1
+          echo $? > "$RUNNER_TEMP/native-deps.status"
+        ' > /dev/null 2>&1 &
+        {
+          echo "CARGO_BUILD_RUSTC_WRAPPER="
+          echo "LIBSQLITE3_FLAGS=-DSQLITE_ENABLE_MATH_FUNCTIONS"
+        } >> "$GITHUB_ENV"
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        # Failed runs must not persist partial caches.
+        cache-on-failure: false
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+
+    - name: Wait for native dependencies
+      shell: bash
+      run: |
+        for _ in $(seq 1 600); do
+          if [ -f "$RUNNER_TEMP/native-deps.status" ]; then
+            break
+          fi
+          sleep 1
+        done
+        status="$(cat "$RUNNER_TEMP/native-deps.status" 2>/dev/null || echo timeout)"
+        if [ "$status" != "0" ]; then
+          cat "$RUNNER_TEMP/native-deps.log" 2>/dev/null || true
+          exit 1
+        fi
+        echo "LIBCLANG_PATH=/usr/lib/llvm-$(clang --version | sed -nE 's/.*clang version ([0-9]+)\..*/\1/p')/lib" >> "$GITHUB_ENV"
