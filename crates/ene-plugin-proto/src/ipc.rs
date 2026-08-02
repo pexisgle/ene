@@ -1,4 +1,4 @@
-//! Plugin IPC wire protocol (protocol version 4).
+//! Plugin IPC wire protocol (protocol version 5).
 //!
 //! Extends the tool IPC (v2) with streaming LLM messages and a richer
 //! handshake that carries [`PluginCapabilities`]. The framing is identical:
@@ -70,6 +70,10 @@ impl VersionRange {
 
 /// Plugin IPC protocol version.
 ///
+/// v5 extends v4 with:
+/// - `SetConfig` / `ConfigApplied` for pushing updated plugin configuration
+///   to a live plugin without restarting it
+///
 /// v4 extends v3 with:
 /// - `CancelStream` for explicit stream cancellation (from host to plugin)
 /// - `DeferredCompleted` for push-based deferred task notification
@@ -107,7 +111,7 @@ impl VersionRange {
 /// required field, or removing/renaming an enum variant. New fields should
 /// use `#[serde(default)]` so older/newer peers stay wire-compatible without
 /// a version bump.
-pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 4;
+pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 5;
 
 /// The oldest plugin IPC protocol version the host still accepts.
 ///
@@ -214,6 +218,28 @@ pub enum PluginIpcRequest {
         request_id: String,
         /// The `request_id` of the `CreateChatStream` to cancel.
         stream_request_id: String,
+    },
+    /// Push updated plugin configuration to a live plugin (protocol v5+).
+    ///
+    /// The plugin applies the blob via `ConfigurablePlugin::set_config` (and
+    /// `set_profiles`) and replies with
+    /// [`PluginIpcResponse::ConfigApplied`]. Older plugins that negotiated
+    /// below v5 do not know this variant; the host gates on
+    /// `supports_set_config()` and keeps the local cache updated for the
+    /// next reconnect handshake instead.
+    SetConfig {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
+        /// Plugin-specific configuration JSON (same payload as Handshake
+        /// `plugin_config`).
+        config: serde_json::Value,
+        /// Per-profile plugin configuration JSON.
+        ///
+        /// `None` means profiles were cleared on the host and the live plugin
+        /// must replace any previously stored map (typically with `{}`).
+        #[serde(default)]
+        profiles: Option<serde_json::Value>,
     },
     /// Cancel a deferred (background) task by id.
     CancelDeferred {
@@ -379,6 +405,12 @@ pub enum PluginIpcResponse {
         request_id: String,
         /// The schema, or `None` if not provided.
         schema: Option<serde_json::Value>,
+    },
+    /// Acknowledgment that a [`PluginIpcRequest::SetConfig`] was applied.
+    ConfigApplied {
+        /// Request identifier correlating this response to the originating request.
+        #[serde(default)]
+        request_id: String,
     },
     /// Error response.
     Error {
@@ -1095,6 +1127,40 @@ mod tests {
         };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn request_set_config_roundtrip() {
+        let req = PluginIpcRequest::SetConfig {
+            request_id: "req-cfg-1".into(),
+            config: serde_json::json!({"api_key": {"source": "env"}}),
+            profiles: Some(serde_json::json!({"default": {"voice": "af_heart"}})),
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn request_set_config_omitted_profiles_defaults_to_none() {
+        let json = r#"{"SetConfig":{"request_id":"r1","config":{"k":1}}}"#;
+        let req: PluginIpcRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req,
+            PluginIpcRequest::SetConfig {
+                request_id: "r1".into(),
+                config: serde_json::json!({"k": 1}),
+                profiles: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn response_config_applied_roundtrip() {
+        let resp = PluginIpcResponse::ConfigApplied {
+            request_id: "req-cfg-1".into(),
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
     }
 
     #[tokio::test]

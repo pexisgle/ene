@@ -19,7 +19,7 @@
 //! - [`IpcStream`] / [`IpcListener`] / [`cleanup_path`] — cross-platform
 //!   transport layer (UDS / Named Pipe).
 //!
-//! ### Plugin types (protocol v4)
+//! ### Plugin types (protocol v5)
 //!
 //! - [`PluginCapabilities`] — advertised during the handshake so the host can
 //!   route tool registrations and provider factories.

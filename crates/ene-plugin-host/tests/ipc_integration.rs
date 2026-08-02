@@ -307,6 +307,17 @@ async fn dispatch_mock(
         PluginIpcRequest::Shutdown => PluginIpcResponse::Ack {
             request_id: String::new(),
         },
+        PluginIpcRequest::SetConfig {
+            request_id,
+            config,
+            profiles,
+        } => {
+            let mut s = state.lock().await;
+            s.plugin_config = Some(config);
+            // Mirror plugin-server semantics: `None` clears live profiles.
+            s.plugin_profiles = profiles.or_else(|| Some(serde_json::json!({})));
+            PluginIpcResponse::ConfigApplied { request_id }
+        }
         _ => PluginIpcResponse::Error {
             request_id: String::new(),
             message: "unsupported request in mock".to_string(),
@@ -651,9 +662,10 @@ async fn handshake_succeeds_and_returns_capabilities() {
 
     // The handshake negotiated the current protocol version (mock and host
     // both advertise it by default), so the negotiated-version accessor and
-    // the v4 `CancelStream` feature gate agree.
+    // the v5 `SetConfig` feature gate agree.
     assert_eq!(conn.negotiated_version(), PLUGIN_IPC_PROTOCOL_VERSION);
     assert!(conn.supports_cancel_stream());
+    assert!(conn.supports_set_config());
 
     cleanup_path(&socket_path);
 }
@@ -700,6 +712,126 @@ async fn handshake_delivers_config_and_profiles() {
         s.plugin_profiles,
         Some(profiles),
         "profiles blob must reach the plugin handshake"
+    );
+    drop(s);
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn set_config_pushes_to_live_plugin() {
+    let (conn, state, socket_path) = spawn_and_connect("set-config-live").await;
+
+    let updated = serde_json::json!({"api_key": "sk-hot-reload"});
+    let profiles = serde_json::json!({"p": {"v": 2}});
+    conn.set_config(Some(updated.clone()), Some(profiles.clone()))
+        .await
+        .expect("SetConfig should succeed on a v5 plugin");
+
+    let s = state.lock().await;
+    assert_eq!(
+        s.plugin_config.as_ref(),
+        Some(&updated),
+        "live SetConfig must update the mock's recorded config"
+    );
+    assert_eq!(
+        s.plugin_profiles.as_ref(),
+        Some(&profiles),
+        "live SetConfig must update the mock's recorded profiles"
+    );
+    drop(s);
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn set_config_none_profiles_clears_live_plugin_profiles() {
+    let (conn, state, socket_path) = spawn_and_connect("set-config-clear-profiles").await;
+
+    conn.set_config(
+        Some(serde_json::json!({"api_key": "sk"})),
+        Some(serde_json::json!({"p": {"v": 1}})),
+    )
+    .await
+    .expect("initial SetConfig");
+
+    conn.set_config(Some(serde_json::json!({"api_key": "sk"})), None)
+        .await
+        .expect("clearing SetConfig");
+
+    let s = state.lock().await;
+    assert_eq!(
+        s.plugin_profiles.as_ref(),
+        Some(&serde_json::json!({})),
+        "None profiles on SetConfig must clear, not leave the previous map"
+    );
+    drop(s);
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn set_config_updates_cache_used_on_reconnect() {
+    // After a live SetConfig, a transport-driven reconnect must re-handshake
+    // with the updated blob rather than the original connect-time value.
+    let socket_path = test_socket_path("set-config-reconnect");
+    let state = Arc::new(Mutex::new(MockState::default()));
+
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    let server = tokio::spawn(async move {
+        run_mock_server(server_path, server_state).await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let initial = serde_json::json!({"v": 1});
+    let conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        Some(initial),
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
+    )
+    .await
+    .expect("handshake should succeed");
+
+    let updated = serde_json::json!({"v": 2});
+    conn.set_config(Some(updated.clone()), None)
+        .await
+        .expect("SetConfig should succeed");
+
+    // Kill the server so the next request hits a transport failure and
+    // reconnects; restart it on the same path before the reconnect retries
+    // exhaust.
+    server.abort();
+    cleanup_path(&socket_path);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        run_mock_server(server_path, server_state).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Clear recorded handshake state so we can assert the reconnect payload.
+    {
+        let mut s = state.lock().await;
+        s.plugin_config = None;
+        s.plugin_profiles = None;
+    }
+
+    conn.list_tools()
+        .await
+        .expect("list_tools after reconnect should succeed");
+
+    let s = state.lock().await;
+    assert_eq!(
+        s.plugin_config.as_ref(),
+        Some(&updated),
+        "reconnect handshake must deliver the SetConfig-updated blob"
     );
     drop(s);
 
@@ -787,13 +919,15 @@ async fn handshake_negotiates_min_supported_version_for_older_plugin() {
     let conn = result.expect("handshake with an N-1 plugin should succeed");
     assert_eq!(conn.negotiated_version(), PLUGIN_IPC_MIN_SUPPORTED_VERSION);
 
-    // The negotiated version predates `CancelStream` (v4), so the feature
-    // gate must report it unsupported and `cancel_stream` must fall back to
-    // a no-op rather than sending a message the plugin cannot deserialize.
-    assert!(!conn.supports_cancel_stream());
-    conn.cancel_stream("some-stream")
+    // N-1 is currently v4, so CancelStream is available, but SetConfig (v5)
+    // is not — the gate must report it unsupported and `set_config` must
+    // update the local cache without sending a message the plugin cannot
+    // deserialize.
+    assert!(conn.supports_cancel_stream());
+    assert!(!conn.supports_set_config());
+    conn.set_config(Some(serde_json::json!({"k": 1})), None)
         .await
-        .expect("cancel_stream must no-op instead of erroring on an old plugin");
+        .expect("set_config must no-op IPC instead of erroring on an old plugin");
 
     cleanup_path(&socket_path);
 }

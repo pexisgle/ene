@@ -231,6 +231,47 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
         PluginIpcRequest::Ping { request_id } => PluginIpcResponse::Pong {
             request_id: request_id.clone(),
         },
+        PluginIpcRequest::SetConfig {
+            request_id,
+            config,
+            profiles,
+        } => {
+            if let Some(tool) = &dispatch.tool {
+                tool.set_config(config);
+            }
+            if let Some(llm) = &dispatch.llm {
+                llm.set_config(config);
+            }
+            if let Some(embed) = &dispatch.embed {
+                embed.set_config(config);
+            }
+            if let Some(tts) = &dispatch.tts {
+                tts.set_config(config);
+            }
+            if let Some(stt) = &dispatch.stt {
+                stt.set_config(config);
+            }
+            let cleared = serde_json::json!({});
+            let profiles = profiles.as_ref().unwrap_or(&cleared);
+            if let Some(tool) = &dispatch.tool {
+                tool.set_profiles(profiles);
+            }
+            if let Some(llm) = &dispatch.llm {
+                llm.set_profiles(profiles);
+            }
+            if let Some(embed) = &dispatch.embed {
+                embed.set_profiles(profiles);
+            }
+            if let Some(tts) = &dispatch.tts {
+                tts.set_profiles(profiles);
+            }
+            if let Some(stt) = &dispatch.stt {
+                stt.set_profiles(profiles);
+            }
+            PluginIpcResponse::ConfigApplied {
+                request_id: request_id.clone(),
+            }
+        }
         PluginIpcRequest::GetConfigSchema { request_id } => {
             let schema = dispatch
                 .tool

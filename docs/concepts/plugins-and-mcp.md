@@ -1,6 +1,6 @@
 # IPC Plugin System & MCP Integration
 
-This document covers Ene's out-of-process IPC plugin architecture, Protocol v4 wire specs, Model Context Protocol (MCP) server integration, and built-in tool plugins.
+This document covers Ene's out-of-process IPC plugin architecture, Protocol v5 wire specs, Model Context Protocol (MCP) server integration, and built-in tool plugins.
 
 ---
 
@@ -13,7 +13,7 @@ Ene Host Application (ene-runtime)
   │
   └── PluginHostManager (ene-plugin-host)
         │
-        ├── IPC Protocol v4 (Length-prefixed JSON over stdio)
+        ├── IPC Protocol v5 (Length-prefixed JSON over stdio)
         │     ├── ene-plugin-anthropic (Anthropic LLM Provider Plugin)
         │     ├── ene-plugin-app       (GUI Launcher Tool)
         │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
@@ -27,12 +27,12 @@ Ene Host Application (ene-runtime)
 
 ---
 
-## 2. IPC Protocol v4 Specification
+## 2. IPC Protocol v5 Specification
 
-Plugins communicate over `stdin`/`stdout` using **IPC Protocol v4**:
+Plugins communicate over `stdin`/`stdout` using **IPC Protocol v5**:
 
 - **Framing**: Every packet begins with a 4-byte little-endian `u32` payload size followed by UTF-8 JSON.
-- **Handshake Negotiation**: The host sends `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`, i.e. `VersionRange { min: 3, max: 4 }` — not a single pinned value. The plugin intersects that range with its own supported range via `VersionRange::negotiate` and responds with `HandshakeAck { version, capabilities: PluginCapabilities }`, where `version` is the highest version common to both sides.
+- **Handshake Negotiation**: The host sends `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`, i.e. `VersionRange { min: 4, max: 5 }` — not a single pinned value. The plugin intersects that range with its own supported range via `VersionRange::negotiate` and responds with `HandshakeAck { version, capabilities: PluginCapabilities }`, where `version` is the highest version common to both sides.
 - **Handshake Timeout**: The host bounds how long it waits for the `HandshakeAck` (`plugins.handshake_timeout_ms`, default 10 s). A plugin that accepts the socket but never replies fails the handshake with `PluginHostError::HandshakeFailed` instead of blocking startup of the remaining plugins. Plugin authors must answer the handshake promptly and defer heavy initialization (model loading, etc.) until afterwards — see `run_plugin_server` in `ene-plugin`.
 - **Request Correlation**: All async requests and responses include a mandatory `request_id` (`Uuid`).
 - **Capabilities**: Plugins advertise supported capabilities (`tools`, `llm_providers`, `stt_providers`, `tts_providers`), each provider spec also declaring a `concurrency: ConcurrencyHint` (see [§3](#3-provider-concurrency-concurrencyhint)).
@@ -45,8 +45,8 @@ Tool and provider plugins ship as independent out-of-process binaries. Bumping `
 - A plugin binary is not required to support a range — it may keep declaring `VersionRange { min: N, max: N }` for whatever version it was built against. The compatibility responsibility is concentrated in the host, not pushed onto every plugin author.
 - **Bumping the protocol version**: when `PLUGIN_IPC_PROTOCOL_VERSION` is bumped, `PLUGIN_IPC_MIN_SUPPORTED_VERSION` must be bumped by the same amount, dropping support for the oldest previously-supported version.
 - **When a bump is required**: only for changing the meaning of an existing message, adding a required field, or removing/renaming an enum variant. New fields should use `#[serde(default)]` so older/newer peers stay wire-compatible without a version bump.
-- **Feature gating**: the host stores the negotiated version on `IpcPluginConnection` (`ene-plugin-host`) and exposes it via `negotiated_version()`. Behavior that depends on a message introduced after the minimum supported version should gate on it — e.g. `supports_cancel_stream()` gates `PluginIpcRequest::CancelStream` (introduced in v4) so a v3 plugin isn't sent a message it cannot deserialize; the connection falls back to its existing timeout-based stream termination instead.
-- **Negotiation failure diagnostics**: when a plugin's proposed range and the host's supported range do not overlap, the plugin's `HandshakeAck` error and the host's `PluginHostError::HandshakeFailed` / `ProtocolMismatch` both name the ranges on both sides (e.g. "host supports 3..=4, plugin supports 2..=2"), so a developer can tell the plugin binary needs rebuilding rather than seeing a generic handshake failure.
+- **Feature gating**: the host stores the negotiated version on `IpcPluginConnection` (`ene-plugin-host`) and exposes it via `negotiated_version()`. Behavior that depends on a message introduced after the minimum supported version should gate on it — e.g. `supports_set_config()` gates `PluginIpcRequest::SetConfig` (introduced in v5) so a v4 plugin isn't sent a message it cannot deserialize; the host still updates its local cache so the next reconnect handshake delivers the fresh config.
+- **Negotiation failure diagnostics**: when a plugin's proposed range and the host's supported range do not overlap, the plugin's `HandshakeAck` error and the host's `PluginHostError::HandshakeFailed` / `ProtocolMismatch` both name the ranges on both sides (e.g. "host supports 4..=5, plugin supports 3..=3"), so a developer can tell the plugin binary needs rebuilding rather than seeing a generic handshake failure.
 
 ---
 
@@ -304,14 +304,23 @@ MCP stdio servers support the same `env_passthrough` field in their
 ### Plugin configuration flow (`set_config` / `set_profiles`)
 
 Every plugin — tool **or** provider — receives its configuration from the
-host once, during the IPC handshake. The `plugins.list.<name>.config` blob is
-delivered verbatim via `ConfigurablePlugin::set_config`; the
+host during the IPC handshake **and** on live updates via
+`PluginIpcRequest::SetConfig` (protocol v5+). The `plugins.list.<name>.config`
+blob is delivered verbatim via `ConfigurablePlugin::set_config`; the
 `plugins.list.<name>.profiles.<profile>` map (for per-model/voice settings) is
 delivered via `ConfigurablePlugin::set_profiles`. Both are host-opaque: the
-host stores them as-is, never interprets their keys, and re-sends them on
-reconnect. Provider plugins (LLM/embed/TTS/STT) get the same delivery as tool
-plugins, so e.g. the Anthropic provider can receive its API key at handshake
-time rather than per request.
+host stores them as-is, never interprets their keys, refreshes the connection
+cache before each push, and re-sends them on reconnect. When a settings
+hot-reload changes a plugin's config/profiles without changing the enable-set,
+the runtime pushes `SetConfig` to the live connection instead of restarting
+the plugin host. A peer that negotiated below v5 gets a warn + local-cache
+update only (no live IPC). Provider plugins (LLM/embed/TTS/STT) get the same
+delivery as tool plugins, so e.g. the Anthropic provider can receive its API
+key at handshake time rather than per request.
+
+Do **not** put host-reserved entry keys (`enable`, `checksum`) inside the
+nested `config` object — they collide with `plugins.list.<name>` fields. The
+host warns when those keys appear in a delivered config blob.
 
 A plugin advertises the JSON Schema its config accepts via
 `config_schema()`. Fields marked `x-ene-secret: true` in that schema will be

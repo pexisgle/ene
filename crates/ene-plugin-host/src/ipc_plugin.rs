@@ -41,6 +41,21 @@ fn next_request_id() -> String {
 /// their end.
 const CANCEL_STREAM_MIN_VERSION: u32 = 4;
 
+/// Protocol version at which [`PluginIpcRequest::SetConfig`] was introduced.
+/// Plugins that negotiated an older version do not know this message
+/// variant; the host updates its local cache and skips the IPC send.
+const SET_CONFIG_MIN_VERSION: u32 = 5;
+
+/// How a [`IpcPluginConnection::set_config`] call delivers the update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetConfigOutcome {
+    /// `SetConfig` IPC was delivered to the live plugin.
+    Pushed,
+    /// The peer negotiated a protocol below `SetConfig` support; only the
+    /// reconnect cache was updated.
+    CachedOnly,
+}
+
 /// Shared routing state for the single reader task.
 ///
 /// Every incoming [`PluginIpcResponse`] is dispatched here by the reader task
@@ -124,6 +139,7 @@ fn response_request_id(resp: &PluginIpcResponse) -> Option<&str> {
         PluginIpcResponse::Ack { request_id }
         | PluginIpcResponse::Pong { request_id }
         | PluginIpcResponse::ConfigSchema { request_id, .. }
+        | PluginIpcResponse::ConfigApplied { request_id }
         | PluginIpcResponse::Error { request_id, .. }
         | PluginIpcResponse::Tools { request_id, .. }
         | PluginIpcResponse::CallResult { request_id, .. }
@@ -197,11 +213,14 @@ async fn reader_loop(mut reader: ReadHalf<IpcStream>, router: Arc<Router>) {
 pub struct IpcPluginConnection {
     socket_path: PathBuf,
     sandbox: SandboxConfigData,
-    plugin_config: Option<serde_json::Value>,
+    /// Plugin configuration re-sent on every (re)connect handshake and
+    /// updated by [`set_config`](Self::set_config) before a live `SetConfig`
+    /// IPC push so reconnect always uses the freshest value.
+    plugin_config: parking_lot::RwLock<Option<serde_json::Value>>,
     /// Per-profile plugin configuration (`plugins.list.<name>.profiles`),
     /// re-sent to the plugin on every (re)connect handshake alongside
     /// [`plugin_config`](Self::plugin_config).
-    plugin_profiles: Option<serde_json::Value>,
+    plugin_profiles: parking_lot::RwLock<Option<serde_json::Value>>,
     /// Write half of the IPC stream, behind its own lock so the write is
     /// serialized (frames never interleave) but released before the response
     /// wait. The read half is owned by the reader task. `None` while
@@ -362,8 +381,8 @@ impl IpcPluginConnection {
         Ok(Self {
             socket_path: socket_path.to_path_buf(),
             sandbox,
-            plugin_config,
-            plugin_profiles,
+            plugin_config: parking_lot::RwLock::new(plugin_config),
+            plugin_profiles: parking_lot::RwLock::new(plugin_profiles),
             writer: Mutex::new(Some(writer)),
             capabilities: parking_lot::RwLock::new(capabilities),
             negotiated_version: AtomicU32::new(negotiated_version),
@@ -418,6 +437,17 @@ impl IpcPluginConnection {
     /// introduced in, and branch on it wherever the feature is used.
     pub fn supports_cancel_stream(&self) -> bool {
         self.negotiated_version() >= CANCEL_STREAM_MIN_VERSION
+    }
+
+    /// Returns whether the negotiated protocol version supports live config
+    /// updates via [`PluginIpcRequest::SetConfig`].
+    ///
+    /// `SetConfig` was introduced in protocol v5. A plugin that negotiated
+    /// v4 does not know this message variant, so [`set_config`](Self::set_config)
+    /// updates the local cache (for the next reconnect handshake) and skips
+    /// the IPC send.
+    pub fn supports_set_config(&self) -> bool {
+        self.negotiated_version() >= SET_CONFIG_MIN_VERSION
     }
 
     /// Sends a `ListTools` request and returns the actual tool specs.
@@ -686,6 +716,51 @@ impl IpcPluginConnection {
         Self::expect_ack(resp, "CancelStream")
     }
 
+    /// Updates the stored config/profiles and, when supported, pushes
+    /// [`PluginIpcRequest::SetConfig`] to the live plugin.
+    ///
+    /// The local cache is always updated first so a later reconnect
+    /// handshake delivers the fresh values even when the peer negotiated a
+    /// protocol version below [`supports_set_config`](Self::supports_set_config)
+    /// (in that case the IPC send is skipped with a warning and
+    /// [`SetConfigOutcome::CachedOnly`] is returned).
+    ///
+    /// Returns [`SetConfigOutcome::Pushed`] when the live plugin received the
+    /// update.
+    pub async fn set_config(
+        &self,
+        config: Option<serde_json::Value>,
+        profiles: Option<serde_json::Value>,
+    ) -> Result<SetConfigOutcome, PluginHostError> {
+        self.plugin_config.write().clone_from(&config);
+        self.plugin_profiles.write().clone_from(&profiles);
+
+        if !self.supports_set_config() {
+            tracing::warn!(
+                component = "IpcPluginConnection",
+                negotiated_version = self.negotiated_version(),
+                "plugin negotiated a version below SetConfig support; \
+                 local config cache updated for reconnect, live push skipped"
+            );
+            return Ok(SetConfigOutcome::CachedOnly);
+        }
+
+        let resp = self
+            .do_request(PluginIpcRequest::SetConfig {
+                request_id: String::new(),
+                config: config.unwrap_or_else(|| serde_json::json!({})),
+                profiles,
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::ConfigApplied { .. } => Ok(SetConfigOutcome::Pushed),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to SetConfig: {other:?}"
+            ))),
+        }
+    }
+
     /// Sends a `CreateChatStream` request and returns a receiver for the
     /// stream's responses.
     ///
@@ -849,13 +924,17 @@ impl IpcPluginConnection {
 
         let mut stream = Self::connect_with_retry(&self.socket_path, &name).await?;
 
+        // Clone under the parking_lot guards *before* awaiting so the
+        // non-Send read guards are not held across `.await`.
+        let plugin_config = self.plugin_config.read().clone();
+        let plugin_profiles = self.plugin_profiles.read().clone();
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::Handshake {
                 version: VersionRange::host_supported(),
                 sandbox: self.sandbox.clone(),
-                plugin_config: self.plugin_config.clone(),
-                plugin_profiles: self.plugin_profiles.clone(),
+                plugin_config,
+                plugin_profiles,
             },
         )
         .await
@@ -994,6 +1073,9 @@ impl IpcPluginConnection {
             | PluginIpcRequest::TranscribeAudio {
                 request_id: rid, ..
             }
+            | PluginIpcRequest::SetConfig {
+                request_id: rid, ..
+            }
             | PluginIpcRequest::Ping { request_id: rid } => {
                 *rid = request_id.to_string();
             }
@@ -1070,6 +1152,7 @@ impl IpcPluginConnection {
             | PluginIpcRequest::EmbedBatch { request_id, .. }
             | PluginIpcRequest::SynthesizeSpeech { request_id, .. }
             | PluginIpcRequest::TranscribeAudio { request_id, .. }
+            | PluginIpcRequest::SetConfig { request_id, .. }
             | PluginIpcRequest::Ping { request_id } => Some(request_id.as_str()),
             PluginIpcRequest::Handshake { .. } | PluginIpcRequest::Shutdown => None,
         }
@@ -1382,6 +1465,11 @@ mod tests {
                 model: "m".into(),
                 dimensions: None,
                 items: Vec::new(),
+            },
+            PluginIpcRequest::SetConfig {
+                request_id: String::new(),
+                config: serde_json::json!({}),
+                profiles: None,
             },
         ]
     }
