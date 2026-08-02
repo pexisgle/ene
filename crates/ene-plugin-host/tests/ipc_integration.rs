@@ -314,9 +314,8 @@ async fn dispatch_mock(
         } => {
             let mut s = state.lock().await;
             s.plugin_config = Some(config);
-            if profiles.is_some() {
-                s.plugin_profiles = profiles;
-            }
+            // Mirror plugin-server semantics: `None` clears live profiles.
+            s.plugin_profiles = profiles.or_else(|| Some(serde_json::json!({})));
             PluginIpcResponse::ConfigApplied { request_id }
         }
         _ => PluginIpcResponse::Error {
@@ -739,6 +738,32 @@ async fn set_config_pushes_to_live_plugin() {
         s.plugin_profiles.as_ref(),
         Some(&profiles),
         "live SetConfig must update the mock's recorded profiles"
+    );
+    drop(s);
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn set_config_none_profiles_clears_live_plugin_profiles() {
+    let (conn, state, socket_path) = spawn_and_connect("set-config-clear-profiles").await;
+
+    conn.set_config(
+        Some(serde_json::json!({"api_key": "sk"})),
+        Some(serde_json::json!({"p": {"v": 1}})),
+    )
+    .await
+    .expect("initial SetConfig");
+
+    conn.set_config(Some(serde_json::json!({"api_key": "sk"})), None)
+        .await
+        .expect("clearing SetConfig");
+
+    let s = state.lock().await;
+    assert_eq!(
+        s.plugin_profiles.as_ref(),
+        Some(&serde_json::json!({})),
+        "None profiles on SetConfig must clear, not leave the previous map"
     );
     drop(s);
 

@@ -222,7 +222,7 @@ pub enum PluginIpcRequest {
     /// Push updated plugin configuration to a live plugin (protocol v5+).
     ///
     /// The plugin applies the blob via `ConfigurablePlugin::set_config` (and
-    /// optionally `set_profiles`) and replies with
+    /// `set_profiles`) and replies with
     /// [`PluginIpcResponse::ConfigApplied`]. Older plugins that negotiated
     /// below v5 do not know this variant; the host gates on
     /// `supports_set_config()` and keeps the local cache updated for the
@@ -234,7 +234,10 @@ pub enum PluginIpcRequest {
         /// Plugin-specific configuration JSON (same payload as Handshake
         /// `plugin_config`).
         config: serde_json::Value,
-        /// Per-profile plugin configuration JSON, when present.
+        /// Per-profile plugin configuration JSON.
+        ///
+        /// `None` means profiles were cleared on the host and the live plugin
+        /// must replace any previously stored map (typically with `{}`).
         #[serde(default)]
         profiles: Option<serde_json::Value>,
     },

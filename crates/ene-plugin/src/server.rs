@@ -527,9 +527,11 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             profiles,
         } => {
             dispatch.set_config(config);
-            if let Some(profiles) = profiles {
-                dispatch.set_profiles(profiles);
-            }
+            // `None` means profiles were cleared on the host (empty map →
+            // `delivered_profiles()` is `None`). Always apply so stale
+            // profiles cannot linger after a hot clear.
+            let cleared = serde_json::json!({});
+            dispatch.set_profiles(profiles.as_ref().unwrap_or(&cleared));
             PluginIpcResponse::ConfigApplied {
                 request_id: request_id.clone(),
             }
@@ -1618,6 +1620,47 @@ mod tests {
         assert_eq!(
             plugin.profiles.lock().unwrap().as_ref(),
             Some(&serde_json::json!({"p": {"v": 1}}))
+        );
+    }
+
+    #[tokio::test]
+    async fn set_config_none_profiles_clears_live_profiles() {
+        let plugin = Arc::new(RecordingLlmPlugin::new());
+        let dispatch = PluginDispatch {
+            tool: None,
+            llm: Some(Arc::clone(&plugin) as Arc<dyn LlmPlugin>),
+            embed: None,
+            tts: None,
+            stt: None,
+        };
+        let _ = dispatch_request(
+            &dispatch,
+            &PluginIpcRequest::SetConfig {
+                request_id: "req-set".into(),
+                config: serde_json::json!({"api_key": "sk-hot"}),
+                profiles: Some(serde_json::json!({"p": {"v": 1}})),
+            },
+        )
+        .await;
+        let resp = dispatch_request(
+            &dispatch,
+            &PluginIpcRequest::SetConfig {
+                request_id: "req-clear".into(),
+                config: serde_json::json!({"api_key": "sk-hot"}),
+                profiles: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            resp,
+            PluginIpcResponse::ConfigApplied {
+                request_id: "req-clear".into(),
+            }
+        );
+        assert_eq!(
+            plugin.profiles.lock().unwrap().as_ref(),
+            Some(&serde_json::json!({})),
+            "cleared profiles must replace the previous map, not leave it stale"
         );
     }
 

@@ -95,11 +95,12 @@ pub trait ConfigurablePlugin: Send + Sync {
     /// Receives plugin-specific configuration (called once during Handshake).
     fn set_config(&self, _config: &serde_json::Value) {}
 
-    /// Receives per-profile plugin configuration (called once during Handshake
-    /// when `plugins.list.<name>.profiles` is configured).
+    /// Receives per-profile plugin configuration (Handshake when
+    /// `plugins.list.<name>.profiles` is set, and live `SetConfig`).
     ///
     /// The value is the raw `profiles` JSON object (`Map<profile, config>`);
-    /// profile selection is plugin-owned.
+    /// profile selection is plugin-owned. On live `SetConfig`, an empty object
+    /// means profiles were cleared and must replace any previously stored map.
     fn set_profiles(&self, _profiles: &serde_json::Value) {}
 
     /// Returns the JSON Schema for the configuration this plugin accepts.

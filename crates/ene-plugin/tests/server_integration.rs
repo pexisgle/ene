@@ -251,22 +251,22 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             if let Some(stt) = &dispatch.stt {
                 stt.set_config(config);
             }
-            if let Some(profiles) = profiles {
-                if let Some(tool) = &dispatch.tool {
-                    tool.set_profiles(profiles);
-                }
-                if let Some(llm) = &dispatch.llm {
-                    llm.set_profiles(profiles);
-                }
-                if let Some(embed) = &dispatch.embed {
-                    embed.set_profiles(profiles);
-                }
-                if let Some(tts) = &dispatch.tts {
-                    tts.set_profiles(profiles);
-                }
-                if let Some(stt) = &dispatch.stt {
-                    stt.set_profiles(profiles);
-                }
+            let cleared = serde_json::json!({});
+            let profiles = profiles.as_ref().unwrap_or(&cleared);
+            if let Some(tool) = &dispatch.tool {
+                tool.set_profiles(profiles);
+            }
+            if let Some(llm) = &dispatch.llm {
+                llm.set_profiles(profiles);
+            }
+            if let Some(embed) = &dispatch.embed {
+                embed.set_profiles(profiles);
+            }
+            if let Some(tts) = &dispatch.tts {
+                tts.set_profiles(profiles);
+            }
+            if let Some(stt) = &dispatch.stt {
+                stt.set_profiles(profiles);
             }
             PluginIpcResponse::ConfigApplied {
                 request_id: request_id.clone(),
