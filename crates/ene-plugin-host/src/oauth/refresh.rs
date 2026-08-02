@@ -42,6 +42,10 @@ impl RefreshFailure {
     }
 }
 
+/// Shared in-flight refresh slot: one HTTP refresh per storage key, with all
+/// concurrent callers for that key awaiting the same result.
+type RefreshSlot = Arc<AsyncMutex<Option<Result<CredentialStore, RefreshFailure>>>>;
+
 /// Refreshes `OAuth2` tokens through each credential's declared token
 /// endpoint, coalescing concurrent refreshes for the same key onto one HTTP
 /// call and persisting rotation.
@@ -50,9 +54,7 @@ pub struct OAuthRefresher {
     registry: Arc<CredentialRegistry>,
     persister: Arc<dyn CredentialPersister>,
     /// storage key → in-flight refresh slot (single-flight).
-    in_flight: AsyncMutex<
-        HashMap<String, Arc<AsyncMutex<Option<Result<CredentialStore, RefreshFailure>>>>>,
-    >,
+    in_flight: AsyncMutex<HashMap<String, RefreshSlot>>,
     /// storage key → time until which refreshes are refused after a failure.
     cooldown: Mutex<HashMap<String, Instant>>,
 }

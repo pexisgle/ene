@@ -82,11 +82,9 @@ impl LoopbackServer {
             let request =
                 match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request(&mut socket)).await {
                     Ok(Ok(request)) => request,
-                    Ok(Err(())) => {
-                        respond(&mut socket, 400).await;
-                        continue;
-                    }
-                    Err(_) => {
+                    // A socket that stalls or sends garbage is dropped and
+                    // the flow keeps listening for the real callback.
+                    Ok(Err(())) | Err(_) => {
                         respond(&mut socket, 400).await;
                         continue;
                     }
@@ -196,9 +194,9 @@ async fn respond(socket: &mut TcpStream, status: u16) {
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    let _ = socket.write_all(head.as_bytes()).await;
-    let _ = socket.write_all(body.as_bytes()).await;
-    let _ = socket.flush().await;
+    drop(socket.write_all(head.as_bytes()).await);
+    drop(socket.write_all(body.as_bytes()).await);
+    drop(socket.flush().await);
 }
 
 #[cfg(test)]

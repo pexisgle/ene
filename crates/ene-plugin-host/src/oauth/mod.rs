@@ -138,6 +138,9 @@ pub struct CredentialInfo {
     pub expired: bool,
 }
 
+/// Opens the authorization URL in the user's browser; injectable for tests.
+type BrowserOpener = dyn Fn(&str) -> Result<(), String> + Send + Sync;
+
 /// Drives OAuth authorization flows and credential revocation.
 ///
 /// One flow per storage key: a second `start_*` while one is in flight is
@@ -157,7 +160,7 @@ pub struct OAuthFlowManager {
     pending: Mutex<HashMap<String, Instant>>,
     http: reqwest::Client,
     /// Opens the authorization URL in the user's browser.
-    browser: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
+    browser: Arc<BrowserOpener>,
 }
 
 impl OAuthFlowManager {
@@ -191,10 +194,7 @@ impl OAuthFlowManager {
 
     /// Overrides the browser opener (tests inject a fake).
     #[must_use]
-    pub fn with_browser(
-        mut self,
-        browser: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
-    ) -> Self {
+    pub fn with_browser(mut self, browser: Arc<BrowserOpener>) -> Self {
         self.browser = browser;
         self
     }
@@ -394,8 +394,8 @@ impl OAuthFlowManager {
         let opener = Arc::clone(&self.browser);
         // webbrowser::open blocks on a spawned helper; run it off the async
         // worker so the flow task stays responsive.
-        let opened = tokio::task::spawn_blocking(move || opener(&url)).await;
-        match opened {
+        let result = tokio::task::spawn_blocking(move || opener(&url)).await;
+        match result {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(FlowError::BrowserOpen(error)),
             Err(_) => Err(FlowError::BrowserOpen(

@@ -89,7 +89,7 @@ async fn parse_token_response(
         .and_then(Value::as_str)
         .map(str::to_owned);
     // Some servers return `expires_in` as a JSON number, others as a string.
-    let expires_in = body.get("expires_in").and_then(|v| v.as_i64()).or_else(|| {
+    let expires_in = body.get("expires_in").and_then(Value::as_i64).or_else(|| {
         body.get("expires_in")
             .and_then(Value::as_str)
             .and_then(|s| s.parse().ok())
