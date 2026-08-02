@@ -327,6 +327,7 @@ MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passt
       "label": "Anthropic API Key",
       "help_url": "https://console.anthropic.com/settings/keys" },
     { "id": "google.calendar", "kind": "oauth2",
+      "client_id": "1234.apps.googleusercontent.com",
       "scopes": ["https://www.googleapis.com/auth/calendar.readonly"],
       "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
       "token_url": "https://oauth2.googleapis.com/token",
@@ -346,9 +347,12 @@ ID は `[A-Za-z0-9._-]` を受け付け、先頭・末尾に `.` を置けませ
   である必要があります（例: `Bearer {value}`）。`env_fallback` は値が保存
   されていない場合にホストが確認する環境変数名です。カスタム名には
   `plugins.list.<plugin>.credential_env_allowlist` への明示的な登録が必要です。
-- `kind: "oauth2"` — ホストが駆動する OAuth2 フロー。`scopes` は同意画面の
+- `kind: "oauth2"` — ホストが駆動する OAuth2 フロー。`client_id` は PKCE
+  フローでも認可サーバーが要求する公開クライアント ID です（デスクトップアプリ
+  はクライアントシークレットを同梱しません）。`scopes` は同意画面の
   スコープ一覧、`auth_url` / `token_url` は認可エンドポイントとトークン
-  エンドポイントです。
+  エンドポイントです。フロー・自動更新・保管の詳細は
+  [資格情報](credentials.md) を参照してください。
 
 **共有ポリシー。** 宣言は既定で共有されます。両方のプラグインが `anthropic`
 を宣言していれば同じ保存値を参照するため、プロバイダーを差し替えてもキーを
@@ -563,9 +567,11 @@ API キーを読み出さないようにするための仕組みです。ホス�
 `env_fallback` は、宣言元プラグインの `credential_env_allowlist` に明示的に
 登録された場合だけ利用されます。
 
-OAuth 形式の資格情報 (`google.calendar` のような `namespace.name` id) は
-OAuth フローとともに導入されます。それまでは期限切れの資格情報は
-`RefreshRequired` エラーになります。
+OAuth 形式の資格情報 (`google.calendar` のような `namespace.name` id) は、
+ホストが駆動する認可フローで取得され、ホストが自動更新します
+([資格情報](credentials.md) 参照)。更新に失敗した期限切れの資格情報は
+`RefreshRequired` エラーになり、クライアントは `authorization_required` として
+表示します。
 
 ### 無効化プッシュ
 

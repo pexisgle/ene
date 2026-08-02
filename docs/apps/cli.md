@@ -31,9 +31,23 @@ Inside the `ene-cli` interactive prompt, type `/` to access commands:
 | `/memory clear` | Purge or reset active session memories |
 | `/tool list` | List registered IPC tool plugins & active MCP servers |
 | `/tool call <name> <json>` | Execute a tool action directly from REPL |
+| `/auth list` | List stored / declared credentials |
+| `/auth status <id>` | Show the status of one credential |
+| `/auth revoke <id>` | Revoke a stored credential |
+| `/auth authorize <id>` | Unsupported in the CLI (needs a browser); prints guidance |
 | `/session list` | List active & past sessions in SQLite |
 | `/session split` | Force an immediate session boundary split |
 | `/quit` or `/exit` | Safely shutdown `ene-runtime` and exit |
+
+---
+
+## OAuth credentials
+
+The OAuth authorization flow opens a browser, so it is not available in the
+CLI (especially headless): use the desktop app's Credentials settings page
+to authorize OAuth services. The CLI can still inspect and revoke stored
+credentials with `/auth list`, `/auth status <id>`, and `/auth revoke <id>`.
+See [Credentials](../concepts/credentials.md) for details.
 
 ---
 

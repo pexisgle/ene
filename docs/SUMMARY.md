@@ -11,6 +11,7 @@
 - [Memory System](concepts/memory-system.md)
 - [Character Card Macros](concepts/character-card-macros.md)
 - [Voice & Avatar](concepts/voice-and-avatar.md)
+- [Credentials](concepts/credentials.md)
 - [Plugins & MCP](concepts/plugins-and-mcp.md)
 
 # Crates API Reference

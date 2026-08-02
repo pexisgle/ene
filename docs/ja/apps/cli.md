@@ -31,9 +31,23 @@ RUST_LOG=info cargo run -p ene-cli
 | `/memory clear` | アクティブセッションの記憶をリセット |
 | `/tool list` | 登録済み IPC ツールプラグインおよび MCP サーバーを表示 |
 | `/tool call <名> <json>` | REPL から直接ツールアクションを実行 |
+| `/auth list` | 保存済み・宣言済みの資格情報を一覧表示 |
+| `/auth status <id>` | 1 つの資格情報の状態を表示 |
+| `/auth revoke <id>` | 保存済みの資格情報を取り消し |
+| `/auth authorize <id>` | CLI では非対応（ブラウザが必要）。案内を表示 |
 | `/session list` | SQLite 内の過去・現在のセッション一覧を表示 |
 | `/session split` | 手動で即時にセッション境界を分割 |
 | `/quit` または `/exit` | `ene-runtime` を安全にシャットダウンして終了 |
+
+---
+
+## OAuth 資格情報
+
+OAuth 認可フローはブラウザを開くため、CLI（特にヘッドレス環境）では実行でき
+ません。OAuth サービスの認可はデスクトップアプリの設定画面（資格情報）で行って
+ください。CLI では保存済みの資格情報の確認・取り消しを
+`/auth list`・`/auth status <id>`・`/auth revoke <id>` で行えます。
+詳細は [資格情報](../concepts/credentials.md) を参照してください。
 
 ---
 

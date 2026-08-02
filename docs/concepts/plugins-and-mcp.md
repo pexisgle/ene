@@ -357,6 +357,7 @@ top level of the schema returned by `config_schema()`, alongside the existing
       "label": "Anthropic API Key",
       "help_url": "https://console.anthropic.com/settings/keys" },
     { "id": "google.calendar", "kind": "oauth2",
+      "client_id": "1234.apps.googleusercontent.com",
       "scopes": ["https://www.googleapis.com/auth/calendar.readonly"],
       "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
       "token_url": "https://oauth2.googleapis.com/token",
@@ -377,9 +378,12 @@ all valid.
   `{value}` (e.g. `Bearer {value}`). `env_fallback` names an environment
   variable the host checks when no value is stored; custom names require an
   explicit `plugins.list.<plugin>.credential_env_allowlist` entry.
-- `kind: "oauth2"` — an OAuth2 flow driven by the host. `scopes` lists the
-  consent scopes, `auth_url` / `token_url` the authorization and token
-  endpoints.
+- `kind: "oauth2"` — an OAuth2 flow driven by the host. `client_id` is the
+  public client identifier the authorization server requires even for PKCE
+  flows (a desktop app ships no client secret); `scopes` lists the consent
+  scopes, `auth_url` / `token_url` the authorization and token endpoints.
+  See [Credentials](credentials.md) for how the flow, token refresh, and
+  storage work.
 
 **Sharing policy.** Declarations are shared by default: two plugins that both
 declare `anthropic` address the same stored value, so switching providers
@@ -602,8 +606,10 @@ Custom `env_fallback` names are used only when explicitly allowlisted in the
 declaring plugin's `credential_env_allowlist`.
 
 OAuth-style credentials (`namespace.name` ids such as `google.calendar`)
-arrive with the OAuth flow; until then an expired credential resolves to a
-`RefreshRequired` error.
+are acquired through the host-driven authorization flow and auto-refreshed
+by the host; see [Credentials](credentials.md). An expired credential whose
+refresh fails resolves to a `RefreshRequired` error, which the client
+surfaces as `authorization_required`.
 
 ### Invalidation push
 

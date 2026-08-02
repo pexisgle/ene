@@ -11,6 +11,7 @@
 - [長期記憶システム](concepts/memory-system.md)
 - [キャラクターカードマクロ](concepts/character-card-macros.md)
 - [音声とアバター](concepts/voice-and-avatar.md)
+- [資格情報](concepts/credentials.md)
 - [プラグインと MCP](concepts/plugins-and-mcp.md)
 
 # クレート API リファレンス
