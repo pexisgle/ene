@@ -91,12 +91,6 @@ impl CognitionEngine {
         }
     }
 
-    /// Emit startup warnings for mind-config inconsistencies that are still
-    /// accepted (warn-only; never an error).
-    pub fn validate_config(config: &MindConfig) {
-        crate::config::warn_on_proactive_interval_issues(&config.proactive);
-    }
-
     /// Sync `CCv3` lorebook and style indices when the card or config changes.
     pub async fn sync_character_memories(
         &self,

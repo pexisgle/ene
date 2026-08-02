@@ -993,6 +993,21 @@ pub enum ProactiveIntervalIssue {
 }
 
 impl ProactiveIntervalIssue {
+    /// Field label, threshold value, and poll interval for structured logs.
+    #[must_use]
+    pub const fn fields(&self) -> (&'static str, u64, u64) {
+        match self {
+            Self::MinIdle {
+                min_idle_seconds,
+                interval_seconds,
+            } => ("min_idle_seconds", *min_idle_seconds, *interval_seconds),
+            Self::Cooldown {
+                cooldown_seconds,
+                interval_seconds,
+            } => ("cooldown_seconds", *cooldown_seconds, *interval_seconds),
+        }
+    }
+
     /// Stable English message for CLI / UI / logs.
     #[must_use]
     pub fn message(&self) -> String {
@@ -1018,9 +1033,15 @@ impl ProactiveIntervalIssue {
 ///
 /// A shorter threshold is not rejected: operators may intentionally poll
 /// infrequently while keeping a low gate. Speech still cannot fire sooner
-/// than the next tick, so the caller should warn.
+/// than the next tick, so the caller should warn. When `enabled` is false
+/// the thresholds are never exercised, so validation is skipped entirely.
 #[must_use]
 pub fn validate_proactive_intervals(config: &ProactiveConfig) -> Vec<ProactiveIntervalIssue> {
+    // Proactive speech is disabled: the thresholds can never be exercised,
+    // so timing relationships cannot matter.
+    if !config.enabled {
+        return Vec::new();
+    }
     let mut issues = Vec::new();
     if config.min_idle_seconds < config.interval_seconds {
         issues.push(ProactiveIntervalIssue::MinIdle {
@@ -1041,35 +1062,19 @@ pub fn validate_proactive_intervals(config: &ProactiveConfig) -> Vec<ProactiveIn
 /// the poll interval.
 ///
 /// Convenience wrapper over [`validate_proactive_intervals`] for startup
-/// paths that only need the side effect.
+/// paths that only need the side effect. Emits nothing while proactive
+/// speech is disabled.
 pub fn warn_on_proactive_interval_issues(config: &ProactiveConfig) {
     for issue in validate_proactive_intervals(config) {
-        match &issue {
-            ProactiveIntervalIssue::MinIdle {
-                min_idle_seconds,
-                interval_seconds,
-            } => {
-                tracing::warn!(
-                    component = "MindConfig",
-                    min_idle_seconds,
-                    interval_seconds,
-                    "{}",
-                    issue.message()
-                );
-            }
-            ProactiveIntervalIssue::Cooldown {
-                cooldown_seconds,
-                interval_seconds,
-            } => {
-                tracing::warn!(
-                    component = "MindConfig",
-                    cooldown_seconds,
-                    interval_seconds,
-                    "{}",
-                    issue.message()
-                );
-            }
-        }
+        let (field, value, interval) = issue.fields();
+        tracing::warn!(
+            component = "MindConfig",
+            field = %field,
+            value_secs = value,
+            interval_secs = interval,
+            "{}",
+            issue.message()
+        );
     }
 }
 
@@ -1388,6 +1393,37 @@ mod tests {
         assert_eq!(cfg.min_idle_seconds, 60);
         assert_eq!(cfg.cooldown_seconds, 90);
         assert_eq!(validate_proactive_intervals(&cfg).len(), 2);
+    }
+
+    #[test]
+    fn validate_proactive_intervals_skips_disabled_config() {
+        let cfg: ProactiveConfig = serde_json::from_str(
+            r#"{
+                "enabled": false,
+                "interval_seconds": 300,
+                "min_idle_seconds": 60,
+                "cooldown_seconds": 90
+            }"#,
+        )
+        .expect("inverted timing must still deserialize");
+        assert!(
+            validate_proactive_intervals(&cfg).is_empty(),
+            "disabled proactive speech must not produce interval warnings"
+        );
+    }
+
+    #[test]
+    fn proactive_interval_issue_fields_expose_label_value_interval() {
+        let min_idle = ProactiveIntervalIssue::MinIdle {
+            min_idle_seconds: 60,
+            interval_seconds: 300,
+        };
+        assert_eq!(min_idle.fields(), ("min_idle_seconds", 60, 300));
+        let cooldown = ProactiveIntervalIssue::Cooldown {
+            cooldown_seconds: 90,
+            interval_seconds: 300,
+        };
+        assert_eq!(cooldown.fields(), ("cooldown_seconds", 90, 300));
     }
 
     #[test]
