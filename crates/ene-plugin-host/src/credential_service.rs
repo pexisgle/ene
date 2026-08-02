@@ -197,7 +197,7 @@ impl CredentialPassenger {
     /// Resolves the storage key for a requested id against the plugin's
     /// declared scope, or `None` when the id is undeclared or unparsable
     /// (fail-closed).
-    fn scope_allows(&self, plugin: &str, id: &str) -> Option<CredentialId> {
+    fn scope_allows(&self, plugin: &str, id: &str) -> Option<String> {
         let id = CredentialId::try_new(id).ok()?;
         match self.registry.resolve_scope(plugin, &id) {
             ScopeDecision::Allowed { storage_key } => Some(storage_key),
@@ -210,7 +210,7 @@ impl CredentialPassenger {
             self.vault.record_audit(plugin, id, false);
             return Self::scope_denied(plugin, id);
         };
-        match self.vault.resolve(storage_key.as_str()) {
+        match self.vault.resolve(&storage_key) {
             Ok(store) => {
                 self.vault.record_audit(plugin, id, true);
                 if let Some(key) = store.api_key() {

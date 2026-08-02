@@ -198,10 +198,12 @@ impl CredentialVault {
         };
         if store.is_expired() {
             let Some(refresher) = &self.refresher else {
-                return Err(ConnectorError::refresh_required(id));
+                return Err(ConnectorError::refresh_required(storage_key));
             };
-            let fresh = refresher.refresh(id, &store)?;
-            self.entries.write().insert(id.to_string(), fresh.clone());
+            let fresh = refresher.refresh(storage_key, &store)?;
+            self.entries
+                .write()
+                .insert(storage_key.to_string(), fresh.clone());
             return Ok(fresh);
         }
         Ok(store)
