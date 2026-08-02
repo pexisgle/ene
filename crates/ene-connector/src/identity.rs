@@ -105,8 +105,10 @@ impl From<ConnectorId> for String {
 /// Unlike [`ConnectorId`], a credential id needs no `namespace.name` form:
 /// `anthropic` and `google.calendar` are both valid. Accepted characters are
 /// ASCII alphanumerics plus `.`, `_`, and `-`; the id must not start or end
-/// with `.`, so the private storage key `<plugin>.<id>` always has exactly one
-/// boundary dot at the plugin/id seam.
+/// with `.`, keeping dotted ids like `google.calendar` free of leading or
+/// trailing separators. The `:` separator that private storage keys use
+/// (`<plugin>:<id>`) is deliberately outside this charset, so no credential id
+/// can be spelled like a private storage key.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct CredentialId(String);
 

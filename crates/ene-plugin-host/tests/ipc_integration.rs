@@ -1986,7 +1986,7 @@ async fn credentials_declared_in_schema_are_registered() {
     assert_eq!(
         registry.resolve_scope("mock", &anthropic),
         ScopeDecision::Allowed {
-            storage_key: anthropic.clone()
+            storage_key: "anthropic".to_string()
         }
     );
     let undeclared = CredentialId::try_new("openai").expect("valid credential id");

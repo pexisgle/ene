@@ -42,8 +42,9 @@ pub mod identity;
 
 pub use credential::{AccountCredentials, CredentialData, CredentialStore};
 pub use declaration::{
-    CredentialDeclaration, CredentialKind, CredentialParse, CredentialRejection, HeaderSpec,
-    RejectedCredential, ScopeDecision, parse_credentials, resolve_scope,
+    CredentialDeclaration, CredentialKind, CredentialParse, CredentialRejection, CredentialWarning,
+    DegradedCredential, HeaderSpec, RejectedCredential, ScopeDecision, parse_credentials,
+    resolve_scope,
 };
 pub use error::ConnectorError;
 pub use identity::{ConnectorId, ConnectorIdentity, CredentialId, PermissionScope};
@@ -52,8 +53,9 @@ pub use identity::{ConnectorId, ConnectorIdentity, CredentialId, PermissionScope
 pub mod prelude {
     pub use crate::credential::{AccountCredentials, CredentialData, CredentialStore};
     pub use crate::declaration::{
-        CredentialDeclaration, CredentialKind, CredentialParse, CredentialRejection, HeaderSpec,
-        RejectedCredential, ScopeDecision, parse_credentials, resolve_scope,
+        CredentialDeclaration, CredentialKind, CredentialParse, CredentialRejection,
+        CredentialWarning, DegradedCredential, HeaderSpec, RejectedCredential, ScopeDecision,
+        parse_credentials, resolve_scope,
     };
     pub use crate::error::ConnectorError;
     pub use crate::identity::{ConnectorId, ConnectorIdentity, CredentialId, PermissionScope};

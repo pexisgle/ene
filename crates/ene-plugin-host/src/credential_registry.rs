@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 
 use ene_connector::declaration::{
-    CredentialDeclaration, CredentialRejection, RejectedCredential, ScopeDecision,
-    parse_credentials,
+    CredentialDeclaration, CredentialRejection, CredentialWarning, DegradedCredential,
+    RejectedCredential, ScopeDecision, parse_credentials,
 };
 use ene_connector::identity::CredentialId;
 use parking_lot::RwLock;
@@ -34,7 +34,9 @@ impl CredentialRegistry {
     ///
     /// Rejected entries are warned about individually and dropped — one bad
     /// declaration never affects the rest, and the plugin itself is never
-    /// involved. A `None` schema registers nothing.
+    /// involved. Entries that kept only part of their configuration (e.g. a
+    /// `header` missing `name`) are kept but warned about. A `None` schema
+    /// registers nothing.
     pub fn register_from_schema(&self, plugin: &str, schema: Option<&Value>) {
         let Some(schema) = schema else {
             return;
@@ -42,6 +44,9 @@ impl CredentialRegistry {
         let parse = parse_credentials(schema);
         for rejected in &parse.rejected {
             warn_rejected_credential(plugin, rejected);
+        }
+        for degraded in &parse.degraded {
+            warn_degraded_credential(plugin, degraded);
         }
         self.register(plugin, parse.declarations);
     }
@@ -127,6 +132,22 @@ fn warn_rejected_credential(plugin: &str, rejected: &RejectedCredential) {
     }
 }
 
+/// Logs a warning for a declaration entry that was kept but lost part of its
+/// configuration (e.g. a `header` object missing `name` or `format`).
+fn warn_degraded_credential(plugin: &str, degraded: &DegradedCredential) {
+    let credential_id = degraded.id.as_str();
+    // Single-variant pattern: `HeaderMissingField` is currently the only
+    // warning, so a plain `let` bind is irrefutable.
+    let CredentialWarning::HeaderMissingField(field) = &degraded.reason;
+    tracing::warn!(
+        component = "PluginHostManager",
+        plugin = %plugin,
+        credential_id = %credential_id,
+        field = %field,
+        "Keeping credential declaration without header injection: header field missing or empty"
+    );
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -192,13 +213,13 @@ mod tests {
         assert_eq!(
             registry.resolve_scope("plugin-a", &shared),
             ScopeDecision::Allowed {
-                storage_key: shared.clone()
+                storage_key: "shared.key".to_string()
             }
         );
         assert_eq!(
             registry.resolve_scope("plugin-a", &private),
             ScopeDecision::Allowed {
-                storage_key: CredentialId::try_new("plugin-a.private.key").unwrap()
+                storage_key: "plugin-a:private.key".to_string()
             }
         );
         // An undeclared plugin is denied even though another declared the id.

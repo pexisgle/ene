@@ -42,7 +42,7 @@ pub struct CredentialDeclaration {
     pub required: bool,
     /// Whether other plugins declaring the same id address the same stored
     /// value (the default). A private declaration (`false`) resolves to
-    /// `<plugin>.<id>`.
+    /// `<plugin>:<id>`.
     pub shared: bool,
     /// Human-readable label for configuration UIs.
     pub label: Option<String>,
@@ -108,6 +108,24 @@ pub struct RejectedCredential {
     pub reason: CredentialRejection,
 }
 
+/// Why a declaration entry that was kept lost part of its configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialWarning {
+    /// The entry's `header` object lacks the named required field (`name` or
+    /// `format`); automatic header injection is disabled for the entry.
+    HeaderMissingField(&'static str),
+}
+
+/// A declaration entry that was kept but lost part of its configuration,
+/// with enough context for the host to warn about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DegradedCredential {
+    /// The credential id of the affected entry.
+    pub id: String,
+    /// What was dropped from the entry.
+    pub reason: CredentialWarning,
+}
+
 /// The outcome of parsing a plugin's `x-ene-credentials` block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialParse {
@@ -116,6 +134,9 @@ pub struct CredentialParse {
     pub declarations: Vec<CredentialDeclaration>,
     /// Rejected entries, in declaration order.
     pub rejected: Vec<RejectedCredential>,
+    /// Kept entries that lost part of their configuration (e.g. a malformed
+    /// `header`), in declaration order; the host warns about each.
+    pub degraded: Vec<DegradedCredential>,
 }
 
 /// Parses and validates the `x-ene-credentials` block of a plugin's config
@@ -123,20 +144,25 @@ pub struct CredentialParse {
 ///
 /// Entries are validated independently: a bad entry lands in
 /// [`CredentialParse::rejected`] and is dropped while valid entries are kept,
-/// so one malformed declaration never disables the rest. Duplicate ids keep
-/// the first occurrence. A schema without `x-ene-credentials` (or with a
-/// non-array value) yields an empty parse, not an error.
+/// so one malformed declaration never disables the rest. An entry whose
+/// `header` lost its `name` or `format` is kept but reported via
+/// [`CredentialParse::degraded`] so the host can warn about the dropped
+/// configuration. Duplicate ids keep the first occurrence. A schema without
+/// `x-ene-credentials` (or with a non-array value) yields an empty parse, not
+/// an error.
 #[must_use]
 pub fn parse_credentials(schema: &Value) -> CredentialParse {
     let Some(entries) = schema.get(CREDENTIALS_KEY).and_then(Value::as_array) else {
         return CredentialParse {
             declarations: Vec::new(),
             rejected: Vec::new(),
+            degraded: Vec::new(),
         };
     };
 
     let mut declarations: Vec<CredentialDeclaration> = Vec::new();
     let mut rejected: Vec<RejectedCredential> = Vec::new();
+    let mut degraded: Vec<DegradedCredential> = Vec::new();
 
     for entry in entries {
         let Some(entry) = entry.as_object() else {
@@ -173,7 +199,13 @@ pub fn parse_credentials(schema: &Value) -> CredentialParse {
 
         let kind = match entry.get("kind").and_then(Value::as_str) {
             Some("api_key") => {
-                let header = parse_header(entry);
+                let (header, degraded_reason) = parse_header(entry);
+                if let Some(reason) = degraded_reason {
+                    degraded.push(DegradedCredential {
+                        id: raw_id.clone(),
+                        reason,
+                    });
+                }
                 if let Some(header) = &header
                     && !header.format.contains(VALUE_PLACEHOLDER)
                 {
@@ -253,24 +285,40 @@ pub fn parse_credentials(schema: &Value) -> CredentialParse {
     CredentialParse {
         declarations,
         rejected,
+        degraded,
     }
 }
 
 /// Parses an `api_key` entry's `header` object.
 ///
-/// A well-formed header has a string `name` and `format`. Anything else —
-/// missing, non-object, or an empty name — degrades to `None`: the
-/// declaration stays valid but no automatic header injection is configured.
-fn parse_header(entry: &serde_json::Map<String, Value>) -> Option<HeaderSpec> {
-    let header = entry.get("header")?.as_object()?;
-    let name = header.get("name")?.as_str()?;
+/// A well-formed header has a string `name` and `format`. A missing or
+/// non-object `header` degrades to `None` silently — the declaration stays
+/// valid with no automatic header injection. An object that lacks a usable
+/// `name` or `format` also degrades to `None`, but reports a
+/// [`CredentialWarning`] so the host can surface the dropped configuration
+/// instead of silently accepting it.
+fn parse_header(
+    entry: &serde_json::Map<String, Value>,
+) -> (Option<HeaderSpec>, Option<CredentialWarning>) {
+    let Some(header) = entry.get("header").and_then(Value::as_object) else {
+        return (None, None);
+    };
+    let Some(name) = header.get("name").and_then(Value::as_str) else {
+        return (None, Some(CredentialWarning::HeaderMissingField("name")));
+    };
     if name.is_empty() {
-        return None;
+        return (None, Some(CredentialWarning::HeaderMissingField("name")));
     }
-    Some(HeaderSpec {
-        name: name.to_owned(),
-        format: header.get("format")?.as_str()?.to_owned(),
-    })
+    let Some(format) = header.get("format").and_then(Value::as_str) else {
+        return (None, Some(CredentialWarning::HeaderMissingField("format")));
+    };
+    (
+        Some(HeaderSpec {
+            name: name.to_owned(),
+            format: format.to_owned(),
+        }),
+        None,
+    )
 }
 
 /// The outcome of resolving a credential request against a plugin's declared
@@ -280,8 +328,11 @@ pub enum ScopeDecision {
     /// The id is declared and the plugin may access the credential.
     Allowed {
         /// Storage key under which the value lives: the id itself for shared
-        /// declarations, `<plugin>.<id>` for private ones.
-        storage_key: CredentialId,
+        /// declarations, `<plugin>:<id>` for private ones. This is a
+        /// vault-internal key, not a [`CredentialId`] — the `:` separator is
+        /// outside the id charset, so the key cannot round-trip through
+        /// validation. The vault must use it verbatim as its lookup key.
+        storage_key: String,
     },
     /// The id is not declared; the request must be denied.
     Undeclared,
@@ -292,9 +343,15 @@ pub enum ScopeDecision {
 ///
 /// Shared declarations resolve to the plain id, so plugins that declare the
 /// same id address the same stored value. Private declarations
-/// (`shared: false`) resolve to `<plugin>.<id>`, keeping each plugin's value
+/// (`shared: false`) resolve to `<plugin>:<id>`, keeping each plugin's value
 /// namespaced even when two plugins declare the same id. An undeclared id is
 /// always denied — sharing is limited to plugins that declared the id.
+///
+/// The `:` separator is outside both the id charset (`[A-Za-z0-9._-]`) and the
+/// plugin-name charset (`[A-Za-z0-9_-]`), so no shared id can be spelled like
+/// a private key: plugin A's private `anthropic` (`A:anthropic`) is
+/// structurally distinct from plugin C sharing the id `A.anthropic`
+/// (`A.anthropic`). No separate uniqueness invariant is needed.
 #[must_use]
 pub fn resolve_scope(
     plugin_name: &str,
@@ -306,17 +363,11 @@ pub fn resolve_scope(
     };
     if decl.shared {
         return ScopeDecision::Allowed {
-            storage_key: id.clone(),
+            storage_key: id.to_string(),
         };
     }
-    // `<plugin>.<id>` is always a valid credential id for a host-validated
-    // plugin name (`[A-Za-z0-9_-]`): the boundary dot is internal and the
-    // id's own boundary dots were validated at parse. An unbuildable key
-    // denies rather than panics — reachable only for a plugin name no host
-    // would ever start with.
-    match CredentialId::try_new(format!("{plugin_name}.{id}")) {
-        Ok(storage_key) => ScopeDecision::Allowed { storage_key },
-        Err(_) => ScopeDecision::Undeclared,
+    ScopeDecision::Allowed {
+        storage_key: format!("{plugin_name}:{id}"),
     }
 }
 
@@ -557,17 +608,38 @@ mod tests {
             "x-ene-credentials": [
                 { "id": "a", "kind": "api_key", "header": { "name": "", "format": "{value}" } },
                 { "id": "b", "kind": "api_key", "header": { "format": "{value}" } },
-                { "id": "c", "kind": "api_key", "header": 42 }
+                { "id": "c", "kind": "api_key", "header": 42 },
+                { "id": "d", "kind": "api_key" },
+                { "id": "e", "kind": "api_key", "header": { "name": "x-api-key" } }
             ]
         }));
         assert!(parse.rejected.is_empty());
-        assert_eq!(parse.declarations.len(), 3);
+        assert_eq!(parse.declarations.len(), 5);
         for decl in &parse.declarations {
             let CredentialKind::ApiKey { header, .. } = &decl.kind else {
                 panic!("expected api_key kind");
             };
             assert!(header.is_none());
         }
+        // A header *object* that lost its name or format is surfaced so the
+        // host can warn; a missing or non-object header stays silent.
+        assert_eq!(
+            parse.degraded,
+            vec![
+                DegradedCredential {
+                    id: "a".to_string(),
+                    reason: CredentialWarning::HeaderMissingField("name"),
+                },
+                DegradedCredential {
+                    id: "b".to_string(),
+                    reason: CredentialWarning::HeaderMissingField("name"),
+                },
+                DegradedCredential {
+                    id: "e".to_string(),
+                    reason: CredentialWarning::HeaderMissingField("format"),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -599,13 +671,13 @@ mod tests {
         assert_eq!(
             resolve_scope("plugin-a", &parse.declarations, &id),
             ScopeDecision::Allowed {
-                storage_key: id.clone()
+                storage_key: "anthropic".to_string()
             }
         );
     }
 
     #[test]
-    fn resolve_scope_private_resolves_to_plugin_prefixed_key() {
+    fn resolve_scope_private_resolves_to_colon_separated_key() {
         let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [{ "id": "anthropic", "kind": "api_key", "shared": false }]
         }));
@@ -613,16 +685,44 @@ mod tests {
         assert_eq!(
             resolve_scope("plugin-a", &parse.declarations, &id),
             ScopeDecision::Allowed {
-                storage_key: CredentialId::try_new("plugin-a.anthropic").unwrap()
+                storage_key: "plugin-a:anthropic".to_string()
             }
         );
         // Two private declarations of the same id stay distinct per plugin.
         assert_eq!(
             resolve_scope("plugin-b", &parse.declarations, &id),
             ScopeDecision::Allowed {
-                storage_key: CredentialId::try_new("plugin-b.anthropic").unwrap()
+                storage_key: "plugin-b:anthropic".to_string()
             }
         );
+    }
+
+    #[test]
+    fn resolve_scope_private_key_cannot_collide_with_shared_id() {
+        // Plugin A's private "anthropic" resolves to `A:anthropic`; plugin C
+        // sharing `A.anthropic` as an id resolves to the plain id
+        // `A.anthropic`. The `:` separator is outside the id charset, so no
+        // shared id can be spelled like a private key and a private value is
+        // never reachable through a shared declaration.
+        let private = parse_declarations(&serde_json::json!({
+            "x-ene-credentials": [{ "id": "anthropic", "kind": "api_key", "shared": false }]
+        }));
+        let shared = parse_declarations(&serde_json::json!({
+            "x-ene-credentials": [{ "id": "A.anthropic", "kind": "api_key" }]
+        }));
+        let anthropic = CredentialId::try_new("anthropic").unwrap();
+        let dotted = CredentialId::try_new("A.anthropic").unwrap();
+        let private_key = match resolve_scope("A", &private.declarations, &anthropic) {
+            ScopeDecision::Allowed { storage_key } => storage_key,
+            ScopeDecision::Undeclared => panic!("private declaration must resolve"),
+        };
+        let shared_key = match resolve_scope("C", &shared.declarations, &dotted) {
+            ScopeDecision::Allowed { storage_key } => storage_key,
+            ScopeDecision::Undeclared => panic!("shared declaration must resolve"),
+        };
+        assert_eq!(private_key, "A:anthropic");
+        assert_eq!(shared_key, "A.anthropic");
+        assert_ne!(private_key, shared_key);
     }
 
     #[test]

@@ -386,7 +386,14 @@ declare `anthropic` address the same stored value, so switching providers
 does not force re-entering keys. Sharing is limited to plugins that declared
 the id — a plugin that never declared `anthropic` is denied even when the
 value exists in the vault. A plugin opts out with `"shared": false`, which
-resolves its own namespaced value at `<plugin>.<id>`.
+resolves its own namespaced value at `<plugin>:<id>`.
+
+The `:` separator makes a private key structurally unable to collide with a
+shared declaration: it is in neither the id charset (`[A-Za-z0-9._-]`) nor the
+plugin-name charset (`[A-Za-z0-9_-]`), so no shared id can be spelled like a
+private key. Plugin A's private `anthropic` (`A:anthropic`) and plugin C
+sharing the id `A.anthropic` (`A.anthropic`) resolve to different keys without
+any extra uniqueness invariant.
 
 **Validation timing.** Declarations are validated when the plugin starts:
 each entry is checked independently, a bad entry is warned about and ignored
