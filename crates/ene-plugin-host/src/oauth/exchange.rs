@@ -8,6 +8,7 @@ use super::FlowError;
 ///
 /// `refresh_token` is `None` both when the server rotated it away and when
 /// it never issued one; the caller decides whether to keep the previous one.
+#[derive(Debug)]
 pub(crate) struct OAuthTokenResponse {
     pub access_token: String,
     pub refresh_token: Option<String>,

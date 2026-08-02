@@ -696,7 +696,7 @@ mod tests {
     #[tokio::test]
     async fn request_authorization_starts_flow_and_reports_pending() {
         use crate::oauth::OAuthFlowManager;
-        let registry = CredentialRegistry::new();
+        let registry = Arc::new(CredentialRegistry::new());
         registry.register_from_schema(
             "anthropic",
             Some(&json!({

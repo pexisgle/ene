@@ -329,10 +329,12 @@ mod tests {
         let store = CredentialStore::oauth2("expired-at", Some("rt-1"), None);
         let a = {
             let refresher = Arc::clone(&refresher);
+            let store = store.clone();
             tokio::spawn(async move { refresher.refresh("google.calendar", &store).await })
         };
         let b = {
             let refresher = Arc::clone(&refresher);
+            let store = store.clone();
             tokio::spawn(async move { refresher.refresh("google.calendar", &store).await })
         };
         let (ra, rb) = tokio::join!(a, b);

@@ -211,16 +211,12 @@ mod tests {
             CredentialStore::from_api_key("sk-test").expose_for_persistence()
         });
         persister.save(&entries).unwrap();
-        let loaded = persister.load();
+        let mut loaded = persister.load();
         assert_eq!(loaded.len(), 2);
-        assert_eq!(
-            CredentialStore::from_exported(loaded["google.calendar"].clone()).access_token(),
-            Some("access")
-        );
-        assert_eq!(
-            CredentialStore::from_exported(loaded["anthropic"].clone()).api_key(),
-            Some("sk-test")
-        );
+        let google = CredentialStore::from_exported(loaded.remove("google.calendar").unwrap());
+        let anthropic = CredentialStore::from_exported(loaded.remove("anthropic").unwrap());
+        assert_eq!(google.access_token(), Some("access"));
+        assert_eq!(anthropic.api_key(), Some("sk-test"));
     }
 
     #[test]
