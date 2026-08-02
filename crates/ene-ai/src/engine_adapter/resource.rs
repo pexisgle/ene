@@ -15,6 +15,19 @@
 //! [`ResourceClass`] equality: any engine that declares the same class as an
 //! existing one automatically starts sharing its admission budget, with no
 //! change to that existing engine or to callers.
+//!
+//! # This is the host process's admission authority
+//!
+//! The registry deliberately stays a process-global static, and every caller
+//! lives in the host process. The local engines below acquire directly;
+//! plugin-provided LLM providers reach the same registry from
+//! `ene-plugin-host`'s `IpcLlmProvider` (which acquires the class the plugin
+//! declared in its `LlmProviderSpec`). Plugin binaries themselves hold no
+//! semaphore at all, so a plugin crash cannot leak a permit — the host's
+//! drop glue releases it. Because both paths key the same global on
+//! [`ResourceClass`] equality, a plugin offloading to `Gpu { device: 0 }`
+//! and a local model on the same device automatically share one budget, with
+//! no coordination between them.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};

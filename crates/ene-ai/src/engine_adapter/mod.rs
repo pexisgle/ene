@@ -37,7 +37,10 @@
 //!   distinct [`ResourceClass`], so independently-constructed
 //!   engines that contend on the same physical resource (most importantly:
 //!   the same GPU device) are admission-controlled together instead of each
-//!   having a lock that only protects itself.
+//!   having a lock that only protects itself. This is the host process's
+//!   admission authority: plugin-provided providers reach it from
+//!   `ene-plugin-host` as well (see `resource`'s module docs), so a plugin
+//!   and a local model on the same device share one budget.
 //!
 //! # Where this does *not* fully work
 //!
