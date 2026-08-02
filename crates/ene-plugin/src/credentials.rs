@@ -768,7 +768,7 @@ mod tests {
                 }
                 HostAction::Invalidate(ids) => {
                     let resp = CredentialResponse::Invalidated {
-                        ids: ids.iter().map(|id| id.to_string()).collect(),
+                        ids: ids.iter().map(str::to_string).collect(),
                     };
                     if write_credential_response(&mut stream, &resp).await.is_err() {
                         return;
@@ -807,7 +807,7 @@ mod tests {
                 handlers.push(tokio::spawn(run_scripted_session(stream, actions)));
             }
             for handler in handlers {
-                let _ = handler.await;
+                drop(handler.await);
             }
             drop(listener);
         });
