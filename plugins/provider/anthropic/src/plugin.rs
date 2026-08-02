@@ -602,7 +602,7 @@ mod tests {
     /// Runs a minimal in-process credential host that answers `Resolve` with a
     /// fixed key, so the plugin's new resolution path is exercised end-to-end
     /// without real credentials.
-    async fn spawn_mock_credential_host() -> (String, String) {
+    fn spawn_mock_credential_host() -> (String, String) {
         let n = SOCKET_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "ene-anthropic-cred-test-{}-{n}.sock",
@@ -656,8 +656,8 @@ mod tests {
     }
 
     /// Builds a context whose credential client points at the mock host.
-    async fn test_ctx() -> PluginContext {
-        let (path, token) = spawn_mock_credential_host().await;
+    fn test_ctx() -> PluginContext {
+        let (path, token) = spawn_mock_credential_host();
         let client = CredentialClient::new();
         client.set_endpoint(path, token);
         PluginContext::new(client)
@@ -665,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_key_injected_from_mock_credential_host() {
-        let ctx = test_ctx().await;
+        let ctx = test_ctx();
         let key = ctx
             .credentials()
             .api_key("anthropic")
@@ -678,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_http_caller_builds_auth_injected_client() {
-        let ctx = test_ctx().await;
+        let ctx = test_ctx();
         let caller = anthropic_http_caller(&ctx).await.expect("build caller");
         // The client carries the resolved key as its x-api-key default header.
         let request = caller
@@ -697,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_credential_maps_to_structured_error() {
-        let ctx = test_ctx().await;
+        let ctx = test_ctx();
         let err = ctx
             .credentials()
             .api_key("google.calendar")

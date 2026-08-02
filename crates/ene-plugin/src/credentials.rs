@@ -618,8 +618,7 @@ impl HttpCaller {
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
-    clippy::panic,
-    reason = "tests use expect/panic for concise failure messages"
+    reason = "tests use expect for concise failure messages"
 )]
 mod tests {
     use super::*;
@@ -635,7 +634,7 @@ mod tests {
     /// Runs a minimal in-process credential host over a real socket: accepts
     /// one connection, answers `Open` with a fixed token, and serves `Resolve`
     /// with a fixed API key.
-    async fn spawn_mock_host() -> (String, String) {
+    fn spawn_mock_host() -> (String, String) {
         let n = SOCKET_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "ene-cred-client-test-{}-{n}.sock",
@@ -692,8 +691,8 @@ mod tests {
         (path.to_string_lossy().to_string(), token)
     }
 
-    async fn client_with_endpoint() -> CredentialClient {
-        let (path, token) = spawn_mock_host().await;
+    fn client_with_endpoint() -> CredentialClient {
+        let (path, token) = spawn_mock_host();
         let client = CredentialClient::new();
         client.set_endpoint(path, token);
         client
@@ -701,7 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_key_resolves_through_host_and_redacts() {
-        let client = client_with_endpoint().await;
+        let client = client_with_endpoint();
         let key = client.api_key("anthropic").await.expect("resolve");
         assert_eq!(key.expose_secret(), "sk-mock-host-key");
         assert!(!format!("{key:?}").contains("sk-mock-host-key"));
@@ -721,7 +720,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_credential_maps_to_credential_missing() {
-        let client = client_with_endpoint().await;
+        let client = client_with_endpoint();
         let err = client
             .api_key("google.calendar")
             .await
@@ -732,7 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_authorization_returns_ok_on_pending() {
-        let client = client_with_endpoint().await;
+        let client = client_with_endpoint();
         client
             .request_authorization("anthropic")
             .await
