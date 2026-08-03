@@ -5,6 +5,10 @@
 [Architecture](architecture.md)
 [Configuration](configuration.md)
 
+# Guides
+
+- [MCP Server Setup](guide/tools/mcp-servers.md)
+
 # Concepts
 
 - [Turn & Session](concepts/turn-and-session.md)

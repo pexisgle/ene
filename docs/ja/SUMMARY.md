@@ -5,6 +5,10 @@
 [アーキテクチャ](architecture.md)
 [設定リファレンス](configuration.md)
 
+# ガイド
+
+- [MCP サーバー設定ガイド](guide/tools/mcp-servers.md)
+
 # コア概念
 
 - [ターンとセッション](concepts/turn-and-session.md)

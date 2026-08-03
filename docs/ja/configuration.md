@@ -318,19 +318,58 @@ override で、空（デフォルト）の場合は `mind.language` を継承し
     "mcp_servers": [
       {
         "name": "filesystem",
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/allowed"]
+        "enabled": true,
+        "transport": {
+          "type": "stdio",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/allowed"]
+        }
       }
     ]
   }
 }
 ```
 
+#### `plugins.mcp_servers` — MCP サーバーエントリ
+
+各エントリは 1 つの MCP サーバーを宣言し、`name`（ルーティングとツールの名前空間にそのまま使われる）、`enabled`、`transport`、任意の `env_passthrough` リストを持ちます：
+
+```jsonc
+"mcp_servers": [
+  {
+    "name": "github",
+    "enabled": true,
+    "transport": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
+    },
+    "env_passthrough": ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+  },
+  {
+    "name": "local-dev",
+    "enabled": true,
+    "transport": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "auth_header": "Bearer <token>"
+    }
+  }
+]
+```
+
+- `enabled` と `transport` は必須です。`enabled: false` にするとサーバーはスキップされます。
+- `transport.type` は `"stdio"`（`command` を `args` 付きで子プロセスとして起動）または `"http"`（`url` に接続し、`auth_header` を `Authorization` ヘッダーとして送信。不正なヘッダーは認証なしへのダウングレードではなく接続拒否になります）。
+- stdio の子プロセスは**クリアされた環境**で実行されます：転送されるのは `PATH`・`HOME`・`TMPDIR`・`LANG`・`TZ`・`LD_LIBRARY_PATH` と Windows 必須変数のみです。それ以外 — 特に API キー — はホスト環境にエクスポートし、`env_passthrough` でホワイトリスト登録する必要があります。サーバーごとのインライン `env` マップはありません。
+- `mcp_servers` は配列のため、エントリは `settings.json` で宣言します：`ENE_` 環境変数はスカラー値（例：`ENE_PLUGINS__MCP_ALLOW_INSECURE_URLS`）の上書きはできますが、配列要素を追加することはできません。
+
 HTTP の MCP エンドポイントは接続前に URL を検証します (既定では HTTPS のみ。
 ループバックおよびクラウドメタデータ/リンクローカルアドレスは拒否)。`plugins` 内で
 `"mcp_allow_insecure_urls": true` を設定すると、ローカル開発用にプレーン `http://` と
 ループバック URL を許可できます。リンクローカルアドレスは拒否されたままです。
 詳細は[プラグインと MCP](concepts/plugins-and-mcp.md) を参照。
+サービス別の設定例（Calendar、Mail/Chat、Notes、Map、RSS）は
+[MCP サーバー設定ガイド](guide/tools/mcp-servers.md) を参照してください。
 
 `max_concurrent` は、**プラグイン接続ごと**の同時進行中 IPC リクエスト数の上限です。ツール呼び出しだけでなく、ping・`list_tools`・`chat_completion` など*すべて*のリクエスト種別を対象とします。上限を超えたリクエストは、プラグインへ無制限に送出されるのではなく（自身のタイムアウトを上限として）キューイングされます。チャット*ストリーム* (`CreateChatStream`) は例外で、この上限をバイパスし、カウントされません。
 
