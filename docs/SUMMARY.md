@@ -15,6 +15,7 @@
 - [Memory System](concepts/memory-system.md)
 - [Character Card Macros](concepts/character-card-macros.md)
 - [Character Card Lorebook](concepts/character-card-lorebook.md)
+- [Character Card Assets & Import](concepts/character-card-assets.md)
 - [Voice & Avatar](concepts/voice-and-avatar.md)
 - [Plugins & MCP](concepts/plugins-and-mcp.md)
 
