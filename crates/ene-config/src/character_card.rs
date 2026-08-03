@@ -329,7 +329,11 @@ fn vrm_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
 /// A card author places each expression in affect space; the runtime picks the
 /// nearest annotated expression to the current affect state (PAD nearest
 /// neighbour over `valence` / `arousal` / `irritation` / `fatigue`). Missing
-/// dimensions default to `0.0`, so partial annotations are allowed.
+/// dimensions default to `0.0`, so partial annotations are allowed. A neutral
+/// state (all dimensions near `0.0`) only matches an annotation close to the
+/// origin — the card's resting expression; otherwise the runtime falls back to
+/// the neutral-named expression, so a resting character never wears an
+/// emotional face the card did not place at rest.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(crate = "crate::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "crate::schemars")]
@@ -383,15 +387,23 @@ pub struct ResolvedExpression {
 /// Built-in default expressions. Used when the card has no `extensions.expressions`,
 /// and as the base that card overrides are merged on top of.
 ///
-/// The affect annotations mirror the legacy threshold mapping (angry≈irritated,
-/// relaxed≈fatigued, happy≈positive valence + arousal, sad≈negative valence,
-/// surprised≈high arousal) so default cards keep their previous behaviour
-/// without hardcoding expression names in the mind crate.
+/// The affect annotations approximate the legacy threshold mapping
+/// (angry≈irritated, relaxed≈fatigued, happy≈positive valence + arousal,
+/// sad≈negative valence, surprised≈high arousal). Nearest-neighbour resolution
+/// agrees with the old priority chain for typical states but differs near
+/// thresholds (e.g. high valence with moderate irritation maps to happy, where
+/// the old chain returned angry); this is the documented price of removing the
+/// hardcoded name table.
 fn default_expressions() -> &'static [ResolvedExpression] {
     use std::sync::LazyLock;
     static DEFAULT: LazyLock<Vec<ResolvedExpression>> = LazyLock::new(|| {
         [
-            ("neutral", "Default resting expression", "neutral", None),
+            (
+                "neutral",
+                "Default resting expression",
+                "neutral",
+                Some(ExpressionAffect::default()),
+            ),
             (
                 "happy",
                 "Feeling joyful, excited, or pleased",
@@ -560,7 +572,7 @@ fn default_ene_expressions() -> Option<Vec<ExpressionDefinition>> {
             description: "Default resting expression".to_string(),
             vrm: std::iter::once(("neutral".to_string(), 1.0)).collect(),
             enabled: true,
-            affect: None,
+            affect: Some(ExpressionAffect::default()),
         },
         ExpressionDefinition {
             name: "happy".to_string(),
