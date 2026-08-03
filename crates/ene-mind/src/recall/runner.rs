@@ -1,11 +1,10 @@
 //! End-to-end hybrid recall execution for the cognitive runtime.
 
 use chrono::Utc;
-use ene_config::CharacterCardV3;
 use ene_core::MemoryPort;
 
-use super::lorebook_boost::merge_lorebook_recall;
 use super::pending::gather_pending_candidates;
+use crate::character::is_lorebook_memory_row;
 use crate::commitments::CommitmentLedger;
 use crate::config::MindConfig;
 use crate::error::CognitionError;
@@ -27,19 +26,12 @@ pub struct ExecuteRecallInput<'a> {
     pub user_input: &'a str,
     /// Recent conversation turns for planning.
     pub recent_turns: &'a [RecallTurn<'a>],
-    /// Total assistant (character) messages in the chat log, counted over the
-    /// full history — feeds the `@@activate_only_after` /
-    /// `@@activate_only_every` lorebook decorators, whose spec counts the
-    /// whole log rather than the recent-turn window.
-    pub assistant_message_count: u32,
     /// Query embedding vector.
     pub query_embedding: &'a [f32],
     /// Embedding model name.
     pub embedding_model: &'a str,
     /// Loaded affect state (optional).
     pub affect: Option<&'a ene_core::AffectState>,
-    /// Character card for lorebook key-trigger recall.
-    pub card: Option<&'a CharacterCardV3>,
 }
 
 /// Execute hybrid typed recall and return plan + recalled memories.
@@ -119,7 +111,10 @@ pub async fn execute_hybrid_recall(
 
     let mut recalled = RecallResultMapper::map(diversified);
 
-    recalled = maybe_merge_lorebook_recall(input, recalled).await?;
+    // Lorebook rows are card data with a guaranteed-injection path of their
+    // own (prompt composition), so embedding-similarity recall must not
+    // surface them again inside the memory sections.
+    recalled.retain(|m| !is_lorebook_memory_row(m.item.source, m.item.source_ref.as_deref()));
 
     Ok((plan, recalled))
 }
@@ -181,26 +176,6 @@ async fn apply_reflection_to_scored(
     );
 }
 
-async fn maybe_merge_lorebook_recall(
-    input: &ExecuteRecallInput<'_>,
-    recalled: Vec<RecalledMemory>,
-) -> Result<Vec<RecalledMemory>, CognitionError> {
-    if input.card.is_none() {
-        return Ok(recalled);
-    }
-
-    merge_lorebook_recall(
-        input.store,
-        input.character_id,
-        input.card,
-        input.user_input,
-        input.recent_turns,
-        input.assistant_message_count,
-        recalled,
-    )
-    .await
-}
-
 /// Bump access counters for the memories that were actually injected into the
 /// prompt.
 ///
@@ -231,13 +206,12 @@ pub async fn bump_injected_memory_access(store: &dyn MemoryPort, injected_ids: &
 mod tests {
     use super::*;
     use crate::config::MindConfig;
-    use ene_config::{CharacterCardV3, Lorebook, LorebookEntry};
     use ene_store::MemoryStore;
     use ene_store::{MemoryConfidence, MemoryKind, MemorySalience, MemorySource, MemoryStatus};
     use ene_store::{MemoryScope, NewMemoryItem};
 
     #[tokio::test]
-    async fn lorebook_recall_merges_constant_entries() {
+    async fn lorebook_rows_do_not_surface_in_recall_results() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let item = NewMemoryItem {
             scope: MemoryScope::Character,
@@ -266,29 +240,6 @@ mod tests {
             .await
             .unwrap();
 
-        let mut card = CharacterCardV3::default();
-        card.data.name = "Ene".into();
-        card.data.character_book = Some(Lorebook {
-            entries: vec![LorebookEntry {
-                keys: vec![],
-                content: "The world is always sunny.".into(),
-                extensions: Default::default(),
-                enabled: true,
-                insertion_order: 20,
-                case_sensitive: None,
-                use_regex: false,
-                constant: Some(true),
-                name: Some("World tone".into()),
-                priority: None,
-                id: Some(serde_json::json!("constant")),
-                comment: None,
-                selective: None,
-                secondary_keys: None,
-                position: None,
-            }],
-            ..Default::default()
-        });
-
         let mut config = MindConfig {
             language: "en".into(),
             ..MindConfig::default()
@@ -302,11 +253,9 @@ mod tests {
             user_id: "User",
             user_input: "How is the weather?",
             recent_turns: &[],
-            assistant_message_count: 0,
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
-            card: Some(&card),
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -315,8 +264,8 @@ mod tests {
         assert!(
             recalled
                 .iter()
-                .any(|m| m.item.content.contains("always sunny")),
-            "constant lorebook should merge after hybrid recall"
+                .all(|m| m.item.content != "The world is always sunny."),
+            "lorebook rows must not surface through recall; the injection path owns them"
         );
     }
 
@@ -388,11 +337,9 @@ mod tests {
             user_id: "User",
             user_input: "warm greeting",
             recent_turns: &[],
-            assistant_message_count: 0,
             query_embedding: &embedding,
             embedding_model: "mock",
             affect: None,
-            card: None,
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -469,11 +416,9 @@ mod tests {
             user_id: "User",
             user_input: "warm greeting",
             recent_turns: &[],
-            assistant_message_count: 0,
             query_embedding: &embedding,
             embedding_model: "mock",
             affect: None,
-            card: None,
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -549,11 +494,9 @@ mod tests {
             user_id: "User",
             user_input: "What does the user like to drink?",
             recent_turns: &[],
-            assistant_message_count: 0,
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
-            card: None,
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -622,11 +565,9 @@ mod tests {
             user_id: "User",
             user_input: "topic related",
             recent_turns: &[],
-            assistant_message_count: 0,
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
-            card: None,
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -708,11 +649,9 @@ mod tests {
             user_id: "alice",
             user_input: "topic related",
             recent_turns: &[],
-            assistant_message_count: 0,
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
-            card: None,
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)

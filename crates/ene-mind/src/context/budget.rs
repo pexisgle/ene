@@ -22,7 +22,8 @@ use ene_core::ActiveCommitmentPrompt;
 use ene_config::UserPersona;
 
 use crate::character::{
-    AuthorsNote, IdentityKernel, StyleExample, apply_authors_note, render_authors_note,
+    AuthorsNote, DecoratorRole, IdentityKernel, LorebookInjection, LorebookMessage, StyleExample,
+    apply_authors_note, render_authors_note,
 };
 use crate::lifecycle::HistoryEntry;
 use crate::prompt_packet::{
@@ -120,6 +121,12 @@ pub struct PackInput {
     pub interruption_note: Option<String>,
     /// Author's note: depth-based instruction injection (roleplay enhancement).
     pub authors_note: Option<AuthorsNote>,
+    /// Guaranteed lorebook injection (sections + depth-placed messages).
+    ///
+    /// The before/after-char sections are required and always survive packing;
+    /// the depth-placed messages are inserted into the post-trim history with
+    /// their tokens reserved up front, mirroring the author's note.
+    pub lorebook: LorebookInjection,
     /// Optional structured user persona for `{{user_persona}}` macro expansion.
     pub user_persona: Option<UserPersona>,
     /// Whether a rolling-compression task is in flight and its summary has not
@@ -173,6 +180,15 @@ fn memory_section_body(memories: &[RecalledMemory]) -> String {
     memories
         .iter()
         .map(|m| format!("- {}", format_recalled_content(m)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render guaranteed lorebook entries as bullet lines in their section.
+fn lorebook_section_body(entries: &[String]) -> String {
+    entries
+        .iter()
+        .map(|content| format!("- {content}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -233,6 +249,66 @@ fn history_entry_tokens(entry: &HistoryEntry) -> usize {
 /// that later lands in history. Inactive / empty notes cost nothing.
 fn authors_note_tokens(note: &AuthorsNote) -> usize {
     render_authors_note(note).map_or(0, |content| history_entry_tokens_for(&content))
+}
+
+/// Token cost of the depth-placed lorebook messages, counted like history
+/// entries so the reservation matches what insertion will add.
+fn lorebook_message_tokens(messages: &[LorebookMessage]) -> usize {
+    messages
+        .iter()
+        .map(|m| history_entry_tokens_for(&m.content))
+        .sum()
+}
+
+/// Insert depth-placed lorebook messages into the packed history.
+///
+/// `@@depth N` targets the `N`th message from the most recent (index
+/// `len - N`); `@@reverse_depth N` the `N`th from the oldest (index `N - 1`).
+/// Depths beyond the history length land at the front (spec: before the
+/// oldest message). Multiple messages keep their entry order at equal depths.
+fn insert_lorebook_messages(history: &mut Vec<HistoryEntry>, messages: &[LorebookMessage]) {
+    if messages.is_empty() {
+        return;
+    }
+    let len = history.len();
+    let mut targets: Vec<(usize, usize, &LorebookMessage)> = messages
+        .iter()
+        .enumerate()
+        .map(|(message_index, message)| {
+            let index = if message.from_oldest {
+                if message.depth <= len {
+                    message.depth.saturating_sub(1)
+                } else {
+                    0
+                }
+            } else {
+                len.saturating_sub(message.depth)
+            };
+            (index.min(len), message_index, message)
+        })
+        .collect();
+    targets.sort_by_key(|(index, message_index, _)| (*index, *message_index));
+    let mut rebuilt = Vec::with_capacity(len.saturating_add(targets.len()));
+    let mut cursor = 0usize;
+    for (index, _, message) in targets {
+        rebuilt.extend_from_slice(&history[cursor..index]);
+        cursor = index;
+        rebuilt.push(HistoryEntry {
+            role: message_role(message.role),
+            content: message.content.clone(),
+        });
+    }
+    rebuilt.extend_from_slice(&history[cursor..]);
+    *history = rebuilt;
+}
+
+/// Map a decorator role onto a history message role.
+fn message_role(role: DecoratorRole) -> ene_ai::Role {
+    match role {
+        DecoratorRole::Assistant => ene_ai::Role::Assistant,
+        DecoratorRole::System => ene_ai::Role::System,
+        DecoratorRole::User => ene_ai::Role::User,
+    }
 }
 
 /// Estimate the total token cost of a history slice (per-entry content
@@ -315,10 +391,30 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
         ));
     }
 
+    if !input.lorebook.before_char.is_empty() {
+        sections.push(
+            PromptSection::new(
+                PromptSectionKind::LorebookBeforeChar,
+                lorebook_section_body(&input.lorebook.before_char),
+            )
+            .with_item_count(input.lorebook.before_char.len()),
+        );
+    }
+
     sections.push(PromptSection::new(
         PromptSectionKind::IdentityKernel,
         input.identity_kernel.text.clone(),
     ));
+
+    if !input.lorebook.after_char.is_empty() {
+        sections.push(
+            PromptSection::new(
+                PromptSectionKind::LorebookAfterChar,
+                lorebook_section_body(&input.lorebook.after_char),
+            )
+            .with_item_count(input.lorebook.after_char.len()),
+        );
+    }
 
     if let Some(text) = &input.behavior_contract {
         sections.push(PromptSection::new(
@@ -472,11 +568,16 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
     let mut history_messages_detached = 0usize;
     let mut history_messages_dropped = 0usize;
 
-    // Reserve the note before packing so section/history fill cannot spend the
-    // tokens the note will add. Insertion still happens after trimming so depth
-    // is relative to the post-trim history length.
+    // Reserve the note and depth-placed lorebook messages before packing so
+    // section/history fill cannot spend the tokens they will add after
+    // trimming. Insertion still happens after trimming so depth is relative
+    // to the post-trim history length.
     let note_tokens = input.authors_note.as_ref().map_or(0, authors_note_tokens);
-    let packing_ceiling = budget.total_tokens.saturating_sub(note_tokens);
+    let lorebook_message_tokens = lorebook_message_tokens(&input.lorebook.messages);
+    let packing_ceiling = budget
+        .total_tokens
+        .saturating_sub(note_tokens)
+        .saturating_sub(lorebook_message_tokens);
 
     let mut total = section_tokens_cache
         .iter()
@@ -539,7 +640,15 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
         apply_authors_note(&mut history, note);
     }
 
-    let packed_tokens = total.saturating_add(note_tokens);
+    // Depth-placed lorebook messages land in the post-trim history. The
+    // author's note is inserted first so its depth stays relative to the real
+    // history; the lorebook messages resolve against the final history the
+    // model will see.
+    insert_lorebook_messages(&mut history, &input.lorebook.messages);
+
+    let packed_tokens = total
+        .saturating_add(note_tokens)
+        .saturating_add(lorebook_message_tokens);
 
     let injected_memory_ids = collect_injected_memory_ids(&survivors);
 
@@ -666,6 +775,7 @@ mod tests {
             output_contract: None,
             interruption_note: None,
             authors_note: None,
+            lorebook: LorebookInjection::default(),
             user_persona: None,
             compression_pending: false,
             user_input: "hello".into(),
@@ -927,6 +1037,7 @@ mod tests {
             output_contract: Some("PHI".into()),
             interruption_note: None,
             authors_note: None,
+            lorebook: LorebookInjection::default(),
             user_persona: None,
             compression_pending: false,
             user_input: "hello".into(),
@@ -999,6 +1110,7 @@ mod tests {
             output_contract: None,
             interruption_note: None,
             authors_note: None,
+            lorebook: LorebookInjection::default(),
             user_persona: None,
             compression_pending: false,
             user_input: "hello".into(),
@@ -1105,6 +1217,7 @@ mod tests {
             output_contract: None,
             interruption_note: Some("your previous reply was cut off mid-sentence".repeat(4)),
             authors_note: None,
+            lorebook: LorebookInjection::default(),
             user_persona: None,
             compression_pending: false,
             user_input: "hello".into(),
@@ -1447,6 +1560,236 @@ mod tests {
             commitments.content.contains("（期限切れ）"),
             "overdue marker missing from packed prompt: {:?}",
             commitments.content
+        );
+    }
+
+    #[test]
+    fn lorebook_sections_survive_tight_budget() {
+        // Guaranteed injection: the before/after-char sections are required,
+        // so even a tiny window keeps them while droppable sections fall.
+        let budget = ContextBudget::with_capacity(10);
+        let input = PackInput {
+            lorebook: LorebookInjection {
+                before_char: vec!["BEFORE_ENTRY".into()],
+                after_char: vec!["AFTER_ENTRY".into()],
+                messages: vec![],
+            },
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &budget);
+        let before = packed
+            .packet
+            .section(PromptSectionKind::LorebookBeforeChar)
+            .expect("before-char lorebook section present");
+        assert!(!before.content.is_empty());
+        let after = packed
+            .packet
+            .section(PromptSectionKind::LorebookAfterChar)
+            .expect("after-char lorebook section present");
+        assert!(!after.content.is_empty());
+        assert!(
+            !packed
+                .meta
+                .dropped
+                .contains(&PromptSectionKind::LorebookBeforeChar),
+            "guaranteed lorebook sections must never be dropped"
+        );
+    }
+
+    #[test]
+    fn lorebook_before_char_renders_before_kernel_in_messages() {
+        let input = PackInput {
+            lorebook: LorebookInjection {
+                before_char: vec!["LOREBEFORE_MARKER".into()],
+                after_char: vec!["LOREAFTER_MARKER".into()],
+                messages: vec![],
+            },
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &default_test_budget());
+        let (messages, _) = packed.packet.to_llm_messages();
+        let system = messages
+            .first()
+            .map(|m| match m {
+                ene_ai::LlmMessage::System { content } => content.clone(),
+                _ => String::new(),
+            })
+            .expect("first message is the system block");
+        let kernel_pos = system.find("KERNEL").expect("kernel present");
+        let before_pos = system
+            .find("LOREBEFORE_MARKER")
+            .expect("before-char lore present");
+        let after_pos = system
+            .find("LOREAFTER_MARKER")
+            .expect("after-char lore present");
+        assert!(
+            before_pos < kernel_pos && kernel_pos < after_pos,
+            "placement must be before-char < kernel < after-char"
+        );
+    }
+
+    #[test]
+    fn depth_messages_insert_into_history_at_resolved_positions() {
+        use crate::character::DecoratorRole;
+
+        let history = vec![
+            HistoryEntry {
+                role: ene_ai::Role::User,
+                content: "oldest".into(),
+            },
+            HistoryEntry {
+                role: ene_ai::Role::Assistant,
+                content: "second".into(),
+            },
+            HistoryEntry {
+                role: ene_ai::Role::User,
+                content: "third".into(),
+            },
+            HistoryEntry {
+                role: ene_ai::Role::Assistant,
+                content: "newest".into(),
+            },
+        ];
+        let input = PackInput {
+            history,
+            lorebook: LorebookInjection {
+                before_char: vec![],
+                after_char: vec![],
+                messages: vec![
+                    LorebookMessage {
+                        depth: 1,
+                        from_oldest: false,
+                        role: DecoratorRole::System,
+                        content: "depth-one".into(),
+                    },
+                    LorebookMessage {
+                        depth: 2,
+                        from_oldest: true,
+                        role: DecoratorRole::User,
+                        content: "from-oldest-two".into(),
+                    },
+                ],
+            },
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &default_test_budget());
+        let contents: Vec<&str> = packed
+            .packet
+            .history
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect();
+        // reverse_depth 2 → index 1 (after the oldest); depth 1 → index 3
+        // (before the newest).
+        assert_eq!(
+            contents,
+            vec![
+                "oldest",
+                "from-oldest-two",
+                "second",
+                "third",
+                "depth-one",
+                "newest"
+            ]
+        );
+        assert_eq!(
+            packed.packet.history[1].role,
+            ene_ai::Role::User,
+            "the @@role decorator must set the history message role"
+        );
+    }
+
+    #[test]
+    fn depth_messages_beyond_history_land_at_front() {
+        use crate::character::DecoratorRole;
+
+        let history = vec![HistoryEntry {
+            role: ene_ai::Role::User,
+            content: "only".into(),
+        }];
+        let input = PackInput {
+            history,
+            lorebook: LorebookInjection {
+                before_char: vec![],
+                after_char: vec![],
+                messages: vec![
+                    LorebookMessage {
+                        depth: 99,
+                        from_oldest: false,
+                        role: DecoratorRole::System,
+                        content: "far-depth".into(),
+                    },
+                    LorebookMessage {
+                        depth: 99,
+                        from_oldest: true,
+                        role: DecoratorRole::System,
+                        content: "far-reverse".into(),
+                    },
+                ],
+            },
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &default_test_budget());
+        let contents: Vec<&str> = packed
+            .packet
+            .history
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect();
+        assert_eq!(contents, vec!["far-depth", "far-reverse", "only"]);
+    }
+
+    #[test]
+    fn depth_message_tokens_reserved_before_history_trim() {
+        use crate::character::DecoratorRole;
+
+        // A tight window that only fits the required sections plus one
+        // exchange: the reserved depth-message tokens must force history
+        // trimming rather than overflowing the budget.
+        let budget = ContextBudget::with_capacity(20);
+        let input = PackInput {
+            history: vec![
+                HistoryEntry {
+                    role: ene_ai::Role::User,
+                    content: "old filler ".repeat(60),
+                },
+                HistoryEntry {
+                    role: ene_ai::Role::Assistant,
+                    content: "old filler ".repeat(60),
+                },
+                HistoryEntry {
+                    role: ene_ai::Role::User,
+                    content: "recent".into(),
+                },
+                HistoryEntry {
+                    role: ene_ai::Role::Assistant,
+                    content: "latest".into(),
+                },
+            ],
+            lorebook: LorebookInjection {
+                before_char: vec![],
+                after_char: vec![],
+                messages: vec![LorebookMessage {
+                    depth: 1,
+                    from_oldest: false,
+                    role: DecoratorRole::System,
+                    content: "deep lore message ".repeat(8),
+                }],
+            },
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &budget);
+        assert!(
+            packed.meta.history_messages_dropped > 0,
+            "reserved depth-message tokens must force history trimming"
+        );
+        assert!(
+            packed
+                .packet
+                .history
+                .iter()
+                .any(|entry| entry.content.contains("deep lore message")),
+            "the depth message must still be inserted after trimming"
         );
     }
 }

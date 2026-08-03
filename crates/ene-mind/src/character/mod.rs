@@ -5,6 +5,7 @@ mod compiler;
 mod kernel;
 mod lorebook;
 mod lorebook_decorators;
+mod lorebook_injection;
 mod style;
 mod sync;
 
@@ -18,6 +19,9 @@ pub use lorebook::{
 pub use lorebook_decorators::{
     ActivationContext, DecoratorRole, EntryDecorators, EntryPlacement, SemanticPosition,
     decorator_filters_pass, entry_decorators_accept,
+};
+pub use lorebook_injection::{
+    LorebookInjection, LorebookMessage, build_lorebook_injection, is_lorebook_memory_row,
 };
 pub use style::{
     STYLE_SOURCE_PREFIX, StyleExample, StyleExampleSelector, StyleIntent, infer_style_intent,

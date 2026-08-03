@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ene_mind::character::IdentityKernel;
+use ene_mind::character::{IdentityKernel, LorebookInjection};
 use ene_mind::{
     CompressionLevel, CompressionResult, ContextBudget, ContextConfig, HistoryEntry, PackInput,
     PromptSectionKind, compression_has_usable_summary, evaluate_compression_trigger, pack_prompt,
@@ -138,6 +138,7 @@ fn pack_prompt_counts_history_toward_total_budget() {
             output_contract: None,
             interruption_note: None,
             authors_note: None,
+            lorebook: LorebookInjection::default(),
             user_persona: None,
             compression_pending: false,
             user_input: "hi".into(),
@@ -191,6 +192,7 @@ fn base_pack_input() -> PackInput {
         output_contract: None,
         interruption_note: None,
         authors_note: None,
+        lorebook: LorebookInjection::default(),
         user_persona: None,
         compression_pending: false,
         user_input: "hi".into(),

@@ -10,7 +10,7 @@ use ene_config::{CharacterCardV3, PromptLibrary};
 use ene_core::MemoryPort;
 use tracing::Instrument;
 
-use crate::character::CharacterProcessor;
+use crate::character::{CharacterProcessor, build_lorebook_injection};
 use crate::commitments::CommitmentLedger;
 use crate::config::MindConfig;
 use crate::context::{
@@ -248,15 +248,9 @@ impl CognitionEngine {
             user_id: ctx.user_name,
             user_input: ctx.user_input,
             recent_turns: &recent_turns,
-            assistant_message_count: ctx
-                .history
-                .iter()
-                .filter(|entry| entry.role == ene_ai::Role::Assistant)
-                .count() as u32,
             query_embedding: embedding,
             embedding_model: embedder.model_name(),
             affect: Some(&affect),
-            card: Some(ctx.card),
         };
 
         let (recall_plan, recalled) = execute_hybrid_recall(ctx.config, &recall_input).await?;
@@ -484,6 +478,13 @@ impl CognitionEngine {
             .get_authors_note()
             .map(|(content, depth)| crate::character::AuthorsNote::new(content, depth));
 
+        // Guaranteed lorebook injection: key-matched and constant entries are
+        // evaluated against the card and history here, outside the recall
+        // pipeline, so they cannot lose a score competition (see
+        // `lorebook_injection`).
+        let lorebook =
+            build_lorebook_injection(ctx.card, ctx.user_name, ctx.user_input, ctx.history);
+
         let pack_input = PackInput {
             platform_contract,
             identity_kernel: kernel,
@@ -498,6 +499,7 @@ impl CognitionEngine {
             output_contract: ctx.post_history_block.map(str::to_string),
             interruption_note,
             authors_note,
+            lorebook,
             user_persona,
             compression_pending: ctx.compression_pending,
             user_input: ctx.user_input.to_string(),
