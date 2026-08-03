@@ -3487,7 +3487,10 @@ mod tests {
             stale_llm_factory_names(&old_kinds, Some(&new_factories)),
             vec!["stale-plugin"]
         );
-        assert_eq!(stale_llm_factory_names(&old_kinds, None), old_kinds);
+        assert_eq!(
+            stale_llm_factory_names::<Arc<dyn ene_ai::LlmProviderFactory>>(&old_kinds, None),
+            old_kinds
+        );
     }
 
     /// A factory whose `create_provider` always fails, standing in for a

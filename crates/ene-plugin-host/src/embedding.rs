@@ -263,10 +263,6 @@ impl ene_ai::EmbeddingProviderFactory for IpcEmbeddingProviderFactory {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    reason = "unit tests use unwrap for concise assertions"
-)]
 mod tests {
     use super::*;
 
