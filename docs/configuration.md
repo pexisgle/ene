@@ -227,7 +227,9 @@ to the decision model regardless of this threshold.
 Proactive decisions also consult stored memory. `mind.proactive.sources.memory` (default
 `true`) feeds the user's `Preference` / `UserProfile` memories — "don't talk while I work",
 "quiet at night" — into the decision context as `user_instructions`. These are injected
-deterministically (newest first, up to `mind.proactive.max_memory_notes`, default 12) and
+deterministically (newest first, up to `mind.proactive.max_memory_notes`, default 12; the
+cap is fixed at 12 during the staged rollout, so the field is not user-configurable yet)
+and
 never pass through recall score competition, so a suppression condition cannot be dropped
 by a low score; the decision model is instructed to honor a matching standing rule with
 `should_speak=false`. The same setting enables topic recall during generation: the

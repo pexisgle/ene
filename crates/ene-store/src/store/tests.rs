@@ -596,7 +596,7 @@ async fn typed_memory_crud() {
     assert!((loaded.confidence.get() - 0.9).abs() < f32::EPSILON);
 
     let by_char = store
-        .get_typed_memories_by_character("ene", None, 10, 0)
+        .get_typed_memories_by_character("ene", None, None, None, 10, 0)
         .await
         .unwrap();
     assert!(!by_char.is_empty());

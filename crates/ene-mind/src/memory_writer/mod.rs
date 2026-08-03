@@ -758,7 +758,7 @@ mod tests {
         .expect("write_memories");
 
         let memories = store
-            .get_typed_memories_by_character("ene", None, 10, 0)
+            .get_typed_memories_by_character("ene", None, None, None, 10, 0)
             .await
             .unwrap();
         assert_eq!(memories.len(), 1);
@@ -901,7 +901,7 @@ mod tests {
         .expect("write_memories");
 
         let memories = store
-            .get_typed_memories_by_character("ene", None, 10, 0)
+            .get_typed_memories_by_character("ene", None, None, None, 10, 0)
             .await
             .unwrap();
         assert_eq!(memories.len(), 1);

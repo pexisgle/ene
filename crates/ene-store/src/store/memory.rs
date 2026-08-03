@@ -441,21 +441,41 @@ impl MemoryStore {
         }
     }
 
-    /// List typed memories for a character, optionally filtered by kind.
+    /// List typed memories for a character, optionally filtered by kind, user,
+    /// and status.
+    ///
+    /// `user_id` keeps rows owned by that user plus character-level rows that
+    /// carry no user id; `status` restricts to a single lifecycle state. Both
+    /// filters run in the query, so a newest-first `limit` window cannot be
+    /// filled with rows that match neither filter.
     pub async fn get_typed_memories_by_character(
         &self,
         character_id: &str,
         kind: Option<crate::MemoryKind>,
+        user_id: Option<&str>,
+        status: Option<crate::MemoryStatus>,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<crate::MemoryItem>, EneMemoryError> {
-        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        use sea_orm::{EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect};
 
         let mut query = entities::typed_memories::Entity::find()
             .filter(entities::typed_memories::Column::CharacterId.eq(character_id));
 
         if let Some(k) = kind {
             query = query.filter(entities::typed_memories::Column::Kind.eq(k.as_str()));
+        }
+
+        if let Some(user) = user_id {
+            query = query.filter(
+                entities::typed_memories::Column::UserId
+                    .eq("")
+                    .or(entities::typed_memories::Column::UserId.eq(user)),
+            );
+        }
+
+        if let Some(s) = status {
+            query = query.filter(entities::typed_memories::Column::Status.eq(s.as_str()));
         }
 
         let models = query

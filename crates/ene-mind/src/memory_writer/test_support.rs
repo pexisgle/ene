@@ -105,13 +105,20 @@ impl MemoryPort for InMemoryMemoryPort {
         &self,
         character_id: &str,
         kind: Option<MemoryKind>,
+        user_id: Option<&str>,
+        status: Option<MemoryStatus>,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<MemoryItem>, MemoryPortError> {
         let items = self.items.lock();
         Ok(items
             .iter()
-            .filter(|m| m.character_id == character_id && kind.is_none_or(|k| m.kind == k))
+            .filter(|m| {
+                m.character_id == character_id
+                    && kind.is_none_or(|k| m.kind == k)
+                    && user_id.is_none_or(|uid| m.user_id.is_empty() || m.user_id == uid)
+                    && status.is_none_or(|s| m.status == s)
+            })
             .skip(offset)
             .take(limit)
             .cloned()

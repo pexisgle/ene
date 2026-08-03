@@ -310,7 +310,9 @@ pub fn build_proactive_context(
 /// store — bypassing hybrid recall scoring entirely — so a suppression
 /// condition ("don't talk while I work") can never be dropped by a low recall
 /// score. User scope is honored (plus character-level rows that carry no user
-/// id), `Active` status only, newest first, capped at `max_notes`.
+/// id), `Active` status only, newest first, capped at `max_notes`. The user
+/// and status filters run in the store query, so rows that do not apply to
+/// this user can never fill the newest-first window ahead of their rules.
 pub async fn load_proactive_memory_notes(
     store: &dyn MemoryPort,
     character_id: &str,
@@ -326,16 +328,23 @@ pub async fn load_proactive_memory_notes(
             break;
         }
         let rows = store
-            .get_typed_memories_by_character(character_id, Some(kind), max_notes, 0)
+            .get_typed_memories_by_character(
+                character_id,
+                Some(kind),
+                Some(user_id),
+                Some(MemoryStatus::Active),
+                max_notes,
+                0,
+            )
             .await
             .map_err(CognitionError::MemoryPort)?;
         for row in rows {
             if notes.len() >= max_notes {
                 break;
             }
-            if row.status != MemoryStatus::Active
-                || (!row.user_id.is_empty() && row.user_id != user_id)
-            {
+            // A note without title or content would inject a blank line and
+            // still count as an instruction for the NoSources gate.
+            if row.title.trim().is_empty() && row.content.trim().is_empty() {
                 continue;
             }
             let line = if row.content.trim().is_empty() {
@@ -717,6 +726,97 @@ mod tests {
                 .expect("zero cap is a no-op")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn memory_notes_survive_fetch_window_competition() {
+        use crate::memory_writer::test_support::InMemoryMemoryPort;
+        use ene_core::MemoryKind;
+
+        let port = InMemoryMemoryPort::default();
+        // Rows that do not apply to the user (other users, archived) sit at
+        // the front of the fetch window; the user's standing rule must still
+        // surface instead of being displaced out of it.
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "bob",
+            MemoryKind::Preference,
+            "Bob rule",
+            "loud music only",
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "bob",
+            MemoryKind::Preference,
+            "Bob rule 2",
+            "no singing",
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "alice",
+            MemoryKind::Preference,
+            "Stale rule",
+            "archived so irrelevant",
+            MemoryStatus::Archived,
+        ))
+        .await
+        .unwrap();
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "alice",
+            MemoryKind::Preference,
+            "Old rule",
+            "call me in the morning",
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+
+        let notes = load_proactive_memory_notes(&port, "ene", "alice", 1)
+            .await
+            .expect("load memory notes");
+        assert_eq!(notes.len(), 1);
+        assert!(notes.iter().any(|n| n.contains("call me in the morning")));
+    }
+
+    #[tokio::test]
+    async fn memory_notes_skip_empty_rows() {
+        use crate::memory_writer::test_support::InMemoryMemoryPort;
+        use ene_core::MemoryKind;
+
+        let port = InMemoryMemoryPort::default();
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "alice",
+            MemoryKind::Preference,
+            "Real rule",
+            "quiet at night",
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "alice",
+            MemoryKind::Preference,
+            "",
+            "",
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+
+        let notes = load_proactive_memory_notes(&port, "ene", "alice", 12)
+            .await
+            .expect("load memory notes");
+        assert_eq!(notes.len(), 1);
+        assert!(notes.iter().all(|n| n.contains("quiet at night")));
     }
 
     #[test]

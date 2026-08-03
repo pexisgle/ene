@@ -91,7 +91,7 @@ impl MemoryHandle {
     ) -> Result<Vec<ene_store::MemoryItem>, EneRuntimeError> {
         let store = self.require_store()?;
         store
-            .get_typed_memories_by_character(character_id, kind, limit, 0)
+            .get_typed_memories_by_character(character_id, kind, None, None, limit, 0)
             .await
             .map_err(EneRuntimeError::Memory)
     }
