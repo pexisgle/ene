@@ -162,6 +162,7 @@ Configures context-window packing, hybrid memory recall, emotion decay, characte
     "proactive": {
       "enabled": true,
       "interval_seconds": 600,
+      "fatigue_suppression_threshold": 0.7,
       "sources": {
         "window_title_level": "app_only"
       }
@@ -203,6 +204,14 @@ provider is configured, **leaves the local machine**. The levels are:
 
 Choose `full_title` only with a local model; with a cloud provider the raw title is sent
 off-machine.
+
+`mind.proactive.fatigue_suppression_threshold` (0.0–1.0, default `0.7`) suppresses
+proactive decisions while the character's affect fatigue is at or above the threshold —
+a tired character does not speak unprompted. The default matches the `"tired"` mood
+label boundary (`compute_mood_label`), so the gate and the character's visible mood stay
+consistent. Set it to `1.0` to disable the gate and let the decision model weigh fatigue
+alone. The full affect state (all eight dimensions plus the mood label) is always passed
+to the decision model regardless of this threshold.
 
 `redacted_title` filters the title field by field. It splits on whitespace and on the
 punctuation window titles are built from (`_ - | 、 ・ 【】 「」 ｜ ：` …), so titles that
