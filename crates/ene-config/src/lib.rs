@@ -52,9 +52,11 @@ pub use character_assets::{
 };
 pub use character_card::{
     AffectBaseline, CharacterAsset, CharacterCardData, CharacterCardV3, EneExtension,
-    ExpressionAffect, ExpressionDefinition, Lorebook, LorebookEntry, MacroContext, PolitenessLevel,
-    ResolvedExpression, SpeechLength, SpeechStyleDefinition, UserPersona, expand_cbs_macros,
-    expand_cbs_macros_ctx, expand_cbs_macros_with, resolve_expressions, session_pick_seed,
+    ExpressionAffect, ExpressionDefinition, LabeledStyleExample, Lorebook, LorebookEntry,
+    MacroContext, PolitenessLevel, RelationshipStage, ResolvedExpression, SceneBehavior,
+    SpeechLength, SpeechStyleDefinition, TimePeriod, TimePeriodBehavior, UserPersona,
+    expand_cbs_macros, expand_cbs_macros_ctx, expand_cbs_macros_with, resolve_expressions,
+    session_pick_seed,
 };
 
 pub use card_import::{ImportedCharacter, import_character_file};
@@ -72,7 +74,11 @@ pub use config::{
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;
-pub use locale::{LocalizedCharacterFields, LocalizedLorebook, LocalizedLorebookEntry};
+pub use locale::{
+    LocalizedCharacterFields, LocalizedEneRoleplay, LocalizedLorebook, LocalizedLorebookEntry,
+    LocalizedRelationshipStage, LocalizedSceneBehavior, LocalizedSpeechStyle,
+    LocalizedStyleExample, LocalizedTimePeriodBehavior,
+};
 pub use migration::{CURRENT_CONFIG_VERSION, MigrationFn, apply_migrations, register_migration};
 pub use paths::{
     IS_DEV_BUILD, app_data_dir, assets_dir, builtin_plugins_dir, builtin_tools_dir,

@@ -788,6 +788,27 @@ pub struct EneExtension {
     /// `Speech style` line; absent cards get a concise default instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speech: Option<SpeechStyleDefinition>,
+    /// Phrases the character must never say, injected into the output
+    /// contract; absent cards get no prohibition list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ng_expressions: Option<Vec<String>>,
+    /// Situation-labeled response examples preferred over `mes_example`
+    /// chunking; absent cards keep the legacy flat-example selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style_examples: Option<Vec<LabeledStyleExample>>,
+    /// Affinity-gated speaking tones; the stage with the highest threshold
+    /// not exceeding the current affinity is rendered into the Identity
+    /// Kernel. Absent cards get no relationship tone line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relationship_stages: Option<Vec<RelationshipStage>>,
+    /// Local-time-gated behaviors rendered into the Identity Kernel when the
+    /// current hour falls in the defined period.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_periods: Option<Vec<TimePeriodBehavior>>,
+    /// Keyword-gated behaviors rendered into the Identity Kernel when the
+    /// active scene matches. Absent cards get no scene behavior line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_behaviors: Option<Vec<SceneBehavior>>,
     /// Per-language card diffs, the serialization form for PNG-distributed
     /// cards. Folder and CHARX work forms use `character.{lang}.json`
     /// sidecars instead; the loader layers a sidecar over this bag when both
@@ -804,6 +825,11 @@ impl EneExtension {
             && self.expressions.is_none()
             && self.affect_baseline.is_none()
             && self.speech.is_none()
+            && self.ng_expressions.is_none()
+            && self.style_examples.is_none()
+            && self.relationship_stages.is_none()
+            && self.time_periods.is_none()
+            && self.scene_behaviors.is_none()
     }
 }
 
@@ -859,6 +885,92 @@ pub struct SpeechStyleDefinition {
     /// Recurring verbal tics / sentence-ending particles (e.g. `"〜だよね"`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub verbal_tics: Vec<String>,
+}
+
+/// A response example labeled with the situation it fits
+/// (`extensions.ene.style_examples`).
+///
+/// `id` is the stable key used by localized diffs; `label` is the
+/// situation tag matched at selection time. A label equal to one of the
+/// selector's intent tags (`greeting`, `comforting`, `joking`,
+/// `serious_explanation`, `refusal`, `tool_use`) selects through the
+/// existing intent pipeline; any other label is matched as a
+/// case-insensitive substring of the user's input.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case")]
+#[schemars(crate = "crate::schemars")]
+pub struct LabeledStyleExample {
+    /// Stable identifier used to match localized diff entries.
+    pub id: String,
+    /// Situation label (e.g. `"angry"`, `"first_meeting"`, `"怒っているとき"`).
+    pub label: String,
+    /// Example dialogue text.
+    pub text: String,
+}
+
+/// A speaking-tone stage gated by the user-relationship affinity
+/// (`extensions.ene.relationship_stages`).
+///
+/// The stage with the highest `threshold` not exceeding the current
+/// `AffectState.affinity` (-1.0..=1.0) is rendered into the Identity Kernel.
+/// Thresholds are numeric keys for localized diffs and are never translated.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case")]
+#[schemars(crate = "crate::schemars")]
+pub struct RelationshipStage {
+    /// Minimum affinity for this stage to apply (-1.0..=1.0).
+    pub threshold: f32,
+    /// Stage name (e.g. `"stranger"`, `"close friend"`).
+    pub label: String,
+    /// Tone instruction for this stage.
+    pub tone: String,
+}
+
+/// Local-time period of day.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case")]
+#[schemars(crate = "crate::schemars")]
+pub enum TimePeriod {
+    /// 05:00–10:59 local time.
+    Morning,
+    /// 11:00–16:59 local time.
+    Afternoon,
+    /// 17:00–20:59 local time.
+    Evening,
+    /// 21:00–04:59 local time.
+    Night,
+}
+
+/// A behavior rendered for one local-time period
+/// (`extensions.ene.time_periods`).
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case")]
+#[schemars(crate = "crate::schemars")]
+pub struct TimePeriodBehavior {
+    /// Period this behavior applies to.
+    pub period: TimePeriod,
+    /// Behavior instruction (e.g. `"speak softly and briefly at night"`).
+    pub behavior: String,
+}
+
+/// A keyword-gated behavior for the active scene
+/// (`extensions.ene.scene_behaviors`).
+///
+/// Keywords are matched against the active scene summary (falling back to
+/// the card's `scenario`); they are translated like lorebook triggers
+/// because they match localized scene text. `name` is the stable key used
+/// by localized diffs.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case")]
+#[schemars(crate = "crate::schemars")]
+pub struct SceneBehavior {
+    /// Stable identifier used to match localized diff entries.
+    pub name: String,
+    /// Scene keywords; any match activates the behavior.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// Behavior instruction for the matching scene.
+    pub behavior: String,
 }
 
 /// Context for expanding CBS (Character Book Spec) template macros.
@@ -1631,5 +1743,104 @@ mod tests {
         let def: SpeechStyleDefinition = serde_json::from_str(json).expect("valid JSON");
         assert_eq!(def.length, Some(SpeechLength::Short));
         assert_eq!(def.politeness, Some(PolitenessLevel::Formal));
+    }
+
+    #[test]
+    fn roleplay_definitions_serde_roundtrip() {
+        let mut card = CharacterCardV3::default();
+        card.data.extensions.ene = Some(EneExtension {
+            ng_expressions: Some(vec!["死ね".into(), "バカ".into()]),
+            style_examples: Some(vec![LabeledStyleExample {
+                id: "angry-1".into(),
+                label: "怒っているとき".into(),
+                text: "{{char}}: 今はそういう気分じゃない。".into(),
+            }]),
+            relationship_stages: Some(vec![RelationshipStage {
+                threshold: 0.3,
+                label: "close friend".into(),
+                tone: "speak with easy warmth".into(),
+            }]),
+            time_periods: Some(vec![TimePeriodBehavior {
+                period: TimePeriod::Night,
+                behavior: "speak softly".into(),
+            }]),
+            scene_behaviors: Some(vec![SceneBehavior {
+                name: "working".into(),
+                keywords: vec!["作業".into(), "work".into()],
+                behavior: "keep replies short".into(),
+            }]),
+            ..EneExtension::default()
+        });
+
+        let json = serde_json::to_string(&card).expect("serialise card");
+        for key in [
+            "ng_expressions",
+            "style_examples",
+            "relationship_stages",
+            "time_periods",
+            "scene_behaviors",
+        ] {
+            assert!(json.contains(key), "{key} missing from {json}");
+        }
+        let back: CharacterCardV3 = serde_json::from_str(&json).expect("valid JSON");
+        let ext = back.data.get_ene_extension().expect("extension preserved");
+        assert_eq!(ext.ng_expressions, Some(vec!["死ね".into(), "バカ".into()]));
+        assert_eq!(
+            ext.style_examples.expect("examples preserved")[0].label,
+            "怒っているとき"
+        );
+        let stage = &ext.relationship_stages.expect("stages preserved")[0];
+        assert!((stage.threshold - 0.3).abs() < f32::EPSILON);
+        assert_eq!(
+            ext.time_periods.expect("periods preserved")[0].period,
+            TimePeriod::Night
+        );
+        assert_eq!(
+            ext.scene_behaviors.expect("scenes preserved")[0].name,
+            "working"
+        );
+    }
+
+    #[test]
+    fn roleplay_absent_card_roundtrips_stable() {
+        let card = CharacterCardV3::default();
+        let first = serde_json::to_string(&card).expect("serialise card");
+        for key in [
+            "ng_expressions",
+            "style_examples",
+            "relationship_stages",
+            "time_periods",
+            "scene_behaviors",
+        ] {
+            assert!(!first.contains(key), "{key} materialised: {first}");
+        }
+        let back: CharacterCardV3 = serde_json::from_str(&first).expect("valid JSON");
+        let second = serde_json::to_string(&back).expect("serialise card again");
+        assert_eq!(first, second, "absent roleplay blocks must not materialise");
+    }
+
+    #[test]
+    fn time_period_resolves_snake_case() {
+        let json = r#"{"period": "morning", "behavior": "greet cheerfully"}"#;
+        let def: TimePeriodBehavior = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(def.period, TimePeriod::Morning);
+    }
+
+    #[test]
+    fn generated_character_schema_includes_roleplay_definitions() {
+        let schema = crate::config::generate_character_card_schema_json()
+            .expect("schema generation succeeds");
+        for key in [
+            "ng_expressions",
+            "style_examples",
+            "relationship_stages",
+            "time_periods",
+            "scene_behaviors",
+            "first_person",
+            "threshold",
+            "morning",
+        ] {
+            assert!(schema.contains(key), "{key} missing from schema");
+        }
     }
 }
