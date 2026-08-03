@@ -99,7 +99,7 @@ pub async fn classify_for_config(
             // fallback does not burn retries on it.
             let provider = ene_ai::create_chat_provider_for_task(&config, &task)
                 .map_err(|e| ClassifierError::Config(e.to_string()))?;
-            Ok(Box::new(provider) as Box<dyn ene_ai::LlmProvider>)
+            Ok(provider)
         },
         &current_affect,
         &conversation,

@@ -12,7 +12,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ene_ai::RetryPolicy;
 use ene_ai::traits::{EmbeddingError, EmbeddingKind};
-use ene_plugin_proto::PluginIpcResponse;
 
 use crate::config::PluginConfig;
 use crate::error::PluginHostError;
