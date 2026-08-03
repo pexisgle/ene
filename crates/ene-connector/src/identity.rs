@@ -10,6 +10,12 @@ use crate::error::ConnectorError;
 use std::fmt;
 use std::str::FromStr;
 
+/// Returns `true` when `c` is an accepted identifier character
+/// (`[A-Za-z0-9._-]`). Shared by [`ConnectorId`] and [`CredentialId`].
+const fn valid_id_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-'
+}
+
 /// A stable, namespaced identifier for a connector or stored credential.
 ///
 /// The canonical form is `namespace.name` (e.g. `mcp.github-mcp` or
@@ -24,11 +30,6 @@ use std::str::FromStr;
 pub struct ConnectorId(String);
 
 impl ConnectorId {
-    /// Returns `true` when `c` is an accepted identifier character.
-    const fn valid_char(c: u8) -> bool {
-        c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-'
-    }
-
     /// Returns `true` when `id` is non-empty, uses only accepted characters,
     /// and contains at least one `.` namespace separator.
     #[must_use]
@@ -37,7 +38,7 @@ impl ConnectorId {
             return false;
         }
         let bytes = id.as_bytes();
-        if !bytes.iter().all(|&b| Self::valid_char(b)) {
+        if !bytes.iter().all(|&b| valid_id_char(b)) {
             return false;
         }
         bytes.contains(&b'.')
@@ -95,6 +96,71 @@ impl FromStr for ConnectorId {
 
 impl From<ConnectorId> for String {
     fn from(id: ConnectorId) -> Self {
+        id.0
+    }
+}
+
+/// A stable identifier for a stored credential.
+///
+/// Unlike [`ConnectorId`], a credential id needs no `namespace.name` form:
+/// `anthropic` and `google.calendar` are both valid. Accepted characters are
+/// ASCII alphanumerics plus `.`, `_`, and `-`; the id must not start or end
+/// with `.`, keeping dotted ids like `google.calendar` free of leading or
+/// trailing separators. The `:` separator that private storage keys use
+/// (`<plugin>:<id>`) is deliberately outside this charset, so no credential id
+/// can be spelled like a private storage key.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct CredentialId(String);
+
+impl CredentialId {
+    /// Returns `true` when `id` is non-empty, uses only accepted characters,
+    /// and does not start or end with `.`.
+    #[must_use]
+    pub fn is_valid(id: &str) -> bool {
+        !id.is_empty()
+            && !id.starts_with('.')
+            && !id.ends_with('.')
+            && id.as_bytes().iter().all(|&b| valid_id_char(b))
+    }
+
+    /// Creates a credential id, validating the charset and boundary form.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorError::Internal`] when `id` is empty, contains a
+    /// character outside `[A-Za-z0-9._-]`, or starts or ends with `.`.
+    pub fn try_new(id: impl Into<String>) -> Result<Self, ConnectorError> {
+        let s = id.into();
+        if Self::is_valid(&s) {
+            Ok(Self(s))
+        } else {
+            Err(ConnectorError::internal(format!(
+                "invalid credential ID: '{s}'"
+            )))
+        }
+    }
+
+    /// Returns the full identifier as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CredentialId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for CredentialId {
+    type Err = ConnectorError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_new(s)
+    }
+}
+
+impl From<CredentialId> for String {
+    fn from(id: CredentialId) -> Self {
         id.0
     }
 }
@@ -242,6 +308,38 @@ mod tests {
         let id = ConnectorId::try_new("ns.sub.name").unwrap();
         assert_eq!(id.namespace(), "ns");
         assert_eq!(id.name(), "sub.name");
+    }
+
+    #[test]
+    fn credential_id_accepts_dotless_dotted_and_hyphenated() {
+        assert!(CredentialId::is_valid("anthropic"));
+        assert!(CredentialId::is_valid("google.calendar"));
+        assert!(CredentialId::is_valid("google-calendar"));
+        assert!(CredentialId::is_valid("my_key.v2"));
+    }
+
+    #[test]
+    fn credential_id_rejects_empty_bad_chars_and_boundary_dots() {
+        assert!(!CredentialId::is_valid(""));
+        assert!(!CredentialId::is_valid(".leading"));
+        assert!(!CredentialId::is_valid("trailing."));
+        assert!(!CredentialId::is_valid("has space"));
+        assert!(!CredentialId::is_valid("semi;colon"));
+        assert!(CredentialId::try_new("slash/name").is_err());
+        assert_eq!(
+            CredentialId::try_new("a.b.").unwrap_err().to_string(),
+            "internal error: invalid credential ID: 'a.b.'"
+        );
+    }
+
+    #[test]
+    fn credential_id_round_trips_via_display_and_fromstr() {
+        let id = CredentialId::try_new("google.calendar").unwrap();
+        assert_eq!(id.as_str(), "google.calendar");
+        assert_eq!(format!("{id}"), "google.calendar");
+        assert_eq!(id.to_string().parse::<CredentialId>().unwrap(), id);
+        let string: String = id.clone().into();
+        assert_eq!(string, "google.calendar");
     }
 
     #[test]

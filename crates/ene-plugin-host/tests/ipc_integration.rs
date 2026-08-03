@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-use ene_plugin_host::{IpcPluginConnection, PluginHostError};
+use ene_connector::declaration::{CredentialRejection, ScopeDecision, parse_credentials};
+use ene_connector::identity::CredentialId;
+use ene_plugin_host::{CredentialRegistry, IpcPluginConnection, PluginHostError};
 use ene_plugin_proto::{
     CallContext, DeferredStatus, IpcListener, PLUGIN_IPC_MIN_SUPPORTED_VERSION,
     PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest, PluginIpcResponse,
@@ -466,6 +468,94 @@ async fn run_dynamic_config_mock(socket_path: PathBuf, state: Arc<Mutex<MockStat
                     break;
                 }
             }
+
+            if write_plugin_response(&mut stream, &resp).await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// Mock that serves a fixed config schema — including `x-ene-credentials` —
+/// via `GetConfigSchema`, plus the minimal surface a started plugin needs
+/// (handshake, ping, list tools, shutdown).
+async fn run_credentials_mock(
+    socket_path: PathBuf,
+    state: Arc<Mutex<MockState>>,
+    schema: serde_json::Value,
+) {
+    cleanup_path(&socket_path);
+    let mut listener = IpcListener::bind(&socket_path).expect("failed to bind credentials mock");
+    let our_range = VersionRange {
+        min: PLUGIN_IPC_PROTOCOL_VERSION,
+        max: PLUGIN_IPC_PROTOCOL_VERSION,
+    };
+
+    loop {
+        let Ok(mut stream) = listener.accept().await else {
+            break;
+        };
+        let state = Arc::clone(&state);
+
+        loop {
+            let Ok(Some(req)) = read_plugin_request(&mut stream).await else {
+                break;
+            };
+
+            let resp = match req {
+                PluginIpcRequest::Handshake {
+                    version: host_range,
+                    plugin_config,
+                    plugin_profiles,
+                    ..
+                } => match our_range.negotiate(&host_range) {
+                    None => PluginIpcResponse::Error {
+                        request_id: String::new(),
+                        message: "version mismatch".into(),
+                    },
+                    Some(negotiated) => {
+                        {
+                            let mut s = state.lock().await;
+                            s.plugin_config = plugin_config;
+                            s.plugin_profiles = plugin_profiles;
+                        }
+                        PluginIpcResponse::HandshakeAck {
+                            version: negotiated,
+                            capabilities: PluginCapabilities {
+                                tools: 1,
+                                supports_list_config_options: true,
+                                supports_validate_config: true,
+                                supports_migrate_config: true,
+                                config_version: 1,
+                                ..PluginCapabilities::default()
+                            },
+                        }
+                    }
+                },
+                PluginIpcRequest::ListTools { request_id } => PluginIpcResponse::Tools {
+                    request_id,
+                    tools: vec![ToolSpec::new(
+                        ToolName::new("mock.echo"),
+                        "Echoes arguments back.",
+                        serde_json::json!({}),
+                    )],
+                },
+                PluginIpcRequest::GetConfigSchema { request_id } => {
+                    PluginIpcResponse::ConfigSchema {
+                        request_id,
+                        schema: Some(schema.clone()),
+                        config_version: 1,
+                    }
+                }
+                PluginIpcRequest::Ping { request_id } => PluginIpcResponse::Pong { request_id },
+                PluginIpcRequest::Shutdown => PluginIpcResponse::Ack {
+                    request_id: String::new(),
+                },
+                other => PluginIpcResponse::Error {
+                    request_id: String::new(),
+                    message: format!("unsupported in credentials mock: {other:?}"),
+                },
+            };
 
             if write_plugin_response(&mut stream, &resp).await.is_err() {
                 break;
@@ -1818,6 +1908,193 @@ async fn dynamic_config_degrades_on_n_minus_one_plugin() {
             .await
             .expect("N-1 list degrade")
             .is_empty()
+    );
+
+    cleanup_path(&socket_path);
+}
+
+// ── Test: x-ene-credentials declaration registration ─────────────────────
+
+/// Spawns a credentials mock and connects an [`IpcPluginConnection`],
+/// returning the connection and socket path.
+async fn spawn_credentials_and_connect(
+    name: &str,
+    schema: serde_json::Value,
+) -> (IpcPluginConnection, PathBuf) {
+    let socket_path = test_socket_path(name);
+    let state = Arc::new(Mutex::new(MockState::default()));
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        run_credentials_mock(server_path, server_state, schema).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
+    )
+    .await
+    .expect("handshake should succeed");
+
+    (conn, socket_path)
+}
+
+#[tokio::test]
+async fn credentials_declared_in_schema_are_registered() {
+    let (conn, socket_path) = spawn_credentials_and_connect(
+        "credentials-valid",
+        serde_json::json!({
+            "type": "object",
+            "x-ene-credentials": [
+                { "id": "anthropic", "kind": "api_key", "required": true,
+                  "header": { "name": "x-api-key", "format": "{value}" },
+                  "env_fallback": "ANTHROPIC_API_KEY" },
+                { "id": "google.calendar", "kind": "oauth2",
+                  "scopes": ["https://www.googleapis.com/auth/calendar.readonly"],
+                  "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                  "token_url": "https://oauth2.googleapis.com/token" }
+            ]
+        }),
+    )
+    .await;
+
+    // The plugin started and its tools registered.
+    let tools = conn.list_tools().await.expect("list_tools");
+    assert_eq!(tools.len(), 1);
+
+    // The schema travels over IPC as an opaque blob; the host-side
+    // registration path parses it and records the declarations.
+    let schema = conn
+        .config_schema()
+        .await
+        .expect("config_schema")
+        .expect("schema must be present");
+
+    let registry = CredentialRegistry::new();
+    registry.register_from_schema("mock", Some(&schema));
+    let declarations = registry.declarations("mock");
+    assert_eq!(declarations.len(), 2);
+    assert_eq!(declarations[0].id.as_str(), "anthropic");
+    assert_eq!(declarations[1].id.as_str(), "google.calendar");
+
+    let anthropic = CredentialId::try_new("anthropic").expect("valid credential id");
+    assert_eq!(
+        registry.resolve_scope("mock", &anthropic),
+        ScopeDecision::Allowed {
+            storage_key: "anthropic".to_string()
+        }
+    );
+    let undeclared = CredentialId::try_new("openai").expect("valid credential id");
+    assert_eq!(
+        registry.resolve_scope("mock", &undeclared),
+        ScopeDecision::Undeclared
+    );
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn invalid_credential_entries_are_dropped_while_plugin_stays_up() {
+    let (conn, socket_path) = spawn_credentials_and_connect(
+        "credentials-mixed",
+        serde_json::json!({
+            "type": "object",
+            "x-ene-credentials": [
+                { "id": "anthropic", "kind": "api_key",
+                  "header": { "name": "x-api-key", "format": "{value}" } },
+                { "id": "bad kind", "kind": "api_key" },
+                { "id": "missing.token", "kind": "oauth2", "auth_url": "https://a" },
+                { "id": "no.placeholder", "kind": "api_key",
+                  "header": { "name": "x-api-key", "format": "literal" } }
+            ]
+        }),
+    )
+    .await;
+
+    // The plugin stays up and its tools register despite the bad entries.
+    let tools = conn.list_tools().await.expect("list_tools");
+    assert_eq!(tools.len(), 1);
+
+    let schema = conn
+        .config_schema()
+        .await
+        .expect("config_schema")
+        .expect("schema must be present");
+
+    // Only the valid entry survives parsing; each bad entry is reported.
+    let parse = parse_credentials(&schema);
+    assert_eq!(parse.declarations.len(), 1);
+    assert_eq!(parse.declarations[0].id.as_str(), "anthropic");
+    assert_eq!(parse.rejected.len(), 3);
+    assert!(
+        parse
+            .rejected
+            .iter()
+            .any(|r| r.reason == CredentialRejection::InvalidId)
+    );
+    assert!(
+        parse
+            .rejected
+            .iter()
+            .any(|r| r.reason == CredentialRejection::MissingOauth2Field("token_url"))
+    );
+    assert!(
+        parse
+            .rejected
+            .iter()
+            .any(|r| r.reason == CredentialRejection::HeaderMissingPlaceholder)
+    );
+
+    let registry = CredentialRegistry::new();
+    registry.register_from_schema("mock", Some(&schema));
+    assert_eq!(registry.declarations("mock").len(), 1);
+    let anthropic = CredentialId::try_new("anthropic").expect("valid credential id");
+    assert!(matches!(
+        registry.resolve_scope("mock", &anthropic),
+        ScopeDecision::Allowed { .. }
+    ));
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn plugin_without_declarations_registers_empty_set() {
+    // The dynamic-config mock serves a schema without `x-ene-credentials`.
+    let socket_path = test_socket_path("credentials-none");
+    let state = Arc::new(Mutex::new(MockState::default()));
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        run_dynamic_config_mock(server_path, server_state).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
+    )
+    .await
+    .expect("handshake should succeed");
+
+    let schema = conn.config_schema().await.expect("config_schema");
+
+    let registry = CredentialRegistry::new();
+    registry.register_from_schema("mock", schema.as_ref());
+    assert!(registry.declarations("mock").is_empty());
+
+    let id = CredentialId::try_new("anthropic").expect("valid credential id");
+    assert_eq!(
+        registry.resolve_scope("mock", &id),
+        ScopeDecision::Undeclared
     );
 
     cleanup_path(&socket_path);

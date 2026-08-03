@@ -341,6 +341,68 @@ flags unlock `ListConfigOptions` (dynamic enums), `ValidateConfig`
 Peers that omit the flags degrade to static schema + host JSON Schema
 validation with no migration. UI wiring for these APIs is out of scope here.
 
+### Credential declaration (`x-ene-credentials`)
+
+Plugins that need credentials (API keys, OAuth2 tokens) declare them at the
+top level of the schema returned by `config_schema()`, alongside the existing
+`x-` markers:
+
+```json
+{
+  "type": "object",
+  "properties": { "voice": { "type": "string" } },
+  "x-ene-credentials": [
+    { "id": "anthropic", "kind": "api_key", "required": true,
+      "header": { "name": "x-api-key", "format": "{value}" },
+      "env_fallback": "ANTHROPIC_API_KEY",
+      "label": "Anthropic API Key",
+      "help_url": "https://console.anthropic.com/settings/keys" },
+    { "id": "google.calendar", "kind": "oauth2",
+      "scopes": ["https://www.googleapis.com/auth/calendar.readonly"],
+      "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+      "token_url": "https://oauth2.googleapis.com/token",
+      "label": "Google Calendar" }
+  ]
+}
+```
+
+Fields common to both kinds: `id` is the stable credential id, `required`
+(default `false`) marks the credential as mandatory, `shared` (default
+`true`) controls namespace sharing (see below), and `label` / `help_url`
+drive the configuration UI. Ids accept `[A-Za-z0-9._-]` and must not start
+or end with `.` — `anthropic`, `google.calendar`, and `google-calendar` are
+all valid.
+
+- `kind: "api_key"` — a static secret. `header` (optional) tells the client
+  how to inject the value; `format` is a template that must contain
+  `{value}` (e.g. `Bearer {value}`). `env_fallback` names an environment
+  variable the host checks when no value is stored.
+- `kind: "oauth2"` — an OAuth2 flow driven by the host. `scopes` lists the
+  consent scopes, `auth_url` / `token_url` the authorization and token
+  endpoints.
+
+**Sharing policy.** Declarations are shared by default: two plugins that both
+declare `anthropic` address the same stored value, so switching providers
+does not force re-entering keys. Sharing is limited to plugins that declared
+the id — a plugin that never declared `anthropic` is denied even when the
+value exists in the vault. A plugin opts out with `"shared": false`, which
+resolves its own namespaced value at `<plugin>:<id>`.
+
+The `:` separator makes a private key structurally unable to collide with a
+shared declaration: it is in neither the id charset (`[A-Za-z0-9._-]`) nor the
+plugin-name charset (`[A-Za-z0-9_-]`), so no shared id can be spelled like a
+private key. Plugin A's private `anthropic` (`A:anthropic`) and plugin C
+sharing the id `A.anthropic` (`A.anthropic`) resolve to different keys without
+any extra uniqueness invariant.
+
+**Validation timing.** Declarations are validated when the plugin starts:
+each entry is checked independently, a bad entry is warned about and ignored
+(the plugin itself still starts), and duplicate ids keep the first
+occurrence. Request-time enforcement lives in the credential service, which
+resolves every request against the requesting plugin's registered
+declarations and denies undeclared ids. Value format validation (e.g. a
+`sk-ant-` prefix) is delegated to the plugin's `ValidateConfig` on save.
+
 ### Binary checksum verification (TOFU)
 
 On first activation, the host computes the SHA-256 checksum of the plugin

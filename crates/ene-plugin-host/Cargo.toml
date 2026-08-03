@@ -17,6 +17,10 @@ hex = { workspace = true }
 ene-plugin-proto = { workspace = true }
 ene-ai = { workspace = true }
 ene-config = { workspace = true }
+# Credential and identity types only (CredentialId, x-ene-credentials
+# parsing, resolve_scope). Connection lifecycle stays in this crate; the
+# dependency is deliberately limited to these types.
+ene-connector = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "time", "process", "sync", "rt", "macros"] }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
