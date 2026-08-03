@@ -21,6 +21,7 @@ Ene ホストアプリケーション (ene-runtime)
         │     ├── ene-plugin-calc      (計算ツール)
         │     ├── ene-plugin-calendar  (カレンダーツール)
         │     ├── ene-plugin-fs        (サンドボックス化ファイルシステムツール)
+        │     ├── ene-plugin-random    (ランダム生成ツール)
         │     ├── ene-plugin-utility   (TODO・質問・タイマー・通知ツール)
         │     └── ene-plugin-web       (Web 検索 & スクレイパーツール)
         │
@@ -130,12 +131,13 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 | `ene-plugin-calc` | `calc.*` | 数式評価・単位/通貨/色変換 | いいえ |
 | `ene-plugin-calendar` | `calendar.*` | カレンダー単位のパーミッション・書き込み確認・空き時間検索付きローカルカレンダー | はい (ホストサービス `db`) |
 | `ene-plugin-fs` | `fs.*` | サンドボックス化ファイル操作 & Undo 履歴 | はい (ホストサービス `db`) |
+| `ene-plugin-random` | `random.*` | 乱数・UUID v4・リスト選択・hex 色生成 | いいえ |
 | `ene-plugin-utility` | `utility.*` | 質問プロンプト、TODO リスト管理、日時/システム情報、カウントダウンタイマー & デスクトップ通知（Linux・D-Bus のみ） | はい (ホストサービス `db`) |
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude プロバイダプラグイン | いいえ |
 | `ene-plugin-openai` | Provider | OpenAI 互換プロバイダプラグイン（チャット・ストリーミング・埋め込み） | いいえ |
 
-上記 8 プラグインはすべてデフォルトの `plugins.list` に含まれており、
+上記 9 プラグインはすべてデフォルトの `plugins.list` に含まれており、
 新規インストール時に自動的に起動します。
 
 ### ファイルツールリファレンス (`filesystem.*`)
