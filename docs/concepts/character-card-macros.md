@@ -20,7 +20,6 @@ turn. A macro's output is therefore baked into the prompt for that turn.
 | `{{description}}` | Card `description` field | |
 | `{{personality}}` | Card `personality` field | |
 | `{{scenario}}` | Card `scenario` field | |
-| `{{persona}}` | Card `creator_notes` field | |
 | `{{mesExamples}}` | Card `mes_example` field | |
 | `{{random:a,b,c}}` | One option, chosen at random | **Re-rolled on every evaluation** |
 | `{{pick:a,b,c}}` | One option, chosen stably | **Stable within a chat** — see below |
@@ -78,3 +77,8 @@ the morning or reacting after a long silence.
 Control-flow macros from some CBS dialects (RisuAI-style `{{#if}}`, arithmetic,
 conditionals) are intentionally **not** supported. Unknown macros are left in
 the text untouched, so a typo surfaces visibly rather than vanishing.
+
+`{{persona}}` is deliberately **not** expanded either: it would reference the
+`creator_notes` field, and creator notes are creator-to-user guidance that
+`CCv3` never sends to the model — expanding it would leak them into prompts.
+Cards using `{{persona}}` see the literal text, like any unknown macro.

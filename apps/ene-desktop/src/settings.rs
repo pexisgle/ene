@@ -369,6 +369,8 @@ pub struct UiState {
     pub character_editor_mes_example: String,
     /// Editable `data.first_mes` buffer.
     pub character_editor_first_mes: String,
+    /// Editable `data.creator_notes` buffer.
+    pub character_editor_creator_notes: String,
     /// Editable `data.post_history_instructions` buffer.
     pub character_editor_post_history: String,
 }

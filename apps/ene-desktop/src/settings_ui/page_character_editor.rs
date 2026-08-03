@@ -134,6 +134,14 @@ pub fn render(
             |s| &mut s.character_editor_first_mes,
         );
 
+        text_area(
+            ui,
+            world,
+            ui_entity,
+            i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-creator-notes"),
+            |s| &mut s.character_editor_creator_notes,
+        );
+
         text_field(
             ui,
             world,

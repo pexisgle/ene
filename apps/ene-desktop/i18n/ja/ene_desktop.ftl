@@ -23,6 +23,8 @@ chat-you = あなた
 chat-ene = エネ
 chat-waiting = AIの応答を待っています…
 chat-empty-history = まだメッセージがありません。話しかけてみてください。
+chat-greeting-prompt = 開始の挨拶を選んでください
+chat-greeting-failed = 挨拶を設定できませんでした: { $error }
 
 # Graphics
 graphics = グラフィックス
@@ -157,6 +159,7 @@ character-editor-scenario = シナリオ
 character-editor-system-prompt = システムプロンプト
 character-editor-mes-example = 会話例
 character-editor-first-mes = 最初のメッセージ
+character-editor-creator-notes = クリエーターノート
 character-editor-post-history = 履歴後の指示
 character-editor-validate = 検証
 character-editor-save = 保存

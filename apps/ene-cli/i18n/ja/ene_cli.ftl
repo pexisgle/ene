@@ -23,6 +23,19 @@ user-input-cancel = (全キャンセル)
 help-commands-title = コマンド一覧:
 help-quit = CLI を終了する
 
+## /greeting コマンド
+greeting-no-card = キャラクターカードが読み込まれていません。
+greeting-no-greetings = このキャラクターには挨拶がありません。
+greeting-history-not-empty = 挨拶は最初のメッセージの前でのみ選択できます。新しいセッションを始めるには REPL を再起動してください。
+greeting-none-selected = 挨拶を選択しませんでした。
+greeting-selected = 選択した挨拶:
+greeting-failed = 挨拶を設定できませんでした: { $error }
+greeting-choose = 挨拶を選択 (Enter で確定)
+greeting-none = (なし)
+
+## /card コマンド
+card-loaded = キャラクターカードを読み込みました: { $name }
+
 init-failed = 初期化に失敗しました: { $error }
 turn-failed = エラー: { $detail }
 runtime-error-no-character-card = キャラクターカードが見つからないか読み込めませんでした。

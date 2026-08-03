@@ -568,8 +568,6 @@ impl CognitionEngine {
                 .system()
                 .render_mascot_context(char_name, ctx.user_name),
         );
-        let behavior_contract = build_behavior_contract(ctx.card, ctx.user_name);
-
         let recent_limit = ctx.config.context.recent_turns.saturating_mul(2).max(2);
         let history: Vec<_> = if ctx.history.len() > recent_limit {
             ctx.history[ctx.history.len() - recent_limit..].to_vec()
@@ -588,13 +586,17 @@ impl CognitionEngine {
         // evaluated against the card and history here, outside the recall
         // pipeline, so they cannot lose a score competition (see
         // `lorebook_injection`).
-        let lorebook =
-            build_lorebook_injection(ctx.card, ctx.user_name, ctx.user_input, ctx.history);
+        let lorebook = build_lorebook_injection(
+            ctx.card,
+            ctx.user_name,
+            ctx.user_input,
+            ctx.history,
+            ctx.greeting_index,
+        );
 
         let pack_input = PackInput {
             platform_contract,
             identity_kernel: kernel,
-            behavior_contract,
             style_examples,
             recalled,
             commitments,
@@ -926,23 +928,6 @@ impl CognitionEngine {
     }
 }
 
-fn build_behavior_contract(card: &CharacterCardV3, user_name: &str) -> Option<String> {
-    let data = &card.data;
-    let char_name = data.get_character_name();
-    let mut parts = Vec::new();
-    if !data.creator_notes.trim().is_empty() {
-        parts.push(format!(
-            "## Creator Notes\n{}",
-            ene_config::expand_cbs_macros(&data.creator_notes, char_name, user_name)
-        ));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
-    }
-}
-
 fn pending_to_affect_proposal(
     pending: ene_core::PendingAffectProposal,
 ) -> crate::emotion::AffectProposal {
@@ -1153,6 +1138,7 @@ mod turn_id_tests {
             session_id: "sess",
             user_input: "hi",
             history: &[],
+            greeting_index: None,
             store: None,
             query_embedding: None,
             embedder: None,
@@ -1178,5 +1164,76 @@ mod turn_id_tests {
         );
         assert_eq!(composed.meta.style_example_count, 1);
         assert!(composed.meta.scene_summary_included);
+    }
+
+    #[tokio::test]
+    async fn compose_prompt_packet_never_includes_creator_notes() {
+        use crate::lifecycle::PreTurnOutput;
+        use crate::recall::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
+        use ene_config::CharacterCardV3;
+        use ene_core::AffectState;
+
+        let engine = CognitionEngine::new();
+        let config = MindConfig::default();
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.creator_notes = "Author X. Temperature 0.8 recommended.".into();
+        card.data.system_prompt = "Be kind. {{persona}}".into();
+        let pre = PreTurnOutput {
+            recall_plan: RecallPlan {
+                current_topic: "test".into(),
+                semantic_queries: Vec::new(),
+                episodic_queries: Vec::new(),
+                required_kinds: Vec::new(),
+                scope: RecallScopeFilter {
+                    character_id: "ene".into(),
+                    user_id: Some("user".into()),
+                },
+                budget: RecallBudgetHints { result_limit: 4 },
+                search: RecallSearchHints {
+                    primary_query_text: "hi".into(),
+                    similarity_threshold: 0.0,
+                    min_score: 0.0,
+                    decay_half_life_days: 30.0,
+                    query_affect: None,
+                },
+            },
+            affect: AffectState::neutral("ene"),
+            recalled: Vec::new(),
+            commitments: Vec::new(),
+            classifier_expression_hint: None,
+        };
+        let ctx = TurnContext {
+            config: &config,
+            card: &card,
+            character_id: "ene",
+            user_name: "user",
+            session_id: "sess",
+            user_input: "hi",
+            history: &[],
+            greeting_index: None,
+            store: None,
+            query_embedding: None,
+            embedder: None,
+            llm_provider: None,
+            available_window: None,
+            post_history_block: None,
+            compression_pending: false,
+            packing_budget_override: None,
+            proactive_topic: None,
+        };
+        let composed = engine
+            .compose_prompt_packet(ctx, pre, crate::lifecycle::ComposePrefetch::default())
+            .await
+            .expect("compose");
+        let blob = format!("{composed:?}");
+        assert!(
+            !blob.contains("Author X"),
+            "creator notes must not reach the composed prompt: {blob}"
+        );
+        assert!(
+            !blob.contains("Creator Notes"),
+            "no creator-notes section may exist in the composed prompt: {blob}"
+        );
     }
 }

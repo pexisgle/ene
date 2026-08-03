@@ -99,7 +99,7 @@ async fn lorebook_sync_and_guaranteed_injection() {
     assert!(report.lorebook_inserted >= 2);
 
     // The constant entry is guaranteed-injected without any key.
-    let injection = build_lorebook_injection(&card, "User", "Tell me about the weather", &[]);
+    let injection = build_lorebook_injection(&card, "User", "Tell me about the weather", &[], None);
     assert!(
         injection
             .after_char
@@ -116,7 +116,7 @@ async fn lorebook_sync_and_guaranteed_injection() {
     assert_eq!(hash, hash2);
 
     // Key-matched entries are injected; unmatched entries are not.
-    let keyed = build_lorebook_injection(&card, "User", "I met a dragon today", &[]);
+    let keyed = build_lorebook_injection(&card, "User", "I met a dragon today", &[], None);
     assert!(
         keyed.after_char.iter().any(|c| c.contains("northern pass")),
         "key-triggered lorebook entry should be injected"
@@ -176,7 +176,7 @@ async fn lorebook_content_update_supersedes_existing_row() {
             .expect("resync after edit");
     assert_eq!(report.lorebook_updated, 1);
 
-    let keyed = build_lorebook_injection(&card, "User", "I met a dragon today", &[]);
+    let keyed = build_lorebook_injection(&card, "User", "I met a dragon today", &[], None);
     assert!(
         keyed.after_char.iter().any(|c| c.contains("eastern gate")),
         "updated lorebook content should be injected"
@@ -230,7 +230,7 @@ async fn disabled_lorebook_entry_is_archived_on_resync() {
             .expect("resync after disable");
     assert!(report.archived >= 1);
 
-    let keyed = build_lorebook_injection(&card, "User", "I met a dragon today", &[]);
+    let keyed = build_lorebook_injection(&card, "User", "I met a dragon today", &[], None);
     assert!(
         !keyed.after_char.iter().any(|c| c.contains("northern pass")),
         "disabled lorebook entry should not be injected"

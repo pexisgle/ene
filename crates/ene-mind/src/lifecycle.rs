@@ -60,6 +60,10 @@ pub struct TurnContext<'a> {
     pub user_input: &'a str,
     /// Recent conversation history.
     pub history: &'a [HistoryEntry],
+    /// Index of the greeting this session started with (`0` = `first_mes`,
+    /// `i+1` = `alternate_greetings[i]`); `None` when no greeting was chosen.
+    /// Drives `@@is_greeting` lorebook gating.
+    pub greeting_index: Option<u32>,
     /// Memory store (optional when memory disabled).
     pub store: Option<&'a dyn MemoryPort>,
     /// Query embedding for recall (optional).

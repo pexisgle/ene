@@ -1431,6 +1431,10 @@ impl TurnActor {
                 drop(reply.send(Ok(())));
                 true
             }
+            EneCommand::SetGreeting { index, reply } => {
+                drop(reply.send(self.apply_greeting(index)));
+                true
+            }
             EneCommand::UpdateProactiveObservation { observation } => {
                 self.proactive.observation = observation;
                 // When screen_summary is enabled, each observe cycle (fresh
@@ -2123,6 +2127,72 @@ impl TurnActor {
     }
 
     // ── Split management ──
+
+    /// Opens the session with the greeting at `index` (`0` = `first_mes`,
+    /// `i+1` = `alternate_greetings[i]`).
+    ///
+    /// Only valid before the first message: a greeting mid-conversation
+    /// would insert an assistant turn the character never produced.
+    fn apply_greeting(&mut self, index: u32) -> Result<String, crate::public_api::PublicApiError> {
+        use crate::public_api::PublicApiError;
+
+        let Some(card) = self.session.character_card.as_ref() else {
+            return Err(PublicApiError::Invalid {
+                message: "no character card loaded".to_string(),
+            });
+        };
+        if self.active_turn.is_some() {
+            return Err(PublicApiError::Invalid {
+                message: "a turn is in progress; wait for it to finish before choosing a greeting"
+                    .to_string(),
+            });
+        }
+        if !self.session.history().is_empty() {
+            return Err(PublicApiError::Invalid {
+                message: "greeting can only be chosen before the first message".to_string(),
+            });
+        }
+
+        let index_usize = usize::try_from(index).map_err(|_| PublicApiError::Invalid {
+            message: format!("greeting index {index} is out of range"),
+        })?;
+        let text = if index_usize == 0 {
+            card.data.first_mes.clone()
+        } else {
+            match card
+                .data
+                .alternate_greetings
+                .get(index_usize.saturating_sub(1))
+            {
+                Some(text) => text.clone(),
+                None => {
+                    return Err(PublicApiError::Invalid {
+                        message: format!("greeting index {index} is out of range"),
+                    });
+                }
+            }
+        };
+        if text.trim().is_empty() {
+            return Err(PublicApiError::Invalid {
+                message: format!("no greeting at index {index}"),
+            });
+        }
+
+        let user_name = self.config.user_name.clone();
+        let expanded =
+            ene_config::expand_cbs_macros(&text, card.data.get_character_name(), &user_name);
+        self.session.apply_greeting(&expanded, index);
+        if let Some(store) = &self.concrete_store {
+            ene_store::MemoryStore::spawn_insert_log(
+                store,
+                self.session.memory.session_id.as_str(),
+                self.session.card_name(),
+                "assistant",
+                &expanded,
+            );
+        }
+        Ok(expanded)
+    }
 
     /// Starts a new session: resets the session and publishes the new id /
     /// started-at / turn count to the mailbox-free shared state.

@@ -23,6 +23,19 @@ user-input-cancel = (cancel all)
 help-commands-title = Commands:
 help-quit = Exit the CLI
 
+## /greeting command
+greeting-no-card = No character card loaded.
+greeting-no-greetings = This character has no greetings.
+greeting-history-not-empty = Greetings can only be chosen before the first message. Restart the REPL to open a new session.
+greeting-none-selected = No greeting selected.
+greeting-selected = Greeting selected:
+greeting-failed = Failed to set greeting: { $error }
+greeting-choose = Choose a greeting (Enter to confirm)
+greeting-none = (none)
+
+## /card command
+card-loaded = Character card loaded: { $name }
+
 init-failed = Failed to initialize: { $error }
 turn-failed = Error: { $detail }
 runtime-error-no-character-card = Character card not found or could not be loaded.

@@ -113,7 +113,7 @@ pipeline, derived from the session history (see
 |---|---|
 | `@@scan_depth N` | Overrides the book's `scan_depth` for this entry. With `recursive_scanning`, other entries' contents still match regardless of the override (per spec). |
 | `@@instruct_scan_depth N` | **Parsed, ignored** — chat context (see `@@instruct_depth`). |
-| `@@is_greeting N` | **Parsed, ignored** — Ene does not track the active greeting index; the spec says to ignore the decorator when it cannot be checked. |
+| `@@is_greeting N` | Only matches when the session's active greeting index is `N` (`0` = `first_mes`, `i+1` = `alternate_greetings[i]`). When no greeting was chosen, the decorator is ignored and the `@@@` fallback chain applies — the spec's "checking the active greeting is not possible" case. |
 
 ### Filters
 

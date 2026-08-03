@@ -166,13 +166,6 @@ impl CharacterCompiler {
                 expand_field(&data.scenario, ctx)
             ));
         }
-        if !data.creator_notes.trim().is_empty() {
-            optional_sections.push(format!(
-                "## Creator Notes\n{}",
-                expand_field(&data.creator_notes, ctx)
-            ));
-        }
-
         // Fit greedily in token space (language-aware), not character space, so
         // a Japanese card is measured against the same budget as an English one.
         let mut text = core_block.clone();
@@ -422,6 +415,33 @@ mod tests {
         assert!(kernel.text.contains("Speech style:"));
         assert!(kernel.text.contains("Hard instruction: remain Ene"));
         assert!(kernel.text.contains("Keep responses short"));
+    }
+
+    #[test]
+    fn creator_notes_never_reach_the_kernel() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.creator_notes =
+            "Author X. This card runs best at temperature 0.8; no redistribution.".into();
+        // `{{persona}}` must stay literal rather than expanding into the notes.
+        card.data.system_prompt = "Be kind. {{persona}}".into();
+
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 128_000, "en");
+
+        assert!(
+            !kernel.text.contains("Author X"),
+            "creator notes must never be injected into the identity kernel: {}",
+            kernel.text
+        );
+        assert!(
+            !kernel.text.contains("Creator Notes"),
+            "the creator-notes section must not exist in the kernel: {}",
+            kernel.text
+        );
+        assert!(
+            kernel.text.contains("{{persona}}"),
+            "the {{persona}} macro stays literal instead of expanding into creator notes"
+        );
     }
 
     #[test]

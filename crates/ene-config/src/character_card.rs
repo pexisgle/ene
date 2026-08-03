@@ -79,6 +79,11 @@ pub struct CharacterCardData {
     #[serde(default)]
     pub source: Option<Vec<String>>,
     /// Alternative greetings shown only in group chats.
+    ///
+    /// Parsed and preserved for cards authored against the `CCv3` spec, but
+    /// unused: Ene renders a single character, so group-chat greetings have
+    /// no consumer. The field becomes meaningful if Ene ever displays
+    /// multiple characters at once.
     #[serde(default)]
     pub group_only_greetings: Vec<String>,
     /// Unix timestamp of when the card was created.
@@ -519,6 +524,25 @@ impl CharacterCardData {
         }
     }
 
+    /// Non-empty greetings in selection order with their `@@is_greeting`
+    /// indices (`0` = `first_mes`, `i+1` = `alternate_greetings[i]`, per
+    /// `SPEC_V3.md` "`@@is_greeting`").
+    #[must_use]
+    pub fn greeting_options(&self) -> Vec<(u32, String)> {
+        let mut options = Vec::new();
+        if !self.first_mes.trim().is_empty() {
+            options.push((0, self.first_mes.trim().to_string()));
+        }
+        options.extend(
+            self.alternate_greetings
+                .iter()
+                .enumerate()
+                .filter(|(_, text)| !text.trim().is_empty())
+                .map(|(i, text)| (i as u32 + 1, text.trim().to_string())),
+        );
+        options
+    }
+
     /// Returns the `EneExtension` object if defined under `extensions.ene`.
     pub fn get_ene_extension(&self) -> Option<EneExtension> {
         self.extensions.ene.clone()
@@ -860,13 +884,15 @@ pub fn expand_cbs_macros_with(
 ///
 /// This is the most general entry point: it additionally expands the
 /// card-field reference macros (`{{description}}`, `{{personality}}`,
-/// `{{scenario}}`, `{{persona}}`, `{{mesExamples}}`), the time macros
+/// `{{scenario}}`, `{{mesExamples}}`), the time macros
 /// (`{{time}}`, `{{date}}`, `{{isotime}}`, `{{isodate}}`, `{{weekday}}`,
 /// `{{idle_duration}}`), and honours a stable `{{pick}}` seed. See
 /// [`MacroContext`] for the meaning of each field.
 ///
 /// Unknown macros are left untouched so card authors can spot typos, matching
-/// the long-standing behaviour of the simpler entry points.
+/// the long-standing behaviour of the simpler entry points. `{{persona}}` is
+/// deliberately not expanded: `creator_notes` is creator-to-user guidance and
+/// never reaches prompts (`CCv3` "`creator_notes`").
 pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
     let mut result = text.to_string();
 
@@ -888,7 +914,6 @@ pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
         result = result.replace("{{description}}", data.description.trim());
         result = result.replace("{{personality}}", data.personality.trim());
         result = result.replace("{{scenario}}", data.scenario.trim());
-        result = result.replace("{{persona}}", data.creator_notes.trim());
         result = result.replace("{{mesExamples}}", data.mes_example.trim());
     }
 
@@ -1365,7 +1390,6 @@ mod tests {
         card.data.description = "A bright AI.".to_string();
         card.data.personality = "Cheerful".to_string();
         card.data.scenario = "In a lab".to_string();
-        card.data.creator_notes = "Be kind".to_string();
         card.data.mes_example = "Hi!".to_string();
         let ctx = MacroContext {
             card: Some(&card),
@@ -1377,7 +1401,7 @@ mod tests {
         );
         assert_eq!(expand_cbs_macros_ctx("{{personality}}", &ctx), "Cheerful");
         assert_eq!(expand_cbs_macros_ctx("{{scenario}}", &ctx), "In a lab");
-        assert_eq!(expand_cbs_macros_ctx("{{persona}}", &ctx), "Be kind");
+        assert_eq!(expand_cbs_macros_ctx("{{persona}}", &ctx), "{{persona}}");
         assert_eq!(expand_cbs_macros_ctx("{{mesExamples}}", &ctx), "Hi!");
     }
 
@@ -1388,6 +1412,28 @@ mod tests {
             expand_cbs_macros_ctx("{{description}}", &ctx),
             "{{description}}"
         );
+    }
+
+    #[test]
+    fn greeting_options_number_first_mes_zero_and_alternates_after() {
+        let data = CharacterCardData {
+            first_mes: "Hello.".into(),
+            alternate_greetings: vec!["One.".into(), String::new(), "Three.".into()],
+            ..CharacterCardData::default()
+        };
+
+        let options = data.greeting_options();
+
+        assert_eq!(
+            options,
+            vec![
+                (0, "Hello.".to_string()),
+                (1, "One.".to_string()),
+                (3, "Three.".to_string())
+            ]
+        );
+        // A card without greetings yields no options.
+        assert!(CharacterCardData::default().greeting_options().is_empty());
     }
 
     #[test]

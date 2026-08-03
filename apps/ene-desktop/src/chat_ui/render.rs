@@ -76,10 +76,7 @@ impl ChatUi {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if messages.is_empty() {
-                    ui.weak(i18n_embed_fl::fl!(
-                        crate::i18n::loader(),
-                        "chat-empty-history"
-                    ));
+                    render_greeting_picker(ui, ai, world, chat_entity, processing);
                 } else {
                     for message in &messages {
                         render_message_bubble(ui, message);
@@ -231,10 +228,84 @@ impl ChatUi {
         {
             ui.weak(status);
         }
+        if let Some(chat) = world.get::<ChatStateComponent>(chat_entity)
+            && let Some(status) = chat.0.greeting_status.as_deref()
+        {
+            ui.weak(status);
+        }
 
         render_permission_dialog(ui, world, chat_entity, ai);
         render_user_input_dialog(ui, world, chat_entity, ai);
     }
+}
+
+fn render_greeting_picker(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    world: &mut World,
+    chat_entity: Entity,
+    processing: bool,
+) {
+    let Some(card) = ai.character_card() else {
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "chat-empty-history"
+        ));
+        return;
+    };
+    let greetings = card.data.greeting_options();
+    if greetings.is_empty() {
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "chat-empty-history"
+        ));
+        return;
+    }
+
+    let mut selected: Option<u32> = None;
+    ui.label(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "chat-greeting-prompt"
+    ));
+    for (index, text) in &greetings {
+        let label = first_line(text);
+        let label: String = if label.chars().count() > 48 {
+            label.chars().take(48).collect()
+        } else {
+            label.to_string()
+        };
+        if ui
+            .add_enabled(!processing, egui::Button::new(format!("[{index}] {label}")))
+            .clicked()
+        {
+            selected = Some(*index);
+        }
+    }
+
+    let Some(index) = selected else {
+        return;
+    };
+    match ai.set_greeting_blocking(index) {
+        Ok(_) => {
+            if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {
+                chat.0.needs_history_reconcile = true;
+                chat.0.greeting_status = None;
+            }
+        }
+        Err(e) => {
+            if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {
+                chat.0.greeting_status = Some(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "chat-greeting-failed",
+                    error = e.to_string()
+                ));
+            }
+        }
+    }
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or("")
 }
 
 fn render_message_bubble(ui: &mut egui::Ui, message: &crate::chat_state::ChatMessage) {

@@ -84,6 +84,7 @@ pub fn build_lorebook_injection(
     user_name: &str,
     user_input: &str,
     history: &[HistoryEntry],
+    greeting_index: Option<u32>,
 ) -> LorebookInjection {
     let Some(book) = card.data.character_book.as_ref() else {
         return LorebookInjection::default();
@@ -101,12 +102,19 @@ pub fn build_lorebook_injection(
         base_turns: &base_turns,
         scan_depth,
         regex_cache: &regex_cache,
+        greeting_index,
     };
 
     let mut selected: Vec<SelectedEntry<'_>> = Vec::new();
     for (index, entry) in book.entries.iter().enumerate().filter(|(_, e)| e.enabled) {
         if lorebook_entry_accepted(entry, index, user_input, &ctx, &base_scan) {
-            selected.push(selected_entry(entry, index, char_name, user_name));
+            selected.push(selected_entry(
+                entry,
+                index,
+                char_name,
+                user_name,
+                greeting_index,
+            ));
         }
     }
 
@@ -180,8 +188,10 @@ fn selected_entry<'a>(
     index: usize,
     char_name: &str,
     user_name: &str,
+    greeting_index: Option<u32>,
 ) -> SelectedEntry<'a> {
-    let (decorators, stripped) = EntryDecorators::parse(&entry.content);
+    let (decorators, stripped) =
+        EntryDecorators::parse_with_greeting(&entry.content, greeting_index);
     let placement = decorators.resolve_placement();
     SelectedEntry {
         entry,
@@ -200,6 +210,8 @@ struct ScanContext<'a> {
     scan_depth: u32,
     /// Precompiled regex cache.
     regex_cache: &'a RegexCache,
+    /// Active greeting index for `@@is_greeting` gating.
+    greeting_index: Option<u32>,
 }
 
 /// Whether a lorebook entry belongs in this turn's prompt.
@@ -215,7 +227,7 @@ fn lorebook_entry_accepted(
     ctx: &ScanContext<'_>,
     base_scan: &str,
 ) -> bool {
-    let (decorators, _) = EntryDecorators::parse(&entry.content);
+    let (decorators, _) = EntryDecorators::parse_with_greeting(&entry.content, ctx.greeting_index);
     let entry_scan = entry_scan_text(
         user_input,
         ctx.base_turns,
@@ -253,6 +265,7 @@ fn entry_accepted_with_scan(
         &ActivationContext {
             assistant_message_count: assistant_message_count(ctx.base_turns),
             previously_matched,
+            greeting_index: ctx.greeting_index,
         },
     )
 }
@@ -294,6 +307,7 @@ fn entry_previously_matched(
                 &ActivationContext {
                     assistant_message_count: assistant_message_count(prior),
                     previously_matched: false,
+                    greeting_index: ctx.greeting_index,
                 },
             )
     })
@@ -331,7 +345,8 @@ fn select_recursive<'a>(
         if selected_indices.contains(&index) || entry.constant.unwrap_or(false) {
             continue;
         }
-        let (decorators, _) = EntryDecorators::parse(&entry.content);
+        let (decorators, _) =
+            EntryDecorators::parse_with_greeting(&entry.content, ctx.greeting_index);
         let entry_scan = entry_scan_text(
             user_input,
             ctx.base_turns,
@@ -341,7 +356,13 @@ fn select_recursive<'a>(
             &recursion_content,
         );
         if entry_accepted_with_scan(entry, index, &decorators, &entry_scan, ctx) {
-            fresh.push(selected_entry(entry, index, char_name, user_name));
+            fresh.push(selected_entry(
+                entry,
+                index,
+                char_name,
+                user_name,
+                ctx.greeting_index,
+            ));
         }
     }
     selected.extend(fresh);
@@ -554,7 +575,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "ドラゴンが現れた", &[]);
+        let injection = build_lorebook_injection(&card, "User", "ドラゴンが現れた", &[], None);
         assert!(
             injection.after_char.iter().any(|c| c.contains("竜の国")),
             "a Japanese key must match inside a longer string"
@@ -568,7 +589,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "hi", &[]);
+        let injection = build_lorebook_injection(&card, "User", "hi", &[], None);
         assert_eq!(injection.after_char.len(), 1);
         assert!(injection.after_char[0].contains("always sunny"));
     }
@@ -583,7 +604,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "I met a dragon", &[]);
+        let injection = build_lorebook_injection(&card, "User", "I met a dragon", &[], None);
         assert!(injection.after_char.iter().any(|c| c.contains("pass")));
         assert!(
             injection.after_char.iter().all(|c| !c.contains("castle")),
@@ -601,7 +622,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "a b", &[]);
+        let injection = build_lorebook_injection(&card, "User", "a b", &[], None);
         let texts: Vec<&str> = injection.after_char.iter().map(String::as_str).collect();
         assert_eq!(texts, vec!["first content", "second content"]);
     }
@@ -615,7 +636,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "dragon castle", &[]);
+        let injection = build_lorebook_injection(&card, "User", "dragon castle", &[], None);
         assert!(injection.before_char.iter().any(|c| c.contains("before")));
         assert!(injection.after_char.iter().any(|c| c.contains("after")));
     }
@@ -633,7 +654,7 @@ mod tests {
         };
         let card = card_with(book);
         let history = history_of(&[("user one", Role::User), ("assistant one", Role::Assistant)]);
-        let injection = build_lorebook_injection(&card, "User", "the dragon roars", &history);
+        let injection = build_lorebook_injection(&card, "User", "the dragon roars", &history, None);
         assert_eq!(injection.messages.len(), 1);
         assert_eq!(injection.messages[0].depth, 2);
         assert!(!injection.messages[0].from_oldest);
@@ -655,7 +676,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "dragon", &[]);
+        let injection = build_lorebook_injection(&card, "User", "dragon", &[], None);
         assert_eq!(injection.before_char.len(), 1);
         assert!(injection.before_char[0].contains("Lore body"));
         assert!(injection.after_char.is_empty());
@@ -673,7 +694,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "a b", &[]);
+        let injection = build_lorebook_injection(&card, "User", "a b", &[], None);
         assert!(injection.after_char.iter().any(|c| c.contains("keep")));
         assert!(
             injection
@@ -697,7 +718,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "a b", &[]);
+        let injection = build_lorebook_injection(&card, "User", "a b", &[], None);
         assert!(injection.after_char.iter().any(|c| c.contains("keep")));
         assert!(
             injection.after_char.iter().all(|c| !c.contains("flagged")),
@@ -716,7 +737,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "a", &[]);
+        let injection = build_lorebook_injection(&card, "User", "a", &[], None);
         assert!(
             injection
                 .after_char
@@ -747,7 +768,8 @@ mod tests {
             ("my sword is here", Role::User),
             ("a reply", Role::Assistant),
         ]);
-        let injection = build_lorebook_injection(&card, "User", "tell me about home", &history);
+        let injection =
+            build_lorebook_injection(&card, "User", "tell me about home", &history, None);
         assert!(
             injection
                 .after_char
@@ -773,7 +795,7 @@ mod tests {
             ("my sword is here", Role::User),
             ("a reply", Role::Assistant),
         ]);
-        let injection = build_lorebook_injection(&card, "User", "the sword again", &history);
+        let injection = build_lorebook_injection(&card, "User", "the sword again", &history, None);
         assert!(
             injection.after_char.is_empty(),
             "a @@dont_activate_after_match entry must not repeat"
@@ -793,7 +815,7 @@ mod tests {
         };
         let card = card_with(book);
         let history = history_of(&[("sword", Role::User), ("one", Role::Assistant)]);
-        let gated = build_lorebook_injection(&card, "User", "sword", &history);
+        let gated = build_lorebook_injection(&card, "User", "sword", &history, None);
         assert!(
             gated.after_char.is_empty(),
             "one assistant message must not satisfy @@activate_only_after 2"
@@ -804,8 +826,61 @@ mod tests {
             ("two", Role::User),
             ("three", Role::Assistant),
         ]);
-        let open = build_lorebook_injection(&card, "User", "sword", &more);
+        let open = build_lorebook_injection(&card, "User", "sword", &more, None);
         assert_eq!(open.after_char.len(), 1);
+    }
+
+    #[test]
+    fn is_greeting_gates_on_the_active_greeting_index() {
+        let book = Lorebook {
+            entries: vec![entry(
+                &["sword"],
+                "@@is_greeting 1\nThe sword remembers.",
+                false,
+                1,
+            )],
+            ..Default::default()
+        };
+        let card = card_with(book);
+        let other = build_lorebook_injection(&card, "User", "sword", &[], Some(2));
+        assert!(
+            other.after_char.is_empty(),
+            "greeting 2 must not activate a @@is_greeting 1 entry"
+        );
+        let matching = build_lorebook_injection(&card, "User", "sword", &[], Some(1));
+        assert_eq!(matching.after_char.len(), 1);
+        let no_greeting = build_lorebook_injection(&card, "User", "sword", &[], None);
+        assert_eq!(
+            no_greeting.after_char.len(),
+            1,
+            "without an active greeting the decorator is ignored per spec, so the keyed entry fires"
+        );
+    }
+
+    #[test]
+    fn is_greeting_fallback_applies_without_an_active_greeting() {
+        let book = Lorebook {
+            entries: vec![entry(
+                &["sword"],
+                "@@is_greeting 1\n@@@activate_only_after 1\nThe sword remembers.",
+                false,
+                1,
+            )],
+            ..Default::default()
+        };
+        let card = card_with(book);
+        let gated = build_lorebook_injection(&card, "User", "sword", &[], None);
+        assert!(
+            gated.after_char.is_empty(),
+            "the fallback's @@activate_only_after 1 gate applies when no greeting is chosen"
+        );
+        let history = history_of(&[("sword", Role::User), ("a reply", Role::Assistant)]);
+        let open = build_lorebook_injection(&card, "User", "sword", &history, None);
+        assert_eq!(open.after_char.len(), 1);
+        // With a greeting active the primary is honored and the fallback is
+        // not consulted, so the entry fires from the first turn.
+        let active = build_lorebook_injection(&card, "User", "sword", &[], Some(1));
+        assert_eq!(active.after_char.len(), 1);
     }
 
     #[test]
@@ -819,7 +894,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "dragon", &[]);
+        let injection = build_lorebook_injection(&card, "User", "dragon", &[], None);
         assert!(
             injection
                 .after_char
@@ -845,7 +920,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "dragon", &[]);
+        let injection = build_lorebook_injection(&card, "User", "dragon", &[], None);
         assert!(injection.after_char.iter().any(|c| c.contains("old map")));
         assert!(
             injection
@@ -867,7 +942,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "dragon", &[]);
+        let injection = build_lorebook_injection(&card, "User", "dragon", &[], None);
         assert!(
             injection
                 .after_char
@@ -893,7 +968,7 @@ mod tests {
             ("beta", Role::Assistant),
             ("dragon", Role::User),
         ]);
-        let injection = build_lorebook_injection(&card, "User", "dragon", &history);
+        let injection = build_lorebook_injection(&card, "User", "dragon", &history, None);
         assert!(
             injection
                 .after_char
@@ -921,7 +996,8 @@ mod tests {
             ("a reply", Role::Assistant),
             ("tell me about home", Role::User),
         ]);
-        let injection = build_lorebook_injection(&card, "User", "tell me about home", &history);
+        let injection =
+            build_lorebook_injection(&card, "User", "tell me about home", &history, None);
         assert!(
             injection
                 .after_char
@@ -942,7 +1018,7 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "User", "dragon castle", &[]);
+        let injection = build_lorebook_injection(&card, "User", "dragon castle", &[], None);
         assert!(
             injection.after_char.is_empty() && injection.before_char.is_empty(),
             "entries with empty content after decorator stripping must not be injected"
@@ -957,8 +1033,24 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        let injection = build_lorebook_injection(&card, "Alice", "dragon", &[]);
+        let injection = build_lorebook_injection(&card, "Alice", "dragon", &[], None);
         assert!(injection.after_char[0].contains("Ene knows Alice."));
+    }
+
+    #[test]
+    fn persona_macro_stays_literal_in_injected_content() {
+        let book = Lorebook {
+            entries: vec![entry(&["dragon"], "{{persona}}", false, 1)],
+            ..Default::default()
+        };
+        let mut card = card_with(book);
+        card.data.creator_notes = "Author X.".into();
+        let injection = build_lorebook_injection(&card, "User", "dragon", &[], None);
+        assert!(
+            injection.after_char[0].contains("{{persona}}"),
+            "the persona macro stays literal instead of expanding into creator notes"
+        );
+        assert!(!injection.after_char[0].contains("Author X"));
     }
 
     #[test]
