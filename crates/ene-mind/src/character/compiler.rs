@@ -9,7 +9,7 @@
     clippy::indexing_slicing,
     reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
 )]
-use chrono::{DateTime, Datelike, Local};
+use chrono::{DateTime, Local, Timelike};
 use ene_config::{
     CharacterCardV3, MacroContext, PolitenessLevel, SceneBehavior, SpeechLength, TimePeriod,
     UserPersona, expand_cbs_macros_ctx,
@@ -94,8 +94,8 @@ impl CharacterCompiler {
     /// and structured labels); card-provided speech values keep their own
     /// language.
     ///
-    /// `ctx` carries per-turn state (affinity, wall clock, active scene) that
-    /// gates the optional relationship/time/scene lines; use
+    /// `kernel_ctx` carries per-turn state (affinity, wall clock, active
+    /// scene) that gates the optional relationship/time/scene lines; use
     /// [`KernelContext::default`] when the state is unknown.
     #[must_use]
     pub fn compile(
@@ -105,7 +105,7 @@ impl CharacterCompiler {
         pick_seed: Option<u64>,
         available_window: usize,
         language: &str,
-        ctx: KernelContext<'_>,
+        kernel_ctx: KernelContext<'_>,
     ) -> IdentityKernel {
         let data = &card.data;
         let char_name = data.get_character_name();
@@ -165,13 +165,13 @@ impl CharacterCompiler {
             format!("Core personality: {core_personality}"),
             format!("Speech style: {speech_style}"),
         ];
-        if let Some(line) = render_relationship_tone(card, ctx.affinity, ja) {
+        if let Some(line) = render_relationship_tone(card, kernel_ctx.affinity, ja) {
             head_lines.push(line);
         }
-        if let Some(line) = render_time_behavior(card, ctx.now, ja) {
+        if let Some(line) = render_time_behavior(card, kernel_ctx.now, ja) {
             head_lines.push(line);
         }
-        if let Some(line) = render_scene_behavior(card, ctx.scene_text, ja) {
+        if let Some(line) = render_scene_behavior(card, kernel_ctx.scene_text, ja) {
             head_lines.push(line);
         }
         let core_block = {

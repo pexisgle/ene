@@ -362,7 +362,7 @@ fn merge_localized_extensions(
                 for stage in stages {
                     let Some(base_stage) = base_stages
                         .iter_mut()
-                        .find(|base| base.threshold == stage.threshold)
+                        .find(|base| thresholds_match(base.threshold, stage.threshold))
                     else {
                         tracing::warn!(
                             threshold = stage.threshold,
@@ -448,6 +448,16 @@ fn merge_localized_extensions(
             );
         }
     }
+}
+
+/// Exact equality is the intended diff-matching semantic: thresholds are
+/// serialized numeric keys, and the same decimal parses to identical bits.
+#[expect(
+    clippy::float_cmp,
+    reason = "thresholds are serialized numeric diff keys; same decimal yields identical f32 bits"
+)]
+fn thresholds_match(a: f32, b: f32) -> bool {
+    a == b
 }
 
 /// Removes the embedded locale bag after merging.

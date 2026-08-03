@@ -45,7 +45,7 @@ impl StyleIntent {
 
     /// Resolves a labeled-example label to a canonical intent, if it is one
     /// of the selector's tags.
-    pub const fn from_tag(tag: &str) -> Option<Self> {
+    pub fn from_tag(tag: &str) -> Option<Self> {
         match tag {
             "greeting" => Some(Self::Greeting),
             "comforting" => Some(Self::Comforting),
@@ -114,8 +114,10 @@ impl StyleExampleSelector {
                 .into_iter()
                 .enumerate()
                 .map(|(index, example)| {
-                    let tag = StyleIntent::from_tag(&example.label)
-                        .map_or(example.label.as_str(), StyleIntent::tag);
+                    let tag = match StyleIntent::from_tag(&example.label) {
+                        Some(intent) => intent.tag(),
+                        None => example.label.as_str(),
+                    };
                     NewMemoryItem {
                         scope: MemoryScope::Character,
                         character_id: character_id.clone(),
