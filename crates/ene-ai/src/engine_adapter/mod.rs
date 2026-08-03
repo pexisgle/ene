@@ -34,7 +34,7 @@
 //!   and resource-class metadata, replacing "call it and see if it errors"
 //!   (e.g. a runtime error when `tools` is non-empty) with an upfront query.
 //! - [`resource::ResourceRegistry`] — one shared admission semaphore per
-//!   distinct [`descriptor::ResourceClass`], so independently-constructed
+//!   distinct [`ResourceClass`], so independently-constructed
 //!   engines that contend on the same physical resource (most importantly:
 //!   the same GPU device) are admission-controlled together instead of each
 //!   having a lock that only protects itself.

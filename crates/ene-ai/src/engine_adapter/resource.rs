@@ -22,7 +22,7 @@ use std::sync::{Arc, OnceLock};
 use parking_lot::Mutex;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 
-use super::descriptor::{ResourceBudgets, ResourceClass};
+use super::{ResourceBudgets, ResourceClass};
 
 /// The default admission budget for a [`ResourceClass`] that has not been
 /// explicitly overridden via [`ResourceRegistry::configure_all`].

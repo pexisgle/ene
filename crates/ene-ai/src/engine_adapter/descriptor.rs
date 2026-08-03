@@ -8,6 +8,10 @@
 
 use std::collections::HashMap;
 
+// Canonical in `ene-plugin-proto`; re-exported so `descriptor::ResourceClass`
+// and the `ene_ai::*` paths stay stable while the definition lives on the wire.
+pub use ene_plugin_proto::ResourceClass;
+
 /// Stable identifier for one loaded engine instance (e.g. `"llama-cpp-chat"`,
 /// `"whisper-base"`). Used in tracing spans and error messages; not
 /// interpreted by this crate beyond that.
@@ -145,44 +149,24 @@ impl Default for ConcurrencyHint {
     }
 }
 
-/// The physical resource an engine contends on, and the key
-/// [`crate::engine_adapter::resource::ResourceRegistry`] uses to share an
-/// admission budget across engines that contend on the same one.
-///
-/// Two engines that declare `==` `ResourceClass` values share one semaphore:
-/// adding a new local model that offloads to the same GPU device (for
-/// example) automatically starts sharing that device's budget the moment it
-/// declares `ResourceClass::Gpu { device: 0 }` — no change to callers or to
-/// engines already using that class.
-///
-/// `Cpu` deliberately carries no field — a distinguishing number would make
-/// a capacity question (how many CPU-bound jobs may run at once) masquerade
-/// as an identity question (are these the same resource): every new CPU
-/// engine would have to pick an unused magic number, and retuning an
-/// engine's thread count would silently change what it shares a budget with.
-/// All CPU-bound local engines declare the same `Cpu` value and share one
-/// process-wide budget; how large that budget is (whether two independent
-/// CPU engines may run concurrently at all) is controlled by
-/// [`crate::engine_adapter::resource::default_permits`] /
-/// [`crate::engine_adapter::resource::ResourceRegistry::configure_all`], not
-/// by this type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ResourceClass {
-    /// A specific GPU device index, as used by `with_main_gpu(n)` /
-    /// CUDA/Vulkan device selection. A real, meaningful identity: two
-    /// engines that declare the same device index genuinely do contend on
-    /// that one physical device.
-    Gpu {
-        /// Device index.
-        device: u32,
-    },
-    /// CPU-bound inference. Shared by every CPU-bound local engine — see the
-    /// type-level docs for why this carries no field.
-    Cpu,
-    /// A network-attached engine (e.g. a local sidecar process reached over
-    /// HTTP/gRPC) that does not contend on host GPU/CPU capacity the same
-    /// way.
-    Network,
+impl From<ene_plugin_proto::ConcurrencyHint> for ConcurrencyHint {
+    fn from(value: ene_plugin_proto::ConcurrencyHint) -> Self {
+        Self {
+            max_in_flight: value.max_in_flight as usize,
+            queue_depth: value.queue_depth as usize,
+        }
+    }
+}
+
+impl TryFrom<ConcurrencyHint> for ene_plugin_proto::ConcurrencyHint {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(value: ConcurrencyHint) -> Result<Self, Self::Error> {
+        Ok(Self {
+            max_in_flight: value.max_in_flight.try_into()?,
+            queue_depth: value.queue_depth.try_into()?,
+        })
+    }
 }
 
 /// Declared capability, concurrency, and resource metadata for one engine.
@@ -194,7 +178,9 @@ pub struct EngineDescriptor {
     pub capabilities: CapabilitySet,
     /// Advisory concurrency sizing.
     pub concurrency: ConcurrencyHint,
-    /// The physical resource this engine's jobs contend on.
+    /// The physical resource this engine's jobs contend on — the key
+    /// [`crate::engine_adapter::resource::ResourceRegistry`] uses to share an
+    /// admission budget across engines that contend on the same one.
     pub resource: ResourceClass,
 }
 
@@ -283,24 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn resource_class_equality_is_by_value() {
-        assert_eq!(
-            ResourceClass::Gpu { device: 0 },
-            ResourceClass::Gpu { device: 0 }
-        );
-        assert_ne!(
-            ResourceClass::Gpu { device: 0 },
-            ResourceClass::Gpu { device: 1 }
-        );
-        // `Cpu` carries no field: every CPU-bound engine shares this one
-        // value on purpose (see the type docs) rather than picking a
-        // distinguishing number, so there is nothing to assert `!=` here —
-        // this instead pins that two `Cpu` values are always equal.
-        assert_eq!(ResourceClass::Cpu, ResourceClass::Cpu);
-        assert_ne!(ResourceClass::Cpu, ResourceClass::Gpu { device: 0 });
-    }
-
-    #[test]
     fn descriptor_new_uses_default_concurrency() {
         let descriptor = EngineDescriptor::new(
             EngineId::new("test-engine"),
@@ -309,5 +277,17 @@ mod tests {
         );
         assert_eq!(descriptor.id.as_str(), "test-engine");
         assert_eq!(descriptor.concurrency.max_in_flight, 1);
+    }
+
+    #[test]
+    fn wire_concurrency_conversion_rejects_unrepresentable_values() {
+        let hint = ConcurrencyHint {
+            max_in_flight: usize::MAX,
+            queue_depth: 2,
+        };
+
+        if usize::MAX > u32::MAX as usize {
+            assert!(ene_plugin_proto::ConcurrencyHint::try_from(hint).is_err());
+        }
     }
 }
