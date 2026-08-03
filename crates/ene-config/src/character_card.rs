@@ -79,6 +79,11 @@ pub struct CharacterCardData {
     #[serde(default)]
     pub source: Option<Vec<String>>,
     /// Alternative greetings shown only in group chats.
+    ///
+    /// Parsed and preserved for cards authored against the `CCv3` spec, but
+    /// unused: Ene renders a single character, so group-chat greetings have
+    /// no consumer. The field becomes meaningful if Ene ever displays
+    /// multiple characters at once.
     #[serde(default)]
     pub group_only_greetings: Vec<String>,
     /// Unix timestamp of when the card was created.
@@ -860,13 +865,15 @@ pub fn expand_cbs_macros_with(
 ///
 /// This is the most general entry point: it additionally expands the
 /// card-field reference macros (`{{description}}`, `{{personality}}`,
-/// `{{scenario}}`, `{{persona}}`, `{{mesExamples}}`), the time macros
+/// `{{scenario}}`, `{{mesExamples}}`), the time macros
 /// (`{{time}}`, `{{date}}`, `{{isotime}}`, `{{isodate}}`, `{{weekday}}`,
 /// `{{idle_duration}}`), and honours a stable `{{pick}}` seed. See
 /// [`MacroContext`] for the meaning of each field.
 ///
 /// Unknown macros are left untouched so card authors can spot typos, matching
-/// the long-standing behaviour of the simpler entry points.
+/// the long-standing behaviour of the simpler entry points. `{{persona}}` is
+/// deliberately not expanded: `creator_notes` is creator-to-user guidance and
+/// never reaches prompts (`CCv3` "creator_notes").
 pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
     let mut result = text.to_string();
 
@@ -888,7 +895,6 @@ pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
         result = result.replace("{{description}}", data.description.trim());
         result = result.replace("{{personality}}", data.personality.trim());
         result = result.replace("{{scenario}}", data.scenario.trim());
-        result = result.replace("{{persona}}", data.creator_notes.trim());
         result = result.replace("{{mesExamples}}", data.mes_example.trim());
     }
 
@@ -1365,7 +1371,6 @@ mod tests {
         card.data.description = "A bright AI.".to_string();
         card.data.personality = "Cheerful".to_string();
         card.data.scenario = "In a lab".to_string();
-        card.data.creator_notes = "Be kind".to_string();
         card.data.mes_example = "Hi!".to_string();
         let ctx = MacroContext {
             card: Some(&card),
@@ -1377,7 +1382,7 @@ mod tests {
         );
         assert_eq!(expand_cbs_macros_ctx("{{personality}}", &ctx), "Cheerful");
         assert_eq!(expand_cbs_macros_ctx("{{scenario}}", &ctx), "In a lab");
-        assert_eq!(expand_cbs_macros_ctx("{{persona}}", &ctx), "Be kind");
+        assert_eq!(expand_cbs_macros_ctx("{{persona}}", &ctx), "{{persona}}");
         assert_eq!(expand_cbs_macros_ctx("{{mesExamples}}", &ctx), "Hi!");
     }
 
