@@ -225,13 +225,17 @@ pub enum ProactiveConfirmation {
     /// Confirmation was not requested: either the config flag is off or the
     /// pipeline stopped before generation started.
     Disabled,
-    /// Generation started with confirmation enabled; the verdict is unknown.
+    /// The decision passed the gate with confirmation enabled and generation
+    /// is about to start; the verdict is not known yet.
     Pending,
     /// The main model accepted: generation completed with visible speech.
     Accepted,
     /// The main model declined with the refusal token; the stream was
     /// cancelled before any visible text.
     Declined,
+    /// The main model produced no visible text (empty or marker-only
+    /// response): neither an acceptance nor a decline.
+    Empty,
 }
 
 impl fmt::Display for ProactiveConfirmation {
@@ -241,6 +245,7 @@ impl fmt::Display for ProactiveConfirmation {
             Self::Pending => write!(f, "pending"),
             Self::Accepted => write!(f, "accepted"),
             Self::Declined => write!(f, "declined"),
+            Self::Empty => write!(f, "empty"),
         }
     }
 }
@@ -257,8 +262,9 @@ pub struct ProactiveDecisionOutcome {
     /// Main-model confirmation state at decision time.
     ///
     /// `Disabled` when the feature is off or the pipeline stopped before
-    /// generation; `Pending` when generation started with confirmation
-    /// enabled. The runtime records the final verdict on its result and logs.
+    /// generation; `Pending` when the decision passed the gate with
+    /// confirmation enabled. The runtime records the final verdict on its
+    /// result and logs.
     pub confirmation: ProactiveConfirmation,
 }
 
@@ -1232,5 +1238,20 @@ mod tests {
         assert_eq!(ProactiveConfirmation::Pending.to_string(), "pending");
         assert_eq!(ProactiveConfirmation::Accepted.to_string(), "accepted");
         assert_eq!(ProactiveConfirmation::Declined.to_string(), "declined");
+        assert_eq!(ProactiveConfirmation::Empty.to_string(), "empty");
+    }
+
+    #[test]
+    fn silent_token_is_pinned_and_named_in_prompt_notes() {
+        assert_eq!(SILENT_TOKEN, "<|silent|>");
+        for lang in ["en", "ja"] {
+            let note = ene_config::PromptLibrary::load(lang)
+                .proactive()
+                .confirmation_note;
+            assert!(
+                note.contains(SILENT_TOKEN),
+                "{lang} confirmation_note must name the refusal token"
+            );
+        }
     }
 }
