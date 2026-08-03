@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(cmd.weight, 1.0);
     }
 
-    /// Regression for #334: saving over a card that exists but cannot be
+    /// Saving over a card that exists but cannot be
     /// parsed must abort — falling back to a default card and rewriting would
     /// destroy the original on disk.
     #[test]
@@ -489,7 +489,7 @@ mod tests {
         );
     }
 
-    /// Regression for #334: a missing card (brand-new character) still saves
+    /// A missing card (brand-new character) still saves
     /// from a default card — creating the file — without erroring.
     #[test]
     fn save_creates_card_when_file_missing() {
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(card.data.name, "Brand New");
     }
 
-    /// Regression for #334: an unreadable existing card (not missing, but
+    /// An unreadable existing card (not missing, but
     /// failing I/O) must abort the save and surface the read error.
     #[test]
     fn save_aborts_on_unreadable_existing_card() {
@@ -526,7 +526,7 @@ mod tests {
         );
     }
 
-    /// Regression for #334: an edit-and-save round-trip must keep top-level
+    /// An edit-and-save round-trip must keep top-level
     /// `data` fields from other apps (e.g. `vendor_field`) while applying the
     /// editor changes.
     #[test]
