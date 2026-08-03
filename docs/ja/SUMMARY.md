@@ -9,6 +9,7 @@
 
 - [MCP サーバー設定ガイド](guide/tools/mcp-servers.md)
 - [ランダム生成ツールガイド](guide/tools/random.md)
+- [地理情報ツールガイド](guide/tools/geo.md)
 
 # コア概念
 

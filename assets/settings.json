@@ -102,6 +102,9 @@
       "fs": {
         "enable": true
       },
+      "geo": {
+        "enable": true
+      },
       "random": {
         "enable": true
       },
