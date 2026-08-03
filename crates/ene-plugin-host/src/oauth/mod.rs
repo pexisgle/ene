@@ -1015,7 +1015,9 @@ mod tests {
         // a flow that will never complete.
         flow.pending.lock().insert(
             "google.calendar".to_string(),
-            Instant::now() - Duration::from_secs(1),
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("test clock is after the epoch"),
         );
         flow.start_authorization("mock", "google.calendar").unwrap();
         let ids = tokio::time::timeout(Duration::from_secs(10), rx.recv())

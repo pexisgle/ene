@@ -554,8 +554,8 @@ mod tests {
             },
         )
         .await
-        .expect("refresh must respect the endpoint timeout")
-        .expect("refresh task must not panic")
+        .unwrap()
+        .unwrap()
         .unwrap_err();
         server.abort();
         // A timeout is a transient failure: retryable, never a
