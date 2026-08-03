@@ -846,6 +846,24 @@ impl PluginHostManager {
                 "Disabling plugin: hard capability requirements are unmet"
             );
         }
+        for started_plugin in &started {
+            if disabled_by_requirements.contains(&started_plugin.name) {
+                continue;
+            }
+            let requirements: Vec<String> = capability_registry
+                .unmet_soft_requirements(&started_plugin.name)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            if !requirements.is_empty() {
+                tracing::warn!(
+                    component = "PluginHostManager",
+                    plugin = %started_plugin.name,
+                    requirements = ?requirements,
+                    "Plugin started with unmet soft capability requirements; fallback is expected"
+                );
+            }
+        }
 
         // Pass 2: register the tools and providers of every plugin that
         // passed the gate.

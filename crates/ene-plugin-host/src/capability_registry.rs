@@ -20,6 +20,7 @@ struct CapabilityId {
 
 impl CapabilityId {
     fn from_ref(capability: &CapabilityRef) -> Option<Self> {
+        let capability = CapabilityRef::parse(capability.as_str()).ok()?;
         Some(Self {
             name: capability.name()?.to_string(),
             major: capability.major()?,
@@ -27,6 +28,7 @@ impl CapabilityId {
     }
 
     fn from_requirement(requirement: &CapabilityRequirement) -> Option<Self> {
+        let requirement = CapabilityRequirement::parse(requirement.as_str()).ok()?;
         Some(Self {
             name: requirement.name()?.to_string(),
             major: requirement.major()?,
@@ -75,6 +77,7 @@ impl CapabilityRegistry {
     /// declaration never fails the plugin's handshake or affects the rest of
     /// its declarations (same per-entry policy as credential declarations).
     pub fn register(&mut self, plugin: &str, capabilities: &PluginCapabilities) {
+        self.remove_provider(plugin);
         let mut declarations = PluginCapabilityDeclarations::default();
         for provided in &capabilities.provides {
             let Some(id) = CapabilityId::from_ref(provided) else {
@@ -350,17 +353,11 @@ mod tests {
     #[test]
     fn malformed_entries_are_dropped_individually() {
         let mut registry = CapabilityRegistry::new();
-        let malformed = PluginCapabilities {
-            provides: vec![
-                CapabilityRef::parse("gguf-runner@1").unwrap(),
-                CapabilityRef::parse("bad_ref").unwrap(),
-            ],
-            requires: vec![
-                CapabilityRequirement::parse("gguf-runner@^1").unwrap(),
-                CapabilityRequirement::parse("also_bad").unwrap(),
-            ],
-            ..PluginCapabilities::default()
-        };
+        let malformed: PluginCapabilities = serde_json::from_value(serde_json::json!({
+            "provides": ["gguf-runner@1", "bad_ref"],
+            "requires": ["gguf-runner@^1", "also_bad"]
+        }))
+        .unwrap();
         registry.register("local-llm", &malformed);
 
         let declarations = registry.declarations("local-llm").unwrap();
@@ -370,6 +367,32 @@ mod tests {
             registry.resolve(&requirement("gguf-runner@^1")),
             Some("local-llm")
         );
+    }
+
+    #[test]
+    fn malformed_names_are_dropped_from_wire_declarations() {
+        let mut registry = CapabilityRegistry::new();
+        let malformed: PluginCapabilities = serde_json::from_value(serde_json::json!({
+            "provides": ["BAD@1", "bad_name@1", "gguf-runner@1"],
+            "requires": ["/runner@^1", "gguf-runner@^1"]
+        }))
+        .unwrap();
+
+        registry.register("local-llm", &malformed);
+
+        let declarations = registry.declarations("local-llm").unwrap();
+        assert_eq!(declarations.provides.len(), 1);
+        assert_eq!(declarations.requires.len(), 1);
+    }
+
+    #[test]
+    fn re_registering_replaces_provider_index_entries() {
+        let mut registry = CapabilityRegistry::new();
+        registry.register("provider", &caps(&["old@1"], &[]));
+        registry.register("provider", &caps(&["new@1"], &[]));
+
+        assert!(registry.providers("old", 1).is_empty());
+        assert_eq!(registry.providers("new", 1), vec!["provider"]);
     }
 
     #[test]
