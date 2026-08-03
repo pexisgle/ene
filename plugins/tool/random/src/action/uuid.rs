@@ -23,8 +23,8 @@ impl UuidAction {
 mod tests {
     use super::*;
 
-    #[test]
-    fn generated_uuid_is_v4_and_canonical() {
+    #[tokio::test]
+    async fn generated_uuid_is_v4_and_canonical() {
         for _ in 0..100 {
             let value = UuidAction::default().run().await.unwrap();
             assert_eq!(value.len(), 36);
