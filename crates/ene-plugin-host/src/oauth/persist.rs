@@ -8,9 +8,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ene_connector::CredentialData;
+use parking_lot::Mutex;
 use thiserror::Error;
 
 /// Errors produced by a [`CredentialPersister`] backend.
@@ -38,6 +40,19 @@ pub trait CredentialPersister: Send + Sync {
     fn load(&self) -> HashMap<String, CredentialData>;
     /// Atomically replaces the whole store with `entries`.
     fn save(&self, entries: &HashMap<String, CredentialData>) -> Result<(), PersistError>;
+    /// Applies one read-modify-write update as a single operation.
+    ///
+    /// Backends that support concurrent callers should serialize this method
+    /// with `save` and `remove`; otherwise two token rotations or a revoke
+    /// can overwrite each other's changes between the read and the rename.
+    fn update(
+        &self,
+        update: &mut dyn FnMut(&mut HashMap<String, CredentialData>),
+    ) -> Result<(), PersistError> {
+        let mut entries = self.load();
+        update(&mut entries);
+        self.save(&entries)
+    }
     /// Removes `ids` from the store, returning how many entries were removed
     /// (no-op when an id is absent).
     fn remove(&self, ids: &[String]) -> Result<usize, PersistError>;
@@ -45,6 +60,14 @@ pub trait CredentialPersister: Send + Sync {
 
 /// Next sequence number for per-write temporary file names.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes read-modify-write operations even when runtime reconfiguration
+/// has created multiple persister handles for the same credentials path.
+static FILE_UPDATE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn file_update_lock() -> &'static Mutex<()> {
+    FILE_UPDATE_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// A temporary path unique per process and per write, so two concurrent
 /// saves can never clobber each other's temporary file mid-write (the rename
@@ -105,6 +128,46 @@ impl FileCredentialPersister {
 
 impl CredentialPersister for FileCredentialPersister {
     fn load(&self) -> HashMap<String, CredentialData> {
+        let _guard = file_update_lock().lock();
+        self.load_unlocked()
+    }
+
+    fn save(&self, entries: &HashMap<String, CredentialData>) -> Result<(), PersistError> {
+        let _guard = file_update_lock().lock();
+        self.save_unlocked(entries)
+    }
+
+    fn update(
+        &self,
+        update: &mut dyn FnMut(&mut HashMap<String, CredentialData>),
+    ) -> Result<(), PersistError> {
+        let _guard = file_update_lock().lock();
+        let mut entries = self.load_unlocked();
+        update(&mut entries);
+        self.save_unlocked(&entries)
+    }
+
+    fn remove(&self, ids: &[String]) -> Result<usize, PersistError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let _guard = file_update_lock().lock();
+        let mut entries = self.load_unlocked();
+        let mut removed = 0;
+        for id in ids {
+            if entries.remove(id).is_some() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.save_unlocked(&entries)?;
+        }
+        Ok(removed)
+    }
+}
+
+impl FileCredentialPersister {
+    fn load_unlocked(&self) -> HashMap<String, CredentialData> {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
@@ -141,7 +204,7 @@ impl CredentialPersister for FileCredentialPersister {
         loaded
     }
 
-    fn save(&self, entries: &HashMap<String, CredentialData>) -> Result<(), PersistError> {
+    fn save_unlocked(&self, entries: &HashMap<String, CredentialData>) -> Result<(), PersistError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(PersistError::Io)?;
         }
@@ -183,23 +246,6 @@ impl CredentialPersister for FileCredentialPersister {
             std::fs::rename(&tmp, &self.path).map_err(PersistError::Io)?;
         }
         Ok(())
-    }
-
-    fn remove(&self, ids: &[String]) -> Result<usize, PersistError> {
-        if ids.is_empty() {
-            return Ok(0);
-        }
-        let mut entries = self.load();
-        let mut removed = 0;
-        for id in ids {
-            if entries.remove(id).is_some() {
-                removed += 1;
-            }
-        }
-        if removed > 0 {
-            self.save(&entries)?;
-        }
-        Ok(removed)
     }
 }
 

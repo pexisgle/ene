@@ -412,9 +412,10 @@ impl OAuthFlowManager {
             .map(|secs| Utc::now() + chrono::Duration::seconds(secs));
         let store = CredentialStore::oauth2(tokens.access_token, tokens.refresh_token, expires_at);
         self.vault.read().store(storage_key, store.clone());
-        let mut entries = self.persister.load();
-        entries.insert(storage_key.to_string(), store.expose_for_persistence());
-        self.persister.save(&entries)?;
+        let mut update = |entries: &mut HashMap<String, ene_connector::CredentialData>| {
+            entries.insert(storage_key.to_string(), store.expose_for_persistence());
+        };
+        self.persister.update(&mut update)?;
         self.vault.read().record_audit(plugin, id, true);
         Ok(())
     }

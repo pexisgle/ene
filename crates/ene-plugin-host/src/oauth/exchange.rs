@@ -20,6 +20,9 @@ pub(crate) fn token_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(TOKEN_CONNECT_TIMEOUT)
         .timeout(TOKEN_ENDPOINT_TIMEOUT)
+        // Token endpoints must not be able to redirect a POST carrying a
+        // refresh token to an unvalidated host or plaintext URL.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         // Building can only fail on a TLS-backend misconfiguration that the
         // fixed rustls feature set cannot produce; the default client keeps

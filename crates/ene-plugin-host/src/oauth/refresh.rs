@@ -49,9 +49,36 @@ impl RefreshFailure {
     }
 }
 
-/// Shared in-flight refresh slot: one HTTP refresh per storage key, with all
+/// The credential snapshot used to start one refresh generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefreshSource {
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+}
+
+impl RefreshSource {
+    fn from_store(store: &CredentialStore) -> Self {
+        Self {
+            access_token: store.access_token().map(str::to_owned),
+            refresh_token: store.refresh_token().map(str::to_owned),
+        }
+    }
+}
+
+/// Completed refresh results stay attached to their source snapshot until a
+/// caller presents a newer snapshot. This closes the hand-off race between a
+/// refresher returning and `CredentialVault` writing the result back: a late
+/// waiter still receives the just-completed generation instead of starting a
+/// duplicate HTTP refresh.
+#[derive(Debug)]
+struct RefreshEntry {
+    source: RefreshSource,
+    result: Result<CredentialStore, RefreshFailure>,
+}
+
+/// Shared refresh slot: one HTTP refresh per source snapshot, with all
 /// concurrent callers for that key awaiting the same result.
-type RefreshSlot = Arc<AsyncMutex<Option<Result<CredentialStore, RefreshFailure>>>>;
+type RefreshSlot = Arc<AsyncMutex<Option<RefreshEntry>>>;
 
 /// Refreshes `OAuth2` tokens through each credential's declared token
 /// endpoint, coalescing concurrent refreshes for the same key onto one HTTP
@@ -167,14 +194,15 @@ impl OAuthRefresher {
     }
 
     fn persist(&self, id: &str, store: &CredentialStore) -> Result<(), crate::oauth::FlowError> {
-        let mut entries = self.persister.load();
-        // A revocation that removed the entry while the refresh was in flight
-        // must not be undone by the write-back.
-        if !entries.contains_key(id) {
-            return Ok(());
-        }
-        entries.insert(id.to_string(), store.expose_for_persistence());
-        self.persister.save(&entries)?;
+        let mut update = |entries: &mut HashMap<String, ene_connector::CredentialData>| {
+            // The update lock makes the existence check and write one
+            // operation, so a concurrent revoke cannot be undone after the
+            // check but before the rename.
+            if entries.contains_key(id) {
+                entries.insert(id.to_string(), store.expose_for_persistence());
+            }
+        };
+        self.persister.update(&mut update)?;
         Ok(())
     }
 }
@@ -195,43 +223,69 @@ impl TokenRefresher for OAuthRefresher {
                 ))
             });
         }
-        let slot = {
-            let mut in_flight = self.in_flight.lock().await;
-            in_flight
-                .entry(id.to_string())
-                .or_insert_with(|| Arc::new(AsyncMutex::new(None)))
-                .clone()
-        };
-        let mut guard = slot.lock().await;
-        if let Some(result) = guard.as_ref() {
-            return match result {
-                Ok(store) => Ok(store.clone()),
-                Err(failure) => Err(failure.clone().into_connector()),
+        let source = RefreshSource::from_store(current);
+        loop {
+            let slot = {
+                let mut in_flight = self.in_flight.lock().await;
+                in_flight
+                    .entry(id.to_string())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(None)))
+                    .clone()
             };
-        }
-        let result = self.refresh_inner(id, current).await;
-        match &result {
-            Ok(_) => {
-                self.cooldown.lock().remove(id);
+            let mut guard = slot.lock().await;
+            if let Some(entry) = guard.as_ref() {
+                let reusable = entry.source == source
+                    && match &entry.result {
+                        Ok(store) => !store.is_expired(),
+                        Err(_) => self.in_cooldown(id).is_some(),
+                    };
+                if reusable {
+                    return match &entry.result {
+                        Ok(store) => Ok(store.clone()),
+                        Err(failure) => Err(failure.clone().into_connector()),
+                    };
+                }
+
+                // The completed generation belongs to a different snapshot,
+                // or its error cooldown has elapsed. Remove only this exact
+                // slot, then retry the lookup so concurrent callers cannot
+                // create two replacement generations.
+                drop(guard);
+                let mut in_flight = self.in_flight.lock().await;
+                if in_flight
+                    .get(id)
+                    .is_some_and(|candidate| Arc::ptr_eq(candidate, &slot))
+                {
+                    in_flight.remove(id);
+                }
+                continue;
             }
-            // A host-side misconfiguration has no endpoint to hammer, so it
-            // gets no cooldown; it fails fast and surfaces as an internal
-            // error.
-            Err(RefreshFailure::Internal(_)) => {}
-            Err(failure) => {
-                let permanent = matches!(failure, RefreshFailure::RefreshRequired(_));
-                self.cooldown.lock().insert(
-                    id.to_string(),
-                    (Instant::now() + REFRESH_COOLDOWN, permanent),
-                );
+
+            let result = self.refresh_inner(id, current).await;
+            match &result {
+                Ok(_) => {
+                    self.cooldown.lock().remove(id);
+                }
+                // A host-side misconfiguration has no endpoint to hammer, so
+                // it gets no cooldown; it fails fast and surfaces as an
+                // internal error.
+                Err(RefreshFailure::Internal(_)) => {}
+                Err(failure) => {
+                    let permanent = matches!(failure, RefreshFailure::RefreshRequired(_));
+                    self.cooldown.lock().insert(
+                        id.to_string(),
+                        (Instant::now() + REFRESH_COOLDOWN, permanent),
+                    );
+                }
             }
-        }
-        *guard = Some(result.clone());
-        drop(guard);
-        self.in_flight.lock().await.remove(id);
-        match result {
-            Ok(store) => Ok(store),
-            Err(failure) => Err(failure.into_connector()),
+            *guard = Some(RefreshEntry {
+                source,
+                result: result.clone(),
+            });
+            return match result {
+                Ok(store) => Ok(store),
+                Err(failure) => Err(failure.into_connector()),
+            };
         }
     }
 }
@@ -389,6 +443,8 @@ mod tests {
         server.await.unwrap();
         assert_eq!(ra.unwrap().unwrap().access_token(), Some("refreshed-at"));
         assert_eq!(rb.unwrap().unwrap().access_token(), Some("refreshed-at"));
+        let late = refresher.refresh("google.calendar", &store).await.unwrap();
+        assert_eq!(late.access_token(), Some("refreshed-at"));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
