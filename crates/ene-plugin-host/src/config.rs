@@ -53,12 +53,11 @@ const fn default_db_quota_mb() -> Option<u64> {
 
 /// Default plugin list containing the builtin tool and provider plugins.
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
-    let mut list: HashMap<String, PluginEntry> = [
-        "app", "browser", "calc", "calendar", "fs", "utility", "web",
-    ]
-        .into_iter()
-        .map(|name| (name.to_string(), PluginEntry::default()))
-        .collect();
+    let mut list: HashMap<String, PluginEntry> =
+        ["app", "browser", "calc", "calendar", "fs", "utility", "web"]
+            .into_iter()
+            .map(|name| (name.to_string(), PluginEntry::default()))
+            .collect();
 
     // The Anthropic provider plugin needs ANTHROPIC_API_KEY forwarded from
     // the host environment; without it the provider cannot authenticate.
