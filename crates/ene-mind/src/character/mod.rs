@@ -45,24 +45,41 @@ impl CharacterProcessor {
     /// `pick_seed`, when provided, keeps `{{pick}}` stable for the lifetime of
     /// the chat instead of re-rolling on each per-turn recompilation;
     /// derive it with [`ene_config::session_pick_seed`].
+    ///
+    /// `language` localises the speech-style line derived for the kernel.
     pub fn compile_kernel(
         card: &CharacterCardV3,
         user_name: &str,
         user_persona: Option<&UserPersona>,
         pick_seed: Option<u64>,
         available_window: usize,
+        language: &str,
     ) -> IdentityKernel {
-        CharacterCompiler::compile(card, user_name, user_persona, pick_seed, available_window)
+        CharacterCompiler::compile(
+            card,
+            user_name,
+            user_persona,
+            pick_seed,
+            available_window,
+            language,
+        )
     }
 
     /// Compile the identity kernel assuming the conservative default window.
     ///
     /// Used when no model window is known (tests and callers outside a live
     /// turn); the budget is still derived from a window rather than a fixed
-    /// token count.
+    /// token count. The speech-style line follows the system locale.
     pub fn compile_kernel_default(card: &CharacterCardV3, user_name: &str) -> IdentityKernel {
         let window = usize::try_from(ene_ai::DEFAULT_CONTEXT_WINDOW).unwrap_or(usize::MAX);
-        Self::compile_kernel(card, user_name, None, None, window)
+        Self::compile_kernel(
+            card,
+            user_name,
+            None,
+            None,
+            window,
+            ene_config::system_language(),
+        )
     }
 
     /// Synchronize `CCv3` lorebook and style indices into typed memory.

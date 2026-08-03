@@ -414,6 +414,9 @@ impl CognitionEngine {
             user_persona.as_ref(),
             pick_seed,
             available_window,
+            // Keep the identity kernel aligned with the system framing when
+            // the classifier task has an explicit language override.
+            ctx.config.resolved_classifier_language(),
         );
 
         let style_examples = if let Some(examples) = prefetch.style_examples {

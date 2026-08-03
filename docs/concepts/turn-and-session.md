@@ -202,6 +202,14 @@ result limit, lorebook token budget, identity-kernel cap), so packing only
 decides *which* sections survive. As a last resort the oldest dialogue messages
 are trimmed.
 
+The identity kernel's `Speech style` line is the character's own declaration:
+it renders `extensions.ene.speech` (length, first/second person, politeness,
+verbal tics) when the card defines it, and a concise language-localized default
+otherwise. It is never guessed from prompt text, so a Japanese card cannot get
+an English keyword match or unrelated instructions as its speech style; labels
+and the default follow the app language (`mind.language`), while the defined
+values keep the card author's language.
+
 ### Prompt Library & Language Packs
 
 The user-facing LLM instruction strings (system framing, emotion rules,
