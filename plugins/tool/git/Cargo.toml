@@ -1,0 +1,32 @@
+[package]
+name = "ene-plugin-git"
+version.workspace = true
+edition.workspace = true
+description = "Built-in read-only git repository inspection tools"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ene-plugin-git"
+path = "src/main.rs"
+
+[dependencies]
+ene-plugin = { workspace = true }
+ene-plugin-proto = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+git2 = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -58,6 +58,7 @@
                   pkgs.pkg-config
                   pkgs.rustPlatform.bindgenHook
                   pkgs.openssl
+                  pkgs.zlib
                 ]
                 ++ lib.optionals withGitCliff [ pkgs.git-cliff ]
                 ++ lib.optionals withSccache [ pkgs.sccache ]
