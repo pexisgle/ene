@@ -23,6 +23,8 @@ chat-you = You
 chat-ene = Ene
 chat-waiting = waiting for AI…
 chat-empty-history = No messages yet. Say hello!
+chat-greeting-prompt = Choose an opening greeting
+chat-greeting-failed = Failed to set greeting: { $error }
 
 # Graphics
 graphics = Graphics
@@ -157,6 +159,7 @@ character-editor-scenario = Scenario
 character-editor-system-prompt = System Prompt
 character-editor-mes-example = Example Dialogue
 character-editor-first-mes = First Message
+character-editor-creator-notes = Creator Notes
 character-editor-post-history = Post-history Instructions
 character-editor-validate = Validate
 character-editor-save = Save

@@ -25,6 +25,8 @@ pub struct ChatState {
     pub user_input_drafts: Vec<QuestionDraft>,
     /// Transient status message from the most recent undo action.
     pub undo_status: Option<String>,
+    /// Transient status message from the most recent greeting selection.
+    pub greeting_status: Option<String>,
 }
 
 impl ChatState {
@@ -49,6 +51,7 @@ impl ChatState {
             .collect();
         self.scroll_to_bottom = true;
         self.needs_history_reconcile = false;
+        self.greeting_status = None;
     }
 
     pub fn append_text_delta(&mut self, delta: &str) {
@@ -141,6 +144,7 @@ impl Default for ChatState {
             pending_user_input: None,
             user_input_drafts: Vec::new(),
             undo_status: None,
+            greeting_status: None,
         }
     }
 }

@@ -267,6 +267,17 @@ impl AiBridge {
         Ok(self.block_on_timeout(self.handle.undo())??)
     }
 
+    /// Open the session with the greeting at `index` (`0` = `first_mes`,
+    /// `i+1` = `alternate_greetings[i]`). Returns the applied greeting text.
+    pub fn set_greeting_blocking(&self, index: u32) -> Result<String, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.set_greeting(index))??)
+    }
+
+    /// The currently loaded character card, if any. Mailbox-free.
+    pub fn character_card(&self) -> Option<std::sync::Arc<ene_config::CharacterCardV3>> {
+        self.handle.character_card()
+    }
+
     /// List stored session metadata. Returns the API v1
     /// [`ene_runtime::PublicSessionMeta`] DTO directly — the desktop UI
     /// renders it as its canonical session type, so there is no reverse

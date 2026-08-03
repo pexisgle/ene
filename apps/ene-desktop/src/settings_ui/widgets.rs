@@ -269,6 +269,10 @@ fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
             .clone_from(&data.first_mes);
         state
             .0
+            .character_editor_creator_notes
+            .clone_from(&data.creator_notes);
+        state
+            .0
             .character_editor_post_history
             .clone_from(&data.post_history_instructions);
         state.0.character_editor_loaded = true;
@@ -333,6 +337,7 @@ fn save_character_card(path: &str, world: &mut World, ui_entity: Entity) {
     card.data.system_prompt = snapshot.character_editor_system_prompt;
     card.data.mes_example = snapshot.character_editor_mes_example;
     card.data.first_mes = snapshot.character_editor_first_mes;
+    card.data.creator_notes = snapshot.character_editor_creator_notes;
     card.data.post_history_instructions = snapshot.character_editor_post_history;
     if let Err(error) = ene_config::save_character_card(std::path::Path::new(path), &card) {
         set_editor_errors(
