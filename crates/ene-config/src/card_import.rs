@@ -202,9 +202,7 @@ fn merge_embedded_locale(card: &mut CharacterCardV3, code: &str) {
 /// oversized diff is warned about and skipped so a broken translation never
 /// sinks the base card.
 fn read_sidecar_diff(card_dir: Option<&Path>, code: &str) -> Option<LocalizedCharacterFields> {
-    let Some(dir) = card_dir else {
-        return None;
-    };
+    let dir = card_dir?;
     let path = dir.join(format!("character.{code}.json"));
     let bytes = match read_card_file(&path) {
         Ok(bytes) => bytes,
