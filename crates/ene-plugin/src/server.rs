@@ -1218,6 +1218,8 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
         supports_validate_config: dispatch.supports_validate_config(),
         supports_migrate_config: dispatch.supports_migrate_config(),
         config_version: dispatch.config_version(),
+        provides: Vec::new(),
+        requires: Vec::new(),
     }
 }
 

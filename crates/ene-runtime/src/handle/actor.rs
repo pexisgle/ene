@@ -3402,6 +3402,17 @@ fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
             };
             (plugin, "disabled", Some(detail.to_string()))
         }
+        PluginHealthEvent::RequirementsUnmet {
+            plugin,
+            requirements,
+        } => (
+            plugin,
+            "disabled",
+            Some(format!(
+                "unmet capability requirements: {}",
+                requirements.join(", ")
+            )),
+        ),
     };
     DiagnosticEvent::ToolHealth {
         tool,
@@ -3588,6 +3599,27 @@ mod tests {
         assert_eq!(tool, "web");
         assert_eq!(status, "disabled");
         assert_eq!(detail.as_deref(), Some("restart budget exhausted"));
+    }
+
+    /// The startup gate emits [`PluginHealthEvent::RequirementsUnmet`] for
+    /// plugins whose hard capability requirements have no provider; the
+    /// bridge maps it to the same `"disabled"` status with the unmet
+    /// requirements named in the detail. Kept in lockstep with the
+    /// bootstrap-time mapper's test.
+    #[test]
+    fn requirements_unmet_maps_to_disabled_detail() {
+        let (tool, status, detail) = tool_health_parts(plugin_health_event_to_diag(
+            PluginHealthEvent::RequirementsUnmet {
+                plugin: "consumer".to_string(),
+                requirements: vec!["gguf-runner@^1".to_string()],
+            },
+        ));
+        assert_eq!(tool, "consumer");
+        assert_eq!(status, "disabled");
+        assert_eq!(
+            detail.as_deref(),
+            Some("unmet capability requirements: gguf-runner@^1")
+        );
     }
 
     #[test]

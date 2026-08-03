@@ -20,6 +20,9 @@ use tokio::sync::{Mutex, mpsc};
 
 use sha2::Digest;
 
+use crate::capability_registry::{
+    CapabilityDeclaration, CapabilityRegistry, evaluate_capability_gate,
+};
 use crate::circuit_breaker::CircuitBreaker;
 use crate::credential_registry::CredentialRegistry;
 use crate::embedding::IpcEmbeddingProviderFactory;
@@ -218,6 +221,15 @@ impl Drop for SupervisedPlugin {
         drop(self.child.wait());
         ene_plugin_proto::cleanup_path(&self.socket_path);
     }
+}
+
+/// A plugin that completed the handshake during startup, before the
+/// capability gate decides whether its tools and providers are registered.
+struct StartedPlugin {
+    plugin: Arc<Mutex<SupervisedPlugin>>,
+    conn: Arc<IpcPluginConnection>,
+    name: String,
+    capabilities: ene_plugin_proto::PluginCapabilities,
 }
 
 /// Pure-function form of the per-restart backoff delay.
@@ -627,6 +639,11 @@ pub struct PluginHostManager {
     /// connection registration; consumed by the credential service for
     /// request-time scope enforcement.
     credential_registry: CredentialRegistry,
+    /// Capability declarations indexed from each plugin's handshake, after
+    /// the startup gate removed plugins with unmet hard requirements.
+    /// Resolves `requires` to provider plugins; the future capability
+    /// mediation service uses it as its ACL source.
+    capability_registry: CapabilityRegistry,
     /// One supervisor task per supervised plugin. Each task independently
     /// pings and restarts only its own plugin, so one plugin's restart
     /// backoff or reconnect can never stall monitoring of the others.
@@ -694,6 +711,7 @@ impl PluginHostManager {
                 embedding_factories: HashMap::new(),
                 embedding_factory_plugins: HashMap::new(),
                 credential_registry: CredentialRegistry::new(),
+                capability_registry: CapabilityRegistry::new(),
                 health_tasks: Vec::new(),
                 health_rx: None,
                 shutdown_on_drop: true,
@@ -737,6 +755,10 @@ impl PluginHostManager {
         // TOFU checksums to persist after startup completes.
         let mut checksums_to_record: HashMap<String, String> = HashMap::new();
 
+        // Pass 1: handshake every plugin and collect its declarations. Tool
+        // and provider registration is deferred to pass 2 so the capability
+        // gate can decide which plugins are registered at all.
+        let mut started: Vec<StartedPlugin> = Vec::new();
         for (name, entry) in &plugin_config.list {
             if !entry.enable {
                 tracing::info!(
@@ -759,13 +781,10 @@ impl PluginHostManager {
                 continue;
             }
 
-            let entry_config = entry.delivered_config(name);
-            let entry_profiles = entry.delivered_profiles();
-
             match Self::start_plugin(
                 name,
-                entry_config.clone(),
-                entry_profiles,
+                entry.delivered_config(name),
+                entry.delivered_profiles(),
                 entry.checksum.clone(),
                 entry.env_passthrough.clone(),
                 db_tokens.get(name).cloned(),
@@ -778,147 +797,12 @@ impl PluginHostManager {
                     if let Some(checksum) = tofu_checksum {
                         checksums_to_record.insert(name.clone(), checksum);
                     }
-
-                    // The plugin config blob is opaque to the host; log only a
-                    // redacted view so a secret (e.g. an inline `api_key`) can
-                    // never appear in the log stream. Redact against the
-                    // plugin's own schema when it advertises one — a custom
-                    // secret key name (`x-ene-secret: true`) is only caught by
-                    // the schema-aware pass — and fall back to the
-                    // schema-independent redaction otherwise.
-                    //
-                    // The schema is fetched exactly once and also feeds the
-                    // credential declaration registration below, so a single
-                    // IPC round-trip serves both.
-                    let schema = match conn.config_schema().await {
-                        Ok(schema) => schema,
-                        Err(e) => {
-                            tracing::warn!(
-                                component = "PluginHostManager",
-                                plugin = %name,
-                                error = %e,
-                                "Failed to fetch config schema"
-                            );
-                            None
-                        }
-                    };
-
-                    if let Some(config) = &entry_config {
-                        let redacted = match &schema {
-                            Some(schema) => crate::redact::redact_config(config, Some(schema)),
-                            None => crate::redact::redact_config_unschematized(config),
-                        };
-                        tracing::debug!(
-                            component = "PluginHostManager",
-                            plugin = %name,
-                            config = %redacted,
-                            "Starting plugin with configuration"
-                        );
-                    }
-
-                    // Collect the schema for credential declaration
-                    // registration, applied after the manager is assembled
-                    // (see `register_credential_schema`). Invalid entries are
-                    // warned about and dropped there; the plugin itself always
-                    // keeps running (a bad declaration only loses that
-                    // declaration).
-                    credential_schemas.push((name.clone(), schema));
-
-                    let caps = conn.capabilities();
-
-                    if caps.tools > 0 {
-                        // Retry once on failure; if it still fails, skip
-                        // registering the tool registry (don't silently
-                        // register empty tools). The plugin process itself is
-                        // still supervised so any LLM providers it offers keep
-                        // working.
-                        let tools = match conn.list_tools().await {
-                            Ok(tools) => Some(tools),
-                            Err(e) => {
-                                tracing::warn!(
-                                    component = "PluginHostManager",
-                                    plugin = %name,
-                                    error = %e,
-                                    "Failed to list tools for plugin; retrying once"
-                                );
-                                match conn.list_tools().await {
-                                    Ok(tools) => Some(tools),
-                                    Err(e) => {
-                                        tracing::error!(
-                                            component = "PluginHostManager",
-                                            plugin = %name,
-                                            error = %e,
-                                            "Failed to list tools for plugin after retry; \
-                                             skipping tool registry registration"
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                        };
-                        if let Some(tools) = tools {
-                            let registry = PluginToolRegistry {
-                                plugin_name: name.clone(),
-                                conn: Arc::clone(&conn),
-                                tools,
-                                breaker: parking_lot::Mutex::new(CircuitBreaker::default()),
-                                health_tx: Some(health_tx.clone()),
-                            };
-                            tool_registries.push(Arc::new(registry));
-                        }
-                    }
-
-                    for spec in &caps.llm_providers {
-                        if llm_factories.contains_key(&spec.kind) {
-                            tracing::warn!(
-                                component = "PluginHostManager",
-                                plugin = %name,
-                                kind = %spec.kind,
-                                "Duplicate LLM provider kind; skipping"
-                            );
-                            continue;
-                        }
-                        let factory = IpcLlmProviderFactory::new(
-                            spec.kind.clone(),
-                            Arc::clone(&conn),
-                            name.clone(),
-                            is_builtin_plugin(name),
-                            spec.context_window,
-                            spec.concurrency,
-                        );
-                        llm_factories.insert(
-                            spec.kind.clone(),
-                            Arc::new(factory) as Arc<dyn ene_ai::LlmProviderFactory>,
-                        );
-                        llm_factory_plugins.insert(spec.kind.clone(), name.clone());
-                    }
-
-                    for kind in &caps.embed_providers {
-                        if embedding_factories.contains_key(kind) {
-                            tracing::warn!(
-                                component = "PluginHostManager",
-                                plugin = %name,
-                                kind = %kind,
-                                "Duplicate embedding provider kind; skipping"
-                            );
-                            continue;
-                        }
-                        let factory = IpcEmbeddingProviderFactory::new(
-                            kind.clone(),
-                            Arc::clone(&conn),
-                            name.clone(),
-                            is_builtin_plugin(name),
-                        );
-                        embedding_factories.insert(
-                            kind.clone(),
-                            Arc::new(factory) as Arc<dyn ene_ai::EmbeddingProviderFactory>,
-                        );
-                        embedding_factory_plugins.insert(kind.clone(), name.clone());
-                    }
-
-                    supervised.push(plugin);
-                    connections.push(conn);
-                    names.push(name.clone());
+                    started.push(StartedPlugin {
+                        capabilities: conn.capabilities(),
+                        plugin,
+                        conn,
+                        name: name.clone(),
+                    });
                 }
                 Err(e) => {
                     tracing::error!(
@@ -929,6 +813,211 @@ impl PluginHostManager {
                     );
                 }
             }
+        }
+
+        // Capability gate: a plugin whose hard requirements have no provider
+        // is not registered at all (tools, providers, supervision). The
+        // fixpoint in `evaluate_capability_gate` also disables consumers of
+        // disabled providers, so the registry handed to the manager only ever
+        // resolves against plugins that actually started.
+        let declarations: Vec<CapabilityDeclaration> = started
+            .iter()
+            .map(|started_plugin| CapabilityDeclaration {
+                plugin: started_plugin.name.clone(),
+                capabilities: started_plugin.capabilities.clone(),
+            })
+            .collect();
+        let (capability_registry, disabled_by_requirements) =
+            evaluate_capability_gate(&declarations);
+        for plugin_name in &disabled_by_requirements {
+            let requirements: Vec<String> = capability_registry
+                .unmet_hard_requirements(plugin_name)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            drop(health_tx.send(PluginHealthEvent::RequirementsUnmet {
+                plugin: plugin_name.clone(),
+                requirements: requirements.clone(),
+            }));
+            tracing::error!(
+                component = "PluginHostManager",
+                plugin = %plugin_name,
+                requirements = ?requirements,
+                "Disabling plugin: hard capability requirements are unmet"
+            );
+        }
+        for started_plugin in &started {
+            if disabled_by_requirements.contains(&started_plugin.name) {
+                continue;
+            }
+            let requirements: Vec<String> = capability_registry
+                .unmet_soft_requirements(&started_plugin.name)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            if !requirements.is_empty() {
+                tracing::warn!(
+                    component = "PluginHostManager",
+                    plugin = %started_plugin.name,
+                    requirements = ?requirements,
+                    "Plugin started with unmet soft capability requirements; fallback is expected"
+                );
+            }
+        }
+
+        // Pass 2: register the tools and providers of every plugin that
+        // passed the gate.
+        for started_plugin in &started {
+            if disabled_by_requirements.contains(&started_plugin.name) {
+                continue;
+            }
+            let name = &started_plugin.name;
+            let conn = &started_plugin.conn;
+
+            // The plugin config blob is opaque to the host; log only a
+            // redacted view so a secret (e.g. an inline `api_key`) can
+            // never appear in the log stream. Redact against the
+            // plugin's own schema when it advertises one — a custom
+            // secret key name (`x-ene-secret: true`) is only caught by
+            // the schema-aware pass — and fall back to the
+            // schema-independent redaction otherwise.
+            //
+            // The schema is fetched exactly once and also feeds the
+            // credential declaration registration below, so a single
+            // IPC round-trip serves both.
+            let schema = match conn.config_schema().await {
+                Ok(schema) => schema,
+                Err(e) => {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        error = %e,
+                        "Failed to fetch config schema"
+                    );
+                    None
+                }
+            };
+
+            if let Some(config) = plugin_config
+                .list
+                .get(name)
+                .and_then(|entry| entry.delivered_config(name))
+            {
+                let redacted = match &schema {
+                    Some(schema) => crate::redact::redact_config(&config, Some(schema)),
+                    None => crate::redact::redact_config_unschematized(&config),
+                };
+                tracing::debug!(
+                    component = "PluginHostManager",
+                    plugin = %name,
+                    config = %redacted,
+                    "Starting plugin with configuration"
+                );
+            }
+
+            // Collect the schema for credential declaration
+            // registration, applied after the manager is assembled
+            // (see `register_credential_schema`). Invalid entries are
+            // warned about and dropped there; the plugin itself always
+            // keeps running (a bad declaration only loses that
+            // declaration).
+            credential_schemas.push((name.clone(), schema));
+
+            let caps = &started_plugin.capabilities;
+
+            if caps.tools > 0 {
+                // Retry once on failure; if it still fails, skip
+                // registering the tool registry (don't silently
+                // register empty tools). The plugin process itself is
+                // still supervised so any LLM providers it offers keep
+                // working.
+                let tools = match conn.list_tools().await {
+                    Ok(tools) => Some(tools),
+                    Err(e) => {
+                        tracing::warn!(
+                            component = "PluginHostManager",
+                            plugin = %name,
+                            error = %e,
+                            "Failed to list tools for plugin; retrying once"
+                        );
+                        match conn.list_tools().await {
+                            Ok(tools) => Some(tools),
+                            Err(e) => {
+                                tracing::error!(
+                                    component = "PluginHostManager",
+                                    plugin = %name,
+                                    error = %e,
+                                    "Failed to list tools for plugin after retry; \
+                                     skipping tool registry registration"
+                                );
+                                None
+                            }
+                        }
+                    }
+                };
+                if let Some(tools) = tools {
+                    let registry = PluginToolRegistry {
+                        plugin_name: name.clone(),
+                        conn: Arc::clone(conn),
+                        tools,
+                        breaker: parking_lot::Mutex::new(CircuitBreaker::default()),
+                        health_tx: Some(health_tx.clone()),
+                    };
+                    tool_registries.push(Arc::new(registry));
+                }
+            }
+
+            for spec in &caps.llm_providers {
+                if llm_factories.contains_key(&spec.kind) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        kind = %spec.kind,
+                        "Duplicate LLM provider kind; skipping"
+                    );
+                    continue;
+                }
+                let factory = IpcLlmProviderFactory::new(
+                    spec.kind.clone(),
+                    Arc::clone(conn),
+                    name.clone(),
+                    is_builtin_plugin(name),
+                    spec.context_window,
+                    spec.concurrency,
+                );
+                llm_factories.insert(
+                    spec.kind.clone(),
+                    Arc::new(factory) as Arc<dyn ene_ai::LlmProviderFactory>,
+                );
+                llm_factory_plugins.insert(spec.kind.clone(), name.clone());
+            }
+
+            for kind in &caps.embed_providers {
+                if embedding_factories.contains_key(kind) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        kind = %kind,
+                        "Duplicate embedding provider kind; skipping"
+                    );
+                    continue;
+                }
+                let factory = IpcEmbeddingProviderFactory::new(
+                    kind.clone(),
+                    Arc::clone(conn),
+                    name.clone(),
+                    is_builtin_plugin(name),
+                );
+                embedding_factories.insert(
+                    kind.clone(),
+                    Arc::new(factory) as Arc<dyn ene_ai::EmbeddingProviderFactory>,
+                );
+                embedding_factory_plugins.insert(kind.clone(), name.clone());
+            }
+
+            supervised.push(Arc::clone(&started_plugin.plugin));
+            connections.push(Arc::clone(conn));
+            names.push(name.clone());
         }
 
         // Batch-persist TOFU checksums recorded during this startup.
@@ -1060,6 +1149,7 @@ impl PluginHostManager {
             embedding_factories,
             embedding_factory_plugins,
             credential_registry: CredentialRegistry::new(),
+            capability_registry,
             health_tasks,
             health_rx: Some(health_rx),
             shutdown_on_drop: true,
@@ -1129,6 +1219,14 @@ impl PluginHostManager {
     /// calls.
     pub fn take_health_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<PluginHealthEvent>> {
         self.health_rx.take()
+    }
+
+    /// Returns the capability registry built from the handshake declarations
+    /// of every started plugin (after the startup gate removed plugins with
+    /// unmet hard requirements).
+    #[must_use]
+    pub fn capability_registry(&self) -> &CapabilityRegistry {
+        &self.capability_registry
     }
 
     /// Registers the credential declarations parsed from `schema` for
@@ -1362,6 +1460,7 @@ impl PluginHostManager {
             embedding_factories: HashMap::new(),
             embedding_factory_plugins: HashMap::new(),
             credential_registry: CredentialRegistry::new(),
+            capability_registry: CapabilityRegistry::new(),
             health_tasks: Vec::new(),
             health_rx: None,
             shutdown_on_drop: false,
