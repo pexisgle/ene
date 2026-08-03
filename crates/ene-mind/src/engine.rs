@@ -788,7 +788,6 @@ impl CognitionEngine {
         config: &MindConfig,
         card: &CharacterCardV3,
         affect: &ene_core::AffectState,
-        response_text: &str,
         llm_proposal: Option<&str>,
         explicit_proposal: bool,
         previous_expression: &str,
@@ -805,7 +804,6 @@ impl CognitionEngine {
             explicit_proposal,
             previous_expression,
             elapsed_since_change,
-            response_text,
             irritation_spike,
         };
         let decision = self.output.resolve(&config.emotion, &input);

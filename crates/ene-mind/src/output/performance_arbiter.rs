@@ -7,6 +7,7 @@
 
 use crate::output::arbiter::affect_to_expression;
 use crate::output::{CueSource, MotionLayer, PerfKind, PerformanceCue};
+use ene_config::ResolvedExpression;
 use ene_core::AffectState;
 
 /// Tracks a single cue slot with priority semantics.
@@ -88,13 +89,17 @@ impl PerformanceArbiter {
     ///
     /// Final expression decisions come from
     /// [`crate::output::arbiter::resolve_expression`]; this only fills gaps
-    /// (e.g. emotion disabled or no resolve path ran).
-    pub fn set_affect_default(&mut self, affect: &AffectState) {
+    /// (e.g. emotion disabled or no resolve path ran). Expressions without an
+    /// affect annotation are never selected; the slot stays empty so the
+    /// previous expression is preserved.
+    pub fn set_affect_default(&mut self, affect: &AffectState, available: &[ResolvedExpression]) {
         if self.expression.is_some() {
             return;
         }
-        let name = affect_to_expression(affect).to_string();
-        let cue = PerformanceCue::expression(name);
+        let Some(name) = affect_to_expression(affect, available) else {
+            return;
+        };
+        let cue = PerformanceCue::expression(name.to_string());
         self.expression = Some(CueSlot::new(cue, CueSource::Affect));
     }
 
@@ -218,6 +223,7 @@ mod tests {
         reason = "tests index into fixed-size fixture vectors"
     )]
     use super::*;
+    use ene_config::ExpressionAffect;
 
     fn expr_cue(name: &str) -> PerformanceCue {
         PerformanceCue::expression(name)
@@ -225,6 +231,32 @@ mod tests {
 
     fn motion_cue(name: &str, layer: Option<MotionLayer>) -> PerformanceCue {
         PerformanceCue::motion(name, layer)
+    }
+
+    fn annotated_defaults() -> Vec<ResolvedExpression> {
+        [
+            ("neutral", 0.0, 0.0, 0.0, 0.0),
+            ("happy", 0.6, 0.3, 0.0, 0.0),
+            ("sad", -0.5, 0.0, 0.0, 0.0),
+            ("angry", -0.2, 0.3, 0.7, 0.0),
+            ("relaxed", 0.2, -0.3, 0.0, 0.7),
+            ("surprised", 0.1, 0.6, 0.0, 0.0),
+        ]
+        .into_iter()
+        .map(
+            |(name, valence, arousal, irritation, fatigue)| ResolvedExpression {
+                name: name.into(),
+                description: String::new(),
+                vrm: Default::default(),
+                affect: Some(ExpressionAffect {
+                    valence,
+                    arousal,
+                    irritation,
+                    fatigue,
+                }),
+            },
+        )
+        .collect()
     }
 
     #[test]
@@ -289,7 +321,8 @@ mod tests {
         let mut state = AffectState::neutral("test");
         state.valence = 0.5;
         state.arousal = 0.3;
-        arbiter.set_affect_default(&state);
+        let available = annotated_defaults();
+        arbiter.set_affect_default(&state, &available);
         let result = arbiter.resolve();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0.name, "happy");
@@ -302,10 +335,31 @@ mod tests {
         let mut state = AffectState::neutral("test");
         state.valence = 0.5;
         state.arousal = 0.3;
-        arbiter.set_affect_default(&state);
+        let available = annotated_defaults();
+        arbiter.set_affect_default(&state, &available);
         let result = arbiter.resolve();
         assert_eq!(result[0].0.name, "sad");
         assert_eq!(result[0].1, CueSource::Hysteresis);
+    }
+
+    #[test]
+    fn set_affect_default_skips_unannotated_expressions() {
+        let mut arbiter = PerformanceArbiter::default();
+        let mut state = AffectState::neutral("test");
+        state.valence = 0.5;
+        state.arousal = 0.3;
+        let available: Vec<ResolvedExpression> = ["neutral", "smile", "frown"]
+            .into_iter()
+            .map(|name| ResolvedExpression {
+                name: name.into(),
+                description: String::new(),
+                vrm: Default::default(),
+                affect: None,
+            })
+            .collect();
+        arbiter.set_affect_default(&state, &available);
+        let result = arbiter.resolve();
+        assert!(result.is_empty());
     }
 
     #[test]

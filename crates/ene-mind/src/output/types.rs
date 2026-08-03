@@ -45,8 +45,6 @@ pub struct ExpressionInput<'a> {
     pub previous_expression: &'a str,
     /// Elapsed time since the last expression change.
     pub elapsed_since_change: Option<Duration>,
-    /// Assistant response text (lightweight sentiment hints).
-    pub response_text: &'a str,
     /// Current irritation level spike overrides hysteresis when true.
     pub irritation_spike: bool,
 }
