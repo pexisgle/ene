@@ -654,6 +654,7 @@ mod tests {
                         CredentialResponse::Resolved {
                             credential: ResolvedCredential::ApiKey {
                                 key: WireSecret::new("sk-ant-mock-host"),
+                                header: None,
                             },
                         }
                     }

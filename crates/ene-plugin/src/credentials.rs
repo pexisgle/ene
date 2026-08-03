@@ -37,6 +37,11 @@ const API_KEY_CACHE_TTL: Duration = Duration::from_mins(1);
 /// stalled or dead host can never hang the caller.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long the connect + `Open` + `OpenAck` handshake may take before the
+/// session is abandoned. Bounds the `conn` mutex hold in `ensure_connected`
+/// so a wedged host cannot hang every credential call.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A secret returned to plugin code.
 ///
 /// Wraps [`SecretString`] (zeroed on drop) and adds a `Serialize` impl that
@@ -82,6 +87,17 @@ enum CredentialKind {
     Bearer,
 }
 
+/// A resolved credential together with the auth mode it implies for the HTTP
+/// helpers and any declared header override for API keys (`None` → the client
+/// falls back to `x-api-key` + the raw value; Bearers always use
+/// `Authorization: Bearer`). The header is consumed only by the http-feature
+/// helpers; a tuple keeps it out of dead-code analysis in non-http builds.
+type ResolvedAuth = (
+    CredentialKind,
+    CredentialSecret,
+    Option<ene_plugin_proto::WireHeaderSpec>,
+);
+
 /// A cached resolved credential with its freshness deadline.
 ///
 /// `epoch` is the connection generation the value was resolved through (see
@@ -91,6 +107,7 @@ enum CredentialKind {
 struct CachedCredential {
     kind: CredentialKind,
     value: CredentialSecret,
+    header: Option<ene_plugin_proto::WireHeaderSpec>,
     deadline: Instant,
     epoch: u64,
 }
@@ -145,6 +162,9 @@ pub struct CredentialClient {
     /// Per-request response timeout (see [`RESPONSE_TIMEOUT`]). Overridable
     /// in tests.
     response_timeout: Duration,
+    /// Connect + `Open` handshake timeout (see [`OPEN_TIMEOUT`]). Overridable
+    /// in tests.
+    open_timeout: Duration,
 }
 
 impl fmt::Debug for CredentialClient {
@@ -171,6 +191,7 @@ impl CredentialClient {
             next_epoch: std::sync::atomic::AtomicU64::new(0),
             cache_ttl: API_KEY_CACHE_TTL,
             response_timeout: RESPONSE_TIMEOUT,
+            open_timeout: OPEN_TIMEOUT,
         }
     }
 
@@ -190,9 +211,10 @@ impl CredentialClient {
     /// [`PluginError::AuthorizationRequired`] mapped from the host's
     /// structured error codes.
     pub async fn api_key(&self, id: &str) -> Result<CredentialSecret, PluginError> {
-        match self.resolve_secret(id).await? {
-            (CredentialKind::ApiKey, secret) => Ok(secret),
-            (CredentialKind::Bearer, _) => Err(PluginError::provider(format!(
+        let (kind, secret, _) = self.resolve_secret(id).await?;
+        match kind {
+            CredentialKind::ApiKey => Ok(secret),
+            CredentialKind::Bearer => Err(PluginError::provider(format!(
                 "credential '{id}' is an OAuth bearer token, not an API key"
             ))),
         }
@@ -200,9 +222,10 @@ impl CredentialClient {
 
     /// Resolves `id` as an OAuth access token.
     pub async fn bearer(&self, id: &str) -> Result<CredentialSecret, PluginError> {
-        match self.resolve_secret(id).await? {
-            (CredentialKind::Bearer, secret) => Ok(secret),
-            (CredentialKind::ApiKey, _) => Err(PluginError::provider(format!(
+        let (kind, secret, _) = self.resolve_secret(id).await?;
+        match kind {
+            CredentialKind::Bearer => Ok(secret),
+            CredentialKind::ApiKey => Err(PluginError::provider(format!(
                 "credential '{id}' is an API key, not an OAuth bearer token"
             ))),
         }
@@ -235,22 +258,9 @@ impl CredentialClient {
     /// invoke it again after an OAuth refresh.
     #[cfg(feature = "http")]
     pub async fn http_client(&self, id: &str) -> Result<reqwest::Client, PluginError> {
-        let (kind, secret) = self.resolve_secret(id).await?;
+        let (kind, secret, header) = self.resolve_secret(id).await?;
         let mut headers = reqwest::header::HeaderMap::new();
-        match kind {
-            CredentialKind::ApiKey => {
-                headers.insert(
-                    http::header::HeaderName::from_static("x-api-key"),
-                    auth_header_value(secret.expose_secret())?,
-                );
-            }
-            CredentialKind::Bearer => {
-                headers.insert(
-                    http::header::AUTHORIZATION,
-                    auth_header_value(&format!("Bearer {}", secret.expose_secret()))?,
-                );
-            }
-        }
+        insert_auth_header(&mut headers, kind, secret.expose_secret(), header.as_ref())?;
         build_http_client(headers, TimeoutPolicy::default())
     }
 
@@ -272,7 +282,7 @@ impl CredentialClient {
                 );
             }
             Some(HttpAuth::Bearer) => {
-                let (kind, secret) = self.resolve_secret(id).await?;
+                let (kind, secret, _) = self.resolve_secret(id).await?;
                 if kind != CredentialKind::Bearer {
                     return Err(PluginError::provider(format!(
                         "credential '{id}' is not an OAuth bearer token"
@@ -284,21 +294,8 @@ impl CredentialClient {
                 );
             }
             None => {
-                let (kind, secret) = self.resolve_secret(id).await?;
-                match kind {
-                    CredentialKind::ApiKey => {
-                        headers.insert(
-                            http::header::HeaderName::from_static("x-api-key"),
-                            auth_header_value(secret.expose_secret())?,
-                        );
-                    }
-                    CredentialKind::Bearer => {
-                        headers.insert(
-                            http::header::AUTHORIZATION,
-                            auth_header_value(&format!("Bearer {}", secret.expose_secret()))?,
-                        );
-                    }
-                }
+                let (kind, secret, header) = self.resolve_secret(id).await?;
+                insert_auth_header(&mut headers, kind, secret.expose_secret(), header.as_ref())?;
             }
         }
         let client = build_http_client(headers, options.timeout)?;
@@ -311,11 +308,8 @@ impl CredentialClient {
     }
 
     /// Resolves a credential through the cache or the wire, returning the
-    /// variant alongside the secret.
-    async fn resolve_secret(
-        &self,
-        id: &str,
-    ) -> Result<(CredentialKind, CredentialSecret), PluginError> {
+    /// variant alongside the secret and any declared header override.
+    async fn resolve_secret(&self, id: &str) -> Result<ResolvedAuth, PluginError> {
         // The current connection generation scopes every cache lookup: an
         // entry is served only while the generation it was resolved under is
         // still current, so a reconnect never hands out a pre-reconnect
@@ -325,11 +319,12 @@ impl CredentialClient {
             return Ok(entry);
         }
         let (resolved, epoch_after) = self.fetch(id).await?;
-        let (kind, secret, deadline) = match resolved {
-            ResolvedCredential::ApiKey { key } => (
+        let (kind, secret, deadline, header) = match resolved {
+            ResolvedCredential::ApiKey { key, header } => (
                 CredentialKind::ApiKey,
                 CredentialSecret::new(key.expose().to_owned()),
                 Instant::now() + self.cache_ttl,
+                header,
             ),
             ResolvedCredential::Bearer { token, expires_at } => {
                 let secret = CredentialSecret::new(token.expose().to_owned());
@@ -343,7 +338,7 @@ impl CredentialClient {
                         Instant::now() + remaining
                     },
                 );
-                (CredentialKind::Bearer, secret, deadline)
+                (CredentialKind::Bearer, secret, deadline, None)
             }
         };
         // Only cache when the reader's generation is unchanged from the fetch
@@ -351,9 +346,16 @@ impl CredentialClient {
         // resolved value is already stale, and caching it would resurrect a
         // credential the host just revoked.
         if epoch_before == epoch_after {
-            self.cache_insert(id, kind, secret.clone(), deadline, epoch_after);
+            self.cache_insert(
+                id,
+                kind,
+                secret.clone(),
+                header.clone(),
+                deadline,
+                epoch_after,
+            );
         }
-        Ok((kind, secret))
+        Ok((kind, secret, header))
     }
 
     /// Returns the epoch of the live connection, opening one when none
@@ -408,7 +410,7 @@ impl CredentialClient {
             };
             if write_result.is_err() {
                 drop(flight);
-                self.conn.lock().await.take();
+                self.drop_conn_if_current(&conn).await;
                 continue;
             }
             if let Ok(Ok(resp)) = tokio::time::timeout(self.response_timeout, rx).await {
@@ -420,9 +422,19 @@ impl CredentialClient {
             drop(flight);
             conn.alive
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            self.conn.lock().await.take();
+            self.drop_conn_if_current(&conn).await;
         }
         Err(PluginError::transport("credential service connection lost"))
+    }
+
+    /// Removes `conn` from the live slot only when it is still the installed
+    /// connection, so a concurrent caller that already replaced it with a
+    /// newer session is never evicted by a stale failure.
+    async fn drop_conn_if_current(&self, conn: &Arc<CredentialConnection>) {
+        let mut slot = self.conn.lock().await;
+        if slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, conn)) {
+            *slot = None;
+        }
     }
 
     /// Returns the live connection, opening one on first use or after the
@@ -445,40 +457,45 @@ impl CredentialClient {
             self.params.lock().clone().ok_or_else(|| {
                 PluginError::provider("credential service not configured by host")
             })?;
-        let mut stream = IpcStream::connect(Path::new(&params.socket_path))
+        let stream = tokio::time::timeout(self.open_timeout, async {
+            let mut stream = IpcStream::connect(Path::new(&params.socket_path))
+                .await
+                .map_err(|e| {
+                    PluginError::transport(format!("failed to connect to host service: {e}"))
+                })?;
+            write_host_service_request(
+                &mut stream,
+                &HostServiceRequest::Open {
+                    service: HostServiceId::Credential,
+                    token: params.token,
+                },
+            )
             .await
-            .map_err(|e| {
-                PluginError::transport(format!("failed to connect to host service: {e}"))
-            })?;
-        write_host_service_request(
-            &mut stream,
-            &HostServiceRequest::Open {
-                service: HostServiceId::Credential,
-                token: params.token,
-            },
-        )
+            .map_err(PluginError::from)?;
+            match read_host_service_response(&mut stream)
+                .await
+                .map_err(PluginError::from)?
+            {
+                Some(HostServiceResponse::OpenAck) => {}
+                Some(HostServiceResponse::Error { code, message }) => {
+                    return Err(match code {
+                        HostServiceErrorCode::UnknownService => {
+                            PluginError::provider("credential service not implemented by host")
+                        }
+                        HostServiceErrorCode::AuthRejected => {
+                            PluginError::provider("credential access denied by host")
+                        }
+                        HostServiceErrorCode::Internal => PluginError::provider(message),
+                    });
+                }
+                None => {
+                    return Err(PluginError::transport("host closed during credential open"));
+                }
+            }
+            Ok::<IpcStream, PluginError>(stream)
+        })
         .await
-        .map_err(PluginError::from)?;
-        match read_host_service_response(&mut stream)
-            .await
-            .map_err(PluginError::from)?
-        {
-            Some(HostServiceResponse::OpenAck) => {}
-            Some(HostServiceResponse::Error { code, message }) => {
-                return Err(match code {
-                    HostServiceErrorCode::UnknownService => {
-                        PluginError::provider("credential service not implemented by host")
-                    }
-                    HostServiceErrorCode::AuthRejected => {
-                        PluginError::provider("credential access denied by host")
-                    }
-                    HostServiceErrorCode::Internal => PluginError::provider(message),
-                });
-            }
-            None => {
-                return Err(PluginError::transport("host closed during credential open"));
-            }
-        }
+        .map_err(|_| PluginError::transport("credential service open timed out"))??;
         let (reader, writer) = tokio::io::split(stream);
         let conn = Arc::new(CredentialConnection {
             writer: tokio::sync::Mutex::new(writer),
@@ -501,11 +518,11 @@ impl CredentialClient {
         Ok(conn)
     }
 
-    fn cache_get(&self, id: &str, epoch: u64) -> Option<(CredentialKind, CredentialSecret)> {
+    fn cache_get(&self, id: &str, epoch: u64) -> Option<ResolvedAuth> {
         let guard = self.cache.lock();
         guard.get(id).and_then(|entry| {
             (entry.deadline > Instant::now() && entry.epoch == epoch)
-                .then(|| (entry.kind, entry.value.clone()))
+                .then(|| (entry.kind, entry.value.clone(), entry.header.clone()))
         })
     }
 
@@ -514,6 +531,7 @@ impl CredentialClient {
         id: &str,
         kind: CredentialKind,
         value: CredentialSecret,
+        header: Option<ene_plugin_proto::WireHeaderSpec>,
         deadline: Instant,
         epoch: u64,
     ) {
@@ -522,6 +540,7 @@ impl CredentialClient {
             CachedCredential {
                 kind,
                 value,
+                header,
                 deadline,
                 epoch,
             },
@@ -582,6 +601,40 @@ fn map_request_error(id: &str, code: CredentialErrorCode, message: String) -> Pl
     }
 }
 
+/// Inserts the resolved credential's auth header into `headers`, honoring the
+/// declared header override for API keys.
+#[cfg(feature = "http")]
+fn insert_auth_header(
+    headers: &mut reqwest::header::HeaderMap,
+    kind: CredentialKind,
+    value: &str,
+    header: Option<&ene_plugin_proto::WireHeaderSpec>,
+) -> Result<(), PluginError> {
+    match (kind, header) {
+        (CredentialKind::ApiKey, Some(spec)) => {
+            let name = http::header::HeaderName::from_bytes(spec.name.as_bytes())
+                .map_err(|_| PluginError::provider("credential declares an invalid header name"))?;
+            headers.insert(
+                name,
+                auth_header_value(&spec.format.replace("{value}", value))?,
+            );
+        }
+        (CredentialKind::ApiKey, None) => {
+            headers.insert(
+                http::header::HeaderName::from_static("x-api-key"),
+                auth_header_value(value)?,
+            );
+        }
+        (CredentialKind::Bearer, _) => {
+            headers.insert(
+                http::header::AUTHORIZATION,
+                auth_header_value(&format!("Bearer {value}"))?,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Builds a reqwest client with the given default headers and timeouts.
 #[cfg(feature = "http")]
 fn build_http_client(
@@ -592,16 +645,38 @@ fn build_http_client(
         .default_headers(headers)
         .connect_timeout(timeout.connect_timeout)
         .timeout(timeout.request_timeout)
+        // reqwest's default redirect policy strips `Authorization` on
+        // cross-origin redirects but forwards arbitrary default headers such
+        // as `x-api-key`; only same-origin hops are followed so the
+        // credential header can never reach a different host. A hop cap keeps
+        // a same-origin redirect loop from cycling forever.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let same_origin = attempt
+                .previous()
+                .last()
+                .is_none_or(|prev| prev.origin() == attempt.url().origin());
+            if same_origin && attempt.previous().len() <= 10 {
+                attempt.follow()
+            } else {
+                attempt.error(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "cross-origin redirect refused; credential header not forwarded",
+                ))
+            }
+        }))
         .build()
         .map_err(|e| PluginError::provider(format!("failed to build HTTP client: {e}")))
 }
 
-/// Validates a header value without ever putting the secret in the error.
+/// Validates a header value without ever putting the secret in the error, and
+/// marks it sensitive so any `Debug`/log formatting redacts it.
 #[cfg(feature = "http")]
 fn auth_header_value(value: &str) -> Result<http::header::HeaderValue, PluginError> {
-    http::header::HeaderValue::from_str(value).map_err(|_| {
+    let mut header = http::header::HeaderValue::from_str(value).map_err(|_| {
         PluginError::provider("credential contains characters invalid for an HTTP header")
-    })
+    })?;
+    header.set_sensitive(true);
+    Ok(header)
 }
 
 /// Auth header mode for [`ClientOptions`].
@@ -614,6 +689,7 @@ pub enum HttpAuth {
     Bearer,
 }
 
+#[cfg(feature = "http")]
 impl fmt::Debug for HttpAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -626,7 +702,8 @@ impl fmt::Debug for HttpAuth {
 /// Options for [`CredentialClient::http_client_with`].
 ///
 /// `auth` defaults to `None`, which derives the header from the resolved
-/// credential (`api_key` → `x-api-key`, oauth → `Authorization: Bearer`).
+/// credential (`api_key` → its declared header, falling back to `x-api-key`;
+/// oauth → `Authorization: Bearer`).
 #[cfg(feature = "http")]
 #[derive(Debug, Clone, Default)]
 pub struct ClientOptions {
@@ -642,12 +719,24 @@ pub struct ClientOptions {
 
 /// HTTP caller combining a shared client with retry / rate-limit / timeout.
 #[cfg(feature = "http")]
-#[derive(Debug)]
 pub struct HttpCaller {
     client: reqwest::Client,
     retry: RetryPolicy,
     rate_limit: Option<RateLimiter>,
     timeout: TimeoutPolicy,
+}
+
+#[cfg(feature = "http")]
+impl fmt::Debug for HttpCaller {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The client carries the credential's default headers; formatting it
+        // would surface the secret (its `Debug` prints them).
+        f.debug_struct("HttpCaller")
+            .field("retry", &self.retry)
+            .field("rate_limit", &self.rate_limit)
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "http")]
@@ -661,7 +750,8 @@ impl HttpCaller {
 
     /// Executes a request, applying rate limit → retry → timeout.
     ///
-    /// The retry policy re-runs the request on any error; configure
+    /// The retry policy re-runs the request on transport errors and on
+    /// retryable HTTP statuses (429 and 5xx); configure
     /// `RetryPolicy::max_retries` to bound it (0 disables retries). The
     /// timeout bounds each attempt.
     pub async fn execute(
@@ -676,22 +766,41 @@ impl HttpCaller {
             .map_err(|e| PluginError::provider(format!("failed to build request: {e}")))?;
         let client = self.client.clone();
         let per_attempt = self.timeout.request_timeout;
+        let max_retries = self.retry.max_retries;
         self.retry
             .retry(
-                move |_attempt| {
+                move |attempt| {
                     let client = client.clone();
                     let request = request.try_clone();
                     async move {
                         let Some(request) = request else {
                             return Err(PluginError::provider("request body is not cloneable"));
                         };
-                        match tokio::time::timeout(per_attempt, client.execute(request)).await {
-                            Ok(Ok(resp)) => Ok(resp),
+                        let resp = match tokio::time::timeout(per_attempt, client.execute(request))
+                            .await
+                        {
+                            Ok(Ok(resp)) => resp,
                             Ok(Err(e)) => {
-                                Err(PluginError::provider(format!("HTTP request failed: {e}")))
+                                return Err(PluginError::provider(format!(
+                                    "HTTP request failed: {e}"
+                                )));
                             }
-                            Err(_) => Err(PluginError::timeout("request exceeded timeout")),
+                            Err(_) => return Err(PluginError::timeout("request exceeded timeout")),
+                        };
+                        // An error status is only a successful `reqwest` call,
+                        // so it never reaches the retry loop as an `Err`; turn
+                        // retryable statuses into one on every attempt but the
+                        // last, which returns the response unchanged.
+                        if (resp.status().is_server_error()
+                            || resp.status() == http::StatusCode::TOO_MANY_REQUESTS)
+                            && attempt < max_retries
+                        {
+                            return Err(PluginError::provider(format!(
+                                "HTTP {} response from server",
+                                resp.status()
+                            )));
                         }
+                        Ok(resp)
                     }
                 },
                 |_: &PluginError| true,
@@ -720,6 +829,8 @@ mod tests {
     enum HostAction {
         /// Read the next `Resolve` and answer it with this key.
         Answer(&'static str),
+        /// Read the next `Resolve` and answer it with this key and header.
+        AnswerWithHeader(&'static str, &'static str, &'static str),
         /// Push an `Invalidated` frame for the given ids.
         Invalidate(&'static [&'static str]),
         /// Read the next request and never answer it, then close the stream
@@ -760,6 +871,26 @@ mod tests {
                     let resp = CredentialResponse::Resolved {
                         credential: ResolvedCredential::ApiKey {
                             key: ene_plugin_proto::WireSecret::new(key),
+                            header: None,
+                        },
+                    };
+                    if write_credential_response(&mut stream, &resp).await.is_err() {
+                        return;
+                    }
+                }
+                HostAction::AnswerWithHeader(key, name, format) => {
+                    let Ok(Some(CredentialRequest::Resolve { .. })) =
+                        read_credential_request(&mut stream).await
+                    else {
+                        return;
+                    };
+                    let resp = CredentialResponse::Resolved {
+                        credential: ResolvedCredential::ApiKey {
+                            key: ene_plugin_proto::WireSecret::new(key),
+                            header: Some(ene_plugin_proto::WireHeaderSpec {
+                                name: name.to_string(),
+                                format: format.to_string(),
+                            }),
                         },
                     };
                     if write_credential_response(&mut stream, &resp).await.is_err() {
@@ -851,6 +982,7 @@ mod tests {
                         CredentialResponse::Resolved {
                             credential: ResolvedCredential::ApiKey {
                                 key: ene_plugin_proto::WireSecret::new("sk-mock-host-key"),
+                                header: None,
                             },
                         }
                     }
@@ -1014,5 +1146,239 @@ mod tests {
         .expect("request must not hang")
         .expect("resolve after reconnect");
         assert_eq!(key.expose_secret(), "sk-after-timeout");
+    }
+
+    #[tokio::test]
+    async fn open_times_out_when_host_never_answers() {
+        // A listener that accepts the session and reads the `Open` request
+        // but never answers it must not hang the client: the open handshake
+        // timeout breaks the wait and surfaces a transport error.
+        let n = SOCKET_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ene-cred-client-test-{}-{n}.sock",
+            std::process::id()
+        ));
+        let mut listener = IpcListener::bind(&path).expect("bind listener");
+        tokio::spawn(async move {
+            let Ok(mut stream) = listener.accept().await else {
+                return;
+            };
+            drop(read_host_service_request(&mut stream).await);
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
+        let mut client = CredentialClient::new();
+        client.open_timeout = std::time::Duration::from_millis(100);
+        client.set_endpoint(
+            path.to_string_lossy().to_string(),
+            "ene-cred-test-token".to_string(),
+        );
+        let err = client
+            .api_key("anthropic")
+            .await
+            .expect_err("open must time out");
+        assert!(err.to_string().contains("open timed out"));
+    }
+
+    #[tokio::test]
+    async fn drop_conn_if_current_keeps_newer_connection() {
+        // A stale caller discarding its dead first session must not evict a
+        // newer session another caller installed in the slot.
+        let (path, token) = spawn_scripted_host(vec![vec![], vec![]]);
+        let client = CredentialClient::new();
+        client.set_endpoint(path, token);
+        let conn1 = client
+            .open_connection()
+            .await
+            .expect("open first connection");
+        *client.conn.lock().await = Some(Arc::clone(&conn1));
+        let conn2 = client
+            .open_connection()
+            .await
+            .expect("open second connection");
+        *client.conn.lock().await = Some(Arc::clone(&conn2));
+
+        client.drop_conn_if_current(&conn1).await;
+        let slot = client.conn.lock().await;
+        assert!(
+            slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, &conn2)),
+            "the newer connection must stay installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_api_key_carries_declared_header() {
+        let (path, token) = spawn_scripted_host(vec![vec![HostAction::AnswerWithHeader(
+            "sk-custom-header-key",
+            "X-Custom-Auth",
+            "Bearer {value}",
+        )]]);
+        let client = CredentialClient::new();
+        client.set_endpoint(path, token);
+        let (_, _, header) = client.resolve_secret("anthropic").await.expect("resolve");
+        let header = header.expect("declared header must be resolved");
+        assert_eq!(header.name, "X-Custom-Auth");
+        assert_eq!(header.format, "Bearer {value}");
+    }
+
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn http_client_applies_declared_custom_header() {
+        let (path, token) = spawn_scripted_host(vec![vec![HostAction::AnswerWithHeader(
+            "sk-custom-header-key",
+            "X-Custom-Auth",
+            "Bearer {value}",
+        )]]);
+        let client = CredentialClient::new();
+        client.set_endpoint(path, token);
+
+        // A tiny local HTTP sink records whether the declared header arrived.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind sink");
+        let addr = listener.local_addr().expect("addr");
+        let header_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let header_seen_clone = std::sync::Arc::clone(&header_seen);
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            if let Ok(n) = std::io::Read::read(&mut stream, &mut buf) {
+                // Header names are lowercased on the wire, so match case-
+                // insensitively.
+                let request = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                if request.contains("x-custom-auth: bearer sk-custom-header-key") {
+                    header_seen_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            drop(std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+            ));
+        });
+
+        let http = client.http_client("anthropic").await.expect("build client");
+        let response = http
+            .post(format!("http://{addr}"))
+            .body("{}")
+            .send()
+            .await
+            .expect("send");
+        assert!(response.status().is_success());
+        assert!(
+            header_seen.load(std::sync::atomic::Ordering::Relaxed),
+            "declared custom header must be sent on the wire"
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn execute_retries_server_error_statuses() {
+        // A tiny local HTTP server answering 500 first and 200 second: the
+        // retry loop must treat the error status as a retryable failure.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind server");
+        let addr = listener.local_addr().expect("addr");
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requests_clone = std::sync::Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                drop(std::io::Read::read(&mut stream, &mut buf));
+                let n = requests_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let body = if n == 0 {
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\nno"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+                };
+                drop(std::io::Write::write_all(&mut stream, body.as_bytes()));
+            }
+        });
+
+        let client = CredentialClient::new();
+        let caller = client
+            .http_client_with(
+                "unused-id",
+                ClientOptions {
+                    retry: RetryPolicy::new(
+                        1,
+                        std::time::Duration::from_millis(10),
+                        std::time::Duration::from_millis(10),
+                        2.0,
+                    )
+                    .expect("valid retry"),
+                    timeout: TimeoutPolicy::new(
+                        std::time::Duration::from_secs(5),
+                        std::time::Duration::from_secs(5),
+                    ),
+                    auth: Some(HttpAuth::ApiKeyHeader("sk-test".to_string())),
+                    ..ClientOptions::default()
+                },
+            )
+            .await
+            .expect("build caller");
+        let response = caller
+            .execute(caller.client().post(format!("http://{addr}")).body("{}"))
+            .await
+            .expect("execute");
+        assert!(response.status().is_success());
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "the 500 must trigger one retry"
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn execute_surfaces_server_error_on_final_attempt() {
+        // With retries disabled, a 503 is returned as the response rather than
+        // masked or retried.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind server");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            drop(std::io::Read::read(&mut stream, &mut buf));
+            drop(std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 2\r\n\r\nno",
+            ));
+        });
+
+        let client = CredentialClient::new();
+        let caller = client
+            .http_client_with(
+                "unused-id",
+                ClientOptions {
+                    retry: RetryPolicy::new(
+                        0,
+                        std::time::Duration::from_millis(10),
+                        std::time::Duration::from_millis(10),
+                        2.0,
+                    )
+                    .expect("valid retry"),
+                    timeout: TimeoutPolicy::new(
+                        std::time::Duration::from_secs(5),
+                        std::time::Duration::from_secs(5),
+                    ),
+                    auth: Some(HttpAuth::ApiKeyHeader("sk-test".to_string())),
+                    ..ClientOptions::default()
+                },
+            )
+            .await
+            .expect("build caller");
+        let response = caller
+            .execute(caller.client().post(format!("http://{addr}")).body("{}"))
+            .await
+            .expect("execute");
+        assert_eq!(
+            response.status(),
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "the final attempt must return the error response unchanged"
+        );
     }
 }
