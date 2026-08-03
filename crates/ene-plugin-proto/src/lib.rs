@@ -78,7 +78,7 @@ pub use capabilities::{
     TtsProviderSpec,
 };
 /// Plugin error type.
-pub use error::PluginError;
+pub use error::{PluginError, ProviderErrorKind};
 /// Host-service channel types and framing helpers.
 pub use host_service::{
     HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId, HostServiceRequest,

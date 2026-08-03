@@ -2437,14 +2437,27 @@ async fn reconfigure_plugin_host_bg(
     // Stop the previous host (and its health bridge) first. Keep the factory
     // handles so stale removal below cannot evict a replacement installed by
     // another runtime handle.
-    let old_llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> = {
+    let (old_llm_factories, old_embedding_factories): (
+        HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
+        HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
+    ) = {
         let mut guard = plugin_host.lock().await;
-        let factories = guard.as_ref().map_or_else(HashMap::new, |host| {
-            host.llm_factories()
-                .iter()
-                .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
-                .collect()
-        });
+        let (llm_factories, embedding_factories) = guard.as_ref().map_or_else(
+            || (HashMap::new(), HashMap::new()),
+            |host| {
+                let llm_factories = host
+                    .llm_factories()
+                    .iter()
+                    .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
+                    .collect();
+                let embedding_factories = host
+                    .embedding_factories()
+                    .iter()
+                    .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
+                    .collect();
+                (llm_factories, embedding_factories)
+            },
+        );
         if let Some(mut host) = guard.take() {
             host.shutdown().await;
         }
@@ -2454,7 +2467,7 @@ async fn reconfigure_plugin_host_bg(
         if let Some(handle) = bridge.take() {
             handle.abort();
         }
-        factories
+        (llm_factories, embedding_factories)
     };
 
     // Abort the previous host-service accept loop before rebinding the shared
@@ -2519,15 +2532,6 @@ async fn reconfigure_plugin_host_bg(
     // Embedding factories follow the same stale-removal / re-registration
     // discipline as LLM factories, so a restarted host cannot leave
     // embeddings pointing at a dead plugin connection.
-    let old_embedding_factories: HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>> = {
-        let guard = plugin_host.lock().await;
-        guard.as_ref().map_or_else(HashMap::new, |host| {
-            host.embedding_factories()
-                .iter()
-                .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
-                .collect()
-        })
-    };
     let old_embedding_kinds: Vec<String> = old_embedding_factories.keys().cloned().collect();
     let stale_embedding_kinds = stale_llm_factory_names(
         &old_embedding_kinds,

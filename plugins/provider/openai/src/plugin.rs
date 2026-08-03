@@ -324,8 +324,14 @@ impl UpstreamError {
             Self::Http { status, body, .. } => {
                 let snippet: String = body.chars().take(280).collect();
                 match status {
-                    401 | 403 => PluginError::provider(format!("authentication failed: {snippet}")),
-                    429 => PluginError::provider(format!("rate limited: {snippet}")),
+                    401 | 403 => PluginError::provider_typed(
+                        ProviderErrorKind::Auth,
+                        format!("authentication failed: {snippet}"),
+                    ),
+                    429 => PluginError::provider_typed(
+                        ProviderErrorKind::RateLimit,
+                        format!("rate limited: {snippet}"),
+                    ),
                     402 => PluginError::provider(format!(
                         "HTTP 402 Payment Required (often OpenRouter credit collateral for max_tokens): {snippet}"
                     )),
@@ -533,6 +539,29 @@ async fn stream_sse_response(
             );
             continue;
         };
+        if let Some(reason) = chunk
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str)
+        {
+            let error = match reason {
+                "length" => Some(PluginError::provider_typed(
+                    ProviderErrorKind::Truncated,
+                    "finish_reason=length: configured token limit reached",
+                )),
+                "content_filter" => Some(PluginError::provider_typed(
+                    ProviderErrorKind::ContentFilter,
+                    "finish_reason=content_filter: provider blocked the response",
+                )),
+                _ => None,
+            };
+            if let Some(error) = error {
+                drop(tx.send(Err(error)).await);
+                return;
+            }
+        }
         if let Some(chunk) = convert::process_sse_chunk(&chunk, &name_mapping)
             && tx.send(Ok(chunk)).await.is_err()
         {
@@ -629,12 +658,14 @@ impl LlmPlugin for OpenAiPlugin {
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             match reason {
                 "length" => {
-                    return Err(PluginError::provider(
+                    return Err(PluginError::provider_typed(
+                        ProviderErrorKind::Truncated,
                         "finish_reason=length: configured token limit reached",
                     ));
                 }
                 "content_filter" => {
-                    return Err(PluginError::provider(
+                    return Err(PluginError::provider_typed(
+                        ProviderErrorKind::ContentFilter,
                         "finish_reason=content_filter: provider blocked the response",
                     ));
                 }

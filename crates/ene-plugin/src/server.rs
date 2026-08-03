@@ -21,6 +21,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin};
 
+fn provider_error_message(error: &PluginError) -> String {
+    error.provider_error_kind().map_or_else(
+        || error.to_string(),
+        |kind| format!("[ene-provider-error:{}] {}", kind.marker(), error),
+    )
+}
+
 /// How often an idle connection polls the tool plugin for deferred task
 /// completions to push to the host (Cr-5). Completions are delivered on this
 /// cadence even when no request is in flight, rather than only piggybacking on
@@ -865,7 +872,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 },
                 Err(e) => PluginIpcResponse::Error {
                     request_id: request_id.clone(),
-                    message: e.to_string(),
+                    message: provider_error_message(&e),
                 },
             }
         }
@@ -1232,7 +1239,7 @@ async fn run_chat_stream(
             drop(
                 tx.send(PluginIpcResponse::StreamError {
                     request_id: request_id.clone(),
-                    message: e.to_string(),
+                    message: provider_error_message(&e),
                 })
                 .await,
             );
@@ -1277,7 +1284,7 @@ async fn run_chat_stream(
                         drop(tx
                             .send(PluginIpcResponse::StreamError {
                                 request_id: request_id.clone(),
-                                message: e.to_string(),
+                                message: provider_error_message(&e),
                             })
                             .await);
                         return;
