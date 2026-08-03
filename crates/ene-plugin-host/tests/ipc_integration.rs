@@ -1243,15 +1243,14 @@ async fn handshake_negotiates_min_supported_version_for_older_plugin() {
     let conn = result.expect("handshake with an N-1 plugin should succeed");
     assert_eq!(conn.negotiated_version(), PLUGIN_IPC_MIN_SUPPORTED_VERSION);
 
-    // N-1 is currently v4, so CancelStream is available, but SetConfig (v5)
-    // is not — the gate must report it unsupported and `set_config` must
-    // update the local cache without sending a message the plugin cannot
-    // deserialize.
+    // N-1 is currently v5: CancelStream (v4) and SetConfig (v5) are both
+    // available, but dynamic-config messages additionally require the
+    // capability flags the old mock does not advertise.
     assert!(conn.supports_cancel_stream());
-    assert!(!conn.supports_set_config());
-    conn.set_config(Some(serde_json::json!({"k": 1})), None)
-        .await
-        .expect("set_config must no-op IPC instead of erroring on an old plugin");
+    assert!(conn.supports_set_config());
+    assert!(!conn.supports_list_config_options());
+    assert!(!conn.supports_validate_config());
+    assert!(!conn.supports_migrate_config());
 
     cleanup_path(&socket_path);
 }

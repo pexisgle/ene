@@ -1786,8 +1786,8 @@ mod tests {
             return;
         };
         assert!(embeddings[0][0].is_nan());
-        assert_eq!(embeddings[0][1], f32::INFINITY);
-        assert_eq!(embeddings[0][2], f32::NEG_INFINITY);
-        assert_eq!(embeddings[0][3], 0.5);
+        assert!(embeddings[0][1].is_infinite() && embeddings[0][1].is_sign_positive());
+        assert!(embeddings[0][2].is_infinite() && embeddings[0][2].is_sign_negative());
+        assert_eq!(embeddings[0][3].to_bits(), 0.5f32.to_bits());
     }
 }
