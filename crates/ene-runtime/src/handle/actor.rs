@@ -591,16 +591,16 @@ impl TurnActor {
                             // response on its session clone; publish the
                             // (possibly incremented) turn count.
                             self.sync_shared_session_state();
-                            if self.active_origin == crate::types::TurnOrigin::Proactive {
-                                if let Some(decision) = self.proactive.last_decision.take() {
-                                    let confirmation = crate::proactive::apply_proactive_completion(
-                                        &mut self.proactive,
-                                        &decision,
-                                        outcome.terminal.clone(),
-                                        outcome.spoke_visible_text,
-                                    );
-                                    crate::proactive::log_confirmation(&decision, confirmation);
-                                }
+                            if self.active_origin == crate::types::TurnOrigin::Proactive
+                                && let Some(decision) = self.proactive.last_decision.take()
+                            {
+                                let confirmation = crate::proactive::apply_proactive_completion(
+                                    &mut self.proactive,
+                                    &decision,
+                                    &outcome.terminal,
+                                    outcome.spoke_visible_text,
+                                );
+                                crate::proactive::log_confirmation(&decision, confirmation);
                             }
                             // Retroactive topic-boundary compression: a
                             // boundary detected on the just-completed turn

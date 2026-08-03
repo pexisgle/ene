@@ -257,7 +257,7 @@ pub(crate) fn proactive_generation_hint(
 /// response) is not an acceptance: the model neither declined nor spoke.
 #[must_use]
 pub(crate) fn resolve_confirmation(
-    terminal: TerminalReason,
+    terminal: &TerminalReason,
     decision_confirmation: ProactiveConfirmation,
     spoke_visible_text: bool,
 ) -> ProactiveConfirmation {
@@ -283,7 +283,7 @@ pub(crate) fn resolve_confirmation(
 pub(crate) fn apply_proactive_completion(
     scheduler: &mut ProactiveScheduler,
     decision: &ProactiveDecisionResult,
-    terminal: TerminalReason,
+    terminal: &TerminalReason,
     spoke_visible_text: bool,
 ) -> ProactiveConfirmation {
     match terminal {
@@ -589,33 +589,33 @@ mod tests {
     fn resolve_confirmation_distinguishes_decline_accept_and_empty() {
         let pending = ene_mind::ProactiveConfirmation::Pending;
         assert_eq!(
-            resolve_confirmation(TerminalReason::Declined, pending, true),
+            resolve_confirmation(&TerminalReason::Declined, pending, true),
             ene_mind::ProactiveConfirmation::Declined
         );
         assert_eq!(
-            resolve_confirmation(TerminalReason::Done, pending, true),
+            resolve_confirmation(&TerminalReason::Done, pending, true),
             ene_mind::ProactiveConfirmation::Accepted
         );
         assert_eq!(
-            resolve_confirmation(TerminalReason::Done, pending, false),
+            resolve_confirmation(&TerminalReason::Done, pending, false),
             ene_mind::ProactiveConfirmation::Empty,
             "a Done turn without visible text is neither accepted nor declined"
         );
         assert_eq!(
             resolve_confirmation(
-                TerminalReason::Done,
+                &TerminalReason::Done,
                 ene_mind::ProactiveConfirmation::Disabled,
                 true
             ),
             ene_mind::ProactiveConfirmation::Disabled
         );
         assert_eq!(
-            resolve_confirmation(TerminalReason::Cancelled, pending, false),
+            resolve_confirmation(&TerminalReason::Cancelled, pending, false),
             pending
         );
         assert_eq!(
             resolve_confirmation(
-                TerminalReason::Failed {
+                &TerminalReason::Failed {
                     message: "x".into(),
                 },
                 pending,
@@ -627,13 +627,14 @@ mod tests {
 
     #[test]
     fn decline_applies_cooldown_without_consuming_budget() {
-        let mut scheduler = ProactiveScheduler::default();
-        scheduler.proactive_turns = 2;
-        scheduler.last_proactive_at = None;
+        let mut scheduler = ProactiveScheduler {
+            proactive_turns: 2,
+            ..ProactiveScheduler::default()
+        };
         let decision = pending_decision();
 
         let verdict =
-            apply_proactive_completion(&mut scheduler, &decision, TerminalReason::Declined, false);
+            apply_proactive_completion(&mut scheduler, &decision, &TerminalReason::Declined, false);
         assert_eq!(verdict, ene_mind::ProactiveConfirmation::Declined);
         assert!(
             scheduler.last_proactive_at.is_some(),
@@ -647,13 +648,14 @@ mod tests {
 
     #[test]
     fn done_consumes_budget_and_resolves_acceptance() {
-        let mut scheduler = ProactiveScheduler::default();
-        scheduler.proactive_turns = 1;
-        scheduler.last_proactive_at = None;
+        let mut scheduler = ProactiveScheduler {
+            proactive_turns: 1,
+            ..ProactiveScheduler::default()
+        };
         let decision = pending_decision();
 
         let verdict =
-            apply_proactive_completion(&mut scheduler, &decision, TerminalReason::Done, true);
+            apply_proactive_completion(&mut scheduler, &decision, &TerminalReason::Done, true);
         assert_eq!(verdict, ene_mind::ProactiveConfirmation::Accepted);
         assert_eq!(scheduler.proactive_turns, 2);
         assert!(scheduler.last_proactive_at.is_some());
