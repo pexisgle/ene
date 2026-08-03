@@ -151,6 +151,13 @@ pub struct AudioChunk {
     pub sample_rate: u32,
     /// Whether this is the final audio chunk for the turn.
     pub is_final: bool,
+    /// Expression cues attributed to the TTS sentence this chunk belongs to.
+    ///
+    /// Non-empty only on the first PCM chunk of a sentence, so the playback
+    /// consumer can switch the expression when that sentence's audio starts
+    /// playing. Each cue carries its [`ene_mind::PerformanceCue::text_offset`]
+    /// in the spoken text.
+    pub cues: Vec<ene_mind::PerformanceCue>,
 }
 
 /// Turn-independent lifecycle notifications emitted from the actor via the

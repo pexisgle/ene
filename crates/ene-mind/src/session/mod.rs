@@ -52,7 +52,10 @@ pub use session::{ConversationSession, InterruptedState};
 /// Session ID and split/compression result types.
 pub use session_split::{SplitReason, SplitResult, generate_session_id};
 /// Performance-marker parsing utilities.
-pub use special_token::{parse_performance_marker, split_text_and_special_tokens, strip_markers};
+pub use special_token::{
+    StreamPiece, parse_performance_marker, split_text_and_special_tokens,
+    split_text_and_special_tokens_ordered, strip_markers,
+};
 /// Topic-boundary detection types.
 pub use topic_boundary::{TopicBoundarySignal, TopicBoundaryTracker};
 /// Type-safe identifiers.

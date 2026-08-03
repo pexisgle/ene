@@ -57,11 +57,16 @@ pub struct MotionCommand {
 
 /// Expression cue with weight and hold duration from [`ene_runtime::EneEvent::Performance`]
 /// when the cue kind is [`PerfKind::Expression`].
+///
+/// `target_time` is seconds on a monotonic clock shared with the emotion
+/// pipeline; `0.0` applies immediately (turn-end cues), a positive value
+/// schedules the cue (TTS-synced mid-utterance cues).
 #[derive(Message, Debug, Clone)]
 pub struct ExpressionCommand {
     pub name: String,
     pub weight: f32,
     pub hold_secs: f64,
+    pub target_time: f64,
 }
 
 /// Cancel cue from [`ene_runtime::EneEvent::Performance`] when the cue kind

@@ -44,11 +44,18 @@ pub enum AppEvent {
         priority: u8,
         duration: f32,
     },
-    /// Expression cue with weight and hold duration.
+    /// Expression cue with weight, hold duration, and scheduled application
+    /// time.
+    ///
+    /// `target_time` is seconds on a monotonic clock shared with the emotion
+    /// pipeline (see [`EmotionCommand`](crate::character_state::EmotionCommand)).
+    /// `0.0` applies the cue immediately; a positive value schedules it for
+    /// later (used by the TTS playback path to sync expressions to audio).
     ExpressionCue {
         name: String,
         weight: f32,
         hold_secs: f64,
+        target_time: f64,
     },
     /// Cancel cue.
     CancelCue { scope: String },

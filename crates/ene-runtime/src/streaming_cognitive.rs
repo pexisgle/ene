@@ -22,7 +22,8 @@ use crate::streaming::{
 use crate::types::TurnOrigin;
 use ene_ai::{LlmMessage, UserMessagePart};
 use ene_mind::{
-    CueSource, PerfKind, PerformanceArbiter, PerformanceCue, cue_source_priority, strip_markers,
+    CueSource, PerfKind, PerformanceArbiter, PerformanceCue, StreamPiece, cue_source_priority,
+    strip_markers,
 };
 use tracing::Instrument;
 
@@ -110,6 +111,62 @@ fn find_tts_sentence_boundary(buf: &str, char_count: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Drains the pending marker cues whose text offset falls before the flushed
+/// sentence's end (`range_end`), leaving the rest for the next sentence.
+///
+/// The pending list is ordered by offset (markers arrive in stream order), so
+/// the claimed prefix is exactly the cues belonging to the flushed sentence.
+/// A marker between two sentences (offset equal to the previous sentence's
+/// end) is claimed by the following sentence, matching the intent of "apply
+/// the expression when the next content begins".
+fn take_cues_before(pending: &mut Vec<PerformanceCue>, range_end: usize) -> Vec<PerformanceCue> {
+    let count = pending
+        .iter()
+        .take_while(|cue| cue.text_offset.is_some_and(|offset| offset < range_end))
+        .count();
+    pending.drain(..count).collect()
+}
+
+/// Absorbs one parsed performance marker into the timed (TTS-synced) cue
+/// path.
+///
+/// A `cancel:expr|expression|all` marker mirrors `expr_cancelled` on the
+/// timed path: it drops not-yet-attributed cues and blocks later expression
+/// markers. An expression marker is queued with its clean-text offset only
+/// while TTS is on and the timed path is not suppressed.
+fn absorb_timed_marker(
+    cue: &PerformanceCue,
+    tts_enabled: bool,
+    clean_chars: usize,
+    expr_cancelled: &mut bool,
+    timed_expr_suppressed: &mut bool,
+    timed_cues: &mut Vec<PerformanceCue>,
+) {
+    if cue.kind == PerfKind::Cancel {
+        let scope = cue.name.to_ascii_lowercase();
+        if matches!(scope.as_str(), "expr" | "expression" | "all") {
+            *expr_cancelled = true;
+            // Mirror the turn-end suppression on the timed path: a cancel
+            // drops not-yet-fired cues and blocks later ones.
+            timed_cues.clear();
+            *timed_expr_suppressed = true;
+        }
+    }
+    if tts_enabled && cue.kind == PerfKind::Expression && !*timed_expr_suppressed {
+        timed_cues.push(cue.clone().with_text_offset(clean_chars));
+    }
+}
+
+/// A sentence dispatched to the TTS worker together with the expression cues
+/// that fall inside its clean-text range.
+///
+/// The cues ride on the sentence's first PCM chunk so the playback consumer
+/// can switch the expression when that sentence's audio starts playing.
+struct TtsSentence {
+    text: String,
+    cues: Vec<PerformanceCue>,
 }
 
 #[expect(
@@ -852,8 +909,9 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     // (not the chat broadcast bus — see `send_audio_chunk`).
     // The worker monitors the turn's CancellationToken so barge-in can stop
     // synthesis immediately instead of finishing the current sentence.
-    let (tts_tx, tts_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let tts_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = if tts_provider.is_some() {
+    let (tts_tx, tts_rx) = tokio::sync::mpsc::unbounded_channel::<TtsSentence>();
+    let tts_tx: Option<tokio::sync::mpsc::UnboundedSender<TtsSentence>> = if tts_provider.is_some()
+    {
         Some(tts_tx)
     } else {
         None
@@ -875,10 +933,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                             None => break, // channel closed: all sentences flushed
                         },
                     };
-                    let trimmed = sentence.trim();
+                    let trimmed = sentence.text.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
+                    let mut sentence_cues = sentence.cues;
                     match tts_provider.synthesize_stream(trimmed).await {
                         Ok(mut stream) => {
                             use tokio_stream::StreamExt as _;
@@ -893,6 +952,10 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                 };
                                 match chunk_res {
                                     Ok(chunk) => {
+                                        // Cues attach to the sentence's first
+                                        // PCM chunk only: that chunk's playback
+                                        // start is the sentence's audio start.
+                                        let cues = std::mem::take(&mut sentence_cues);
                                         send_audio_chunk(
                                             &audio_tx,
                                             AudioChunk {
@@ -901,6 +964,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                                 pcm: chunk.pcm,
                                                 sample_rate: chunk.sample_rate,
                                                 is_final: false,
+                                                cues,
                                             },
                                         )
                                         .await;
@@ -941,6 +1005,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                             pcm: Vec::new(),
                             sample_rate: 0,
                             is_final: true,
+                            cues: Vec::new(),
                         },
                     )
                     .await;
@@ -962,6 +1027,17 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let mut tts_sentence_buf = String::new();
     // Incremental char count for `tts_sentence_buf` to avoid O(n) rescans.
     let mut tts_sentence_buf_chars: usize = 0;
+    // Clean-text position of the first char currently in `tts_sentence_buf`,
+    // so TTS sentence ranges and marker offsets share one coordinate space.
+    let mut tts_buf_start: usize = 0;
+    // Character offset of the current position in the turn's clean text
+    // (markers stripped); each marker snapshots this counter as its position.
+    let mut clean_chars: usize = 0;
+    // Expression markers waiting to be attributed to a TTS sentence, in
+    // stream order. Populated only while TTS is enabled (timed path).
+    let mut timed_cues: Vec<PerformanceCue> = Vec::new();
+    // `[cancel:expr]` also cancels the timed path, mirroring `expr_cancelled`.
+    let mut timed_expr_suppressed = false;
 
     loop {
         if cancel_token.is_cancelled() {
@@ -1067,57 +1143,70 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 Ok(chunk) => {
                     if let Some(content_delta) = &chunk.text_delta {
                         assistant_content.push_str(content_delta);
-                        let (text_deltas, special_tokens) = session.process_delta(content_delta);
-                        for text in text_deltas {
-                            // Mirror streamed text into the shared buffer so a
-                            // hard-aborted turn can recover its partial response
-                            // for interruption recording.
-                            partial_text.lock().push_str(&text);
-                            drop(event_tx.send(EneEvent::TextDelta {
-                                turn: turn.clone(),
-                                origin,
-                                delta: text.clone(),
-                            }));
-                            if let Some(ref tx) = tts_tx {
-                                tts_sentence_buf.push_str(&text);
-                                tts_sentence_buf_chars =
-                                    tts_sentence_buf_chars.saturating_add(text.chars().count());
-                                while let Some(end) = find_tts_sentence_boundary(
-                                    &tts_sentence_buf,
-                                    tts_sentence_buf_chars,
-                                ) {
-                                    let sentence: String = tts_sentence_buf.drain(..end).collect();
-                                    tts_sentence_buf_chars = tts_sentence_buf_chars
-                                        .saturating_sub(sentence.chars().count());
-                                    drop(tx.send(sentence));
-                                }
-                            }
-                        }
-                        for token in special_tokens {
-                            accumulated_emotion_tokens.push(token.clone());
-
-                            // When emotion is enabled, expression markers are
-                            // accumulated for end-of-turn resolve_expression
-                            // only (motions / look_at / cancel stay mid-turn).
-                            // When emotion is disabled, expression markers must
-                            // still surface via the mid-turn arbiter — otherwise
-                            // they are dropped entirely.
-                            if let Some(cue) = ene_mind::parse_performance_marker(&token) {
-                                // An explicit `[cancel:expr|expression|all]`
-                                // suppresses the end-of-turn resolve fill so the
-                                // previous expression is preserved.
-                                if cue.kind == PerfKind::Cancel {
-                                    let scope = cue.name.to_ascii_lowercase();
-                                    if matches!(scope.as_str(), "expr" | "expression" | "all") {
-                                        expr_cancelled = true;
+                        for piece in session.process_delta_ordered(content_delta) {
+                            match piece {
+                                StreamPiece::Text(text) => {
+                                    // Mirror streamed text into the shared buffer so a
+                                    // hard-aborted turn can recover its partial response
+                                    // for interruption recording.
+                                    partial_text.lock().push_str(&text);
+                                    clean_chars += text.chars().count();
+                                    drop(event_tx.send(EneEvent::TextDelta {
+                                        turn: turn.clone(),
+                                        origin,
+                                        delta: text.clone(),
+                                    }));
+                                    if let Some(ref tx) = tts_tx {
+                                        tts_sentence_buf.push_str(&text);
+                                        tts_sentence_buf_chars = tts_sentence_buf_chars
+                                            .saturating_add(text.chars().count());
+                                        while let Some(end) = find_tts_sentence_boundary(
+                                            &tts_sentence_buf,
+                                            tts_sentence_buf_chars,
+                                        ) {
+                                            let sentence: String =
+                                                tts_sentence_buf.drain(..end).collect();
+                                            let sentence_chars = sentence.chars().count();
+                                            tts_sentence_buf_chars = tts_sentence_buf_chars
+                                                .saturating_sub(sentence_chars);
+                                            tts_buf_start += sentence_chars;
+                                            let cues =
+                                                take_cues_before(&mut timed_cues, tts_buf_start);
+                                            drop(tx.send(TtsSentence {
+                                                text: sentence,
+                                                cues,
+                                            }));
+                                        }
                                     }
                                 }
-                                let accept_mid_turn = match cue.kind {
-                                    PerfKind::Expression => !mind.emotion.enabled,
-                                    PerfKind::Motion | PerfKind::LookAt | PerfKind::Cancel => true,
-                                };
-                                if accept_mid_turn {
-                                    perf_arbiter.accept(cue, CueSource::Llm);
+                                StreamPiece::Marker(token) => {
+                                    accumulated_emotion_tokens.push(token.clone());
+
+                                    // When emotion is enabled, expression markers are
+                                    // accumulated for end-of-turn resolve_expression
+                                    // only (motions / look_at / cancel stay mid-turn).
+                                    // When emotion is disabled, expression markers must
+                                    // still surface via the mid-turn arbiter — otherwise
+                                    // they are dropped entirely.
+                                    if let Some(cue) = ene_mind::parse_performance_marker(&token) {
+                                        absorb_timed_marker(
+                                            &cue,
+                                            tts_tx.is_some(),
+                                            clean_chars,
+                                            &mut expr_cancelled,
+                                            &mut timed_expr_suppressed,
+                                            &mut timed_cues,
+                                        );
+                                        let accept_mid_turn = match cue.kind {
+                                            PerfKind::Expression => !mind.emotion.enabled,
+                                            PerfKind::Motion
+                                            | PerfKind::LookAt
+                                            | PerfKind::Cancel => true,
+                                        };
+                                        if accept_mid_turn {
+                                            perf_arbiter.accept(cue, CueSource::Llm);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1478,7 +1567,13 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             if let Some(ref tx) = tts_tx
                 && !tts_sentence_buf.trim().is_empty()
             {
-                drop(tx.send(tts_sentence_buf.clone()));
+                let remaining = tts_sentence_buf.clone();
+                let cues =
+                    take_cues_before(&mut timed_cues, tts_buf_start + remaining.chars().count());
+                drop(tx.send(TtsSentence {
+                    text: remaining,
+                    cues,
+                }));
             }
             drop(tts_tx);
 
@@ -1639,5 +1734,139 @@ mod tests {
         assert_eq!(char_count(buf), buf.chars().count());
         let end = find_tts_sentence_boundary(buf, char_count(buf)).expect("boundary");
         assert_eq!(&buf[..end], "こんにちは。");
+    }
+
+    fn cue_with_offset(name: &str, offset: usize) -> PerformanceCue {
+        PerformanceCue::expression(name).with_text_offset(offset)
+    }
+
+    #[test]
+    fn take_cues_before_claims_markers_inside_sentence_range() {
+        let mut pending = vec![cue_with_offset("happy", 0), cue_with_offset("sad", 8)];
+        let taken = take_cues_before(&mut pending, 10);
+        assert_eq!(taken.len(), 2);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn take_cues_before_leaves_markers_beyond_range() {
+        let mut pending = vec![cue_with_offset("happy", 12)];
+        let taken = take_cues_before(&mut pending, 10);
+        assert!(taken.is_empty());
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn take_cues_before_claims_boundary_marker_with_next_sentence() {
+        // A marker between sentence A and B (offset == A's end) fires with B,
+        // so the expression is applied when the following content begins.
+        let mut pending = vec![cue_with_offset("happy", 6)];
+        let taken_a = take_cues_before(&mut pending, 6);
+        assert!(taken_a.is_empty());
+        let taken_b = take_cues_before(&mut pending, 9);
+        assert_eq!(taken_b.len(), 1);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn take_cues_before_partial_drain_keeps_order() {
+        let mut pending = vec![cue_with_offset("happy", 1), cue_with_offset("sad", 9)];
+        let taken = take_cues_before(&mut pending, 5);
+        assert_eq!(taken, vec![cue_with_offset("happy", 1)]);
+        assert_eq!(pending, vec![cue_with_offset("sad", 9)]);
+    }
+
+    #[test]
+    fn take_cues_before_marker_without_offset_stays_pending() {
+        // Defensive: a cue without a position can never be claimed; the timed
+        // path only pushes positioned cues, so this guards future callers.
+        let mut pending = vec![PerformanceCue::expression("happy")];
+        let taken = take_cues_before(&mut pending, 10);
+        assert!(taken.is_empty());
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn absorb_timed_marker_queues_expression_with_offset() {
+        let cue = PerformanceCue::expression("happy");
+        let mut timed_cues = Vec::new();
+        let mut expr_cancelled = false;
+        let mut suppressed = false;
+        absorb_timed_marker(
+            &cue,
+            true,
+            12,
+            &mut expr_cancelled,
+            &mut suppressed,
+            &mut timed_cues,
+        );
+        assert_eq!(timed_cues, vec![cue_with_offset("happy", 12)]);
+        assert!(!expr_cancelled);
+        assert!(!suppressed);
+    }
+
+    #[test]
+    fn absorb_timed_marker_skips_expressions_without_tts() {
+        // Without TTS there is no timeline to sync to; markers keep the
+        // turn-end behavior.
+        let cue = PerformanceCue::expression("happy");
+        let mut timed_cues = Vec::new();
+        let mut expr_cancelled = false;
+        let mut suppressed = false;
+        absorb_timed_marker(
+            &cue,
+            false,
+            5,
+            &mut expr_cancelled,
+            &mut suppressed,
+            &mut timed_cues,
+        );
+        assert!(timed_cues.is_empty());
+    }
+
+    #[test]
+    fn absorb_timed_marker_cancel_clears_and_suppresses() {
+        let mut timed_cues = vec![cue_with_offset("happy", 3)];
+        let mut expr_cancelled = false;
+        let mut suppressed = false;
+        absorb_timed_marker(
+            &PerformanceCue::cancel("expr"),
+            true,
+            8,
+            &mut expr_cancelled,
+            &mut suppressed,
+            &mut timed_cues,
+        );
+        assert!(timed_cues.is_empty());
+        assert!(expr_cancelled);
+        assert!(suppressed);
+        // Later expression markers are blocked.
+        absorb_timed_marker(
+            &PerformanceCue::expression("sad"),
+            true,
+            9,
+            &mut expr_cancelled,
+            &mut suppressed,
+            &mut timed_cues,
+        );
+        assert!(timed_cues.is_empty());
+    }
+
+    #[test]
+    fn absorb_timed_marker_other_cancel_scope_leaves_timed_path_alone() {
+        let mut timed_cues = vec![cue_with_offset("happy", 3)];
+        let mut expr_cancelled = false;
+        let mut suppressed = false;
+        absorb_timed_marker(
+            &PerformanceCue::cancel("motion"),
+            true,
+            8,
+            &mut expr_cancelled,
+            &mut suppressed,
+            &mut timed_cues,
+        );
+        assert_eq!(timed_cues, vec![cue_with_offset("happy", 3)]);
+        assert!(!expr_cancelled);
+        assert!(!suppressed);
     }
 }

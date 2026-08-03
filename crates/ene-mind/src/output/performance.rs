@@ -56,6 +56,11 @@ pub enum PerfKind {
     Cancel,
 }
 
+/// Default expression weight when a cue omits `weight`.
+pub const DEFAULT_EXPRESSION_WEIGHT: f32 = 1.0;
+/// Default expression hold when a cue omits `hold` (seconds).
+pub const DEFAULT_EXPRESSION_HOLD_SECS: f64 = 4.0;
+
 /// A single presentation cue (expression / motion / look-at / cancel).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerformanceCue {
@@ -69,6 +74,11 @@ pub struct PerformanceCue {
     pub hold_secs: Option<f64>,
     /// Motion body layer (Motion only).
     pub motion_layer: Option<MotionLayer>,
+    /// Character offset of the marker in the turn's clean (marker-stripped)
+    /// spoken text. Set when the cue came from a streamed `<|perf:…|>` marker;
+    /// lets the TTS pipeline attribute the cue to the sentence whose text
+    /// range contains it, so hosts can switch the expression while speaking.
+    pub text_offset: Option<usize>,
 }
 
 impl PerformanceCue {
@@ -80,6 +90,7 @@ impl PerformanceCue {
             weight: None,
             hold_secs: None,
             motion_layer: None,
+            text_offset: None,
         }
     }
 
@@ -91,6 +102,7 @@ impl PerformanceCue {
             weight: Some(weight.clamp(0.0, 1.0)),
             hold_secs: Some(hold_secs.max(0.0)),
             motion_layer: None,
+            text_offset: None,
         }
     }
 
@@ -102,6 +114,7 @@ impl PerformanceCue {
             weight: None,
             hold_secs: None,
             motion_layer: layer,
+            text_offset: None,
         }
     }
 
@@ -113,6 +126,7 @@ impl PerformanceCue {
             weight: None,
             hold_secs: None,
             motion_layer: None,
+            text_offset: None,
         }
     }
 
@@ -124,6 +138,40 @@ impl PerformanceCue {
             weight: None,
             hold_secs: None,
             motion_layer: None,
+            text_offset: None,
         }
+    }
+
+    /// Records the marker's character offset in the clean spoken text.
+    #[must_use]
+    pub fn with_text_offset(mut self, offset: usize) -> Self {
+        self.text_offset = Some(offset);
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_text_offset_records_position() {
+        let cue = PerformanceCue::expression("happy").with_text_offset(42);
+        assert_eq!(cue.text_offset, Some(42));
+        assert_eq!(cue.name, "happy");
+    }
+
+    #[test]
+    fn constructors_start_without_text_offset() {
+        assert_eq!(PerformanceCue::expression("happy").text_offset, None);
+        assert_eq!(PerformanceCue::motion("wave", None).text_offset, None);
+    }
+
+    #[test]
+    fn with_text_offset_is_pure() {
+        let base = PerformanceCue::expression("sad");
+        let moved = base.clone().with_text_offset(7);
+        assert_eq!(base.text_offset, None);
+        assert_eq!(moved.text_offset, Some(7));
     }
 }

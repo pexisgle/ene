@@ -12,17 +12,29 @@
 )]
 use crate::output::{MotionLayer, PerformanceCue};
 
-/// Splits streaming text into normal text deltas and special tokens (like `<|perf:expr=happy|>`).
-/// Handles partial tokens that span across chunks via a carry buffer.
-pub fn split_text_and_special_tokens(
-    carry: &mut String,
-    chunk: &str,
-) -> (Vec<String>, Vec<String>) {
+/// One item of an interleaved streaming delta: either clean text or a
+/// `<|perf:…|>` marker token, in the order they appeared in the stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamPiece {
+    /// Clean text (markers removed).
+    Text(String),
+    /// A complete `<|…|>` marker token.
+    Marker(String),
+}
+
+/// Splits streaming text into an ordered stream of text deltas and special
+/// tokens (like `<|perf:expr=happy|>`), preserving their interleaving.
+///
+/// The two-list variant ([`split_text_and_special_tokens`]) cannot tell
+/// whether a marker preceded or followed the text of the same chunk, which
+/// matters when marker positions must be mapped onto the clean text (TTS
+/// expression timing). Handles partial tokens that span across chunks via a
+/// carry buffer.
+pub fn split_text_and_special_tokens_ordered(carry: &mut String, chunk: &str) -> Vec<StreamPiece> {
     let mut buffer = std::mem::take(carry);
     buffer.push_str(chunk);
 
-    let mut text_deltas = Vec::new();
-    let mut special_tokens = Vec::new();
+    let mut pieces = Vec::new();
     let mut cursor = 0usize;
 
     while cursor < buffer.len() {
@@ -32,19 +44,19 @@ pub fn split_text_and_special_tokens(
                 if remaining.ends_with('<') {
                     let safe_end = buffer.len() - 1;
                     if cursor < safe_end {
-                        text_deltas.push(buffer[cursor..safe_end].to_string());
+                        pieces.push(StreamPiece::Text(buffer[cursor..safe_end].to_string()));
                     }
                     *carry = "<".to_string();
                 } else {
-                    text_deltas.push(remaining.to_string());
+                    pieces.push(StreamPiece::Text(remaining.to_string()));
                 }
-                return (text_deltas, special_tokens);
+                return pieces;
             }
             Some(open_rel) => {
                 let open = cursor + open_rel;
 
                 if open > cursor {
-                    text_deltas.push(buffer[cursor..open].to_string());
+                    pieces.push(StreamPiece::Text(buffer[cursor..open].to_string()));
                 }
 
                 let token_start = open + 2;
@@ -52,12 +64,12 @@ pub fn split_text_and_special_tokens(
                 match buffer[token_start..].find("|>") {
                     None => {
                         *carry = buffer[open..].to_string();
-                        return (text_deltas, special_tokens);
+                        return pieces;
                     }
                     Some(close_rel) => {
                         let close = token_start + close_rel;
                         let inner = &buffer[token_start..close];
-                        special_tokens.push(format!("<|{inner}|>"));
+                        pieces.push(StreamPiece::Marker(format!("<|{inner}|>")));
                         cursor = close + 2;
                     }
                 }
@@ -65,6 +77,23 @@ pub fn split_text_and_special_tokens(
         }
     }
 
+    pieces
+}
+
+/// Splits streaming text into normal text deltas and special tokens (like `<|perf:expr=happy|>`).
+/// Handles partial tokens that span across chunks via a carry buffer.
+pub fn split_text_and_special_tokens(
+    carry: &mut String,
+    chunk: &str,
+) -> (Vec<String>, Vec<String>) {
+    let mut text_deltas = Vec::new();
+    let mut special_tokens = Vec::new();
+    for piece in split_text_and_special_tokens_ordered(carry, chunk) {
+        match piece {
+            StreamPiece::Text(text) => text_deltas.push(text),
+            StreamPiece::Marker(token) => special_tokens.push(token),
+        }
+    }
     (text_deltas, special_tokens)
 }
 
@@ -355,6 +384,74 @@ mod tests {
         let (text, tokens) = split_text_and_special_tokens(&mut carry, "");
         assert!(text.is_empty());
         assert!(tokens.is_empty());
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn ordered_split_preserves_interleaving() {
+        let mut carry = String::new();
+        let pieces =
+            split_text_and_special_tokens_ordered(&mut carry, "Hi <|perf:expr=happy|> there");
+        assert_eq!(
+            pieces,
+            vec![
+                StreamPiece::Text("Hi ".to_string()),
+                StreamPiece::Marker("<|perf:expr=happy|>".to_string()),
+                StreamPiece::Text(" there".to_string()),
+            ]
+        );
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn ordered_split_keeps_multiple_markers_in_order() {
+        let mut carry = String::new();
+        let pieces = split_text_and_special_tokens_ordered(
+            &mut carry,
+            "<|perf:expr=happy|> A <|perf:expr=sad|> B",
+        );
+        assert_eq!(
+            pieces,
+            vec![
+                StreamPiece::Marker("<|perf:expr=happy|>".to_string()),
+                StreamPiece::Text(" A ".to_string()),
+                StreamPiece::Marker("<|perf:expr=sad|>".to_string()),
+                StreamPiece::Text(" B".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_split_completes_marker_across_chunks() {
+        let mut carry = String::new();
+        let part1 = split_text_and_special_tokens_ordered(&mut carry, "Hello <|perf");
+        assert_eq!(part1, vec![StreamPiece::Text("Hello ".to_string())]);
+        assert_eq!(carry, "<|perf");
+
+        let part2 = split_text_and_special_tokens_ordered(&mut carry, ":expr=happy|> world");
+        assert_eq!(
+            part2,
+            vec![
+                StreamPiece::Marker("<|perf:expr=happy|>".to_string()),
+                StreamPiece::Text(" world".to_string()),
+            ]
+        );
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn ordered_split_buffers_bare_angle_bracket_at_end() {
+        let mut carry = String::new();
+        let pieces = split_text_and_special_tokens_ordered(&mut carry, "Hello <");
+        assert_eq!(pieces, vec![StreamPiece::Text("Hello ".to_string())]);
+        assert_eq!(carry, "<");
+    }
+
+    #[test]
+    fn ordered_split_plain_text_only() {
+        let mut carry = String::new();
+        let pieces = split_text_and_special_tokens_ordered(&mut carry, "Hello world");
+        assert_eq!(pieces, vec![StreamPiece::Text("Hello world".to_string())]);
         assert!(carry.is_empty());
     }
 

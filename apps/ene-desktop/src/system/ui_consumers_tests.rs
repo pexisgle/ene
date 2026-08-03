@@ -388,3 +388,40 @@ fn apply_emotions_system_drains_bevy_queue_into_pipeline() {
     assert_eq!(pipeline.pending.len(), 1);
     assert_eq!(pipeline.pending[0].emotion, "happy");
 }
+
+#[test]
+fn apply_cancel_expr_clears_scheduled_and_active_expressions() {
+    use crate::resource::motion_layer::MotionLayerState;
+    use crate::system::ui_consumers::apply_cancel_system;
+    let mut world = World::new();
+    let mut pipeline = EmotionPipelineState::default();
+    // A scheduled (future `target_time`) cue plus an active expression.
+    pipeline
+        .pending
+        .push_back(crate::character_state::EmotionCommand {
+            emotion: "happy".into(),
+            target_time: 100.0,
+            hold_secs: 4.0,
+            weight: 1.0,
+        });
+    pipeline.active = Some(crate::character_state::ActiveEmotion {
+        name: "sad".into(),
+        weight: 1.0,
+        hold_until_secs: 200.0,
+    });
+    world.insert_resource(pipeline);
+    world.init_resource::<Messages<CancelCommand>>();
+    world.init_resource::<MotionLayerState>();
+
+    let mut schedule = Schedule::default();
+    schedule.add_systems(apply_cancel_system);
+    schedule.run(&mut world);
+    world
+        .resource_mut::<Messages<CancelCommand>>()
+        .write(CancelCommand("expr".to_string()));
+    schedule.run(&mut world);
+
+    let pipeline = world.resource::<EmotionPipelineState>();
+    assert!(pipeline.pending.is_empty());
+    assert!(pipeline.active.is_none());
+}

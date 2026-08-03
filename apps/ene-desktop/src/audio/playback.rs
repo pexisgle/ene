@@ -8,7 +8,11 @@
 //! [`crossbeam_channel`]; the playback thread appends
 //! each chunk to the sink, feeds the same PCM to the shared
 //! [`VisemeState`](super::VisemeState) for lip-sync, and toggles the
-//! `tts_playing` flag used for self-voice suppression.
+//! `tts_playing` flag used for self-voice suppression. Chunks that carry
+//! sentence-scoped expression cues ([`AudioChunkPayload::cues`]) also fire
+//! those cues on the emotion pipeline timed to when that sentence's audio
+//! starts playing. A barge-in (`abort` final) additionally cancels the
+//! pipeline's scheduled expressions, whose audio was just discarded.
 //!
 //! The playback thread exits when the channel closes **or** when the
 //! shared shutdown flag is raised. The flag is necessary because the
@@ -21,7 +25,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rodio::Player;
 use rodio::buffer::SamplesBuffer;
@@ -30,6 +34,91 @@ use rodio::mixer::{self, Mixer};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use super::{AudioChunkPayload, AudioChunkReceiver, AudioChunkSender, VisemeState};
+use crate::events::{AppEvent, AppEventSender};
+
+/// Wall-clock ↔ audio-timeline mapping used to schedule expression cues.
+///
+/// Models the rodio sink as a continuous player: the first chunk appended in
+/// a playback segment starts playing immediately, and timeline position `p`
+/// (cumulative appended PCM seconds) plays at wall time
+/// `segment_started_at + p`. The anchor resets after every final marker
+/// (barge-in stop or natural drain) because the sink then restarts from
+/// silence. This is the same enqueue-time proxy the viseme driver uses for
+/// lip-sync pacing.
+#[derive(Debug)]
+struct PlaybackTimeline {
+    segment_started_at: Option<Instant>,
+    appended_secs: f64,
+}
+
+impl PlaybackTimeline {
+    const fn new() -> Self {
+        Self {
+            segment_started_at: None,
+            appended_secs: 0.0,
+        }
+    }
+
+    /// Starts a new playback segment at `now` (first chunk after a final
+    /// marker: the sink restarts from silence).
+    fn on_segment_start(&mut self, now: Instant) {
+        self.segment_started_at = Some(now);
+        self.appended_secs = 0.0;
+    }
+
+    /// Wall time at which the next appended chunk starts playing.
+    fn next_chunk_start(&self) -> Option<Instant> {
+        self.segment_started_at
+            .map(|anchor| anchor + Duration::from_secs_f64(self.appended_secs))
+    }
+
+    /// Records that a PCM chunk of `pcm_len` samples at `sample_rate` was
+    /// appended to the sink.
+    fn append(&mut self, pcm_len: usize, sample_rate: u32) {
+        self.appended_secs += pcm_len as f64 / f64::from(sample_rate);
+    }
+
+    /// Ends the current segment (final marker); the next chunk starts fresh.
+    fn reset(&mut self) {
+        self.segment_started_at = None;
+        self.appended_secs = 0.0;
+    }
+}
+
+/// Schedules an expression cue on the emotion pipeline, timed to the audio.
+///
+/// `fire_wall` is the wall time at which the sentence's audio starts playing;
+/// the cue is scheduled there (or immediately when the sink has already
+/// passed it). `clock_origin` is the app-wide monotonic origin the emotion
+/// pipeline ticks against (`AppState::clock_origin`), so the cue pops on the
+/// frame at or after the sentence's audio start — at most one frame late,
+/// never early.
+fn fire_cues(
+    cues: &[ene_mind::PerformanceCue],
+    fire_wall: Option<Instant>,
+    clock_origin: Instant,
+    event_tx: &AppEventSender,
+) {
+    let delay = fire_wall.map_or(0.0, |wall| {
+        wall.saturating_duration_since(Instant::now()).as_secs_f64()
+    });
+    let target_time = clock_origin.elapsed().as_secs_f64() + delay;
+    for cue in cues {
+        if cue.kind != ene_mind::PerfKind::Expression {
+            continue;
+        }
+        drop(
+            event_tx.send(AppEvent::ExpressionCue {
+                name: cue.name.clone(),
+                weight: cue.weight.unwrap_or(ene_mind::DEFAULT_EXPRESSION_WEIGHT),
+                hold_secs: cue
+                    .hold_secs
+                    .unwrap_or(ene_mind::DEFAULT_EXPRESSION_HOLD_SECS),
+                target_time,
+            }),
+        );
+    }
+}
 
 /// Manually assembled audio sink: a rodio [`Mixer`] fed into a cpal output
 /// stream, with a [`Player`] for queueing sounds.
@@ -130,17 +219,31 @@ impl Drop for AudioPlaybackHandle {
 ///
 /// Returns the sender half (handed to the AI bridge pump so it can
 /// forward `AudioChunk` events) and the handle that keeps the thread
-/// alive.
+/// alive. `clock_origin` is the app-wide monotonic origin
+/// (`AppState::clock_origin`) that the emotion pipeline also ticks
+/// against, so cues scheduled here pop exactly when the matching audio
+/// starts.
 pub fn spawn_playback(
     viseme: VisemeState,
     tts_playing: Arc<AtomicBool>,
+    cue_events: AppEventSender,
+    clock_origin: Instant,
 ) -> (AudioChunkSender, AudioPlaybackHandle) {
     let (tx, rx) = crossbeam_channel::bounded::<AudioChunkPayload>(PLAYBACK_CHANNEL_CAPACITY);
     let shutdown = Arc::new(AtomicBool::new(false));
     let loop_shutdown = Arc::clone(&shutdown);
     let join = std::thread::Builder::new()
         .name("ene-audio-playback".to_string())
-        .spawn(move || playback_loop(rx, viseme, tts_playing, loop_shutdown))
+        .spawn(move || {
+            playback_loop(
+                rx,
+                viseme,
+                tts_playing,
+                loop_shutdown,
+                cue_events,
+                clock_origin,
+            );
+        })
         .ok();
     (tx, AudioPlaybackHandle { join, shutdown })
 }
@@ -157,6 +260,8 @@ fn playback_loop(
     viseme: VisemeState,
     tts_playing: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    cue_events: AppEventSender,
+    clock_origin: Instant,
 ) {
     let sink = match open_audio_sink() {
         Ok(sink) => Some(sink),
@@ -172,11 +277,12 @@ fn playback_loop(
 
     let Some(sink) = sink else {
         // No audio backend: drain and discard so the sender never blocks.
-        drain_until_shutdown(&rx, &viseme, &shutdown);
+        drain_until_shutdown(&rx, &viseme, &shutdown, &cue_events, clock_origin);
         return;
     };
 
     let mut state = PlaybackState::new();
+    let mut timeline = PlaybackTimeline::new();
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -199,13 +305,29 @@ fn playback_loop(
                 // utterance drain naturally before resetting.
                 if abort {
                     sink.player.stop();
+                    cancel_scheduled_cues(&cue_events);
                 } else if was_speaking {
                     sink.player.sleep_until_end();
                 }
                 tts_playing.store(false, Ordering::Relaxed);
                 viseme.reset();
+                timeline.reset();
             }
             PlaybackAction::Audio { first } => {
+                if first {
+                    // The sink restarted from silence (previous segment was
+                    // finalized): the new segment's timeline begins now.
+                    timeline.on_segment_start(Instant::now());
+                }
+                // The chunk's audio starts at the timeline position before
+                // its own span; cues riding this chunk mark a sentence start
+                // and must fire when that sentence's audio begins.
+                let fire_wall = timeline.next_chunk_start();
+                if !chunk.cues.is_empty() {
+                    fire_cues(&chunk.cues, fire_wall, clock_origin, &cue_events);
+                }
+                timeline.append(chunk.pcm.len(), chunk.sample_rate);
+
                 // Queue the PCM for time-aligned viseme analysis. The
                 // render loop consumes it paced by the playback clock rather
                 // than feeding the whole chunk at enqueue time.
@@ -235,8 +357,28 @@ fn playback_loop(
     viseme.reset();
 }
 
+/// Asks the emotion pipeline to drop its scheduled and active expression
+/// state (`CancelCommand("expr")` semantics). Sent when a barge-in abort
+/// discards the queued audio: cues already scheduled for that audio are
+/// stale and would otherwise pop during the next turn.
+fn cancel_scheduled_cues(cue_events: &AppEventSender) {
+    drop(cue_events.send(AppEvent::CancelCue {
+        scope: "expr".to_string(),
+    }));
+}
+
 /// Drain-and-discard loop used when no audio output device is available.
-fn drain_until_shutdown(rx: &AudioChunkReceiver, viseme: &VisemeState, shutdown: &Arc<AtomicBool>) {
+///
+/// Expression cues still fire (immediately — there is no audio timeline to
+/// sync to), so a headless run keeps some expression behavior instead of
+/// dropping markers silently.
+fn drain_until_shutdown(
+    rx: &AudioChunkReceiver,
+    viseme: &VisemeState,
+    shutdown: &Arc<AtomicBool>,
+    cue_events: &AppEventSender,
+    clock_origin: Instant,
+) {
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
@@ -245,6 +387,12 @@ fn drain_until_shutdown(rx: &AudioChunkReceiver, viseme: &VisemeState, shutdown:
             Ok(chunk) => {
                 if chunk.is_final {
                     viseme.reset();
+                    if chunk.abort {
+                        cancel_scheduled_cues(cue_events);
+                    }
+                }
+                if !chunk.cues.is_empty() {
+                    fire_cues(&chunk.cues, None, clock_origin, cue_events);
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -308,6 +456,7 @@ mod tests {
             sample_rate,
             is_final,
             abort: false,
+            cues: Vec::new(),
         }
     }
 
@@ -317,7 +466,158 @@ mod tests {
             sample_rate: 0,
             is_final: true,
             abort,
+            cues: Vec::new(),
         }
+    }
+
+    #[test]
+    fn timeline_no_segment_has_no_sentence_start() {
+        let timeline = PlaybackTimeline::new();
+        assert!(timeline.next_chunk_start().is_none());
+    }
+
+    #[test]
+    fn timeline_sentence_start_follows_appended_duration() {
+        let now = Instant::now();
+        let mut timeline = PlaybackTimeline::new();
+        timeline.on_segment_start(now);
+        // 24,000 samples at 24 kHz = 1 second of audio.
+        timeline.append(24_000, 24_000);
+        assert_eq!(
+            timeline.next_chunk_start(),
+            Some(now + Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn timeline_first_chunk_starts_immediately() {
+        let now = Instant::now();
+        let mut timeline = PlaybackTimeline::new();
+        timeline.on_segment_start(now);
+        assert_eq!(timeline.next_chunk_start(), Some(now));
+    }
+
+    #[test]
+    fn timeline_reset_clears_segment() {
+        let now = Instant::now();
+        let mut timeline = PlaybackTimeline::new();
+        timeline.on_segment_start(now);
+        timeline.append(24_000, 24_000);
+        timeline.reset();
+        assert!(timeline.next_chunk_start().is_none());
+        // A fresh segment restarts the timeline at zero.
+        timeline.on_segment_start(now + Duration::from_secs(5));
+        assert_eq!(
+            timeline.next_chunk_start(),
+            Some(now + Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn timeline_empty_chunk_advances_nothing() {
+        let now = Instant::now();
+        let mut timeline = PlaybackTimeline::new();
+        timeline.on_segment_start(now);
+        timeline.append(0, 24_000);
+        assert_eq!(timeline.next_chunk_start(), Some(now));
+    }
+
+    #[test]
+    fn timeline_appends_accumulate() {
+        let now = Instant::now();
+        let mut timeline = PlaybackTimeline::new();
+        timeline.on_segment_start(now);
+        timeline.append(12_000, 24_000);
+        timeline.append(12_000, 24_000);
+        assert_eq!(
+            timeline.next_chunk_start(),
+            Some(now + Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    #[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
+    fn fire_cues_schedules_expression_only_and_clamps_negative_delay() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let epoch = Instant::now();
+        let cues = vec![
+            ene_mind::PerformanceCue::expression("happy"),
+            ene_mind::PerformanceCue::motion("wave", None),
+        ];
+        // Past fire wall (sink ahead of the timeline): fires immediately.
+        fire_cues(&cues, Some(epoch), epoch, &tx);
+        let event = rx.try_recv().expect("expression cue must be sent");
+        assert!(
+            matches!(
+                &event,
+                AppEvent::ExpressionCue {
+                    name,
+                    weight,
+                    hold_secs,
+                    target_time
+                } if name == "happy" && *weight == 1.0_f32 && *hold_secs == 4.0_f64
+                    && *target_time >= 0.0 && *target_time < 1.0
+            ),
+            "expected an immediate happy cue, got {event:?}"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "motion cues must not be forwarded by the expression path"
+        );
+    }
+
+    #[test]
+    fn fire_cues_schedules_future_cue_at_wall_time() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let epoch = Instant::now();
+        let future = Instant::now() + Duration::from_secs(5);
+        fire_cues(
+            &[ene_mind::PerformanceCue::expression("sad")],
+            Some(future),
+            epoch,
+            &tx,
+        );
+        let event = rx.try_recv().expect("expression cue must be sent");
+        assert!(
+            matches!(
+                &event,
+                AppEvent::ExpressionCue { target_time, .. }
+                    if (4.5..=5.5).contains(target_time)
+            ),
+            "target_time should sit ~5s on the epoch, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn fire_cues_without_fire_wall_fires_immediately() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let epoch = Instant::now();
+        fire_cues(
+            &[ene_mind::PerformanceCue::expression("happy")],
+            None,
+            epoch,
+            &tx,
+        );
+        let event = rx.try_recv().expect("cue must be sent");
+        assert!(
+            matches!(
+                &event,
+                AppEvent::ExpressionCue { target_time, .. }
+                    if *target_time >= 0.0 && *target_time < 1.0
+            ),
+            "expected an immediate cue, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_scheduled_cues_sends_expr_cancel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        cancel_scheduled_cues(&tx);
+        let event = rx.try_recv().expect("cancel cue must be sent");
+        assert!(
+            matches!(&event, AppEvent::CancelCue { scope } if scope == "expr"),
+            "expected an expr cancel cue, got {event:?}"
+        );
     }
 
     #[test]
@@ -424,11 +724,12 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded::<AudioChunkPayload>(4);
         let viseme = VisemeState::default();
         let shutdown = Arc::new(AtomicBool::new(false));
+        let (cue_tx, _cue_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
 
         let drain_shutdown = Arc::clone(&shutdown);
         let drain_viseme = viseme.clone();
         let handle = std::thread::spawn(move || {
-            drain_until_shutdown(&rx, &drain_viseme, &drain_shutdown);
+            drain_until_shutdown(&rx, &drain_viseme, &drain_shutdown, &cue_tx, Instant::now());
         });
 
         // Send a chunk, then raise the shutdown flag.

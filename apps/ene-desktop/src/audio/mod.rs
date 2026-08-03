@@ -54,6 +54,10 @@ pub struct AudioChunkPayload {
     /// of draining queued audio. Only meaningful on a final marker: `true`
     /// for a cancelled turn, `false` for normal completion.
     pub abort: bool,
+    /// Expression cues attached to the first PCM chunk of a TTS sentence.
+    /// The playback path switches the expression when that sentence's audio
+    /// starts playing; empty on every other chunk.
+    pub cues: Vec<ene_mind::PerformanceCue>,
 }
 
 /// Sender half used by the AI bridge pump to forward `AudioChunk`
