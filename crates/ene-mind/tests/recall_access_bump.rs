@@ -159,6 +159,7 @@ async fn compose(
         post_history_block: None,
         compression_pending: false,
         packing_budget_override: Some(packing_budget),
+        proactive_topic: None,
     };
     engine
         .compose_prompt_packet(ctx, pre, prefetch)

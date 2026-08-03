@@ -332,6 +332,10 @@ pub struct StreamContext {
     pub runtime_directive: Option<String>,
     /// Optional decision-time screen frame (JPEG data URI) for vision-capable generation.
     pub proactive_screen_image: Option<String>,
+    /// Raw topic hint from the proactive decision, used for generation-phase
+    /// memory recall. Distinct from `runtime_directive` (the rendered prompt
+    /// text); this is the model's own topic phrase.
+    pub proactive_topic: Option<String>,
     /// Wall-clock cap for proactive generation (outer timeout wins over provider defaults).
     pub generation_timeout: Option<std::time::Duration>,
     /// Sender for classifier `JoinHandles` spawned after Terminal emission.

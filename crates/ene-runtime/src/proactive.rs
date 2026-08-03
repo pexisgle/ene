@@ -168,6 +168,7 @@ pub(crate) async fn run_decision_task(
     epoch: u64,
     affect: Option<StoreAffectState>,
     commitments: Vec<ActiveCommitmentPrompt>,
+    user_instructions: Vec<String>,
     prompt_language: String,
 ) -> ProactiveDecisionResult {
     let observation = sanitize_observation(&config, observation);
@@ -177,6 +178,7 @@ pub(crate) async fn run_decision_task(
         &observation,
         affect.as_ref(),
         &commitments,
+        &user_instructions,
         suppression,
     );
     let outcome = decide_proactive_speech(&config, &context, provider, &prompt_language).await;
@@ -256,5 +258,95 @@ mod tests {
         let uri = rgb_to_jpeg_data_uri(2, 2, &rgb).expect("encode");
         assert!(uri.starts_with("data:image/jpeg;base64,"));
         assert!(uri.len() > "data:image/jpeg;base64,".len());
+    }
+
+    struct CaptureProvider {
+        captured: std::sync::Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CaptureProvider {
+        fn name(&self) -> &'static str {
+            "capture"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn tokio_stream::Stream<
+                            Item = Result<ene_ai::LlmResponseChunk, ene_ai::LlmProviderError>,
+                        > + Send,
+                >,
+            >,
+            ene_ai::LlmProviderError,
+        > {
+            Err(ene_ai::LlmProviderError::Provider("stream unused".into()))
+        }
+
+        async fn chat_completion(
+            &self,
+            messages: &[ene_ai::LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<ene_ai::LlmCompletion, ene_ai::LlmProviderError> {
+            for message in messages {
+                if let ene_ai::LlmMessage::User { parts } = message {
+                    for part in parts {
+                        if let ene_ai::UserMessagePart::Text { text } = part {
+                            *self.captured.lock().expect("lock") = Some(text.clone());
+                        }
+                    }
+                }
+            }
+            Ok(ene_ai::LlmCompletion::text_only(
+                r#"{"should_speak":false,"confidence":0.9,"reason":"quiet","topic_hint":"","urgency":"low"}"#
+                    .into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn decision_context_carries_user_instructions() {
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            ..ProactiveConfig::default()
+        };
+        let provider = Arc::new(CaptureProvider {
+            captured: std::sync::Mutex::new(None),
+        });
+        let result = run_decision_task(
+            config,
+            vec![ene_mind::HistoryEntry {
+                role: ene_ai::Role::User,
+                content: "hi".into(),
+            }],
+            ProactiveObservation::default(),
+            ProactiveSuppressionState {
+                seconds_since_user_input: 300,
+                seconds_since_proactive: 1000,
+                proactive_turns_this_session: 0,
+                user_turn_busy: false,
+            },
+            Some(provider.clone() as Arc<dyn LlmProvider>),
+            0,
+            None,
+            Vec::new(),
+            vec!["don't talk while I work".to_string()],
+            "en".to_string(),
+        )
+        .await;
+        assert!(!result.should_generate);
+        let captured = provider.captured.lock().expect("lock").clone();
+        let text = captured.expect("decision provider must have been invoked");
+        assert!(
+            text.contains("\"user_instructions\":[\"don't talk while I work\"]"),
+            "user instructions must reach the decision context JSON"
+        );
     }
 }

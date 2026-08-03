@@ -58,7 +58,10 @@ pub fn evaluate_deterministic_gates(
     let has_conversation = config.sources.conversation && !context.history.is_empty();
     let has_activity = config.sources.activity && context.activity.is_some();
     let has_screen = config.sources.screen_summary && context.screen_summary.is_some();
-    if !(has_conversation || has_activity || has_screen) {
+    // User standing rules are decision input too: a memory-only configuration
+    // still has something to decide on (and to be suppressed by).
+    let has_instructions = config.sources.memory && !context.user_instructions.is_empty();
+    if !(has_conversation || has_activity || has_screen || has_instructions) {
         return Err(GateRejectReason::NoSources);
     }
 
@@ -79,6 +82,7 @@ pub fn evaluate_deterministic_gates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProactiveSourcesConfig;
     use crate::lifecycle::HistoryEntry;
     use crate::proactive::{ActivitySnapshot, ProactiveSuppressionState};
     use ene_ai::Role;
@@ -95,6 +99,7 @@ mod tests {
             affect_summary: None,
             fatigue: None,
             commitments: vec![],
+            user_instructions: vec![],
             suppression,
         }
     }
@@ -198,5 +203,41 @@ mod tests {
         };
         rested.fatigue = Some(0.95);
         assert_eq!(evaluate_deterministic_gates(&relaxed, &rested), Ok(()));
+    }
+
+    #[test]
+    fn memory_notes_alone_satisfy_the_source_gate() {
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            sources: ProactiveSourcesConfig {
+                conversation: false,
+                activity: false,
+                screen_summary: false,
+                ..ProactiveSourcesConfig::default()
+            },
+            ..ProactiveConfig::default()
+        };
+        let mut ctx = ctx_with(ProactiveSuppressionState {
+            seconds_since_user_input: 60,
+            seconds_since_proactive: 1000,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        });
+        ctx.history.clear();
+        ctx.activity = None;
+
+        // Without stored instructions the memory source provides no context.
+        ctx.user_instructions.clear();
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Err(GateRejectReason::NoSources)
+        );
+
+        // A stored standing rule is decision input on its own.
+        ctx.user_instructions = vec!["don't talk while I work".into()];
+        assert_eq!(evaluate_deterministic_gates(&config, &ctx), Ok(()));
     }
 }

@@ -1100,16 +1100,32 @@ impl TurnActor {
         let card_name = self.session.card_name().to_string();
         let user_name = self.config.user_name.clone();
         let mem_store = self.session.memory.memory_store.clone();
-        let (affect, commitments) = if let Some(store) = mem_store.as_ref() {
+        let (affect, commitments, user_instructions) = if let Some(store) = mem_store.as_ref() {
             let affect = store.get_affect_state(&card_name).await.ok();
             let raw = store
                 .list_active_commitments(&card_name, Some(user_name.as_str()), 10)
                 .await
                 .unwrap_or_default();
             let commitments = CommitmentLedger::active_prompt_candidates(&raw);
-            (affect, commitments)
+            // Deterministic suppression-condition injection: loaded without
+            // recall scoring so a "don't talk" instruction can never lose a
+            // score competition. Errors degrade to no notes (fail-closed
+            // silence is the decision model's job, not the loader's).
+            let user_instructions = if mind.proactive.sources.memory {
+                ene_mind::load_proactive_memory_notes(
+                    store.as_ref(),
+                    &card_name,
+                    &user_name,
+                    mind.proactive.max_memory_notes,
+                )
+                .await
+                .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            (affect, commitments, user_instructions)
         } else {
-            (None, Vec::new())
+            (None, Vec::new(), Vec::new())
         };
         let (tx, rx) = oneshot::channel();
         self.proactive_decision_rx = Some(rx);
@@ -1125,6 +1141,7 @@ impl TurnActor {
                 epoch,
                 affect,
                 commitments,
+                user_instructions,
                 prompt_language,
             )
             .await;
@@ -1222,6 +1239,7 @@ impl TurnActor {
             mind.proactive.allow_tools,
             Some(hint),
             screen_image,
+            Some(result.topic_hint),
             Some(generation_timeout),
         )
         .await;
@@ -1276,6 +1294,7 @@ impl TurnActor {
                     crate::types::TurnOrigin::User,
                     true,
                     true,
+                    None,
                     None,
                     None,
                     None,
@@ -1810,6 +1829,7 @@ impl TurnActor {
         allow_tools: bool,
         runtime_directive: Option<String>,
         proactive_screen_image: Option<String>,
+        proactive_topic: Option<String>,
         generation_timeout: Option<std::time::Duration>,
     ) {
         // Create the provider before mutating history so a failed open leaves
@@ -1928,6 +1948,7 @@ impl TurnActor {
                         allow_tools,
                         runtime_directive,
                         proactive_screen_image,
+                        proactive_topic,
                         generation_timeout,
                         classifier_tx,
                         memory_writer_tx,

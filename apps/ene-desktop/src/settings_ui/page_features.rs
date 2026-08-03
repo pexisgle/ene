@@ -199,6 +199,22 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             crate::i18n::loader(),
             "proactive-source-screen-hint"
         ));
+
+        let mut memory = mind.proactive.sources.memory;
+        if ui
+            .checkbox(
+                &mut memory,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-memory"),
+            )
+            .changed()
+        {
+            mind.proactive.sources.memory = memory;
+            persist_mind(settings, ai, &mind);
+        }
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "proactive-source-memory-hint"
+        ));
     });
 }
 

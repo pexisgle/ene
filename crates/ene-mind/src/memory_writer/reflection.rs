@@ -203,7 +203,14 @@ pub async fn load_reflection_memories(
     character_id: &str,
 ) -> Vec<ene_core::MemoryItem> {
     match store
-        .get_typed_memories_by_character(character_id, Some(MemoryKind::Reflection), 50, 0)
+        .get_typed_memories_by_character(
+            character_id,
+            Some(MemoryKind::Reflection),
+            None,
+            None,
+            50,
+            0,
+        )
         .await
     {
         Ok(items) => items

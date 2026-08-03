@@ -895,6 +895,14 @@ pub struct ProactiveSourcesConfig {
     pub activity: bool,
     /// Include a short-lived screen text summary (never raw image bytes).
     pub screen_summary: bool,
+    /// Include stored user memory: standing preferences / profile notes for
+    /// the decision and topic-hint recall for generation.
+    ///
+    /// Disable to keep proactive speech free of recall (cost / latency
+    /// sensitive setups). When disabled, "don't talk to me" style conditions
+    /// stored as `Preference` / `UserProfile` memories never reach the
+    /// decision, so the decision model cannot honor them.
+    pub memory: bool,
     /// Window-title capture level for the activity source.
     ///
     /// Only consulted when [`Self::activity`] is enabled. Defaults to
@@ -909,6 +917,7 @@ impl Default for ProactiveSourcesConfig {
             conversation: true,
             activity: true,
             screen_summary: false,
+            memory: true,
             window_title_level: WindowTitleLevel::default(),
         }
     }
@@ -918,7 +927,7 @@ impl ProactiveSourcesConfig {
     /// Returns true when at least one source is enabled.
     #[must_use]
     pub const fn any_enabled(&self) -> bool {
-        self.conversation || self.activity || self.screen_summary
+        self.conversation || self.activity || self.screen_summary || self.memory
     }
 }
 
@@ -951,7 +960,7 @@ impl Default for ProactiveDecisionConfig {
 /// release once the proactive system is fully validated. Affected fields include:
 /// `max_turns_per_session`, `decision_timeout_seconds`, `generation_timeout_seconds`,
 /// `decision`, `allow_tools`, `max_conversation_chars`, `max_activity_chars`,
-/// `max_screen_summary_chars`.
+/// `max_screen_summary_chars`, `max_memory_notes`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -1023,6 +1032,14 @@ pub struct ProactiveConfig {
     )]
     #[schemars(skip)]
     pub max_screen_summary_chars: usize,
+    /// Maximum user memory one-liners injected into the decision context.
+    #[serde(
+        skip_deserializing,
+        default = "default_max_memory_notes",
+        skip_serializing
+    )]
+    #[schemars(skip)]
+    pub max_memory_notes: usize,
     /// Suppress proactive decisions while affect fatigue is at or above this
     /// threshold (0.0..=1.0). `1.0` disables the gate. The default matches the
     /// `"tired"` boundary in `compute_mood_label`, so a tired character never
@@ -1047,6 +1064,7 @@ impl Default for ProactiveConfig {
             max_conversation_chars: 4_000,
             max_activity_chars: 500,
             max_screen_summary_chars: 800,
+            max_memory_notes: 12,
             fatigue_suppression_threshold: 0.7,
         }
     }
@@ -1192,6 +1210,10 @@ const fn default_max_activity_chars() -> usize {
 
 const fn default_max_screen_summary_chars() -> usize {
     800
+}
+
+const fn default_max_memory_notes() -> usize {
+    12
 }
 
 fn deserialize_positive_usize<'de, D>(deserializer: D) -> Result<usize, D::Error>

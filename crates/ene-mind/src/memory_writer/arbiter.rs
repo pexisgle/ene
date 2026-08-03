@@ -317,7 +317,14 @@ impl MemoryArbiter {
         let mut existing: Vec<MemoryItem> = Vec::new();
         for kind in &candidate_kinds {
             let items = store
-                .get_typed_memories_by_character(ctx.character_id, Some(*kind), 10_000, 0)
+                .get_typed_memories_by_character(
+                    ctx.character_id,
+                    Some(*kind),
+                    None,
+                    None,
+                    10_000,
+                    0,
+                )
                 .await
                 .map_err(CognitionError::MemoryPort)?;
             existing.extend(items);
@@ -1775,7 +1782,14 @@ mod tests {
         }
 
         let active = store
-            .get_typed_memories_by_character("ene", Some(MemoryKind::Reflection), 100, 0)
+            .get_typed_memories_by_character(
+                "ene",
+                Some(MemoryKind::Reflection),
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap()
             .into_iter()

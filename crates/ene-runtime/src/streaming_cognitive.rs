@@ -150,6 +150,7 @@ fn build_turn_context<'a>(
         post_history_block,
         compression_pending,
         packing_budget_override: None,
+        proactive_topic: None,
     }
 }
 
@@ -291,6 +292,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         allow_tools,
         runtime_directive,
         proactive_screen_image,
+        proactive_topic,
         generation_timeout,
         classifier_tx,
         memory_writer_tx,
@@ -527,7 +529,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     tracing::info!(%turn, "Retrieving memory recall context and selecting relevant tools...");
     let (pre_turn_result, tools, style_examples, scene_summary) = if is_proactive {
         let span_pre_b = tracing::info_span!("pre_turn.phase_b");
-        let turn_ctx = build_turn_context(
+        let mut turn_ctx = build_turn_context(
             &mind,
             &card,
             &card_name,
@@ -543,6 +545,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             post_history_phi.as_deref(),
             compression_pending,
         );
+        turn_ctx.proactive_topic = proactive_topic.as_deref();
         let recall_span = tracing::info_span!(parent: &span_pre_b, "recall");
         let style_span = tracing::info_span!(parent: &span_pre_b, "style_examples");
         let scene_span = tracing::info_span!(parent: &span_pre_b, "scene_summary");

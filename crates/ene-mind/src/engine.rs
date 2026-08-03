@@ -22,7 +22,10 @@ use crate::lifecycle::{
     ComposePrefetch, ComposedPrompt, PostTurnInput, PreTurnOutput, TurnContext,
 };
 use crate::memory_writer::MemoryWriter;
-use crate::recall::{ExecuteRecallInput, execute_hybrid_recall};
+use crate::recall::{
+    ExecuteRecallInput, RecallPlan, RecallPlanner, RecallPlannerInput, RecallPlannerOptions,
+    RecallResultMapper, execute_hybrid_recall,
+};
 
 /// Central cognitive engine facade.
 #[expect(
@@ -298,7 +301,7 @@ impl CognitionEngine {
     ) -> Result<PreTurnOutput, CognitionError> {
         use crate::recall::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
 
-        let recall_plan = RecallPlan {
+        let mut recall_plan = RecallPlan {
             current_topic: "proactive".to_string(),
             semantic_queries: Vec::new(),
             episodic_queries: Vec::new(),
@@ -348,13 +351,116 @@ impl CognitionEngine {
             };
         let commitments = CommitmentLedger::active_prompt_candidates(&commitment_rows);
 
+        // Generation-phase recall: the decision model already gated speaking,
+        // so this supplies topic knowledge ("what the user said before").
+        // Scored competition is fine here — only the decision-phase
+        // suppression conditions demand deterministic injection. Lexical-only
+        // (`embedding: None`) so the proactive path never blocks on an
+        // embedder.
+        let recalled = if ctx.config.proactive.sources.memory
+            && ctx
+                .proactive_topic
+                .is_some_and(|topic| !topic.trim().is_empty())
+        {
+            recall_plan = Self::build_proactive_topic_plan(
+                ctx.config,
+                ctx.proactive_topic.unwrap_or_default(),
+                ctx.character_id,
+                ctx.user_name,
+                &affect,
+                &commitments,
+            );
+            Self::run_proactive_topic_recall(ctx.config, store, &recall_plan).await
+        } else {
+            Vec::new()
+        };
+
         Ok(PreTurnOutput {
             recall_plan,
             affect,
-            recalled: Vec::new(),
+            recalled,
             commitments,
             classifier_expression_hint: None,
         })
+    }
+
+    /// Build a recall plan for a proactive generation turn from its topic hint.
+    ///
+    /// The hint is a model-generated phrase ("Ask how the presentation went"),
+    /// so it is fed through the same planner as an ordinary turn would be.
+    /// Planning only fails when the hint normalizes to nothing, which the
+    /// caller already excluded — the fallback keeps recall empty anyway.
+    fn build_proactive_topic_plan(
+        config: &MindConfig,
+        topic: &str,
+        character_id: &str,
+        user_id: &str,
+        affect: &ene_core::AffectState,
+        commitments: &[ene_core::ActiveCommitmentPrompt],
+    ) -> RecallPlan {
+        let input = RecallPlannerInput {
+            user_input: topic,
+            recent_turns: &[],
+            scene_summary: None,
+            affect: Some(affect),
+            commitments,
+            language: config.resolved_classifier_language(),
+            character_id,
+            user_id: Some(user_id),
+        };
+        let options = RecallPlannerOptions::from_config(&config.memory);
+        RecallPlanner::plan(&input, &options).unwrap_or_else(|error| {
+            tracing::warn!(
+                component = "CognitionEngine",
+                error = %error,
+                "Proactive topic recall planning failed; recalling nothing"
+            );
+            RecallPlan {
+                current_topic: "proactive".to_string(),
+                semantic_queries: Vec::new(),
+                episodic_queries: Vec::new(),
+                required_kinds: Vec::new(),
+                scope: crate::recall::RecallScopeFilter {
+                    character_id: character_id.to_string(),
+                    user_id: Some(user_id.to_string()),
+                },
+                budget: crate::recall::RecallBudgetHints { result_limit: 0 },
+                search: crate::recall::RecallSearchHints {
+                    primary_query_text: String::new(),
+                    similarity_threshold: 0.0,
+                    min_score: 0.0,
+                    decay_half_life_days: 30.0,
+                    query_affect: None,
+                },
+            }
+        })
+    }
+
+    /// Execute lexical-only topic recall for a proactive generation turn.
+    ///
+    /// Uses the store's hybrid path with `embedding: None`, which scores on
+    /// lexical match + recency without needing an embedding provider; failures
+    /// degrade to an empty recall rather than blocking the turn.
+    async fn run_proactive_topic_recall(
+        config: &MindConfig,
+        store: &dyn MemoryPort,
+        plan: &RecallPlan,
+    ) -> Vec<crate::recall::RecalledMemory> {
+        let query = RecallPlanner::to_query(plan, None, "", Utc::now(), &config.memory);
+        match store.search(&query).await {
+            Ok(gathered) => {
+                let scored = ene_rag::score_and_rank(&query, gathered);
+                RecallResultMapper::map(scored)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    component = "CognitionEngine",
+                    error = %error,
+                    "Proactive topic recall search failed; recalling nothing"
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// Persist affect state after pre-turn update (survives stream cancel/failure).
@@ -1055,6 +1161,7 @@ mod turn_id_tests {
             post_history_block: None,
             compression_pending: false,
             packing_budget_override: None,
+            proactive_topic: None,
         };
         let composed = engine
             .compose_prompt_packet(ctx, pre, prefetch)

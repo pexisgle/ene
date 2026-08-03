@@ -65,11 +65,20 @@ pub trait MemoryPort: Send + Sync {
     /// Insert a new typed memory item and return its assigned ID.
     async fn insert_typed_memory(&self, item: &NewMemoryItem) -> Result<i64, MemoryPortError>;
 
-    /// List typed memories for a character, optionally filtered by kind.
+    /// List typed memories for a character, optionally filtered by kind, user,
+    /// and status.
+    ///
+    /// `user_id` keeps rows owned by that user plus character-level rows that
+    /// carry no user id; `status` restricts to a single lifecycle state. Both
+    /// filters are applied before the newest-first window, so rows that a
+    /// caller filters out post-query can never displace matching rows from the
+    /// `limit`-sized window.
     async fn get_typed_memories_by_character(
         &self,
         character_id: &str,
         kind: Option<MemoryKind>,
+        user_id: Option<&str>,
+        status: Option<MemoryStatus>,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<MemoryItem>, MemoryPortError>;

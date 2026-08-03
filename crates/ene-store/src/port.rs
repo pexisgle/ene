@@ -45,10 +45,21 @@ impl MemoryPort for MemoryStore {
         &self,
         character_id: &str,
         kind: Option<MemoryKind>,
+        user_id: Option<&str>,
+        status: Option<MemoryStatus>,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<MemoryItem>, MemoryPortError> {
-        Ok(Self::get_typed_memories_by_character(self, character_id, kind, limit, offset).await?)
+        Ok(Self::get_typed_memories_by_character(
+            self,
+            character_id,
+            kind,
+            user_id,
+            status,
+            limit,
+            offset,
+        )
+        .await?)
     }
 
     async fn list_typed_memories_by_source_prefix(
