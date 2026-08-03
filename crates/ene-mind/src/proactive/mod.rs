@@ -1245,9 +1245,8 @@ mod tests {
     fn silent_token_is_pinned_and_named_in_prompt_notes() {
         assert_eq!(SILENT_TOKEN, "<|silent|>");
         for lang in ["en", "ja"] {
-            let note = ene_config::PromptLibrary::load(lang)
-                .proactive()
-                .confirmation_note;
+            let library = ene_config::PromptLibrary::load(lang);
+            let note = &library.proactive().confirmation_note;
             assert!(
                 note.contains(SILENT_TOKEN),
                 "{lang} confirmation_note must name the refusal token"

@@ -237,7 +237,8 @@ pub(crate) fn proactive_generation_hint(
     prompt_language: &str,
     confirmation_enabled: bool,
 ) -> String {
-    let prompts = ene_config::PromptLibrary::load(prompt_language).proactive();
+    let library = ene_config::PromptLibrary::load(prompt_language);
+    let prompts = library.proactive();
     let hint = prompts.render_generation_hint(topic_hint, confirmation_enabled);
     if confirmation_enabled && prompts.confirmation_note.trim().is_empty() {
         tracing::warn!(

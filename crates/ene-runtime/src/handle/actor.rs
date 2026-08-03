@@ -1394,10 +1394,6 @@ impl TurnActor {
                 }
                 self.active_turn = None;
                 self.turn_gate.end();
-                if origin == crate::types::TurnOrigin::Proactive {
-                    // No stream will run, so no completion arm will consume it.
-                    self.proactive.last_decision = None;
-                }
                 drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Idle,
                 }));
@@ -1874,6 +1870,10 @@ impl TurnActor {
                 }
                 self.active_turn = None;
                 self.turn_gate.end();
+                if origin == crate::types::TurnOrigin::Proactive {
+                    // No stream will run, so no completion arm will consume it.
+                    self.proactive.last_decision = None;
+                }
                 drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Idle,
                 }));
