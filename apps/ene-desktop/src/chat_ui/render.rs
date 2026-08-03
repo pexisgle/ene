@@ -76,7 +76,7 @@ impl ChatUi {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if messages.is_empty() {
-                    render_greeting_picker(ui, ai, world, chat_entity);
+                    render_greeting_picker(ui, ai, world, chat_entity, processing);
                 } else {
                     for message in &messages {
                         render_message_bubble(ui, message);
@@ -244,6 +244,7 @@ fn render_greeting_picker(
     ai: &Arc<AiBridge>,
     world: &mut World,
     chat_entity: Entity,
+    processing: bool,
 ) {
     let Some(card) = ai.character_card() else {
         ui.weak(i18n_embed_fl::fl!(
@@ -252,7 +253,7 @@ fn render_greeting_picker(
         ));
         return;
     };
-    let greetings = greeting_options(&card);
+    let greetings = card.data.greeting_options();
     if greetings.is_empty() {
         ui.weak(i18n_embed_fl::fl!(
             crate::i18n::loader(),
@@ -273,7 +274,10 @@ fn render_greeting_picker(
         } else {
             label.to_string()
         };
-        if ui.button(format!("[{index}] {label}")).clicked() {
+        if ui
+            .add_enabled(!processing, egui::Button::new(format!("[{index}] {label}")))
+            .clicked()
+        {
             selected = Some(*index);
         }
     }
@@ -298,22 +302,6 @@ fn render_greeting_picker(
             }
         }
     }
-}
-
-fn greeting_options(card: &ene_config::CharacterCardV3) -> Vec<(u32, String)> {
-    let mut options = Vec::new();
-    if !card.data.first_mes.trim().is_empty() {
-        options.push((0, card.data.first_mes.trim().to_string()));
-    }
-    options.extend(
-        card.data
-            .alternate_greetings
-            .iter()
-            .enumerate()
-            .filter(|(_, text)| !text.trim().is_empty())
-            .map(|(i, text)| (i as u32 + 1, text.trim().to_string())),
-    );
-    options
 }
 
 fn first_line(text: &str) -> &str {
