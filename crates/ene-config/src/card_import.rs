@@ -290,13 +290,16 @@ fn charx_card_json(bytes: &[u8]) -> Result<serde_json::Value, EneConfigError> {
         // `by_index` refuses encrypted entries up front, so the encryption
         // probe goes through `by_index_raw` and the read below re-opens
         // with `by_index`.
-        let file = archive
-            .by_index_raw(index)
-            .map_err(EneConfigError::CharxError)?;
-        if file.name() != "card.json" {
-            continue;
-        }
-        if file.encrypted() {
+        let is_encrypted_card = {
+            let file = archive
+                .by_index_raw(index)
+                .map_err(EneConfigError::CharxError)?;
+            if file.name() != "card.json" {
+                continue;
+            }
+            file.encrypted()
+        };
+        if is_encrypted_card {
             return Err(EneConfigError::CharxEncrypted("card.json".to_string()));
         }
         let mut file = archive
