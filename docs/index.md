@@ -50,7 +50,7 @@ Ene Workspace
 │   └── ene-plugin-macros  (Proc-macros for plugins)
 └── Out-of-Process Plugins
     ├── plugins/provider/* (Provider plugins: anthropic)
-    └── plugins/tool/*     (Tool plugins: app, browser, calc, calendar, fs, geo, utility, web)
+    └── plugins/tool/*     (Tool plugins: app, browser, calc, calendar, fs, geo, git, random, utility, web)
 ```
 
 ---

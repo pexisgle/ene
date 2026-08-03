@@ -10,6 +10,7 @@
 - [MCP Server Setup Guide](guide/tools/mcp-servers.md)
 - [Random Generation Tool Guide](guide/tools/random.md)
 - [Geo Tool Guide](guide/tools/geo.md)
+- [Git Tool Guide](guide/tools/git.md)
 
 # Concepts
 
