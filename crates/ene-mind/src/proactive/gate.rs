@@ -17,6 +17,8 @@ pub enum GateRejectReason {
     SessionLimit,
     /// Every configured input source is disabled or empty.
     NoSources,
+    /// Character fatigue is at or above `fatigue_suppression_threshold`.
+    HighFatigue,
 }
 
 impl fmt::Display for GateRejectReason {
@@ -27,6 +29,7 @@ impl fmt::Display for GateRejectReason {
             Self::Cooldown => write!(f, "proactive cooldown"),
             Self::SessionLimit => write!(f, "session proactive limit"),
             Self::NoSources => write!(f, "no proactive sources available"),
+            Self::HighFatigue => write!(f, "high fatigue"),
         }
     }
 }
@@ -59,6 +62,17 @@ pub fn evaluate_deterministic_gates(
         return Err(GateRejectReason::NoSources);
     }
 
+    // Unknown fatigue (no affect state) never suppresses: only a measured
+    // value at or above the threshold does. The gate compares the unrounded
+    // source value, not the prompt's `{:.2}` wire value, so it stays aligned
+    // with `compute_mood_label`'s raw boundary instead of tripping on
+    // round-trip rounding around the threshold.
+    if let Some(fatigue) = context.fatigue
+        && fatigue >= config.fatigue_suppression_threshold
+    {
+        return Err(GateRejectReason::HighFatigue);
+    }
+
     Ok(())
 }
 
@@ -79,6 +93,7 @@ mod tests {
             activity: Some(ActivitySnapshot::default()),
             screen_summary: None,
             affect_summary: None,
+            fatigue: None,
             commitments: vec![],
             suppression,
         }
@@ -114,5 +129,74 @@ mod tests {
             evaluate_deterministic_gates(&config, &idle),
             Err(GateRejectReason::MinIdle)
         );
+    }
+
+    #[test]
+    fn rejects_high_fatigue_at_or_above_threshold() {
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            ..ProactiveConfig::default()
+        };
+        let mut tired = ctx_with(ProactiveSuppressionState {
+            seconds_since_user_input: 60,
+            seconds_since_proactive: 120,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        });
+        tired.fatigue = Some(0.85);
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &tired),
+            Err(GateRejectReason::HighFatigue)
+        );
+
+        // Exactly at the default 0.7 "tired" boundary: still suppressed.
+        tired.fatigue = Some(0.7);
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &tired),
+            Err(GateRejectReason::HighFatigue)
+        );
+    }
+
+    #[test]
+    fn passes_when_fatigue_is_low_unknown_or_absent() {
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            ..ProactiveConfig::default()
+        };
+        let mut rested = ctx_with(ProactiveSuppressionState {
+            seconds_since_user_input: 60,
+            seconds_since_proactive: 120,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        });
+        rested.fatigue = Some(0.60);
+        assert_eq!(evaluate_deterministic_gates(&config, &rested), Ok(()));
+
+        // Just below the threshold (0.699) must pass on the unrounded value:
+        // the `{:.2}` wire form would round it up to 0.70 and suppress.
+        rested.fatigue = Some(0.699);
+        assert_eq!(evaluate_deterministic_gates(&config, &rested), Ok(()));
+
+        // No affect state at all: the gate must pass.
+        rested.fatigue = None;
+        assert_eq!(evaluate_deterministic_gates(&config, &rested), Ok(()));
+
+        // A threshold of 1.0 disables the gate even at extreme fatigue.
+        let relaxed = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            fatigue_suppression_threshold: 1.0,
+            ..ProactiveConfig::default()
+        };
+        rested.fatigue = Some(0.95);
+        assert_eq!(evaluate_deterministic_gates(&relaxed, &rested), Ok(()));
     }
 }
