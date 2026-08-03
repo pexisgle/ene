@@ -62,7 +62,7 @@ pub mod redact;
 pub mod tool_registry;
 
 /// Host-side registry of per-plugin capability declarations.
-pub use capability_registry::CapabilityRegistry;
+pub use capability_registry::{CapabilityRegistry, DisabledPlugin};
 /// Per-plugin circuit breaker.
 pub use circuit_breaker::{BreakerState, CircuitBreaker};
 /// Plugin system configuration.

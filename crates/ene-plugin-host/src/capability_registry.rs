@@ -94,22 +94,81 @@ impl CapabilityRegistry {
         .map(str::to_owned)
     }
 
+    /// Removes `plugin`'s declarations from the registry, if any.
+    pub fn remove(&self, plugin: &str) {
+        self.provides.write().remove(plugin);
+        self.requires.write().remove(plugin);
+    }
+
     /// The `requires` entries of `plugin` that no registered provider
     /// satisfies, in declaration order. Soft entries are included: callers
     /// decide whether an unmet soft requirement matters (startup does not;
     /// only hard ones gate the plugin).
     #[must_use]
     pub fn unmet_requires(&self, plugin: &str) -> Vec<RequiredCapability> {
-        let requires = self.requires.read();
-        let Some(entries) = requires.get(plugin) else {
-            return Vec::new();
-        };
+        let entries = self
+            .requires
+            .read()
+            .get(plugin)
+            .cloned()
+            .unwrap_or_default();
         entries
             .iter()
             .filter(|req| self.resolve(&req.name, &req.req).is_none())
             .cloned()
             .collect()
     }
+
+    /// Partitions `candidates` into committed and disabled plugins per the
+    /// startup gate, removing disabled declarations from the registry.
+    ///
+    /// A plugin commits only when its hard `requires` are satisfied by the
+    /// `provides` of plugins that also commit; the rest are disabled and
+    /// their declarations removed, so a disabled plugin can never satisfy
+    /// another plugin's `requires` or surface through
+    /// [`resolve`](Self::resolve). Because dropping a provider can newly
+    /// break the consumers that relied on it, the pass iterates until no
+    /// further plugin is disabled (a fixpoint). Soft requirements never
+    /// gate.
+    ///
+    /// Returns `(committed, disabled)`; only the committed declarations
+    /// remain in the registry.
+    #[must_use]
+    pub fn gate(&self, candidates: &[String]) -> (Vec<String>, Vec<DisabledPlugin>) {
+        let mut remaining = candidates.to_vec();
+        let mut disabled = Vec::new();
+        loop {
+            let mut progressed = false;
+            let mut survivors = Vec::with_capacity(remaining.len());
+            for name in remaining {
+                let unmet = self.unmet_requires(&name);
+                if unmet.iter().any(|r| !r.soft) {
+                    self.remove(&name);
+                    disabled.push(DisabledPlugin { name, unmet });
+                    progressed = true;
+                } else {
+                    survivors.push(name);
+                }
+            }
+            remaining = survivors;
+            if !progressed {
+                return (remaining, disabled);
+            }
+        }
+    }
+}
+
+/// A plugin the startup gate disabled for unmet hard capability requirements.
+///
+/// Carries the requirements that were unmet at the moment the plugin was
+/// disabled so the caller can report them; soft entries are included
+/// alongside the disabling hard ones but never cause a disablement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisabledPlugin {
+    /// Plugin name.
+    pub name: String,
+    /// Unmet requirements at disablement time, in declaration order.
+    pub unmet: Vec<RequiredCapability>,
 }
 
 /// Logs a warning for one rejected capability declaration entry.
@@ -330,5 +389,101 @@ mod tests {
         let unmet = registry.unmet_requires("mock");
         assert_eq!(unmet.len(), 1);
         assert_eq!(unmet[0].name.as_str(), "y");
+    }
+
+    #[test]
+    fn remove_drops_declarations_and_resolution() {
+        let registry = CapabilityRegistry::new();
+        registry.register_from_schema("mock", Some(&json_capabilities(&["a@1"], &["x@^1"])));
+        registry.remove("mock");
+        assert!(
+            registry
+                .providers(&CapabilityId::try_new("a").unwrap())
+                .is_empty()
+        );
+        assert!(registry.unmet_requires("mock").is_empty());
+    }
+
+    #[test]
+    fn gate_commits_plugins_whose_requires_are_satisfied() {
+        let registry = CapabilityRegistry::new();
+        registry.register_from_schema("provider", Some(&json_capabilities(&["g2p/ja@2.1.0"], &[])));
+        registry.register_from_schema(
+            "consumer",
+            Some(&json_capabilities(&[], &["g2p/ja@^2", "onnx-runner@^1?"])),
+        );
+
+        let (committed, disabled) =
+            registry.gate(&["consumer".to_string(), "provider".to_string()]);
+        // Both commit: the consumer's hard `g2p/ja` is satisfied and the
+        // soft `onnx-runner` never gates; candidates keep their order.
+        assert_eq!(
+            committed,
+            vec!["consumer".to_string(), "provider".to_string()]
+        );
+        assert!(disabled.is_empty());
+        // Committed provides survive for the resolution API.
+        let g2p = CapabilityId::try_new("g2p/ja").unwrap();
+        assert_eq!(
+            registry.resolve(&g2p, &"^2".parse().unwrap()),
+            Some("provider".to_string())
+        );
+    }
+
+    #[test]
+    fn gate_disables_plugins_whose_provider_is_itself_disabled() {
+        // H1 regression: P2 provides g2p/ja but fails its own hard
+        // requirement; P1's `g2p/ja@^2` must not resolve to the disabled P2.
+        let registry = CapabilityRegistry::new();
+        registry.register_from_schema("consumer", Some(&json_capabilities(&[], &["g2p/ja@^2"])));
+        registry.register_from_schema(
+            "provider",
+            Some(&json_capabilities(&["g2p/ja@2.1.0"], &["onnx-runner@^1"])),
+        );
+
+        let (committed, disabled) =
+            registry.gate(&["consumer".to_string(), "provider".to_string()]);
+
+        // The provider cannot satisfy its own hard requirement and the
+        // consumer cannot rely on a disabled provider, so both are disabled.
+        assert!(committed.is_empty());
+        assert_eq!(disabled.len(), 2);
+        assert!(disabled.iter().any(|d| d.name == "consumer"));
+        assert!(disabled.iter().any(|d| d.name == "provider"));
+        let g2p = CapabilityId::try_new("g2p/ja").unwrap();
+        assert_eq!(registry.resolve(&g2p, &"^2".parse().unwrap()), None);
+        assert!(registry.providers(&g2p).is_empty());
+    }
+
+    #[test]
+    fn gate_ignores_unmet_soft_requirements() {
+        let registry = CapabilityRegistry::new();
+        registry.register_from_schema(
+            "consumer",
+            Some(&json_capabilities(&[], &["tts/synthesize@^1?"])),
+        );
+
+        let (committed, disabled) = registry.gate(&["consumer".to_string()]);
+        assert_eq!(committed, vec!["consumer".to_string()]);
+        assert!(disabled.is_empty());
+    }
+
+    #[test]
+    fn gate_iterates_to_a_fixpoint_across_the_dependency_chain() {
+        // Each plugin's only provider fails its own hard requirement one
+        // link down the chain; disabling propagates backwards until every
+        // plugin is disabled, so no stale provides survives.
+        let registry = CapabilityRegistry::new();
+        registry.register_from_schema("a", Some(&json_capabilities(&[], &["x@^1"])));
+        registry.register_from_schema("b", Some(&json_capabilities(&["x@1"], &["y@^1"])));
+        registry.register_from_schema("c", Some(&json_capabilities(&["y@1"], &["z@^1"])));
+
+        let (committed, disabled) =
+            registry.gate(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert!(committed.is_empty());
+        assert_eq!(disabled.len(), 3);
+        let x = CapabilityId::try_new("x").unwrap();
+        assert_eq!(registry.resolve(&x, &"^1".parse().unwrap()), None);
+        assert!(registry.providers(&x).is_empty());
     }
 }

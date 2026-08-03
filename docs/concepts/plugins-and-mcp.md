@@ -437,10 +437,14 @@ metadata are banned** in both versions and ranges — pre-release spelling would
 collide with the `?` soft marker, and build metadata carries no precedence
 meaning.
 
-**Resolution.** The host resolves every plugin's `requires` against the
-combined `provides` of all plugins that started successfully, exactly once at
-startup. A plugin whose **hard** requirements are unmet is shut down before
-supervision begins, contributes no tools or LLM providers, and emits a
+**Resolution.** At startup the host resolves every plugin's `requires`
+against the `provides` of plugins that started successfully. Resolution
+iterates to a fixpoint: a plugin may only rely on providers that are
+themselves committed, so a plugin disabled for unmet hard requirements never
+satisfies another plugin's `requires` — its declarations are dropped from the
+host's registry and never surface through the resolution API. A plugin whose
+**hard** requirements are unmet is shut down before supervision begins,
+contributes no tools or LLM providers, and emits a
 `PluginHealthEvent::RequirementsUnmet` (status `requirements_unmet`) listing
 the missing capabilities. Soft requirements never block startup. When several
 plugins provide a matching capability, the host picks one deterministically

@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use sha2::Digest;
 
-use crate::capability_registry::CapabilityRegistry;
+use crate::capability_registry::{CapabilityRegistry, DisabledPlugin};
 use crate::circuit_breaker::CircuitBreaker;
 use crate::credential_registry::CredentialRegistry;
 use crate::error::PluginHostError;
@@ -865,44 +865,60 @@ impl PluginHostManager {
 
         // Pass 2 — capability gate, then commit. Register every declaration
         // first so each plugin's `requires` resolves against all providers
-        // (resolution happens exactly once, after all spawn attempts: a
-        // plugin that failed to spawn contributes no `provides`). A plugin
-        // whose hard requirements are unmet is shut down gracefully and kept
-        // out of supervision and contribution registration, with a health
-        // event for diagnostics; soft unmet requirements never gate.
+        // (a plugin that failed to spawn contributes no `provides`). The
+        // gate then iterates to a fixpoint: a plugin may only rely on
+        // providers that are themselves committed, so a plugin disabled for
+        // unmet hard requirements never satisfies another plugin's
+        // `requires` — its declarations are dropped from the registry, which
+        // is also what keeps the public resolution API from returning a
+        // disabled provider. Disabled plugins are shut down gracefully and
+        // kept out of supervision and contribution registration, with a
+        // health event for diagnostics; soft unmet requirements never gate.
         for pending_plugin in &pending {
             manager
                 .register_capability_schema(&pending_plugin.name, pending_plugin.schema.as_ref());
         }
+
+        let pending_names: Vec<String> = pending.iter().map(|p| p.name.clone()).collect();
+        let (_, disabled) = manager.capability_registry.gate(&pending_names);
+
+        for DisabledPlugin { name, unmet } in disabled {
+            // `gate` disables exactly the pending candidates, so the entry
+            // is always present; `remove` leaves `pending` holding only the
+            // committed plugins, in startup order, for the commit pass below.
+            let Some(index) = pending.iter().position(|p| p.name == name) else {
+                continue;
+            };
+            let pending_plugin = pending.remove(index);
+
+            // Graceful IPC shutdown first, then drop the child: dropping the
+            // last `Arc` runs `SupervisedPlugin::drop`, which kills, reaps,
+            // and cleans up the socket. `shutdown` sends a best-effort
+            // `Shutdown` request and returns immediately — the drop reaps the
+            // child regardless, so a wedged peer cannot outlive its own
+            // teardown frame.
+            pending_plugin.conn.shutdown().await;
+            drop(pending_plugin.plugin);
+            drop(health_tx.send(PluginHealthEvent::RequirementsUnmet {
+                plugin: name.clone(),
+                unmet: unmet.iter().map(ToString::to_string).collect(),
+            }));
+            let unmet_summary = unmet
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                component = "PluginHostManager",
+                plugin = %name,
+                unmet = %unmet_summary,
+                "Plugin disabled at startup: required capabilities are not \
+                 provided by any running plugin"
+            );
+        }
+
         for pending_plugin in pending {
             let name = pending_plugin.name.clone();
-            let unmet = manager.unmet_requires(&name);
-            if unmet.iter().any(|r| !r.soft) {
-                // Graceful IPC shutdown first, then drop the child: dropping
-                // the last `Arc` runs `SupervisedPlugin::drop`, which kills,
-                // reaps, and cleans up the socket. `shutdown` is awaited (and
-                // internally timeout-bounded) like every other plugin teardown
-                // so a wedged peer cannot outlive its own shutdown frame.
-                pending_plugin.conn.shutdown().await;
-                drop(pending_plugin.plugin);
-                drop(health_tx.send(PluginHealthEvent::RequirementsUnmet {
-                    plugin: name.clone(),
-                    unmet: unmet.iter().map(ToString::to_string).collect(),
-                }));
-                let unmet_summary = unmet
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                tracing::warn!(
-                    component = "PluginHostManager",
-                    plugin = %name,
-                    unmet = %unmet_summary,
-                    "Plugin disabled at startup: required capabilities are not \
-                     provided by any running plugin"
-                );
-                continue;
-            }
 
             // The schema fetched in pass 1 feeds the credential declaration
             // registration below, applied after the manager is assembled (see
