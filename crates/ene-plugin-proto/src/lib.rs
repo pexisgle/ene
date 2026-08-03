@@ -34,7 +34,7 @@
 //!   [`read_plugin_response`] / [`write_plugin_response`] — framing helpers
 //!   that reuse the same 4-byte little-endian length-prefixed pattern. The
 //!   handshake exchange always uses JSON; frames after the handshake use the
-//!   negotiated [`WireFormat`] (MessagePack for protocol v6, JSON below).
+//!   negotiated [`WireFormat`] (`MessagePack` for protocol v6, JSON below).
 //! - [`PluginError`] — the plugin crate's error type.
 //!
 //! ## Crate boundaries

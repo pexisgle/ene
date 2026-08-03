@@ -12,13 +12,13 @@ use serde::de::DeserializeOwned;
 pub enum WireFormat {
     /// UTF-8 JSON payload.
     Json,
-    /// MessagePack payload (`rmp-serde`, map-encoded structs).
+    /// `MessagePack` payload (`rmp-serde`, map-encoded structs).
     MsgPack,
 }
 
 impl WireFormat {
     /// Minimum plugin IPC protocol version whose non-handshake frames use
-    /// MessagePack. The handshake exchange stays JSON at every version
+    /// `MessagePack`. The handshake exchange stays JSON at every version
     /// because the host must parse the ack (which carries the negotiated
     /// version) before it can know the peer's format; versions below this
     /// constant keep the original JSON framing so N-1 peers stay
@@ -36,7 +36,7 @@ impl WireFormat {
 
     /// Encodes `value` into a payload in this format.
     ///
-    /// Structs are map-encoded (MessagePack `to_vec_named`), never
+    /// Structs are map-encoded (`MessagePack` `to_vec_named`), never
     /// array-encoded, so `#[serde(default)]` fields stay forward-compatible
     /// exactly as they are on the JSON wire.
     pub(crate) fn encode<T: Serialize>(self, value: &T) -> Result<Vec<u8>, WireError> {
@@ -64,10 +64,10 @@ pub(crate) enum WireError {
     /// JSON payload could not be deserialized.
     #[error("JSON deserialization failed: {0}")]
     JsonDecode(serde_json::Error),
-    /// MessagePack payload could not be serialized.
+    /// `MessagePack` payload could not be serialized.
     #[error("MessagePack serialization failed: {0}")]
     MsgPackEncode(rmp_serde::encode::Error),
-    /// MessagePack payload could not be deserialized.
+    /// `MessagePack` payload could not be deserialized.
     #[error("MessagePack deserialization failed: {0}")]
     MsgPackDecode(rmp_serde::decode::Error),
 }

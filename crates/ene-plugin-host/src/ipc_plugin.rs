@@ -1230,7 +1230,7 @@ impl IpcPluginConnection {
         let reader_task = tokio::spawn(reader_loop(
             reader,
             Arc::clone(&self.router),
-            WireFormat::for_version(version),
+            WireFormat::for_version(self.negotiated_version()),
         ));
         *writer_guard = Some(writer);
         *self.reader_task.lock().await = Some(reader_task);

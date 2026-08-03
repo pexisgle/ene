@@ -4,7 +4,7 @@
 //! handshake that carries [`PluginCapabilities`]. The framing is identical:
 //! a 4-byte little-endian length prefix followed by a payload. The handshake
 //! exchange always uses JSON; every frame after the handshake uses the
-//! negotiated [`WireFormat`] (MessagePack for protocol v6, JSON for older
+//! negotiated [`WireFormat`] (`MessagePack` for protocol v6, JSON for older
 //! versions — see [`WireFormat::for_version`]).
 
 use crate::capabilities::PluginCapabilities;
@@ -75,7 +75,7 @@ impl VersionRange {
 /// Plugin IPC protocol version.
 ///
 /// v6 changes the wire format: after the JSON handshake exchange, every
-/// frame is MessagePack when both sides negotiated v6 (see
+/// frame is `MessagePack` when both sides negotiated v6 (see
 /// [`WireFormat`]). Peers that negotiated v5 or lower keep the original
 /// JSON framing, so N-1 backward compatibility is preserved without any
 /// per-frame format tag.
