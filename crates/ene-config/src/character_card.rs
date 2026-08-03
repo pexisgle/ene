@@ -1416,9 +1416,11 @@ mod tests {
 
     #[test]
     fn greeting_options_number_first_mes_zero_and_alternates_after() {
-        let mut data = CharacterCardData::default();
-        data.first_mes = "Hello.".into();
-        data.alternate_greetings = vec!["One.".into(), String::new(), "Three.".into()];
+        let data = CharacterCardData {
+            first_mes: "Hello.".into(),
+            alternate_greetings: vec!["One.".into(), String::new(), "Three.".into()],
+            ..CharacterCardData::default()
+        };
 
         let options = data.greeting_options();
 
