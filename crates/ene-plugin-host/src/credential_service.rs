@@ -172,7 +172,7 @@ impl CredentialPassenger {
     /// flow's vault snapshot in sync with [`Self::replace_vault_and_broadcast`].
     #[must_use]
     pub fn oauth_flow(&self) -> Option<Arc<OAuthFlowManager>> {
-        self.oauth_flow.clone()
+        self.oauth_flow.lock().clone()
     }
 
     /// Pushes an invalidation notice to every connected client whose declared
@@ -291,7 +291,8 @@ impl CredentialPassenger {
                     return Self::scope_denied(plugin, &id);
                 }
                 self.vault.read().record_audit(plugin, &id, true);
-                let Some(flow) = &self.oauth_flow else {
+                let flow_guard = self.oauth_flow.lock();
+                let Some(flow) = flow_guard.as_ref() else {
                     return CredentialResponse::Error {
                         code: CredentialErrorCode::Unsupported,
                         message: "authorization flows are not available in this host".to_string(),
