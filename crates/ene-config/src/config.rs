@@ -878,7 +878,7 @@ pub fn generate_character_card_schema_json() -> Result<String, serde_json::Error
 
 /// Serializes `card` and atomically writes it to `path`.
 ///
-/// The counterpart of [`load_character_card`]. The write goes through an
+/// The counterpart of [`crate::load_character_card`]. The write goes through an
 /// atomic temp-file-and-rename operation so a crash mid-write can never leave
 /// a truncated card behind; host apps must not use a plain `fs::write` here.
 pub fn save_character_card(

@@ -2422,12 +2422,6 @@ fn stale_llm_factory_names<T>(
 /// Performs the heavy I/O (host shutdown, DB IPC spawn, host start, health
 /// bridge) off the actor loop. Updates the shared `plugin_host`,
 /// `health_bridge_handle`, and `host_service_handle` mutexes directly, then
-/// Provider factory snapshots taken from the plugin host before a restart.
-type ProviderFactorySnapshots = (
-    HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
-    HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
-);
-
 /// sends [`EneCommand::PluginHostReconfigured`] back through the mailbox so
 /// the actor can update its own `registry` and `plugin_tool_registries`
 /// fields.
