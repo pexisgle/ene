@@ -385,16 +385,8 @@ fn expression_resolves_from_classifier_hint_without_stream_token() {
     affect.valence = 0.1;
     affect.arousal = 0.0;
 
-    let (decision, _) = engine.resolve_expression_turn(
-        &mind,
-        &card,
-        &affect,
-        "That sounds great!",
-        Some("happy"),
-        false,
-        "",
-        None,
-    );
+    let (decision, _) =
+        engine.resolve_expression_turn(&mind, &card, &affect, Some("happy"), false, "", None);
     assert_eq!(decision.expression, "happy");
 }
 

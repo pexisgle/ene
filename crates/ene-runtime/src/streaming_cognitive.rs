@@ -1,5 +1,5 @@
 use ene_ai::LlmToolCallChunk;
-use ene_config::PromptLibrary;
+use ene_config::{PromptLibrary, resolve_expressions};
 use ene_mind::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use ene_mind::{
     CognitionEngine, ComposePrefetch, HistoryEntry, MindConfig, OwnedPostTurnInput, OwnedTurnInput,
@@ -1183,7 +1183,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     &mind,
                     &card,
                     &turn_affect,
-                    &clean_content,
                     llm_proposal.as_deref(),
                     explicit_proposal,
                     previous_expression.as_ref(),
@@ -1213,7 +1212,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             } else if !mind.emotion.enabled {
                 // Affect default fills the expression gap when emotion is off
                 // and no expression marker arrived mid-turn.
-                perf_arbiter.set_affect_default(&turn_affect);
+                let expressions = resolve_expressions(&card);
+                perf_arbiter.set_affect_default(&turn_affect, &expressions);
             }
 
             let resolved = perf_arbiter.resolve();
@@ -1370,6 +1370,10 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 let classifier_timeout_secs = mind.emotion.classifier_timeout_secs;
                 let classifier_character_id = card_name.clone();
                 let classifier_user_id = user_name.clone();
+                let classifier_expressions: Vec<String> = resolve_expressions(&card)
+                    .into_iter()
+                    .map(|e| e.name)
+                    .collect();
                 let classifier_turn_id =
                     ene_mind::engine::completed_user_turn_at_post_turn(&history);
                 let classifier_context = ene_mind::engine::build_classifier_context(
@@ -1396,6 +1400,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                             &classifier_context,
                             classifier_timeout_secs,
                             &classifier_lang,
+                            &classifier_expressions,
                         )
                         .await
                         {
