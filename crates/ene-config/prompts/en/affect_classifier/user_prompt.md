@@ -5,3 +5,8 @@ Estimate the character's post-conversation affect from the turn-start state and 
 
 ## Conversation history
 {conversation}
+
+## Available expressions
+{available_expressions}
+
+`recommended_expression` must be exactly one of the names above.

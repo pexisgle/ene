@@ -23,7 +23,7 @@ Schema:
 - `arousal` (number): Excitement/calm in [-1.0, 1.0].
 - `irritation` (number): Irritation in [0.0, 1.0].
 - `affinity` (number): Liking toward user in [-1.0, 1.0].
-- `recommended_expression` (string): One of neutral, happy, sad, angry, relaxed, surprised.
+- `recommended_expression` (string): One of the available expression names listed under `## Available expressions` in the user prompt. Never invent a name that is not on that list.
 - `confidence` (number): 0.0–1.0 (use below 0.5 when uncertain).
 
 ## Decision rules

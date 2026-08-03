@@ -5,3 +5,8 @@
 
 ## Conversation history
 {conversation}
+
+## Available expressions
+{available_expressions}
+
+`recommended_expression` は上記の名前のうちのいずれか 1 つを正確に選んでください。
