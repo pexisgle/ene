@@ -244,6 +244,53 @@ const ENV_PASSTHROUGH_DENYLIST: &[&str] = &[
     "ENE_PLUGIN_SOCKET",
 ];
 
+/// Credential-shaped suffixes that are never copied into a plugin process.
+/// Credential delivery goes through the host service so a plugin cannot turn
+/// an explicitly configured passthrough into an unscoped secret channel.
+const SECRET_ENV_MARKERS: &[&str] = &[
+    "API_KEY",
+    "APIKEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "PRIVATE_KEY",
+    "ACCESS_KEY",
+];
+
+/// Credential-shaped underscore-delimited tokens. This catches names such as
+/// `MY_SECRET_KEY` and `AWS_ACCESS_KEY_ID` in addition to the suffix list.
+const SECRET_ENV_TOKENS: &[&str] = &[
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "PASS",
+    "PRIVATE",
+    "ACCESS",
+    "KEY",
+    "CREDENTIAL",
+];
+
+fn is_blocked_passthrough(var: &str) -> bool {
+    if ENV_PASSTHROUGH_DENYLIST
+        .iter()
+        .any(|blocked| blocked.eq_ignore_ascii_case(var))
+    {
+        return true;
+    }
+
+    let upper = var.to_ascii_uppercase();
+    SECRET_ENV_MARKERS.iter().any(|marker| {
+        upper == *marker
+            || upper
+                .strip_suffix(marker)
+                .is_some_and(|prefix| prefix.ends_with('_'))
+    }) || upper
+        .split('_')
+        .any(|token| SECRET_ENV_TOKENS.contains(&token))
+}
+
 /// Abstraction over command types that support environment manipulation.
 ///
 /// Both `std::process::Command` and `tokio::process::Command` implement
@@ -311,16 +358,14 @@ pub(crate) fn apply_hardened_env(cmd: &mut impl EnvCommand, env_passthrough: &[S
         }
     }
 
-    // Per-plugin explicit passthrough, filtered against the denylist.
+    // Per-plugin explicit passthrough, filtered against the denylist and
+    // credential-shaped names.
     for var in env_passthrough {
-        if ENV_PASSTHROUGH_DENYLIST
-            .iter()
-            .any(|blocked| blocked.eq_ignore_ascii_case(var))
-        {
+        if is_blocked_passthrough(var) {
             tracing::warn!(
                 component = "PluginHostManager",
                 variable = %var,
-                "env_passthrough entry is on the denylist; ignoring"
+                "env_passthrough entry is blocked; use the credential service for secrets"
             );
             continue;
         }
@@ -346,7 +391,8 @@ pub(crate) fn apply_hardened_env(cmd: &mut impl EnvCommand, env_passthrough: &[S
 /// - `ENE_PLUGIN_SOCKET` — the IPC channel
 ///
 /// Additional variables can be forwarded per-plugin via `env_passthrough`,
-/// subject to a denylist that blocks security-sensitive names.
+/// subject to a denylist that blocks security-sensitive and
+/// credential-shaped names.
 fn build_plugin_command(
     binary_path: &std::path::Path,
     socket_path: &std::path::Path,
@@ -2157,6 +2203,12 @@ mod tests {
         let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
         assert!(!envs.contains_key(OsStr::new("LD_PRELOAD")));
         unsafe { std::env::remove_var("LD_PRELOAD") };
+
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "secret") };
+        let cmd = build_plugin_command(binary, socket, &["ANTHROPIC_API_KEY".to_string()]);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert!(!envs.contains_key(OsStr::new("ANTHROPIC_API_KEY")));
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
 
         // ENE_PLUGIN_SOCKET must not be overridable via passthrough.
         let cmd = build_plugin_command(binary, socket, &["ENE_PLUGIN_SOCKET".to_string()]);

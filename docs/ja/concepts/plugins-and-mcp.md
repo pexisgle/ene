@@ -249,7 +249,7 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
   "plugins": {
     "list": {
       "fs": { "enable": true },
-      "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] }
+      "anthropic": { "enable": true }
     }
   }
 }
@@ -300,17 +300,20 @@ trust gate が依拠しているもの) を暗黙に置き換えることを防�
 
 ### プラグインごとの `env_passthrough`
 
-追加のホスト環境変数 (API キーなど) が必要なプラグインは、`plugins.list`
+追加の**非シークレット**なホスト環境変数が必要なプラグインは、`plugins.list`
 エントリの `env_passthrough` で明示的に宣言します。セキュリティ上危険な名前
 (`LD_PRELOAD`、`LD_AUDIT`、`DYLD_INSERT_LIBRARIES`、`ENE_PLUGIN_SOCKET` など)
-は設定に関係なくブロックする組み込み拒否リストが適用されます。
+と、`*_API_KEY`・`*_TOKEN`・`*_SECRET` のような資格情報らしい名前は、設定に
+関係なくホストがブロックします。プラグインのシークレットは credential
+サービスを利用してください。資格情報宣言のカスタム `env_fallback` は、名前を
+`plugins.list.<name>.credential_env_allowlist` に明示した場合だけ利用できます。
 
 MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passthrough`
 フィールドをサポートしています。
 
 ### プラグイン設定フロー (`set_config` / `set_profiles`)
 
-ツールプラグイン・**プロバイダープラグインの両方**が、IPC ハンドシェイク時およびライブ更新 (`PluginIpcRequest::SetConfig`、protocol v5+) でホストから設定を受け取ります。`plugins.list.<name>.config` ブロブは `ConfigurablePlugin::set_config` 経由でそのまま配信され、`plugins.list.<name>.profiles.<profile>` マップ（モデル/音声ごとの設定用）は `ConfigurablePlugin::set_profiles` 経由で配信されます。どちらもホストからは不透明です。ホストはそれらをそのまま保存し、キーを解釈せず、プッシュ前に接続キャッシュを更新し、再接続時にも再送信します。設定のホットリロードで enable 集合は変わらず config/profiles だけが変わった場合、ランタイムはプラグインホストを再起動せず生きている接続へ `SetConfig` を送ります。v5 未満でネゴシエートしたピアには warn + ローカルキャッシュ更新のみ（ライブ IPC なし）です。プロバイダープラグイン（LLM/embed/TTS/STT）はツールプラグインと同じ配信を受けるため、たとえば Anthropic プロバイダーは API キーをリクエストごとではなくハンドシェイク時に受け取れます。
+ツールプラグイン・**プロバイダープラグインの両方**が、IPC ハンドシェイク時およびライブ更新 (`PluginIpcRequest::SetConfig`、protocol v5+) でホストから設定を受け取ります。`plugins.list.<name>.config` ブロブは `ConfigurablePlugin::set_config` 経由で配信されますが、トップレベルの `api_key` はホスト側の資格情報解決用に保持され、プラグインには渡されません。その他のキーは保存された形で配信されます。`plugins.list.<name>.profiles.<profile>` マップ（モデル/音声ごとの設定用）は `ConfigurablePlugin::set_profiles` 経由で配信されます。どちらもホストからは不透明です。ホストはそれらをそのまま保存し、キーを解釈せず、プッシュ前に接続キャッシュを更新し、再接続時にも再送信します。設定のホットリロードで enable 集合は変わらず config/profiles だけが変わった場合、ランタイムはプラグインホストを再起動せず生きている接続へ `SetConfig` を送ります。v5 未満でネゴシエートしたピアには warn + ローカルキャッシュ更新のみ（ライブ IPC なし）です。プロバイダープラグイン（LLM/embed/TTS/STT）はツールプラグインと同じ非シークレット設定の配信を受け、資格情報の値は credential サービスから取得します。
 
 ネストした `config` オブジェクト内にホスト予約キー（`enable`、`checksum`）を置かないでください——`plugins.list.<name>` のエントリフィールドと衝突します。ホストは配信ブロブにこれらのキーが含まれる場合に警告します。
 
@@ -351,7 +354,8 @@ ID は `[A-Za-z0-9._-]` を受け付け、先頭・末尾に `.` を置けませ
 - `kind: "api_key"` — 静的シークレット。`header`（任意）はクライアントが
   値を注入する方法を指定します。`format` は `{value}` を含むテンプレート
   である必要があります（例: `Bearer {value}`）。`env_fallback` は値が保存
-  されていない場合にホストが確認する環境変数名です。
+  されていない場合にホストが確認する環境変数名です。カスタム名には
+  `plugins.list.<plugin>.credential_env_allowlist` への明示的な登録が必要です。
 - `kind: "oauth2"` — ホストが駆動する OAuth2 フロー。`scopes` は同意画面の
   スコープ一覧、`auth_url` / `token_url` は認可エンドポイントとトークン
   エンドポイントです。
@@ -564,6 +568,10 @@ API キーを読み出さないようにするための仕組みです。ホス�
    バックエンドの kind だけが資格情報 id を特定します
    (例: `kind: "anthropic"` の `ai.providers.my-anthropic` は `anthropic` に供給)
 3. `{ID}_API_KEY` 環境変数 (例: `ANTHROPIC_API_KEY`)
+
+宣言済み資格情報では慣例的な環境変数名を利用できます。カスタムの
+`env_fallback` は、宣言元プラグインの `credential_env_allowlist` に明示的に
+登録された場合だけ利用されます。
 
 OAuth 形式の資格情報 (`google.calendar` のような `namespace.name` id) は
 OAuth フローとともに導入されます。それまでは期限切れの資格情報は

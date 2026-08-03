@@ -251,7 +251,7 @@ auto-execute" attack vector.
   "plugins": {
     "list": {
       "fs": { "enable": true },
-      "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] }
+      "anthropic": { "enable": true }
     }
   }
 }
@@ -300,11 +300,14 @@ inherited environment is wiped and only an explicit whitelist is forwarded:
 
 ### Per-plugin `env_passthrough`
 
-Plugins that need additional host variables (e.g. API keys) declare them
-explicitly via `env_passthrough` in their `plugins.list` entry. A built-in
-denylist blocks security-sensitive names (`LD_PRELOAD`, `LD_AUDIT`,
-`DYLD_INSERT_LIBRARIES`, `ENE_PLUGIN_SOCKET`, etc.) regardless of
-configuration.
+Plugins that need additional **non-secret** host variables declare them
+explicitly via `env_passthrough` in their `plugins.list` entry. The host blocks
+security-sensitive names (`LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`,
+`ENE_PLUGIN_SOCKET`, etc.) and credential-shaped names such as `*_API_KEY`,
+`*_TOKEN`, and `*_SECRET` regardless of configuration. Plugins must use the
+credential service for secrets; a custom credential declaration
+`env_fallback` is accepted only when its name is listed in
+`plugins.list.<name>.credential_env_allowlist`.
 
 MCP stdio servers support the same `env_passthrough` field in their
 `plugins.mcp_servers` entry for parity.
@@ -314,7 +317,9 @@ MCP stdio servers support the same `env_passthrough` field in their
 Every plugin — tool **or** provider — receives its configuration from the
 host during the IPC handshake **and** on live updates via
 `PluginIpcRequest::SetConfig` (protocol v5+). The `plugins.list.<name>.config`
-blob is delivered verbatim via `ConfigurablePlugin::set_config`; the
+blob is delivered via `ConfigurablePlugin::set_config`; a top-level `api_key`
+is retained for host-side credential resolution but withheld from the plugin.
+Other keys are delivered as stored; the
 `plugins.list.<name>.profiles.<profile>` map (for per-model/voice settings) is
 delivered via `ConfigurablePlugin::set_profiles`. Both are host-opaque: the
 host stores them as-is, never interprets their keys, refreshes the connection
@@ -323,8 +328,9 @@ hot-reload changes a plugin's config/profiles without changing the enable-set,
 the runtime pushes `SetConfig` to the live connection instead of restarting
 the plugin host. A peer that negotiated below v5 gets a warn + local-cache
 update only (no live IPC). Provider plugins (LLM/embed/TTS/STT) get the same
-delivery as tool plugins, so e.g. the Anthropic provider can receive its API
-key at handshake time rather than per request.
+non-secret configuration delivery as tool plugins; credential values are
+obtained through the credential service rather than the configuration
+handshake.
 
 Do **not** put host-reserved entry keys (`enable`, `checksum`) inside the
 nested `config` object — they collide with `plugins.list.<name>` fields. The
@@ -378,7 +384,8 @@ all valid.
 - `kind: "api_key"` — a static secret. `header` (optional) tells the client
   how to inject the value; `format` is a template that must contain
   `{value}` (e.g. `Bearer {value}`). `env_fallback` names an environment
-  variable the host checks when no value is stored.
+  variable the host checks when no value is stored; custom names require an
+  explicit `plugins.list.<plugin>.credential_env_allowlist` entry.
 - `kind: "oauth2"` — an OAuth2 flow driven by the host. `scopes` lists the
   consent scopes, `auth_url` / `token_url` the authorization and token
   endpoints.
@@ -598,6 +605,10 @@ resolves the key in this order:
    credential (e.g. `ai.providers.my-anthropic` with `kind: "anthropic"`
    feeds `anthropic`)
 3. The `{ID}_API_KEY` environment variable (e.g. `ANTHROPIC_API_KEY`)
+
+The conventional environment name is allowed for a declared credential.
+Custom `env_fallback` names are used only when explicitly allowlisted in the
+declaring plugin's `credential_env_allowlist`.
 
 OAuth-style credentials (`namespace.name` ids such as `google.calendar`)
 arrive with the OAuth flow; until then an expired credential resolves to a

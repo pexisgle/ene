@@ -58,15 +58,7 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
         .map(|name| (name.to_string(), PluginEntry::default()))
         .collect();
 
-    // The Anthropic provider plugin needs ANTHROPIC_API_KEY forwarded from
-    // the host environment; without it the provider cannot authenticate.
-    list.insert(
-        "anthropic".to_string(),
-        PluginEntry {
-            env_passthrough: vec!["ANTHROPIC_API_KEY".to_string()],
-            ..PluginEntry::default()
-        },
-    );
+    list.insert("anthropic".to_string(), PluginEntry::default());
 
     list
 }
@@ -88,9 +80,14 @@ pub struct PluginEntry {
     /// variables are cleared for security (`env_clear()`).
     ///
     /// This is an interim mechanism until a proper credential service
-    /// is implemented.
+    /// is implemented. Credential-looking names are rejected by the host.
     #[serde(default)]
     pub env_passthrough: Vec<String>,
+    /// Environment variable names permitted as custom credential fallbacks
+    /// in plugin credential declarations. The conventional `<ID>_API_KEY`
+    /// fallback remains available without an entry here.
+    #[serde(default)]
+    pub credential_env_allowlist: Vec<String>,
     /// Per-plugin cap on how much of the shared `memory.db` this plugin's
     /// tables may occupy, in mebibytes.
     ///
@@ -108,8 +105,9 @@ pub struct PluginEntry {
     /// handshake time and via live `SetConfig` IPC through
     /// `ConfigurablePlugin::set_config`).
     ///
-    /// The host does **not** interpret this blob: it is stored and
-    /// delivered verbatim. Plugin-owned settings live here (e.g.
+    /// The host does **not** interpret this blob apart from withholding a
+    /// top-level `api_key` from plugin delivery. Plugin-owned settings live
+    /// here (e.g.
     /// `plugins.list.llama-cpp.config.mmproj_url`). The environment override
     /// path is the single-key form
     /// `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>`
@@ -147,6 +145,7 @@ impl Default for PluginEntry {
             enable: true,
             checksum: None,
             env_passthrough: Vec::new(),
+            credential_env_allowlist: Vec::new(),
             db_quota_mb: default_db_quota_mb(),
             config: serde_json::Value::Object(serde_json::Map::default()),
             profiles: HashMap::new(),
@@ -198,6 +197,19 @@ impl PluginEntry {
             }
             Some(serde_json::Value::Object(folded))
         };
+        let config = config.map(|mut blob| {
+            if let Some(obj) = blob.as_object_mut()
+                && obj.remove("api_key").is_some()
+            {
+                tracing::warn!(
+                    component = "PluginEntry",
+                    plugin = %plugin_name,
+                    "withholding top-level api_key from plugin config delivery"
+                );
+            }
+            blob
+        });
+        let config = config.filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()));
         if let Some(ref blob) = config {
             warn_reserved_config_keys(plugin_name, blob);
         }
@@ -380,6 +392,7 @@ mod tests {
             "enable": true,
             "checksum": "abc123",
             "env_passthrough": ["ANTHROPIC_API_KEY"],
+            "credential_env_allowlist": ["CUSTOM_API_KEY"],
             "db_quota_mb": 512,
             "config": {
                 "mmproj_url": "https://cdn.example/mmproj.gguf",
@@ -395,6 +408,7 @@ mod tests {
             serde_json::from_value(json.clone()).expect("deserialize plugin entry");
         assert!(entry.enable);
         assert_eq!(entry.checksum.as_deref(), Some("abc123"));
+        assert_eq!(entry.credential_env_allowlist, ["CUSTOM_API_KEY"]);
         assert_eq!(
             entry
                 .config
@@ -450,10 +464,9 @@ mod tests {
     }
 
     #[test]
-    fn delivered_config_passes_reserved_keys_through() {
-        // Reserved host keys inside the nested config blob must survive
-        // delivery verbatim: `delivered_config` warns via
-        // `warn_reserved_config_keys` but never strips the keys.
+    fn delivered_config_withholds_legacy_api_key() {
+        // Host-reserved keys survive delivery for compatibility, but the
+        // legacy top-level API key must remain host-owned.
         let entry = PluginEntry {
             config: serde_json::json!({
                 "enable": false,
@@ -467,6 +480,6 @@ mod tests {
             .expect("non-empty config must be delivered");
         assert_eq!(blob.get("enable"), Some(&serde_json::json!(false)));
         assert_eq!(blob.get("checksum"), Some(&serde_json::json!("deadbeef")));
-        assert_eq!(blob.get("api_key"), Some(&serde_json::json!("sk-test")));
+        assert!(blob.get("api_key").is_none());
     }
 }

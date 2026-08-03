@@ -128,8 +128,12 @@ impl CredentialPassenger {
     /// rotation/removal: the runtime rebuilds the vault from configuration
     /// and calls this instead of mutating entries.
     pub fn replace_vault_and_broadcast(&self, vault: Arc<CredentialVault>) {
-        let ids = vault.storage_keys();
-        *self.vault.write() = vault;
+        let mut current = self.vault.write();
+        let mut ids = current.storage_keys();
+        ids.extend(vault.storage_keys());
+        ids.sort();
+        ids.dedup();
+        *current = vault;
         drop(self.invalidated_tx.send(ids));
     }
 
@@ -192,10 +196,7 @@ impl CredentialPassenger {
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     };
-                    let allowed: Vec<String> = ids
-                        .into_iter()
-                        .filter(|id| self.scope_allows(plugin, id).is_some())
-                        .collect();
+                    let allowed = self.invalidation_ids_for_plugin(plugin, ids);
                     if allowed.is_empty() {
                         continue;
                     }
@@ -212,6 +213,34 @@ impl CredentialPassenger {
             }
         }
         reader.abort();
+    }
+
+    /// Maps request ids and vault storage keys to the request ids declared by
+    /// one plugin. Private declarations use `{plugin}:{id}` storage keys, so
+    /// parsing every broadcast as a plain [`CredentialId`] would drop them.
+    fn invalidation_ids_for_plugin(
+        &self,
+        plugin: &str,
+        ids: impl IntoIterator<Item = String>,
+    ) -> Vec<String> {
+        let declarations = self.registry.declarations(plugin);
+        let mut allowed = Vec::new();
+        for key in ids {
+            for decl in &declarations {
+                let ScopeDecision::Allowed { storage_key } =
+                    self.registry.resolve_scope(plugin, &decl.id)
+                else {
+                    continue;
+                };
+                if decl.id.as_str() == key || storage_key == key {
+                    allowed.push(decl.id.as_str().to_string());
+                    break;
+                }
+            }
+        }
+        allowed.sort();
+        allowed.dedup();
+        allowed
     }
 
     fn handle_request(&self, plugin: &str, request: CredentialRequest) -> CredentialResponse {
@@ -399,6 +428,21 @@ mod tests {
                     "id": "anthropic",
                     "kind": "api_key",
                     "header": { "name": "x-api-key", "format": "{value}" }
+                }]
+            })),
+        );
+        Arc::new(registry)
+    }
+
+    fn private_registry() -> Arc<CredentialRegistry> {
+        let registry = CredentialRegistry::new();
+        registry.register_from_schema(
+            "anthropic",
+            Some(&json!({
+                "x-ene-credentials": [{
+                    "id": "private-key",
+                    "kind": "api_key",
+                    "shared": false
                 }]
             })),
         );
@@ -607,6 +651,42 @@ mod tests {
             } => assert_eq!(key.expose(), "rotated-secret"),
             other => panic!("unexpected response: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn replace_vault_broadcasts_removed_keys() {
+        let passenger = passenger(vault(), registry(), "ene-cred-good");
+        let mut client = open_session(Arc::clone(&passenger), "ene-cred-good").await;
+
+        passenger.replace_vault_and_broadcast(Arc::new(CredentialVault::new(Vec::new())));
+
+        let resp = read_response(&mut client).await;
+        assert_eq!(
+            resp,
+            CredentialResponse::Invalidated {
+                ids: vec!["anthropic".to_string()],
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn private_storage_key_invalidation_reaches_client() {
+        let private_vault = Arc::new(CredentialVault::new(vec![VaultEntry::new(
+            "anthropic:private-key",
+            CredentialStore::from_api_key(SECRET),
+        )]));
+        let passenger = passenger(private_vault, private_registry(), "ene-cred-good");
+        let mut client = open_session(Arc::clone(&passenger), "ene-cred-good").await;
+
+        passenger.replace_vault_and_broadcast(Arc::new(CredentialVault::new(Vec::new())));
+
+        let resp = read_response(&mut client).await;
+        assert_eq!(
+            resp,
+            CredentialResponse::Invalidated {
+                ids: vec!["private-key".to_string()],
+            }
+        );
     }
 
     #[tokio::test]

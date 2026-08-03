@@ -3029,6 +3029,7 @@ fn plugin_config_blob_updates(
             continue;
         }
         let Some(next_e) = next_entry else {
+            updates.insert(key.clone(), (None, None));
             continue;
         };
         let changed = prev_entry.is_none_or(|p| {
@@ -3433,7 +3434,8 @@ fn resolve_credential_key(
 /// Resolves a key for a credential id declared by `plugin`, with the
 /// declaration-specific precedence (see [`build_credential_vault`]): the
 /// declaring plugin's own config first, then `ai.providers` matched by kind,
-/// then the declaration's `env_fallback` or the conventional `{ID}_API_KEY`.
+/// then an allowlisted declaration `env_fallback` or the conventional
+/// `{ID}_API_KEY`.
 fn resolve_declared_credential_key(
     plugin: &str,
     id: &str,
@@ -3463,6 +3465,15 @@ fn resolve_declared_credential_key(
         }
         CredentialKind::OAuth2 { .. } => env_var_for_id(id),
     };
+    let conventional = env_var_for_id(id);
+    let allowed = env_var == conventional
+        || plugin_config
+            .list
+            .get(plugin)
+            .is_some_and(|entry| entry.credential_env_allowlist.contains(&env_var));
+    if !allowed {
+        return None;
+    }
     std::env::var(env_var)
         .ok()
         .filter(|key| !key.trim().is_empty())
@@ -4045,7 +4056,17 @@ mod tests {
     fn vault_prefers_declared_env_fallback_over_convention() {
         unsafe { std::env::set_var("ENE_VAULT_TEST_FALLBACK_VAR", "sk-fallback") };
         unsafe { std::env::set_var("FALLBACK_KEY_API_KEY", "sk-convention") };
-        let config = vault_test_config(&[], &[]);
+        let mut config = vault_test_config(&[], &[]);
+        let mut plugins = config
+            .get_section::<ene_plugin_host::PluginConfig>()
+            .expect("plugin config section");
+        plugins
+            .list
+            .entry("custom".to_string())
+            .or_default()
+            .credential_env_allowlist
+            .push("ENE_VAULT_TEST_FALLBACK_VAR".to_string());
+        drop(config.set_section(&plugins));
         let registry = CredentialRegistry::new();
         registry.register_from_schema(
             "custom",
@@ -4064,6 +4085,33 @@ mod tests {
             .resolve("fallback-key")
             .expect("env_fallback seeded the entry");
         assert_eq!(store.api_key(), Some("sk-fallback"));
+    }
+
+    /// A declaration cannot turn an arbitrary host environment variable into
+    /// a credential source without an explicit host allowlist entry.
+    #[cfg(any(unix, windows))]
+    #[test]
+    #[expect(
+        clippy::undocumented_unsafe_blocks,
+        reason = "test-only set_var/remove_var on a unique variable name"
+    )]
+    fn vault_ignores_unallowlisted_declared_env_fallback() {
+        unsafe { std::env::set_var("ENE_VAULT_TEST_UNALLOWLISTED_VAR", "sk-secret") };
+        let config = vault_test_config(&[], &[]);
+        let registry = CredentialRegistry::new();
+        registry.register_from_schema(
+            "custom",
+            Some(&serde_json::json!({
+                "x-ene-credentials": [{
+                    "id": "unallowlisted-key",
+                    "kind": "api_key",
+                    "env_fallback": "ENE_VAULT_TEST_UNALLOWLISTED_VAR"
+                }]
+            })),
+        );
+        let vault = build_credential_vault(&config, &registry);
+        unsafe { std::env::remove_var("ENE_VAULT_TEST_UNALLOWLISTED_VAR") };
+        assert!(vault.resolve("unallowlisted-key").is_err());
     }
 
     /// Without a declared `env_fallback`, the conventional `{ID}_API_KEY`
@@ -4090,5 +4138,27 @@ mod tests {
             .resolve("plain-key")
             .expect("conventional env var seeded the entry");
         assert_eq!(store.api_key(), Some("sk-plain"));
+    }
+
+    #[test]
+    fn plugin_config_blob_updates_clear_removed_enabled_entries() {
+        let mut prev = ene_plugin_host::PluginConfig {
+            list: HashMap::new(),
+            ..Default::default()
+        };
+        prev.list.insert(
+            "demo".to_string(),
+            ene_plugin_host::PluginEntry {
+                config: serde_json::json!({"setting": "old"}),
+                ..Default::default()
+            },
+        );
+        let next = ene_plugin_host::PluginConfig {
+            list: HashMap::new(),
+            ..Default::default()
+        };
+
+        let updates = plugin_config_blob_updates(&prev, &next);
+        assert_eq!(updates.get("demo"), Some(&(None, None)));
     }
 }

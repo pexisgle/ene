@@ -19,6 +19,7 @@ use ene_plugin_proto::{
 };
 use sea_orm::DatabaseConnection;
 use tokio::io::AsyncReadExt;
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::db_server::{DbIpcServer, DbServerError};
@@ -126,36 +127,43 @@ impl HostServiceServer {
             "Host service listening"
         );
 
-        #[expect(
-            clippy::infinite_loop,
-            reason = "host-service accept loop runs until the server task is cancelled"
-        )]
+        let mut connection_tasks = JoinSet::new();
+
         loop {
-            let stream = match listener.accept().await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "Host service accept failed; backing off and continuing"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    continue;
-                }
-            };
-            debug!("Accepted host-service connection");
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let stream = match accepted {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            error!(
+                                error = %e,
+                                "Host service accept failed; backing off and continuing"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            continue;
+                        }
+                    };
+                    debug!("Accepted host-service connection");
 
-            let db = self.db.clone();
-            let db_plugins = Arc::clone(&self.db_plugins);
-            let passengers = Arc::clone(&self.passengers);
-            let failed_opens = Arc::clone(&self.failed_opens);
+                    let db = self.db.clone();
+                    let db_plugins = Arc::clone(&self.db_plugins);
+                    let passengers = Arc::clone(&self.passengers);
+                    let failed_opens = Arc::clone(&self.failed_opens);
 
-            tokio::spawn(async move {
-                if let Err(e) =
-                    Self::handle_connection(stream, db, db_plugins, passengers, failed_opens).await
-                {
-                    error!(error = %e, "Host service connection error");
+                    connection_tasks.spawn(async move {
+                        if let Err(e) =
+                            Self::handle_connection(stream, db, db_plugins, passengers, failed_opens).await
+                        {
+                            error!(error = %e, "Host service connection error");
+                        }
+                    });
                 }
-            });
+                result = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+                    if let Some(Err(e)) = result {
+                        error!(error = %e, "Host service connection task failed");
+                    }
+                }
+            }
         }
     }
 
