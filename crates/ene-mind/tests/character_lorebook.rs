@@ -59,9 +59,6 @@ fn lorebook_card() -> CharacterCardV3 {
                 selective: None,
                 secondary_keys: None,
                 position: None,
-                not_keys: Vec::new(),
-                sticky_turns: None,
-                turns_since_match: None,
             },
             LorebookEntry {
                 keys: vec![],
@@ -79,9 +76,6 @@ fn lorebook_card() -> CharacterCardV3 {
                 selective: None,
                 secondary_keys: None,
                 position: None,
-                not_keys: Vec::new(),
-                sticky_turns: None,
-                turns_since_match: None,
             },
         ],
         ..Default::default()
@@ -110,6 +104,7 @@ async fn lorebook_sync_and_constant_recall_merge() {
         Some(&card),
         "Tell me about the weather",
         &[],
+        0,
         vec![],
     )
     .await
@@ -135,6 +130,7 @@ async fn lorebook_sync_and_constant_recall_merge() {
         Some(&card),
         "I met a dragon today",
         &[],
+        0,
         vec![],
     )
     .await
@@ -206,6 +202,7 @@ async fn lorebook_content_update_supersedes_existing_row() {
         Some(&card),
         "I met a dragon today",
         &[],
+        0,
         vec![],
     )
     .await
@@ -271,6 +268,7 @@ async fn disabled_lorebook_entry_is_archived_on_resync() {
         Some(&card),
         "I met a dragon today",
         &[],
+        0,
         vec![],
     )
     .await

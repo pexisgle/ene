@@ -248,6 +248,11 @@ impl CognitionEngine {
             user_id: ctx.user_name,
             user_input: ctx.user_input,
             recent_turns: &recent_turns,
+            assistant_message_count: ctx
+                .history
+                .iter()
+                .filter(|entry| entry.role == ene_ai::Role::Assistant)
+                .count() as u32,
             query_embedding: embedding,
             embedding_model: embedder.model_name(),
             affect: Some(&affect),

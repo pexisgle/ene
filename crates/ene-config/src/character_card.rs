@@ -234,15 +234,6 @@ pub struct LorebookEntry {
     /// Where the content is inserted (`"before_char"` or `"after_char"`).
     #[serde(default)]
     pub position: Option<String>,
-    /// NOT keys: entry is suppressed if any of these match the scan text.
-    #[serde(default)]
-    pub not_keys: Vec<String>,
-    /// Sticky: keep entry active for N turns (user messages) after last key match.
-    #[serde(default)]
-    pub sticky_turns: Option<usize>,
-    /// Turns since last key match (runtime state, not serialized).
-    #[serde(skip)]
-    pub turns_since_match: Option<usize>,
 }
 
 /// Structured user persona for roleplay context.

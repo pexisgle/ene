@@ -17,7 +17,7 @@ pub use lorebook::{
 };
 pub use lorebook_decorators::{
     ActivationContext, DecoratorRole, EntryDecorators, EntryPlacement, SemanticPosition,
-    UiPromptKind, decorator_filters_pass, entry_decorators_accept,
+    decorator_filters_pass, entry_decorators_accept,
 };
 pub use style::{
     STYLE_SOURCE_PREFIX, StyleExample, StyleExampleSelector, StyleIntent, infer_style_intent,

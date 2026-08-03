@@ -7,6 +7,8 @@
 
 use ene_config::LorebookEntry;
 
+use super::lorebook::stable_entry_id;
+
 /// Role for a decorator-injected message (`@@role`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoratorRole {
@@ -29,15 +31,6 @@ pub enum SemanticPosition {
     Personality,
     /// `scenario` — in the scenario section.
     Scenario,
-}
-
-/// UI prompt kind targeted by `@@disable_ui_prompt`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UiPromptKind {
-    /// `post_history_instructions`
-    PostHistoryInstructions,
-    /// `system_prompt`
-    SystemPrompt,
 }
 
 /// Where a matched entry lands in the prompt.
@@ -64,13 +57,11 @@ pub enum EntryPlacement {
 /// Conversation state the activation decorators evaluate against.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ActivationContext {
-    /// Number of assistant (character) messages in the chat log.
+    /// Number of assistant (character) messages in the chat log, counted over
+    /// the full history — never over a recent-turn window.
     pub assistant_message_count: u32,
     /// Whether this entry matched on an earlier turn (sticky decorators).
     pub previously_matched: bool,
-    /// Active greeting index (`0` = `first_mes`, `1` = first alternate), when
-    /// the application tracks it. `None` ignores `@@is_greeting` per spec.
-    pub greeting_index: Option<u32>,
 }
 
 /// Parsed decorators of a single lorebook entry.
@@ -94,30 +85,20 @@ pub struct EntryDecorators {
     pub depth: Option<i64>,
     /// `@@reverse_depth N` — message insertion depth from the oldest message.
     pub reverse_depth: Option<i64>,
-    /// `@@instruct_depth N` — token-based insertion depth (non-chat contexts).
-    pub instruct_depth: Option<i64>,
     /// `@@position` semantic insertion position.
     pub position: Option<SemanticPosition>,
     /// `@@scan_depth N` — per-entry scan depth override.
     pub scan_depth: Option<u32>,
-    /// `@@instruct_scan_depth N` — token-based scan depth (non-chat contexts).
-    pub instruct_scan_depth: Option<u32>,
-    /// `@@is_greeting N` — only match at greeting index `N`.
-    pub is_greeting: Option<u32>,
     /// `@@additional_keys` — extra keys, at least one must match (accumulates
     /// across multiple decorator lines, per spec).
     pub additional_keys: Vec<String>,
     /// `@@exclude_keys` — suppress when any key matches.
     pub exclude_keys: Vec<String>,
-    /// `@@is_user_icon name` — only match for the named user icon.
-    pub is_user_icon: Option<String>,
     /// `@@role` — role of the injected message.
     pub role: Option<DecoratorRole>,
     /// `@@ignore_on_max_context` — drop first when the prompt exceeds the
     /// lorebook token budget.
     pub ignore_on_max_context: bool,
-    /// `@@disable_ui_prompt` — UI prompt kinds the card asks to disable.
-    pub disable_ui_prompt: Vec<UiPromptKind>,
 }
 
 impl EntryDecorators {
@@ -127,10 +108,13 @@ impl EntryDecorators {
     /// A line starting with `@@` is a decorator; a line starting with `@@@` is
     /// a fallback for the preceding decorator (chains of any length are
     /// supported). Each `@@` line plus its immediately following `@@@` lines
-    /// form one group; the first recognized decorator with a valid value wins.
-    /// Unknown groups are ignored (but still stripped). Only the first
-    /// decorator of a given name counts — except `@@additional_keys`, which
-    /// the spec explicitly allows multiple times.
+    /// form one group; the first decorator in the chain that is recognized,
+    /// valid, **and honored in Ene's context** wins. Decorators Ene ignores in
+    /// its chat context (see [`is_context_ignored`]) never resolve, so their
+    /// fallbacks are consulted per the spec's fallback rule. Unknown groups are
+    /// ignored (but still stripped). Only the first decorator of a given name
+    /// counts — except `@@additional_keys`, which the spec explicitly allows
+    /// multiple times.
     #[must_use]
     pub fn parse(content: &str) -> (Self, String) {
         let mut decorators = Self::default();
@@ -188,19 +172,7 @@ impl EntryDecorators {
         {
             return false;
         }
-        if let Some(greeting) = self.is_greeting
-            && let Some(active) = ctx.greeting_index
-            && greeting != active
-        {
-            return false;
-        }
         true
-    }
-
-    /// Whether `@@disable_ui_prompt` names `kind`.
-    #[must_use]
-    pub fn disables_ui_prompt(&self, kind: UiPromptKind) -> bool {
-        self.disable_ui_prompt.contains(&kind)
     }
 
     /// Effective scan depth: the `@@scan_depth` override or `book_default`.
@@ -246,10 +218,11 @@ struct ChainGroup {
 
 impl ChainGroup {
     /// Resolve the group into `decorators` and reset it. The primary wins
-    /// when recognized; fallbacks are only consulted when the primary is
-    /// unknown or invalid (spec: "if the decorator is not recognized ...
-    /// check if the fallback decorator is present"). A group without a
-    /// primary (`@@@` with no preceding `@@`) never resolves.
+    /// when recognized and honored; fallbacks are only consulted when the
+    /// primary is unknown, invalid, or ignored in Ene's context (spec: "if the
+    /// decorator is not recognized ... or decorator is ignored, check if the
+    /// fallback decorator is present"). A group without a primary (`@@@` with
+    /// no preceding `@@`) never resolves.
     fn resolve(&mut self, decorators: &mut EntryDecorators, seen_names: &mut Vec<String>) {
         let Some((name, value)) = self.primary.take() else {
             // `@@@` lines without a preceding `@@` are not decorators.
@@ -305,17 +278,12 @@ enum ResolvedDecorator {
     DontActivate,
     Depth(i64),
     ReverseDepth(i64),
-    InstructDepth(i64),
     Position(SemanticPosition),
     ScanDepth(u32),
-    InstructScanDepth(u32),
-    IsGreeting(u32),
     AdditionalKeys(Vec<String>),
     ExcludeKeys(Vec<String>),
-    IsUserIcon(String),
     Role(DecoratorRole),
     IgnoreOnMaxContext,
-    DisableUiPrompt(UiPromptKind),
 }
 
 /// Split a decorator line into its name and optional value.
@@ -337,9 +305,30 @@ fn split_values(value: Option<&str>) -> Option<Vec<String>> {
     })
 }
 
-/// Resolve one decorator chain element, or `None` when the name is unknown or
-/// the value is invalid (the spec's "ignore the decorator" case).
+/// Decorators the spec defines but Ene's context forces it to ignore, so they
+/// never resolve and their `@@@` fallbacks are consulted instead:
+/// `instruct_depth` / `instruct_scan_depth` (Ene is always chat-based),
+/// `is_greeting` (the active greeting index is not tracked), `is_user_icon`
+/// (no user-icon feature), and `disable_ui_prompt` (deliberately not honored —
+/// cards must not be able to disable Ene's expression output contract).
+fn is_context_ignored(name: &str) -> bool {
+    matches!(
+        name,
+        "instruct_depth"
+            | "instruct_scan_depth"
+            | "is_greeting"
+            | "is_user_icon"
+            | "disable_ui_prompt"
+    )
+}
+
+/// Resolve one decorator chain element, or `None` when the name is unknown,
+/// ignored in Ene's context, or the value is invalid (the spec's "ignore the
+/// decorator" case).
 fn resolve_decorator(name: &str, value: Option<&str>) -> Option<ResolvedDecorator> {
+    if is_context_ignored(name) {
+        return None;
+    }
     match name {
         "activate_only_after" => {
             let parsed = value?.parse::<u32>().ok()?;
@@ -359,9 +348,6 @@ fn resolve_decorator(name: &str, value: Option<&str>) -> Option<ResolvedDecorato
         "dont_activate" if value.is_none() => Some(ResolvedDecorator::DontActivate),
         "depth" => Some(ResolvedDecorator::Depth(value?.parse::<i64>().ok()?)),
         "reverse_depth" => Some(ResolvedDecorator::ReverseDepth(value?.parse::<i64>().ok()?)),
-        "instruct_depth" => Some(ResolvedDecorator::InstructDepth(
-            value?.parse::<i64>().ok()?,
-        )),
         "position" => {
             let position = match value? {
                 "after_desc" => SemanticPosition::AfterDesc,
@@ -373,13 +359,8 @@ fn resolve_decorator(name: &str, value: Option<&str>) -> Option<ResolvedDecorato
             Some(ResolvedDecorator::Position(position))
         }
         "scan_depth" => Some(ResolvedDecorator::ScanDepth(value?.parse::<u32>().ok()?)),
-        "instruct_scan_depth" => Some(ResolvedDecorator::InstructScanDepth(
-            value?.parse::<u32>().ok()?,
-        )),
-        "is_greeting" => Some(ResolvedDecorator::IsGreeting(value?.parse::<u32>().ok()?)),
         "additional_keys" => Some(ResolvedDecorator::AdditionalKeys(split_values(value)?)),
         "exclude_keys" => Some(ResolvedDecorator::ExcludeKeys(split_values(value)?)),
-        "is_user_icon" => Some(ResolvedDecorator::IsUserIcon(value?.to_string())),
         "role" => {
             let role = match value? {
                 "assistant" => DecoratorRole::Assistant,
@@ -390,14 +371,6 @@ fn resolve_decorator(name: &str, value: Option<&str>) -> Option<ResolvedDecorato
             Some(ResolvedDecorator::Role(role))
         }
         "ignore_on_max_context" if value.is_none() => Some(ResolvedDecorator::IgnoreOnMaxContext),
-        "disable_ui_prompt" => {
-            let kind = match value? {
-                "post_history_instructions" => UiPromptKind::PostHistoryInstructions,
-                "system_prompt" => UiPromptKind::SystemPrompt,
-                _ => return None,
-            };
-            Some(ResolvedDecorator::DisableUiPrompt(kind))
-        }
         _ => None,
     }
 }
@@ -415,34 +388,44 @@ fn apply_resolved(decorators: &mut EntryDecorators, resolved: ResolvedDecorator)
         ResolvedDecorator::DontActivate => decorators.dont_activate = true,
         ResolvedDecorator::Depth(value) => decorators.depth = Some(value),
         ResolvedDecorator::ReverseDepth(value) => decorators.reverse_depth = Some(value),
-        ResolvedDecorator::InstructDepth(value) => decorators.instruct_depth = Some(value),
         ResolvedDecorator::Position(value) => decorators.position = Some(value),
         ResolvedDecorator::ScanDepth(value) => decorators.scan_depth = Some(value),
-        ResolvedDecorator::InstructScanDepth(value) => decorators.instruct_scan_depth = Some(value),
-        ResolvedDecorator::IsGreeting(value) => decorators.is_greeting = Some(value),
         ResolvedDecorator::AdditionalKeys(values) => decorators.additional_keys.extend(values),
         ResolvedDecorator::ExcludeKeys(values) => decorators.exclude_keys.extend(values),
-        ResolvedDecorator::IsUserIcon(value) => decorators.is_user_icon = Some(value),
         ResolvedDecorator::Role(value) => decorators.role = Some(value),
         ResolvedDecorator::IgnoreOnMaxContext => decorators.ignore_on_max_context = true,
-        ResolvedDecorator::DisableUiPrompt(kind) => decorators.disable_ui_prompt.push(kind),
     }
 }
 
 /// Whether the `@@additional_keys` / `@@exclude_keys` filters pass for
 /// `scan_text`. Key matching follows the entry's `use_regex` / `case_sensitive`
 /// settings; per spec, `@@exclude_keys` is ignored when `use_regex` is set.
+/// Regex patterns are looked up in `regex_cache` first (keyed like the entry
+/// keys) and compiled on demand only on a cache miss.
+#[expect(
+    clippy::implicit_hasher,
+    reason = "HashMap key type is fixed to String in lorebook API"
+)]
 #[must_use]
 pub fn decorator_filters_pass(
     decorators: &EntryDecorators,
     entry: &LorebookEntry,
+    entry_index: usize,
     scan_text: &str,
+    regex_cache: Option<&std::collections::HashMap<String, regex::Regex>>,
 ) -> bool {
     let use_regex = entry.use_regex;
     let case_sensitive = entry.case_sensitive.unwrap_or(false);
+    let entry_id = stable_entry_id(entry, entry_index);
 
     let key_matches = |key: &str| -> bool {
         if use_regex {
+            let cache_key = format!("{entry_id}:{key}");
+            if let Some(cache) = regex_cache
+                && let Some(re) = cache.get(&cache_key)
+            {
+                return re.is_match(scan_text);
+            }
             regex::RegexBuilder::new(key)
                 .case_insensitive(!case_sensitive)
                 .build()
@@ -480,17 +463,24 @@ pub fn decorator_filters_pass(
 ///
 /// Combines the activation gates and the additional/exclude key filters.
 /// `previously_matched` feeds the sticky decorators.
+#[expect(
+    clippy::implicit_hasher,
+    reason = "HashMap key type is fixed to String in lorebook API"
+)]
 #[must_use]
 pub fn entry_decorators_accept(
     decorators: &EntryDecorators,
     entry: &LorebookEntry,
+    entry_index: usize,
     scan_text: &str,
+    regex_cache: Option<&std::collections::HashMap<String, regex::Regex>>,
     ctx: &ActivationContext,
 ) -> bool {
     if decorators.activate {
         return true;
     }
-    decorator_filters_pass(decorators, entry, scan_text) && decorators.activation_passes(ctx)
+    decorator_filters_pass(decorators, entry, entry_index, scan_text, regex_cache)
+        && decorators.activation_passes(ctx)
 }
 
 #[cfg(test)]
@@ -519,9 +509,6 @@ mod tests {
             selective: None,
             secondary_keys: None,
             position: None,
-            not_keys: Vec::new(),
-            sticky_turns: None,
-            turns_since_match: None,
         }
     }
 
@@ -706,22 +693,6 @@ mod tests {
     }
 
     #[test]
-    fn is_greeting_gates_on_active_greeting_index() {
-        let decorators = EntryDecorators {
-            is_greeting: Some(2),
-            ..EntryDecorators::default()
-        };
-        let ctx = |greeting: Option<u32>| ActivationContext {
-            greeting_index: greeting,
-            ..ActivationContext::default()
-        };
-        assert!(decorators.activation_passes(&ctx(Some(2))));
-        assert!(!decorators.activation_passes(&ctx(Some(1))));
-        // Unknown greeting index: spec says ignore the decorator.
-        assert!(decorators.activation_passes(&ctx(None)));
-    }
-
-    #[test]
     fn additional_keys_require_one_match() {
         let entry = sample_entry();
         let decorators = EntryDecorators {
@@ -731,12 +702,16 @@ mod tests {
         assert!(decorator_filters_pass(
             &decorators,
             &entry,
-            "a sword lies here"
+            0,
+            "a sword lies here",
+            None
         ));
         assert!(!decorator_filters_pass(
             &decorators,
             &entry,
-            "only a dagger"
+            0,
+            "only a dagger",
+            None
         ));
     }
 
@@ -750,9 +725,17 @@ mod tests {
         assert!(!decorator_filters_pass(
             &decorators,
             &entry,
-            "a rusty sword"
+            0,
+            "a rusty sword",
+            None
         ));
-        assert!(decorator_filters_pass(&decorators, &entry, "a shiny sword"));
+        assert!(decorator_filters_pass(
+            &decorators,
+            &entry,
+            0,
+            "a shiny sword",
+            None
+        ));
     }
 
     #[test]
@@ -763,14 +746,28 @@ mod tests {
             additional_keys: vec!["sword\\d+".into()],
             ..EntryDecorators::default()
         };
-        assert!(decorator_filters_pass(&decorators, &entry, "sword42 here"));
-        assert!(!decorator_filters_pass(&decorators, &entry, "sword here"));
+        assert!(decorator_filters_pass(
+            &decorators,
+            &entry,
+            0,
+            "sword42 here",
+            None
+        ));
+        assert!(!decorator_filters_pass(
+            &decorators,
+            &entry,
+            0,
+            "sword here",
+            None
+        ));
         // Invalid regex means no match.
         let broken = EntryDecorators {
             additional_keys: vec!["(unclosed".into()],
             ..EntryDecorators::default()
         };
-        assert!(!decorator_filters_pass(&broken, &entry, "anything"));
+        assert!(!decorator_filters_pass(
+            &broken, &entry, 0, "anything", None
+        ));
     }
 
     #[test]
@@ -781,7 +778,79 @@ mod tests {
             exclude_keys: vec!["rusty".into()],
             ..EntryDecorators::default()
         };
-        assert!(decorator_filters_pass(&decorators, &entry, "rusty"));
+        assert!(decorator_filters_pass(
+            &decorators,
+            &entry,
+            0,
+            "rusty",
+            None
+        ));
+    }
+
+    #[test]
+    fn additional_keys_follow_case_sensitive() {
+        let mut entry = sample_entry();
+        entry.case_sensitive = Some(true);
+        let decorators = EntryDecorators {
+            additional_keys: vec!["Sword".into()],
+            ..EntryDecorators::default()
+        };
+        assert!(decorator_filters_pass(
+            &decorators,
+            &entry,
+            0,
+            "a Sword lies here",
+            None
+        ));
+        assert!(!decorator_filters_pass(
+            &decorators,
+            &entry,
+            0,
+            "a sword lies here",
+            None
+        ));
+    }
+
+    #[test]
+    fn exclude_keys_follow_case_sensitive() {
+        let mut entry = sample_entry();
+        entry.case_sensitive = Some(true);
+        let decorators = EntryDecorators {
+            exclude_keys: vec!["Rusty".into()],
+            ..EntryDecorators::default()
+        };
+        assert!(!decorator_filters_pass(
+            &decorators,
+            &entry,
+            0,
+            "a Rusty sword",
+            None
+        ));
+        assert!(decorator_filters_pass(
+            &decorators,
+            &entry,
+            0,
+            "a rusty sword",
+            None
+        ));
+    }
+
+    #[test]
+    fn activate_only_every_zero_disables_gate() {
+        let decorators = EntryDecorators {
+            activate_only_every: Some(0),
+            ..EntryDecorators::default()
+        };
+        for count in [0, 5, 6] {
+            let ctx = ActivationContext {
+                assistant_message_count: count,
+                ..ActivationContext::default()
+            };
+            assert!(
+                decorators.activation_passes(&ctx),
+                "every 0 must disable the gate at count {count}"
+            );
+        }
     }
 
     #[test]
@@ -860,41 +929,40 @@ mod tests {
     }
 
     #[test]
-    fn disable_ui_prompt_first_decorator_wins() {
-        let (decorators, _) = parse(
-            "@@disable_ui_prompt post_history_instructions\n@@disable_ui_prompt system_prompt\nBody",
-        );
-        // Only the first decorator of a name counts (spec); a card cannot
-        // disable both UI prompts in one entry.
-        assert!(decorators.disables_ui_prompt(UiPromptKind::PostHistoryInstructions));
-        assert!(!decorators.disables_ui_prompt(UiPromptKind::SystemPrompt));
-        let (unknown, _) = parse("@@disable_ui_prompt custom_thing\nBody");
-        assert!(unknown.disable_ui_prompt.is_empty());
+    fn disable_ui_prompt_is_ignored_and_falls_back() {
+        // Ene does not support disabling its UI prompts (cards must not be
+        // able to drop the expression output contract), so the decorator is
+        // ignored and its `@@@` fallback is consulted per spec.
+        let (decorators, _) =
+            parse("@@disable_ui_prompt post_history_instructions\n@@@depth 2\nBody");
+        assert_eq!(decorators.depth, Some(2));
     }
 
     #[test]
-    fn user_icon_decorator_parses_but_is_never_wired() {
-        let (decorators, _) = parse("@@is_user_icon alice\nBody");
-        assert_eq!(decorators.is_user_icon.as_deref(), Some("alice"));
-        // Ene has no user-icon feature, so the decorator is parsed but never
-        // suppresses an entry (spec: ignore when user icons are unsupported).
-        assert!(decorators.activation_passes(&ActivationContext::default()));
+    fn user_icon_decorator_is_ignored_and_falls_back() {
+        let (decorators, _) = parse("@@is_user_icon alice\n@@@activate\nBody");
+        assert!(decorators.activate);
     }
 
     #[test]
-    fn instruct_decorators_parse_but_are_ignored_in_chat_context() {
-        let (decorators, _) = parse("@@instruct_depth 5\n@@instruct_scan_depth 5\nBody");
-        assert_eq!(decorators.instruct_depth, Some(5));
-        assert_eq!(decorators.instruct_scan_depth, Some(5));
-        // Chat contexts ignore them, so they affect neither activation nor
-        // placement.
-        let ctx = ActivationContext::default();
-        assert!(decorators.activation_passes(&ctx));
-        assert_eq!(
-            decorators.resolve_placement(),
-            EntryPlacement::Section,
-            "instruct_depth must not place in chat contexts"
-        );
+    fn instruct_decorators_ignored_in_chat_context_fall_back() {
+        // Ene is chat-based, so the token-based instruct decorators are ignored
+        // and their fallback chains are consulted per the spec.
+        let (decorators, _) = parse("@@instruct_depth 5\n@@@depth 2\nBody");
+        assert_eq!(decorators.depth, Some(2));
+        let (decorators, _) = parse("@@instruct_scan_depth 5\n@@@scan_depth 3\nBody");
+        assert_eq!(decorators.scan_depth, Some(3));
+        // Without a fallback the whole group is dropped.
+        let (decorators, _) = parse("@@instruct_depth 5\nBody");
+        assert_eq!(decorators, EntryDecorators::default());
+    }
+
+    #[test]
+    fn greeting_decorator_is_ignored_and_falls_back() {
+        // Ene does not track the active greeting index, so `@@is_greeting` is
+        // ignored and its fallback is consulted.
+        let (decorators, _) = parse("@@is_greeting 2\n@@@activate_only_after 4\nBody");
+        assert_eq!(decorators.activate_only_after, Some(4));
     }
 
     #[test]
@@ -922,7 +990,9 @@ mod tests {
         assert!(entry_decorators_accept(
             &decorators,
             &entry,
+            0,
             "a sword",
+            None,
             &ctx
         ));
         let early = ActivationContext {
@@ -932,13 +1002,40 @@ mod tests {
         assert!(!entry_decorators_accept(
             &decorators,
             &entry,
+            0,
             "a sword",
+            None,
             &early
         ));
         assert!(!entry_decorators_accept(
             &decorators,
             &entry,
+            0,
             "no weapons",
+            None,
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn activate_bypasses_filters_through_entry_decorators_accept() {
+        let entry = sample_entry();
+        let decorators = EntryDecorators {
+            activate: true,
+            exclude_keys: vec!["rusty".into()],
+            additional_keys: vec!["sword".into()],
+            ..EntryDecorators::default()
+        };
+        let ctx = ActivationContext {
+            assistant_message_count: 0,
+            ..ActivationContext::default()
+        };
+        assert!(entry_decorators_accept(
+            &decorators,
+            &entry,
+            0,
+            "a rusty sword",
+            None,
             &ctx
         ));
     }
