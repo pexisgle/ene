@@ -1110,7 +1110,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         let mut expr_cancelled = false;
 
         let mut is_first_chunk = true;
-        while let Some(chunk_res) = stream.next().await {
+        'stream: while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
                 let spoken = session.display.display_buffer.clone();
                 spawn_interrupted_memory_work(
@@ -1194,7 +1194,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                         && !spoke_visible_text
                                     {
                                         refused = true;
-                                        break;
+                                        break 'stream;
                                     }
                                     accumulated_emotion_tokens.push(token.clone());
 

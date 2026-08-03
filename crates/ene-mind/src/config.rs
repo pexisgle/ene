@@ -1616,7 +1616,7 @@ mod tests {
         let mut low = default;
         low.decision.min_confidence = 0.1;
         low.confirmation_enabled = true;
-        assert_eq!(low.effective_decision_min_confidence(), 0.0);
+        assert!(low.effective_decision_min_confidence().abs() < f64::EPSILON);
     }
 
     #[test]
