@@ -901,9 +901,15 @@ impl AiConfig {
             )
         })?;
         let dimensions = resolved.dimensions.unwrap_or(1536);
+        // `resolve_base_url` only errors when both `base_url` and
+        // `OPENAI_BASE_URL` are unset; the OpenAI plugin then uses its own
+        // default, so resolution must not hard-fail here (chat would keep
+        // working while embedding setup would not).
+        let base_url = resolve_base_url(&def.base_url)
+            .unwrap_or_else(|_| crate::config::DEFAULT_OPENAI_API_BASE.to_string());
         Ok(ResolvedEmbedding::Cloud {
             kind: crate::config::canonical_provider_kind(&def.kind).to_string(),
-            base_url: resolve_base_url(&def.base_url)?,
+            base_url,
             api_key: def.api_key.resolve_api_key(),
             model: model.to_string(),
             dimensions,
@@ -919,7 +925,8 @@ impl AiConfig {
     fn resolve_openai_chat_task(&self, task: &TaskRef) -> Result<ResolvedChat, LlmProviderError> {
         if Self::is_local_provider(&task.provider) {
             return Err(LlmProviderError::Provider(
-                "chat tasks cannot use local provider; use openai_compatible".to_string(),
+                "chat tasks cannot use the local provider; configure a cloud provider kind"
+                    .to_string(),
             ));
         }
         let resolved = self.resolve_task_ref(task)?;

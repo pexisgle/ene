@@ -70,13 +70,14 @@ fn apply_kind_prefix(text: &str, kind: EmbeddingKind, prefix: Option<&str>) -> S
 /// Maps a [`PluginHostError`] into the [`EmbeddingError`] domain.
 ///
 /// Transport failures become [`EmbeddingError::Provider`] (retryable);
-/// everything else is a provider-level error too, but the host's transport
-/// retry re-issues the whole IPC call, so upstream plugin errors are not
-/// retried — matching the chat path's `map_host_error`.
+/// everything else is [`EmbeddingError::Other`] (not retried by the policy),
+/// mirroring the chat path's `map_host_error` — the plugin has already
+/// retried its own upstream errors, so the host must not re-issue the IPC
+/// call (which would re-run the plugin's retry budget).
 fn map_host_error(e: PluginHostError) -> EmbeddingError {
     match e {
         PluginHostError::TransportFailed { message } => EmbeddingError::Provider(message),
-        other => EmbeddingError::Provider(other.to_string()),
+        other => EmbeddingError::Other(other.to_string()),
     }
 }
 
@@ -288,5 +289,32 @@ mod tests {
             apply_kind_prefix("hello", EmbeddingKind::Summary, Some("Q:")),
             "hello"
         );
+    }
+
+    #[test]
+    fn map_host_error_transport_failure_is_retryable() {
+        let err = map_host_error(PluginHostError::TransportFailed {
+            message: "connection reset".to_string(),
+        });
+        assert!(
+            matches!(err, EmbeddingError::Provider(_)),
+            "transport failures must be retryable, got {err:?}"
+        );
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn map_host_error_upstream_plugin_error_is_not_retried() {
+        // The plugin already retried its own upstream failures; the host
+        // must not re-issue the IPC call and run that budget again.
+        let err = map_host_error(PluginHostError::ConnectFailed {
+            name: "openai".to_string(),
+            reason: "provider rejected the request".to_string(),
+        });
+        assert!(
+            matches!(err, EmbeddingError::Other(_)),
+            "non-transport errors must be terminal, got {err:?}"
+        );
+        assert!(!err.is_retryable());
     }
 }

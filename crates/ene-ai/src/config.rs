@@ -13,6 +13,14 @@ pub const LOCAL_PROVIDER: &str = "local";
 /// (`plugins/provider/openai`).
 pub const OPENAI_PROVIDER_KIND: &str = "openai";
 
+/// Default API base for OpenAI-compatible requests when neither `base_url`
+/// nor `OPENAI_BASE_URL` is configured.
+///
+/// Mirrors the `OpenAI` provider plugin's own default so pre-plugin resolution
+/// paths (embedding setup, health probes) agree with where the plugin will
+/// actually send requests.
+pub const DEFAULT_OPENAI_API_BASE: &str = "https://api.openai.com/v1";
+
 /// Legacy `kind` value for OpenAI-compatible providers, accepted as an alias
 /// for [`OPENAI_PROVIDER_KIND`] so pre-plugin configs keep working. The
 /// canonical registry kind is always [`OPENAI_PROVIDER_KIND`].
@@ -83,19 +91,22 @@ ene_config::define_label_enum!(
 
 /// Cloud / plugin provider definition.
 ///
-/// `kind` selects the backend (`"openai_compatible"`, `"anthropic"`, …).
+/// `kind` selects the backend (`"openai"`, `"anthropic"`, …; the legacy
+/// `"openai_compatible"` spelling is an alias of `"openai"`).
 /// OpenAI-compatible providers use the typed [`AiProviderDef::base_url`] and
 /// [`AiProviderDef::api_key`] fields; provider-specific options for other
 /// kinds are captured in the [`AiProviderDef::extra`] catch-all. The struct
 /// form is backward-compatible with the previous tagged-enum JSON:
-/// `{"kind": "openai_compatible", "base_url": "...", "api_key": {...}}`.
+/// `{"kind": "openai", "base_url": "...", "api_key": {...}}`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct AiProviderDef {
-    /// Provider backend kind (e.g. `"openai_compatible"`, `"anthropic"`).
+    /// Provider backend kind (e.g. `"openai"`, `"anthropic"`; the legacy
+    /// `"openai_compatible"` spelling is accepted as an alias of `"openai"`).
     pub kind: String,
-    /// API base URL (empty → `OPENAI_BASE_URL` env for `openai_compatible`).
+    /// API base URL (empty → `OPENAI_BASE_URL` env, then the `OpenAI` plugin
+    /// default, for `openai_compatible`).
     #[serde(default = "default_string")]
     pub base_url: String,
     /// API key configuration.
@@ -305,6 +316,15 @@ pub struct TaskRef {
     /// When true, proactive generation may attach the decision-time screen frame.
     #[serde(default)]
     pub supports_vision: bool,
+    /// When true, the provider sends `thinking: {type: disabled}` for this
+    /// task's requests.
+    ///
+    /// The runtime sets this for the decision classifier: it is a short
+    /// structured-output call, and reasoning models that emit their answer in
+    /// `reasoning_content` (MiMo-class and beyond the plugin's name heuristic)
+    /// otherwise stall or corrupt the JSON reply.
+    #[serde(default)]
+    pub thinking_disabled: bool,
 }
 
 impl Default for TaskRef {
@@ -316,6 +336,7 @@ impl Default for TaskRef {
             dimensions: None,
             query_prefix: None,
             supports_vision: false,
+            thinking_disabled: false,
         }
     }
 }
@@ -345,6 +366,7 @@ impl Default for AiTasksConfig {
                 dimensions: None,
                 query_prefix: None,
                 supports_vision: false,
+                thinking_disabled: false,
             },
             embedding: TaskRef {
                 provider: "default".to_string(),
@@ -353,6 +375,7 @@ impl Default for AiTasksConfig {
                 dimensions: Some(1536),
                 query_prefix: None,
                 supports_vision: false,
+                thinking_disabled: false,
             },
             classifier: None,
             proactive: None,
@@ -580,6 +603,25 @@ mod tests {
     }
 
     #[test]
+    fn task_ref_thinking_disabled_defaults_false_and_round_trips() {
+        let task: TaskRef =
+            serde_json::from_str(r#"{"provider": "default", "model": "gpt-4o-mini"}"#)
+                .expect("pre-field config files must deserialize");
+        assert!(!task.thinking_disabled);
+
+        let task: TaskRef =
+            serde_json::from_str(r#"{"provider": "default", "thinking_disabled": true}"#)
+                .expect("deserialize with thinking_disabled");
+        assert!(task.thinking_disabled);
+        assert_eq!(
+            serde_json::to_value(&task)
+                .expect("serialize")
+                .get("thinking_disabled"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    #[test]
     fn local_model_default_context_size_is_16k() {
         // The default must hold the 12,000-token prompt budget plus a
         // response reserve.
@@ -667,6 +709,7 @@ mod tests {
             dimensions: None,
             query_prefix: None,
             supports_vision: false,
+            thinking_disabled: false,
         };
         let embed = cfg.resolve_embedding().expect("resolve local embedding");
         match embed {

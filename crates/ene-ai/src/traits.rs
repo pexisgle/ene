@@ -112,6 +112,12 @@ pub enum EmbeddingError {
     /// error (HTTP 4xx/5xx, network failure) prevented the request.
     #[error("embedding provider error: {0}")]
     Provider(String),
+    /// An upstream plugin rejected the request with a non-transport error
+    /// (e.g. authentication or rate-limit after the plugin exhausted its own
+    /// retry budget). Terminal from the host's perspective — the plugin
+    /// already retried — so the host policy must not re-issue the call.
+    #[error("embedding provider rejected the request: {0}")]
+    Other(String),
     /// The supplied text is empty or whitespace-only. We
     /// refuse to produce an embedding for it because
     /// every implementation would either return the
@@ -130,8 +136,9 @@ pub enum EmbeddingError {
 impl EmbeddingError {
     /// Whether this error is transient and may succeed on retry.
     ///
-    /// Transport / API failures (`Provider`) are retryable; init, empty-input,
-    /// and dimension-mismatch errors are deterministic and not retried.
+    /// Transport / API failures (`Provider`) are retryable; init, other
+    /// provider rejections, empty-input, and dimension-mismatch errors are
+    /// deterministic and not retried.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         matches!(self, Self::Provider(_))
@@ -375,6 +382,12 @@ impl EmbeddingProviderRegistry {
         let kind = factory.provider_kind().to_string();
         if let Ok(mut guard) = Self::global().factories.lock() {
             guard.insert(kind, factory);
+        } else {
+            tracing::warn!(
+                component = "EmbeddingProviderRegistry",
+                provider = %kind,
+                "Cannot register embedding provider factory because the registry lock is poisoned"
+            );
         }
     }
 

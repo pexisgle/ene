@@ -237,10 +237,12 @@ fn build_cloud_decision_provider(
     };
     // The decision classifier is a short structured-output call: cap the
     // completion at `DECISION_MAX_TOKENS` via the task override, which the
-    // plugin-backed provider honors. The OpenAI plugin applies its own
-    // thinking-disabled heuristic for reasoning models.
+    // plugin-backed provider honors, and disable thinking so reasoning models
+    // (o3-class, deepseek-reasoner, gpt-5, not just MiMo) answer in `content`
+    // instead of stalling on `reasoning_content`.
     let mut decision_task = task.clone();
     decision_task.max_tokens = Some(DECISION_MAX_TOKENS);
+    decision_task.thinking_disabled = true;
     let provider = ene_ai::create_chat_provider_for_task(config, &decision_task)?;
     Ok(Arc::from(provider))
 }
@@ -290,6 +292,7 @@ mod smoke {
             dimensions: None,
             query_prefix: None,
             supports_vision: false,
+            thinking_disabled: false,
         });
         let mut cfg = ene_config::EneConfig::default();
         cfg.set_section(&ai).expect("ai config merges");

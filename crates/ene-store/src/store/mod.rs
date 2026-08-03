@@ -503,7 +503,10 @@ impl MemoryStore {
         })?;
         init_sqlite_vec();
         let mut opt = ConnectOptions::new(format!("sqlite:{path_str}?mode=rwc"));
-        opt.max_connections(8);
+        // SQLite `:memory:` databases are per-connection: a pool wider than
+        // one would hand later requests a fresh empty DB instead of the
+        // migrated one (see `open_in_memory`).
+        opt.max_connections(if path_str == ":memory:" { 1 } else { 8 });
         opt.map_sqlx_sqlite_opts(sqlite_connect_pragmas);
         let db = Database::connect(opt).await?;
 

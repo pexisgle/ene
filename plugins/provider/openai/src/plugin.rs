@@ -253,7 +253,8 @@ fn resolve_api_key_with_host(
 }
 
 /// Resolves the effective API base URL, with the same precedence as the API
-/// key, falling back to the `OpenAI` default.
+/// key: host config, then request config, then the `OPENAI_BASE_URL`
+/// environment variable, falling back to the `OpenAI` default.
 fn resolve_base_url(config: &Value) -> String {
     let host_config = PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner);
     host_config
@@ -263,7 +264,16 @@ fn resolve_base_url(config: &Value) -> String {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|url| !url.is_empty())
-        .map_or_else(|| DEFAULT_API_BASE.to_string(), str::to_string)
+        .map_or_else(
+            || {
+                std::env::var("OPENAI_BASE_URL")
+                    .ok()
+                    .map(|url| url.trim().to_string())
+                    .filter(|url| !url.is_empty())
+                    .unwrap_or_else(|| DEFAULT_API_BASE.to_string())
+            },
+            str::to_string,
+        )
 }
 
 /// Heuristic: models whose name contains "mimo" (case-insensitive) fill
@@ -271,6 +281,17 @@ fn resolve_base_url(config: &Value) -> String {
 /// Extend the match if other reasoning models exhibit the same behavior.
 fn model_wants_thinking_disabled(model: &str) -> bool {
     model.to_ascii_lowercase().contains("mimo")
+}
+
+/// Effective thinking-disabled decision for a request: the host's explicit
+/// `thinking_disabled` instruction (forwarded from the task config by
+/// `IpcLlmProviderFactory`) wins; absent, fall back to the model-name
+/// heuristic.
+fn effective_thinking_disabled(config: &Value, model: &str) -> bool {
+    config
+        .get("thinking_disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| model_wants_thinking_disabled(model))
 }
 
 /// An upstream OpenAI-compatible API failure, before mapping to
@@ -551,7 +572,7 @@ impl LlmPlugin for OpenAiPlugin {
             oa_tools,
             None,
             true,
-            model_wants_thinking_disabled(&model),
+            effective_thinking_disabled(&config, &model),
         );
 
         let response = post_with_retry(&base_url, &api_key, "chat/completions", &body).await?;
@@ -585,7 +606,7 @@ impl LlmPlugin for OpenAiPlugin {
             Vec::new(),
             json_schema,
             false,
-            model_wants_thinking_disabled(&model),
+            effective_thinking_disabled(&config, &model),
         );
 
         let response = post_with_retry(&base_url, &api_key, "chat/completions", &body).await?;
@@ -755,6 +776,12 @@ mod tests {
     #[test]
     fn resolve_base_url_precedence_and_default() {
         let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let original = std::env::var("OPENAI_BASE_URL").ok();
+        // SAFETY: Test-only env var mutation, serialized by `ENV_MUTEX`.
+        unsafe {
+            std::env::remove_var("OPENAI_BASE_URL");
+        }
         *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
         assert_eq!(resolve_base_url(&json!({})), DEFAULT_API_BASE);
         assert_eq!(
@@ -767,6 +794,47 @@ mod tests {
             "https://host.example/v1"
         );
         *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        // SAFETY: Test-only env restore, serialized by `ENV_MUTEX`.
+        match original {
+            Some(value) => unsafe {
+                std::env::set_var("OPENAI_BASE_URL", value);
+            },
+            None => unsafe {
+                std::env::remove_var("OPENAI_BASE_URL");
+            },
+        }
+    }
+
+    #[test]
+    fn resolve_base_url_env_fallback_after_config() {
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let original = std::env::var("OPENAI_BASE_URL").ok();
+        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        // SAFETY: Test-only env var mutation, serialized by `ENV_MUTEX`.
+        unsafe {
+            std::env::set_var("OPENAI_BASE_URL", "https://env.example/v1");
+        }
+        assert_eq!(
+            resolve_base_url(&json!({})),
+            "https://env.example/v1",
+            "OPENAI_BASE_URL must be used when no config sets a base_url"
+        );
+        assert_eq!(
+            resolve_base_url(&json!({"base_url": "https://request.example/v1"})),
+            "https://request.example/v1",
+            "request config must win over OPENAI_BASE_URL"
+        );
+        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        // SAFETY: Test-only env restore, serialized by `ENV_MUTEX`.
+        match original {
+            Some(value) => unsafe {
+                std::env::set_var("OPENAI_BASE_URL", value);
+            },
+            None => unsafe {
+                std::env::remove_var("OPENAI_BASE_URL");
+            },
+        }
     }
 
     #[test]
@@ -872,6 +940,31 @@ mod tests {
         assert!(model_wants_thinking_disabled("openrouter/mimo-7b"));
         assert!(model_wants_thinking_disabled("MIMO-32B"));
         assert!(!model_wants_thinking_disabled("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn explicit_thinking_disabled_overrides_heuristic() {
+        assert!(effective_thinking_disabled(
+            &json!({"thinking_disabled": true}),
+            "gpt-4o-mini"
+        ));
+        assert!(!effective_thinking_disabled(
+            &json!({"thinking_disabled": false}),
+            "openrouter/mimo-7b"
+        ));
+    }
+
+    #[test]
+    fn absent_thinking_disabled_falls_back_to_heuristic() {
+        assert!(effective_thinking_disabled(
+            &json!({}),
+            "openrouter/mimo-7b"
+        ));
+        assert!(!effective_thinking_disabled(&json!({}), "gpt-4o-mini"));
+        assert!(!effective_thinking_disabled(
+            &json!({"api_key": "sk-test"}),
+            "gpt-4o-mini"
+        ));
     }
 
     #[test]

@@ -63,7 +63,7 @@ export ENE_MIND__PROACTIVE__INTERVAL_SECONDS="300"
 プロバイダのバックエンドはプラグインとして提供されます。OpenAI 互換
 バックエンドは `openai` プロバイダプラグイン（`plugins/provider/openai`、
 kind は `"openai"`）で、デフォルトの `plugins.list` に含まれ、
-`OPENAI_API_KEY` が子プロセスへ受け渡されます。旧 kind 値
+`OPENAI_API_KEY` と `OPENAI_BASE_URL` が子プロセスへ受け渡されます。旧 kind 値
 `"openai_compatible"` はエイリアスとして引き続き受け付けられ、プロバイダごとの
 `base_url` / `api_key` はリクエストごとにプラグインへ転送されるため、
 既存の OpenAI 互換設定（OpenRouter、ローカルサーバなど）はそのまま動作します。

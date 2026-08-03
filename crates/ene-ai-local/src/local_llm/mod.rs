@@ -362,6 +362,7 @@ mod tests {
             dimensions: None,
             query_prefix: None,
             supports_vision: false,
+            thinking_disabled: false,
         });
         cfg.set_section(&ai).expect("ai config merges");
         let handles = build_proactive_llm_handles(&cfg).await.expect("build");
@@ -388,6 +389,7 @@ mod tests {
             dimensions: None,
             query_prefix: None,
             supports_vision: false,
+            thinking_disabled: false,
         });
         cfg.set_section(&ai).expect("ai config merges");
         let handles = build_proactive_llm_handles(&cfg)
@@ -414,6 +416,7 @@ mod tests {
             dimensions: None,
             query_prefix: None,
             supports_vision: false,
+            thinking_disabled: false,
         });
         cfg.set_section(&ai).expect("ai config merges");
         let handles = build_proactive_llm_handles(&cfg)

@@ -468,6 +468,31 @@ async fn pragmas_are_applied_on_open() {
 }
 
 #[tokio::test]
+async fn config_style_in_memory_path_survives_pool_use() {
+    // `StoreConfig::resolve_memory_db_path` maps `in_memory: true` to the
+    // `:memory:` path, which goes through `open_with_options` with a pool.
+    // SQLite `:memory:` databases are per-connection, so the pool must be
+    // capped at one or a later request hits a fresh empty DB ("no such
+    // table"). Insert + read after the write forces a pool round-trip.
+    let store = MemoryStore::open_with_options(
+        std::path::Path::new(":memory:"),
+        4,
+        &crate::backup::OpenOptions::default(),
+    )
+    .await
+    .expect("open :memory: via options path");
+    store
+        .insert_conversation_turn("pool-test", "ene", "Hello", "Hi there!")
+        .await
+        .expect("insert must hit the migrated in-memory DB");
+    let logs = store
+        .get_logs_by_session("pool-test")
+        .await
+        .expect("read must hit the same migrated DB");
+    assert_eq!(logs.len(), 2);
+}
+
+#[tokio::test]
 async fn insert_conversation_turn_stores_and_retrieves() {
     let store = setup_store().await;
     let session_id = "turn-test-session";
