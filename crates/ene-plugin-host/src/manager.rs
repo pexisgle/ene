@@ -244,6 +244,53 @@ const ENV_PASSTHROUGH_DENYLIST: &[&str] = &[
     "ENE_PLUGIN_SOCKET",
 ];
 
+/// Credential-shaped suffixes that are never copied into a plugin process.
+/// Credential delivery goes through the host service so a plugin cannot turn
+/// an explicitly configured passthrough into an unscoped secret channel.
+const SECRET_ENV_MARKERS: &[&str] = &[
+    "API_KEY",
+    "APIKEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "PRIVATE_KEY",
+    "ACCESS_KEY",
+];
+
+/// Credential-shaped underscore-delimited tokens. This catches names such as
+/// `MY_SECRET_KEY` and `AWS_ACCESS_KEY_ID` in addition to the suffix list.
+const SECRET_ENV_TOKENS: &[&str] = &[
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "PASS",
+    "PRIVATE",
+    "ACCESS",
+    "KEY",
+    "CREDENTIAL",
+];
+
+fn is_blocked_passthrough(var: &str) -> bool {
+    if ENV_PASSTHROUGH_DENYLIST
+        .iter()
+        .any(|blocked| blocked.eq_ignore_ascii_case(var))
+    {
+        return true;
+    }
+
+    let upper = var.to_ascii_uppercase();
+    SECRET_ENV_MARKERS.iter().any(|marker| {
+        upper == *marker
+            || upper
+                .strip_suffix(marker)
+                .is_some_and(|prefix| prefix.ends_with('_'))
+    }) || upper
+        .split('_')
+        .any(|token| SECRET_ENV_TOKENS.contains(&token))
+}
+
 /// Abstraction over command types that support environment manipulation.
 ///
 /// Both `std::process::Command` and `tokio::process::Command` implement
@@ -311,16 +358,14 @@ pub(crate) fn apply_hardened_env(cmd: &mut impl EnvCommand, env_passthrough: &[S
         }
     }
 
-    // Per-plugin explicit passthrough, filtered against the denylist.
+    // Per-plugin explicit passthrough, filtered against the denylist and
+    // credential-shaped names.
     for var in env_passthrough {
-        if ENV_PASSTHROUGH_DENYLIST
-            .iter()
-            .any(|blocked| blocked.eq_ignore_ascii_case(var))
-        {
+        if is_blocked_passthrough(var) {
             tracing::warn!(
                 component = "PluginHostManager",
                 variable = %var,
-                "env_passthrough entry is on the denylist; ignoring"
+                "env_passthrough entry is blocked; use the credential service for secrets"
             );
             continue;
         }
@@ -346,7 +391,8 @@ pub(crate) fn apply_hardened_env(cmd: &mut impl EnvCommand, env_passthrough: &[S
 /// - `ENE_PLUGIN_SOCKET` — the IPC channel
 ///
 /// Additional variables can be forwarded per-plugin via `env_passthrough`,
-/// subject to a denylist that blocks security-sensitive names.
+/// subject to a denylist that blocks security-sensitive and
+/// credential-shaped names.
 fn build_plugin_command(
     binary_path: &std::path::Path,
     socket_path: &std::path::Path,
@@ -616,8 +662,9 @@ pub struct PluginHostManager {
     /// Credential declarations parsed from each plugin's `x-ene-credentials`
     /// schema block at startup. Populated by [`start`](Self::start) alongside
     /// connection registration; consumed by the credential service for
-    /// request-time scope enforcement.
-    credential_registry: CredentialRegistry,
+    /// request-time scope enforcement. Shared (`Arc`) with the host-service
+    /// `credential` passenger, which is built before the manager starts.
+    credential_registry: Arc<CredentialRegistry>,
     /// One supervisor task per supervised plugin. Each task independently
     /// pings and restarts only its own plugin, so one plugin's restart
     /// backoff or reconnect can never stall monitoring of the others.
@@ -657,7 +704,14 @@ impl PluginHostManager {
     ///
     /// `db_tokens` maps plugin names to pre-shared DB IPC auth tokens; tool
     /// plugins that need database access receive their token via the sandbox
-    /// config during the handshake.
+    /// config during the handshake. `credential_tokens` maps plugin names to
+    /// pre-shared credential-service auth tokens, delivered the same way
+    /// (`SandboxConfigData::credential_auth_token`).
+    ///
+    /// `credential_registry` is shared with the host-service `credential`
+    /// passenger: the manager populates it from each plugin's
+    /// `config_schema()` here, and the passenger resolves request-time scope
+    /// against the same data.
     ///
     /// Respects the `plugins` config section: when `plugins.enabled` is
     /// `false`, no plugins are started. Individual plugins can be disabled
@@ -665,6 +719,8 @@ impl PluginHostManager {
     pub async fn start(
         config: &EneConfig,
         db_tokens: HashMap<String, String>,
+        credential_tokens: HashMap<String, String>,
+        credential_registry: Arc<CredentialRegistry>,
     ) -> Result<Self, PluginHostError> {
         let plugin_config = config
             .get_section::<crate::config::PluginConfig>()
@@ -682,7 +738,7 @@ impl PluginHostManager {
                 tool_registries: Vec::new(),
                 llm_factories: HashMap::new(),
                 llm_factory_plugins: HashMap::new(),
-                credential_registry: CredentialRegistry::new(),
+                credential_registry,
                 health_tasks: Vec::new(),
                 health_rx: None,
                 shutdown_on_drop: true,
@@ -755,6 +811,7 @@ impl PluginHostManager {
                 entry.checksum.clone(),
                 entry.env_passthrough.clone(),
                 db_tokens.get(name).cloned(),
+                credential_tokens.get(name).cloned(),
                 Duration::from_millis(plugin_config.handshake_timeout_ms),
                 plugin_config.max_concurrent,
             )
@@ -1020,7 +1077,7 @@ impl PluginHostManager {
             tool_registries,
             llm_factories,
             llm_factory_plugins,
-            credential_registry: CredentialRegistry::new(),
+            credential_registry,
             health_tasks,
             health_rx: Some(health_rx),
             shutdown_on_drop: true,
@@ -1168,6 +1225,7 @@ impl PluginHostManager {
         expected_checksum: Option<String>,
         env_passthrough: Vec<String>,
         db_token: Option<String>,
+        credential_token: Option<String>,
         handshake_timeout: Duration,
         max_concurrent: usize,
     ) -> Result<
@@ -1204,27 +1262,33 @@ impl PluginHostManager {
         };
 
         let mut sandbox = ene_plugin_proto::SandboxConfigData::default();
+        // The shared endpoint is served to every plugin that carries any
+        // host-service token (db or credential), so the socket path is set
+        // unconditionally; each service token then gates that service only.
+        let host_socket = {
+            #[cfg(unix)]
+            {
+                ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
+            }
+            #[cfg(windows)]
+            {
+                PathBuf::from(r"\\.\pipe\ene-host-service")
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
+            }
+        };
+        let host_socket = host_socket.to_string_lossy().to_string();
+        sandbox.host_service_socket = Some(host_socket.clone());
+        // Compatibility alias: plugins that only read `db_socket` still
+        // reach the shared host-service endpoint.
+        sandbox.db_socket = Some(host_socket);
+        if let Some(token) = &credential_token {
+            sandbox.credential_auth_token = Some(token.clone());
+        }
         if let Some(token) = &db_token {
             sandbox.db_auth_token = Some(token.clone());
-            let host_socket = {
-                #[cfg(unix)]
-                {
-                    ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
-                }
-                #[cfg(windows)]
-                {
-                    PathBuf::from(r"\\.\pipe\ene-host-service")
-                }
-                #[cfg(not(any(unix, windows)))]
-                {
-                    ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
-                }
-            };
-            let host_socket = host_socket.to_string_lossy().to_string();
-            sandbox.host_service_socket = Some(host_socket.clone());
-            // Compatibility alias: plugins that only read `db_socket` still
-            // reach the shared host-service endpoint.
-            sandbox.db_socket = Some(host_socket);
         }
 
         let mut child = build_plugin_command(&binary_path, &socket_path, &env_passthrough)
@@ -1297,7 +1361,7 @@ impl PluginHostManager {
             tool_registries: Vec::new(),
             llm_factories: HashMap::new(),
             llm_factory_plugins: HashMap::new(),
-            credential_registry: CredentialRegistry::new(),
+            credential_registry: Arc::new(CredentialRegistry::new()),
             health_tasks: Vec::new(),
             health_rx: None,
             shutdown_on_drop: false,
@@ -2139,6 +2203,12 @@ mod tests {
         let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
         assert!(!envs.contains_key(OsStr::new("LD_PRELOAD")));
         unsafe { std::env::remove_var("LD_PRELOAD") };
+
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "secret") };
+        let cmd = build_plugin_command(binary, socket, &["ANTHROPIC_API_KEY".to_string()]);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert!(!envs.contains_key(OsStr::new("ANTHROPIC_API_KEY")));
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
 
         // ENE_PLUGIN_SOCKET must not be overridable via passthrough.
         let cmd = build_plugin_command(binary, socket, &["ENE_PLUGIN_SOCKET".to_string()]);

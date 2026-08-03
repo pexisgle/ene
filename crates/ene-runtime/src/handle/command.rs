@@ -22,6 +22,8 @@ use crate::vision::VisionPrepared;
 use chrono::{DateTime, Utc};
 use ene_config::CharacterCardV3;
 use ene_mind::CompressionResult;
+use ene_plugin_host::CredentialRegistry;
+use ene_plugin_host::credential_service::CredentialPassenger;
 use ene_plugin_proto::ToolSpec;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -224,6 +226,12 @@ pub enum EneCommand {
         registry: Arc<dyn ene_plugin_host::ToolRegistry>,
         /// Per-plugin tool registries for future re-merges.
         plugin_tool_registries: Vec<Arc<dyn ene_plugin_host::ToolRegistry>>,
+        /// Credential declaration registry shared with the new host; the
+        /// actor retains it to rebuild the credential vault on config change.
+        credential_registry: Arc<CredentialRegistry>,
+        /// The `credential` passenger built alongside the host-service
+        /// acceptor; `None` when no endpoint was bound.
+        credential_passenger: Option<Arc<CredentialPassenger>>,
     },
     /// Test-only: mutates `pending_permissions`, `permission_scopes`, and
     /// `undo_stack` — the three shared-state fields a panicking command can

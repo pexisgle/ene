@@ -352,7 +352,7 @@ previous fully-sequential behavior. The classification is fail-closed: a tool
 that does not declare `ReadOnly` side effects is never parallelized.
 
 `plugins.list.<name>.db_quota_mb` caps how much of the **shared `memory.db`** a
- plugin's tables may occupy, in mebibytes (#424). Stateful plugins write into
+ plugin's tables may occupy, in mebibytes. Stateful plugins write into
  one shared database, so without a cap a single runaway or malicious plugin
  could exhaust the disk or bloat `memory.db` enough to degrade the memory
  system's queries, backups, and integrity checks. The host measures each
@@ -365,7 +365,7 @@ that does not declare `ReadOnly` side effects is never parallelized.
  does real damage. Set the field to `null` to disable enforcement for a plugin
  that legitimately needs unbounded storage.
 
-#### `plugins.list.<name>.config` — plugin-owned settings (#313)
+#### `plugins.list.<name>.config` — plugin-owned settings
 
 Every plugin entry can carry a host-**opaque** configuration blob:
 
@@ -391,9 +391,9 @@ Every plugin entry can carry a host-**opaque** configuration blob:
 }
 ```
 
-The host stores and delivers this blob **verbatim** — it never interprets,
-rewrites, or drops keys inside it (unknown keys survive load → save
-round-trips). It is sent to the plugin once at handshake time
+The host stores this blob as configured, but withholds a top-level `api_key`
+from plugin delivery so the value remains host-owned. Other keys are sent to
+the plugin once at handshake time
 (`ConfigurablePlugin::set_config`); plugins that also implement provider
 traits (LLM/embed/TTS/STT) receive it the same way as tool plugins. The
 environment override path for a single key is
@@ -414,8 +414,13 @@ migrated document is persisted. Files without those keys are left logically
 unchanged. Legacy flat entry-level keys (`plugins.list.<name>.<key>`, from
 before the nested `config`/`profiles` hierarchy) are also folded into the
 delivered config blob at startup, with explicit `config` keys taking
-precedence — the file on disk is not rewritten for this, so the fold is
-stable across reloads.
+precedence, except that a top-level `api_key` is still withheld. The file on
+disk is not rewritten for this, so the fold is stable across reloads.
+
+`plugins.list.<name>.credential_env_allowlist` permits explicitly named custom
+`env_fallback` variables from that plugin's credential declarations. The
+conventional `<ID>_API_KEY` fallback does not need an allowlist entry; arbitrary
+credential-shaped variables are never forwarded through `env_passthrough`.
 
 #### `plugins.list.<name>.profiles.<profile>` — per-profile settings (#313)
 

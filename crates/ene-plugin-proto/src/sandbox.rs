@@ -67,6 +67,14 @@ pub struct SandboxConfigData {
     /// [`crate::HostServiceRequest::Open`] before any DB request. `None`
     /// disables DB access for this plugin.
     pub db_auth_token: Option<String>,
+    /// Pre-shared auth token for the host-service `credential` passenger.
+    /// The plugin presents it in [`crate::HostServiceRequest::Open`] for the
+    /// credential service. Kept separate from `db_auth_token` so DB access
+    /// never implies credential access. `None` disables credential access
+    /// for this plugin (older plugins that predate the credential service
+    /// never receive the field, so their handshake still succeeds).
+    #[serde(default)]
+    pub credential_auth_token: Option<String>,
 }
 
 impl Default for SandboxConfigData {
@@ -84,6 +92,7 @@ impl Default for SandboxConfigData {
             host_service_socket: None,
             db_socket: None,
             db_auth_token: None,
+            credential_auth_token: None,
         }
     }
 }
@@ -144,6 +153,7 @@ mod tests {
             host_service_socket: Some("/tmp/ene-host-service.sock".into()),
             db_socket: Some("/tmp/ene-host-service.sock".into()),
             db_auth_token: Some("ene-db-deadbeef".into()),
+            credential_auth_token: Some("ene-cred-deadbeef".into()),
         };
         let json = serde_json::to_string(&config).unwrap();
         let deser: SandboxConfigData = serde_json::from_str(&json).unwrap();

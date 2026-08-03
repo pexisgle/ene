@@ -533,40 +533,66 @@ impl EneHandle {
             None
         };
 
-        let (db_tokens, host_service_handle) =
-            actor::spawn_db_ipc_servers(&config, memory_store.as_ref())?;
+        // The credential registry is shared between the host-service
+        // `credential` passenger and the plugin host manager: the manager
+        // populates it from plugin schemas during `start`, and the passenger
+        // (built below, before `start`) resolves request-time scope against
+        // the same data.
+        let credential_registry = std::sync::Arc::new(ene_plugin_host::CredentialRegistry::new());
+        let host_services = actor::spawn_host_services(
+            &config,
+            memory_store.as_ref(),
+            credential_registry.clone(),
+        )?;
+        let db_tokens = host_services.db_tokens;
+        let credential_tokens = host_services.credential_tokens;
+        let host_service_handle = host_services.handle;
+        let credential_passenger = host_services.credential_passenger;
 
         // Start the plugin host (discovers and launches v3 plugin binaries).
         // Non-fatal: on failure we log and continue with no plugin-provided
         // providers/tools, mirroring the tool host's empty-set fallback.
-        let mut plugin_host =
-            match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
-                Ok(host) => {
-                    for (kind, factory) in host.llm_factories() {
-                        tracing::info!(
-                            component = "Bootstrap",
-                            kind = %kind,
-                            "Registered plugin-provided LLM provider factory"
-                        );
-                        LlmProviderRegistry::register(Arc::clone(factory));
-                    }
+        let mut plugin_host = match ene_plugin_host::PluginHostManager::start(
+            &config,
+            db_tokens,
+            credential_tokens,
+            credential_registry.clone(),
+        )
+        .await
+        {
+            Ok(host) => {
+                // `start` populated the registry from the started plugins'
+                // schemas; the interim vault built in spawn_host_services
+                // could only see an empty registry, so rebuild it now (this
+                // is also what surfaces private declarations) and swap it in.
+                if let Some(passenger) = credential_passenger.as_ref() {
+                    actor::refresh_credential_vault(&config, &credential_registry, passenger);
+                }
+                for (kind, factory) in host.llm_factories() {
                     tracing::info!(
                         component = "Bootstrap",
-                        tool_registries = host.tool_registries().len(),
-                        llm_factories = host.llm_factories().len(),
-                        "Plugin host started"
+                        kind = %kind,
+                        "Registered plugin-provided LLM provider factory"
                     );
-                    Some(host)
+                    LlmProviderRegistry::register(Arc::clone(factory));
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        component = "Bootstrap",
-                        error = %e,
-                        "Plugin host failed to start; continuing without plugins"
-                    );
-                    None
-                }
-            };
+                tracing::info!(
+                    component = "Bootstrap",
+                    tool_registries = host.tool_registries().len(),
+                    llm_factories = host.llm_factories().len(),
+                    "Plugin host started"
+                );
+                Some(host)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    component = "Bootstrap",
+                    error = %e,
+                    "Plugin host failed to start; continuing without plugins"
+                );
+                None
+            }
+        };
 
         // Bridge plugin health events into the diagnostics channel.
         // The task's `JoinHandle` is retained so it can be aborted during
@@ -730,6 +756,8 @@ impl EneHandle {
             Arc::clone(&plugin_host),
             Arc::clone(&health_bridge_handle),
             Arc::clone(&host_service_handle),
+            Some(credential_registry),
+            credential_passenger,
             Arc::clone(&shared),
         );
         let join = tokio::spawn(actor.run());
@@ -2001,6 +2029,8 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            None,
+            None,
             Arc::clone(&shared),
         );
         (actor, diag_rx, lifecycle_rx, gate, shared)

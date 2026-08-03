@@ -18,8 +18,14 @@
 //! - [`SandboxConfigData`] — sandbox configuration shared across tool processes.
 //! - [`HostServiceId`] / [`HostServiceRequest`] / [`HostServiceResponse`] —
 //!   multiplexed host-service channel (shared socket, passenger services).
+//! - [`HostServicePassenger`] — signature-only service abstraction for the
+//!   host-service channel.
+//! - [`CredentialRequest`] / [`CredentialResponse`] / [`WireSecret`] —
+//!   credential service wire types (secrets redacted on `Debug`).
 //! - [`IpcStream`] / [`IpcListener`] / [`cleanup_path`] — cross-platform
 //!   transport layer (UDS / Named Pipe).
+//! - [`write_framed_json`] / [`read_framed_json`] — shared 4-byte-LE
+//!   length-prefixed JSON framing for host-service protocols.
 //!
 //! ### Plugin types (protocol v5)
 //!
@@ -51,8 +57,12 @@
 
 /// Plugin capability declarations.
 pub mod capabilities;
+/// Credential host-service wire types.
+pub mod credential;
 /// Plugin error types.
 pub mod error;
+/// Shared length-prefixed JSON framing for host-service protocols.
+pub mod frame;
 /// Multiplexed host-service channel wire types.
 pub mod host_service;
 /// Plugin IPC wire protocol (request / response / framing).
@@ -76,12 +86,20 @@ pub mod usage;
 pub use capabilities::{
     ConcurrencyHint, LlmProviderSpec, PluginCapabilities, SttProviderSpec, TtsProviderSpec,
 };
+/// Credential host-service wire types and framing helpers.
+pub use credential::{
+    CredentialErrorCode, CredentialRequest, CredentialResponse, ResolvedCredential, WireSecret,
+    read_credential_request, read_credential_response, write_credential_request,
+    write_credential_response,
+};
 /// Plugin error type.
 pub use error::PluginError;
+/// Shared framed-JSON helpers (4-byte LE length + JSON body).
+pub use frame::{MAX_FRAMED_MESSAGE_SIZE, read_framed_json, write_framed_json};
 /// Host-service channel types and framing helpers.
 pub use host_service::{
-    HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId, HostServiceRequest,
-    HostServiceResponse, read_host_service_request, read_host_service_response,
+    HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId, HostServicePassenger,
+    HostServiceRequest, HostServiceResponse, read_host_service_request, read_host_service_response,
     write_host_service_request, write_host_service_response,
 };
 /// Plugin IPC message types, protocol version, and framing helpers.
