@@ -2,21 +2,22 @@
 
 > **Crate**: `ene-connector` | **Role**: Credential and identity authority for external-service connectors
 
-`ene-connector` owns the *credential* side of connecting to external services: secure OAuth2 / API-key storage (secrets are redacted from `Debug`/`Serialize` and zeroed on drop, never logged), stable connector identifiers (`ConnectorId`), OAuth permission scopes, and display metadata (`ConnectorIdentity`). It does not implement any specific external service, and it does not own connection lifecycle — process supervision, restarts, and health probing live in `ene-plugin-host`. These types have no consumer yet: the MCP bridge (including its SSRF URL validation) already lives in `ene-plugin-host`'s `mcp_registry`, and the credential side that will consume this crate is reintroduced there under #412, backed by the credential vault landing here under #415.
+`ene-connector` owns the *credential* side of connecting to external services: secure OAuth2 / API-key storage (secrets are redacted from `Debug`/`Serialize` and zeroed on drop, never logged), stable connector identifiers (`ConnectorId`), OAuth permission scopes, display metadata (`ConnectorIdentity`), and the host's in-memory credential vault (`CredentialVault` — storage-keyed entries plus a bounded audit trail). It does not implement any specific external service, and it does not own connection lifecycle — process supervision, restarts, and health probing live in `ene-plugin-host`. The first concrete consumer is the host-service `credential` passenger in `ene-plugin-host`, which authenticates plugins and resolves vault entries over IPC; the plugin-facing client API builds on that channel.
 
 ---
 
 ## Architectural boundaries
 
-- `ene-connector` defines `CredentialStore` / `CredentialData` / `AccountCredentials`, `ConnectorId`, `PermissionScope`, `ConnectorIdentity`, and `ConnectorError`. It has no MCP-specific, tool-translation, or process-supervision logic of its own.
+- `ene-connector` defines `CredentialStore` / `CredentialData` / `AccountCredentials`, `CredentialVault` / `VaultEntry` / `CredentialAuditLog` / `TokenRefresher`, `ConnectorId`, `PermissionScope`, `ConnectorIdentity`, and `ConnectorError`. It has no MCP-specific, tool-translation, or process-supervision logic of its own.
 - Concrete integrations live in the consuming crate (`ene-plugin-host`), keeping this framework decoupled from any single external protocol.
 - **Dependency direction**: `ene-connector` deliberately does **not** depend on `ene-config` or `ene-plugin-proto` (#308). Exposing that weight through credential types would propagate it to every plugin that sees them; instead `ene-plugin-host` is the crate that knows both connector and proto (#412).
 
 ## Design rationale
 
 - **Why credentials are redacted and zeroed on drop**: `CredentialStore` holds OAuth tokens and API keys, which must not linger in process memory, logs, or accidental serializations. Raw material is reachable only through the explicit, audited `expose_for_persistence()` path.
+- **Why the vault is server-side and fail-closed**: scope enforcement is not the vault's job — the credential passenger resolves every requested id against the plugin's registered `x-ene-credentials` declarations (parsed by `parse_credentials` / `resolve_scope`) and only hands the vault the resolved storage key. A plugin with no declaration can request nothing; a missing or expired credential resolves to a structured error carrying only non-secret display metadata.
 - **Why the `Connector` lifecycle layer was removed (#416)**: an earlier revision shipped a `Connector` trait and `ConnectorRegistry` that were never wired into the live MCP path and duplicated supervision `ene-plugin-host` already provides. They were deleted; the MCP bridge's SSRF URL validation moved into `ene-plugin-host`'s `mcp_registry`.
-- **Where the policy types went**: the former `policy.rs` (retry / rate limiting / timeouts) was deleted with the lifecycle layer. A client-side credential policy is reintroduced in `ene-plugin` under #413; a credential vault and OAuth flow land here in #415.
+- **Where the policy types went**: the former `policy.rs` (retry / rate limiting / timeouts) was deleted with the lifecycle layer. A client-side credential policy is reintroduced in `ene-plugin` under #413.
 
 ## API reference
 
@@ -26,7 +27,7 @@ Struct and method signatures are not duplicated here — they drift. Generate ru
 cargo doc -p ene-connector --open
 ```
 
-Start at `CredentialStore` and `ConnectorId`.
+Start at `CredentialStore`, `CredentialVault`, and `ConnectorId`.
 
 ---
 

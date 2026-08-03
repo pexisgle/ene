@@ -18,6 +18,9 @@
 //! - [`ConnectorId`] — stable `namespace.name` identifier.
 //! - [`CredentialId`] — stable identifier for a stored credential (no
 //!   namespace required).
+//! - [`CredentialVault`] — the host's in-memory credential snapshot, built
+//!   from configuration at startup and keyed by declaration-resolved storage
+//!   keys, with a bounded audit trail.
 //! - [`PermissionScope`] — an OAuth scope requested by a connector.
 //! - [`ConnectorIdentity`] — display metadata for configuration UIs.
 //! - [`CredentialDeclaration`] / [`resolve_scope`] — parsing of a plugin's
@@ -43,6 +46,7 @@ pub mod credential;
 pub mod declaration;
 pub mod error;
 pub mod identity;
+pub mod vault;
 
 pub use capability::{CapabilityId, ProvidedCapability, RequiredCapability};
 pub use credential::{AccountCredentials, CredentialData, CredentialStore};
@@ -54,6 +58,7 @@ pub use declaration::{
 };
 pub use error::ConnectorError;
 pub use identity::{ConnectorId, ConnectorIdentity, CredentialId, PermissionScope};
+pub use vault::{AuditEntry, CredentialAuditLog, CredentialVault, TokenRefresher, VaultEntry};
 
 /// Convenience re-exports of the crate's public API.
 pub mod prelude {
@@ -67,4 +72,7 @@ pub mod prelude {
     };
     pub use crate::error::ConnectorError;
     pub use crate::identity::{ConnectorId, ConnectorIdentity, CredentialId, PermissionScope};
+    pub use crate::vault::{
+        AuditEntry, CredentialAuditLog, CredentialVault, TokenRefresher, VaultEntry,
+    };
 }

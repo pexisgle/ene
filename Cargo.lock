@@ -2537,11 +2537,13 @@ name = "ene-connector"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "parking_lot",
  "secrecy",
  "semver",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "tracing",
 ]
 
 [[package]]
@@ -2801,6 +2803,7 @@ name = "ene-plugin-proto"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "schemars",
  "serde",
  "serde_json",
@@ -2875,12 +2878,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.0",
- "blake3",
  "cargo-husky",
  "chrono",
  "ene-ai",
  "ene-ai-local",
  "ene-config",
+ "ene-connector",
  "ene-core",
  "ene-mind",
  "ene-plugin-host",
@@ -2892,6 +2895,7 @@ dependencies = [
  "image",
  "once_cell",
  "parking_lot",
+ "rand 0.10.2",
  "regex",
  "serde",
  "serde_json",

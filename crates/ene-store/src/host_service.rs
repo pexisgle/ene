@@ -2,9 +2,11 @@
 //!
 //! Binds a single shared socket and routes authenticated
 //! [`HostServiceRequest::Open`](ene_plugin_proto::HostServiceRequest::Open)
-//! sessions to passenger handlers. Only the `db` service is implemented
-//! today; reserved service ids are rejected with
-//! [`HostServiceErrorCode::UnknownService`].
+//! sessions to passenger handlers. The `db` service is authenticated here;
+//! other services are delegated to a registered
+//! [`HostServicePassenger`](ene_plugin_proto::HostServicePassenger) that
+//! authenticates and writes its own `Open` response. Unregistered services
+//! keep the historical [`HostServiceErrorCode::UnknownService`] rejection.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,11 +14,12 @@ use std::sync::{Arc, Mutex};
 
 use ene_plugin_db::{DbErrorCode, DbRequest, DbResponse};
 use ene_plugin_proto::{
-    HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId, HostServiceRequest,
-    HostServiceResponse, write_host_service_response,
+    HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId, HostServicePassenger,
+    HostServiceRequest, HostServiceResponse, write_host_service_response,
 };
 use sea_orm::DatabaseConnection;
 use tokio::io::AsyncReadExt;
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::db_server::{DbIpcServer, DbServerError};
@@ -63,25 +66,32 @@ impl OpenFailureTracker {
 /// Shared host-service listener that multiplexes passenger services.
 pub struct HostServiceServer {
     socket_path: PathBuf,
-    db: DatabaseConnection,
+    /// `None` when the deployment has no memory storage (and therefore no
+    /// `db` registrations); the `db` service is unreachable then.
+    db: Option<DatabaseConnection>,
     /// Auth token → `db` registration. Identity and prefix isolation are
     /// derived from this map so a shared socket cannot forge another
     /// plugin's namespace.
     db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
+    /// Service id → passenger. Only services present here are openable;
+    /// everything else keeps the `UnknownService` rejection.
+    passengers: Arc<HashMap<HostServiceId, Arc<dyn HostServicePassenger>>>,
     failed_opens: Arc<Mutex<OpenFailureTracker>>,
 }
 
 impl HostServiceServer {
     /// Creates a host-service server bound to `socket_path`.
     pub fn new(
-        db: DatabaseConnection,
+        db: Option<DatabaseConnection>,
         socket_path: PathBuf,
         db_plugins: HashMap<String, DbPluginRegistration>,
+        passengers: HashMap<HostServiceId, Arc<dyn HostServicePassenger>>,
     ) -> Self {
         Self {
             socket_path,
             db,
             db_plugins: Arc::new(db_plugins),
+            passengers: Arc::new(passengers),
             failed_opens: Arc::new(Mutex::new(OpenFailureTracker::default())),
         }
     }
@@ -117,41 +127,51 @@ impl HostServiceServer {
             "Host service listening"
         );
 
-        #[expect(
-            clippy::infinite_loop,
-            reason = "host-service accept loop runs until the server task is cancelled"
-        )]
+        let mut connection_tasks = JoinSet::new();
+
         loop {
-            let stream = match listener.accept().await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "Host service accept failed; backing off and continuing"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    continue;
-                }
-            };
-            debug!("Accepted host-service connection");
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let stream = match accepted {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            error!(
+                                error = %e,
+                                "Host service accept failed; backing off and continuing"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            continue;
+                        }
+                    };
+                    debug!("Accepted host-service connection");
 
-            let db = self.db.clone();
-            let db_plugins = Arc::clone(&self.db_plugins);
-            let failed_opens = Arc::clone(&self.failed_opens);
+                    let db = self.db.clone();
+                    let db_plugins = Arc::clone(&self.db_plugins);
+                    let passengers = Arc::clone(&self.passengers);
+                    let failed_opens = Arc::clone(&self.failed_opens);
 
-            tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(stream, db, db_plugins, failed_opens).await
-                {
-                    error!(error = %e, "Host service connection error");
+                    connection_tasks.spawn(async move {
+                        if let Err(e) =
+                            Self::handle_connection(stream, db, db_plugins, passengers, failed_opens).await
+                        {
+                            error!(error = %e, "Host service connection error");
+                        }
+                    });
                 }
-            });
+                result = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+                    if let Some(Err(e)) = result {
+                        error!(error = %e, "Host service connection task failed");
+                    }
+                }
+            }
         }
     }
 
     async fn handle_connection(
         mut stream: ene_plugin_proto::transport::IpcStream,
-        db: DatabaseConnection,
+        db: Option<DatabaseConnection>,
         db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
+        passengers: Arc<HashMap<HostServiceId, Arc<dyn HostServicePassenger>>>,
         failed_opens: Arc<Mutex<OpenFailureTracker>>,
     ) -> Result<(), DbServerError> {
         // Read the first frame manually so a legacy `DbRequest::Handshake`
@@ -166,16 +186,25 @@ impl HostServiceServer {
         if let Ok(HostServiceRequest::Open { service, token }) = serde_json::from_slice(&frame) {
             match service {
                 HostServiceId::Db => {}
+                // The `Open` response is written by the service that owns the
+                // session: `db` authenticates here and writes `OpenAck`
+                // below, while a registered passenger authenticates and
+                // writes its own response. This asymmetry keeps per-service
+                // secrets and token maps out of the store.
                 HostServiceId::Assets | HostServiceId::Capability | HostServiceId::Credential => {
-                    warn!(?service, "Host service Open for unimplemented service");
-                    write_host_service_response(
-                        &mut stream,
-                        &HostServiceResponse::Error {
-                            code: HostServiceErrorCode::UnknownService,
-                            message: format!("service {service:?} is not implemented"),
-                        },
-                    )
-                    .await?;
+                    let Some(passenger) = passengers.get(&service) else {
+                        warn!(?service, "Host service Open for unimplemented service");
+                        write_host_service_response(
+                            &mut stream,
+                            &HostServiceResponse::Error {
+                                code: HostServiceErrorCode::UnknownService,
+                                message: format!("service {service:?} is not implemented"),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    };
+                    passenger.serve(stream, token).await;
                     return Ok(());
                 }
             }
@@ -187,6 +216,21 @@ impl HostServiceServer {
                     &HostServiceResponse::Error {
                         code: HostServiceErrorCode::AuthRejected,
                         message: "Invalid auth token".to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+
+            // A matched token implies a backing store: `db` registrations are
+            // only issued when the service was spawned with one, so `None`
+            // here is unreachable and just a defensive fallback.
+            let Some(db) = db else {
+                write_host_service_response(
+                    &mut stream,
+                    &HostServiceResponse::Error {
+                        code: HostServiceErrorCode::UnknownService,
+                        message: "db service is unavailable (memory storage disabled)".to_string(),
                     },
                 )
                 .await?;
@@ -218,6 +262,17 @@ impl HostServiceServer {
                     &DbResponse::Error {
                         code: DbErrorCode::PermissionDenied,
                         message: "Invalid auth token".to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            let Some(db) = db else {
+                DbIpcServer::send_response(
+                    &mut stream,
+                    &DbResponse::Error {
+                        code: DbErrorCode::Internal,
+                        message: "db service is unavailable (memory storage disabled)".to_string(),
                     },
                 )
                 .await?;
@@ -303,8 +358,13 @@ pub fn host_service_socket_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use ene_plugin_db::{DbRequest, DbResponse};
     use ene_plugin_proto::transport::{IpcStream, cleanup_path};
+    use ene_plugin_proto::{
+        CredentialRequest, CredentialResponse, HostServicePassenger, read_credential_request,
+        read_credential_response, write_credential_request,
+    };
     use sea_orm::Database;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -316,6 +376,37 @@ mod tests {
                 prefix: "fs_".into(),
                 quota_bytes: Some(1024),
             },
+        )])
+    }
+
+    /// A minimal credential passenger for delegation tests: accepts any token
+    /// and answers one `Resolve` with a fixed key before closing.
+    struct EchoCredentialPassenger;
+
+    #[async_trait]
+    impl HostServicePassenger for EchoCredentialPassenger {
+        async fn serve(&self, stream: IpcStream, _token: String) {
+            let mut stream = stream;
+            drop(write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await);
+            if let Some(request) = read_credential_request(&mut stream)
+                .await
+                .expect("read request")
+                && let CredentialRequest::Resolve { id: _ } = request
+            {
+                let response = CredentialResponse::Resolved {
+                    credential: ene_plugin_proto::ResolvedCredential::ApiKey {
+                        key: ene_plugin_proto::WireSecret::new("echo-key"),
+                    },
+                };
+                drop(ene_plugin_proto::write_credential_response(&mut stream, &response).await);
+            }
+        }
+    }
+
+    fn test_passengers() -> HashMap<HostServiceId, Arc<dyn HostServicePassenger>> {
+        HashMap::from([(
+            HostServiceId::Credential,
+            Arc::new(EchoCredentialPassenger) as Arc<dyn HostServicePassenger>,
         )])
     }
 
@@ -350,7 +441,12 @@ mod tests {
     async fn legacy_handshake_routes_to_registered_plugin() {
         let socket = std::env::temp_dir().join(format!("ene-hs-test-{}", std::process::id()));
         let db = Database::connect("sqlite::memory:").await.expect("open db");
-        let server = HostServiceServer::new(db, socket.clone(), test_registration("ene-db-good"));
+        let server = HostServiceServer::new(
+            Some(db),
+            socket.clone(),
+            test_registration("ene-db-good"),
+            test_passengers(),
+        );
         let server_task = tokio::spawn(server.run());
         wait_for_socket(&socket).await;
 
@@ -376,7 +472,12 @@ mod tests {
     async fn legacy_handshake_rejects_unknown_token() {
         let socket = std::env::temp_dir().join(format!("ene-hs-test2-{}", std::process::id()));
         let db = Database::connect("sqlite::memory:").await.expect("open db");
-        let server = HostServiceServer::new(db, socket.clone(), test_registration("ene-db-good"));
+        let server = HostServiceServer::new(
+            Some(db),
+            socket.clone(),
+            test_registration("ene-db-good"),
+            test_passengers(),
+        );
         let server_task = tokio::spawn(server.run());
         wait_for_socket(&socket).await;
 
@@ -396,6 +497,134 @@ mod tests {
             resp,
             DbResponse::Error {
                 code: DbErrorCode::PermissionDenied,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn credential_open_delegates_to_registered_passenger() {
+        let socket = std::env::temp_dir().join(format!("ene-hs-test3-{}", std::process::id()));
+        let db = Database::connect("sqlite::memory:").await.expect("open db");
+        let server = HostServiceServer::new(
+            Some(db),
+            socket.clone(),
+            test_registration("ene-db-good"),
+            test_passengers(),
+        );
+        let server_task = tokio::spawn(server.run());
+        wait_for_socket(&socket).await;
+
+        let mut client = IpcStream::connect(&socket).await.expect("connect");
+        let open = ene_plugin_proto::HostServiceRequest::Open {
+            service: HostServiceId::Credential,
+            token: "any-token".into(),
+        };
+        ene_plugin_proto::write_host_service_request(&mut client, &open)
+            .await
+            .expect("write open");
+        let ack = ene_plugin_proto::read_host_service_response(&mut client)
+            .await
+            .expect("read ack")
+            .expect("ack frame");
+        assert!(matches!(ack, HostServiceResponse::OpenAck));
+
+        write_credential_request(
+            &mut client,
+            &CredentialRequest::Resolve {
+                id: "anthropic".into(),
+            },
+        )
+        .await
+        .expect("write resolve");
+        let resp = read_credential_response(&mut client)
+            .await
+            .expect("read resolve")
+            .expect("resolve frame");
+
+        server_task.abort();
+        cleanup_path(&socket);
+        assert!(matches!(resp, CredentialResponse::Resolved { .. }));
+    }
+
+    #[tokio::test]
+    async fn credential_service_serves_without_memory_store() {
+        let socket = std::env::temp_dir().join(format!("ene-hs-test5-{}", std::process::id()));
+        // No database backing and no db registrations, exactly what a
+        // store-disabled deployment produces; the credential passenger is
+        // store-independent and must still be openable.
+        let server =
+            HostServiceServer::new(None, socket.clone(), HashMap::new(), test_passengers());
+        let server_task = tokio::spawn(server.run());
+        wait_for_socket(&socket).await;
+
+        let mut client = IpcStream::connect(&socket).await.expect("connect");
+        let open = ene_plugin_proto::HostServiceRequest::Open {
+            service: HostServiceId::Credential,
+            token: "any-token".into(),
+        };
+        ene_plugin_proto::write_host_service_request(&mut client, &open)
+            .await
+            .expect("write open");
+        let ack = ene_plugin_proto::read_host_service_response(&mut client)
+            .await
+            .expect("read ack")
+            .expect("ack frame");
+        assert!(matches!(ack, HostServiceResponse::OpenAck));
+
+        write_credential_request(
+            &mut client,
+            &CredentialRequest::Resolve {
+                id: "anthropic".into(),
+            },
+        )
+        .await
+        .expect("write resolve");
+        let resp = read_credential_response(&mut client)
+            .await
+            .expect("read resolve")
+            .expect("resolve frame");
+
+        server_task.abort();
+        cleanup_path(&socket);
+        assert!(matches!(resp, CredentialResponse::Resolved { .. }));
+    }
+
+    #[tokio::test]
+    async fn unregistered_service_keeps_unknown_service_rejection() {
+        let socket = std::env::temp_dir().join(format!("ene-hs-test4-{}", std::process::id()));
+        let db = Database::connect("sqlite::memory:").await.expect("open db");
+        // No passengers registered: `Credential` must fall back to the
+        // historical `UnknownService` rejection, and so must the other
+        // reserved-but-unimplemented ids.
+        let server = HostServiceServer::new(
+            Some(db),
+            socket.clone(),
+            test_registration("ene-db-good"),
+            HashMap::new(),
+        );
+        let server_task = tokio::spawn(server.run());
+        wait_for_socket(&socket).await;
+
+        let mut client = IpcStream::connect(&socket).await.expect("connect");
+        let open = ene_plugin_proto::HostServiceRequest::Open {
+            service: HostServiceId::Credential,
+            token: "ene-db-good".into(),
+        };
+        ene_plugin_proto::write_host_service_request(&mut client, &open)
+            .await
+            .expect("write open");
+        let resp = ene_plugin_proto::read_host_service_response(&mut client)
+            .await
+            .expect("read response")
+            .expect("response frame");
+
+        server_task.abort();
+        cleanup_path(&socket);
+        assert!(matches!(
+            resp,
+            HostServiceResponse::Error {
+                code: HostServiceErrorCode::UnknownService,
                 ..
             }
         ));

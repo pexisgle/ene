@@ -29,13 +29,14 @@ tracing = { workspace = true }
 ene-config = { workspace = true }
 ene-core = { workspace = true }
 ene-store = { workspace = true }
-blake3 = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 image = { workspace = true, features = ["jpeg"] }
+rand = { workspace = true }
 
 once_cell = { workspace = true }
 ene-rag = { workspace = true, features = ["tool"] }
+ene-connector = { workspace = true }
 ene-plugin-proto = { workspace = true }
 ene-plugin-host = { workspace = true }
 

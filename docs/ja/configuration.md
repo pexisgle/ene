@@ -321,9 +321,9 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 
 `parallel_tool_calls_max` は、1 つの LLM 応答に含まれる**副作用のない**ツール呼び出しを同時にいくつ実行するかの上限です。モデルが 1 ターンで複数のツール呼び出しを出力したとき、`ToolSpec` で `side_effects: ReadOnly` を宣言しているもの（かつバックグラウンド非対応のもの）を、この上限まで並列にディスパッチします。並列化は応答内の*すべて*の呼び出しが副作用のない場合にのみ適用されます。混合ラウンドでは、読み取り専用の呼び出しが同じ応答内の先行する書き込みを追い越してはならない（read-after-write）ため、厳密に元の順序で逐次実行されます。それ以外 — 副作用のあるツール、副作用を宣言していないツール、`system.search_tools` — は従来どおり逐次実行されます。結果は元の `tool_calls` の順序へ並べ戻されるため、権限/ユーザー入力のプロンプト、undo スタック、`ToolCallStart`/`ToolCallResult` イベント、`ToolResultSummary` の順序はすべて保たれます。`0` を設定すると並列化が完全に無効になり、以前の完全逐次動作に戻ります。分類はフェイルクローズドです。`ReadOnly` の副作用を宣言していないツールは決して並列化されません。
 
-`plugins.list.<name>.db_quota_mb` は、プラグインのテーブルが**共有 `memory.db`** 内で占有できる上限をメビバイト単位で設定します (#424)。ステートフルなプラグインはすべて 1 つの共有データベースへ書き込むため、上限がなければ 1 つの暴走（または悪意ある）プラグインがディスクを使い切ったり、`memory.db` を肥大化させて記憶システムのクエリ・バックアップ・整合性検査を劣化させたりするおそれがあります。ホストは各プラグインの使用量（宣言済みテーブル全体の全セルのバイト長合計）を測定し、上限に達するか超えるようなストレージを増やす書き込み（`Insert`/`Upsert`、`Batch` 内のものを含む）を拒否し、`QUOTA_EXCEEDED` エラーを返します。読み取りと削除は一切制限されないため、上限に達したプラグインでも常に空きを確保できます。既定値は `256` で、組み込みプラグインが近づけないほど十分に大きい一方、暴走プラグインが実際の被害を出す前に抑制できます。無制限のストレージが正当に必要なプラグインには、このフィールドを `null` に設定して強制を無効化できます。
+`plugins.list.<name>.db_quota_mb` は、プラグインのテーブルが**共有 `memory.db`** 内で占有できる上限をメビバイト単位で設定します。ステートフルなプラグインはすべて 1 つの共有データベースへ書き込むため、上限がなければ 1 つの暴走（または悪意ある）プラグインがディスクを使い切ったり、`memory.db` を肥大化させて記憶システムのクエリ・バックアップ・整合性検査を劣化させたりするおそれがあります。ホストは各プラグインの使用量（宣言済みテーブル全体の全セルのバイト長合計）を測定し、上限に達するか超えるようなストレージを増やす書き込み（`Insert`/`Upsert`、`Batch` 内のものを含む）を拒否し、`QUOTA_EXCEEDED` エラーを返します。読み取りと削除は一切制限されないため、上限に達したプラグインでも常に空きを確保できます。既定値は `256` で、組み込みプラグインが近づけないほど十分に大きい一方、暴走プラグインが実際の被害を出す前に抑制できます。無制限のストレージが正当に必要なプラグインには、このフィールドを `null` に設定して強制を無効化できます。
 
-#### `plugins.list.<name>.config` — プラグイン所有の設定 (#313)
+#### `plugins.list.<name>.config` — プラグイン所有の設定
 
 各プラグインエントリは、ホストからは**不透明**な設定ブロブを保持できます：
 
@@ -349,9 +349,11 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 }
 ```
 
-ホストはこのブロブを**そのまま**保存・配信します。ブロブ内のキーを解釈・書き換え・破棄することは決してありません（未知のキーもロード→セーブの往復で保持されます）。ブロブはハンドシェイク時に一度だけプラグインへ送信されます（`ConfigurablePlugin::set_config`）。プロバイダートレイト（LLM/embed/TTS/STT）を実装するプラグインも、ツールプラグインと同じ方法で受け取ります。単一キーの環境変数オーバーライドは `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>`（例：`ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY`）です。従来 `ai.*` にあったプロバイダー固有設定はここへ移動しました。たとえば `plugins.list.llama-cpp.config.{mmproj_url,mmproj_path,acceleration}`（旧 `ai.local_models.<name>.{mmproj_url,mmproj_path,acceleration}`）、`plugins.list.onnx.config.ort_dylib_path`（旧 `ai.ort_dylib_path`）、`plugins.list.kokoro.profiles.kokoro.voices_path`（旧 `ai.tts.voices_path`）。
+ホストはこのブロブを設定どおり保存しますが、トップレベルの `api_key` はホスト所有として保持し、プラグインには渡しません。その他のキーはハンドシェイク時にプラグインへ送信されます（`ConfigurablePlugin::set_config`）。プロバイダートレイト（LLM/embed/TTS/STT）を実装するプラグインも、ツールプラグインと同じ方法で受け取ります。単一キーの環境変数オーバーライドは `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>`（例：`ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY`）です。従来 `ai.*` にあったプロバイダー固有設定はここへ移動しました。たとえば `plugins.list.llama-cpp.config.{mmproj_url,mmproj_path,acceleration}`（旧 `ai.local_models.<name>.{mmproj_url,mmproj_path,acceleration}`）、`plugins.list.onnx.config.ort_dylib_path`（旧 `ai.ort_dylib_path`）、`plugins.list.kokoro.profiles.kokoro.voices_path`（旧 `ai.tts.voices_path`）。
 
-バージョン 1 の `settings.json` は読み込み時に自動でマイグレーションされます。上記の移設対象キーは `plugins.list.*` の移動先へ移され（旧 `ai.*` の場所からは削除され）、その後にファイルが読み込まれて、マイグレーション後のドキュメントが永続化されます。対象キーを持たないファイルは論理的に変更されません。また、ネストした `config`/`profiles` 階層より前のレガシーなフラットなエントリレベルキー（`plugins.list.<name>.<key>`）も、起動時に配信される設定ブロブへ折り込まれます（明示的な `config` キーが優先）。この折り込みはディスク上のファイルを書き換えないため、リロードをまたいで安定しています。
+バージョン 1 の `settings.json` は読み込み時に自動でマイグレーションされます。上記の移設対象キーは `plugins.list.*` の移動先へ移され（旧 `ai.*` の場所からは削除され）、その後にファイルが読み込まれて、マイグレーション後のドキュメントが永続化されます。対象キーを持たないファイルは論理的に変更されません。また、ネストした `config`/`profiles` 階層より前のレガシーなフラットなエントリレベルキー（`plugins.list.<name>.<key>`）も、起動時に配信される設定ブロブへ折り込まれます（明示的な `config` キーが優先され、トップレベルの `api_key` は渡されません）。この折り込みはディスク上のファイルを書き換えないため、リロードをまたいで安定しています。
+
+`plugins.list.<name>.credential_env_allowlist` には、そのプラグインの資格情報宣言から参照できるカスタム `env_fallback` の環境変数名を明示します。慣例的な `<ID>_API_KEY` は allowlist 不要ですが、資格情報らしい変数を `env_passthrough` で転送することはできません。
 
 #### `plugins.list.<name>.profiles.<profile>` — プロファイル別設定 (#313)
 

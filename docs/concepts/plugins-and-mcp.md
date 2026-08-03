@@ -135,11 +135,13 @@ automatically on fresh installs.
 Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`) persist their
 data into the host's `memory.db` through the shared **host-service** socket
 (`ene-host-service.sock` / named pipe). The first framed message opens a
-passenger service with a pre-shared token; today only `db` is implemented
-(`ene-store`'s `host_service` + `db_server`). Reserved ids (`assets`,
-`capability`, `credential`) are rejected until implemented. All plugins share
-this one socket, so namespace isolation rests on the per-plugin auth token
-alone — the per-plugin socket path layer is gone. A plugin never
+passenger service with a pre-shared token. Two passengers are implemented
+today: `db` (authenticated by `ene-store`; `host_service` + `db_server`) and
+`credential` (authenticated by the host's `CredentialPassenger`, see
+[§9](#9-credential-service--secret-brokering)). Reserved ids (`assets`,
+`capability`) are rejected with `UnknownService` until implemented. All
+plugins share this one socket, so namespace isolation rests on the per-plugin
+auth token alone — the per-plugin socket path layer is gone. A plugin never
 issues DDL directly: it
 declares its tables, columns, and indexes with a `DeclareSchema` request, and
 the host creates and owns the physical tables. Every table name must start
@@ -249,7 +251,7 @@ auto-execute" attack vector.
   "plugins": {
     "list": {
       "fs": { "enable": true },
-      "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] }
+      "anthropic": { "enable": true }
     }
   }
 }
@@ -298,11 +300,14 @@ inherited environment is wiped and only an explicit whitelist is forwarded:
 
 ### Per-plugin `env_passthrough`
 
-Plugins that need additional host variables (e.g. API keys) declare them
-explicitly via `env_passthrough` in their `plugins.list` entry. A built-in
-denylist blocks security-sensitive names (`LD_PRELOAD`, `LD_AUDIT`,
-`DYLD_INSERT_LIBRARIES`, `ENE_PLUGIN_SOCKET`, etc.) regardless of
-configuration.
+Plugins that need additional **non-secret** host variables declare them
+explicitly via `env_passthrough` in their `plugins.list` entry. The host blocks
+security-sensitive names (`LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`,
+`ENE_PLUGIN_SOCKET`, etc.) and credential-shaped names such as `*_API_KEY`,
+`*_TOKEN`, and `*_SECRET` regardless of configuration. Plugins must use the
+credential service for secrets; a custom credential declaration
+`env_fallback` is accepted only when its name is listed in
+`plugins.list.<name>.credential_env_allowlist`.
 
 MCP stdio servers support the same `env_passthrough` field in their
 `plugins.mcp_servers` entry for parity.
@@ -312,7 +317,9 @@ MCP stdio servers support the same `env_passthrough` field in their
 Every plugin — tool **or** provider — receives its configuration from the
 host during the IPC handshake **and** on live updates via
 `PluginIpcRequest::SetConfig` (protocol v5+). The `plugins.list.<name>.config`
-blob is delivered verbatim via `ConfigurablePlugin::set_config`; the
+blob is delivered via `ConfigurablePlugin::set_config`; a top-level `api_key`
+is retained for host-side credential resolution but withheld from the plugin.
+Other keys are delivered as stored; the
 `plugins.list.<name>.profiles.<profile>` map (for per-model/voice settings) is
 delivered via `ConfigurablePlugin::set_profiles`. Both are host-opaque: the
 host stores them as-is, never interprets their keys, refreshes the connection
@@ -321,8 +328,9 @@ hot-reload changes a plugin's config/profiles without changing the enable-set,
 the runtime pushes `SetConfig` to the live connection instead of restarting
 the plugin host. A peer that negotiated below v5 gets a warn + local-cache
 update only (no live IPC). Provider plugins (LLM/embed/TTS/STT) get the same
-delivery as tool plugins, so e.g. the Anthropic provider can receive its API
-key at handshake time rather than per request.
+non-secret configuration delivery as tool plugins; credential values are
+obtained through the credential service rather than the configuration
+handshake.
 
 Do **not** put host-reserved entry keys (`enable`, `checksum`) inside the
 nested `config` object — they collide with `plugins.list.<name>` fields. The
@@ -376,7 +384,8 @@ all valid.
 - `kind: "api_key"` — a static secret. `header` (optional) tells the client
   how to inject the value; `format` is a template that must contain
   `{value}` (e.g. `Bearer {value}`). `env_fallback` names an environment
-  variable the host checks when no value is stored.
+  variable the host checks when no value is stored; custom names require an
+  explicit `plugins.list.<plugin>.credential_env_allowlist` entry.
 - `kind: "oauth2"` — an OAuth2 flow driven by the host. `scopes` lists the
   consent scopes, `auth_url` / `token_url` the authorization and token
   endpoints.
@@ -616,3 +625,64 @@ async fn main() {
     }
 }
 ```
+
+---
+
+## 9. Credential Service & Secret Brokering
+
+The `credential` passenger brokers host-held secrets to plugins over the
+shared host-service socket. It exists so plugin binaries never read API keys
+out of configuration themselves: the host resolves, scopes, and audits every
+access, and a revoked or rotated credential can be pushed to connected
+clients.
+
+### Wire protocol
+
+A plugin opens the service with `Open { service: "credential", token }` using
+the `credential_auth_token` from its `SandboxConfigData` (distinct from the
+`db` token so database access never implies credential access). Once open,
+the session speaks `CredentialRequest` / `CredentialResponse` frames
+(`Ping` / `Resolve { id }` / `RequestAuthorization { id }` today). Secrets
+travel in a dedicated wire type whose `Debug`/`Display` always render
+`<redacted>`, so a value that reaches a log or error message is redacted by
+construction.
+
+### Scope enforcement (server-side)
+
+Every credential id a plugin may request is a declared-scope decision. The
+plugin lists them in the `x-ene-credentials` block of its `config_schema()`
+(see §8, "Credential declaration (`x-ene-credentials`)"); a plugin with no
+declaration is allowed nothing (fail-closed). The host matches each requested
+id against the plugin's registered declarations **server-side** — the client
+is never trusted — and denies undeclared ids with `ScopeDenied` while
+recording the outcome in the audit trail (plugin, id, outcome only; never
+the secret).
+
+### Resolution order
+
+For a credential id that names a plugin (e.g. `anthropic`), the host's vault
+resolves the key in this order:
+
+1. `plugins.list.<id>.config.api_key` (plain string or `{"source": ...}`)
+2. `ai.providers.<alias>.api_key` where `<alias>`'s `kind` equals the id —
+   the alias name is arbitrary, only the backend kind identifies the
+   credential (e.g. `ai.providers.my-anthropic` with `kind: "anthropic"`
+   feeds `anthropic`)
+3. The `{ID}_API_KEY` environment variable (e.g. `ANTHROPIC_API_KEY`)
+
+The conventional environment name is allowed for a declared credential.
+Custom `env_fallback` names are used only when explicitly allowlisted in the
+declaring plugin's `credential_env_allowlist`.
+
+OAuth-style credentials (`namespace.name` ids such as `google.calendar`)
+arrive with the OAuth flow; until then an expired credential resolves to a
+`RefreshRequired` error.
+
+### Invalidation push
+
+When a credential is updated or revoked, the host can push
+`Invalidated { ids }` on the open session; the client drops its cached copies
+for the ids inside its declared scope.
+
+The plugin-facing client API (`ctx.credentials().api_key(id)` /
+`http_client(id)`) is introduced alongside this service.

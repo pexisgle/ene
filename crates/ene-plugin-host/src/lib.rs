@@ -40,6 +40,8 @@ pub mod circuit_breaker;
 pub mod config;
 /// Host-side registry of per-plugin credential declarations.
 pub mod credential_registry;
+/// Host-side `credential` passenger (host-service channel).
+pub mod credential_service;
 /// Plugin host error types.
 pub mod error;
 /// LLM provider factory backed by a plugin IPC connection.
@@ -69,6 +71,8 @@ pub use circuit_breaker::{BreakerState, CircuitBreaker};
 pub use config::{PluginConfig, PluginEntry};
 /// Host-side registry of per-plugin credential declarations.
 pub use credential_registry::CredentialRegistry;
+/// Host-side `credential` passenger and registration.
+pub use credential_service::{CredentialPassenger, CredentialPluginRegistration};
 /// Plugin host error type.
 pub use error::PluginHostError;
 /// Backward-compatible alias for [`PluginHostError`].
