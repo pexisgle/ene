@@ -95,6 +95,7 @@ unicode-normalization = "0.1"
 
 # ── Utility ──
 blake3 = "1.8"
+flate2 = "1"
 meval = "0.2"
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = { version = "1", default-features = false, features = ["zeroize_derive"] }

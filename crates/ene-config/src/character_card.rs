@@ -34,31 +34,43 @@ impl Default for CharacterCardV3 {
 /// The core data payload of a V3 character card.
 pub struct CharacterCardData {
     /// The character's primary name.
+    #[serde(default)]
     pub name: String,
     /// A short description of the character.
+    #[serde(default)]
     pub description: String,
     /// Tags / categories for discovery.
+    #[serde(default)]
     pub tags: Vec<String>,
     /// Who created this card.
+    #[serde(default)]
     pub creator: String,
     /// Version string for this character definition.
+    #[serde(default)]
     pub character_version: String,
     /// Example dialogue shown to the LLM on the first turn.
+    #[serde(default)]
     pub mes_example: String,
     /// Extension key-value store (expressions, ene metadata, etc.).
     #[serde(default)]
     pub extensions: Extensions,
     /// The character's system prompt.
+    #[serde(default)]
     pub system_prompt: String,
     /// Instructions appended after the conversation history (PHI).
+    #[serde(default)]
     pub post_history_instructions: String,
     /// The character's opening message.
+    #[serde(default)]
     pub first_mes: String,
     /// Alternate greeting messages that can replace `first_mes`.
+    #[serde(default)]
     pub alternate_greetings: Vec<String>,
     /// Personality traits description.
+    #[serde(default)]
     pub personality: String,
     /// Scenario / setting description.
+    #[serde(default)]
     pub scenario: String,
     /// Notes from the card creator (`CCv2`+).
     #[serde(default)]
@@ -111,7 +123,7 @@ pub struct CharacterCardData {
 #[serde(crate = "crate::serde")]
 pub struct Extensions {
     /// Ene-specific extension block (motions, expressions, etc.).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_ene")]
     pub ene: Option<EneExtension>,
     /// Catch-all for other extension keys.
     ///
@@ -120,6 +132,23 @@ pub struct Extensions {
     /// produce different bytes.
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
+}
+
+/// Lenient reader for `extensions.ene`: a missing key, a non-object value
+/// (some V2 exporters write arbitrary types here), or a wrong-typed object
+/// all yield `None` so one malformed extension cannot sink the whole card.
+fn deserialize_ene<'de, D>(deserializer: D) -> Result<Option<EneExtension>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::Object(map)) => {
+            Ok(serde_json::from_value(serde_json::Value::Object(map)).ok())
+        }
+        Some(_) => Ok(None),
+    }
 }
 
 impl schemars::JsonSchema for Extensions {
@@ -152,13 +181,17 @@ impl schemars::JsonSchema for Extensions {
 /// A reference to an external asset (VRM model, VRMA animation, etc.).
 pub struct CharacterAsset {
     /// The type of asset (e.g. `"vrm"`, `"vrma"`, `"png"`).
+    #[serde(default)]
     #[serde(rename = "type")]
     pub asset_type: String,
     /// URI pointing to the asset file.
+    #[serde(default)]
     pub uri: String,
     /// Human-readable name for the asset.
+    #[serde(default)]
     pub name: String,
     /// File extension (e.g. `"vrm"`, `"vrma"`).
+    #[serde(default)]
     pub ext: String,
 }
 

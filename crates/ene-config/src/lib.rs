@@ -17,6 +17,10 @@
 )]
 extern crate self as ene_config;
 
+/// Character card containers (PNG chunks, CHARX) and importing.
+pub mod card_import;
+/// App-specific asset types and URI resolution for card `assets`.
+pub mod character_assets;
 /// V3-format character card models with CBS macro expansion.
 pub mod character_card;
 /// Per-character configuration (position, motion, expressions).
@@ -40,6 +44,10 @@ pub mod resources;
 /// Centralized config store with dirty tracking for auto-save.
 pub mod store;
 
+pub use character_assets::{
+    DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH, EneAssetKind, ResolvedAssetUri, decode_data_payload,
+    resolve_asset_uri,
+};
 pub use character_card::{
     AffectBaseline, CharacterAsset, CharacterCardData, CharacterCardV3, EneExtension,
     ExpressionAffect, ExpressionDefinition, Lorebook, LorebookEntry, MacroContext, PolitenessLevel,
@@ -47,6 +55,7 @@ pub use character_card::{
     expand_cbs_macros_ctx, expand_cbs_macros_with, resolve_expressions, session_pick_seed,
 };
 
+pub use card_import::{ImportedCharacter, import_character_file};
 pub use character_config::{CharacterConfig, MotionCatalog, MotionEntry, MotionLayer};
 pub use characters::{
     CharacterEntry, discover_characters, load_character_card, resolve_character_path,

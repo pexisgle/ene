@@ -33,6 +33,54 @@ pub enum EneConfigError {
     /// assets tree.
     #[error("Unsafe character path: {0}")]
     UnsafeCharacterPath(String),
+    /// An asset URI uses a scheme this build does not consume.
+    ///
+    /// The Character Card Spec lets applications ignore unsupported URI
+    /// types, so callers treat this as "skip the asset", not a hard failure.
+    #[error("Unsupported asset URI scheme: {0}")]
+    UnsupportedAssetUriScheme(String),
+    /// An asset path escapes the card's directory.
+    ///
+    /// `assets[].uri` comes from third-party card distributions; traversal
+    /// components and absolute paths must not resolve outside the card.
+    #[error("Unsafe asset path: {0}")]
+    UnsafeAssetPath(String),
+    /// A malformed asset URI (embedded path, data URL, or http URL).
+    #[error("Invalid asset URI: {0}")]
+    InvalidAssetUri(String),
+    /// A data-URL payload exceeds the materialization size cap.
+    #[error("Asset data URI payload exceeds the {0} byte limit")]
+    AssetPayloadTooLarge(u64),
+    /// The card file format is not an importable container.
+    #[error("Unsupported character card file: {0}")]
+    UnsupportedCardFile(String),
+    /// A CHARX archive could not be read (corrupt or unsupported zip).
+    #[error("CHARX archive error: {0}")]
+    CharxError(#[from] zip::result::ZipError),
+    /// A CHARX archive has no `card.json` at its root.
+    #[error("CHARX archive is missing card.json")]
+    CharxMissingCard,
+    /// A CHARX archive entry path escapes the extraction directory.
+    #[error("Unsafe path in CHARX archive: {0}")]
+    CharxUnsafePath(String),
+    /// A CHARX archive contains an encrypted entry.
+    #[error("CHARX archive contains an encrypted entry: {0}")]
+    CharxEncrypted(String),
+    /// A CHARX archive exceeds the extraction size limits.
+    #[error("CHARX archive exceeds the extraction size limit at {0}")]
+    CharxTooLarge(String),
+    /// The PNG card has neither a `ccv3` nor a `chara` text chunk.
+    #[error("PNG card is missing a ccv3 or chara text chunk")]
+    PngCardMissingChunk,
+    /// The PNG card bytes are not a valid PNG file.
+    #[error("Invalid PNG card: {0}")]
+    InvalidPngCard(String),
+    /// The import target folder already exists.
+    #[error("Character import target already exists: {0}")]
+    CharacterImportExists(String),
+    /// The card has no usable name to derive an import folder from.
+    #[error("Character card has no usable name for import")]
+    CharacterImportUnnamed,
     /// I/O error while reading a character card file.
     #[error("Failed to read character card: {0}")]
     CardReadError(#[from] std::io::Error),
