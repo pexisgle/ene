@@ -1,5 +1,10 @@
 use ene_plugin::prelude::*;
+use std::fmt::Write;
 use std::sync::Arc;
+
+const DEFAULT_LINE_LIMIT: usize = 2000;
+const MAX_LINE_LENGTH: usize = 2000;
+const MAX_LINE_SUFFIX: &str = "... (line truncated)";
 
 #[derive(Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(
@@ -23,6 +28,12 @@ pub struct GetContentAction {
     /// script, style, noscript, iframe, svg, nav, header, footer, aside,
     /// template, code, canvas, audio, video, map, object, embed.
     trim: Option<bool>,
+    /// 1-indexed line number to start reading from.
+    #[serde(default)]
+    offset: Option<u64>,
+    /// Maximum number of lines to return (default 2000).
+    #[serde(default)]
+    limit: Option<u64>,
 
     #[tool(skip)]
     #[serde(skip, default = "crate::utils::default_store")]
@@ -35,6 +46,8 @@ impl GetContentAction {
             format: None,
             extract: None,
             trim: None,
+            offset: None,
+            limit: None,
             store,
         }
     }
@@ -73,11 +86,74 @@ impl GetContentAction {
             _ => ene_util::html::extract_markdown(&html, extract, trim),
         };
 
-        Ok(ene_util::truncate::Truncate::simple(&extracted, 15000))
+        paginate_content(&extracted, self.offset, self.limit)
     }
 }
 
+/// Windows `content` by line, mirroring `fs.read`'s continuation protocol:
+/// when the window does not cover the whole content, the returned text ends
+/// with a footer stating the omitted range and the exact offset to resume.
+fn paginate_content(
+    content: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> Result<String, ToolError> {
+    let lines: Vec<&str> = content.lines().collect();
+    let start = offset
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(1)
+        .saturating_sub(1);
+    if start > lines.len() && !(lines.is_empty() && start == 0) {
+        return Err(ToolError::execution_failed(format!(
+            "Offset {} is out of range for this content ({} lines)",
+            start + 1,
+            lines.len()
+        )));
+    }
+    let end = (start
+        + limit
+            .and_then(|v| usize::try_from(v).ok())
+            .unwrap_or(DEFAULT_LINE_LIMIT))
+    .min(lines.len());
+
+    let mut output = String::new();
+    for line in &lines[start..end] {
+        let line = if line.chars().count() > MAX_LINE_LENGTH {
+            let head: String = line.chars().take(MAX_LINE_LENGTH).collect();
+            format!("{head}{MAX_LINE_SUFFIX}")
+        } else {
+            (*line).to_string()
+        };
+        output.push_str(&line);
+        output.push('\n');
+    }
+
+    if end < lines.len() {
+        // `fmt::Error` is `Copy`, so `drop()` would itself trip
+        // `clippy::dropping_copy_types`; writing into a `String` via
+        // `fmt::Write` never actually fails.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "fmt::Write to a String is infallible in practice"
+        )]
+        let _ = write!(
+            output,
+            "\n(Showing lines {}-{} of {}. Use offset={} to continue.)",
+            start + 1,
+            end,
+            lines.len(),
+            end + 1
+        );
+    }
+
+    Ok(output)
+}
+
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test fixtures assert on the paginated output directly"
+)]
 mod tests {
     use super::*;
 
@@ -110,5 +186,74 @@ mod tests {
             matches!(result, Err(ToolError::InvalidArguments { .. })),
             "case-variant format must be rejected"
         );
+    }
+
+    #[test]
+    fn paginate_returns_full_content_when_within_limit() {
+        let result = paginate_content("a\nb\nc", None, None).unwrap();
+        assert_eq!(result, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn paginate_appends_continuation_footer_when_truncated() {
+        let content = (1..=5)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = paginate_content(&content, None, Some(3)).unwrap();
+        assert_eq!(
+            result,
+            "line1\nline2\nline3\n\n(Showing lines 1-3 of 5. Use offset=4 to continue.)"
+        );
+    }
+
+    #[test]
+    fn paginate_windows_from_offset() {
+        let content = (1..=6)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = paginate_content(&content, Some(4), Some(2)).unwrap();
+        assert_eq!(
+            result,
+            "line4\nline5\n\n(Showing lines 4-5 of 6. Use offset=6 to continue.)"
+        );
+    }
+
+    #[test]
+    fn paginate_returns_window_without_footer_at_end() {
+        let content = (1..=4)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = paginate_content(&content, Some(3), None).unwrap();
+        assert_eq!(result, "line3\nline4\n");
+    }
+
+    #[test]
+    fn paginate_rejects_offset_beyond_content() {
+        let result = paginate_content("a\nb", Some(5), None);
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("out of range"),
+            "out-of-range offset must explain itself, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn paginate_truncates_pathological_lines() {
+        let long = "x".repeat(MAX_LINE_LENGTH + 10);
+        let result = paginate_content(&long, None, None).unwrap();
+        assert_eq!(
+            result.chars().count(),
+            MAX_LINE_LENGTH + MAX_LINE_SUFFIX.chars().count() + 1
+        );
+        assert!(result.ends_with(&format!("{MAX_LINE_SUFFIX}\n")));
+    }
+
+    #[test]
+    fn paginate_empty_content_returns_empty() {
+        let result = paginate_content("", None, None).unwrap();
+        assert_eq!(result, "");
     }
 }
