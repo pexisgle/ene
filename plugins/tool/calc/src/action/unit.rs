@@ -2,6 +2,36 @@ use ene_plugin::prelude::*;
 
 use super::format_number;
 
+/// Physical dimension of a unit. Conversions are only allowed between
+/// units of the same dimension; the temperature scales are all tagged
+/// `Temperature` so their affine offsets never block each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dimension {
+    Length,
+    Mass,
+    Time,
+    Volume,
+    Speed,
+    Area,
+    Temperature,
+    Data,
+}
+
+impl Dimension {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Length => "length",
+            Self::Mass => "mass",
+            Self::Time => "time",
+            Self::Volume => "volume",
+            Self::Speed => "speed",
+            Self::Area => "area",
+            Self::Temperature => "temperature",
+            Self::Data => "data",
+        }
+    }
+}
+
 /// A unit definition anchored to its SI base unit.
 ///
 /// Converting `value` in this unit to SI: `si = (value + offset) * factor`.
@@ -10,8 +40,29 @@ use super::format_number;
 /// 459.67), so affine conversion is exact in both directions.
 #[derive(Debug, Clone, Copy)]
 struct UnitDef {
+    dimension: Dimension,
     factor: f64,
     offset: f64,
+}
+
+impl UnitDef {
+    /// A unit whose zero point coincides with the SI scale.
+    const fn linear(dimension: Dimension, factor: f64) -> Self {
+        Self {
+            dimension,
+            factor,
+            offset: 0.0,
+        }
+    }
+
+    /// A unit whose zero point is shifted from the SI scale.
+    const fn affine(dimension: Dimension, factor: f64, offset: f64) -> Self {
+        Self {
+            dimension,
+            factor,
+            offset,
+        }
+    }
 }
 
 /// Static unit catalog: canonical name, aliases, and the SI anchor.
@@ -24,205 +75,126 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
     (
         "mm",
         &["millimeter", "millimeters", "millimetre", "millimetres"],
-        UnitDef {
-            factor: 0.001,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Length, 0.001),
     ),
     (
         "cm",
         &["centimeter", "centimeters", "centimetre", "centimetres"],
-        UnitDef {
-            factor: 0.01,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Length, 0.01),
     ),
     (
         "m",
         &["meter", "meters", "metre", "metres"],
-        UnitDef {
-            factor: 1.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Length, 1.0),
     ),
     (
         "km",
         &["kilometer", "kilometers", "kilometre", "kilometres"],
-        UnitDef {
-            factor: 1000.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Length, 1000.0),
     ),
     (
         "in",
         &["inch", "inches"],
-        UnitDef {
-            factor: 0.0254,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Length, 0.0254),
     ),
     (
         "ft",
         &["foot", "feet"],
-        UnitDef {
-            factor: 0.3048,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Length, 0.3048),
     ),
     (
         "yd",
         &["yard", "yards"],
-        UnitDef {
-            factor: 0.9144,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Length, 0.9144),
     ),
     (
         "mi",
         &["mile", "miles"],
-        UnitDef {
-            factor: 1609.344,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Length, 1609.344),
     ),
     (
         "nmi",
         &["nautical_mile", "nautical_miles"],
-        UnitDef {
-            factor: 1852.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Length, 1852.0),
     ),
     // Mass (kg)
     (
         "mg",
         &["milligram", "milligrams"],
-        UnitDef {
-            factor: 1.0e-6,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Mass, 1.0e-6),
     ),
     (
         "g",
         &["gram", "grams", "gramme", "grammes"],
-        UnitDef {
-            factor: 0.001,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Mass, 0.001),
     ),
     (
         "kg",
         &["kilogram", "kilograms", "kilogramme", "kilogrammes"],
-        UnitDef {
-            factor: 1.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Mass, 1.0),
     ),
     (
         "t",
         &["tonne", "tonnes", "metric_ton", "metric_tons"],
-        UnitDef {
-            factor: 1000.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Mass, 1000.0),
     ),
     (
         "oz",
         &["ounce", "ounces"],
-        UnitDef {
-            factor: 0.028_349_523_125,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Mass, 0.028_349_523_125),
     ),
     (
         "lb",
         &["pound", "pounds"],
-        UnitDef {
-            factor: 0.453_592_37,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Mass, 0.453_592_37),
     ),
     // Time (s)
     (
         "ms",
         &["millisecond", "milliseconds"],
-        UnitDef {
-            factor: 0.001,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Time, 0.001),
     ),
     (
         "s",
         &["second", "seconds", "sec"],
-        UnitDef {
-            factor: 1.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Time, 1.0),
     ),
     (
         "min",
         &["minute", "minutes"],
-        UnitDef {
-            factor: 60.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Time, 60.0),
     ),
     (
         "h",
         &["hour", "hours", "hr"],
-        UnitDef {
-            factor: 3600.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Time, 3600.0),
     ),
-    (
-        "day",
-        &["days"],
-        UnitDef {
-            factor: 86_400.0,
-            offset: 0.0,
-        },
-    ),
+    ("day", &["days"], UnitDef::linear(Dimension::Time, 86_400.0)),
     (
         "week",
         &["weeks"],
-        UnitDef {
-            factor: 604_800.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Time, 604_800.0),
     ),
     // Volume (m³)
     (
         "ml",
         &["milliliter", "milliliters", "millilitre", "millilitres"],
-        UnitDef {
-            factor: 1.0e-6,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Volume, 1.0e-6),
     ),
     (
         "l",
         &["liter", "liters", "litre", "litres"],
-        UnitDef {
-            factor: 0.001,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Volume, 0.001),
     ),
     (
         "m3",
         &["cubic_meter", "cubic_meters", "cubic_metre", "cubic_metres"],
-        UnitDef {
-            factor: 1.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Volume, 1.0),
     ),
     (
         "gal_us",
         &["us_gallon", "us_gallons", "gallon_us"],
-        UnitDef {
-            factor: 0.003_785_411_784,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Volume, 0.003_785_411_784),
     ),
     (
         "gal_uk",
@@ -233,10 +205,7 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
             "imperial_gallon",
             "imperial_gallons",
         ],
-        UnitDef {
-            factor: 0.004_546_09,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Volume, 0.004_546_09),
     ),
     // Speed (m/s)
     (
@@ -248,10 +217,7 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
             "metres_per_second",
             "mps",
         ],
-        UnitDef {
-            factor: 1.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Speed, 1.0),
     ),
     (
         "km/h",
@@ -262,51 +228,33 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
             "kilometres_per_hour",
             "kph",
         ],
-        UnitDef {
-            factor: 1.0 / 3.6,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Speed, 1.0 / 3.6),
     ),
     (
         "mph",
         &["mile_per_hour", "miles_per_hour"],
-        UnitDef {
-            factor: 0.447_04,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Speed, 0.447_04),
     ),
     (
         "knot",
         &["knots", "kt"],
-        UnitDef {
-            factor: 1852.0 / 3600.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Speed, 1852.0 / 3600.0),
     ),
     (
         "ft/s",
         &["foot_per_second", "feet_per_second", "fps"],
-        UnitDef {
-            factor: 0.3048,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Speed, 0.3048),
     ),
     // Area (m²)
     (
         "mm2",
         &["square_millimeter", "square_millimeters"],
-        UnitDef {
-            factor: 1.0e-6,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Area, 1.0e-6),
     ),
     (
         "cm2",
         &["square_centimeter", "square_centimeters"],
-        UnitDef {
-            factor: 1.0e-4,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Area, 1.0e-4),
     ),
     (
         "m2",
@@ -316,59 +264,39 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
             "square_metre",
             "square_metres",
         ],
-        UnitDef {
-            factor: 1.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Area, 1.0),
     ),
     (
         "km2",
         &["square_kilometer", "square_kilometers"],
-        UnitDef {
-            factor: 1.0e6,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Area, 1.0e6),
     ),
     (
         "ha",
         &["hectare", "hectares"],
-        UnitDef {
-            factor: 1.0e4,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Area, 1.0e4),
     ),
     (
         "acre",
         &["acres"],
-        UnitDef {
-            factor: 4_046.856_422_4,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Area, 4_046.856_422_4),
     ),
     (
         "ft2",
         &["square_foot", "square_feet"],
-        UnitDef {
-            factor: 0.092_903_04,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Area, 0.092_903_04),
     ),
-    // Temperature (K). C/F use an offset so 0 °C == 273.15 K holds.
+    // Temperature (K). C/F use an offset so 0 °C == 273.15 K holds; all
+    // three scales share the Temperature dimension.
     (
         "k",
         &["kelvin", "kelvins"],
-        UnitDef {
-            factor: 1.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Temperature, 1.0),
     ),
     (
         "c",
         &["celsius", "celsius_degree", "celsius_degrees", "degc"],
-        UnitDef {
-            factor: 1.0,
-            offset: 273.15,
-        },
+        UnitDef::affine(Dimension::Temperature, 1.0, 273.15),
     ),
     (
         "f",
@@ -378,83 +306,53 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
             "fahrenheit_degrees",
             "degf",
         ],
-        UnitDef {
-            factor: 5.0 / 9.0,
-            offset: 459.67,
-        },
+        UnitDef::affine(Dimension::Temperature, 5.0 / 9.0, 459.67),
     ),
     // Data (byte)
     (
         "b",
         &["byte", "bytes"],
-        UnitDef {
-            factor: 1.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Data, 1.0),
     ),
     (
         "kb",
         &["kilobyte", "kilobytes"],
-        UnitDef {
-            factor: 1000.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Data, 1000.0),
     ),
     (
         "mb",
         &["megabyte", "megabytes"],
-        UnitDef {
-            factor: 1.0e6,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Data, 1.0e6),
     ),
     (
         "gb",
         &["gigabyte", "gigabytes"],
-        UnitDef {
-            factor: 1.0e9,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Data, 1.0e9),
     ),
     (
         "tb",
         &["terabyte", "terabytes"],
-        UnitDef {
-            factor: 1.0e12,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Data, 1.0e12),
     ),
     (
         "kib",
         &["kibibyte", "kibibytes"],
-        UnitDef {
-            factor: 1024.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Data, 1024.0),
     ),
     (
         "mib",
         &["mebibyte", "mebibytes"],
-        UnitDef {
-            factor: 1_048_576.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Data, 1_048_576.0),
     ),
     (
         "gib",
         &["gibibyte", "gibibytes"],
-        UnitDef {
-            factor: 1_073_741_824.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Data, 1_073_741_824.0),
     ),
     (
         "tib",
         &["tebibyte", "tebibytes"],
-        UnitDef {
-            factor: 1_099_511_627_776.0,
-            offset: 0.0,
-        },
+        UnitDef::linear(Dimension::Data, 1_099_511_627_776.0),
     ),
 ];
 
@@ -514,6 +412,16 @@ fn convert(value: f64, from: &str, to: &str) -> Result<String, ToolError> {
     let to_def = unit_def(to).ok_or_else(|| ToolError::InvalidArguments {
         message: format!("unknown unit '{to}'"),
     })?;
+
+    if from_def.dimension != to_def.dimension {
+        return Err(ToolError::InvalidArguments {
+            message: format!(
+                "cannot convert '{from}' ({}) to '{to}' ({}): dimensions differ",
+                from_def.dimension.label(),
+                to_def.dimension.label(),
+            ),
+        });
+    }
 
     // SI-anchored affine conversion: source to SI, SI to target.
     let si = (value + from_def.offset) * from_def.factor;
@@ -621,6 +529,28 @@ mod tests {
             err.to_string().contains("unknown unit 'lightyear'"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn dimension_mismatch_rejected() {
+        let err = convert_test(1.0, "km", "kg").unwrap_err();
+        assert!(err.to_string().contains("length"), "{err}");
+        assert!(err.to_string().contains("mass"), "{err}");
+        let err = convert_test(1.0, "h", "mi").unwrap_err();
+        assert!(err.to_string().contains("time"), "{err}");
+        assert!(err.to_string().contains("length"), "{err}");
+        let err = convert_test(60.0, "m", "min").unwrap_err();
+        assert!(err.to_string().contains("length"), "{err}");
+        assert!(err.to_string().contains("time"), "{err}");
+        let err = convert_test(1.0, "gal_us", "kg").unwrap_err();
+        assert!(err.to_string().contains("volume"), "{err}");
+        assert!(err.to_string().contains("mass"), "{err}");
+    }
+
+    #[test]
+    fn temperature_scales_share_dimension() {
+        let out = convert_test(32.0, "f", "k").unwrap();
+        assert_eq!(out, "32 f = 273.15 k");
     }
 
     #[test]

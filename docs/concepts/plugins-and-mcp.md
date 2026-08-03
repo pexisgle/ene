@@ -344,6 +344,12 @@ denylist blocks security-sensitive names (`LD_PRELOAD`, `LD_AUDIT`,
 `DYLD_INSERT_LIBRARIES`, `ENE_PLUGIN_SOCKET`, etc.) regardless of
 configuration.
 
+A plugin's env fallback only works when the entry forwards it: for example
+`calc.currency_convert` falls back to `EXCHANGERATE_HOST_API_KEY`, but the
+default `calc` entry forwards no variables — set
+`plugins.list.calc.env_passthrough = ["EXCHANGERATE_HOST_API_KEY"]`, or
+configure `plugins.list.calc.config.exchangerate_host_access_key` instead.
+
 MCP stdio servers support the same `env_passthrough` field in their
 `plugins.mcp_servers` entry for parity.
 

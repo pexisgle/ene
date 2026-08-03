@@ -41,8 +41,9 @@ fn default_config() -> Arc<RwLock<CalcConfig>> {
 ///
 /// Requires an access key, configured either in the plugin config
 /// (`plugins.list.calc.config.exchangerate_host_access_key`) or in the
-/// `EXCHANGERATE_HOST_API_KEY` environment variable passed through the
-/// plugin entry's `env_passthrough`. `from`/`to` are ISO 4217 codes
+/// `EXCHANGERATE_HOST_API_KEY` environment variable — which the host only
+/// forwards when the plugin entry's `env_passthrough` lists it (the
+/// default entry forwards no variables). `from`/`to` are ISO 4217 codes
 /// (e.g. USD, EUR, JPY).
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
@@ -95,16 +96,19 @@ impl CurrencyConvertAction {
             .build()
             .map_err(|e| ToolError::execution_failed(format!("HTTP client init failed: {e}")))?;
 
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| ToolError::execution_failed(format!("HTTP request failed: {e}")))?;
+        let response = client.get(url).send().await.map_err(|e| {
+            ToolError::execution_failed(format!(
+                "HTTP request failed: {}",
+                sanitize_reqwest_error(e)
+            ))
+        })?;
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| ToolError::execution_failed(format!("Failed to read response: {e}")))?;
+        let body = response.text().await.map_err(|e| {
+            ToolError::execution_failed(format!(
+                "Failed to read response: {}",
+                sanitize_reqwest_error(e)
+            ))
+        })?;
         if !status.is_success() {
             return Err(ToolError::execution_failed(format!(
                 "exchangerate.host returned HTTP {status}"
@@ -160,6 +164,14 @@ fn build_convert_url(
         url.query_pairs_mut().append_pair("access_key", key);
     }
     Ok(url)
+}
+
+/// Renders a reqwest error without its request URL, whose query string
+/// carries the exchangerate.host access key. reqwest's Display appends
+/// `for url (...)`, so a raw `{e}` would leak the key into logs and the
+/// tool result the model sees.
+fn sanitize_reqwest_error(e: reqwest::Error) -> String {
+    e.without_url().to_string()
 }
 
 fn format_convert_response(
@@ -296,5 +308,36 @@ mod tests {
             CurrencyConvertAction::spec().name.as_str(),
             "calc.currency_convert"
         );
+    }
+
+    #[test]
+    fn convert_url_carries_key_in_query() {
+        let url = build_convert_url("USD", "EUR", 100.0, Some("secret")).unwrap();
+        assert!(url.as_str().contains("access_key=secret"), "{url}");
+    }
+
+    #[tokio::test]
+    async fn request_error_does_not_leak_access_key() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(socket);
+        });
+
+        let url = reqwest::Url::parse(&format!(
+            "http://{addr}/convert?from=USD&to=EUR&amount=1&access_key=SECRET_KEY"
+        ))
+        .unwrap();
+        let err = reqwest::Client::new().get(url).send().await.unwrap_err();
+        server.await.unwrap();
+
+        // The raw Display carries the URL; the sanitized message must not.
+        assert!(err.to_string().contains("SECRET_KEY"), "{err}");
+        let sanitized = sanitize_reqwest_error(err);
+        assert!(!sanitized.contains("SECRET_KEY"), "{sanitized}");
+        assert!(!sanitized.contains("access_key"), "{sanitized}");
     }
 }

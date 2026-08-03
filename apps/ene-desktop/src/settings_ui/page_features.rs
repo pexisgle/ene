@@ -12,7 +12,7 @@ use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 
 /// Known tool binary names shown even when absent from the saved map.
-const DEFAULT_TOOL_NAMES: &[&str] = &["app", "browser", "fs", "utility", "web"];
+const DEFAULT_TOOL_NAMES: &[&str] = &["app", "browser", "calc", "fs", "utility", "web"];
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -454,11 +454,12 @@ fn provider_display(provider: &str) -> String {
 
 fn tool_display_name(name: &str) -> &str {
     match name {
-        "fs" => "Filesystem",
-        "web" => "Web",
-        "browser" => "Browser",
-        "utility" => "Utility",
         "app" => "App",
+        "browser" => "Browser",
+        "calc" => "Calculator",
+        "fs" => "Filesystem",
+        "utility" => "Utility",
+        "web" => "Web",
         other => other,
     }
 }
@@ -480,6 +481,7 @@ mod tests {
 
     #[test]
     fn tool_display_name_covers_builtins() {
+        assert_eq!(tool_display_name("calc"), "Calculator");
         assert_eq!(tool_display_name("fs"), "Filesystem");
         assert_eq!(tool_display_name("unknown"), "unknown");
     }

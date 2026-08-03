@@ -343,6 +343,12 @@ trust gate が依拠しているもの) を暗黙に置き換えることを防�
 (`LD_PRELOAD`、`LD_AUDIT`、`DYLD_INSERT_LIBRARIES`、`ENE_PLUGIN_SOCKET` など)
 は設定に関係なくブロックする組み込み拒否リストが適用されます。
 
+プラグインの環境変数フォールバックは、そのエントリが転送して初めて機能します。
+たとえば `calc.currency_convert` は `EXCHANGERATE_HOST_API_KEY` にフォール
+バックしますが、デフォルトの `calc` エントリは変数を一切転送しないため、
+`plugins.list.calc.env_passthrough = ["EXCHANGERATE_HOST_API_KEY"]` を設定するか、
+代わりに `plugins.list.calc.config.exchangerate_host_access_key` を構成してください。
+
 MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passthrough`
 フィールドをサポートしています。
 

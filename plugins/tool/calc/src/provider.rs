@@ -11,7 +11,9 @@ use std::sync::{Arc, RwLock};
 #[serde(default, rename_all = "snake_case")]
 pub struct CalcConfig {
     /// exchangerate.host API access key, used by `calc.currency_convert`.
-    /// Falls back to the `EXCHANGERATE_HOST_API_KEY` environment variable.
+    /// Falls back to the `EXCHANGERATE_HOST_API_KEY` environment variable,
+    /// which the host only forwards when `plugins.list.calc.env_passthrough`
+    /// lists it — the default plugin entry forwards no variables.
     pub exchangerate_host_access_key: String,
 }
 
