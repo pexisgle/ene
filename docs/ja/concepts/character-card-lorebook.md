@@ -56,7 +56,9 @@ CCv3 キャラクターカードには **ロアブック**（`character_book`）
 
 `constant: true` のエントリは**決して落とされません** — カードの常時注入契約
 です。`token_budget` 未設定なら、マッチした全エントリがサイズに関わらず注入
-されます。
+されます。`@@ignore_on_max_context` が効くのは `token_budget` が設定された
+ときだけです: 予算がなければ何も削られないため、フラグ付きエントリも他と
+同様に注入され続けます。
 
 ### 深さ配置
 
@@ -124,7 +126,7 @@ CCv3 キャラクターカードには **ロアブック**（`character_book`）
 | デコレータ | Ene の挙動 |
 |---|---|
 | `@@role assistant\|system\|user` | 深さ配置メッセージ（`@@depth` / `@@reverse_depth`）のロールを設定します。デフォルトは `system`。 |
-| `@@ignore_on_max_context` | 注入エントリが `token_budget` を超えたとき最優先で落とされます（[トークン予算](#トークン予算) 参照）。 |
+| `@@ignore_on_max_context` | 注入エントリが `token_budget` を超えたとき最優先で落とされます（[トークン予算](#トークン予算) 参照）; 予算未設定時は無効です。 |
 | `@@disable_ui_prompt post_history_instructions\|system_prompt` | **パースのみ・配線なし** — 有効化するとカードが Ene の感情表現出力契約を無効化できてしまうためです（コアの製品保証）。 |
 
 ## フォールバックチェーン（`@@@`）

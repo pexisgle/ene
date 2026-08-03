@@ -98,6 +98,12 @@ pub async fn execute_hybrid_recall(
         gather_pending_candidates(input.store, &search_options, &mut gathered, pending_limit).await;
     }
 
+    // Lorebook rows are card data with a guaranteed-injection path of their
+    // own (prompt composition), so embedding-similarity recall must not
+    // surface them again inside the memory sections. Filtering before scoring
+    // and MMR keeps them from consuming search, score, and diversify slots.
+    gathered.retain(|c| !is_lorebook_memory_row(c.item.source, c.item.source_ref.as_deref()));
+
     let mut scored = ene_rag::score_and_rank(&search_options, gathered);
 
     // Close the self-reflection feedback loop: reflections are excluded
@@ -109,12 +115,7 @@ pub async fn execute_hybrid_recall(
     let diversify_options = MemoryDiversifyOptions::from_config(&config.memory);
     let diversified = MemoryDiversifyPipeline::diversify(scored, &plan, diversify_options);
 
-    let mut recalled = RecallResultMapper::map(diversified);
-
-    // Lorebook rows are card data with a guaranteed-injection path of their
-    // own (prompt composition), so embedding-similarity recall must not
-    // surface them again inside the memory sections.
-    recalled.retain(|m| !is_lorebook_memory_row(m.item.source, m.item.source_ref.as_deref()));
+    let recalled = RecallResultMapper::map(diversified);
 
     Ok((plan, recalled))
 }
@@ -266,6 +267,79 @@ mod tests {
                 .iter()
                 .all(|m| m.item.content != "The world is always sunny."),
             "lorebook rows must not surface through recall; the injection path owns them"
+        );
+    }
+
+    #[tokio::test]
+    async fn lorebook_rows_do_not_consume_recall_slots() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let embedding = [1.0, 0.0, 0.0, 0.0];
+
+        // A lorebook row whose embedding matches the query exactly. Without
+        // the pre-MMR filter it would win the single seat and then be removed,
+        // leaving nothing recalled at all.
+        let lorebook = NewMemoryItem {
+            scope: MemoryScope::Character,
+            character_id: "Ene".into(),
+            user_id: String::new(),
+            kind: MemoryKind::Semantic,
+            title: "World tone".into(),
+            content: "The world is always sunny.".into(),
+            source: MemorySource::Ccv3,
+            source_ref: Some("ccv3:lorebook:constant".into()),
+            confidence: MemoryConfidence::new(1.0),
+            salience: MemorySalience::new(1.0),
+            affect: Default::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: true,
+            created_at: None,
+            commitment_id: None,
+        };
+        insert_with_embedding(&store, &lorebook, &embedding).await;
+
+        let normal = NewMemoryItem {
+            title: "user preference".into(),
+            content: "The user likes tea.".into(),
+            source: MemorySource::Conversation,
+            source_ref: None,
+            ..lorebook.clone()
+        };
+        insert_with_embedding(&store, &normal, &[0.5, 0.0, 0.0, 0.0]).await;
+
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+        config.memory.recall_result_limit = 1;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "How is the weather?",
+            recent_turns: &[],
+            query_embedding: &embedding,
+            embedding_model: "mock",
+            affect: None,
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
+        assert_eq!(
+            recalled.len(),
+            1,
+            "the lone recall slot must go to a real memory, not a lorebook row"
+        );
+        assert_eq!(
+            recalled[0].item.content, "The user likes tea.",
+            "the lower-scoring normal memory must take the seat the lorebook row would have consumed"
         );
     }
 

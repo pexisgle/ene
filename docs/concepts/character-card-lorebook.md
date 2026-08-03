@@ -56,7 +56,9 @@ until it fits:
 
 `constant: true` entries are **never** dropped — they are the card's
 always-injected contract. With no `token_budget`, all matched entries are
-injected regardless of size.
+injected regardless of size. `@@ignore_on_max_context` only takes effect
+under a `token_budget`: without one nothing is ever trimmed, so flagged
+entries stay in the prompt like any other.
 
 ### Depth placement
 
@@ -126,7 +128,7 @@ pipeline, derived from the session history (see
 | Decorator | Ene behavior |
 |---|---|
 | `@@role assistant\|system\|user` | Sets the role of depth-injected messages (`@@depth` / `@@reverse_depth`); default `system`. |
-| `@@ignore_on_max_context` | Trimmed first when the injected entries exceed `token_budget` (see [Token budget](#token-budget)). |
+| `@@ignore_on_max_context` | Trimmed first when the injected entries exceed `token_budget` (see [Token budget](#token-budget)); inert without one. |
 | `@@disable_ui_prompt post_history_instructions\|system_prompt` | **Parsed, not wired** — honoring it would let cards disable Ene's expression output contract, which is a core product guarantee. |
 
 ## Fallback chains (`@@@`)

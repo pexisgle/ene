@@ -68,9 +68,13 @@ struct SelectedEntry<'a> {
 
 /// Build the guaranteed-injection content for the current turn.
 ///
-/// `history` is the session history *before* the current user message; the
-/// last `scan_depth`-scaled window of it plus `user_input` forms the scan
-/// text. Sticky decorator state is derived from `history`: an entry counts as
+/// `history` is the stream-start snapshot: for user turns it already ends
+/// with the current user message (the actor appends it before prompt
+/// composition), and that trailing entry is excluded from the scan so
+/// `user_input` appears exactly once. Snapshots without it (proactive turns,
+/// direct callers) pass through unchanged. The last `scan_depth`-scaled
+/// window of the remaining turns plus `user_input` forms the scan text.
+/// Sticky decorator state is derived from the history: an entry counts as
 /// previously matched when a strictly earlier turn accepted it with that
 /// turn's assistant count, so the state holds while the matching turn stays
 /// within the retained history.
@@ -91,7 +95,7 @@ pub fn build_lorebook_injection(
     let char_name = card.data.get_character_name();
     let scan_depth = book.scan_depth.unwrap_or(4);
     let regex_cache = compile_lorebook_regex_cache(book);
-    let base_turns = history_turns(history);
+    let base_turns = without_current_user_message(history_turns(history), user_input);
     let base_scan = build_lorebook_scan_text(user_input, &base_turns, scan_depth);
     let ctx = ScanContext {
         base_turns: &base_turns,
@@ -107,10 +111,15 @@ pub fn build_lorebook_injection(
     }
 
     if book.recursive_scanning.unwrap_or(false) && !selected.is_empty() {
-        select_recursive(&mut selected, book, &ctx, char_name, user_name);
+        select_recursive(&mut selected, book, &ctx, char_name, user_name, &base_scan);
     }
 
     selected = apply_token_budget(selected, book.token_budget);
+
+    // The spec requires empty content to inject nothing; decorator-only
+    // entries (`@@activate` without a body, `constant` with no text) drop
+    // out here.
+    selected.retain(|s| !s.content.trim().is_empty());
 
     // Sections and same-depth messages follow `insertion_order` (ties broken
     // by card position, keeping the ordering stable).
@@ -247,16 +256,15 @@ const fn sticky_decorators_active(decorators: &EntryDecorators) -> bool {
 }
 
 /// Whether an earlier turn accepted `entry` (keys + filters + gates at that
-/// turn's assistant count). A turn is "earlier" when it is strictly before
-/// the last history entry, which is the one the current user input follows.
+/// turn's assistant count). Every retained turn precedes the current user
+/// input, so any of them can carry the previous-match record.
 fn entry_previously_matched(
     entry: &LorebookEntry,
     index: usize,
     decorators: &EntryDecorators,
     ctx: &ScanContext<'_>,
 ) -> bool {
-    let last = ctx.base_turns.len().saturating_sub(1);
-    (0..last).any(|pos| {
+    (0..ctx.base_turns.len()).any(|pos| {
         let prior = &ctx.base_turns[..pos];
         let scan = build_lorebook_scan_text(
             ctx.base_turns[pos].content,
@@ -280,20 +288,22 @@ fn entry_previously_matched(
     })
 }
 
-/// Extend the selection with entries whose keys match inside already-selected
-/// content (`recursive_scanning`), per the spec's allow-list.
+/// Extend the selection with entries whose keys match inside the base scan
+/// text extended with already-selected content (`recursive_scanning`), per
+/// the spec's allow-list. The base scan stays in the evaluation window so
+/// `@@exclude_keys` hits from the first pass remain effective; entries with
+/// `@@scan_depth` still re-evaluate against their own window only.
 fn select_recursive<'a>(
     selected: &mut Vec<SelectedEntry<'a>>,
     book: &'a ene_config::Lorebook,
     ctx: &ScanContext<'_>,
     char_name: &str,
     user_name: &str,
+    base_scan: &str,
 ) {
-    let mut extended = String::new();
+    let mut extended = String::from(base_scan);
     for item in selected.iter() {
-        if !extended.is_empty() {
-            extended.push('\n');
-        }
+        extended.push('\n');
         extended.push_str(&item.content);
     }
     let selected_indices: std::collections::HashSet<usize> =
@@ -353,6 +363,23 @@ fn history_turns(history: &[HistoryEntry]) -> Vec<RecallTurn<'_>> {
             content: entry.content.as_str(),
         })
         .collect()
+}
+
+/// Strip the trailing current user message the stream-start history already
+/// contains, so the scan window counts it once. Snapshots without it
+/// (proactive turns, direct callers) pass through unchanged.
+fn without_current_user_message<'a>(
+    mut turns: Vec<RecallTurn<'a>>,
+    user_input: &str,
+) -> Vec<RecallTurn<'a>> {
+    if !user_input.is_empty()
+        && turns
+            .last()
+            .is_some_and(|t| t.role == "user" && t.content == user_input)
+    {
+        turns.pop();
+    }
+    turns
 }
 
 /// Whether the entry's `position` field places it before the character
@@ -418,6 +445,14 @@ fn apply_token_budget(
                 "token_budget"
             },
             "Dropped lorebook entry over token budget"
+        );
+    }
+    if total.saturating_sub(dropped_tokens) > budget {
+        tracing::warn!(
+            component = "LorebookInjection",
+            budget,
+            remaining_tokens = total.saturating_sub(dropped_tokens),
+            "Lorebook entries exceed token_budget; only non-droppable (constant) entries remain"
         );
     }
     selected
@@ -583,7 +618,7 @@ mod tests {
 
     #[test]
     fn position_decorator_overrides_position_field() {
-        let mut position = entry(&["dragon"], "@@position before_desc", false, 1);
+        let mut position = entry(&["dragon"], "@@position before_desc\nLore body.", false, 1);
         position.position = Some("after_char".into());
         let book = Lorebook {
             entries: vec![position],
@@ -592,6 +627,7 @@ mod tests {
         let card = card_with(book);
         let injection = build_lorebook_injection(&card, "User", "dragon", &[]);
         assert_eq!(injection.before_char.len(), 1);
+        assert!(injection.before_char[0].contains("Lore body"));
         assert!(injection.after_char.is_empty());
     }
 
@@ -761,6 +797,106 @@ mod tests {
                 .any(|c| c.contains("Lost city lore")),
             "recursive scanning should match keys inside selected content"
         );
+    }
+
+    #[test]
+    fn recursive_scanning_keeps_base_scan_in_the_extended_window() {
+        let book = Lorebook {
+            recursive_scanning: Some(true),
+            entries: vec![
+                entry(&["dragon"], "The old map marks the lost city.", false, 1),
+                entry(
+                    &["lost city"],
+                    "@@exclude_keys dragon\nLost city lore.",
+                    false,
+                    2,
+                ),
+            ],
+            ..Default::default()
+        };
+        let card = card_with(book);
+        let injection = build_lorebook_injection(&card, "User", "dragon", &[]);
+        assert!(injection.after_char.iter().any(|c| c.contains("old map")));
+        assert!(
+            injection
+                .after_char
+                .iter()
+                .all(|c| !c.contains("Lost city lore")),
+            "@@exclude_keys hits in the base scan text must stay effective in the recursive pass"
+        );
+    }
+
+    #[test]
+    fn current_user_message_in_history_scanned_once() {
+        let book = Lorebook {
+            scan_depth: Some(1),
+            entries: vec![entry(&["alpha"], "Alpha lore.", false, 1)],
+            ..Default::default()
+        };
+        let card = card_with(book);
+        // Production shape: the stream-start history ends with the current
+        // user message. Without excluding it, the depth-1 window (the last
+        // two messages) would skip "alpha" and match nothing.
+        let history = history_of(&[
+            ("alpha", Role::User),
+            ("beta", Role::Assistant),
+            ("dragon", Role::User),
+        ]);
+        let injection = build_lorebook_injection(&card, "User", "dragon", &history);
+        assert!(
+            injection
+                .after_char
+                .iter()
+                .any(|c| c.contains("Alpha lore")),
+            "the scan window must cover the turns before the current user message"
+        );
+    }
+
+    #[test]
+    fn sticky_state_reads_production_shape_history() {
+        let book = Lorebook {
+            scan_depth: Some(1),
+            entries: vec![entry(
+                &["sword"],
+                "@@keep_activate_after_match\nThe sword remembers.",
+                false,
+                1,
+            )],
+            ..Default::default()
+        };
+        let card = card_with(book);
+        let history = history_of(&[
+            ("my sword is here", Role::User),
+            ("a reply", Role::Assistant),
+            ("tell me about home", Role::User),
+        ]);
+        let injection = build_lorebook_injection(&card, "User", "tell me about home", &history);
+        assert!(
+            injection
+                .after_char
+                .iter()
+                .any(|c| c.contains("sword remembers")),
+            "a once-matched @@keep_activate_after_match entry stays injected from the production history shape"
+        );
+    }
+
+    #[test]
+    fn decorator_only_entry_injects_nothing() {
+        let book = Lorebook {
+            entries: vec![
+                entry(&["dragon"], "@@activate", false, 1),
+                entry(&["castle"], "", false, 2),
+                entry(&[], "", true, 3),
+            ],
+            ..Default::default()
+        };
+        let card = card_with(book);
+        let injection = build_lorebook_injection(&card, "User", "dragon castle", &[]);
+        assert!(
+            injection.after_char.is_empty() && injection.before_char.is_empty(),
+            "entries with empty content after decorator stripping must not be injected"
+        );
+        assert!(injection.messages.is_empty());
     }
 
     #[test]
