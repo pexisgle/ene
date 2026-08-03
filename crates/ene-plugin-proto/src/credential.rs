@@ -113,6 +113,20 @@ pub enum CredentialResponse {
     },
 }
 
+/// Header injection specification carried alongside a resolved API key.
+///
+/// Mirrors the declaration's `header` block ([`HeaderSpec`] in
+/// `ene-connector`) so the plugin-side client can apply the declared header
+/// name/format without re-parsing schemas. `format` is a `{value}` template
+/// the client substitutes the secret into.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireHeaderSpec {
+    /// Header name, e.g. `x-api-key` or `Authorization`.
+    pub name: String,
+    /// Template containing the `{value}` placeholder, e.g. `Bearer {value}`.
+    pub format: String,
+}
+
 /// A resolved credential payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -121,6 +135,10 @@ pub enum ResolvedCredential {
     ApiKey {
         /// The API key (secret).
         key: WireSecret,
+        /// Declared header override for the client to inject; `None` means
+        /// the client falls back to `x-api-key` + the raw value.
+        #[serde(default)]
+        header: Option<WireHeaderSpec>,
     },
     /// A bearer/access token (`Authorization: Bearer`-style authentication).
     Bearer {
@@ -218,10 +236,42 @@ mod tests {
     fn resolved_api_key_roundtrip() {
         let resolved = ResolvedCredential::ApiKey {
             key: WireSecret::new("sk-test"),
+            header: None,
         };
         let json = serde_json::to_string(&resolved).unwrap();
         assert!(json.contains("api_key"));
         assert!(json.contains("sk-test"));
+        let back: ResolvedCredential = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, resolved);
+    }
+
+    #[test]
+    fn resolved_api_key_without_header_deserializes() {
+        // Wire compatibility: a host built before the header field existed
+        // omits it entirely; the `#[serde(default)]` must keep old frames
+        // decoding.
+        let json = r#"{"kind":"api_key","key":"sk-old-host"}"#;
+        let resolved: ResolvedCredential = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            resolved,
+            ResolvedCredential::ApiKey {
+                key: WireSecret::new("sk-old-host"),
+                header: None,
+            }
+        );
+    }
+
+    #[test]
+    fn resolved_api_key_header_roundtrips() {
+        let resolved = ResolvedCredential::ApiKey {
+            key: WireSecret::new("sk-test"),
+            header: Some(WireHeaderSpec {
+                name: "X-Custom-Auth".into(),
+                format: "Bearer {value}".into(),
+            }),
+        };
+        let json = serde_json::to_string(&resolved).unwrap();
+        assert!(json.contains("X-Custom-Auth"));
         let back: ResolvedCredential = serde_json::from_str(&json).unwrap();
         assert_eq!(back, resolved);
     }

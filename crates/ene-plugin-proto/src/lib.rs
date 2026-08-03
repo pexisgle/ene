@@ -88,8 +88,8 @@ pub use capabilities::{
 };
 /// Credential host-service wire types and framing helpers.
 pub use credential::{
-    CredentialErrorCode, CredentialRequest, CredentialResponse, ResolvedCredential, WireSecret,
-    read_credential_request, read_credential_response, write_credential_request,
+    CredentialErrorCode, CredentialRequest, CredentialResponse, ResolvedCredential, WireHeaderSpec,
+    WireSecret, read_credential_request, read_credential_response, write_credential_request,
     write_credential_response,
 };
 /// Plugin error type.
