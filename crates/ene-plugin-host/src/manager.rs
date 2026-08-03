@@ -1442,6 +1442,7 @@ impl PluginHostManager {
             embedding_factories: HashMap::new(),
             embedding_factory_plugins: HashMap::new(),
             credential_registry: CredentialRegistry::new(),
+            capability_registry: CapabilityRegistry::new(),
             health_tasks: Vec::new(),
             health_rx: None,
             shutdown_on_drop: false,
