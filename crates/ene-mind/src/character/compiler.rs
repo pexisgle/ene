@@ -253,13 +253,8 @@ const fn politeness_phrase(politeness: PolitenessLevel, ja: bool) -> &'static st
 /// Renders the Identity Kernel's `Speech style` line from the card's
 /// [`ene_config::SpeechStyleDefinition`].
 ///
-/// The speech style is the card author's structured declaration — the
-/// hard-coded keyword inference it replaces could never detect Japanese
-/// wording like `簡潔に`, and the fallback that used the system prompt's first
-/// 160 characters presented unrelated text as the character's speech style.
 /// Cards without a definition (or with an empty one) get the concise default.
-/// Labels and the default follow `lang`; the values themselves are the card
-/// author's own words and keep their language.
+/// Labels and the default follow `lang`; values keep the card author's language.
 fn render_speech_style(card: &CharacterCardV3, lang: &str) -> String {
     let Some(speech) = card.data.get_ene_extension().and_then(|ext| ext.speech) else {
         return default_speech_style(lang).to_string();
@@ -289,8 +284,14 @@ fn render_speech_style(card: &CharacterCardV3, lang: &str) -> String {
     if let Some(politeness) = speech.politeness {
         parts.push(politeness_phrase(politeness, ja).to_string());
     }
-    if !speech.verbal_tics.is_empty() {
-        let tics = speech.verbal_tics.join(if ja { "、" } else { ", " });
+    let verbal_tics: Vec<&str> = speech
+        .verbal_tics
+        .iter()
+        .map(String::as_str)
+        .filter(|tic| !tic.trim().is_empty())
+        .collect();
+    if !verbal_tics.is_empty() {
+        let tics = verbal_tics.join(if ja { "、" } else { ", " });
         parts.push(format!(
             "{} {tics}",
             if ja { "口癖" } else { "verbal tics" }
@@ -572,6 +573,30 @@ mod tests {
     }
 
     #[test]
+    fn speech_style_language_aliases_and_fallbacks_are_resolved() {
+        let card = CharacterCardV3::default();
+        for language in ["ja", "ja-JP", "jp"] {
+            let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, language);
+            assert!(kernel.text.contains("Speech style: 自然で温かく"));
+        }
+        for language in ["fr", ""] {
+            let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, language);
+            assert!(kernel.text.contains("Speech style: natural, warm"));
+        }
+    }
+
+    #[test]
+    fn speech_style_ignores_empty_verbal_tics() {
+        let card = card_with_speech(SpeechStyleDefinition {
+            verbal_tics: vec![String::new(), "  ".into(), "だよね".into()],
+            ..SpeechStyleDefinition::default()
+        });
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "ja");
+        assert!(kernel.text.contains("口癖 だよね"));
+        assert!(!kernel.text.contains("口癖 、"));
+    }
+
+    #[test]
     fn macros_expanded_in_kernel() {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
@@ -672,6 +697,7 @@ mod tests {
         assert!(kernel.text.contains("Name: Alicia"));
         assert!(kernel.text.contains("cheerful") || kernel.text.contains("Friendly"));
         assert!(kernel.text.contains("Hard instruction: remain Alicia"));
+        assert!(kernel.text.contains("Speech style: short responses"));
     }
 
     #[test]

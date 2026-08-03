@@ -19,6 +19,9 @@
     "character_version": "1.0",
     "extensions": {
       "ene": {
+        "speech": {
+          "length": "short"
+        },
         "motion_catalog": {
           "motions": [
           {
