@@ -287,8 +287,11 @@ fn charx_card_json(bytes: &[u8]) -> Result<serde_json::Value, EneConfigError> {
     let mut archive =
         ZipArchive::new(std::io::Cursor::new(bytes)).map_err(EneConfigError::CharxError)?;
     for index in 0..archive.len() {
-        let mut file = archive
-            .by_index(index)
+        // `by_index` refuses encrypted entries up front, so the encryption
+        // probe goes through `by_index_raw` and the read below re-opens
+        // with `by_index`.
+        let file = archive
+            .by_index_raw(index)
             .map_err(EneConfigError::CharxError)?;
         if file.name() != "card.json" {
             continue;
@@ -296,6 +299,9 @@ fn charx_card_json(bytes: &[u8]) -> Result<serde_json::Value, EneConfigError> {
         if file.encrypted() {
             return Err(EneConfigError::CharxEncrypted("card.json".to_string()));
         }
+        let mut file = archive
+            .by_index(index)
+            .map_err(EneConfigError::CharxError)?;
         let mut content = Vec::new();
         file.by_ref()
             .take(MAX_CHARX_ENTRY_BYTES + 1)
@@ -437,7 +443,7 @@ fn validate_charx_entries(
     let mut total = 0u64;
     for index in 0..archive.len() {
         let file = archive
-            .by_index(index)
+            .by_index_raw(index)
             .map_err(EneConfigError::CharxError)?;
         let name = file.name().to_string();
         validate_zip_entry_name(&name)?;

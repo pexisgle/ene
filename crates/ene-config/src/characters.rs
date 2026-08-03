@@ -271,9 +271,7 @@ fn declared_asset_paths(
 
 /// `true` when the path names a regular file without going through symlinks.
 fn is_regular_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_file())
-        .unwrap_or(false)
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
 /// Reads the per-character default motion from `character_settings.json`.
