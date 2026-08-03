@@ -1365,12 +1365,12 @@ mod tests {
         card.data.extensions.ene = Some(EneExtension {
             relationship_stages: Some(vec![ene_config::RelationshipStage {
                 threshold: 0.0,
-                label: "".into(),
+                label: String::new(),
                 tone: "   ".into(),
             }]),
             time_periods: Some(vec![ene_config::TimePeriodBehavior {
                 period: ene_config::TimePeriod::Night,
-                behavior: "".into(),
+                behavior: String::new(),
             }]),
             scene_behaviors: Some(vec![ene_config::SceneBehavior {
                 name: "working".into(),

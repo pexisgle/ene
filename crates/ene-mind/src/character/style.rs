@@ -502,7 +502,7 @@ mod tests {
         let selected = select_labeled(
             &examples,
             "I'm really angry right now",
-            StyleIntent::Greeting,
+            StyleIntent::SeriousExplanation,
             1,
         );
         assert_eq!(selected[0].text, "Labeled angry reply");
@@ -510,7 +510,7 @@ mod tests {
         let first_meeting = select_labeled(
             &examples,
             "It's our first meeting, right?",
-            StyleIntent::Greeting,
+            StyleIntent::SeriousExplanation,
             1,
         );
         assert_eq!(first_meeting[0].text, "Labeled first-meeting reply");
@@ -548,7 +548,7 @@ mod tests {
         card.data.extensions.ene = Some(ene_config::EneExtension {
             style_examples: Some(vec![ene_config::LabeledStyleExample {
                 id: "e-1".into(),
-                label: "".into(),
+                label: String::new(),
                 text: "Empty label".into(),
             }]),
             ..ene_config::EneExtension::default()
