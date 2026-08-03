@@ -2,7 +2,6 @@
 
 use crate::config::ProactiveConfig;
 use crate::proactive::ProactiveContext;
-use crate::proactive::prompt::parse_affect_summary;
 use std::fmt;
 
 /// Reasons a proactive tick is suppressed without calling the LLM.
@@ -63,14 +62,13 @@ pub fn evaluate_deterministic_gates(
         return Err(GateRejectReason::NoSources);
     }
 
-    // Unknown fatigue (no affect state or a legacy three-axis line) never
-    // suppresses: only a measured value at or above the threshold does.
-    if let Some(fatigue) = context
-        .affect_summary
-        .as_deref()
-        .and_then(parse_affect_summary)
-        .and_then(|summary| summary.fatigue)
-        && fatigue >= f64::from(config.fatigue_suppression_threshold)
+    // Unknown fatigue (no affect state) never suppresses: only a measured
+    // value at or above the threshold does. The gate compares the unrounded
+    // source value, not the prompt's `{:.2}` wire value, so it stays aligned
+    // with `compute_mood_label`'s raw boundary instead of tripping on
+    // round-trip rounding around the threshold.
+    if let Some(fatigue) = context.fatigue
+        && fatigue >= config.fatigue_suppression_threshold
     {
         return Err(GateRejectReason::HighFatigue);
     }
@@ -95,6 +93,7 @@ mod tests {
             activity: Some(ActivitySnapshot::default()),
             screen_summary: None,
             affect_summary: None,
+            fatigue: None,
             commitments: vec![],
             suppression,
         }
@@ -147,14 +146,14 @@ mod tests {
             proactive_turns_this_session: 0,
             user_turn_busy: false,
         });
-        tired.affect_summary = Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.85".into());
+        tired.fatigue = Some(0.85);
         assert_eq!(
             evaluate_deterministic_gates(&config, &tired),
             Err(GateRejectReason::HighFatigue)
         );
 
         // Exactly at the default 0.7 "tired" boundary: still suppressed.
-        tired.affect_summary = Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.70".into());
+        tired.fatigue = Some(0.7);
         assert_eq!(
             evaluate_deterministic_gates(&config, &tired),
             Err(GateRejectReason::HighFatigue)
@@ -176,16 +175,16 @@ mod tests {
             proactive_turns_this_session: 0,
             user_turn_busy: false,
         });
-        rested.affect_summary =
-            Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.60".into());
+        rested.fatigue = Some(0.60);
         assert_eq!(evaluate_deterministic_gates(&config, &rested), Ok(()));
 
-        // Legacy three-axis lines carry no fatigue: the gate must pass.
-        rested.affect_summary = Some("valence=0.10 arousal=0.10 dominance=0.10".into());
+        // Just below the threshold (0.699) must pass on the unrounded value:
+        // the `{:.2}` wire form would round it up to 0.70 and suppress.
+        rested.fatigue = Some(0.699);
         assert_eq!(evaluate_deterministic_gates(&config, &rested), Ok(()));
 
         // No affect state at all: the gate must pass.
-        rested.affect_summary = None;
+        rested.fatigue = None;
         assert_eq!(evaluate_deterministic_gates(&config, &rested), Ok(()));
 
         // A threshold of 1.0 disables the gate even at extreme fatigue.
@@ -197,8 +196,7 @@ mod tests {
             fatigue_suppression_threshold: 1.0,
             ..ProactiveConfig::default()
         };
-        rested.affect_summary =
-            Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.95".into());
+        rested.fatigue = Some(0.95);
         assert_eq!(evaluate_deterministic_gates(&relaxed, &rested), Ok(()));
     }
 }

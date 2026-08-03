@@ -226,6 +226,7 @@ mod tests {
             activity: None,
             screen_summary: None,
             affect_summary: None,
+            fatigue: None,
             commitments: vec![],
             suppression: ProactiveSuppressionState::default(),
         }

@@ -93,6 +93,9 @@ pub struct ProactiveContext {
     pub screen_summary: Option<String>,
     /// Current affect summary line for the prompt (optional).
     pub affect_summary: Option<String>,
+    /// Unrounded fatigue from the affect state, compared by the deterministic
+    /// gate instead of the prompt's two-decimal wire value.
+    pub fatigue: Option<f32>,
     /// Active commitment one-liners (optional).
     pub commitments: Vec<String>,
     /// Suppression counters at decision time.
@@ -257,6 +260,8 @@ pub fn build_proactive_context(
         )
     });
 
+    let fatigue = affect.map(|a| a.fatigue);
+
     let commitments = commitments
         .iter()
         .map(|c| {
@@ -275,6 +280,7 @@ pub fn build_proactive_context(
         activity,
         screen_summary,
         affect_summary,
+        fatigue,
         commitments,
         suppression,
     }
@@ -551,6 +557,7 @@ mod tests {
             activity: None,
             screen_summary: None,
             affect_summary: None,
+            fatigue: None,
             commitments: vec![],
             suppression: ProactiveSuppressionState {
                 seconds_since_user_input: 5,
@@ -587,6 +594,7 @@ mod tests {
             }),
             screen_summary: None,
             affect_summary: Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.85".into()),
+            fatigue: Some(0.85),
             commitments: vec![],
             suppression: ProactiveSuppressionState {
                 seconds_since_user_input: 200,
@@ -623,6 +631,7 @@ mod tests {
             }),
             screen_summary: None,
             affect_summary: None,
+            fatigue: None,
             commitments: vec![],
             suppression: ProactiveSuppressionState {
                 seconds_since_user_input: 200,
@@ -662,6 +671,7 @@ mod tests {
             }),
             screen_summary: None,
             affect_summary: None,
+            fatigue: None,
             commitments: vec![],
             suppression: ProactiveSuppressionState {
                 seconds_since_user_input: 200,
@@ -710,6 +720,7 @@ mod tests {
             }),
             screen_summary: None,
             affect_summary: None,
+            fatigue: None,
             commitments: vec![],
             suppression: ProactiveSuppressionState {
                 seconds_since_user_input: 200,
