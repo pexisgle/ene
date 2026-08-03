@@ -157,6 +157,8 @@ pub mod actions {
     pub const GEO_LOCATION: &str = "GeoLocation";
     /// Weather derived from the caller's own IP.
     pub const GEO_WEATHER: &str = "GeoWeather";
+    /// Sunrise and sunset lookup for caller-provided coordinates.
+    pub const GEO_SUN: &str = "GeoSun";
 }
 
 #[cfg(test)]

@@ -98,13 +98,16 @@ impl WeatherAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        if self.location.is_none() {
-            self.state.gate().check(
-                GEO_WEATHER,
-                "geo:ip-weather",
-                "Look up the weather for your approximate location, derived from your IP address, via wttr.in",
-            )?;
-        }
+        let description = match self.location.as_deref() {
+            Some(location) => {
+                format!("Look up weather for {location} and send it to wttr.in")
+            }
+            None => "Look up the weather for your approximate location, derived from your IP address, via wttr.in"
+                .to_string(),
+        };
+        self.state
+            .gate()
+            .check(GEO_WEATHER, "geo:ip-weather", &description)?;
 
         let url = build_weather_url(self.location.as_deref())?;
         let body = fetch_json(self.state.client(), url, "wttr.in").await?;
@@ -139,17 +142,25 @@ fn build_weather_url(location: Option<&str>) -> Result<reqwest::Url, GeoError> {
     Ok(url)
 }
 
-/// Validates a "lat,lon" location; plain city names are passed through.
+/// Validates a "lat,lon" location; city names, including names with commas,
+/// are passed through.
 fn validate_weather_location(location: &str) -> Result<(), GeoError> {
-    if let Some((latitude_part, longitude_part)) = location.split_once(',') {
-        let latitude: f64 = latitude_part.trim().parse().map_err(|_| {
-            GeoError::InvalidArguments(format!("'{location}' is not a valid location"))
-        })?;
-        let longitude: f64 = longitude_part.trim().parse().map_err(|_| {
-            GeoError::InvalidArguments(format!("'{location}' is not a valid location"))
-        })?;
-        validate_latitude(latitude)?;
-        validate_longitude(longitude)?;
+    let Some((latitude_part, longitude_part)) = location.split_once(',') else {
+        return Ok(());
+    };
+    let latitude = latitude_part.trim().parse::<f64>();
+    let longitude = longitude_part.trim().parse::<f64>();
+    match (latitude, longitude) {
+        (Ok(latitude), Ok(longitude)) => {
+            validate_latitude(latitude)?;
+            validate_longitude(longitude)?;
+        }
+        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+            return Err(GeoError::InvalidArguments(format!(
+                "'{location}' is not a valid location"
+            )));
+        }
+        (Err(_), Err(_)) => {}
     }
     Ok(())
 }
@@ -294,8 +305,14 @@ mod tests {
         assert!(build_weather_url(Some("35.68,139.69")).is_ok());
         assert!(build_weather_url(Some("91,139")).is_err());
         assert!(build_weather_url(Some("35,181")).is_err());
-        assert!(build_weather_url(Some("not,numbers")).is_err());
+        assert!(build_weather_url(Some("35,not-a-number")).is_err());
         assert!(build_weather_url(Some("   ")).is_err());
+    }
+
+    #[test]
+    fn city_name_with_comma_is_accepted() {
+        let url = build_weather_url(Some("Paris, France")).unwrap();
+        assert_eq!(url.as_str(), "https://wttr.in/Paris,%20France?format=j1");
     }
 
     #[test]

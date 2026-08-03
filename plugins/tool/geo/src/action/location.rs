@@ -10,15 +10,16 @@ fn default_state() -> Arc<GeoState> {
     Arc::new(GeoState::new())
 }
 
-/// Response envelope of the ip-api.com JSON endpoint.
+/// Response envelope of the ipapi.co JSON endpoint.
 #[derive(Debug, Deserialize)]
 struct LocationResponse {
-    status: String,
     #[serde(default)]
-    message: Option<String>,
+    error: bool,
     #[serde(default)]
+    reason: Option<String>,
+    #[serde(rename = "country_name", default)]
     country: Option<String>,
-    #[serde(rename = "regionName", default)]
+    #[serde(rename = "region", default)]
     region_name: Option<String>,
     #[serde(default)]
     city: Option<String>,
@@ -28,22 +29,21 @@ struct LocationResponse {
     longitude: Option<f64>,
     #[serde(default)]
     timezone: Option<String>,
-    #[serde(default)]
+    #[serde(rename = "ip", default)]
     query: Option<String>,
 }
 
-/// Looks up the geographic location of an IP address via ip-api.com.
+/// Looks up the geographic location of an IP address via ipapi.co.
 ///
 /// When `ip` is omitted, the caller's own public IP is located, which
-/// reveals the user's approximate location; that call requires explicit
-/// user approval. ip-api.com's free tier only supports plain HTTP, so the
-/// request itself is not encrypted.
+/// reveals the user's approximate location; every lookup requires explicit
+/// user approval because the address is sent to the external service.
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "geo",
     name = "location",
     summary = "Get the geographic location of an IP address.",
-    description = "Looks up the approximate geographic location (country, region, city, coordinates, timezone) of an IP address using ip-api.com. When `ip` is omitted, the caller's own public IP is located, which reveals the user's approximate location; that call requires explicit user approval. The free ip-api.com tier is plain HTTP only, so the request is not encrypted.",
+    description = "Looks up the approximate geographic location (country, region, city, coordinates, timezone) of an IP address using ipapi.co. Every lookup requires explicit user approval because the address is sent to the external service.",
     category = "Utility",
     keywords_primary = "location, geolocation, ip, address, country, city, coordinates, where",
     side_effects = "Network { external: true }"
@@ -66,51 +66,47 @@ impl LocationAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        if self.ip.is_none() {
-            self.state.gate().check(
-                GEO_LOCATION,
-                "geo:ip-location",
-                "Look up your approximate location from your IP address and send it to ip-api.com",
-            )?;
-        }
+        let description = match self.ip.as_deref() {
+            Some(ip) => format!(
+                "Look up the approximate location of IP address {ip} and send it to ipapi.co"
+            ),
+            None => {
+                "Look up your approximate location from your IP address and send it to ipapi.co"
+                    .to_string()
+            }
+        };
+        self.state
+            .gate()
+            .check(GEO_LOCATION, "geo:ip-location", &description)?;
 
         let url = build_location_url(self.ip.as_deref())?;
-        let body = fetch_json(self.state.client(), url, "ip-api.com").await?;
-        let parsed: LocationResponse = serde_json::from_str(&body).map_err(|e| {
-            ToolError::execution_failed(format!("Invalid ip-api.com response: {e}"))
-        })?;
+        let body = fetch_json(self.state.client(), url, "ipapi.co").await?;
+        let parsed: LocationResponse = serde_json::from_str(&body)
+            .map_err(|e| ToolError::execution_failed(format!("Invalid ipapi.co response: {e}")))?;
         format_location(&parsed).map_err(ToolError::from)
     }
 }
 
-/// Builds the ip-api.com request URL.
-///
-/// The free tier exposes only the HTTP endpoint; HTTPS answers with
-/// "SSL unavailable for this endpoint". The `fields` parameter keeps the
-/// response to the fields the tool actually reports.
+/// Builds the ipapi.co request URL.
 fn build_location_url(ip: Option<&str>) -> Result<reqwest::Url, GeoError> {
     let base = if let Some(ip) = ip {
         let parsed: IpAddr = ip
             .parse()
             .map_err(|_| GeoError::InvalidArguments(format!("'{ip}' is not a valid IP address")))?;
-        format!("http://ip-api.com/json/{parsed}")
+        format!("https://ipapi.co/{parsed}/json/")
     } else {
-        "http://ip-api.com/json/".to_string()
+        "https://ipapi.co/json/".to_string()
     };
-    let mut url = reqwest::Url::parse(&base)
-        .map_err(|e| GeoError::Internal(format!("invalid ip-api.com URL: {e}")))?;
-    url.query_pairs_mut().append_pair(
-        "fields",
-        "status,message,country,regionName,city,lat,lon,timezone,query",
-    );
+    let url = reqwest::Url::parse(&base)
+        .map_err(|e| GeoError::Internal(format!("invalid ipapi.co URL: {e}")))?;
     Ok(url)
 }
 
 fn format_location(response: &LocationResponse) -> Result<String, GeoError> {
-    if response.status != "success" {
-        let detail = response.message.as_deref().unwrap_or("no details provided");
+    if response.error {
+        let detail = response.reason.as_deref().unwrap_or("no details provided");
         return Err(GeoError::ApiFailure(format!(
-            "ip-api.com rejected the request: {detail}"
+            "ipapi.co rejected the request: {detail}"
         )));
     }
 
@@ -139,7 +135,7 @@ fn format_location(response: &LocationResponse) -> Result<String, GeoError> {
     }
     if lines.is_empty() {
         return Err(GeoError::InvalidResponse(
-            "ip-api.com response contains no location data".to_string(),
+            "ipapi.co response contains no location data".to_string(),
         ));
     }
     Ok(lines.join("\n"))
@@ -150,14 +146,13 @@ mod tests {
     use super::*;
 
     const SUCCESS_FIXTURE: &str = r#"{
-        "status": "success",
-        "country": "Japan",
-        "regionName": "Tokyo",
+        "country_name": "Japan",
+        "region": "Tokyo",
         "city": "Tokyo",
         "lat": 35.6837,
         "lon": 139.6805,
         "timezone": "Asia/Tokyo",
-        "query": "153.246.222.121"
+        "ip": "153.246.222.121"
     }"#;
 
     fn parse(fixture: &str) -> LocationResponse {
@@ -184,14 +179,14 @@ mod tests {
 
     #[test]
     fn missing_optional_fields_are_skipped() {
-        let fixture = r#"{"status":"success","country":"Japan"}"#;
+        let fixture = r#"{"country_name":"Japan"}"#;
         let out = format_location(&parse(fixture)).unwrap();
         assert_eq!(out, "Country: Japan");
     }
 
     #[test]
     fn api_failure_carries_the_message() {
-        let fixture = r#"{"status":"fail","message":"invalid query"}"#;
+        let fixture = r#"{"error":true,"reason":"invalid query"}"#;
         let err = format_location(&parse(fixture)).unwrap_err();
         assert!(matches!(err, GeoError::ApiFailure(_)));
         assert!(err.to_string().contains("invalid query"));
@@ -206,16 +201,13 @@ mod tests {
     #[test]
     fn own_ip_url_has_no_address_segment() {
         let url = build_location_url(None).unwrap();
-        assert_eq!(
-            url.as_str(),
-            "http://ip-api.com/json/?fields=status%2Cmessage%2Ccountry%2CregionName%2Ccity%2Clat%2Clon%2Ctimezone%2Cquery"
-        );
+        assert_eq!(url.as_str(), "https://ipapi.co/json/");
     }
 
     #[test]
     fn explicit_ip_is_placed_in_the_path() {
         let url = build_location_url(Some("8.8.8.8")).unwrap();
-        assert!(url.as_str().starts_with("http://ip-api.com/json/8.8.8.8?"));
+        assert_eq!(url.as_str(), "https://ipapi.co/8.8.8.8/json/");
     }
 
     #[test]

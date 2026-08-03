@@ -1,4 +1,5 @@
 use super::{fetch_json, format_day_length, validate_latitude, validate_longitude};
+use crate::approval::actions::GEO_SUN;
 use crate::error::GeoError;
 use crate::provider::GeoState;
 use ene_plugin::prelude::*;
@@ -100,6 +101,13 @@ impl SunAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
+        let description = format!(
+            "Look up sunrise and sunset for coordinates {}, {} via sunrise-sunset.org",
+            self.latitude, self.longitude
+        );
+        self.state
+            .gate()
+            .check(GEO_SUN, "geo:sunrise-sunset", &description)?;
         // The service's own no-date default is its server-local day, which
         // can be the previous UTC day; the tool always sends an explicit
         // client-computed UTC date so "today" means the caller's today.
