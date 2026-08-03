@@ -330,7 +330,7 @@ fn vrm_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
 /// nearest annotated expression to the current affect state (PAD nearest
 /// neighbour over `valence` / `arousal` / `irritation` / `fatigue`). Missing
 /// dimensions default to `0.0`, so partial annotations are allowed.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(crate = "crate::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "crate::schemars")]
 pub struct ExpressionAffect {
