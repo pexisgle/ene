@@ -2434,13 +2434,18 @@ async fn reconfigure_plugin_host_bg(
     diag_tx: broadcast::Sender<DiagnosticEvent>,
     cmd_tx: mpsc::UnboundedSender<EneCommand>,
 ) {
+    /// Factory snapshots captured from a running plugin host, keyed by provider
+    /// kind, kept after a host restart so stale-removal cannot evict a
+    /// replacement installed by another runtime handle.
+    type ProviderFactorySnapshots = (
+        HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
+        HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
+    );
+
     // Stop the previous host (and its health bridge) first. Keep the factory
     // handles so stale removal below cannot evict a replacement installed by
     // another runtime handle.
-    let (old_llm_factories, old_embedding_factories): (
-        HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
-        HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
-    ) = {
+    let (old_llm_factories, old_embedding_factories): ProviderFactorySnapshots = {
         let mut guard = plugin_host.lock().await;
         let (llm_factories, embedding_factories) = guard.as_ref().map_or_else(
             || (HashMap::new(), HashMap::new()),
