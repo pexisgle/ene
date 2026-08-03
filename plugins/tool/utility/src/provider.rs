@@ -1,8 +1,12 @@
 use crate::action;
+use crate::task_registry::TaskRegistry;
 use crate::todo_store::TodoStore;
 use async_trait::async_trait;
 use ene_plugin::{ActionSetProvider, ToolAction};
-use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
+use ene_plugin_proto::{
+    DeferredOutcome, DeferredStatus, SandboxConfigData, ToolError, ToolProvider, ToolResult,
+    ToolSpec,
+};
 use std::sync::Arc;
 
 /// Shared state for the todo actions.
@@ -109,8 +113,15 @@ impl Default for UtilityState {
 /// generically, and the two utility-specific pieces of `ToolProvider`
 /// state — session ID and the DB sandbox socket/token — are threaded into
 /// `UtilityState` via hooks instead of a hand-written `ToolProvider` impl.
+///
+/// Deferred (background) execution is the exception: [`ActionSetProvider`]
+/// deliberately leaves `call_tool_deferred`/`poll_deferred`/`cancel_deferred`
+/// at their synchronous defaults (see its module docs), so this provider
+/// overrides the three deferred methods to dispatch `utility.timer_start`
+/// and `utility.notify_send` onto the shared [`TaskRegistry`].
 pub struct UtilityToolProvider {
     inner: ActionSetProvider,
+    tasks: Arc<TaskRegistry>,
 }
 
 impl UtilityToolProvider {
@@ -118,6 +129,7 @@ impl UtilityToolProvider {
     #[must_use]
     pub fn new() -> Self {
         let state = Arc::new(UtilityState::new());
+        let tasks = Arc::new(TaskRegistry::new());
         let actions: Vec<Box<dyn ToolAction>> = vec![
             Box::new(action::AskQuestionAction::default()),
             Box::new(action::TodoListAction::new(state.clone())),
@@ -127,6 +139,9 @@ impl UtilityToolProvider {
             Box::new(action::TodoDeleteAction::new(state.clone())),
             Box::new(action::GetCurrentTimeAction::default()),
             Box::new(action::GetSystemInfoAction::default()),
+            Box::new(action::TimerStartAction::default()),
+            Box::new(action::TimerStopAction::new(tasks.clone())),
+            Box::new(action::NotifySendAction::default()),
         ];
 
         let session_state = state.clone();
@@ -142,8 +157,14 @@ impl UtilityToolProvider {
                 sandbox_state.set_db_auth_token(sandbox.db_auth_token.clone());
             });
 
-        Self { inner }
+        Self { inner, tasks }
     }
+}
+
+fn parse_args<T: serde::de::DeserializeOwned>(name: &str, arguments: &str) -> Result<T, ToolError> {
+    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
+        message: format!("Invalid arguments for {name}: {e}"),
+    })
 }
 
 impl Default for UtilityToolProvider {
@@ -162,11 +183,144 @@ impl ToolProvider for UtilityToolProvider {
         self.inner.call_tool(name, arguments).await
     }
 
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<DeferredOutcome, ToolError> {
+        let task_id = match name {
+            action::TimerStartAction::TOOL_NAME => {
+                let args: action::TimerStartAction = parse_args(name, arguments)?;
+                args.schedule(&self.tasks)?
+            }
+            action::NotifySendAction::TOOL_NAME => {
+                let args: action::NotifySendAction = parse_args(name, arguments)?;
+                args.dispatch(&self.tasks)?
+            }
+            _ => {
+                return Ok(DeferredOutcome::Sync(ToolResult::text(
+                    self.inner.call_tool(name, arguments).await?,
+                )));
+            }
+        };
+        Ok(DeferredOutcome::Deferred { task_id })
+    }
+
+    fn poll_deferred(&self, task_id: &str) -> DeferredStatus {
+        self.tasks.poll(task_id)
+    }
+
+    fn cancel_deferred(&self, task_id: &str) {
+        self.tasks.cancel(task_id);
+    }
+
     fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
         self.inner.set_call_context(ctx);
     }
 
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
         self.inner.set_sandbox(sandbox);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider() -> UtilityToolProvider {
+        UtilityToolProvider::new()
+    }
+
+    #[tokio::test]
+    async fn deferred_dispatch_starts_polls_and_cancels_timer() {
+        let provider = provider();
+        let outcome = provider
+            .call_tool_deferred(
+                action::TimerStartAction::TOOL_NAME,
+                r#"{"name":"pasta","seconds":300}"#,
+            )
+            .await
+            .unwrap();
+        let DeferredOutcome::Deferred { task_id } = outcome else {
+            unreachable!("timer_start is background-capable");
+        };
+
+        assert_eq!(provider.poll_deferred(&task_id), DeferredStatus::Pending);
+        provider.cancel_deferred(&task_id);
+        assert_eq!(provider.poll_deferred(&task_id), DeferredStatus::Cancelled);
+        assert_eq!(provider.poll_deferred(&task_id), DeferredStatus::Unknown);
+    }
+
+    #[tokio::test]
+    async fn deferred_dispatch_accepts_notify() {
+        let provider = provider();
+        let outcome = provider
+            .call_tool_deferred(
+                action::NotifySendAction::TOOL_NAME,
+                r#"{"title":"Heads up","message":"Done"}"#,
+            )
+            .await
+            .unwrap();
+        let DeferredOutcome::Deferred { task_id } = outcome else {
+            unreachable!("notify_send is background-capable");
+        };
+        // Best-effort abort: keeps a real notification from popping up on
+        // developer machines while exercising `cancel_deferred`.
+        provider.cancel_deferred(&task_id);
+    }
+
+    #[tokio::test]
+    async fn deferred_dispatch_falls_back_to_sync() {
+        let provider = provider();
+        let outcome = provider
+            .call_tool_deferred(action::TimerStopAction::TOOL_NAME, r"{}")
+            .await
+            .unwrap();
+        let DeferredOutcome::Sync(result) = outcome else {
+            unreachable!("timer_stop is not background-capable");
+        };
+        assert!(
+            result.text_for_llm().contains("\"running\""),
+            "sync fallback must run the action, got: {}",
+            result.text_for_llm()
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_dispatch_unknown_tool_is_not_found() {
+        let provider = provider();
+        let err = provider
+            .call_tool_deferred("utility.nope", "{}")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn timer_stop_via_execute_uses_shared_registry() {
+        // `TimerStopAction` carries the registry in a `#[tool(skip)]` field
+        // that `execute()` re-copies from `self` after deserialization; the
+        // serde default would otherwise fall back to a fresh empty registry
+        // and silently report every timer as not found.
+        let provider = provider();
+        let outcome = provider
+            .call_tool_deferred(
+                action::TimerStartAction::TOOL_NAME,
+                r#"{"name":"pasta","seconds":300}"#,
+            )
+            .await
+            .unwrap();
+        let DeferredOutcome::Deferred { .. } = outcome else {
+            unreachable!("timer_start is background-capable");
+        };
+
+        let result = provider
+            .call_tool(action::TimerStopAction::TOOL_NAME, r#"{"name":"pasta"}"#)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("\"status\": \"stopped\""),
+            "timer_stop must see the timer started through the provider, got: {result}"
+        );
     }
 }
