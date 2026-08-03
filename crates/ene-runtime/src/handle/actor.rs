@@ -903,7 +903,9 @@ impl TurnActor {
     #[cfg(any(unix, windows))]
     async fn authorize_credential(&self, id: &str) -> Result<(), String> {
         let Some(passenger) = &self.credential_passenger else {
-            return Err("no plugin host is running; cannot start an authorization flow".to_string());
+            return Err(
+                "no plugin host is running; cannot start an authorization flow".to_string(),
+            );
         };
         match passenger.oauth_flow() {
             Some(flow) => flow
@@ -1545,7 +1547,8 @@ impl TurnActor {
                         && let Some(registry) = self.credential_registry.as_ref()
                     {
                         refresh_credential_vault(&self.config, registry, passenger);
-                    }                }
+                    }
+                }
                 true
             }
             EneCommand::PrepareVisionSummary { app_label, reply } => {
