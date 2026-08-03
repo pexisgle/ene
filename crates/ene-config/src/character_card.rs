@@ -524,6 +524,25 @@ impl CharacterCardData {
         }
     }
 
+    /// Non-empty greetings in selection order with their `@@is_greeting`
+    /// indices (`0` = `first_mes`, `i+1` = `alternate_greetings[i]`, per
+    /// `SPEC_V3.md` "`@@is_greeting`").
+    #[must_use]
+    pub fn greeting_options(&self) -> Vec<(u32, String)> {
+        let mut options = Vec::new();
+        if !self.first_mes.trim().is_empty() {
+            options.push((0, self.first_mes.trim().to_string()));
+        }
+        options.extend(
+            self.alternate_greetings
+                .iter()
+                .enumerate()
+                .filter(|(_, text)| !text.trim().is_empty())
+                .map(|(i, text)| (i as u32 + 1, text.trim().to_string())),
+        );
+        options
+    }
+
     /// Returns the `EneExtension` object if defined under `extensions.ene`.
     pub fn get_ene_extension(&self) -> Option<EneExtension> {
         self.extensions.ene.clone()
@@ -1393,6 +1412,26 @@ mod tests {
             expand_cbs_macros_ctx("{{description}}", &ctx),
             "{{description}}"
         );
+    }
+
+    #[test]
+    fn greeting_options_number_first_mes_zero_and_alternates_after() {
+        let mut data = CharacterCardData::default();
+        data.first_mes = "Hello.".into();
+        data.alternate_greetings = vec!["One.".into(), String::new(), "Three.".into()];
+
+        let options = data.greeting_options();
+
+        assert_eq!(
+            options,
+            vec![
+                (0, "Hello.".to_string()),
+                (1, "One.".to_string()),
+                (3, "Three.".to_string())
+            ]
+        );
+        // A card without greetings yields no options.
+        assert!(CharacterCardData::default().greeting_options().is_empty());
     }
 
     #[test]
