@@ -144,7 +144,7 @@ fn parse_card_bytes(bytes: &[u8], code: Option<&str>) -> Result<CharacterCardV3,
     }
     if is_zip_archive(bytes) {
         if let Some(code) = code {
-            let (value, diff) = charx_card_json_localized(bytes, code)?;
+            let (value, diff) = charx_card_json_localized(bytes, Some(code))?;
             let mut card: CharacterCardV3 =
                 serde_json::from_value(value).map_err(EneConfigError::JsonError)?;
             if let Some(diff) = diff {
@@ -177,23 +177,21 @@ fn is_container(bytes: &[u8]) -> bool {
 /// Locale keys are canonicalized with [`crate::resolve_language_alias`], so
 /// a producer embedding `ja-JP` is read as `ja`.
 fn merge_embedded_locale(card: &mut CharacterCardV3, code: &str) {
-    let Some(locales) = card
+    let diff = card
         .data
         .extensions
         .ene
         .as_ref()
         .and_then(|ene| ene.locales.as_ref())
-    else {
-        return;
-    };
-    let Some(diff) = locales
-        .iter()
-        .find(|(key, _)| crate::resolve_language_alias(key) == code)
-        .map(|(_, diff)| diff)
-    else {
-        return;
-    };
-    merge_localized_fields(card, diff);
+        .and_then(|locales| {
+            locales
+                .iter()
+                .find(|(key, _)| crate::resolve_language_alias(key) == code)
+                .map(|(_, diff)| diff.clone())
+        });
+    if let Some(diff) = diff {
+        merge_localized_fields(card, &diff);
+    }
 }
 
 /// Reads the `character.{code}.json` sidecar next to a folder-form card.
