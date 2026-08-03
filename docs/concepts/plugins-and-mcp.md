@@ -114,7 +114,7 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 
 ### ResourceClass: the in-process admission key is a wire type
 
-The in-process admission budget that serializes local engines contending on the same physical resource (same GPU device, the shared CPU class, or the network-attached class) keys on a `ResourceClass` enum — `Gpu { device: u32 }` / `Cpu` / `Network` — defined in `ene-plugin-proto`'s `capabilities.rs` alongside `ConcurrencyHint`. In-process engines use it as `ene_ai::ResourceClass`; the follow-up host-side resource admission work wires it into the plugin capability specs so a plugin can declare which physical resources it uses, making this the same type on both sides of the boundary rather than a second definition (#319).
+The in-process admission budget that serializes local engines contending on the same physical resource (same GPU device, the shared CPU class, or the network-attached class) keys on a `ResourceClass` enum — `Gpu { device: u32 }` / `Cpu` / `Network` — defined in `ene-plugin-proto`'s `capabilities.rs` alongside `ConcurrencyHint`. In-process engines use it as `ene_ai::ResourceClass`; the follow-up host-side resource admission work wires it into the plugin capability specs so a plugin can declare which physical resources it uses, making this the same type on both sides of the boundary rather than a second definition.
 
 ---
 

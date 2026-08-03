@@ -158,12 +158,14 @@ impl From<ene_plugin_proto::ConcurrencyHint> for ConcurrencyHint {
     }
 }
 
-impl From<ConcurrencyHint> for ene_plugin_proto::ConcurrencyHint {
-    fn from(value: ConcurrencyHint) -> Self {
-        Self {
-            max_in_flight: u32::try_from(value.max_in_flight).unwrap_or(u32::MAX),
-            queue_depth: u32::try_from(value.queue_depth).unwrap_or(u32::MAX),
-        }
+impl TryFrom<ConcurrencyHint> for ene_plugin_proto::ConcurrencyHint {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(value: ConcurrencyHint) -> Result<Self, Self::Error> {
+        Ok(Self {
+            max_in_flight: value.max_in_flight.try_into()?,
+            queue_depth: value.queue_depth.try_into()?,
+        })
     }
 }
 
@@ -275,5 +277,17 @@ mod tests {
         );
         assert_eq!(descriptor.id.as_str(), "test-engine");
         assert_eq!(descriptor.concurrency.max_in_flight, 1);
+    }
+
+    #[test]
+    fn wire_concurrency_conversion_rejects_unrepresentable_values() {
+        let hint = ConcurrencyHint {
+            max_in_flight: usize::MAX,
+            queue_depth: 2,
+        };
+
+        if usize::MAX > u32::MAX as usize {
+            assert!(ene_plugin_proto::ConcurrencyHint::try_from(hint).is_err());
+        }
     }
 }

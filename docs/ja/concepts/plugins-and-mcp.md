@@ -114,7 +114,7 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 
 ### ResourceClass: プロセス内入場制御のキーがワイヤ型になる
 
-同一の物理リソース（同じ GPU デバイス、共有の CPU クラス、ネットワーク接続クラス）を奪い合うローカルエンジンを直列化するプロセス内入場予算は、`ResourceClass` enum——`Gpu { device: u32 }` / `Cpu` / `Network`——をキーにしています。この enum は `ConcurrencyHint` と同じく `ene-plugin-proto` の `capabilities.rs` に定義され、プロセス内エンジンは `ene_ai::ResourceClass` として利用します。ホスト側リソース入場制御の後続作業では、これをプラグインの能力仕様に配線し、プラグインが自身の使用する物理リソースを申告できるようにします——境界の両側で同じ型を使い、二重定義を避けるためです (#319)。
+同一の物理リソース（同じ GPU デバイス、共有の CPU クラス、ネットワーク接続クラス）を奪い合うローカルエンジンを直列化するプロセス内入場予算は、`ResourceClass` enum——`Gpu { device: u32 }` / `Cpu` / `Network`——をキーにしています。この enum は `ConcurrencyHint` と同じく `ene-plugin-proto` の `capabilities.rs` に定義され、プロセス内エンジンは `ene_ai::ResourceClass` として利用します。ホスト側リソース入場制御の後続作業では、これをプラグインの能力仕様に配線し、プラグインが自身の使用する物理リソースを申告できるようにします——境界の両側で同じ型を使い、二重定義を避けるためです。
 
 ---
 
