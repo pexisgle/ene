@@ -243,8 +243,17 @@ pub fn build_proactive_context(
 
     let affect_summary = affect.map(|a| {
         format!(
-            "valence={:.2} arousal={:.2} dominance={:.2}",
-            a.valence, a.arousal, a.dominance
+            "mood={} valence={:.2} arousal={:.2} dominance={:.2} trust={:.2} \
+             affinity={:.2} irritation={:.2} curiosity={:.2} fatigue={:.2}",
+            a.mood_label,
+            a.valence,
+            a.arousal,
+            a.dominance,
+            a.trust,
+            a.affinity,
+            a.irritation,
+            a.curiosity,
+            a.fatigue
         )
     });
 
@@ -560,6 +569,42 @@ mod tests {
             outcome.skip,
             Some(ProactiveSkipReason::Gate(GateRejectReason::MinIdle))
         ));
+    }
+
+    #[tokio::test]
+    async fn high_fatigue_suppresses_before_calling_llm() {
+        let config = base_config();
+        let ctx = ProactiveContext {
+            history: vec![HistoryEntry {
+                role: Role::User,
+                content: "hi".into(),
+            }],
+            seconds_since_user_input: 200,
+            activity: Some(ActivitySnapshot {
+                idle_seconds: Some(200),
+                active_window_label: "Browser".into(),
+                recent_change: String::new(),
+            }),
+            screen_summary: None,
+            affect_summary: Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.85".into()),
+            commitments: vec![],
+            suppression: ProactiveSuppressionState {
+                seconds_since_user_input: 200,
+                seconds_since_proactive: 1000,
+                proactive_turns_this_session: 0,
+                user_turn_busy: false,
+            },
+        };
+        let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
+            body: r#"{"should_speak":true,"confidence":1.0}"#.into(),
+        });
+        let outcome = decide_proactive_speech(&config, &ctx, Some(provider), "en").await;
+        assert!(!outcome.llm_invoked);
+        assert!(!outcome.decision.should_speak);
+        assert_eq!(
+            outcome.skip,
+            Some(ProactiveSkipReason::Gate(GateRejectReason::HighFatigue))
+        );
     }
 
     #[tokio::test]

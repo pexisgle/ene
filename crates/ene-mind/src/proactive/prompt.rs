@@ -96,42 +96,113 @@ fn format_context_block(context: &ProactiveContext) -> String {
     Value::Object(map).to_string()
 }
 
-/// Parse the internal affect summary line (produced by
-/// [`crate::proactive::build_proactive_context`] as
-/// `valence=0.30 arousal=0.10 dominance=0.00`) into a structured object.
+/// Parsed affect summary line (produced by
+/// [`crate::proactive::build_proactive_context`]).
 ///
-/// Returns `None` when the line does not carry all three axes, so the field
-/// is omitted rather than passed through as an opaque string.
+/// The line is whitespace-delimited `key=value` tokens, so `mood` must not
+/// contain whitespace; every mood label emitted by `compute_mood_label` is a
+/// single word. `valence`, `arousal`, and `dominance` are required; the
+/// remaining dimensions are optional for backward compatibility with the
+/// earlier three-axis line.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AffectSummary {
+    /// Derived mood label (e.g. `"tired"`), empty when not yet computed.
+    pub mood: String,
+    pub valence: f64,
+    pub arousal: f64,
+    pub dominance: f64,
+    pub trust: Option<f64>,
+    pub affinity: Option<f64>,
+    pub irritation: Option<f64>,
+    pub curiosity: Option<f64>,
+    pub fatigue: Option<f64>,
+}
+
+/// Parse the internal affect summary line into a structured summary.
+///
+/// Returns `None` when the line does not carry all three PAD axes, so the
+/// field is omitted rather than passed through as an opaque string.
 ///
 /// The producer→parser wire format is locked by the round-trip test
 /// [`tests::affect_survives_round_trip_from_build_proactive_context`], which
 /// pipes the real producer output through this module's serializer.
-fn affect_value(summary: &str) -> Option<Value> {
+pub(crate) fn parse_affect_summary(summary: &str) -> Option<AffectSummary> {
+    let mut mood = String::new();
     let mut valence: Option<f64> = None;
     let mut arousal: Option<f64> = None;
     let mut dominance: Option<f64> = None;
+    let mut trust: Option<f64> = None;
+    let mut affinity: Option<f64> = None;
+    let mut irritation: Option<f64> = None;
+    let mut curiosity: Option<f64> = None;
+    let mut fatigue: Option<f64> = None;
     for token in summary.split_whitespace() {
         let Some((key, raw)) = token.split_once('=') else {
             continue;
         };
-        let Ok(value) = raw.parse::<f64>() else {
-            continue;
-        };
         match key {
-            "valence" => valence = Some(value),
-            "arousal" => arousal = Some(value),
-            "dominance" => dominance = Some(value),
-            _ => {}
+            "mood" => mood = raw.to_string(),
+            _ => {
+                let Ok(value) = raw.parse::<f64>() else {
+                    continue;
+                };
+                match key {
+                    "valence" => valence = Some(value),
+                    "arousal" => arousal = Some(value),
+                    "dominance" => dominance = Some(value),
+                    "trust" => trust = Some(value),
+                    "affinity" => affinity = Some(value),
+                    "irritation" => irritation = Some(value),
+                    "curiosity" => curiosity = Some(value),
+                    "fatigue" => fatigue = Some(value),
+                    _ => {}
+                }
+            }
         }
     }
     match (valence, arousal, dominance) {
-        (Some(valence), Some(arousal), Some(dominance)) => Some(json!({
-            "valence": valence,
-            "arousal": arousal,
-            "dominance": dominance,
-        })),
+        (Some(valence), Some(arousal), Some(dominance)) => Some(AffectSummary {
+            mood,
+            valence,
+            arousal,
+            dominance,
+            trust,
+            affinity,
+            irritation,
+            curiosity,
+            fatigue,
+        }),
         _ => None,
     }
+}
+
+/// Build the `affect` JSON value from the internal summary line, or `None`
+/// when the line is unparsable so the field is omitted entirely.
+fn affect_value(summary: &str) -> Option<Value> {
+    let summary = parse_affect_summary(summary)?;
+    let mut object = Map::new();
+    if !summary.mood.is_empty() {
+        object.insert("mood".to_string(), json!(summary.mood));
+    }
+    object.insert("valence".to_string(), json!(summary.valence));
+    object.insert("arousal".to_string(), json!(summary.arousal));
+    object.insert("dominance".to_string(), json!(summary.dominance));
+    if let Some(trust) = summary.trust {
+        object.insert("trust".to_string(), json!(trust));
+    }
+    if let Some(affinity) = summary.affinity {
+        object.insert("affinity".to_string(), json!(affinity));
+    }
+    if let Some(irritation) = summary.irritation {
+        object.insert("irritation".to_string(), json!(irritation));
+    }
+    if let Some(curiosity) = summary.curiosity {
+        object.insert("curiosity".to_string(), json!(curiosity));
+    }
+    if let Some(fatigue) = summary.fatigue {
+        object.insert("fatigue".to_string(), json!(fatigue));
+    }
+    Some(Value::Object(object))
 }
 
 #[cfg(test)]
@@ -295,6 +366,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_three_axis_line_still_reaches_context_json() {
+        let mut ctx = base_ctx();
+        ctx.affect_summary = Some("valence=0.10 arousal=0.20 dominance=0.30".into());
+        let obj = parse_block(&ctx);
+        assert_eq!(obj["affect"]["valence"], json!(0.10));
+        assert_eq!(obj["affect"]["arousal"], json!(0.20));
+        assert_eq!(obj["affect"]["dominance"], json!(0.30));
+        assert!(obj["affect"].get("fatigue").is_none());
+    }
+
+    #[test]
+    fn mood_and_all_dimensions_reach_context_json() {
+        let mut ctx = base_ctx();
+        ctx.affect_summary = Some(
+            "mood=tired valence=0.10 arousal=0.20 dominance=0.30 trust=0.40 \
+             affinity=0.50 irritation=0.60 curiosity=0.70 fatigue=0.80"
+                .into(),
+        );
+        let obj = parse_block(&ctx);
+        assert_eq!(obj["affect"]["mood"], json!("tired"));
+        assert_eq!(obj["affect"]["valence"], json!(0.10));
+        assert_eq!(obj["affect"]["arousal"], json!(0.20));
+        assert_eq!(obj["affect"]["dominance"], json!(0.30));
+        assert_eq!(obj["affect"]["trust"], json!(0.40));
+        assert_eq!(obj["affect"]["affinity"], json!(0.50));
+        assert_eq!(obj["affect"]["irritation"], json!(0.60));
+        assert_eq!(obj["affect"]["curiosity"], json!(0.70));
+        assert_eq!(obj["affect"]["fatigue"], json!(0.80));
+    }
+
+    #[test]
     fn affect_survives_round_trip_from_build_proactive_context() {
         // Locks the producer→parser contract: the parser in
         // `affect_value` must keep understanding the exact line that
@@ -363,7 +465,10 @@ mod tests {
         // The producer emits the exact line the parser is coupled to…
         assert_eq!(
             ctx.affect_summary.as_deref(),
-            Some("valence=0.30 arousal=0.10 dominance=0.00")
+            Some(
+                "mood= valence=0.30 arousal=0.10 dominance=0.00 trust=0.00 \
+                 affinity=0.00 irritation=0.00 curiosity=0.00 fatigue=0.00"
+            )
         );
 
         // …and it survives round-trip through the JSON context document.
@@ -374,5 +479,9 @@ mod tests {
         assert_eq!(affect["valence"], json!(0.30));
         assert_eq!(affect["arousal"], json!(0.10));
         assert_eq!(affect["dominance"], json!(0.0));
+        assert_eq!(affect["fatigue"], json!(0.0));
+        assert_eq!(affect["irritation"], json!(0.0));
+        // The empty mood label is omitted rather than emitted as "".
+        assert!(affect.get("mood").is_none());
     }
 }

@@ -2,6 +2,7 @@
 
 use crate::config::ProactiveConfig;
 use crate::proactive::ProactiveContext;
+use crate::proactive::prompt::parse_affect_summary;
 use std::fmt;
 
 /// Reasons a proactive tick is suppressed without calling the LLM.
@@ -17,6 +18,8 @@ pub enum GateRejectReason {
     SessionLimit,
     /// Every configured input source is disabled or empty.
     NoSources,
+    /// Character fatigue is at or above `fatigue_suppression_threshold`.
+    HighFatigue,
 }
 
 impl fmt::Display for GateRejectReason {
@@ -27,6 +30,7 @@ impl fmt::Display for GateRejectReason {
             Self::Cooldown => write!(f, "proactive cooldown"),
             Self::SessionLimit => write!(f, "session proactive limit"),
             Self::NoSources => write!(f, "no proactive sources available"),
+            Self::HighFatigue => write!(f, "high fatigue"),
         }
     }
 }
@@ -57,6 +61,18 @@ pub fn evaluate_deterministic_gates(
     let has_screen = config.sources.screen_summary && context.screen_summary.is_some();
     if !(has_conversation || has_activity || has_screen) {
         return Err(GateRejectReason::NoSources);
+    }
+
+    // Unknown fatigue (no affect state or a legacy three-axis line) never
+    // suppresses: only a measured value at or above the threshold does.
+    if let Some(fatigue) = context
+        .affect_summary
+        .as_deref()
+        .and_then(parse_affect_summary)
+        .and_then(|summary| summary.fatigue)
+        && fatigue >= f64::from(config.fatigue_suppression_threshold)
+    {
+        return Err(GateRejectReason::HighFatigue);
     }
 
     Ok(())
@@ -114,5 +130,75 @@ mod tests {
             evaluate_deterministic_gates(&config, &idle),
             Err(GateRejectReason::MinIdle)
         );
+    }
+
+    #[test]
+    fn rejects_high_fatigue_at_or_above_threshold() {
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            ..ProactiveConfig::default()
+        };
+        let mut tired = ctx_with(ProactiveSuppressionState {
+            seconds_since_user_input: 60,
+            seconds_since_proactive: 120,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        });
+        tired.affect_summary = Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.85".into());
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &tired),
+            Err(GateRejectReason::HighFatigue)
+        );
+
+        // Exactly at the default 0.7 "tired" boundary: still suppressed.
+        tired.affect_summary = Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.70".into());
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &tired),
+            Err(GateRejectReason::HighFatigue)
+        );
+    }
+
+    #[test]
+    fn passes_when_fatigue_is_low_unknown_or_absent() {
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            ..ProactiveConfig::default()
+        };
+        let mut rested = ctx_with(ProactiveSuppressionState {
+            seconds_since_user_input: 60,
+            seconds_since_proactive: 120,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        });
+        rested.affect_summary =
+            Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.60".into());
+        assert_eq!(evaluate_deterministic_gates(&config, &rested), Ok(()));
+
+        // Legacy three-axis lines carry no fatigue: the gate must pass.
+        rested.affect_summary = Some("valence=0.10 arousal=0.10 dominance=0.10".into());
+        assert_eq!(evaluate_deterministic_gates(&config, &rested), Ok(()));
+
+        // No affect state at all: the gate must pass.
+        rested.affect_summary = None;
+        assert_eq!(evaluate_deterministic_gates(&config, &rested), Ok(()));
+
+        // A threshold of 1.0 disables the gate even at extreme fatigue.
+        let relaxed = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            fatigue_suppression_threshold: 1.0,
+            ..ProactiveConfig::default()
+        };
+        rested.affect_summary =
+            Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.95".into());
+        assert_eq!(evaluate_deterministic_gates(&relaxed, &rested), Ok(()));
     }
 }

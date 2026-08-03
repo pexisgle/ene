@@ -1023,6 +1023,12 @@ pub struct ProactiveConfig {
     )]
     #[schemars(skip)]
     pub max_screen_summary_chars: usize,
+    /// Suppress proactive decisions while affect fatigue is at or above this
+    /// threshold (0.0..=1.0). `1.0` disables the gate. The default matches the
+    /// `"tired"` boundary in `compute_mood_label`, so a tired character never
+    /// speaks unprompted.
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub fatigue_suppression_threshold: f32,
 }
 
 impl Default for ProactiveConfig {
@@ -1041,6 +1047,7 @@ impl Default for ProactiveConfig {
             max_conversation_chars: 4_000,
             max_activity_chars: 500,
             max_screen_summary_chars: 800,
+            fatigue_suppression_threshold: 0.7,
         }
     }
 }
@@ -1519,6 +1526,19 @@ mod tests {
         let cfg: ProactiveConfig =
             serde_json::from_str(r#"{"decision":{"min_confidence": 1.5}}"#).expect("deserialize");
         assert!((cfg.decision.min_confidence - 0.55).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn proactive_fatigue_threshold_defaults_to_tired_boundary_and_clamps() {
+        let default = ProactiveConfig::default();
+        assert!((default.fatigue_suppression_threshold - 0.7).abs() < f32::EPSILON);
+        let clamped: ProactiveConfig =
+            serde_json::from_str(r#"{"fatigue_suppression_threshold": 1.5}"#).expect("deserialize");
+        assert!((clamped.fatigue_suppression_threshold - 1.0).abs() < f32::EPSILON);
+        let cfg: ProactiveConfig =
+            serde_json::from_str(r#"{"fatigue_suppression_threshold": 0.85}"#)
+                .expect("deserialize");
+        assert!((cfg.fatigue_suppression_threshold - 0.85).abs() < f32::EPSILON);
     }
 
     #[test]
