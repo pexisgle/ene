@@ -766,10 +766,10 @@ mod tests {
     /// central-directory unix mode shifted into the high bits and `flags`
     /// the general-purpose bitfield (bit 0 = encrypted); this exercises
     /// entry metadata that [`ZipWriter`] cannot produce.
-    fn raw_zip(entries: &[(&str, &[u8], u32, u16)]) -> Vec<u8> {
+    fn raw_zip(entries: &[(&str, &[u8], u32, u32, u16)]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut central = Vec::new();
-        for (name, content, external_attrs, flags) in entries {
+        for (name, content, claimed_size, external_attrs, flags) in entries {
             let name_bytes = name.as_bytes();
             let local_offset = out.len() as u32;
             let mut crc = flate2::Crc::new();
@@ -781,8 +781,8 @@ mod tests {
             out.extend_from_slice(&0u16.to_le_bytes());
             out.extend_from_slice(&0u32.to_le_bytes());
             out.extend_from_slice(&crc_sum.to_le_bytes());
-            out.extend_from_slice(&(content.len() as u32).to_le_bytes());
-            out.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            out.extend_from_slice(&claimed_size.to_le_bytes());
+            out.extend_from_slice(&claimed_size.to_le_bytes());
             out.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
             out.extend_from_slice(&0u16.to_le_bytes());
             out.extend_from_slice(name_bytes);
@@ -795,8 +795,8 @@ mod tests {
             central.extend_from_slice(&0u16.to_le_bytes());
             central.extend_from_slice(&0u32.to_le_bytes());
             central.extend_from_slice(&crc_sum.to_le_bytes());
-            central.extend_from_slice(&(content.len() as u32).to_le_bytes());
-            central.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            central.extend_from_slice(&claimed_size.to_le_bytes());
+            central.extend_from_slice(&claimed_size.to_le_bytes());
             central.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
             central.extend_from_slice(&0u16.to_le_bytes());
             central.extend_from_slice(&0u16.to_le_bytes());
@@ -866,8 +866,14 @@ mod tests {
         let assets = tmp.path().join("assets");
         let src = tmp.path().join("evil.charx");
         let bytes = raw_zip(&[
-            ("card.json", CARD_JSON.as_bytes(), 0o100_644 << 16, 0),
-            ("link", b"", 0o120_777 << 16, 0),
+            (
+                "card.json",
+                CARD_JSON.as_bytes(),
+                CARD_JSON.len() as u32,
+                0o100_644 << 16,
+                0,
+            ),
+            ("link", b"", 0, 0o120_777 << 16, 0),
         ]);
         std::fs::write(&src, bytes).expect("write charx");
 
@@ -886,12 +892,46 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let assets = tmp.path().join("assets");
         let src = tmp.path().join("evil.charx");
-        let bytes = raw_zip(&[("card.json", CARD_JSON.as_bytes(), 0o100_644 << 16, 1)]);
+        let bytes = raw_zip(&[(
+            "card.json",
+            CARD_JSON.as_bytes(),
+            CARD_JSON.len() as u32,
+            0o100_644 << 16,
+            1,
+        )]);
         std::fs::write(&src, bytes).expect("write charx");
 
         assert!(matches!(
             import_character_file_in(&src, &assets),
             Err(EneConfigError::CharxEncrypted(_))
+        ));
+    }
+
+    #[test]
+    fn import_charx_rejects_total_size_cap() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let src = tmp.path().join("huge.charx");
+        let one_gib = MAX_CHARX_ENTRY_BYTES as u32;
+        let entries = [
+            (
+                "card.json",
+                CARD_JSON.as_bytes(),
+                CARD_JSON.len() as u32,
+                0o100_644 << 16,
+                0,
+            ),
+            ("a.bin", b"", one_gib, 0o100_644 << 16, 0),
+            ("b.bin", b"", one_gib, 0o100_644 << 16, 0),
+            ("c.bin", b"", one_gib, 0o100_644 << 16, 0),
+            ("d.bin", b"", one_gib, 0o100_644 << 16, 0),
+            ("e.bin", b"", one_gib, 0o100_644 << 16, 0),
+        ];
+        std::fs::write(&src, raw_zip(&entries)).expect("write charx");
+
+        assert!(matches!(
+            import_character_file_in(&src, &assets),
+            Err(EneConfigError::CharxTooLarge(_))
         ));
     }
 
