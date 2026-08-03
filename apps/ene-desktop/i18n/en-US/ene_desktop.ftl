@@ -161,6 +161,10 @@ character-editor-post-history = Post-history Instructions
 character-editor-validate = Validate
 character-editor-save = Save
 character-editor-reload = Reload
+character-editor-read-error = Failed to read card: { $error }
+character-editor-parse-error = Failed to parse card: { $error }
+character-editor-save-error = Failed to save card: { $error }
+character-editor-name-required = Name must not be empty
 
 # Spotlight quick launcher (#218)
 spotlight-title = Spotlight

@@ -161,6 +161,10 @@ character-editor-post-history = 履歴後の指示
 character-editor-validate = 検証
 character-editor-save = 保存
 character-editor-reload = 再読み込み
+character-editor-read-error = カードの読み込みに失敗しました: { $error }
+character-editor-parse-error = カードの解析に失敗しました: { $error }
+character-editor-save-error = カードの保存に失敗しました: { $error }
+character-editor-name-required = 名前は空にできません
 
 # Spotlight quick launcher (#218)
 spotlight-title = スポットライト

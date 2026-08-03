@@ -26,6 +26,13 @@ pub enum EneConfigError {
     /// JSON deserialisation error.
     #[error("Failed to parse JSON: {0}")]
     JsonError(#[from] serde_json::Error),
+    /// JSON serialisation error while writing a character card.
+    ///
+    /// Deliberately not `#[from]`: `JsonError` already owns the
+    /// `serde_json::Error` conversion and a serialisation failure must not
+    /// read as a parse failure.
+    #[error("Failed to serialize JSON: {0}")]
+    SerializeError(serde_json::Error),
     /// Catch-all configuration error with a free-form message.
     #[error("Configuration error: {0}")]
     GenericConfigError(String),
