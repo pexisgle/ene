@@ -5,6 +5,7 @@ mod clear;
 mod commitments;
 mod config;
 mod doctor;
+mod greeting;
 mod help;
 mod history;
 mod memory;
@@ -67,6 +68,7 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &session::SessionCommand as &dyn CliCommand,
     &permissions::PermissionsCommand as &dyn CliCommand,
     &doctor::DoctorCommand as &dyn CliCommand,
+    &greeting::GreetingCommand as &dyn CliCommand,
     &store::StoreCommand as &dyn CliCommand,
 ];
 

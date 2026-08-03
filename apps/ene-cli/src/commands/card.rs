@@ -34,6 +34,12 @@ impl CliCommand for CardCommand {
             .await
             .map_err(|e| CliError::ActorError(format!("Failed to load character card: {e}")))?;
         println!("Character card loaded: {name}");
+        if let Some(card) = ctx.handle.character_card() {
+            println!("{}", crate::style::header(card.data.get_character_name()));
+            if !card.data.creator_notes.trim().is_empty() {
+                println!("{}", card.data.creator_notes.trim());
+            }
+        }
         Ok(CommandOutcome::Continue)
     }
 }
