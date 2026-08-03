@@ -270,10 +270,15 @@ fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
 }
 
 /// Write the editor buffers back to the character card at `path`.
-/// The existing on-disk card is read first (when present) so that
-/// extensions, assets, and other fields the editor does not expose
-/// are preserved; a missing/unreadable file starts from a default
-/// card.
+///
+/// The existing on-disk card is read first so that extensions, assets, and
+/// other fields the editor does not expose are preserved. An unreadable or
+/// unparseable existing card aborts the save with the reason surfaced
+/// through `character_editor_validation_errors` — overwriting it with a
+/// default card would destroy the original. Only a missing file (a brand-new
+/// card) starts from a default. The write itself is atomic
+/// (temp file + rename via [`ene_config::save_character_card`]), so a crash
+/// mid-write cannot leave a truncated card behind.
 fn save_character_card(path: &str, world: &mut World, ui_entity: Entity) {
     let Some(snapshot) = world
         .get::<UiStateComponent>(ui_entity)
@@ -281,10 +286,30 @@ fn save_character_card(path: &str, world: &mut World, ui_entity: Entity) {
     else {
         return;
     };
-    let mut card = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<ene_config::CharacterCardV3>(&content).ok())
-        .unwrap_or_default();
+    let mut card = match std::fs::read_to_string(path) {
+        Ok(content) => match serde_json::from_str::<ene_config::CharacterCardV3>(&content) {
+            Ok(card) => card,
+            Err(error) => {
+                set_editor_errors(
+                    world,
+                    ui_entity,
+                    vec![format!("Failed to parse card: {error}")],
+                );
+                return;
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ene_config::CharacterCardV3::default()
+        }
+        Err(error) => {
+            set_editor_errors(
+                world,
+                ui_entity,
+                vec![format!("Failed to read card: {error}")],
+            );
+            return;
+        }
+    };
     card.data.name = snapshot.character_editor_name;
     card.data.description = snapshot.character_editor_description;
     card.data.personality = snapshot.character_editor_personality;
@@ -293,22 +318,11 @@ fn save_character_card(path: &str, world: &mut World, ui_entity: Entity) {
     card.data.mes_example = snapshot.character_editor_mes_example;
     card.data.first_mes = snapshot.character_editor_first_mes;
     card.data.post_history_instructions = snapshot.character_editor_post_history;
-    let serialized = match serde_json::to_string_pretty(&card) {
-        Ok(serialized) => serialized,
-        Err(error) => {
-            set_editor_errors(
-                world,
-                ui_entity,
-                vec![format!("Failed to serialize card: {error}")],
-            );
-            return;
-        }
-    };
-    if let Err(error) = std::fs::write(path, serialized) {
+    if let Err(error) = ene_config::save_character_card(std::path::Path::new(path), &card) {
         set_editor_errors(
             world,
             ui_entity,
-            vec![format!("Failed to write card: {error}")],
+            vec![format!("Failed to save card: {error}")],
         );
         return;
     }
@@ -381,6 +395,47 @@ fn push_default_expression(
 #[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
 mod tests {
     use super::*;
+    use crate::settings::UiState;
+
+    fn editor_world(name: &str) -> (World, Entity) {
+        let mut world = World::new();
+        let entity = world
+            .spawn(UiStateComponent(UiState {
+                character_editor_name: name.to_string(),
+                ..UiState::default()
+            }))
+            .id();
+        (world, entity)
+    }
+
+    fn editor_errors(world: &World, entity: Entity) -> Vec<String> {
+        world
+            .get::<UiStateComponent>(entity)
+            .map(|s| s.0.character_editor_validation_errors.clone())
+            .unwrap_or_default()
+    }
+
+    fn seed_card_json() -> &'static str {
+        r#"{
+            "spec": "chara_card_v3",
+            "spec_version": "3.0",
+            "data": {
+                "name": "Old",
+                "description": "desc",
+                "personality": "kind",
+                "scenario": "lab",
+                "mes_example": "hi",
+                "first_mes": "hello",
+                "system_prompt": "sys",
+                "post_history_instructions": "phi",
+                "alternate_greetings": ["alt"],
+                "tags": ["robot"],
+                "creator": "pexisgle",
+                "character_version": "1.0",
+                "vendor_field": "from-other-app"
+            }
+        }"#
+    }
 
     #[test]
     fn push_default_expression_drops_on_none_expression() {
@@ -407,6 +462,97 @@ mod tests {
         assert_eq!(cmd.target_time, 7.5);
         assert_eq!(cmd.hold_secs, 4.0);
         assert_eq!(cmd.weight, 1.0);
+    }
+
+    /// Regression for #334: saving over a card that exists but cannot be
+    /// parsed must abort — falling back to a default card and rewriting would
+    /// destroy the original on disk.
+    #[test]
+    fn save_aborts_on_unparseable_existing_card() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        let corrupt = "{ this is not json";
+        std::fs::write(&path, corrupt).expect("seed corrupt card");
+        let (mut world, entity) = editor_world("New Name");
+
+        save_character_card(path.to_string_lossy().as_ref(), &mut world, entity);
+
+        let errors = editor_errors(&world, entity);
+        assert!(
+            errors.iter().any(|e| e.contains("Failed to parse card")),
+            "parse failure must be surfaced, got {errors:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            corrupt,
+            "an unparseable card must never be overwritten"
+        );
+    }
+
+    /// Regression for #334: a missing card (brand-new character) still saves
+    /// from a default card — creating the file — without erroring.
+    #[test]
+    fn save_creates_card_when_file_missing() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        let (mut world, entity) = editor_world("Brand New");
+
+        save_character_card(path.to_string_lossy().as_ref(), &mut world, entity);
+
+        assert!(
+            editor_errors(&world, entity).is_empty(),
+            "save must succeed silently"
+        );
+        let on_disk = std::fs::read_to_string(&path).expect("read card");
+        let card: ene_config::CharacterCardV3 = serde_json::from_str(&on_disk).expect("valid JSON");
+        assert_eq!(card.data.name, "Brand New");
+    }
+
+    /// Regression for #334: an unreadable existing card (not missing, but
+    /// failing I/O) must abort the save and surface the read error.
+    #[test]
+    fn save_aborts_on_unreadable_existing_card() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let dir_path = tmp.path().join("character.json");
+        std::fs::create_dir(&dir_path).expect("create dir path (read_to_string fails on it)");
+        let (mut world, entity) = editor_world("Ene");
+
+        save_character_card(dir_path.to_string_lossy().as_ref(), &mut world, entity);
+
+        let errors = editor_errors(&world, entity);
+        assert!(
+            errors.iter().any(|e| e.contains("Failed to read card")),
+            "read failure must be surfaced, got {errors:?}"
+        );
+    }
+
+    /// Regression for #334: an edit-and-save round-trip must keep top-level
+    /// `data` fields from other apps (e.g. `vendor_field`) while applying the
+    /// editor changes.
+    #[test]
+    fn save_preserves_unknown_top_level_fields() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        std::fs::write(&path, seed_card_json()).expect("seed card");
+        let (mut world, entity) = editor_world("Edited");
+
+        save_character_card(path.to_string_lossy().as_ref(), &mut world, entity);
+
+        assert!(
+            editor_errors(&world, entity).is_empty(),
+            "save must succeed silently"
+        );
+        let on_disk = std::fs::read_to_string(&path).expect("read card");
+        let parsed: serde_json::Value = serde_json::from_str(&on_disk).expect("valid JSON");
+        assert_eq!(
+            parsed.pointer("/data/name"),
+            Some(&serde_json::json!("Edited"))
+        );
+        assert_eq!(
+            parsed.pointer("/data/vendor_field"),
+            Some(&serde_json::json!("from-other-app")),
+            "unknown top-level field must survive the save"
+        );
     }
 
     /// `ResetCharacterPosition` must zero all three axes of
