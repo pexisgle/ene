@@ -132,10 +132,10 @@ impl RateLimiter {
     /// Creates a token-bucket rate limiter.
     ///
     /// # Errors
-    /// Returns [`PluginError::Provider`] when `capacity` or `rate` is not
-    /// positive.
+    /// Returns [`PluginError::Provider`] when `capacity` is not finite and at
+    /// least one token, or `rate` is not finite and positive.
     pub fn new(capacity: f64, rate: f64) -> Result<Self, PluginError> {
-        if capacity > 0.0 && rate > 0.0 {
+        if capacity.is_finite() && capacity >= 1.0 && rate.is_finite() && rate > 0.0 {
             Ok(Self {
                 state: Arc::new(Mutex::new(RateLimiterState {
                     capacity,
@@ -145,7 +145,9 @@ impl RateLimiter {
                 })),
             })
         } else {
-            Err(PluginError::provider("capacity and rate must be positive"))
+            Err(PluginError::provider(
+                "capacity must be finite and at least 1; rate must be finite and positive",
+            ))
         }
     }
 
@@ -175,7 +177,7 @@ impl RateLimiter {
             Duration::ZERO
         } else {
             let needed = 1.0 - state.tokens;
-            Duration::from_secs_f64(needed / state.rate)
+            Duration::from_secs_f64((needed / state.rate).min(Duration::MAX.as_secs_f64()))
         }
     }
 
@@ -462,10 +464,15 @@ mod tests {
     }
 
     #[test]
-    fn rate_limiter_rejects_non_positive_parameters() {
+    fn rate_limiter_rejects_invalid_parameters() {
         assert!(RateLimiter::new(0.0, 1.0).is_err());
+        assert!(RateLimiter::new(0.5, 1.0).is_err());
         assert!(RateLimiter::new(1.0, 0.0).is_err());
         assert!(RateLimiter::new(-1.0, 1.0).is_err());
+        assert!(RateLimiter::new(f64::NAN, 1.0).is_err());
+        assert!(RateLimiter::new(f64::INFINITY, 1.0).is_err());
+        assert!(RateLimiter::new(1.0, f64::NAN).is_err());
+        assert!(RateLimiter::new(1.0, f64::INFINITY).is_err());
         assert!(RateLimiter::new(10.0, 5.0).is_ok());
     }
 

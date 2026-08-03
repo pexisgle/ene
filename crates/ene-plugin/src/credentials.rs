@@ -237,7 +237,7 @@ impl CredentialClient {
     /// answers pending immediately and the credential arrives via a later
     /// invalidation.
     pub async fn request_authorization(&self, id: &str) -> Result<(), PluginError> {
-        let (resp, _epoch) = self
+        let (resp, _conn, _epoch) = self
             .request(&CredentialRequest::RequestAuthorization { id: id.to_string() })
             .await?;
         match resp {
@@ -318,7 +318,7 @@ impl CredentialClient {
         if let Some(entry) = self.cache_get(id, epoch_before) {
             return Ok(entry);
         }
-        let (resolved, epoch_after) = self.fetch(id).await?;
+        let (resolved, conn, epoch_after) = self.fetch(id).await?;
         let (kind, secret, deadline, header) = match resolved {
             ResolvedCredential::ApiKey { key, header } => (
                 CredentialKind::ApiKey,
@@ -341,12 +341,14 @@ impl CredentialClient {
                 (CredentialKind::Bearer, secret, deadline, None)
             }
         };
-        // Only cache when the reader's generation is unchanged from the fetch
-        // start: an `Invalidated` frame processed in between means the
-        // resolved value is already stale, and caching it would resurrect a
-        // credential the host just revoked.
+        // The epoch comparison rejects a response that raced an invalidation
+        // during the request. The cache lock is shared with the invalidation
+        // reader, which increments the epoch while holding the same lock, so
+        // this final check and insertion are also atomic with respect to an
+        // invalidation arriving after the response.
         if epoch_before == epoch_after {
-            self.cache_insert(
+            self.cache_insert_if_current(
+                &conn,
                 id,
                 kind,
                 secret.clone(),
@@ -370,12 +372,15 @@ impl CredentialClient {
 
     /// Fetches a credential from the host (bypassing the cache), returning
     /// the connection generation it was resolved through.
-    async fn fetch(&self, id: &str) -> Result<(ResolvedCredential, u64), PluginError> {
-        let (resp, epoch) = self
+    async fn fetch(
+        &self,
+        id: &str,
+    ) -> Result<(ResolvedCredential, Arc<CredentialConnection>, u64), PluginError> {
+        let (resp, conn, epoch) = self
             .request(&CredentialRequest::Resolve { id: id.to_string() })
             .await?;
         match resp {
-            CredentialResponse::Resolved { credential } => Ok((credential, epoch)),
+            CredentialResponse::Resolved { credential } => Ok((credential, conn, epoch)),
             CredentialResponse::Error { code, message } => {
                 Err(map_request_error(id, code, message))
             }
@@ -388,13 +393,13 @@ impl CredentialClient {
     /// Sends one request over the connection, reconnecting once when the
     /// session has died or the host does not answer in time.
     ///
-    /// Returns the response together with the connection generation it was
-    /// delivered under, so callers can detect an invalidation that raced the
-    /// request.
+    /// Returns the response together with the connection and generation it was
+    /// delivered under, so callers can serialize cache insertion with
+    /// invalidation processing.
     async fn request(
         &self,
         req: &CredentialRequest,
-    ) -> Result<(CredentialResponse, u64), PluginError> {
+    ) -> Result<(CredentialResponse, Arc<CredentialConnection>, u64), PluginError> {
         for _ in 0..2 {
             let conn = self.ensure_connected().await?;
             // Single-flight wire protocol: the flight lock serializes
@@ -414,7 +419,8 @@ impl CredentialClient {
                 continue;
             }
             if let Ok(Ok(resp)) = tokio::time::timeout(self.response_timeout, rx).await {
-                return Ok((resp, conn.epoch.load(std::sync::atomic::Ordering::Relaxed)));
+                let epoch = conn.epoch.load(std::sync::atomic::Ordering::Relaxed);
+                return Ok((resp, Arc::clone(&conn), epoch));
             }
             // Reader exited (sender dropped) or host stalled: discard the
             // session so the next attempt reconnects instead of retrying on a
@@ -526,8 +532,9 @@ impl CredentialClient {
         })
     }
 
-    fn cache_insert(
+    fn cache_insert_if_current(
         &self,
+        conn: &Arc<CredentialConnection>,
         id: &str,
         kind: CredentialKind,
         value: CredentialSecret,
@@ -535,7 +542,11 @@ impl CredentialClient {
         deadline: Instant,
         epoch: u64,
     ) {
-        self.cache.lock().insert(
+        let mut guard = self.cache.lock();
+        if conn.epoch.load(std::sync::atomic::Ordering::Relaxed) != epoch {
+            return;
+        }
+        guard.insert(
             id.to_string(),
             CachedCredential {
                 kind,
@@ -561,11 +572,12 @@ async fn credential_reader_loop(
         match read_credential_response(&mut reader).await {
             Ok(Some(CredentialResponse::Invalidated { ids })) => {
                 // A revocation/rotation supersedes any in-flight resolution:
-                // bump the generation so `resolve_secret` skips caching a
-                // value resolved before this frame, and drop the entries.
+                let mut guard = cache.lock();
+                // Hold the cache lock while bumping the generation so a
+                // concurrent resolver cannot insert a stale value between
+                // this epoch change and removal.
                 conn.epoch
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let mut guard = cache.lock();
                 for id in ids {
                     guard.remove(&id);
                 }
@@ -1074,6 +1086,27 @@ mod tests {
             "sk-second",
             "Invalidated must drop the cached entry so the host is re-queried"
         );
+    }
+
+    #[tokio::test]
+    async fn cache_insert_rejects_stale_connection_epoch() {
+        let client = client_with_endpoint();
+        let conn = client.ensure_connected().await.expect("connect");
+        let epoch = conn.epoch.load(std::sync::atomic::Ordering::Relaxed);
+        conn.epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        client.cache_insert_if_current(
+            &conn,
+            "anthropic",
+            CredentialKind::ApiKey,
+            CredentialSecret::new("stale"),
+            None,
+            Instant::now() + Duration::from_mins(1),
+            epoch,
+        );
+
+        assert!(client.cache.lock().get("anthropic").is_none());
     }
 
     #[tokio::test]
