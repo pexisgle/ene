@@ -560,6 +560,7 @@ mod tests {
         let (text, tokens) = s.process_delta("Hi <|perf:expr=happy|> there");
         assert_eq!(text, vec!["Hi ", " there"]);
         assert_eq!(tokens, vec!["<|perf:expr=happy|>"]);
+        assert!(s.display.token_carry.is_empty());
         assert_eq!(s.display.display_buffer, "Hi  there");
     }
 

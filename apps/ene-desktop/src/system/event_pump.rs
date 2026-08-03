@@ -316,6 +316,41 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
+    fn expression_cue_emits_typed_message() {
+        let (mut world, tx) = build_world();
+        tx.send(AppEvent::ExpressionCue {
+            name: "happy".to_string(),
+            weight: 0.8,
+            hold_secs: 3.0,
+            target_time: 2.5,
+        })
+        .unwrap();
+        run_pump(&mut world);
+        let messages = world.resource_mut::<Messages<ExpressionCommand>>();
+        let mut cursor = messages.get_cursor();
+        let events: Vec<_> = cursor.read(&*messages).collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "happy");
+        assert_eq!(events[0].target_time, 2.5);
+    }
+
+    #[test]
+    fn cancel_cue_emits_typed_message() {
+        let (mut world, tx) = build_world();
+        tx.send(AppEvent::CancelCue {
+            scope: "expr".to_string(),
+        })
+        .unwrap();
+        run_pump(&mut world);
+        let messages = world.resource_mut::<Messages<CancelCommand>>();
+        let mut cursor = messages.get_cursor();
+        let events: Vec<_> = cursor.read(&*messages).collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "expr");
+    }
+
+    #[test]
     fn ai_finished_emits_message() {
         let (mut world, tx) = build_world();
         tx.send(AppEvent::Ai(AiStreamUpdate::Finished)).unwrap();

@@ -155,8 +155,8 @@ pub struct AudioChunk {
     ///
     /// Non-empty only on the first PCM chunk of a sentence, so the playback
     /// consumer can switch the expression when that sentence's audio starts
-    /// playing. Carries [`ene_mind::PerformanceCue::text_offset`] so hosts
-    /// can refine the timing from the marker's position in the spoken text.
+    /// playing. Each cue carries its [`ene_mind::PerformanceCue::text_offset`]
+    /// in the spoken text.
     pub cues: Vec<ene_mind::PerformanceCue>,
 }
 

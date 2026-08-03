@@ -77,11 +77,20 @@ utterance, synced to audio playback:
    switches the expression when that sentence's audio starts playing,
    scheduling the cue on the emotion pipeline, which honors `hold=SECS`
    (default 4 s) and fades the expression out afterwards. The next marker
-   replaces the current expression.
+   replaces the current expression. A sentence without a marker keeps the
+   current expression (its hold and fade continue); a reply carrying no
+   expression marker at all leaves the expression to the usual turn-end
+   resolution.
 4. Marker-driven mid-turn switches bypass the end-of-turn hysteresis (they
    come from the marker language, not the affect arbiter); the end-of-turn
    resolution is unchanged.
-5. `cancel:expr` clears not-yet-fired timed cues and suppresses later ones.
+5. `cancel:expr` stops the timed path: cues not yet attached to a TTS
+   sentence are dropped and later expression markers are ignored, so the
+   face keeps its current expression for the rest of the utterance. Cues
+   already attached to audio chunks still fire, and the currently shown
+   expression is not cleared mid-utterance; the cancel lands in the
+   turn-end `EneEvent::Performance`, after which the desktop clears its
+   scheduled and active expression state.
 
 Motions and look-at cues remain turn-unit: they are applied once at turn end
 through `EneEvent::Performance`.

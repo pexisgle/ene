@@ -677,8 +677,9 @@ async fn pump_events(
                             }));
                         }
                         ene_mind::PerfKind::Expression => {
-                            let weight = cue.weight.unwrap_or(1.0);
-                            let hold_secs = cue.hold_secs.unwrap_or(4.0);
+                            let weight = cue.weight.unwrap_or(ene_mind::DEFAULT_EXPRESSION_WEIGHT);
+                            let hold_secs =
+                                cue.hold_secs.unwrap_or(ene_mind::DEFAULT_EXPRESSION_HOLD_SECS);
                             // Turn-end cues apply immediately; mid-utterance
                             // TTS-synced cues arrive via the audio chunk path
                             // with a scheduled `target_time`.

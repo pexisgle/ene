@@ -129,6 +129,36 @@ fn take_cues_before(pending: &mut Vec<PerformanceCue>, range_end: usize) -> Vec<
     pending.drain(..count).collect()
 }
 
+/// Absorbs one parsed performance marker into the timed (TTS-synced) cue
+/// path.
+///
+/// A `cancel:expr|expression|all` marker mirrors `expr_cancelled` on the
+/// timed path: it drops not-yet-attributed cues and blocks later expression
+/// markers. An expression marker is queued with its clean-text offset only
+/// while TTS is on and the timed path is not suppressed.
+fn absorb_timed_marker(
+    cue: &PerformanceCue,
+    tts_enabled: bool,
+    clean_chars: usize,
+    expr_cancelled: &mut bool,
+    timed_expr_suppressed: &mut bool,
+    timed_cues: &mut Vec<PerformanceCue>,
+) {
+    if cue.kind == PerfKind::Cancel {
+        let scope = cue.name.to_ascii_lowercase();
+        if matches!(scope.as_str(), "expr" | "expression" | "all") {
+            *expr_cancelled = true;
+            // Mirror the turn-end suppression on the timed path: a cancel
+            // drops not-yet-fired cues and blocks later ones.
+            timed_cues.clear();
+            *timed_expr_suppressed = true;
+        }
+    }
+    if tts_enabled && cue.kind == PerfKind::Expression && !*timed_expr_suppressed {
+        timed_cues.push(cue.clone().with_text_offset(clean_chars));
+    }
+}
+
 /// A sentence dispatched to the TTS worker together with the expression cues
 /// that fall inside its clean-text range.
 ///
@@ -1159,35 +1189,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                     // still surface via the mid-turn arbiter — otherwise
                                     // they are dropped entirely.
                                     if let Some(cue) = ene_mind::parse_performance_marker(&token) {
-                                        // An explicit `[cancel:expr|expression|all]`
-                                        // suppresses the end-of-turn resolve fill so the
-                                        // previous expression is preserved.
-                                        if cue.kind == PerfKind::Cancel {
-                                            let scope = cue.name.to_ascii_lowercase();
-                                            if matches!(
-                                                scope.as_str(),
-                                                "expr" | "expression" | "all"
-                                            ) {
-                                                expr_cancelled = true;
-                                                // Mirror the turn-end suppression on the
-                                                // timed path: a cancel drops not-yet-fired
-                                                // cues and blocks later ones.
-                                                timed_cues.clear();
-                                                timed_expr_suppressed = true;
-                                            }
-                                        }
-                                        // Timed path: expression markers ride the TTS
-                                        // sentences so the host can switch the expression
-                                        // mid-utterance. Only active when TTS is on —
-                                        // without audio there is no timeline to sync to
-                                        // (markers then keep the turn-end behavior).
-                                        if tts_tx.is_some()
-                                            && cue.kind == PerfKind::Expression
-                                            && !timed_expr_suppressed
-                                        {
-                                            timed_cues
-                                                .push(cue.clone().with_text_offset(clean_chars));
-                                        }
+                                        absorb_timed_marker(
+                                            &cue,
+                                            tts_tx.is_some(),
+                                            clean_chars,
+                                            &mut expr_cancelled,
+                                            &mut timed_expr_suppressed,
+                                            &mut timed_cues,
+                                        );
                                         let accept_mid_turn = match cue.kind {
                                             PerfKind::Expression => !mind.emotion.enabled,
                                             PerfKind::Motion
@@ -1775,5 +1784,89 @@ mod tests {
         let taken = take_cues_before(&mut pending, 10);
         assert!(taken.is_empty());
         assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn absorb_timed_marker_queues_expression_with_offset() {
+        let cue = PerformanceCue::expression("happy");
+        let mut timed_cues = Vec::new();
+        let mut expr_cancelled = false;
+        let mut suppressed = false;
+        absorb_timed_marker(
+            &cue,
+            true,
+            12,
+            &mut expr_cancelled,
+            &mut suppressed,
+            &mut timed_cues,
+        );
+        assert_eq!(timed_cues, vec![cue_with_offset("happy", 12)]);
+        assert!(!expr_cancelled);
+        assert!(!suppressed);
+    }
+
+    #[test]
+    fn absorb_timed_marker_skips_expressions_without_tts() {
+        // Without TTS there is no timeline to sync to; markers keep the
+        // turn-end behavior.
+        let cue = PerformanceCue::expression("happy");
+        let mut timed_cues = Vec::new();
+        let mut expr_cancelled = false;
+        let mut suppressed = false;
+        absorb_timed_marker(
+            &cue,
+            false,
+            5,
+            &mut expr_cancelled,
+            &mut suppressed,
+            &mut timed_cues,
+        );
+        assert!(timed_cues.is_empty());
+    }
+
+    #[test]
+    fn absorb_timed_marker_cancel_clears_and_suppresses() {
+        let mut timed_cues = vec![cue_with_offset("happy", 3)];
+        let mut expr_cancelled = false;
+        let mut suppressed = false;
+        absorb_timed_marker(
+            &PerformanceCue::cancel("expr"),
+            true,
+            8,
+            &mut expr_cancelled,
+            &mut suppressed,
+            &mut timed_cues,
+        );
+        assert!(timed_cues.is_empty());
+        assert!(expr_cancelled);
+        assert!(suppressed);
+        // Later expression markers are blocked.
+        absorb_timed_marker(
+            &PerformanceCue::expression("sad"),
+            true,
+            9,
+            &mut expr_cancelled,
+            &mut suppressed,
+            &mut timed_cues,
+        );
+        assert!(timed_cues.is_empty());
+    }
+
+    #[test]
+    fn absorb_timed_marker_other_cancel_scope_leaves_timed_path_alone() {
+        let mut timed_cues = vec![cue_with_offset("happy", 3)];
+        let mut expr_cancelled = false;
+        let mut suppressed = false;
+        absorb_timed_marker(
+            &PerformanceCue::cancel("motion"),
+            true,
+            8,
+            &mut expr_cancelled,
+            &mut suppressed,
+            &mut timed_cues,
+        );
+        assert_eq!(timed_cues, vec![cue_with_offset("happy", 3)]);
+        assert!(!expr_cancelled);
+        assert!(!suppressed);
     }
 }

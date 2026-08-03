@@ -56,6 +56,11 @@ pub enum PerfKind {
     Cancel,
 }
 
+/// Default expression weight when a cue omits `weight`.
+pub const DEFAULT_EXPRESSION_WEIGHT: f32 = 1.0;
+/// Default expression hold when a cue omits `hold` (seconds).
+pub const DEFAULT_EXPRESSION_HOLD_SECS: f64 = 4.0;
+
 /// A single presentation cue (expression / motion / look-at / cancel).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerformanceCue {

@@ -11,7 +11,8 @@
 //! `tts_playing` flag used for self-voice suppression. Chunks that carry
 //! sentence-scoped expression cues ([`AudioChunkPayload::cues`]) also fire
 //! those cues on the emotion pipeline timed to when that sentence's audio
-//! starts playing.
+//! starts playing. A barge-in (`abort` final) additionally cancels the
+//! pipeline's scheduled expressions, whose audio was just discarded.
 //!
 //! The playback thread exits when the channel closes **or** when the
 //! shared shutdown flag is raised. The flag is necessary because the
@@ -88,29 +89,34 @@ impl PlaybackTimeline {
 ///
 /// `fire_wall` is the wall time at which the sentence's audio starts playing;
 /// the cue is scheduled there (or immediately when the sink has already
-/// passed it). `epoch` is the playback thread's monotonic clock — the emotion
-/// pipeline ticks against its own, slightly later clock, so a scheduled cue
-/// pops a few tens of milliseconds late, never early.
+/// passed it). `clock_origin` is the app-wide monotonic origin the emotion
+/// pipeline ticks against (`AppState::clock_origin`), so the cue pops on the
+/// frame at or after the sentence's audio start — at most one frame late,
+/// never early.
 fn fire_cues(
     cues: &[ene_mind::PerformanceCue],
     fire_wall: Option<Instant>,
-    epoch: Instant,
+    clock_origin: Instant,
     event_tx: &AppEventSender,
 ) {
     let delay = fire_wall.map_or(0.0, |wall| {
         wall.saturating_duration_since(Instant::now()).as_secs_f64()
     });
-    let target_time = epoch.elapsed().as_secs_f64() + delay;
+    let target_time = clock_origin.elapsed().as_secs_f64() + delay;
     for cue in cues {
         if cue.kind != ene_mind::PerfKind::Expression {
             continue;
         }
-        drop(event_tx.send(AppEvent::ExpressionCue {
-            name: cue.name.clone(),
-            weight: cue.weight.unwrap_or(1.0),
-            hold_secs: cue.hold_secs.unwrap_or(4.0),
-            target_time,
-        }));
+        drop(
+            event_tx.send(AppEvent::ExpressionCue {
+                name: cue.name.clone(),
+                weight: cue.weight.unwrap_or(ene_mind::DEFAULT_EXPRESSION_WEIGHT),
+                hold_secs: cue
+                    .hold_secs
+                    .unwrap_or(ene_mind::DEFAULT_EXPRESSION_HOLD_SECS),
+                target_time,
+            }),
+        );
     }
 }
 
@@ -213,18 +219,31 @@ impl Drop for AudioPlaybackHandle {
 ///
 /// Returns the sender half (handed to the AI bridge pump so it can
 /// forward `AudioChunk` events) and the handle that keeps the thread
-/// alive.
+/// alive. `clock_origin` is the app-wide monotonic origin
+/// (`AppState::clock_origin`) that the emotion pipeline also ticks
+/// against, so cues scheduled here pop exactly when the matching audio
+/// starts.
 pub fn spawn_playback(
     viseme: VisemeState,
     tts_playing: Arc<AtomicBool>,
     cue_events: AppEventSender,
+    clock_origin: Instant,
 ) -> (AudioChunkSender, AudioPlaybackHandle) {
     let (tx, rx) = crossbeam_channel::bounded::<AudioChunkPayload>(PLAYBACK_CHANNEL_CAPACITY);
     let shutdown = Arc::new(AtomicBool::new(false));
     let loop_shutdown = Arc::clone(&shutdown);
     let join = std::thread::Builder::new()
         .name("ene-audio-playback".to_string())
-        .spawn(move || playback_loop(rx, viseme, tts_playing, loop_shutdown, cue_events))
+        .spawn(move || {
+            playback_loop(
+                rx,
+                viseme,
+                tts_playing,
+                loop_shutdown,
+                cue_events,
+                clock_origin,
+            );
+        })
         .ok();
     (tx, AudioPlaybackHandle { join, shutdown })
 }
@@ -242,9 +261,8 @@ fn playback_loop(
     tts_playing: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     cue_events: AppEventSender,
+    clock_origin: Instant,
 ) {
-    // Playback epoch for scheduled expression cues; see `fire_cues`.
-    let epoch = Instant::now();
     let sink = match open_audio_sink() {
         Ok(sink) => Some(sink),
         Err(e) => {
@@ -259,7 +277,7 @@ fn playback_loop(
 
     let Some(sink) = sink else {
         // No audio backend: drain and discard so the sender never blocks.
-        drain_until_shutdown(&rx, &viseme, &shutdown, &cue_events, epoch);
+        drain_until_shutdown(&rx, &viseme, &shutdown, &cue_events, clock_origin);
         return;
     };
 
@@ -287,6 +305,7 @@ fn playback_loop(
                 // utterance drain naturally before resetting.
                 if abort {
                     sink.player.stop();
+                    cancel_scheduled_cues(&cue_events);
                 } else if was_speaking {
                     sink.player.sleep_until_end();
                 }
@@ -305,7 +324,7 @@ fn playback_loop(
                 // and must fire when that sentence's audio begins.
                 let fire_wall = timeline.next_chunk_start();
                 if !chunk.cues.is_empty() {
-                    fire_cues(&chunk.cues, fire_wall, epoch, &cue_events);
+                    fire_cues(&chunk.cues, fire_wall, clock_origin, &cue_events);
                 }
                 timeline.append(chunk.pcm.len(), chunk.sample_rate);
 
@@ -338,6 +357,16 @@ fn playback_loop(
     viseme.reset();
 }
 
+/// Asks the emotion pipeline to drop its scheduled and active expression
+/// state (`CancelCommand("expr")` semantics). Sent when a barge-in abort
+/// discards the queued audio: cues already scheduled for that audio are
+/// stale and would otherwise pop during the next turn.
+fn cancel_scheduled_cues(cue_events: &AppEventSender) {
+    drop(cue_events.send(AppEvent::CancelCue {
+        scope: "expr".to_string(),
+    }));
+}
+
 /// Drain-and-discard loop used when no audio output device is available.
 ///
 /// Expression cues still fire (immediately — there is no audio timeline to
@@ -348,7 +377,7 @@ fn drain_until_shutdown(
     viseme: &VisemeState,
     shutdown: &Arc<AtomicBool>,
     cue_events: &AppEventSender,
-    epoch: Instant,
+    clock_origin: Instant,
 ) {
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -358,9 +387,12 @@ fn drain_until_shutdown(
             Ok(chunk) => {
                 if chunk.is_final {
                     viseme.reset();
+                    if chunk.abort {
+                        cancel_scheduled_cues(cue_events);
+                    }
                 }
                 if !chunk.cues.is_empty() {
-                    fire_cues(&chunk.cues, None, epoch, cue_events);
+                    fire_cues(&chunk.cues, None, clock_origin, cue_events);
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -574,6 +606,17 @@ mod tests {
                     if *target_time >= 0.0 && *target_time < 1.0
             ),
             "expected an immediate cue, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_scheduled_cues_sends_expr_cancel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        cancel_scheduled_cues(&tx);
+        let event = rx.try_recv().expect("cancel cue must be sent");
+        assert!(
+            matches!(&event, AppEvent::CancelCue { scope } if scope == "expr"),
+            "expected an expr cancel cue, got {event:?}"
         );
     }
 

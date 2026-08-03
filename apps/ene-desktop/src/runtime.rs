@@ -47,13 +47,12 @@ pub struct Runtime {
     chat_egui_window: Option<ChatEguiWindow>,
     last_cursor_physical: Option<PhysicalPosition<f64>>,
     last_frame_instant: Option<Instant>,
-    /// Lazily-initialized clock for the emotion pipeline. The AI bridge
-    /// pushes commands with `target_time = 0.0`, so once the clock is set
-    /// every tick has monotonically increasing `now_secs` and commands pop
-    /// immediately; settings-UI commands are scheduled against their own
-    /// `started_at.elapsed()` clock. The two clocks need not agree because
-    /// both paths ultimately push into `EmotionPipelineState::pending`.
-    emotion_clock: Option<Instant>,
+    /// Monotonic clock origin for the emotion pipeline, shared with the TTS
+    /// playback thread (`AppState::clock_origin`). `tick_emotions` reads
+    /// `elapsed()` from this base and the playback thread schedules
+    /// TTS-synced cues on the same base, so a cue pops exactly when the
+    /// matching sentence's audio starts.
+    emotion_clock: Instant,
     device_state: device_query::DeviceState,
     char_surface_fatal: bool,
     /// Whether an Alt modifier key is currently held. Tracked from
@@ -69,6 +68,7 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(state: AppState, event_tx: AppEventSender) -> Self {
         let mut state = state;
+        let emotion_clock = state.clock_origin;
         // Run the bevy schedule once eagerly so the `Startup`
         // systems (notably `UiPlugin::spawn_settings_ui_window`)
         // can spawn the UI entity before any winit callback
@@ -102,7 +102,7 @@ impl Runtime {
             chat_egui_window: None,
             last_cursor_physical: None,
             last_frame_instant: None,
-            emotion_clock: None,
+            emotion_clock,
             device_state: device_query::DeviceState::new(),
             char_surface_fatal: false,
             alt_held: false,
@@ -648,9 +648,7 @@ impl Runtime {
                 return;
             };
             let bevy_world = self.state.app.world_mut();
-            let now_secs = self
-                .emotion_clock
-                .map_or(0.0, |t| t.elapsed().as_secs_f64());
+            let now_secs = self.emotion_clock.elapsed().as_secs_f64();
             match uw.render_frame(
                 &self.state.gpu.device,
                 &self.state.gpu.queue,
@@ -1056,9 +1054,7 @@ impl Runtime {
             let pipeline =
                 world.get_resource_mut::<crate::resource::emotion_pipeline::EmotionPipelineState>();
             if let Some(mut pipeline) = pipeline {
-                let now_secs = self
-                    .emotion_clock
-                    .map_or(0.0, |t| t.elapsed().as_secs_f64());
+                let now_secs = self.emotion_clock.elapsed().as_secs_f64();
                 Some(crate::resource::emotion_pipeline::tick_emotions(
                     &mut pipeline,
                     now_secs,
@@ -1067,7 +1063,6 @@ impl Runtime {
                 None
             }
         };
-        self.emotion_clock = self.emotion_clock.or_else(|| Some(Instant::now()));
 
         let cs = &settings.character_state;
         let actual_scale = character.auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN) * cs.model_scale;

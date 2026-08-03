@@ -17,6 +17,7 @@
 //! bevy `UiStateComponent`) and have `AppState` read/write through it
 //! exclusively.
 use std::sync::Arc;
+use std::time::Instant;
 
 use bevy_app::App;
 use tokio::sync::mpsc;
@@ -81,6 +82,11 @@ pub struct AppState {
     /// Keep-alive handle for the TTS playback thread; joined on drop.
     #[cfg(feature = "voice")]
     pub audio_playback: Option<crate::audio::playback::AudioPlaybackHandle>,
+    /// Monotonic clock origin shared by the emotion pipeline
+    /// (`Runtime::emotion_clock`) and the TTS playback thread, so
+    /// scheduled expression cues pop exactly when the matching sentence's
+    /// audio starts.
+    pub clock_origin: Instant,
 }
 
 impl AppState {
@@ -101,6 +107,11 @@ impl AppState {
     ) -> (Self, AppEventSender) {
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
         let config = settings.config_clone();
+        // One monotonic origin for every time-sensitive subsystem: the
+        // emotion pipeline ticks and the playback thread's cue scheduling
+        // share it, so a cue scheduled at `origin + d` pops exactly when
+        // the matching sentence starts playing.
+        let clock_origin = Instant::now();
 
         // Voice pipeline: spawn the TTS playback thread once and build the
         // shared audio state. The playback sender is cloned into the AI
@@ -118,6 +129,7 @@ impl AppState {
                 viseme.clone(),
                 tts_playing.clone(),
                 tx.clone(),
+                clock_origin,
             );
             let state = crate::audio::AudioState {
                 mic_active,
@@ -179,6 +191,7 @@ impl AppState {
                 audio_tx,
                 #[cfg(feature = "voice")]
                 audio_playback,
+                clock_origin,
             },
             tx,
         )

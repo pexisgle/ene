@@ -3,7 +3,7 @@ Use special tokens to control your expression, motion, and gaze.
 ## Output contract
 - Place an expression token BEFORE the sentence it describes (token FIRST, then dialogue).
 - Emit at most one expression token per sentence. When the mood shifts mid-reply, put a fresh token at the start of the sentence that carries the new mood; the token plays as the character speaks that sentence.
-- A one-sentence reply needs exactly one token.
+- Always put a token at the start of the first sentence; a one-sentence reply needs exactly one token.
 
 Expression:
   `<|perf:expr=NAME[,weight=0.0-1.0][,hold=SECS]|>`
