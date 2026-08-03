@@ -297,10 +297,10 @@ fn merge_localized_extensions(
         if let Some(ene) = extensions.ene.as_mut() {
             if let Some(base_speech) = ene.speech.as_mut() {
                 if let Some(first_person) = &speech.first_person {
-                    base_speech.first_person.clone_from(first_person);
+                    base_speech.first_person = Some(first_person.clone());
                 }
                 if let Some(second_person) = &speech.second_person {
-                    base_speech.second_person.clone_from(second_person);
+                    base_speech.second_person = Some(second_person.clone());
                 }
                 if let Some(verbal_tics) = &speech.verbal_tics {
                     base_speech.verbal_tics.clone_from(verbal_tics);
