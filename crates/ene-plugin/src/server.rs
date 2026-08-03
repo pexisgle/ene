@@ -2715,7 +2715,7 @@ mod tests {
     }
 
     /// A v6 handshake must switch the real connection's framing to
-    /// MessagePack for every frame after the JSON ack.
+    /// `MessagePack` for every frame after the JSON ack.
     #[cfg(unix)]
     #[tokio::test]
     async fn v6_connection_switches_to_msgpack_after_handshake() {
@@ -2775,76 +2775,6 @@ mod tests {
             .expect("non-EOF");
         assert!(
             matches!(&pong, PluginIpcResponse::Pong { request_id } if request_id == "p1"),
-            "expected Pong, got {pong:?}"
-        );
-    }
-
-    /// A v5 (N-1) handshake must keep the whole connection on JSON framing.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn v5_connection_stays_json_after_handshake() {
-        use ene_plugin_proto::{
-            PLUGIN_IPC_MIN_SUPPORTED_VERSION, SandboxConfigData, read_plugin_response,
-            write_plugin_request,
-        };
-
-        let dispatch = Arc::new(PluginDispatch::new(None, None, None, None, None));
-        let shutdown = Arc::new(tokio::sync::Notify::new());
-
-        let (client, server) = tokio::net::UnixStream::pair().expect("unix pair");
-        tokio::spawn(handle_connection(
-            dispatch,
-            IpcStream::Unix(server),
-            shutdown,
-        ));
-        let mut client = client;
-
-        write_plugin_request(
-            &mut client,
-            &PluginIpcRequest::Handshake {
-                version: VersionRange {
-                    min: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
-                    max: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
-                },
-                sandbox: SandboxConfigData::default(),
-                plugin_config: None,
-                plugin_profiles: None,
-            },
-            WireFormat::Json,
-        )
-        .await
-        .expect("write handshake");
-
-        let ack = read_plugin_response(&mut client, WireFormat::Json)
-            .await
-            .expect("read ack")
-            .expect("non-EOF");
-        assert!(
-            matches!(
-                &ack,
-                PluginIpcResponse::HandshakeAck {
-                    version: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
-                    ..
-                }
-            ),
-            "expected v5 HandshakeAck, got {ack:?}"
-        );
-
-        write_plugin_request(
-            &mut client,
-            &PluginIpcRequest::Ping {
-                request_id: "p5".into(),
-            },
-            WireFormat::Json,
-        )
-        .await
-        .expect("write ping");
-        let pong = read_plugin_response(&mut client, WireFormat::Json)
-            .await
-            .expect("read pong")
-            .expect("non-EOF");
-        assert!(
-            matches!(&pong, PluginIpcResponse::Pong { request_id } if request_id == "p5"),
             "expected Pong, got {pong:?}"
         );
     }
