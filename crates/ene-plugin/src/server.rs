@@ -706,14 +706,18 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             // cannot be reordered behind a spawned task.
             other => {
                 let resp = dispatch_request(dispatch, &other).await;
-                drop(tx.send(resp).await);
                 // Publish the negotiated version only after the ack is queued:
                 // the drainer gate keys on this cell, so storing earlier would
                 // let a drainer push jump ahead of the ack in the channel and
                 // be framed with the negotiated format while the host still
                 // reads pre-ack frames as JSON.
-                if let PluginIpcResponse::HandshakeAck { version, .. } = &resp {
-                    negotiated.store(*version, Ordering::Release);
+                let negotiated_version = match &resp {
+                    PluginIpcResponse::HandshakeAck { version, .. } => Some(*version),
+                    _ => None,
+                };
+                drop(tx.send(resp).await);
+                if let Some(version) = negotiated_version {
+                    negotiated.store(version, Ordering::Release);
                 }
             }
         }
