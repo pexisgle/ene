@@ -270,7 +270,7 @@ fn render_speech_style(card: &CharacterCardV3, lang: &str) -> String {
     if let Some(length) = speech.length {
         parts.push(speech_length_phrase(length, ja).to_string());
     }
-    for (label, value) in [
+    for (pronoun, label) in [
         (
             speech.first_person,
             if ja { "一人称" } else { "first person" },
@@ -280,10 +280,10 @@ fn render_speech_style(card: &CharacterCardV3, lang: &str) -> String {
             if ja { "二人称" } else { "second person" },
         ),
     ] {
-        if let Some(value) = value
-            && !value.trim().is_empty()
+        if let Some(pronoun) = pronoun
+            && !pronoun.trim().is_empty()
         {
-            parts.push(format!("{label} {value}"));
+            parts.push(format!("{label} {pronoun}"));
         }
     }
     if let Some(politeness) = speech.politeness {
