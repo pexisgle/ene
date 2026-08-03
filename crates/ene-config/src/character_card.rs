@@ -96,6 +96,14 @@ pub struct CharacterCardData {
     /// 0 = most recent assistant turn.
     #[serde(default)]
     pub authors_note_depth: Option<usize>,
+    /// Catch-all for top-level `data` fields this build does not model.
+    ///
+    /// Cards produced by other apps may carry vendor-specific keys; keeping
+    /// them here lets an edit-and-save round-trip preserve everything instead
+    /// of silently dropping it. An [`IndexMap`] (not `HashMap`) so unknown
+    /// keys keep their original order on re-serialization.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 /// Typed extension store for character cards.
@@ -951,6 +959,93 @@ mod tests {
             vec!["ene", "zeta", "alpha", "mid"],
             "extension key order must be preserved, got {keys:?}"
         );
+    }
+
+    /// A card carrying vendor-specific top-level `data` fields must survive an
+    /// edit-and-save round-trip with those fields (and their order) intact.
+    /// Cards from other apps use these keys; dropping them on save would
+    /// corrupt interop.
+    #[test]
+    fn unknown_top_level_data_fields_survive_roundtrip() {
+        let raw = r#"{
+            "spec": "chara_card_v3",
+            "spec_version": "3.0",
+            "data": {
+                "name": "Ene",
+                "description": "desc",
+                "personality": "kind",
+                "scenario": "lab",
+                "mes_example": "hi",
+                "first_mes": "hello",
+                "system_prompt": "sys",
+                "post_history_instructions": "phi",
+                "alternate_greetings": ["alt"],
+                "tags": ["robot"],
+                "creator": "pexisgle",
+                "character_version": "1.0",
+                "vendor_block": { "nested": [1, 2, 3] },
+                "vendor_flag": true
+            }
+        }"#;
+        let mut card: CharacterCardV3 = serde_json::from_str(raw).expect("valid card");
+        card.data.name = "Ene 2".to_string();
+
+        let out = serde_json::to_string_pretty(&card).expect("serialise card");
+        let back: CharacterCardV3 = serde_json::from_str(&out).expect("valid JSON");
+
+        assert_eq!(back.data.name, "Ene 2");
+        let value: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(
+            value.pointer("/data/vendor_block"),
+            Some(&serde_json::json!({ "nested": [1, 2, 3] }))
+        );
+        assert_eq!(
+            value.pointer("/data/vendor_flag"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            back.data.extra.get("vendor_block"),
+            Some(&serde_json::json!({ "nested": [1, 2, 3] }))
+        );
+        assert_eq!(
+            back.data.extra.get("vendor_flag"),
+            Some(&serde_json::json!(true))
+        );
+        // Unknown keys keep parse order relative to each other.
+        assert_eq!(
+            back.data.extra.keys().collect::<Vec<_>>(),
+            vec!["vendor_block", "vendor_flag"]
+        );
+    }
+
+    /// A card without unknown fields must not gain any when re-serialized —
+    /// the catch-all has to stay empty so saves stay byte-stable.
+    #[test]
+    fn clean_card_has_no_extra_keys_after_roundtrip() {
+        let raw = r#"{
+            "spec": "chara_card_v3",
+            "spec_version": "3.0",
+            "data": {
+                "name": "Ene",
+                "description": "",
+                "personality": "",
+                "scenario": "",
+                "mes_example": "",
+                "first_mes": "",
+                "system_prompt": "",
+                "post_history_instructions": "",
+                "alternate_greetings": [],
+                "tags": [],
+                "creator": "",
+                "character_version": ""
+            }
+        }"#;
+        let card: CharacterCardV3 = serde_json::from_str(raw).expect("valid card");
+        assert!(card.data.extra.is_empty());
+        let out = serde_json::to_string(&card).expect("serialise card");
+        assert!(!out.contains("vendor_"));
+        let back: CharacterCardV3 = serde_json::from_str(&out).expect("valid JSON");
+        assert!(back.data.extra.is_empty());
     }
 
     /// A fixed instant for the time-macro tests (2026-08-01 09:05:07 local).

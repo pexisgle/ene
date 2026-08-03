@@ -50,8 +50,8 @@ pub use config::{
     ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_character_schema_json,
     generate_schema_json, get_global_config, get_global_section, load_character_card, load_config,
     load_config_from, load_full_config, load_full_config_from, register_config_schema,
-    register_runtime_schema, register_tool_schema, resolve_character_path, save_full_config,
-    update_global_config, update_section, write_schemas,
+    register_runtime_schema, register_tool_schema, resolve_character_path, save_character_card,
+    save_full_config, update_global_config, update_section, write_schemas,
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;

@@ -909,6 +909,19 @@ pub fn load_character_card(
     serde_json::from_str(&file_content).map_err(crate::EneConfigError::JsonError)
 }
 
+/// Serializes `card` and atomically writes it to `path`.
+///
+/// The counterpart of [`load_character_card`]. The write goes through
+/// [`atomic_write`] (temp file + rename) so a crash mid-write can never leave
+/// a truncated card behind; host apps must not use a plain `fs::write` here.
+pub fn save_character_card(
+    path: &Path,
+    card: &crate::CharacterCardV3,
+) -> Result<(), crate::EneConfigError> {
+    let json = serde_json::to_string_pretty(card).map_err(crate::EneConfigError::SerializeError)?;
+    atomic_write(path, &json)
+}
+
 /// Reads the asset directory and settings.json, resolves `character_card_path`, etc., and returns `EneConfig`.
 ///
 /// Returns [`EneConfigError`] if the on-disk `settings.json` is malformed,
@@ -2528,5 +2541,85 @@ mod tests {
             "17-digit artefact in full config output: {json}"
         );
         assert!(json.contains("0.3"), "expected clean 0.3 in: {json}");
+    }
+
+    /// `save_character_card` must write a valid, re-loadable card and leave no
+    /// temp-file residue behind — the atomic-write contract for card saves.
+    #[test]
+    fn save_character_card_writes_valid_card_without_temp_residue() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        let mut card = crate::CharacterCardV3::default();
+        card.data.name = "Ene".to_string();
+        card.data
+            .extra
+            .insert("vendor_key".to_string(), serde_json::json!({"keep": 42}));
+
+        save_character_card(&path, &card).expect("save card");
+
+        let entries: Vec<std::ffi::OsString> = std::fs::read_dir(tmp.path())
+            .expect("read temp dir")
+            .map(|e| e.expect("dir entry").file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("character.json")],
+            "no temp files may be left behind, got {entries:?}"
+        );
+
+        let loaded =
+            crate::load_character_card(&path.to_string_lossy()).expect("reload card after save");
+        assert_eq!(loaded.data.name, "Ene");
+        assert_eq!(
+            loaded.data.extra.get("vendor_key"),
+            Some(&serde_json::json!({"keep": 42}))
+        );
+    }
+
+    /// Saving over an existing card must replace it atomically (a reader
+    /// either sees the old or the new bytes, never a mix) and preserve the
+    /// unknown-field catch-all from the original document.
+    #[test]
+    fn save_character_card_replaces_existing_card_preserving_unknown_fields() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        let original = r#"{
+            "spec": "chara_card_v3",
+            "spec_version": "3.0",
+            "data": {
+                "name": "Old",
+                "description": "",
+                "personality": "",
+                "scenario": "",
+                "mes_example": "",
+                "first_mes": "",
+                "system_prompt": "",
+                "post_history_instructions": "",
+                "alternate_greetings": [],
+                "tags": [],
+                "creator": "",
+                "character_version": "",
+                "vendor_field": "from-other-app"
+            }
+        }"#;
+        std::fs::write(&path, original).expect("seed existing card");
+
+        let mut card: crate::CharacterCardV3 =
+            serde_json::from_str(original).expect("parse seeded card");
+        card.data.name = "New".to_string();
+        save_character_card(&path, &card).expect("save card");
+
+        let on_disk = std::fs::read_to_string(&path).expect("read back");
+        assert_ne!(on_disk, original, "card must be updated in place");
+        let parsed: serde_json::Value = serde_json::from_str(&on_disk).expect("valid JSON");
+        assert_eq!(
+            parsed.pointer("/data/name"),
+            Some(&serde_json::json!("New"))
+        );
+        assert_eq!(
+            parsed.pointer("/data/vendor_field"),
+            Some(&serde_json::json!("from-other-app")),
+            "unknown top-level field must survive the save"
+        );
     }
 }
