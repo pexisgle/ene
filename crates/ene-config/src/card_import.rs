@@ -398,12 +398,13 @@ fn import_charx(
             if file.is_dir() {
                 continue;
             }
+            let size = file.size();
             let mut content = Vec::new();
             file.by_ref()
-                .take(file.size() + 1)
+                .take(size + 1)
                 .read_to_end(&mut content)
                 .map_err(|e| EneConfigError::CharxError(zip::result::ZipError::Io(e)))?;
-            if content.len() as u64 > file.size() {
+            if content.len() as u64 > size {
                 return Err(EneConfigError::CharxTooLarge(name));
             }
             let relative = if name == "card.json" {
