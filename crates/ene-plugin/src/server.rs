@@ -692,9 +692,8 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             | PluginIpcRequest::PollDeferred { .. }) => {
                 let dispatch = Arc::clone(dispatch);
                 let tx = tx.clone();
-                let negotiated = Arc::clone(&negotiated);
                 tokio::spawn(async move {
-                    let resp = dispatch_request(&dispatch, &long_running, &negotiated).await;
+                    let resp = dispatch_request(&dispatch, &long_running).await;
                     drop(tx.send(resp).await);
                 });
             }
@@ -706,8 +705,16 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             // any later request that depends on them is dispatched, so they
             // cannot be reordered behind a spawned task.
             other => {
-                let resp = dispatch_request(dispatch, &other, &negotiated).await;
+                let resp = dispatch_request(dispatch, &other).await;
                 drop(tx.send(resp).await);
+                // Publish the negotiated version only after the ack is queued:
+                // the drainer gate keys on this cell, so storing earlier would
+                // let a drainer push jump ahead of the ack in the channel and
+                // be framed with the negotiated format while the host still
+                // reads pre-ack frames as JSON.
+                if let PluginIpcResponse::HandshakeAck { version, .. } = &resp {
+                    negotiated.store(*version, Ordering::Release);
+                }
             }
         }
     }
@@ -718,11 +725,7 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
     clippy::manual_let_else,
     reason = "match-based return is clearer for multi-branch dispatch with early returns"
 )]
-async fn dispatch_request(
-    dispatch: &PluginDispatch,
-    req: &PluginIpcRequest,
-    negotiated: &AtomicU32,
-) -> PluginIpcResponse {
+async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> PluginIpcResponse {
     match req {
         PluginIpcRequest::Handshake {
             version: host_range,
@@ -754,9 +757,6 @@ async fn dispatch_request(
                     ),
                 };
             };
-            // Published before the ack is enqueued so the read/write loops
-            // derive the negotiated framing for every later frame.
-            negotiated.store(negotiated_version, Ordering::Release);
             if let Some(tool) = &dispatch.tool {
                 tool.set_sandbox(sandbox);
             }
@@ -1358,12 +1358,6 @@ mod tests {
     };
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
-
-    /// Direct-dispatch tests bypass the handshake, so the negotiation cell
-    /// stays at 0 (JSON framing); the value is irrelevant to their assertions.
-    fn test_negotiated() -> AtomicU32 {
-        AtomicU32::new(0)
-    }
     use ene_plugin_proto::{
         ConcurrencyHint, DeferredStatus, LlmProviderSpec, SttProviderSpec, ToolSpec,
         TtsProviderSpec, VersionRange,
@@ -1698,7 +1692,7 @@ mod tests {
             plugin_config: Some(serde_json::json!({"key": "value"})),
             plugin_profiles: None,
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::HandshakeAck {
                 version,
@@ -1721,7 +1715,7 @@ mod tests {
             plugin_config: None,
             plugin_profiles: None,
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -1739,7 +1733,7 @@ mod tests {
             plugin_config: None,
             plugin_profiles: None,
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::HandshakeAck { version, .. } => {
                 assert_eq!(version, PLUGIN_IPC_PROTOCOL_VERSION);
@@ -1756,7 +1750,6 @@ mod tests {
             &PluginIpcRequest::Ping {
                 request_id: "ping-1".into(),
             },
-            &test_negotiated(),
         )
         .await;
         assert_eq!(
@@ -1770,8 +1763,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_shutdown() {
         let dispatch = make_dispatch(false, false, false);
-        let resp =
-            dispatch_request(&dispatch, &PluginIpcRequest::Shutdown, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &PluginIpcRequest::Shutdown).await;
         assert_eq!(
             resp,
             PluginIpcResponse::Ack {
@@ -1786,7 +1778,7 @@ mod tests {
         let req = PluginIpcRequest::GetConfigSchema {
             request_id: "req-1".into(),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::ConfigSchema {
                 request_id, schema, ..
@@ -1804,7 +1796,7 @@ mod tests {
         let req = PluginIpcRequest::GetConfigSchema {
             request_id: "req-1".into(),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::ConfigSchema {
                 request_id, schema, ..
@@ -1881,7 +1873,7 @@ mod tests {
             plugin_config: Some(serde_json::json!({"api_key": {"source": "env"}})),
             plugin_profiles: Some(serde_json::json!({"default": {"voice": "af_heart"}})),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::HandshakeAck { .. }));
         assert_eq!(
             plugin.config.lock().unwrap().as_ref(),
@@ -1910,7 +1902,6 @@ mod tests {
                 config: serde_json::json!({"api_key": "sk-hot"}),
                 profiles: Some(serde_json::json!({"p": {"v": 1}})),
             },
-            &test_negotiated(),
         )
         .await;
         assert_eq!(
@@ -1946,7 +1937,6 @@ mod tests {
                 config: serde_json::json!({"api_key": "sk-hot"}),
                 profiles: Some(serde_json::json!({"p": {"v": 1}})),
             },
-            &test_negotiated(),
         )
         .await;
         let resp = dispatch_request(
@@ -1956,7 +1946,6 @@ mod tests {
                 config: serde_json::json!({"api_key": "sk-hot"}),
                 profiles: None,
             },
-            &test_negotiated(),
         )
         .await;
         assert_eq!(
@@ -1989,7 +1978,6 @@ mod tests {
             &PluginIpcRequest::GetConfigSchema {
                 request_id: "req-1".into(),
             },
-            &test_negotiated(),
         )
         .await;
         match resp {
@@ -2117,7 +2105,6 @@ mod tests {
                 request_id: "o".into(),
                 path: "voice".into(),
             },
-            &test_negotiated(),
         )
         .await;
         match options {
@@ -2134,7 +2121,6 @@ mod tests {
                 request_id: "v".into(),
                 value: serde_json::json!({}),
             },
-            &test_negotiated(),
         )
         .await;
         match validated {
@@ -2152,7 +2138,6 @@ mod tests {
                 from_version: 1,
                 value: serde_json::json!({"speaker": "alloy"}),
             },
-            &test_negotiated(),
         )
         .await;
         match migrated {
@@ -2194,7 +2179,7 @@ mod tests {
         let req = PluginIpcRequest::ListTools {
             request_id: "req-1".into(),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::Tools { request_id, tools } => {
                 assert_eq!(request_id, "req-1");
@@ -2210,7 +2195,7 @@ mod tests {
         let req = PluginIpcRequest::ListTools {
             request_id: "req-1".into(),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::Tools { request_id, tools } => {
                 assert_eq!(request_id, "req-1");
@@ -2230,7 +2215,7 @@ mod tests {
             deferred: false,
             context: None,
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::CallResult { request_id, result } => {
                 assert_eq!(request_id, "req-1");
@@ -2250,7 +2235,7 @@ mod tests {
             deferred: false,
             context: None,
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::CallResult { request_id, result } => {
                 assert_eq!(request_id, "req-1");
@@ -2270,7 +2255,7 @@ mod tests {
             deferred: false,
             context: None,
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2284,7 +2269,7 @@ mod tests {
             deferred: true,
             context: None,
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::CallResult { request_id, result } => {
                 assert_eq!(request_id, "req-1");
@@ -2306,7 +2291,7 @@ mod tests {
             messages: vec![serde_json::json!({"role": "user", "content": "Hi"})],
             json_schema: None,
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::ChatCompletionResult {
                 request_id,
@@ -2333,7 +2318,7 @@ mod tests {
             messages: vec![],
             json_schema: None,
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2348,7 +2333,7 @@ mod tests {
             dimensions: Some(3),
             items: vec!["hello".into(), "world".into()],
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::EmbedBatchResult {
                 request_id,
@@ -2373,7 +2358,7 @@ mod tests {
             dimensions: None,
             items: vec![],
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2384,7 +2369,7 @@ mod tests {
             request_id: "req-1".into(),
             task_id: "task-1".into(),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::DeferredStatus {
                 request_id,
@@ -2428,7 +2413,7 @@ mod tests {
             },
         ];
         for req in &ack_requests {
-            let resp = dispatch_request(&dispatch, req, &test_negotiated()).await;
+            let resp = dispatch_request(&dispatch, req).await;
             assert_eq!(
                 resp,
                 PluginIpcResponse::Ack {
@@ -2521,7 +2506,7 @@ mod tests {
             plugin_config: None,
             plugin_profiles: None,
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::HandshakeAck { capabilities, .. } => {
                 assert_eq!(capabilities.tools, 0);
@@ -2544,7 +2529,7 @@ mod tests {
             voice: "default".into(),
             format: "wav".into(),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::SpeechResult {
                 request_id,
@@ -2570,7 +2555,7 @@ mod tests {
             voice: "default".into(),
             format: "wav".into(),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2584,7 +2569,7 @@ mod tests {
             audio_base64: base64_encode(b"fake audio"),
             format: "wav".into(),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         match resp {
             PluginIpcResponse::TranscriptionResult { request_id, text } => {
                 assert_eq!(request_id, "req-stt-1");
@@ -2604,7 +2589,7 @@ mod tests {
             audio_base64: "AAAA".into(),
             format: "wav".into(),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2618,7 +2603,7 @@ mod tests {
             audio_base64: "!!!invalid base64!!!".into(),
             format: "wav".into(),
         };
-        let resp = dispatch_request(&dispatch, &req, &test_negotiated()).await;
+        let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
@@ -2722,6 +2707,141 @@ mod tests {
         assert!(
             saw_cancel_error,
             "expected terminal StreamError after cancel"
+        );
+    }
+
+    /// A v6 handshake must switch the real connection's framing to
+    /// MessagePack for every frame after the JSON ack.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v6_connection_switches_to_msgpack_after_handshake() {
+        use ene_plugin_proto::{SandboxConfigData, read_plugin_response, write_plugin_request};
+
+        let dispatch = Arc::new(PluginDispatch::new(None, None, None, None, None));
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        let (client, server) = tokio::net::UnixStream::pair().expect("unix pair");
+        tokio::spawn(handle_connection(
+            dispatch,
+            IpcStream::Unix(server),
+            shutdown,
+        ));
+        let mut client = client;
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::Handshake {
+                version: VersionRange::host_supported(),
+                sandbox: SandboxConfigData::default(),
+                plugin_config: None,
+                plugin_profiles: None,
+            },
+            WireFormat::Json,
+        )
+        .await
+        .expect("write handshake");
+
+        let ack = read_plugin_response(&mut client, WireFormat::Json)
+            .await
+            .expect("read ack")
+            .expect("non-EOF");
+        assert!(
+            matches!(
+                &ack,
+                PluginIpcResponse::HandshakeAck {
+                    version: PLUGIN_IPC_PROTOCOL_VERSION,
+                    ..
+                }
+            ),
+            "expected v6 HandshakeAck, got {ack:?}"
+        );
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::Ping {
+                request_id: "p1".into(),
+            },
+            WireFormat::MsgPack,
+        )
+        .await
+        .expect("write ping");
+        let pong = read_plugin_response(&mut client, WireFormat::MsgPack)
+            .await
+            .expect("read pong")
+            .expect("non-EOF");
+        assert!(
+            matches!(&pong, PluginIpcResponse::Pong { request_id } if request_id == "p1"),
+            "expected Pong, got {pong:?}"
+        );
+    }
+
+    /// A v5 (N-1) handshake must keep the whole connection on JSON framing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v5_connection_stays_json_after_handshake() {
+        use ene_plugin_proto::{
+            PLUGIN_IPC_MIN_SUPPORTED_VERSION, SandboxConfigData, read_plugin_response,
+            write_plugin_request,
+        };
+
+        let dispatch = Arc::new(PluginDispatch::new(None, None, None, None, None));
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        let (client, server) = tokio::net::UnixStream::pair().expect("unix pair");
+        tokio::spawn(handle_connection(
+            dispatch,
+            IpcStream::Unix(server),
+            shutdown,
+        ));
+        let mut client = client;
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::Handshake {
+                version: VersionRange {
+                    min: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+                    max: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+                },
+                sandbox: SandboxConfigData::default(),
+                plugin_config: None,
+                plugin_profiles: None,
+            },
+            WireFormat::Json,
+        )
+        .await
+        .expect("write handshake");
+
+        let ack = read_plugin_response(&mut client, WireFormat::Json)
+            .await
+            .expect("read ack")
+            .expect("non-EOF");
+        assert!(
+            matches!(
+                &ack,
+                PluginIpcResponse::HandshakeAck {
+                    version: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+                    ..
+                }
+            ),
+            "expected v5 HandshakeAck, got {ack:?}"
+        );
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::Ping {
+                request_id: "p5".into(),
+            },
+            WireFormat::Json,
+        )
+        .await
+        .expect("write ping");
+        let pong = read_plugin_response(&mut client, WireFormat::Json)
+            .await
+            .expect("read pong")
+            .expect("non-EOF");
+        assert!(
+            matches!(&pong, PluginIpcResponse::Pong { request_id } if request_id == "p5"),
+            "expected Pong, got {pong:?}"
         );
     }
 
