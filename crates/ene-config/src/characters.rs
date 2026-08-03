@@ -5,8 +5,11 @@
 //! A character is a subdirectory of `assets/characters/` containing
 //! `character.json`; resolution additionally falls back to a
 //! `characters/{name}.charx` or `characters/{name}.png` file so cards in
-//! those containers can be loaded without an import. A character that shows
-//! up in a list always resolves.
+//! those containers can be loaded without an import. Card loading is
+//! locale-aware: [`load_character_card_localized`] layers
+//! `character.{lang}.json` diffs (folder sidecar, CHARX root entry, or
+//! PNG-embedded bag) over the base card. A character that shows up in a
+//! list always resolves.
 
 use std::path::{Path, PathBuf};
 
@@ -14,12 +17,13 @@ use serde::Serialize;
 
 use crate::CharacterCardV3;
 use crate::CharacterConfig;
-use crate::card_import::load_card_from_path;
+use crate::card_import::{load_card_from_path, load_card_from_path_localized};
 use crate::character_assets::{
     DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH, EneAssetKind, ResolvedAssetUri, resolve_asset_uri,
 };
 use crate::error::EneConfigError;
 use crate::paths;
+use crate::{resolve_language_alias, save_character_card};
 
 /// Maximum recursion depth for the legacy extension-scan fallback.
 const MAX_SCAN_DEPTH: usize = 16;
@@ -354,6 +358,90 @@ fn file_stem(path: &str) -> String {
 pub fn load_character_card(name_or_path: &str) -> Result<CharacterCardV3, EneConfigError> {
     let path = resolve_character_path(name_or_path)?;
     load_card_from_path(&path)
+}
+
+/// Loads a character card with the active locale's diff layered over the base.
+///
+/// `app_language` is the app's selected language; a per-card override in
+/// `character_settings.json` (`language`) takes precedence when set. The
+/// resolved locale's diff is applied from the folder sidecar, CHARX root
+/// entry, or PNG-embedded locale bag; untranslated fields keep the base
+/// language. The returned card is a merged single-language `CCv3` card with
+/// the locale bag stripped, so every container form normalizes to the same
+/// in-memory shape.
+///
+/// # Errors
+///
+/// Propagates [`EneConfigError::CharacterNotConfigured`] and
+/// [`EneConfigError::UnsafeCharacterPath`] from [`resolve_character_path`],
+/// plus read and parse errors for the card file itself. A missing or
+/// malformed diff never fails the load — the base card is returned.
+/// Encrypted CHARX diff entries are the exception: like `card.json` itself,
+/// they are archive-integrity failures and hard-error.
+pub fn load_character_card_localized(
+    name_or_path: &str,
+    app_language: &str,
+) -> Result<CharacterCardV3, EneConfigError> {
+    let path = resolve_character_path(name_or_path)?;
+    let code = effective_locale(&path, app_language);
+    load_card_from_path_localized(&path, &code)
+}
+
+/// Merges the base card with `language`'s diff and writes the resulting
+/// complete single-language `CCv3` card to `out_path` (atomic).
+///
+/// The exported card carries no `extensions.ene.locales` bag, so any `CCv3`
+/// reader parses it as an ordinary single-language card. Unlike
+/// [`load_character_card_localized`], the language is taken literally — the
+/// per-card `character_settings.json` override does not apply.
+///
+/// # Errors
+///
+/// Propagates resolution, read, and parse errors from the card loading path,
+/// plus write errors from [`save_character_card`].
+pub fn export_character_card(
+    name_or_path: &str,
+    language: &str,
+    out_path: &Path,
+) -> Result<(), EneConfigError> {
+    let path = resolve_character_path(name_or_path)?;
+    let code = resolve_language_alias(language);
+    let card = load_card_from_path_localized(&path, &code)?;
+    save_character_card(out_path, &card)
+}
+
+/// The locale code to load: the per-card `character_settings.json` override
+/// when set, else the app language. Only folder-form cards can carry the
+/// override — CHARX / PNG cards have no settings file.
+fn effective_locale(card_path: &Path, app_language: &str) -> String {
+    let mut code = resolve_language_alias(app_language);
+    if card_path
+        .file_name()
+        .is_none_or(|name| name != "character.json")
+    {
+        return code;
+    }
+    let Some(dir) = card_path.parent() else {
+        return code;
+    };
+    let settings_path = dir.join("character_settings.json");
+    let Ok(content) = std::fs::read_to_string(&settings_path) else {
+        return code;
+    };
+    match serde_json::from_str::<CharacterConfig>(&content) {
+        Ok(config) if !config.language.trim().is_empty() => {
+            code = resolve_language_alias(&config.language);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                path = %settings_path.display(),
+                error = %e,
+                "Failed to parse character settings; using the app language"
+            );
+        }
+    }
+    code
 }
 
 #[cfg(test)]
@@ -781,5 +869,164 @@ mod tests {
 
         let resolved = resolve_character_path_in(&assets, "Ada").expect("folder wins");
         assert_eq!(resolved, assets.join("characters/Ada/character.json"));
+    }
+
+    const LOCALIZED_BASE_JSON: &str = r#"{
+        "spec":"chara_card_v3",
+        "spec_version":"3.0",
+        "data":{
+            "name":"Ada",
+            "description":"Base description",
+            "personality":"Base personality",
+            "first_mes":"Hello!",
+            "alternate_greetings":["Hi"],
+            "nickname":"Ada",
+            "tags":["engineer"],
+            "character_book":{
+                "entries":[
+                    {
+                        "id":"lore-1",
+                        "keys":["cat","kitty"],
+                        "secondary_keys":["pet"],
+                        "content":"Base lore",
+                        "enabled":true,
+                        "insertion_order":0,
+                        "use_regex":false
+                    }
+                ]
+            }
+        }
+    }"#;
+
+    const JA_DIFF_JSON: &str = r#"{
+        "description":"日本語の説明",
+        "first_mes":"やっほー！",
+        "alternate_greetings":["こんにちは"],
+        "nickname":"エイダ",
+        "tags":["エンジニア"],
+        "character_book":{
+            "entries":[
+                {
+                    "id":"lore-1",
+                    "keys":["猫","ねこ"],
+                    "secondary_keys":["ペット"],
+                    "content":"日本語のロア"
+                }
+            ]
+        }
+    }"#;
+
+    fn write_localized_card(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("create character dir");
+        std::fs::write(dir.join("character.json"), LOCALIZED_BASE_JSON).expect("write base");
+        std::fs::write(dir.join("character.ja.json"), JA_DIFF_JSON).expect("write diff");
+    }
+
+    #[test]
+    fn localized_load_applies_folder_sidecar_via_public_api() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let card_dir = tmp.path().join("Ada");
+        write_localized_card(&card_dir);
+        let path = card_dir.join("character.json");
+
+        let card = load_character_card_localized(&path.to_string_lossy(), "ja")
+            .expect("localized card loads");
+        assert_eq!(card.data.description, "日本語の説明");
+        assert_eq!(card.data.personality, "Base personality");
+        assert_eq!(card.data.alternate_greetings, ["こんにちは"]);
+        let entry = &card.data.character_book.expect("book").entries[0];
+        assert_eq!(entry.keys, ["猫", "ねこ"]);
+        assert_eq!(entry.secondary_keys, Some(vec!["ペット".to_string()]));
+
+        let base = load_character_card(&path.to_string_lossy()).expect("base card loads");
+        assert_eq!(base.data.description, "Base description");
+    }
+
+    #[test]
+    fn per_character_settings_override_wins_over_app_language() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let card_dir = tmp.path().join("Ada");
+        write_localized_card(&card_dir);
+        std::fs::write(
+            card_dir.join("character_settings.json"),
+            r#"{"language":"ja"}"#,
+        )
+        .expect("write settings");
+        let path = card_dir.join("character.json");
+
+        let card = load_character_card_localized(&path.to_string_lossy(), "en")
+            .expect("localized card loads");
+        assert_eq!(card.data.description, "日本語の説明");
+    }
+
+    #[test]
+    fn empty_per_character_override_inherits_app_language() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let card_dir = tmp.path().join("Ada");
+        write_localized_card(&card_dir);
+        std::fs::write(
+            card_dir.join("character_settings.json"),
+            r#"{"language":""}"#,
+        )
+        .expect("write settings");
+        let path = card_dir.join("character.json");
+
+        let card = load_character_card_localized(&path.to_string_lossy(), "ja")
+            .expect("localized card loads");
+        assert_eq!(card.data.description, "日本語の説明");
+    }
+
+    #[test]
+    fn export_character_card_writes_complete_single_language_card() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let card_dir = tmp.path().join("Ada");
+        write_localized_card(&card_dir);
+        let out = tmp.path().join("ada-ja.json");
+
+        export_character_card(
+            &card_dir.join("character.json").to_string_lossy(),
+            "ja",
+            &out,
+        )
+        .expect("exports");
+
+        let exported: CharacterCardV3 =
+            serde_json::from_str(&std::fs::read_to_string(&out).expect("read export"))
+                .expect("export parses as CCv3");
+        assert_eq!(exported.spec, "chara_card_v3");
+        assert_eq!(exported.data.description, "日本語の説明");
+        assert_eq!(exported.data.personality, "Base personality");
+        let entry = &exported.data.character_book.expect("book").entries[0];
+        assert_eq!(entry.keys, ["猫", "ねこ"]);
+        assert_eq!(entry.secondary_keys, Some(vec!["ペット".to_string()]));
+        assert!(
+            exported
+                .data
+                .extensions
+                .ene
+                .as_ref()
+                .is_none_or(|ene| ene.locales.is_none()),
+            "export carries no locale bag"
+        );
+    }
+
+    #[test]
+    fn export_character_card_without_diff_exports_base() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let card_dir = tmp.path().join("Ada");
+        write_localized_card(&card_dir);
+        let out = tmp.path().join("ada-en.json");
+
+        export_character_card(
+            &card_dir.join("character.json").to_string_lossy(),
+            "en",
+            &out,
+        )
+        .expect("exports");
+
+        let exported: CharacterCardV3 =
+            serde_json::from_str(&std::fs::read_to_string(&out).expect("read export"))
+                .expect("export parses as CCv3");
+        assert_eq!(exported.data.description, "Base description");
     }
 }

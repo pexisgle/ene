@@ -47,7 +47,7 @@ impl LorebookIndexer {
         };
 
         let char_name = card.data.get_character_name();
-        let character_id = card.data.get_character_name().to_string();
+        let character_id = card.data.get_character_id().to_string();
 
         book.entries
             .iter()

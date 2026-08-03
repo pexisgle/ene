@@ -44,3 +44,15 @@ pub fn select_language(lang: &str) {
         drop(localizer.select(&requested_languages));
     }
 }
+
+/// Primary language code of the active UI locale: the `--lang` override when
+/// set, else the system-negotiated locale.
+///
+/// Drives character card localization, so a Japanese UI selects
+/// `character.ja.json` diffs without extra configuration.
+pub fn active_language_code() -> String {
+    loader().current_languages().first().map_or_else(
+        || ene_config::system_language().to_string(),
+        |lang| lang.language.as_str().to_string(),
+    )
+}

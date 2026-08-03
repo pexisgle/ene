@@ -810,7 +810,7 @@ impl CharacterSettings {
             .get(self.character_state.selected_motion)
             .cloned()
             .unwrap_or_default();
-        let existing_extra = store.character_config().extra;
+        let existing = store.character_config();
         let char_config = CharacterConfig {
             character_position: [
                 self.character_state.character_position.x,
@@ -826,7 +826,10 @@ impl CharacterSettings {
             // `CharacterConfig` so two different models can have
             // two different defaults.
             default_expression: self.character_state.default_expression.clone(),
-            extra: existing_extra,
+            // The card locale is not surfaced in the UI; keep whatever is on
+            // disk so a manual per-character override survives a save.
+            language: existing.language,
+            extra: existing.extra,
         };
         store.set_character_config(char_config);
     }

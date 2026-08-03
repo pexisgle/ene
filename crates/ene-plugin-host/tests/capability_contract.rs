@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use ene_plugin_host::{CapabilityRegistry, IpcPluginConnection};
 use ene_plugin_proto::{
     CapabilityRef, CapabilityRequirement, IpcListener, PLUGIN_IPC_PROTOCOL_VERSION,
-    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, VersionRange, cleanup_path,
-    read_plugin_request, write_plugin_response,
+    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, VersionRange, WireFormat,
+    cleanup_path, read_plugin_request, write_plugin_response,
 };
 
 /// Counter for generating unique socket paths across parallel tests.
@@ -54,7 +54,7 @@ async fn run_mock_server(socket_path: PathBuf, capabilities: PluginCapabilities)
             let Ok(Some(PluginIpcRequest::Handshake {
                 version: host_range,
                 ..
-            })) = read_plugin_request(&mut stream).await
+            })) = read_plugin_request(&mut stream, WireFormat::Json).await
             else {
                 return;
             };
@@ -70,6 +70,7 @@ async fn run_mock_server(socket_path: PathBuf, capabilities: PluginCapabilities)
                     version: negotiated,
                     capabilities,
                 },
+                WireFormat::Json,
             )
             .await
             .is_err()
@@ -78,11 +79,15 @@ async fn run_mock_server(socket_path: PathBuf, capabilities: PluginCapabilities)
             }
             // Answer pings so the connection stays healthy for the test.
             while let Ok(Some(PluginIpcRequest::Ping { request_id })) =
-                read_plugin_request(&mut stream).await
+                read_plugin_request(&mut stream, WireFormat::Json).await
             {
-                if write_plugin_response(&mut stream, &PluginIpcResponse::Pong { request_id })
-                    .await
-                    .is_err()
+                if write_plugin_response(
+                    &mut stream,
+                    &PluginIpcResponse::Pong { request_id },
+                    WireFormat::Json,
+                )
+                .await
+                .is_err()
                 {
                     break;
                 }
