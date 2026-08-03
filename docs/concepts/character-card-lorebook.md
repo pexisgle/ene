@@ -11,7 +11,7 @@ An entry is selected when:
 
 - it is `constant: true` (always selected), **or**
 - at least one `keys` entry matches the recent conversation (within
-  `scan_depth`), unless a `not_keys` entry matches;
+  `scan_depth`), and no `@@exclude_keys` value matches;
 - `selective` / `secondary_keys` behave per the CCv3 spec: with `selective`,
   at least one `secondary_keys` value must also match;
 - and every active `@@` decorator condition passes (see below).
@@ -111,7 +111,7 @@ pipeline, derived from the session history (see
 
 | Decorator | Ene behavior |
 |---|---|
-| `@@scan_depth N` | Overrides the book's `scan_depth` for this entry. |
+| `@@scan_depth N` | Overrides the book's `scan_depth` for this entry. With `recursive_scanning`, other entries' contents still match regardless of the override (per spec). |
 | `@@instruct_scan_depth N` | **Parsed, ignored** — chat context (see `@@instruct_depth`). |
 | `@@is_greeting N` | **Parsed, ignored** — Ene does not track the active greeting index; the spec says to ignore the decorator when it cannot be checked. |
 

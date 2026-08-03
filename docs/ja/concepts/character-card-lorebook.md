@@ -11,7 +11,7 @@ CCv3 キャラクターカードには **ロアブック**（`character_book`）
 
 - `constant: true`（常に選択）**または**
 - `keys` の少なくとも 1 つが直近の会話（`scan_depth` 以内）にマッチし、
-  `not_keys` のいずれにもマッチしない;
+  `@@exclude_keys` のいずれにもマッチしない;
 - `selective` / `secondary_keys` は CCv3 仕様どおり:
   `selective` 指定時は `secondary_keys` の少なくとも 1 つもマッチする必要があります;
 - 有効な `@@` デコレータの条件がすべて満たされている（下記参照）。
@@ -109,7 +109,7 @@ CCv3 キャラクターカードには **ロアブック**（`character_book`）
 
 | デコレータ | Ene の挙動 |
 |---|---|
-| `@@scan_depth N` | このエントリに限りロアブックの `scan_depth` を上書き。 |
+| `@@scan_depth N` | このエントリに限りロアブックの `scan_depth` を上書き。`recursive_scanning` 時は、上書きの有無に関わらず他エントリの内容はマッチ対象に残ります（spec 準拠）。 |
 | `@@instruct_scan_depth N` | **パースのみ・無視** — チャット文脈（`@@instruct_depth` 参照）。 |
 | `@@is_greeting N` | **パースのみ・無視** — Ene はアクティブなグリーティング番号を追跡していません。仕様は判定不能な場合に無視を許容しています。 |
 

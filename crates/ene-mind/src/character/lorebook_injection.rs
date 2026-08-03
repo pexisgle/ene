@@ -111,7 +111,15 @@ pub fn build_lorebook_injection(
     }
 
     if book.recursive_scanning.unwrap_or(false) && !selected.is_empty() {
-        select_recursive(&mut selected, book, &ctx, char_name, user_name, &base_scan);
+        select_recursive(
+            &mut selected,
+            book,
+            &ctx,
+            char_name,
+            user_name,
+            user_input,
+            &base_scan,
+        );
     }
 
     selected = apply_token_budget(selected, book.token_budget);
@@ -214,6 +222,7 @@ fn lorebook_entry_accepted(
         base_scan,
         &decorators,
         ctx.scan_depth,
+        "",
     );
     entry_accepted_with_scan(entry, index, &decorators, &entry_scan, ctx)
 }
@@ -238,11 +247,12 @@ fn entry_accepted_with_scan(
     entry_decorators_accept(
         decorators,
         entry,
+        index,
         entry_scan,
+        Some(ctx.regex_cache),
         &ActivationContext {
             assistant_message_count: assistant_message_count(ctx.base_turns),
             previously_matched,
-            ..ActivationContext::default()
         },
     )
 }
@@ -278,11 +288,12 @@ fn entry_previously_matched(
             && entry_decorators_accept(
                 decorators,
                 entry,
+                index,
                 &scan,
+                Some(ctx.regex_cache),
                 &ActivationContext {
                     assistant_message_count: assistant_message_count(prior),
                     previously_matched: false,
-                    ..ActivationContext::default()
                 },
             )
     })
@@ -291,20 +302,27 @@ fn entry_previously_matched(
 /// Extend the selection with entries whose keys match inside the base scan
 /// text extended with already-selected content (`recursive_scanning`), per
 /// the spec's allow-list. The base scan stays in the evaluation window so
-/// `@@exclude_keys` hits from the first pass remain effective; entries with
-/// `@@scan_depth` still re-evaluate against their own window only.
+/// `@@exclude_keys` hits from the first pass remain effective; `@@scan_depth`
+/// entries re-evaluate against their own window with the selected contents
+/// appended (spec: recursive matching holds regardless of the override).
 fn select_recursive<'a>(
     selected: &mut Vec<SelectedEntry<'a>>,
     book: &'a ene_config::Lorebook,
     ctx: &ScanContext<'_>,
     char_name: &str,
     user_name: &str,
+    user_input: &str,
     base_scan: &str,
 ) {
     let mut extended = String::from(base_scan);
+    let mut recursion_content = String::new();
     for item in selected.iter() {
         extended.push('\n');
         extended.push_str(&item.content);
+        if !recursion_content.is_empty() {
+            recursion_content.push('\n');
+        }
+        recursion_content.push_str(&item.content);
     }
     let selected_indices: std::collections::HashSet<usize> =
         selected.iter().map(|s| s.index).collect();
@@ -314,8 +332,14 @@ fn select_recursive<'a>(
             continue;
         }
         let (decorators, _) = EntryDecorators::parse(&entry.content);
-        let entry_scan =
-            entry_scan_text("", ctx.base_turns, &extended, &decorators, ctx.scan_depth);
+        let entry_scan = entry_scan_text(
+            user_input,
+            ctx.base_turns,
+            &extended,
+            &decorators,
+            ctx.scan_depth,
+            &recursion_content,
+        );
         if entry_accepted_with_scan(entry, index, &decorators, &entry_scan, ctx) {
             fresh.push(selected_entry(entry, index, char_name, user_name));
         }
@@ -323,24 +347,30 @@ fn select_recursive<'a>(
     selected.extend(fresh);
 }
 
-/// Per-entry scan text: the `@@scan_depth` override rebuilds the scan window,
-/// entries without the decorator share the book-level (or recursively
-/// extended) scan text.
+/// Per-entry scan text: the `@@scan_depth` override rebuilds the scan window
+/// (with the recursive-scan contents appended), entries without the decorator
+/// share the book-level (or recursively extended) scan text.
 fn entry_scan_text<'a>(
     user_input: &str,
     base_turns: &[RecallTurn<'_>],
     base_scan: &'a str,
     decorators: &EntryDecorators,
     book_scan_depth: u32,
+    recursion_content: &str,
 ) -> std::borrow::Cow<'a, str> {
     if decorators.scan_depth.is_none() {
         std::borrow::Cow::Borrowed(base_scan)
     } else {
-        std::borrow::Cow::Owned(build_lorebook_scan_text(
+        let mut rebuilt = build_lorebook_scan_text(
             user_input,
             base_turns,
             decorators.effective_scan_depth(book_scan_depth),
-        ))
+        );
+        if !recursion_content.is_empty() {
+            rebuilt.push('\n');
+            rebuilt.push_str(recursion_content);
+        }
+        std::borrow::Cow::Owned(rebuilt)
     }
 }
 
@@ -823,6 +853,27 @@ mod tests {
                 .iter()
                 .all(|c| !c.contains("Lost city lore")),
             "@@exclude_keys hits in the base scan text must stay effective in the recursive pass"
+        );
+    }
+
+    #[test]
+    fn recursive_scanning_reaches_scan_depth_entries_regardless_of_override() {
+        let book = Lorebook {
+            recursive_scanning: Some(true),
+            entries: vec![
+                entry(&["dragon"], "The old map marks the lost city.", false, 1),
+                entry(&["lost city"], "@@scan_depth 1\nLost city lore.", false, 2),
+            ],
+            ..Default::default()
+        };
+        let card = card_with(book);
+        let injection = build_lorebook_injection(&card, "User", "dragon", &[]);
+        assert!(
+            injection
+                .after_char
+                .iter()
+                .any(|c| c.contains("Lost city lore")),
+            "recursive scanning must match inside an @@scan_depth entry's window too (spec: regardless of the override)"
         );
     }
 
