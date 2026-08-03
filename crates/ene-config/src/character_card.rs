@@ -566,6 +566,64 @@ pub struct EneExtension {
     /// Resting affect that decay converges toward; all zeros when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub affect_baseline: Option<AffectBaseline>,
+    /// Structured speech-style definition driving the Identity Kernel's
+    /// `Speech style` line; absent cards get a concise default instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speech: Option<SpeechStyleDefinition>,
+}
+
+/// Preferred reply length (`extensions.ene.speech.length`).
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case")]
+#[schemars(crate = "crate::schemars")]
+pub enum SpeechLength {
+    /// Short, clipped replies.
+    Short,
+    /// Average-length replies.
+    #[default]
+    Normal,
+    /// Longer, fuller replies.
+    Long,
+}
+
+/// Politeness register (`extensions.ene.speech.politeness`).
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case")]
+#[schemars(crate = "crate::schemars")]
+pub enum PolitenessLevel {
+    /// Casual, friendly register.
+    #[default]
+    Casual,
+    /// Polite register.
+    Polite,
+    /// Formal register.
+    Formal,
+}
+
+/// Structured speech-style definition under `extensions.ene.speech`.
+///
+/// Every field is optional; only the fields the card author defines are
+/// rendered into the Identity Kernel, so a minimal `{ "length": "short" }`
+/// card stays valid.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "crate::schemars")]
+pub struct SpeechStyleDefinition {
+    /// Preferred reply length.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length: Option<SpeechLength>,
+    /// The character's first-person pronoun (e.g. `"私"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_person: Option<String>,
+    /// How the character addresses the user (e.g. `"きみ"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second_person: Option<String>,
+    /// Politeness register.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub politeness: Option<PolitenessLevel>,
+    /// Recurring verbal tics / sentence-ending particles (e.g. `"〜だよね"`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub verbal_tics: Vec<String>,
 }
 
 /// Context for expanding CBS (Character Book Spec) template macros.
@@ -1175,5 +1233,59 @@ mod tests {
         assert!((baseline.arousal + 1.0).abs() < f32::EPSILON);
         assert!((baseline.irritation - 1.0).abs() < f32::EPSILON);
         assert!((baseline.fatigue - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn speech_style_definition_serde_roundtrip() {
+        let mut card = CharacterCardV3::default();
+        card.data.extensions.ene = Some(EneExtension {
+            speech: Some(SpeechStyleDefinition {
+                length: Some(SpeechLength::Short),
+                first_person: Some("私".into()),
+                second_person: Some("きみ".into()),
+                politeness: Some(PolitenessLevel::Casual),
+                verbal_tics: vec!["〜だよね".into(), "んだよ".into()],
+            }),
+            ..EneExtension::default()
+        });
+
+        let json = serde_json::to_string(&card).expect("serialise card");
+        assert!(json.contains("\"speech\""));
+        assert!(json.contains("\"first_person\":\"私\""));
+        let back: CharacterCardV3 = serde_json::from_str(&json).expect("valid JSON");
+        let speech = back
+            .data
+            .get_ene_extension()
+            .and_then(|ext| ext.speech)
+            .expect("speech preserved");
+        assert_eq!(speech.length, Some(SpeechLength::Short));
+        assert_eq!(speech.first_person.as_deref(), Some("私"));
+        assert_eq!(speech.second_person.as_deref(), Some("きみ"));
+        assert_eq!(speech.politeness, Some(PolitenessLevel::Casual));
+        assert_eq!(
+            speech.verbal_tics,
+            vec!["〜だよね".to_string(), "んだよ".to_string()]
+        );
+    }
+
+    #[test]
+    fn speech_style_absent_card_roundtrips_stable() {
+        let card = CharacterCardV3::default();
+        let first = serde_json::to_string(&card).expect("serialise card");
+        assert!(!first.contains("speech"));
+        let back: CharacterCardV3 = serde_json::from_str(&first).expect("valid JSON");
+        let second = serde_json::to_string(&back).expect("serialise card again");
+        assert_eq!(first, second, "absent speech must not be materialised");
+    }
+
+    #[test]
+    fn speech_style_enums_resolve_snake_case() {
+        let json = r#"{
+            "length": "short",
+            "politeness": "formal"
+        }"#;
+        let def: SpeechStyleDefinition = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(def.length, Some(SpeechLength::Short));
+        assert_eq!(def.politeness, Some(PolitenessLevel::Formal));
     }
 }
