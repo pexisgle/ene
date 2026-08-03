@@ -954,6 +954,27 @@ impl EneHandle {
         rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
+    /// Open the session with the greeting at `index` (`0` = `first_mes`,
+    /// `i+1` = `alternate_greetings[i]`).
+    ///
+    /// Applies the greeting as the character's opening message and records
+    /// the active greeting index for `@@is_greeting` lorebook gating. Rejected
+    /// when the card has no greeting at `index` or the session already has
+    /// messages. Returns the applied (CBS-expanded) greeting text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublicApiError::ActorDead`] if the actor is no longer
+    /// running, or [`PublicApiError::Invalid`] for the validation failures
+    /// above.
+    pub async fn set_greeting(&self, index: u32) -> Result<String, PublicApiError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::SetGreeting { index, reply: tx })
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)?
+    }
+
     /// Manually trigger a compression-only pass over the current conversation.
     ///
     /// Compression trims history into a stored scene summary but does **not**
@@ -1428,6 +1449,64 @@ mod tests {
         );
 
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test]
+    async fn set_greeting_applies_message_and_blocks_mid_session() {
+        let mut card = test_card();
+        card.data.name = "Ene".into();
+        card.data.first_mes = "Hello {{user}}!".into();
+        card.data.alternate_greetings = vec!["Hey there.".into()];
+        let handle = EneHandle::open(test_config_memory_off(), card)
+            .await
+            .expect("open initializes handle");
+
+        let text = handle
+            .set_greeting(0)
+            .await
+            .expect("first_mes greeting applies");
+        assert_eq!(text, "Hello User!");
+        let history = handle.history().await.expect("history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, ene_ai::Role::Assistant);
+        assert_eq!(history[0].content, "Hello User!");
+
+        let err = handle
+            .set_greeting(1)
+            .await
+            .expect_err("mid-session greeting rejected");
+        assert!(matches!(err, PublicApiError::Invalid { .. }));
+    }
+
+    #[tokio::test]
+    async fn set_greeting_validates_index_and_card() {
+        let mut card = test_card();
+        card.data.name = "Ene".into();
+        card.data.alternate_greetings = vec!["Hey there.".into()];
+        let handle = EneHandle::open(test_config_memory_off(), card)
+            .await
+            .expect("open initializes handle");
+
+        let text = handle
+            .set_greeting(1)
+            .await
+            .expect("alternate greeting applies");
+        assert_eq!(text, "Hey there.");
+
+        let err = handle
+            .set_greeting(2)
+            .await
+            .expect_err("out-of-range greeting rejected");
+        assert!(matches!(err, PublicApiError::Invalid { .. }));
+
+        let empty = EneHandle::open(test_config_memory_off(), test_card())
+            .await
+            .expect("open initializes handle");
+        let err = empty
+            .set_greeting(0)
+            .await
+            .expect_err("card without greetings rejected");
+        assert!(matches!(err, PublicApiError::Invalid { .. }));
     }
 
     /// Config whose chat provider points at a local listener that completes

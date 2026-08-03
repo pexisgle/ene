@@ -177,6 +177,14 @@ pub enum EneCommand {
         /// Confirmation channel.
         reply: oneshot::Sender<Result<(), EneRuntimeError>>,
     },
+    /// Open the session with the greeting at `index` (`0` = `first_mes`,
+    /// `i+1` = `alternate_greetings[i]`).
+    SetGreeting {
+        /// Greeting index into the current character card.
+        index: u32,
+        /// Reply channel carrying the applied greeting text.
+        reply: oneshot::Sender<Result<String, crate::public_api::PublicApiError>>,
+    },
     /// Update host-side proactive observation snapshot.
     UpdateProactiveObservation {
         /// Normalized observation from desktop (no raw screenshots).
