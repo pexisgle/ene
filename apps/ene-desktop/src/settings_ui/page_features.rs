@@ -12,7 +12,15 @@ use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 
 /// Known tool binary names shown even when absent from the saved map.
-const DEFAULT_TOOL_NAMES: &[&str] = &["app", "browser", "calc", "fs", "utility", "web"];
+const DEFAULT_TOOL_NAMES: &[&str] = &[
+    "app",
+    "browser",
+    "calc",
+    "calendar",
+    "fs",
+    "utility",
+    "web",
+];
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -473,6 +481,7 @@ fn tool_display_name(name: &str) -> &str {
         "app" => "App",
         "browser" => "Browser",
         "calc" => "Calculator",
+        "calendar" => "Calendar",
         "fs" => "Filesystem",
         "utility" => "Utility",
         "web" => "Web",
