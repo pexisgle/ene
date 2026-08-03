@@ -47,8 +47,8 @@ pub async fn open_ready(
 /// desktop keeps synced with its UI language), with the system locale as the
 /// fallback when unset.
 fn card_language(config: &EneConfig) -> String {
-    config
-        .get_section::<MindConfig>()
-        .map(|mind| mind.resolved_language().to_string())
-        .unwrap_or_else(|_| ene_config::system_language().to_string())
+    config.get_section::<MindConfig>().map_or_else(
+        |_| ene_config::system_language().to_string(),
+        |mind| mind.resolved_language().to_string(),
+    )
 }
