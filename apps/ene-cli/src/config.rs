@@ -23,7 +23,10 @@ pub async fn init(opts: &InitOptions) -> Result<EneHandle, EneRuntimeError> {
         config.character = character.clone();
     }
 
-    let card = ene_config::load_character_card(&config.character)?;
+    let card = ene_config::load_character_card_localized(
+        &config.character,
+        &crate::i18n::active_language_code(),
+    )?;
     let handle = open_ready(config.clone(), card).await?;
 
     tracing::info!("[Runtime] AI runtime initialized successfully.");

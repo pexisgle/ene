@@ -31,6 +31,8 @@ pub mod characters;
 pub mod config;
 /// Configuration-related error types.
 pub mod error;
+/// Localized card diffs (`character.{lang}.json`) and merge logic.
+pub mod locale;
 /// Config-version migration for `settings.json`.
 pub mod migration;
 /// Platform-aware directory and file path resolution.
@@ -58,7 +60,8 @@ pub use character_card::{
 pub use card_import::{ImportedCharacter, import_character_file};
 pub use character_config::{CharacterConfig, MotionCatalog, MotionEntry, MotionLayer};
 pub use characters::{
-    CharacterEntry, discover_characters, load_character_card, resolve_character_path,
+    CharacterEntry, discover_characters, export_character_card, load_character_card,
+    load_character_card_localized, resolve_character_path,
 };
 pub use config::{
     ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_character_schema_json,
@@ -69,6 +72,7 @@ pub use config::{
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;
+pub use locale::{LocalizedCharacterFields, LocalizedLorebook, LocalizedLorebookEntry};
 pub use migration::{CURRENT_CONFIG_VERSION, MigrationFn, apply_migrations, register_migration};
 pub use paths::{
     IS_DEV_BUILD, app_data_dir, assets_dir, builtin_plugins_dir, builtin_tools_dir,

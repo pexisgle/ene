@@ -1,7 +1,6 @@
 use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use async_trait::async_trait;
-use ene_config::load_character_card;
 
 pub struct CardCommand;
 
@@ -27,8 +26,9 @@ impl CliCommand for CardCommand {
         }
 
         let name = arg.to_string();
-        let card = load_character_card(&name)
-            .map_err(|e| CliError::ExecutionFailed(format!("Failed to load card: {e}")))?;
+        let card =
+            ene_config::load_character_card_localized(&name, &crate::i18n::active_language_code())
+                .map_err(|e| CliError::ExecutionFailed(format!("Failed to load card: {e}")))?;
         ctx.handle
             .set_character(card)
             .await

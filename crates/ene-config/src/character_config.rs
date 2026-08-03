@@ -83,6 +83,11 @@ pub struct CharacterConfig {
     pub default_motion: String,
     /// Name of the default expression (e.g. `"neutral"`).
     pub default_expression: String,
+    /// Language code override for this character's card (e.g. `"ja"`).
+    /// Empty (the default) inherits the app language; the value is
+    /// canonicalized through [`crate::resolve_language_alias`] when the
+    /// card is loaded.
+    pub language: String,
 
     /// Catch-all for extra configurations.
     ///
@@ -102,6 +107,7 @@ impl Default for CharacterConfig {
             look_at_strength: 0.6,
             default_motion: String::new(),
             default_expression: "neutral".to_string(),
+            language: String::new(),
             extra: IndexMap::new(),
         }
     }

@@ -763,6 +763,23 @@ pub struct EneExtension {
     /// `Speech style` line; absent cards get a concise default instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speech: Option<SpeechStyleDefinition>,
+    /// Per-language card diffs, the serialization form for PNG-distributed
+    /// cards. Folder and CHARX work forms use `character.{lang}.json`
+    /// sidecars instead; the loader layers a sidecar over this bag when both
+    /// exist. Removed from the card after a locale is applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locales: Option<indexmap::IndexMap<String, crate::locale::LocalizedCharacterFields>>,
+}
+
+impl EneExtension {
+    /// Whether every optional block is absent; used to collapse a
+    /// locales-only extension block back to `None` after the bag is removed.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.motion_catalog.is_none()
+            && self.expressions.is_none()
+            && self.affect_baseline.is_none()
+            && self.speech.is_none()
+    }
 }
 
 /// Preferred reply length (`extensions.ene.speech.length`).
