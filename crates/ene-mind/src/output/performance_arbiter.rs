@@ -220,7 +220,8 @@ impl PerformanceArbiter {
 mod tests {
     #![expect(
         clippy::indexing_slicing,
-        reason = "tests index into fixed-size fixture vectors"
+        clippy::default_trait_access,
+        reason = "tests index into fixed-size fixture vectors and use explicit Default for fixture clarity"
     )]
     use super::*;
     use ene_config::ExpressionAffect;
