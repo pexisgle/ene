@@ -51,9 +51,8 @@ pub fn select_language(lang: &str) {
 /// Drives character card localization, so a Japanese UI selects
 /// `character.ja.json` diffs without extra configuration.
 pub fn active_language_code() -> String {
-    loader()
-        .current_languages()
-        .first()
-        .map(|lang| lang.language.as_str().to_string())
-        .unwrap_or_else(|| ene_config::system_language().to_string())
+    loader().current_languages().first().map_or_else(
+        || ene_config::system_language().to_string(),
+        |lang| lang.language.as_str().to_string(),
+    )
 }
