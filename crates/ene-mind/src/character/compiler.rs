@@ -418,6 +418,33 @@ mod tests {
     }
 
     #[test]
+    fn creator_notes_never_reach_the_kernel() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.creator_notes =
+            "Author X. This card runs best at temperature 0.8; no redistribution.".into();
+        // `{{persona}}` must stay literal rather than expanding into the notes.
+        card.data.system_prompt = "Be kind. {{persona}}".into();
+
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 128_000, "en");
+
+        assert!(
+            !kernel.text.contains("Author X"),
+            "creator notes must never be injected into the identity kernel: {}",
+            kernel.text
+        );
+        assert!(
+            !kernel.text.contains("Creator Notes"),
+            "the creator-notes section must not exist in the kernel: {}",
+            kernel.text
+        );
+        assert!(
+            kernel.text.contains("{{persona}}"),
+            "the {{persona}} macro stays literal instead of expanding into creator notes"
+        );
+    }
+
+    #[test]
     fn nickname_preferred_over_name() {
         let mut card = CharacterCardV3::default();
         card.data.name = "Official".into();
