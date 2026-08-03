@@ -132,11 +132,13 @@ fn translate_event(
             name,
             weight,
             hold_secs,
+            target_time,
         } => {
             expression.write(ExpressionCommand {
                 name,
                 weight,
                 hold_secs,
+                target_time,
             });
         }
         AppEvent::CancelCue { scope } => {

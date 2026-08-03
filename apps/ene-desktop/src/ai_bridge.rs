@@ -588,6 +588,7 @@ fn forward_audio_chunk(
             pcm,
             sample_rate,
             is_final,
+            cues,
         } = chunk;
         // Track the turn that owns the in-flight TTS audio separately from
         // `active_turn`: the fire-and-forget TTS worker keeps emitting
@@ -607,6 +608,7 @@ fn forward_audio_chunk(
                 sample_rate,
                 is_final,
                 abort: false,
+                cues,
             }) {
                 tracing::warn!(
                     component = "AiBridge",
@@ -677,10 +679,14 @@ async fn pump_events(
                         ene_mind::PerfKind::Expression => {
                             let weight = cue.weight.unwrap_or(1.0);
                             let hold_secs = cue.hold_secs.unwrap_or(4.0);
+                            // Turn-end cues apply immediately; mid-utterance
+                            // TTS-synced cues arrive via the audio chunk path
+                            // with a scheduled `target_time`.
                             drop(event_tx.send(AppEvent::ExpressionCue {
                                 name: cue.name,
                                 weight,
                                 hold_secs,
+                                target_time: 0.0,
                             }));
                         }
                         ene_mind::PerfKind::Cancel => {
@@ -790,6 +796,7 @@ async fn pump_events(
                         sample_rate: 0,
                         is_final: true,
                         abort,
+                        cues: Vec::new(),
                     }) {
                         tracing::warn!(
                             component = "AiBridge",
@@ -821,6 +828,7 @@ async fn pump_events(
                         sample_rate: 0,
                         is_final: true,
                         abort: false,
+                        cues: Vec::new(),
                     }) {
                         tracing::warn!(
                             component = "AiBridge",
@@ -851,6 +859,7 @@ async fn pump_events(
                         sample_rate: 0,
                         is_final: true,
                         abort: false,
+                        cues: Vec::new(),
                     })
                 {
                     tracing::warn!(

@@ -78,6 +78,7 @@ async fn audio_burst_does_not_lag_chat_subscribers() {
                 pcm: vec![0.0_f32; 4096],
                 sample_rate: 24_000,
                 is_final: i + 1 == burst_count,
+                cues: Vec::new(),
             };
             // Bounded send: back-pressures against the drain task below,
             // exactly like the production audio channel.

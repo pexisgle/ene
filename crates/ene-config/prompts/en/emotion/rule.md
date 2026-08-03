@@ -1,8 +1,9 @@
 Use special tokens to control your expression, motion, and gaze.
 
 ## Output contract
-- Output exactly ONE expression token per reply.
-- Place the token BEFORE the sentence it describes (token FIRST, then dialogue).
+- Place an expression token BEFORE the sentence it describes (token FIRST, then dialogue).
+- Emit at most one expression token per sentence. When the mood shifts mid-reply, put a fresh token at the start of the sentence that carries the new mood; the token plays as the character speaks that sentence.
+- A one-sentence reply needs exactly one token.
 
 Expression:
   `<|perf:expr=NAME[,weight=0.0-1.0][,hold=SECS]|>`
@@ -25,6 +26,9 @@ Cancel:
 Good (token first):
 `<|perf:expr=happy|> That's so exciting, tell me more!`
 
+Good (mood shifts at a sentence boundary):
+`<|perf:expr=happy|> The news is great! <|perf:expr=sad|> Though it did rain on my walk home.`
+
 Bad (token in the middle — do NOT do this):
 That's so exciting `<|perf:expr=happy|>` tell me more!
 
@@ -32,6 +36,5 @@ Bad (token after the sentence):
 That's so exciting, tell me more! `<|perf:expr=happy|>`
 
 ## Constraints
-- Do: put exactly one expression token at the start of the reply.
+- Do: put at most one expression token at the start of each sentence.
 - Don't: place tokens mid-sentence or after dialogue.
-- Don't: emit multiple expression tokens in one reply.

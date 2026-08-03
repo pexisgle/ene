@@ -59,3 +59,34 @@ The final expression of a turn is chosen by `ene-mind`'s expression arbiter from
 3. **Neutral fallback** — no annotated expression available (or the expression list is empty).
 
 `ene-desktop` receives these performance events and maps them to VRM blendshapes and skeletal bone animations.
+
+### Timed mid-utterance expressions (TTS sync)
+
+When TTS is enabled, expression markers change the avatar's face **during** the
+utterance, synced to audio playback:
+
+1. Each `<|perf:expr=…|>` marker is tagged with its character offset in the
+   spoken (marker-stripped) text (`PerformanceCue::text_offset`).
+2. The TTS sentence splitter attributes each marker to the sentence whose text
+   range contains it. A marker between two sentences applies to the following
+   sentence; a marker that arrives after its sentence was already sent applies
+   to the next one; a marker trailing the final text is covered by the
+   turn-end event instead.
+3. The sentence's cues ride on the first PCM chunk of that sentence
+   (`AudioChunk::cues`, dedicated audio channel). The desktop playback path
+   switches the expression when that sentence's audio starts playing,
+   scheduling the cue on the emotion pipeline, which honors `hold=SECS`
+   (default 4 s) and fades the expression out afterwards. The next marker
+   replaces the current expression.
+4. Marker-driven mid-turn switches bypass the end-of-turn hysteresis (they
+   come from the marker language, not the affect arbiter); the end-of-turn
+   resolution is unchanged.
+5. `cancel:expr` clears not-yet-fired timed cues and suppresses later ones.
+
+Motions and look-at cues remain turn-unit: they are applied once at turn end
+through `EneEvent::Performance`.
+
+**Without TTS** there is no audio timeline to sync to, so markers keep the
+turn-end behavior — accumulated by the runtime and resolved into a single
+`EneEvent::Performance` by the expression arbiter. The TTS-on / TTS-off
+behaviors differ by design.

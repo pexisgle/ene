@@ -213,7 +213,7 @@ pub fn apply_expression_commands_system(
     for cmd in events.read() {
         pipeline.pending.push_back(EmotionCommand {
             emotion: cmd.name.clone(),
-            target_time: 0.0,
+            target_time: cmd.target_time,
             hold_secs: cmd.hold_secs,
             weight: cmd.weight,
         });

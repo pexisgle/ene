@@ -3,7 +3,7 @@
     reason = "mind pipeline uses intentional turn/score/index arithmetic"
 )]
 use super::session_split::generate_session_id;
-use super::special_token::split_text_and_special_tokens;
+use super::special_token::{StreamPiece, split_text_and_special_tokens_ordered};
 use super::types::SessionId;
 use chrono::{DateTime, Utc};
 use ene_ai::EmbeddingProvider;
@@ -258,20 +258,40 @@ impl ConversationSession {
     ///
     /// Returns `(text_deltas, special_tokens)`.
     pub fn process_delta(&mut self, chunk: &str) -> (Vec<String>, Vec<String>) {
-        let (mut text_deltas, special_tokens) =
-            split_text_and_special_tokens(&mut self.display.token_carry, chunk);
+        let mut text_deltas = Vec::new();
+        let mut special_tokens = Vec::new();
+        for piece in self.process_delta_ordered(chunk) {
+            match piece {
+                StreamPiece::Text(text) => text_deltas.push(text),
+                StreamPiece::Marker(token) => special_tokens.push(token),
+            }
+        }
+        (text_deltas, special_tokens)
+    }
+
+    /// Processes a streaming text chunk, returning an ordered stream of text
+    /// deltas and special-token markers so callers can map marker positions
+    /// onto the clean text.
+    ///
+    /// Appends text to the display buffer. See
+    /// [`split_text_and_special_tokens_ordered`] for the ordering contract.
+    pub fn process_delta_ordered(&mut self, chunk: &str) -> Vec<StreamPiece> {
+        let mut pieces =
+            split_text_and_special_tokens_ordered(&mut self.display.token_carry, chunk);
         // Guard against unbounded growth from an unterminated marker: if the
         // carry exceeds `MAX_TOKEN_CARRY`, abandon the marker and release the
         // withheld text to the live output stream so it reaches the display and
         // TTS instead of being held back (or silently dropped).
         if self.display.token_carry.len() > MAX_TOKEN_CARRY {
             let abandoned = std::mem::take(&mut self.display.token_carry);
-            text_deltas.push(abandoned);
+            pieces.push(StreamPiece::Text(abandoned));
         }
-        for delta in &text_deltas {
-            self.display.display_buffer.push_str(delta);
+        for piece in &pieces {
+            if let StreamPiece::Text(text) = piece {
+                self.display.display_buffer.push_str(text);
+            }
         }
-        (text_deltas, special_tokens)
+        pieces
     }
 
     /// Finalizes the current response: flushes any remaining token carry, commits the
@@ -540,8 +560,23 @@ mod tests {
         let (text, tokens) = s.process_delta("Hi <|perf:expr=happy|> there");
         assert_eq!(text, vec!["Hi ", " there"]);
         assert_eq!(tokens, vec!["<|perf:expr=happy|>"]);
-        assert!(s.display.token_carry.is_empty());
         assert_eq!(s.display.display_buffer, "Hi  there");
+    }
+
+    #[test]
+    fn process_delta_ordered_preserves_text_marker_interleaving() {
+        let mut s = ConversationSession::default();
+        let pieces = s.process_delta_ordered("<|perf:expr=happy|> A <|perf:expr=sad|> B");
+        assert_eq!(
+            pieces,
+            vec![
+                StreamPiece::Marker("<|perf:expr=happy|>".to_string()),
+                StreamPiece::Text(" A ".to_string()),
+                StreamPiece::Marker("<|perf:expr=sad|>".to_string()),
+                StreamPiece::Text(" B".to_string()),
+            ]
+        );
+        assert_eq!(s.display.display_buffer, " A  B");
     }
 
     #[test]

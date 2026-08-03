@@ -112,8 +112,13 @@ impl AppState {
             let mic_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let tts_playing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let viseme = crate::audio::VisemeState::default();
-            let (sender, handle) =
-                crate::audio::playback::spawn_playback(viseme.clone(), tts_playing.clone());
+            // The playback thread needs the event sender to schedule
+            // expression cues against the audio timeline.
+            let (sender, handle) = crate::audio::playback::spawn_playback(
+                viseme.clone(),
+                tts_playing.clone(),
+                tx.clone(),
+            );
             let state = crate::audio::AudioState {
                 mic_active,
                 tts_playing,
