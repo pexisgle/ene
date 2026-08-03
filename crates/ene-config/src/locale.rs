@@ -176,10 +176,12 @@ pub(crate) fn strip_locales(card: &mut CharacterCardV3) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use serde_json::json;
 
     use super::*;
-    use crate::{EneExtension, LorebookEntry};
+    use crate::{AffectBaseline, EneExtension, LorebookEntry};
 
     fn base_card() -> CharacterCardV3 {
         CharacterCardV3 {
@@ -208,7 +210,7 @@ mod tests {
         LorebookEntry {
             keys,
             content: content.to_string(),
-            extensions: Default::default(),
+            extensions: HashMap::default(),
             enabled: true,
             insertion_order: 0,
             case_sensitive: None,
@@ -334,8 +336,8 @@ mod tests {
     fn strip_locales_keeps_other_extension_fields() {
         let mut card = base_card();
         card.data.extensions.ene = Some(EneExtension {
-            locales: Some(Default::default()),
-            affect_baseline: Some(Default::default()),
+            locales: Some(indexmap::IndexMap::default()),
+            affect_baseline: Some(AffectBaseline::default()),
             ..EneExtension::default()
         });
 
