@@ -151,6 +151,7 @@ async fn compose(
         session_id: "sess",
         user_input: "hi",
         history: &[],
+        greeting_index: None,
         store,
         query_embedding: None,
         embedder: None,

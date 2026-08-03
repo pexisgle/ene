@@ -62,6 +62,10 @@ pub struct ActivationContext {
     pub assistant_message_count: u32,
     /// Whether this entry matched on an earlier turn (sticky decorators).
     pub previously_matched: bool,
+    /// Index of the greeting this session started with (`0` = `first_mes`,
+    /// `i+1` = `alternate_greetings[i]`); `None` when no greeting was chosen.
+    /// Drives `@@is_greeting` (`CCv3` `SPEC_V3.md`).
+    pub greeting_index: Option<u32>,
 }
 
 /// Parsed decorators of a single lorebook entry.
@@ -93,6 +97,10 @@ pub struct EntryDecorators {
     pub position: Option<SemanticPosition>,
     /// `@@scan_depth N` — per-entry scan depth override.
     pub scan_depth: Option<u32>,
+    /// `@@is_greeting N` — only match when the session's active greeting
+    /// index equals `N`. Inert when no greeting was chosen (spec: ignore the
+    /// decorator when checking the active greeting is not possible).
+    pub is_greeting: Option<u32>,
     /// `@@additional_keys` — extra keys, at least one must match (accumulates
     /// across multiple decorator lines, per spec).
     pub additional_keys: Vec<String>,
@@ -173,6 +181,11 @@ impl EntryDecorators {
         if let Some(every) = self.activate_only_every
             && every > 1
             && !ctx.assistant_message_count.is_multiple_of(every)
+        {
+            return false;
+        }
+        if let Some(index) = self.is_greeting
+            && ctx.greeting_index != Some(index)
         {
             return false;
         }
@@ -284,6 +297,7 @@ enum ResolvedDecorator {
     ReverseDepth(i64),
     Position(SemanticPosition),
     ScanDepth(u32),
+    IsGreeting(u32),
     AdditionalKeys(Vec<String>),
     ExcludeKeys(Vec<String>),
     Role(DecoratorRole),
@@ -312,17 +326,13 @@ fn split_values(value: Option<&str>) -> Option<Vec<String>> {
 /// Decorators the spec defines but Ene's context forces it to ignore, so they
 /// never resolve and their `@@@` fallbacks are consulted instead:
 /// `instruct_depth` / `instruct_scan_depth` (Ene is always chat-based),
-/// `is_greeting` (the active greeting index is not tracked), `is_user_icon`
-/// (no user-icon feature), and `disable_ui_prompt` (deliberately not honored —
-/// cards must not be able to disable Ene's expression output contract).
+/// `is_user_icon` (no user-icon feature), and `disable_ui_prompt`
+/// (deliberately not honored — cards must not be able to disable Ene's
+/// expression output contract).
 fn is_context_ignored(name: &str) -> bool {
     matches!(
         name,
-        "instruct_depth"
-            | "instruct_scan_depth"
-            | "is_greeting"
-            | "is_user_icon"
-            | "disable_ui_prompt"
+        "instruct_depth" | "instruct_scan_depth" | "is_user_icon" | "disable_ui_prompt"
     )
 }
 
@@ -363,6 +373,7 @@ fn resolve_decorator(name: &str, value: Option<&str>) -> Option<ResolvedDecorato
             Some(ResolvedDecorator::Position(position))
         }
         "scan_depth" => Some(ResolvedDecorator::ScanDepth(value?.parse::<u32>().ok()?)),
+        "is_greeting" => Some(ResolvedDecorator::IsGreeting(value?.parse::<u32>().ok()?)),
         "additional_keys" => Some(ResolvedDecorator::AdditionalKeys(split_values(value)?)),
         "exclude_keys" => Some(ResolvedDecorator::ExcludeKeys(split_values(value)?)),
         "role" => {
@@ -394,6 +405,7 @@ fn apply_resolved(decorators: &mut EntryDecorators, resolved: ResolvedDecorator)
         ResolvedDecorator::ReverseDepth(value) => decorators.reverse_depth = Some(value),
         ResolvedDecorator::Position(value) => decorators.position = Some(value),
         ResolvedDecorator::ScanDepth(value) => decorators.scan_depth = Some(value),
+        ResolvedDecorator::IsGreeting(value) => decorators.is_greeting = Some(value),
         ResolvedDecorator::AdditionalKeys(values) => decorators.additional_keys.extend(values),
         ResolvedDecorator::ExcludeKeys(values) => decorators.exclude_keys.extend(values),
         ResolvedDecorator::Role(value) => decorators.role = Some(value),
@@ -962,10 +974,35 @@ mod tests {
     }
 
     #[test]
-    fn greeting_decorator_is_ignored_and_falls_back() {
-        // Ene does not track the active greeting index, so `@@is_greeting` is
-        // ignored and its fallback is consulted.
+    fn greeting_decorator_parses_and_gates_on_active_index() {
         let (decorators, _) = parse("@@is_greeting 2\n@@@activate_only_after 4\nBody");
+        assert_eq!(decorators.is_greeting, Some(2));
+        assert_eq!(decorators.activate_only_after, Some(4));
+
+        let matching = ActivationContext {
+            greeting_index: Some(2),
+            ..ActivationContext::default()
+        };
+        assert!(decorators.activation_passes(&matching));
+        let other = ActivationContext {
+            greeting_index: Some(1),
+            ..ActivationContext::default()
+        };
+        assert!(!decorators.activation_passes(&other));
+    }
+
+    #[test]
+    fn greeting_decorator_inert_without_active_greeting() {
+        // Spec: ignore the decorator when checking the active greeting is not
+        // possible, so `@@@` fallbacks still apply.
+        let (decorators, _) = parse("@@is_greeting 0\nBody");
+        assert!(!decorators.activation_passes(&ActivationContext::default()));
+    }
+
+    #[test]
+    fn greeting_decorator_invalid_value_consults_fallback() {
+        let (decorators, _) = parse("@@is_greeting abc\n@@@activate_only_after 4\nBody");
+        assert_eq!(decorators.is_greeting, None);
         assert_eq!(decorators.activate_only_after, Some(4));
     }
 

@@ -588,8 +588,13 @@ impl CognitionEngine {
         // evaluated against the card and history here, outside the recall
         // pipeline, so they cannot lose a score competition (see
         // `lorebook_injection`).
-        let lorebook =
-            build_lorebook_injection(ctx.card, ctx.user_name, ctx.user_input, ctx.history);
+        let lorebook = build_lorebook_injection(
+            ctx.card,
+            ctx.user_name,
+            ctx.user_input,
+            ctx.history,
+            ctx.greeting_index,
+        );
 
         let pack_input = PackInput {
             platform_contract,
@@ -1153,6 +1158,7 @@ mod turn_id_tests {
             session_id: "sess",
             user_input: "hi",
             history: &[],
+            greeting_index: None,
             store: None,
             query_embedding: None,
             embedder: None,

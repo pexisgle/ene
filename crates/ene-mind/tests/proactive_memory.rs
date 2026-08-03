@@ -68,6 +68,7 @@ fn turn_ctx<'a>(
         session_id: "sess",
         user_input: "",
         history: &[],
+        greeting_index: None,
         store: Some(store),
         query_embedding: None,
         embedder: None,

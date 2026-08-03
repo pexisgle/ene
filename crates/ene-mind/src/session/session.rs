@@ -125,6 +125,10 @@ pub struct ConversationSession {
     pub character_card: Option<CharacterCardV3>,
     /// The filesystem path to the current character card.
     current_card_path: String,
+    /// Index of the greeting chosen for this session (`0` = `first_mes`,
+    /// `i+1` = `alternate_greetings[i]`); `None` before a greeting is applied.
+    /// Drives the `@@is_greeting` lorebook decorator (`CCv3` `SPEC_V3.md`).
+    active_greeting_index: Option<u32>,
     /// Snapshot of the most recently interrupted turn, if any.
     interrupted: Option<InterruptedState>,
 }
@@ -182,6 +186,7 @@ impl ConversationSession {
             },
             character_card: None,
             current_card_path: String::new(),
+            active_greeting_index: None,
             interrupted: None,
         }
     }
@@ -204,6 +209,7 @@ impl ConversationSession {
         self.character_card = Some(card.clone());
         self.current_card_path.clear();
         self.history.conversation_history.clear();
+        self.active_greeting_index = None;
         self.memory.ccv3_memory_hash = None;
         resolve_expressions(card)
     }
@@ -230,6 +236,7 @@ impl ConversationSession {
         self.character_card = Some(card.clone());
         self.current_card_path = path.to_string();
         self.history.conversation_history.clear();
+        self.active_greeting_index = None;
         self.memory.ccv3_memory_hash = None;
 
         Ok(resolve_expressions(&card))
@@ -251,6 +258,24 @@ impl ConversationSession {
             content: text.to_string(),
         });
         self.history.trim_history();
+    }
+
+    /// Opens the session with `text` as the character's greeting message and
+    /// records `index` as the active greeting.
+    ///
+    /// The greeting is an ordinary assistant history entry (so it counts
+    /// toward `@@activate_only_after` like any character message) but does not
+    /// bump the turn count: it is not a model turn. Callers are responsible
+    /// for validating that the session has no history yet.
+    pub fn apply_greeting(&mut self, text: &str, index: u32) {
+        self.add_assistant_message(text);
+        self.active_greeting_index = Some(index);
+    }
+
+    /// Index of the greeting this session started with, if any.
+    #[must_use]
+    pub const fn active_greeting_index(&self) -> Option<u32> {
+        self.active_greeting_index
     }
 
     /// Processes a streaming text chunk, splitting it into text deltas and special tokens
@@ -371,6 +396,7 @@ impl ConversationSession {
         self.state.last_resolved_expression.clear();
         self.state.last_expression_changed_at = None;
         self.state.topic_boundary.reset_topic();
+        self.active_greeting_index = None;
         self.interrupted = None;
         new_id
     }
@@ -552,6 +578,29 @@ mod tests {
         s.mark_interrupted("turn-1", "partial", 3);
         s.reset_session();
         assert!(s.take_interruption().is_none());
+    }
+
+    #[test]
+    fn apply_greeting_records_message_and_index() {
+        let mut s = ConversationSession::default();
+        s.apply_greeting("Hi there!", 2);
+        assert_eq!(s.active_greeting_index(), Some(2));
+        let history = s.history();
+        assert_eq!(history.len(), 1);
+        let entry = history.first().expect("greeting recorded");
+        assert_eq!(entry.role, Role::Assistant);
+        assert_eq!(entry.content, "Hi there!");
+        // A greeting is not a model turn.
+        assert_eq!(s.current_turn_count(), 0);
+    }
+
+    #[test]
+    fn reset_session_clears_active_greeting() {
+        let mut s = ConversationSession::default();
+        s.apply_greeting("Hello", 0);
+        s.reset_session();
+        assert_eq!(s.active_greeting_index(), None);
+        assert!(s.history().is_empty());
     }
 
     #[test]
