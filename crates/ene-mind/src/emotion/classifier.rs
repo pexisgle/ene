@@ -126,7 +126,8 @@ const fn classifier_failure_reason(error: &ClassifierError) -> &'static str {
 ///
 /// `recommended_expression` is constrained to the card's expression names so
 /// the model cannot emit names the arbiter would have to guess at. An empty
-/// list keeps the field unconstrained (the arbiter falls back to neutral).
+/// list keeps the field unconstrained; the arbiter then rejects any proposal
+/// and falls back.
 fn proposal_json_schema(available_expressions: &[String]) -> serde_json::Value {
     let recommended_expression = if available_expressions.is_empty() {
         serde_json::json!({ "type": "string" })

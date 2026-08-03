@@ -89,17 +89,26 @@ impl PerformanceArbiter {
     ///
     /// Final expression decisions come from
     /// [`crate::output::arbiter::resolve_expression`]; this only fills gaps
-    /// (e.g. emotion disabled or no resolve path ran). Expressions without an
-    /// affect annotation are never selected; the slot stays empty so the
-    /// previous expression is preserved.
+    /// (e.g. emotion disabled or no resolve path ran). The affect mapping is
+    /// used when it yields a confident match; otherwise a card-defined
+    /// "neutral" fills the slot so the face does not freeze. When the card has
+    /// neither, the slot stays empty and the previous expression is preserved.
     pub fn set_affect_default(&mut self, affect: &AffectState, available: &[ResolvedExpression]) {
         if self.expression.is_some() {
             return;
         }
-        let Some(name) = affect_to_expression(affect, available) else {
-            return;
+        let name = if let Some(name) = affect_to_expression(affect, available) {
+            name.to_string()
+        } else {
+            let Some(neutral) = available
+                .iter()
+                .find(|e| e.name.eq_ignore_ascii_case("neutral"))
+            else {
+                return;
+            };
+            neutral.name.clone()
         };
-        let cue = PerformanceCue::expression(name.to_string());
+        let cue = PerformanceCue::expression(name);
         self.expression = Some(CueSlot::new(cue, CueSource::Affect));
     }
 
@@ -224,7 +233,7 @@ mod tests {
         reason = "tests index into fixed-size fixture vectors and use explicit Default for fixture clarity"
     )]
     use super::*;
-    use ene_config::ExpressionAffect;
+    use ene_config::{CharacterCardV3, resolve_expressions};
 
     fn expr_cue(name: &str) -> PerformanceCue {
         PerformanceCue::expression(name)
@@ -234,30 +243,10 @@ mod tests {
         PerformanceCue::motion(name, layer)
     }
 
+    /// The production built-in defaults (via the real merge), so tests cannot
+    /// drift from what a default card resolves to at runtime.
     fn annotated_defaults() -> Vec<ResolvedExpression> {
-        [
-            ("neutral", 0.0, 0.0, 0.0, 0.0),
-            ("happy", 0.6, 0.3, 0.0, 0.0),
-            ("sad", -0.5, 0.0, 0.0, 0.0),
-            ("angry", -0.2, 0.3, 0.7, 0.0),
-            ("relaxed", 0.2, -0.3, 0.0, 0.7),
-            ("surprised", 0.1, 0.6, 0.0, 0.0),
-        ]
-        .into_iter()
-        .map(
-            |(name, valence, arousal, irritation, fatigue)| ResolvedExpression {
-                name: name.into(),
-                description: String::new(),
-                vrm: Default::default(),
-                affect: Some(ExpressionAffect {
-                    valence,
-                    arousal,
-                    irritation,
-                    fatigue,
-                }),
-            },
-        )
-        .collect()
+        resolve_expressions(&CharacterCardV3::default())
     }
 
     #[test]
@@ -344,7 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn set_affect_default_skips_unannotated_expressions() {
+    fn set_affect_default_emits_neutral_when_card_has_one() {
+        // Unannotated card with a neutral-named expression: the resting face
+        // is emitted instead of freezing the previous expression.
         let mut arbiter = PerformanceArbiter::default();
         let mut state = AffectState::neutral("test");
         state.valence = 0.5;
@@ -360,7 +351,41 @@ mod tests {
             .collect();
         arbiter.set_affect_default(&state, &available);
         let result = arbiter.resolve();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0.name, "neutral");
+        assert_eq!(result[0].1, CueSource::Fallback);
+    }
+
+    #[test]
+    fn set_affect_default_skips_cards_without_neutral_or_annotations() {
+        let mut arbiter = PerformanceArbiter::default();
+        let mut state = AffectState::neutral("test");
+        state.valence = 0.5;
+        state.arousal = 0.3;
+        let available: Vec<ResolvedExpression> = ["smile", "frown"]
+            .into_iter()
+            .map(|name| ResolvedExpression {
+                name: name.into(),
+                description: String::new(),
+                vrm: Default::default(),
+                affect: None,
+            })
+            .collect();
+        arbiter.set_affect_default(&state, &available);
+        let result = arbiter.resolve();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn set_affect_default_resting_state_uses_neutral() {
+        // Regression: an all-zero state must not default to a sad face.
+        let mut arbiter = PerformanceArbiter::default();
+        let state = AffectState::neutral("test");
+        let available = annotated_defaults();
+        arbiter.set_affect_default(&state, &available);
+        let result = arbiter.resolve();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0.name, "neutral");
     }
 
     #[test]

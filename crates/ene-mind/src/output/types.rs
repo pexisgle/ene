@@ -10,7 +10,8 @@ use ene_core::AffectState;
 pub enum ExpressionSource {
     /// LLM proposal is canonical when present.
     Llm,
-    /// Affect mapping used when no LLM proposal was available.
+    /// Affect mapping used when no usable LLM proposal was available,
+    /// including out-of-list proposals that were rejected.
     AffectFallback,
     /// Previous expression held due to hysteresis.
     HysteresisHold,
