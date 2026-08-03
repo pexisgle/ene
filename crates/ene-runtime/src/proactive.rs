@@ -238,16 +238,29 @@ pub(crate) fn proactive_generation_hint(
     confirmation_enabled: bool,
 ) -> String {
     let library = ene_config::PromptLibrary::load(prompt_language);
-    let prompts = library.proactive();
-    let hint = prompts.render_generation_hint(topic_hint, confirmation_enabled);
+    let mut prompts = library.proactive().clone();
     if confirmation_enabled && prompts.confirmation_note.trim().is_empty() {
+        let fallback_language = if ene_config::resolve_language_alias(prompt_language) == "ja" {
+            "ja"
+        } else {
+            "en"
+        };
+        let fallback = ene_config::PromptLibrary::load(fallback_language)
+            .proactive()
+            .confirmation_note
+            .clone();
+        prompts.confirmation_note = if fallback.trim().is_empty() {
+            "If you decide not to speak, emit exactly <|silent|> as the first token and nothing else."
+                .to_string()
+        } else {
+            fallback
+        };
         tracing::warn!(
             component = "Proactive",
-            "confirmation_enabled requires a confirmation_note in the prompt pack; \
-             the decline instruction is missing"
+            "confirmation_enabled requires a confirmation_note; using the embedded fallback"
         );
     }
-    hint
+    prompts.render_generation_hint(topic_hint, confirmation_enabled)
 }
 
 /// Resolve the final confirmation verdict from the terminal reason and

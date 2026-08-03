@@ -1191,6 +1191,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                 StreamPiece::Marker(token) => {
                                     if confirmation_enabled
                                         && token == ene_mind::SILENT_TOKEN
+                                        && round == 0
+                                        && turn_tool_results.is_empty()
                                         && !spoke_visible_text
                                     {
                                         refused = true;
