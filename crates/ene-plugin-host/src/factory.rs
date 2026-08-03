@@ -157,7 +157,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
 /// Whether a provider definition serves the plugin factory's `kind`.
 ///
 /// The legacy `openai_compatible` alias is folded onto the `openai` plugin
-/// kind so pre-plugin configs keep resolving to the OpenAI plugin.
+/// kind so pre-plugin configs keep resolving to the `openai` plugin.
 pub(crate) fn provider_def_kind_matches(def: &AiProviderDef, kind: &str) -> bool {
     ene_ai::canonical_provider_kind(&def.kind) == kind
 }

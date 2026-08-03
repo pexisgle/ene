@@ -239,6 +239,7 @@ mod tests {
                 },
                 context_window: Some(200_000),
             }],
+            embed_providers: vec!["openai".into()],
             tts_providers: vec![],
             stt_providers: vec![],
             supports_list_config_options: true,
