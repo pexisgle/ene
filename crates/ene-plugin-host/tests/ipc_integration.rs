@@ -1252,6 +1252,12 @@ async fn handshake_negotiates_min_supported_version_for_older_plugin() {
     assert!(!conn.supports_validate_config());
     assert!(!conn.supports_migrate_config());
 
+    // A full request/response cycle over the N-1 connection must complete in
+    // the JSON framing (v5 never switches to MessagePack).
+    let tools = conn.list_tools().await.expect("list_tools over v5 JSON");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name.as_str(), "mock.echo");
+
     cleanup_path(&socket_path);
 }
 
