@@ -592,54 +592,14 @@ impl TurnActor {
                             // (possibly incremented) turn count.
                             self.sync_shared_session_state();
                             if self.active_origin == crate::types::TurnOrigin::Proactive {
-                                match outcome.terminal {
-                                    TerminalReason::Done => {
-                                        self.proactive.on_proactive_completed();
-                                    }
-                                    TerminalReason::Declined => {
-                                        self.proactive.on_proactive_declined();
-                                    }
-                                    _ => {}
-                                }
                                 if let Some(decision) = self.proactive.last_decision.take() {
-                                    let confirmation = match outcome.terminal {
-                                        TerminalReason::Declined => {
-                                            ene_mind::ProactiveConfirmation::Declined
-                                        }
-                                        TerminalReason::Done
-                                            if decision.confirmation
-                                                == ene_mind::ProactiveConfirmation::Pending =>
-                                        {
-                                            ene_mind::ProactiveConfirmation::Accepted
-                                        }
-                                        _ => decision.confirmation,
-                                    };
-                                    match confirmation {
-                                        ene_mind::ProactiveConfirmation::Declined => {
-                                            tracing::info!(
-                                                component = "Proactive",
-                                                event = "confirmation",
-                                                decision_should_speak = decision.should_speak,
-                                                decision_confidence = decision.confidence,
-                                                decision_llm_invoked = decision.llm_invoked,
-                                                confirmation = %confirmation,
-                                                skip = %ene_mind::ProactiveSkipReason::ConfirmationDeclined,
-                                                "Proactive main model declined"
-                                            );
-                                        }
-                                        ene_mind::ProactiveConfirmation::Accepted => {
-                                            tracing::info!(
-                                                component = "Proactive",
-                                                event = "confirmation",
-                                                decision_should_speak = decision.should_speak,
-                                                decision_confidence = decision.confidence,
-                                                decision_llm_invoked = decision.llm_invoked,
-                                                confirmation = %confirmation,
-                                                "Proactive decision/main-model agreement"
-                                            );
-                                        }
-                                        _ => {}
-                                    }
+                                    let confirmation = crate::proactive::apply_proactive_completion(
+                                        &mut self.proactive,
+                                        &decision,
+                                        outcome.terminal.clone(),
+                                        outcome.spoke_visible_text,
+                                    );
+                                    crate::proactive::log_confirmation(&decision, confirmation);
                                 }
                             }
                             // Retroactive topic-boundary compression: a
@@ -1434,6 +1394,10 @@ impl TurnActor {
                 }
                 self.active_turn = None;
                 self.turn_gate.end();
+                if origin == crate::types::TurnOrigin::Proactive {
+                    // No stream will run, so no completion arm will consume it.
+                    self.proactive.last_decision = None;
+                }
                 drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Idle,
                 }));

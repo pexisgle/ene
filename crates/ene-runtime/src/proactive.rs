@@ -1,11 +1,14 @@
 use ene_ai::LlmProvider;
 use ene_mind::{
-    ActiveCommitmentPrompt, ProactiveConfig, ProactiveObservation, ProactiveSuppressionState,
-    ScreenSummaryStatus, build_proactive_context, decide_proactive_speech,
+    ActiveCommitmentPrompt, ProactiveConfig, ProactiveConfirmation, ProactiveObservation,
+    ProactiveSkipReason, ProactiveSuppressionState, ScreenSummaryStatus, build_proactive_context,
+    decide_proactive_speech,
 };
 use ene_store::AffectState as StoreAffectState;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::TerminalReason;
 
 /// Mutable scheduler counters owned by the actor.
 #[derive(Debug)]
@@ -234,9 +237,104 @@ pub(crate) fn proactive_generation_hint(
     prompt_language: &str,
     confirmation_enabled: bool,
 ) -> String {
-    ene_config::PromptLibrary::load(prompt_language)
-        .proactive()
-        .render_generation_hint(topic_hint, confirmation_enabled)
+    let prompts = ene_config::PromptLibrary::load(prompt_language).proactive();
+    let hint = prompts.render_generation_hint(topic_hint, confirmation_enabled);
+    if confirmation_enabled && prompts.confirmation_note.trim().is_empty() {
+        tracing::warn!(
+            component = "Proactive",
+            "confirmation_enabled requires a confirmation_note in the prompt pack; \
+             the decline instruction is missing"
+        );
+    }
+    hint
+}
+
+/// Resolve the final confirmation verdict from the terminal reason and
+/// whether the turn streamed visible text.
+///
+/// A `Done` turn that produced no visible text (empty or marker-only
+/// response) is not an acceptance: the model neither declined nor spoke.
+#[must_use]
+pub(crate) fn resolve_confirmation(
+    terminal: TerminalReason,
+    decision_confirmation: ProactiveConfirmation,
+    spoke_visible_text: bool,
+) -> ProactiveConfirmation {
+    match terminal {
+        TerminalReason::Declined => ProactiveConfirmation::Declined,
+        TerminalReason::Done if decision_confirmation == ProactiveConfirmation::Pending => {
+            if spoke_visible_text {
+                ProactiveConfirmation::Accepted
+            } else {
+                ProactiveConfirmation::Empty
+            }
+        }
+        _ => decision_confirmation,
+    }
+}
+
+/// Apply a proactive generation's terminal outcome to the scheduler and
+/// resolve the confirmation verdict.
+///
+/// `Done` completes the turn (utterance budget consumed); `Declined` applies
+/// the cooldown without consuming the budget.
+#[must_use]
+pub(crate) fn apply_proactive_completion(
+    scheduler: &mut ProactiveScheduler,
+    decision: &ProactiveDecisionResult,
+    terminal: TerminalReason,
+    spoke_visible_text: bool,
+) -> ProactiveConfirmation {
+    match terminal {
+        TerminalReason::Done => scheduler.on_proactive_completed(),
+        TerminalReason::Declined => scheduler.on_proactive_declined(),
+        _ => {}
+    }
+    resolve_confirmation(terminal, decision.confirmation, spoke_visible_text)
+}
+
+/// Emit the decision/main-model agreement line for a confirmed generation.
+pub(crate) fn log_confirmation(
+    decision: &ProactiveDecisionResult,
+    confirmation: ProactiveConfirmation,
+) {
+    match confirmation {
+        ProactiveConfirmation::Declined => {
+            tracing::info!(
+                component = "Proactive",
+                event = "confirmation",
+                decision_should_speak = decision.should_speak,
+                decision_confidence = decision.confidence,
+                decision_llm_invoked = decision.llm_invoked,
+                confirmation = %confirmation,
+                skip = %ProactiveSkipReason::ConfirmationDeclined,
+                "Proactive main model declined"
+            );
+        }
+        ProactiveConfirmation::Accepted => {
+            tracing::info!(
+                component = "Proactive",
+                event = "confirmation",
+                decision_should_speak = decision.should_speak,
+                decision_confidence = decision.confidence,
+                decision_llm_invoked = decision.llm_invoked,
+                confirmation = %confirmation,
+                "Proactive decision/main-model agreement"
+            );
+        }
+        ProactiveConfirmation::Empty => {
+            tracing::info!(
+                component = "Proactive",
+                event = "confirmation",
+                decision_should_speak = decision.should_speak,
+                decision_confidence = decision.confidence,
+                decision_llm_invoked = decision.llm_invoked,
+                confirmation = %confirmation,
+                "Proactive main model produced no speech"
+            );
+        }
+        _ => {}
+    }
 }
 
 /// Interval duration from config (minimum 1s).
@@ -470,5 +568,136 @@ mod tests {
             result.confirmation,
             ene_mind::ProactiveConfirmation::Pending
         );
+    }
+
+    fn pending_decision() -> ProactiveDecisionResult {
+        ProactiveDecisionResult {
+            epoch: 0,
+            world_state_tick: 0,
+            should_generate: true,
+            should_speak: true,
+            confidence: 0.8,
+            llm_invoked: true,
+            topic_hint: String::new(),
+            detail: String::new(),
+            confirmation: ene_mind::ProactiveConfirmation::Pending,
+        }
+    }
+
+    #[test]
+    fn resolve_confirmation_distinguishes_decline_accept_and_empty() {
+        let pending = ene_mind::ProactiveConfirmation::Pending;
+        assert_eq!(
+            resolve_confirmation(TerminalReason::Declined, pending, true),
+            ene_mind::ProactiveConfirmation::Declined
+        );
+        assert_eq!(
+            resolve_confirmation(TerminalReason::Done, pending, true),
+            ene_mind::ProactiveConfirmation::Accepted
+        );
+        assert_eq!(
+            resolve_confirmation(TerminalReason::Done, pending, false),
+            ene_mind::ProactiveConfirmation::Empty,
+            "a Done turn without visible text is neither accepted nor declined"
+        );
+        assert_eq!(
+            resolve_confirmation(
+                TerminalReason::Done,
+                ene_mind::ProactiveConfirmation::Disabled,
+                true
+            ),
+            ene_mind::ProactiveConfirmation::Disabled
+        );
+        assert_eq!(
+            resolve_confirmation(TerminalReason::Cancelled, pending, false),
+            pending
+        );
+        assert_eq!(
+            resolve_confirmation(
+                TerminalReason::Failed {
+                    message: "x".into(),
+                },
+                pending,
+                false
+            ),
+            pending
+        );
+    }
+
+    #[test]
+    fn decline_applies_cooldown_without_consuming_budget() {
+        let mut scheduler = ProactiveScheduler::default();
+        scheduler.proactive_turns = 2;
+        scheduler.last_proactive_at = None;
+        let decision = pending_decision();
+
+        let verdict =
+            apply_proactive_completion(&mut scheduler, &decision, TerminalReason::Declined, false);
+        assert_eq!(verdict, ene_mind::ProactiveConfirmation::Declined);
+        assert!(
+            scheduler.last_proactive_at.is_some(),
+            "a decline must apply the cooldown"
+        );
+        assert_eq!(
+            scheduler.proactive_turns, 2,
+            "a decline must not consume the utterance budget"
+        );
+    }
+
+    #[test]
+    fn done_consumes_budget_and_resolves_acceptance() {
+        let mut scheduler = ProactiveScheduler::default();
+        scheduler.proactive_turns = 1;
+        scheduler.last_proactive_at = None;
+        let decision = pending_decision();
+
+        let verdict =
+            apply_proactive_completion(&mut scheduler, &decision, TerminalReason::Done, true);
+        assert_eq!(verdict, ene_mind::ProactiveConfirmation::Accepted);
+        assert_eq!(scheduler.proactive_turns, 2);
+        assert!(scheduler.last_proactive_at.is_some());
+    }
+
+    #[test]
+    fn confirmation_logging_emits_distinct_states() {
+        use std::io::Write;
+
+        struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        fn capture(emit: impl FnOnce()) -> String {
+            let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer_buffer = Arc::clone(&buffer);
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || Buffer(Arc::clone(&writer_buffer)))
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, emit);
+            String::from_utf8(buffer.lock().expect("lock").clone()).expect("utf8 log")
+        }
+
+        let decision = pending_decision();
+        let declined = capture(|| {
+            log_confirmation(&decision, ene_mind::ProactiveConfirmation::Declined);
+        });
+        assert!(declined.contains("declined"), "log: {declined}");
+        let accepted = capture(|| {
+            log_confirmation(&decision, ene_mind::ProactiveConfirmation::Accepted);
+        });
+        assert!(accepted.contains("agreement"), "log: {accepted}");
+        let empty = capture(|| {
+            log_confirmation(&decision, ene_mind::ProactiveConfirmation::Empty);
+        });
+        assert!(empty.contains("no speech"), "log: {empty}");
     }
 }

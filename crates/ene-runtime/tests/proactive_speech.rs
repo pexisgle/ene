@@ -411,6 +411,7 @@ async fn proactive_stream_declines_on_leading_silent_token() {
 
     let outcome = run_stream_cognitive(ctx).await;
     assert_eq!(outcome.terminal, TerminalReason::Declined);
+    assert!(!outcome.spoke_visible_text);
     assert_eq!(
         outcome.session.history().len(),
         0,
@@ -500,6 +501,7 @@ async fn proactive_stream_speaks_when_text_precedes_silent_token() {
 
     let outcome = run_stream_cognitive(ctx).await;
     assert_eq!(outcome.terminal, TerminalReason::Done);
+    assert!(outcome.spoke_visible_text);
     let updated = outcome.session;
     assert_eq!(updated.history().len(), 1);
     assert_eq!(
@@ -572,6 +574,7 @@ async fn proactive_stream_ignores_silent_token_without_confirmation() {
         TerminalReason::Done,
         "without confirmation the token is an ordinary marker"
     );
+    assert!(!outcome.spoke_visible_text);
     assert_eq!(outcome.session.history().len(), 1);
 }
 

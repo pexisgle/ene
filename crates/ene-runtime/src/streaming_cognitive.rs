@@ -1607,7 +1607,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             }
             drop(tts_tx);
 
-            return stream_finish(
+            let mut outcome = stream_finish(
                 session,
                 &event_tx,
                 &terminal_emitted,
@@ -1616,6 +1616,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 TerminalReason::Done,
                 topic_boundary_score,
             );
+            outcome.spoke_visible_text = spoke_visible_text;
+            return outcome;
         }
 
         let tool_calls = finalize_tool_calls(current_tool_calls);
