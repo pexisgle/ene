@@ -102,6 +102,9 @@
       "fs": {
         "enable": true
       },
+      "random": {
+        "enable": true
+      },
       "utility": {
         "enable": true
       },
