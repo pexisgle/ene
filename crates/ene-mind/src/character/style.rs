@@ -42,6 +42,20 @@ impl StyleIntent {
             Self::ToolUse => "tool_use",
         }
     }
+
+    /// Resolves a labeled-example label to a canonical intent, if it is one
+    /// of the selector's tags.
+    pub const fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "greeting" => Some(Self::Greeting),
+            "comforting" => Some(Self::Comforting),
+            "joking" => Some(Self::Joking),
+            "serious_explanation" => Some(Self::SeriousExplanation),
+            "refusal" => Some(Self::Refusal),
+            "tool_use" => Some(Self::ToolUse),
+            _ => None,
+        }
+    }
 }
 
 /// A selected style example ready for prompt injection.
@@ -95,6 +109,37 @@ impl StyleExampleSelector {
     pub fn compile_items(card: &CharacterCardV3, user_name: &str) -> Vec<NewMemoryItem> {
         let char_name = card.data.get_character_name();
         let character_id = card.data.get_character_id().to_string();
+        if let Some(examples) = labeled_examples(card) {
+            return examples
+                .into_iter()
+                .enumerate()
+                .map(|(index, example)| {
+                    let tag = StyleIntent::from_tag(&example.label)
+                        .map_or(example.label.as_str(), StyleIntent::tag);
+                    NewMemoryItem {
+                        scope: MemoryScope::Character,
+                        character_id: character_id.clone(),
+                        user_id: String::new(),
+                        kind: MemoryKind::Procedure,
+                        title: format!("[style:{tag}] example {index}"),
+                        content: example.text,
+                        source: MemorySource::Ccv3,
+                        source_ref: Some(format!("{STYLE_SOURCE_PREFIX}{index}")),
+                        confidence: MemoryConfidence::new(1.0),
+                        salience: ene_core::MemorySalience::new(0.8),
+                        affect: AffectAnnotation::default(),
+                        relationship_impact: 0.0,
+                        valid_from: None,
+                        valid_until: None,
+                        status: MemoryStatus::Active,
+                        supersedes_id: None,
+                        pinned: false,
+                        created_at: None,
+                        commitment_id: None,
+                    }
+                })
+                .collect();
+        }
         Self::chunk_mes_example(&card.data.mes_example, char_name, user_name)
             .into_iter()
             .enumerate()
@@ -139,6 +184,12 @@ impl StyleExampleSelector {
         let intent = infer_style_intent(user_input).unwrap_or(StyleIntent::Greeting);
         let character_id = card.data.get_character_id();
 
+        // Labeled examples are structured, so selection is card-direct and
+        // never competes with (or loses to) the compiled memory pool.
+        if let Some(examples) = labeled_examples(card) {
+            return select_labeled(&examples, user_input, intent, max_examples);
+        }
+
         if let (Some(store), Some(_embedder)) = (store, embedder)
             && let Ok(selected) = select_from_store(store, character_id, intent, max_examples).await
             && !selected.is_empty()
@@ -148,6 +199,56 @@ impl StyleExampleSelector {
 
         select_from_card(card, user_name, intent, max_examples)
     }
+}
+
+/// The card's labeled style examples; `None` when absent or empty.
+fn labeled_examples(card: &CharacterCardV3) -> Option<Vec<ene_config::LabeledStyleExample>> {
+    card.data
+        .get_ene_extension()
+        .and_then(|ext| ext.style_examples)
+        .filter(|examples| !examples.is_empty())
+}
+
+/// Select labeled examples by deterministic label matching.
+///
+/// A label equal to a canonical intent tag selects through the intent
+/// pipeline; any other non-empty label is matched as a case-insensitive
+/// substring of the user's input. No match falls back to the first
+/// `max_examples` examples, mirroring the flat-example fallback.
+fn select_labeled(
+    examples: &[ene_config::LabeledStyleExample],
+    user_input: &str,
+    intent: StyleIntent,
+    max_examples: usize,
+) -> Vec<StyleExample> {
+    let lower_input = user_input.to_lowercase();
+    let mut matched: Vec<StyleExample> = examples
+        .iter()
+        .filter(|example| {
+            StyleIntent::from_tag(&example.label) == Some(intent)
+                || label_matches(&example.label, &lower_input)
+        })
+        .map(|example| StyleExample {
+            text: example.text.clone(),
+            intent,
+        })
+        .take(max_examples)
+        .collect();
+    if matched.is_empty() {
+        matched = examples
+            .iter()
+            .take(max_examples)
+            .map(|example| StyleExample {
+                text: example.text.clone(),
+                intent,
+            })
+            .collect();
+    }
+    matched
+}
+
+fn label_matches(label: &str, lower_input: &str) -> bool {
+    !label.trim().is_empty() && lower_input.contains(&label.to_lowercase())
 }
 
 fn select_from_card(
@@ -350,5 +451,112 @@ mod tests {
         let selected = select_from_card(&card, "User", StyleIntent::Greeting, 1);
         assert_eq!(selected.len(), 1);
         assert!(selected[0].text.contains("Hey"));
+    }
+
+    fn labeled_card() -> CharacterCardV3 {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.mes_example = "<START>\n{{user}}: Hi\n{{char}}: Flat greeting".into();
+        card.data.extensions.ene = Some(ene_config::EneExtension {
+            style_examples: Some(vec![
+                ene_config::LabeledStyleExample {
+                    id: "g-1".into(),
+                    label: "greeting".into(),
+                    text: "Labeled greeting".into(),
+                },
+                ene_config::LabeledStyleExample {
+                    id: "a-1".into(),
+                    label: "angry".into(),
+                    text: "Labeled angry reply".into(),
+                },
+                ene_config::LabeledStyleExample {
+                    id: "f-1".into(),
+                    label: "first meeting".into(),
+                    text: "Labeled first-meeting reply".into(),
+                },
+            ]),
+            ..ene_config::EneExtension::default()
+        });
+        card
+    }
+
+    #[test]
+    fn labeled_examples_replace_flat_mes_example_selection() {
+        let card = labeled_card();
+        let selected = select_labeled(
+            &labeled_examples(&card).expect("labeled examples present"),
+            "hello there",
+            StyleIntent::Greeting,
+            2,
+        );
+        assert_eq!(selected.len(), 1, "only the greeting label matches");
+        assert_eq!(selected[0].text, "Labeled greeting");
+    }
+
+    #[test]
+    fn labeled_examples_match_labels_as_input_substrings() {
+        let card = labeled_card();
+        let examples = labeled_examples(&card).expect("labeled examples present");
+        let selected = select_labeled(
+            &examples,
+            "I'm really angry right now",
+            StyleIntent::Greeting,
+            1,
+        );
+        assert_eq!(selected[0].text, "Labeled angry reply");
+
+        let first_meeting = select_labeled(
+            &examples,
+            "It's our first meeting, right?",
+            StyleIntent::Greeting,
+            1,
+        );
+        assert_eq!(first_meeting[0].text, "Labeled first-meeting reply");
+    }
+
+    #[test]
+    fn labeled_examples_fall_back_to_first_entries_without_a_match() {
+        let card = labeled_card();
+        let selected = select_labeled(
+            &labeled_examples(&card).expect("labeled examples present"),
+            "unrelated topic",
+            StyleIntent::Joking,
+            2,
+        );
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].text, "Labeled greeting");
+        assert_eq!(selected[1].text, "Labeled angry reply");
+    }
+
+    #[test]
+    fn compile_items_uses_labeled_examples_when_defined() {
+        let card = labeled_card();
+        let items = StyleExampleSelector::compile_items(&card, "User");
+        assert_eq!(items.len(), 3);
+        assert!(items[0].title.contains("[style:greeting]"));
+        assert!(items[1].title.contains("[style:angry]"));
+        assert!(items[2].title.contains("[style:first meeting]"));
+        assert_eq!(items[0].content, "Labeled greeting");
+    }
+
+    #[test]
+    fn empty_label_never_matches_input() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.extensions.ene = Some(ene_config::EneExtension {
+            style_examples: Some(vec![ene_config::LabeledStyleExample {
+                id: "e-1".into(),
+                label: "".into(),
+                text: "Empty label".into(),
+            }]),
+            ..ene_config::EneExtension::default()
+        });
+        let selected = select_labeled(
+            &labeled_examples(&card).expect("labeled examples present"),
+            "",
+            StyleIntent::Greeting,
+            1,
+        );
+        assert_eq!(selected[0].text, "Empty label", "fallback still returns it");
     }
 }

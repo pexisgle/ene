@@ -9,9 +9,10 @@
     clippy::indexing_slicing,
     reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
 )]
+use chrono::{DateTime, Datelike, Local};
 use ene_config::{
-    CharacterCardV3, MacroContext, PolitenessLevel, SpeechLength, UserPersona,
-    expand_cbs_macros_ctx,
+    CharacterCardV3, MacroContext, PolitenessLevel, SceneBehavior, SpeechLength, TimePeriod,
+    UserPersona, expand_cbs_macros_ctx,
 };
 
 use super::kernel::IdentityKernel;
@@ -38,6 +39,24 @@ const MIN_IDENTITY_KERNEL_TOKENS: usize = 400;
 /// A 128K-window model does not need a 16K character definition; past this
 /// point extra budget buys nothing and only delays the sections that follow.
 const MAX_IDENTITY_KERNEL_TOKENS: usize = 4_000;
+
+/// Per-turn state the Identity Kernel renders into its core lines.
+///
+/// Every field is optional: `None` simply omits the corresponding line, so
+/// cards without roleplay definitions compile byte-identically to the
+/// previous kernel. `now` pins the wall clock for time-period behavior (tests
+/// inject a fixed instant); `scene_text` is the active scene summary falling
+/// back to the card's `scenario`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KernelContext<'a> {
+    /// Current `AffectState.affinity` (-1.0..=1.0) for relationship stages.
+    pub affinity: Option<f32>,
+    /// Local-time instant for time-period behavior; `None` renders no
+    /// time-of-day line.
+    pub now: Option<DateTime<Local>>,
+    /// Current scene text for keyword-gated scene behaviors.
+    pub scene_text: Option<&'a str>,
+}
 
 /// Size the Identity Kernel token budget from the available context window.
 ///
@@ -74,6 +93,10 @@ impl CharacterCompiler {
     /// `language` localises the kernel's derived speech-style line (defaults
     /// and structured labels); card-provided speech values keep their own
     /// language.
+    ///
+    /// `ctx` carries per-turn state (affinity, wall clock, active scene) that
+    /// gates the optional relationship/time/scene lines; use
+    /// [`KernelContext::default`] when the state is unknown.
     #[must_use]
     pub fn compile(
         card: &CharacterCardV3,
@@ -82,6 +105,7 @@ impl CharacterCompiler {
         pick_seed: Option<u64>,
         available_window: usize,
         language: &str,
+        ctx: KernelContext<'_>,
     ) -> IdentityKernel {
         let data = &card.data;
         let char_name = data.get_character_name();
@@ -119,6 +143,7 @@ impl CharacterCompiler {
             String::from("helpful and consistent")
         };
 
+        let ja = ene_config::resolve_language_alias(language) == "ja";
         let speech_style = render_speech_style(card, language);
 
         let anti_impersonation = format!(
@@ -133,15 +158,24 @@ impl CharacterCompiler {
         let hard_line = format!(
             "Hard instruction: remain {char_name} even in long conversations{anti_impersonation}"
         );
-        let head_lines = [
+        let mut head_lines = vec![
             "[Identity Kernel]".to_string(),
             format!("Name: {char_name}"),
             format!("Role: desktop companion living on {user_name}'s screen"),
             format!("Core personality: {core_personality}"),
             format!("Speech style: {speech_style}"),
         ];
+        if let Some(line) = render_relationship_tone(card, ctx.affinity, ja) {
+            head_lines.push(line);
+        }
+        if let Some(line) = render_time_behavior(card, ctx.now, ja) {
+            head_lines.push(line);
+        }
+        if let Some(line) = render_scene_behavior(card, ctx.scene_text, ja) {
+            head_lines.push(line);
+        }
         let core_block = {
-            let mut lines = head_lines.to_vec();
+            let mut lines = head_lines.clone();
             lines.push(hard_line.clone());
             lines.join("\n")
         };
@@ -296,6 +330,118 @@ fn render_speech_style(card: &CharacterCardV3, lang: &str) -> String {
     parts.join(if ja { "；" } else { "; " })
 }
 
+/// Renders the relationship-stage tone line for the current affinity.
+///
+/// The stage with the highest `threshold` not exceeding `affinity` wins;
+/// blank tones are omitted. Threshold comparisons use `partial_cmp` so a NaN
+/// threshold can never select a stage.
+fn render_relationship_tone(
+    card: &CharacterCardV3,
+    affinity: Option<f32>,
+    ja: bool,
+) -> Option<String> {
+    let stages = card
+        .data
+        .get_ene_extension()
+        .and_then(|ext| ext.relationship_stages)?;
+    let affinity = affinity?;
+    let stage = stages
+        .iter()
+        .filter(|stage| stage.threshold <= affinity)
+        .max_by(|a, b| {
+            a.threshold
+                .partial_cmp(&b.threshold)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+    let tone = stage.tone.trim();
+    if tone.is_empty() {
+        return None;
+    }
+    let header = if ja {
+        "関係性に応じた口調"
+    } else {
+        "Relationship tone"
+    };
+    let label = stage.label.trim();
+    Some(if label.is_empty() {
+        format!("{header}: {tone}")
+    } else {
+        format!("{header}: {label} — {tone}")
+    })
+}
+
+/// Local-time period for an hour of day (05–10 morning, 11–16 afternoon,
+/// 17–20 evening, 21–04 night).
+const fn time_period_for_hour(hour: u32) -> TimePeriod {
+    match hour {
+        5..=10 => TimePeriod::Morning,
+        11..=16 => TimePeriod::Afternoon,
+        17..=20 => TimePeriod::Evening,
+        _ => TimePeriod::Night,
+    }
+}
+
+/// Renders the time-of-day behavior line when `now` falls in a defined
+/// period; blank behaviors are omitted.
+fn render_time_behavior(
+    card: &CharacterCardV3,
+    now: Option<DateTime<Local>>,
+    ja: bool,
+) -> Option<String> {
+    let periods = card
+        .data
+        .get_ene_extension()
+        .and_then(|ext| ext.time_periods)?;
+    let period = time_period_for_hour(now?.hour());
+    let behavior = periods
+        .iter()
+        .find(|entry| entry.period == period)
+        .map(|entry| entry.behavior.trim())?;
+    if behavior.is_empty() {
+        return None;
+    }
+    let header = if ja {
+        "時間帯の行動"
+    } else {
+        "Time-of-day behavior"
+    };
+    Some(format!("{header}: {behavior}"))
+}
+
+/// Renders the scene behavior line when any keyword appears in the active
+/// scene text; blank keywords or behaviors are omitted.
+fn render_scene_behavior(
+    card: &CharacterCardV3,
+    scene_text: Option<&str>,
+    ja: bool,
+) -> Option<String> {
+    let scenes = card
+        .data
+        .get_ene_extension()
+        .and_then(|ext| ext.scene_behaviors)?;
+    let lower_scene = scene_text?.to_lowercase();
+    let behavior = scenes
+        .iter()
+        .find(|scene| scene_matches(scene, &lower_scene))
+        .map(|scene| scene.behavior.trim())?;
+    if behavior.is_empty() {
+        return None;
+    }
+    let header = if ja {
+        "場面の行動"
+    } else {
+        "Scene behavior"
+    };
+    Some(format!("{header}: {behavior}"))
+}
+
+fn scene_matches(scene: &SceneBehavior, lower_scene: &str) -> bool {
+    scene
+        .keywords
+        .iter()
+        .any(|keyword| !keyword.trim().is_empty() && lower_scene.contains(&keyword.to_lowercase()))
+}
+
 fn truncate_chars(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
@@ -330,6 +476,7 @@ fn truncate_preserving_core(head_lines: &[String], hard_line: &str, max_tokens: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use ene_config::{
         CharacterCardV3, EneExtension, PolitenessLevel, SpeechLength, SpeechStyleDefinition,
     };
@@ -381,8 +528,24 @@ mod tests {
 
         // 3_200 → budget floor (400 tokens): core block fills the budget, so the
         // optional scenario section is dropped; 128K leaves room for it.
-        let small = CharacterCompiler::compile(&card, "User", None, None, 3_200, "en");
-        let large = CharacterCompiler::compile(&card, "User", None, None, 128_000, "en");
+        let small = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            3_200,
+            "en",
+            KernelContext::default(),
+        );
+        let large = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            128_000,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(
             estimate_tokens_language_aware(&large.text)
@@ -408,7 +571,15 @@ mod tests {
         card.data.system_prompt = "Keep responses short for overlay.".into();
         card.data.personality = "Energetic.".into();
 
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(kernel.text.contains("Name: Ene"));
         assert!(kernel.text.contains("Core personality: Energetic."));
@@ -449,7 +620,15 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Official".into();
         card.data.nickname = "Ene".into();
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(kernel.text.contains("Name: Ene"));
         assert!(!kernel.text.contains("Official"));
@@ -464,7 +643,15 @@ mod tests {
             politeness: Some(PolitenessLevel::Casual),
             verbal_tics: vec!["〜だよね".into(), "んだよ".into()],
         });
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(
             kernel.text.contains(
@@ -486,7 +673,15 @@ mod tests {
             verbal_tics: vec!["〜ですわ".into()],
             ..SpeechStyleDefinition::default()
         });
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "ja");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "ja",
+            KernelContext::default(),
+        );
 
         assert!(
             kernel
@@ -505,7 +700,15 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.system_prompt = "First, remember the house rules.".repeat(20);
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         let speech_line = kernel
             .text
@@ -530,7 +733,15 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.system_prompt = "Keep responses short and brief for the overlay.".into();
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(
             !kernel.text.contains("short, warm"),
@@ -548,7 +759,15 @@ mod tests {
     fn speech_style_default_is_localized() {
         let mut card = CharacterCardV3::default();
         card.data.name = "エネ".into();
-        let kernel = CharacterCompiler::compile(&card, "ユーザー", None, None, 400, "ja");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "ユーザー",
+            None,
+            None,
+            400,
+            "ja",
+            KernelContext::default(),
+        );
 
         assert!(
             kernel
@@ -562,7 +781,15 @@ mod tests {
     #[test]
     fn speech_style_empty_definition_falls_back_to_default() {
         let card = card_with_speech(SpeechStyleDefinition::default());
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(
             kernel
@@ -578,7 +805,15 @@ mod tests {
             second_person: Some("   ".into()),
             ..SpeechStyleDefinition::default()
         });
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(
             !kernel.text.contains("first person"),
@@ -596,11 +831,27 @@ mod tests {
     fn speech_style_language_aliases_and_fallbacks_are_resolved() {
         let card = CharacterCardV3::default();
         for language in ["ja", "ja-JP", "jp"] {
-            let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, language);
+            let kernel = CharacterCompiler::compile(
+                &card,
+                "User",
+                None,
+                None,
+                400,
+                language,
+                KernelContext::default(),
+            );
             assert!(kernel.text.contains("Speech style: 自然で温かく"));
         }
         for language in ["fr", ""] {
-            let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, language);
+            let kernel = CharacterCompiler::compile(
+                &card,
+                "User",
+                None,
+                None,
+                400,
+                language,
+                KernelContext::default(),
+            );
             assert!(kernel.text.contains("Speech style: natural, warm"));
         }
     }
@@ -611,7 +862,15 @@ mod tests {
             verbal_tics: vec![String::new(), "  ".into(), "だよね".into()],
             ..SpeechStyleDefinition::default()
         });
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "ja");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "ja",
+            KernelContext::default(),
+        );
         assert!(kernel.text.contains("口癖 だよね"));
         assert!(!kernel.text.contains("口癖 、"));
     }
@@ -621,7 +880,15 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.personality = "Friends with {{user}}.".into();
-        let kernel = CharacterCompiler::compile(&card, "Alice", None, None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "Alice",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(kernel.text.contains("Friends with Alice."));
         // The anti-impersonation guard is expanded at compile time, so no
@@ -650,7 +917,15 @@ mod tests {
             pronouns: None,
             notes: None,
         };
-        let kernel = CharacterCompiler::compile(&card, "Alice", Some(&persona), None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "Alice",
+            Some(&persona),
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(
             kernel.text.contains("Name: Alice"),
@@ -670,7 +945,15 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.post_history_instructions = "Stay in character.".into();
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(!kernel.text.contains("Stay in character."));
         let phi = kernel
@@ -699,9 +982,25 @@ mod tests {
         card.data.personality = "Hair color: {{pick:red,blue,green,gold,silver}}.".into();
 
         let seed = Some(ene_config::session_pick_seed("ene:session-1"));
-        let first = CharacterCompiler::compile(&card, "User", None, seed, 400, "en");
+        let first = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            seed,
+            400,
+            "en",
+            KernelContext::default(),
+        );
         for _ in 0..16 {
-            let again = CharacterCompiler::compile(&card, "User", None, seed, 400, "en");
+            let again = CharacterCompiler::compile(
+                &card,
+                "User",
+                None,
+                seed,
+                400,
+                "en",
+                KernelContext::default(),
+            );
             assert_eq!(
                 again.text, first.text,
                 "seeded {{{{pick}}}} must be stable across recompilations"
@@ -712,7 +1011,15 @@ mod tests {
     #[test]
     fn alicia_default_card_compiles() {
         let card = alicia_card();
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
 
         assert!(kernel.text.contains("Name: Alicia"));
         assert!(kernel.text.contains("cheerful") || kernel.text.contains("Friendly"));
@@ -728,7 +1035,15 @@ mod tests {
         card.data.description = "y".repeat(2_000);
         // A small window forces truncation; the core header and the
         // anti-spoofing block must both survive.
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 8_000, "en");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            8_000,
+            "en",
+            KernelContext::default(),
+        );
         assert!(kernel.text.contains("[Identity Kernel]"));
         assert!(kernel.text.contains("Hard instruction: remain Ene"));
     }
@@ -744,7 +1059,15 @@ mod tests {
         card.data.description = "彼女は画面の中で暮らし、いつもユーザーを励ましている。".repeat(6);
         card.data.scenario = "今日は一緒に作業しながら、たまに雑談をする場面。".repeat(6);
 
-        let kernel = CharacterCompiler::compile(&card, "ユーザー", None, None, 16_000, "ja");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "ユーザー",
+            None,
+            None,
+            16_000,
+            "ja",
+            KernelContext::default(),
+        );
 
         assert!(
             kernel.text.contains("Name: エネ"),
@@ -804,5 +1127,273 @@ mod tests {
             truncated.contains("絶対指示"),
             "a non-English hard instruction must still be preserved: {truncated}"
         );
+    }
+
+    fn roleplay_card() -> CharacterCardV3 {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.extensions.ene = Some(EneExtension {
+            relationship_stages: Some(vec![
+                ene_config::RelationshipStage {
+                    threshold: -0.5,
+                    label: "stranger".into(),
+                    tone: "keep a formal distance".into(),
+                },
+                ene_config::RelationshipStage {
+                    threshold: 0.3,
+                    label: "close friend".into(),
+                    tone: "speak with easy warmth".into(),
+                },
+            ]),
+            time_periods: Some(vec![ene_config::TimePeriodBehavior {
+                period: ene_config::TimePeriod::Night,
+                behavior: "speak softly".into(),
+            }]),
+            scene_behaviors: Some(vec![ene_config::SceneBehavior {
+                name: "working".into(),
+                keywords: vec!["work".into(), "作業".into()],
+                behavior: "keep replies short".into(),
+            }]),
+            ..EneExtension::default()
+        });
+        card
+    }
+
+    fn night_instant() -> chrono::DateTime<chrono::Local> {
+        chrono::Local
+            .with_ymd_and_hms(2026, 8, 4, 22, 30, 0)
+            .single()
+            .expect("fixed local instant")
+    }
+
+    #[test]
+    fn relationship_tone_renders_highest_matching_stage() {
+        let card = roleplay_card();
+        let ctx = KernelContext {
+            affinity: Some(0.3),
+            ..KernelContext::default()
+        };
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en", ctx);
+        assert!(
+            kernel
+                .text
+                .contains("Relationship tone: close friend — speak with easy warmth"),
+            "kernel must render the winning stage: {}",
+            kernel.text
+        );
+        assert!(!kernel.text.contains("stranger"));
+    }
+
+    #[test]
+    fn relationship_tone_omitted_below_all_thresholds_or_without_affinity() {
+        let card = roleplay_card();
+        let below = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext {
+                affinity: Some(-0.9),
+                ..KernelContext::default()
+            },
+        );
+        assert!(!below.text.contains("Relationship tone"));
+
+        let no_affinity = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
+        assert!(!no_affinity.text.contains("Relationship tone"));
+    }
+
+    #[test]
+    fn relationship_tone_renders_japanese_label() {
+        let card = roleplay_card();
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "ja",
+            KernelContext {
+                affinity: Some(0.8),
+                ..KernelContext::default()
+            },
+        );
+        assert!(
+            kernel
+                .text
+                .contains("関係性に応じた口調: close friend — speak with easy warmth"),
+            "Japanese header with card-authored values: {}",
+            kernel.text
+        );
+    }
+
+    #[test]
+    fn time_behavior_renders_for_matching_local_period() {
+        let card = roleplay_card();
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext {
+                now: Some(night_instant()),
+                ..KernelContext::default()
+            },
+        );
+        assert!(
+            kernel.text.contains("Time-of-day behavior: speak softly"),
+            "kernel must render the night behavior: {}",
+            kernel.text
+        );
+    }
+
+    #[test]
+    fn time_behavior_omitted_for_undefined_or_absent_period() {
+        let card = roleplay_card();
+        let morning = chrono::Local
+            .with_ymd_and_hms(2026, 8, 4, 8, 0, 0)
+            .single()
+            .expect("fixed local instant");
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext {
+                now: Some(morning),
+                ..KernelContext::default()
+            },
+        );
+        assert!(!kernel.text.contains("Time-of-day behavior"));
+        let no_clock = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
+        assert!(!no_clock.text.contains("Time-of-day behavior"));
+    }
+
+    #[test]
+    fn scene_behavior_renders_on_keyword_match() {
+        let card = roleplay_card();
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "ja",
+            KernelContext {
+                scene_text: Some("ユーザーはプログラミングの作業中です"),
+                ..KernelContext::default()
+            },
+        );
+        assert!(
+            kernel.text.contains("場面の行動: keep replies short"),
+            "Japanese header with matched scene: {}",
+            kernel.text
+        );
+    }
+
+    #[test]
+    fn scene_behavior_omitted_without_match_or_scene() {
+        let card = roleplay_card();
+        let unmatched = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext {
+                scene_text: Some("walking in the park"),
+                ..KernelContext::default()
+            },
+        );
+        assert!(!unmatched.text.contains("Scene behavior"));
+        let no_scene = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
+        assert!(!no_scene.text.contains("Scene behavior"));
+    }
+
+    #[test]
+    fn default_context_renders_no_roleplay_lines() {
+        let card = roleplay_card();
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
+        assert!(!kernel.text.contains("Relationship tone"));
+        assert!(!kernel.text.contains("Time-of-day behavior"));
+        assert!(!kernel.text.contains("Scene behavior"));
+    }
+
+    #[test]
+    fn blank_tone_and_behavior_values_are_omitted() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.extensions.ene = Some(EneExtension {
+            relationship_stages: Some(vec![ene_config::RelationshipStage {
+                threshold: 0.0,
+                label: "".into(),
+                tone: "   ".into(),
+            }]),
+            time_periods: Some(vec![ene_config::TimePeriodBehavior {
+                period: ene_config::TimePeriod::Night,
+                behavior: "".into(),
+            }]),
+            scene_behaviors: Some(vec![ene_config::SceneBehavior {
+                name: "working".into(),
+                keywords: vec!["work".into()],
+                behavior: "  ".into(),
+            }]),
+            ..EneExtension::default()
+        });
+        let kernel = CharacterCompiler::compile(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext {
+                affinity: Some(0.5),
+                now: Some(night_instant()),
+                scene_text: Some("working"),
+            },
+        );
+        assert!(!kernel.text.contains("Relationship tone"));
+        assert!(!kernel.text.contains("Time-of-day behavior"));
+        assert!(!kernel.text.contains("Scene behavior"));
     }
 }

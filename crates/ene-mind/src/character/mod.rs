@@ -10,7 +10,7 @@ mod style;
 mod sync;
 
 pub use authors_note::{AuthorsNote, apply_authors_note, render_authors_note};
-pub use compiler::{CharacterCompiler, identity_kernel_budget_tokens};
+pub use compiler::{CharacterCompiler, KernelContext, identity_kernel_budget_tokens};
 pub use kernel::IdentityKernel;
 pub use lorebook::{
     LOREBOOK_SOURCE_PREFIX, LorebookIndexer, build_lorebook_scan_text,
@@ -56,6 +56,10 @@ impl CharacterProcessor {
     /// derive it with [`ene_config::session_pick_seed`].
     ///
     /// `language` localises the speech-style line derived for the kernel.
+    ///
+    /// `ctx` carries per-turn state (affinity, wall clock, active scene) for
+    /// the optional relationship/time/scene kernel lines; pass
+    /// [`KernelContext::default`] when the state is unknown.
     pub fn compile_kernel(
         card: &CharacterCardV3,
         user_name: &str,
@@ -63,6 +67,7 @@ impl CharacterProcessor {
         pick_seed: Option<u64>,
         available_window: usize,
         language: &str,
+        ctx: KernelContext<'_>,
     ) -> IdentityKernel {
         CharacterCompiler::compile(
             card,
@@ -71,6 +76,7 @@ impl CharacterProcessor {
             pick_seed,
             available_window,
             language,
+            ctx,
         )
     }
 
@@ -88,6 +94,7 @@ impl CharacterProcessor {
             None,
             window,
             ene_config::system_language(),
+            KernelContext::default(),
         )
     }
 
