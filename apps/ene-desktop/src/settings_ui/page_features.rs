@@ -128,6 +128,29 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             }
         });
 
+        ui.horizontal(|ui| {
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "proactive-fatigue-threshold"
+            ));
+            let mut value = mind.proactive.fatigue_suppression_threshold;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut value)
+                        .range(0.0..=1.0)
+                        .speed(0.01),
+                )
+                .changed()
+            {
+                mind.proactive.fatigue_suppression_threshold = value.clamp(0.0, 1.0);
+                persist_mind(settings, ai, &mind);
+            }
+        });
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "proactive-fatigue-threshold-hint"
+        ));
+
         ui.label(i18n_embed_fl::fl!(
             crate::i18n::loader(),
             "proactive-sources"
