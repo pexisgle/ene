@@ -91,9 +91,10 @@ pub(crate) fn load_card_from_path(path: &Path) -> Result<CharacterCardV3, EneCon
 
 /// Reads a card with `code`'s diff layered over the base.
 ///
-/// Folder-form cards (JSON) additionally consult the `character.{code}.json`
-/// sidecar next to the card; CHARX reads the same entry name from the
-/// archive root and PNG cards use the embedded `extensions.ene.locales` bag.
+/// Folder-form cards (`character.json`) additionally consult the
+/// `character.{code}.json` sidecar next to the card; CHARX reads the same
+/// entry name from the archive root and PNG cards use the embedded
+/// `extensions.ene.locales` bag.
 pub(crate) fn load_card_from_path_localized(
     path: &Path,
     code: &str,
@@ -102,6 +103,9 @@ pub(crate) fn load_card_from_path_localized(
     let code = crate::resolve_language_alias(code);
     let mut card = load_card_from_bytes_localized(&bytes, &code)?;
     if !is_container(&bytes)
+        && path
+            .file_name()
+            .is_some_and(|name| name == "character.json")
         && let Some(diff) = read_sidecar_diff(path.parent(), &code)
     {
         merge_localized_fields(&mut card, &diff);
@@ -406,7 +410,10 @@ fn charx_card_json(bytes: &[u8]) -> Result<serde_json::Value, EneConfigError> {
 /// `character.{code}.json` diff entry from a CHARX zip.
 ///
 /// Only the requested entries are probed for encryption and size, so a base
-/// (unlocalized) load is unaffected by a hostile or corrupt diff entry.
+/// (unlocalized) load is unaffected by a hostile or corrupt diff entry. A
+/// diff entry hard-errors only when encrypted (an archive-integrity
+/// boundary); oversized or malformed ones are skipped with a warning, like
+/// the folder sidecar path.
 fn charx_card_json_localized(
     bytes: &[u8],
     code: Option<&str>,
@@ -444,13 +451,31 @@ fn charx_card_json_localized(
         let mut file = archive
             .by_index(index)
             .map_err(EneConfigError::CharxError)?;
+        let size = file.size();
+        if size > MAX_CHARX_ENTRY_BYTES {
+            if name == "card.json" {
+                return Err(EneConfigError::CharxTooLarge(name));
+            }
+            tracing::warn!(
+                name = %name,
+                "Skipping oversized localized diff entry in CHARX archive"
+            );
+            continue;
+        }
         let mut content = Vec::new();
         file.by_ref()
-            .take(MAX_CHARX_ENTRY_BYTES + 1)
+            .take(size + 1)
             .read_to_end(&mut content)
             .map_err(|e| EneConfigError::CharxError(zip::result::ZipError::Io(e)))?;
-        if content.len() as u64 > MAX_CHARX_ENTRY_BYTES {
-            return Err(EneConfigError::CharxTooLarge(name));
+        if content.len() as u64 > size {
+            if name == "card.json" {
+                return Err(EneConfigError::CharxTooLarge(name));
+            }
+            tracing::warn!(
+                name = %name,
+                "Skipping size-mismatched localized diff entry in CHARX archive"
+            );
+            continue;
         }
         if name == "card.json" && card.is_none() {
             card = Some(serde_json::from_slice(&content).map_err(EneConfigError::JsonError)?);
@@ -596,7 +621,9 @@ fn import_charx(
 
 /// Materializes embedded `extensions.ene.locales` as `character.{code}.json`
 /// sidecars and strips them from the card, producing the folder work form.
-/// Sidecars already on disk (extracted from a CHARX archive) win.
+/// Sidecars already on disk (extracted from a CHARX archive) win only when
+/// they parse as a valid diff; a malformed sidecar is overwritten so a
+/// broken archive entry cannot discard the embedded translation.
 fn split_embedded_locales(
     card: &mut CharacterCardV3,
     card_dir: &Path,
@@ -611,8 +638,15 @@ fn split_embedded_locales(
     for (key, fields) in locales {
         let code = crate::resolve_language_alias(&key);
         let path = card_dir.join(format!("character.{code}.json"));
-        if path.exists() {
-            continue;
+        match std::fs::read_to_string(&path) {
+            Ok(content) if serde_json::from_str::<LocalizedCharacterFields>(&content).is_ok() => {
+                continue;
+            }
+            Ok(_) => tracing::warn!(
+                path = %path.display(),
+                "Overwriting malformed localized card diff sidecar with the embedded locale"
+            ),
+            Err(_) => {}
         }
         let json = serde_json::to_string_pretty(&fields).map_err(EneConfigError::SerializeError)?;
         std::fs::write(&path, json).map_err(EneConfigError::IoError)?;
@@ -1489,6 +1523,7 @@ mod tests {
             "description":"Base description",
             "personality":"Base personality",
             "first_mes":"Hello!",
+            "alternate_greetings":["Hi"],
             "nickname":"Ada",
             "tags":["engineer"],
             "character_book":{
@@ -1496,6 +1531,7 @@ mod tests {
                     {
                         "id":"lore-1",
                         "keys":["cat","kitty"],
+                        "secondary_keys":["pet"],
                         "content":"Base lore",
                         "enabled":true,
                         "insertion_order":0,
@@ -1509,11 +1545,17 @@ mod tests {
     const JA_DIFF_JSON: &str = r#"{
         "description":"日本語の説明",
         "first_mes":"やっほー！",
+        "alternate_greetings":["こんにちは"],
         "nickname":"エイダ",
         "tags":["エンジニア"],
         "character_book":{
             "entries":[
-                {"id":"lore-1","keys":["猫","ねこ"],"content":"日本語のロア"}
+                {
+                    "id":"lore-1",
+                    "keys":["猫","ねこ"],
+                    "secondary_keys":["ペット"],
+                    "content":"日本語のロア"
+                }
             ]
         }
     }"#;
@@ -1521,6 +1563,7 @@ mod tests {
     fn assert_ja_applied(card: &CharacterCardV3) {
         assert_eq!(card.data.description, "日本語の説明");
         assert_eq!(card.data.first_mes, "やっほー！");
+        assert_eq!(card.data.alternate_greetings, ["こんにちは"]);
         assert_eq!(card.data.nickname, "エイダ");
         assert_eq!(card.data.tags, ["エンジニア"]);
         assert_eq!(card.data.personality, "Base personality");
@@ -1531,6 +1574,7 @@ mod tests {
             .expect("book present")
             .entries[0];
         assert_eq!(entry.keys, ["猫", "ねこ"]);
+        assert_eq!(entry.secondary_keys, Some(vec!["ペット".to_string()]));
         assert_eq!(entry.content, "日本語のロア");
     }
 
@@ -1776,5 +1820,209 @@ mod tests {
                 .is_none_or(|ene| ene.locales.is_none()),
             "character.json no longer embeds the locale bag"
         );
+    }
+
+    #[test]
+    fn charx_localized_encrypted_diff_entry_errors() {
+        let bytes = raw_zip(&[
+            (
+                "card.json",
+                LOCALIZED_BASE_JSON.as_bytes(),
+                LOCALIZED_BASE_JSON.len() as u32,
+                0,
+                0,
+            ),
+            (
+                "character.ja.json",
+                JA_DIFF_JSON.as_bytes(),
+                JA_DIFF_JSON.len() as u32,
+                0,
+                1,
+            ),
+        ]);
+
+        assert!(matches!(
+            load_card_from_bytes_localized(&bytes, "ja"),
+            Err(EneConfigError::CharxEncrypted(name)) if name == "character.ja.json"
+        ));
+        let base = load_card_from_bytes(&bytes).expect("base load is unaffected");
+        assert_eq!(base.data.description, "Base description");
+    }
+
+    #[test]
+    fn charx_localized_oversized_diff_entry_falls_back_to_base() {
+        let bytes = raw_zip(&[
+            (
+                "card.json",
+                LOCALIZED_BASE_JSON.as_bytes(),
+                LOCALIZED_BASE_JSON.len() as u32,
+                0,
+                0,
+            ),
+            (
+                "character.ja.json",
+                JA_DIFF_JSON.as_bytes(),
+                (MAX_CHARX_ENTRY_BYTES + 1) as u32,
+                0,
+                0,
+            ),
+        ]);
+
+        let card = load_card_from_bytes_localized(&bytes, "ja").expect("loads");
+        assert_eq!(card.data.description, "Base description");
+    }
+
+    #[test]
+    fn charx_localized_malformed_diff_entry_falls_back_to_base() {
+        let bytes = charx(&[
+            ("card.json", LOCALIZED_BASE_JSON.as_bytes()),
+            ("character.ja.json", b"{not json"),
+        ]);
+
+        let card = load_card_from_bytes_localized(&bytes, "ja").expect("loads");
+        assert_eq!(card.data.description, "Base description");
+    }
+
+    #[test]
+    fn localized_png_canonicalizes_embedded_locale_keys() {
+        let card_json = r#"{
+            "spec":"chara_card_v3",
+            "spec_version":"3.0",
+            "data":{
+                "name":"Ada",
+                "description":"Base description",
+                "extensions":{
+                    "ene":{
+                        "locales":{
+                            "ja-JP":{"description":"日本語の説明"}
+                        }
+                    }
+                }
+            }
+        }"#;
+        let bytes = png(&[text_chunk("ccv3", base64(card_json).as_bytes())]);
+
+        let card = load_card_from_bytes_localized(&bytes, "ja").expect("loads");
+        assert_eq!(card.data.description, "日本語の説明");
+    }
+
+    #[test]
+    fn unknown_diff_fields_make_the_whole_diff_skip() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = tmp.path().join("Ada");
+        std::fs::create_dir_all(&dir).expect("create card dir");
+        std::fs::write(dir.join("character.json"), LOCALIZED_BASE_JSON).expect("write base");
+        std::fs::write(
+            dir.join("character.ja.json"),
+            r#"{"first_mess":"タイポしたフィールド"}"#,
+        )
+        .expect("write diff");
+
+        let card = load_card_from_path_localized(&dir.join("character.json"), "ja").expect("loads");
+        assert_eq!(card.data.description, "Base description");
+        assert_eq!(card.data.first_mes, "Hello!");
+    }
+
+    #[test]
+    fn localized_load_ignores_sidecars_for_non_standard_card_names() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = tmp.path().join("Ada");
+        std::fs::create_dir_all(&dir).expect("create card dir");
+        std::fs::write(dir.join("exported.json"), LOCALIZED_BASE_JSON).expect("write base");
+        std::fs::write(dir.join("character.ja.json"), JA_DIFF_JSON).expect("write diff");
+
+        let card = load_card_from_path_localized(&dir.join("exported.json"), "ja").expect("loads");
+        assert_eq!(card.data.description, "Base description");
+    }
+
+    #[test]
+    fn import_charx_overwrites_malformed_sidecar_with_embedded_locale() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let src = tmp.path().join("ada.charx");
+        let card_json = r#"{
+            "spec":"chara_card_v3",
+            "spec_version":"3.0",
+            "data":{
+                "name":"Ada",
+                "description":"Base description",
+                "extensions":{
+                    "ene":{
+                        "locales":{
+                            "ja":{"description":"埋め込みの日本語"}
+                        }
+                    }
+                }
+            }
+        }"#;
+        let bytes = charx(&[
+            ("card.json", card_json.as_bytes()),
+            ("character.ja.json", b"{not json"),
+        ]);
+        std::fs::write(&src, bytes).expect("write charx");
+
+        import_character_file_in(&src, &assets).expect("imports");
+        let folder = assets.join("characters/Ada");
+        let sidecar =
+            std::fs::read_to_string(folder.join("character.ja.json")).expect("sidecar rewritten");
+        assert!(
+            sidecar.contains("埋め込みの日本語"),
+            "malformed zip sidecar is replaced by the embedded locale"
+        );
+    }
+
+    #[test]
+    fn export_character_card_merges_charx_root_diff() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let src = tmp.path().join("ada.charx");
+        let bytes = charx(&[
+            ("card.json", LOCALIZED_BASE_JSON.as_bytes()),
+            ("character.ja.json", JA_DIFF_JSON.as_bytes()),
+        ]);
+        std::fs::write(&src, bytes).expect("write charx");
+        let out = tmp.path().join("ada-ja.json");
+
+        crate::export_character_card(&src.to_string_lossy(), "ja", &out).expect("exports");
+
+        let exported: CharacterCardV3 =
+            serde_json::from_str(&std::fs::read_to_string(&out).expect("read export"))
+                .expect("export parses as CCv3");
+        assert_ja_applied(&exported);
+    }
+
+    #[test]
+    fn export_character_card_merges_png_embedded_locales() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let src = tmp.path().join("ada.png");
+        let card_json = r#"{
+            "spec":"chara_card_v3",
+            "spec_version":"3.0",
+            "data":{
+                "name":"Ada",
+                "description":"Base description",
+                "personality":"Base personality",
+                "extensions":{
+                    "ene":{
+                        "locales":{
+                            "ja":{"description":"日本語の説明"}
+                        }
+                    }
+                }
+            }
+        }"#;
+        std::fs::write(
+            &src,
+            png(&[text_chunk("ccv3", base64(card_json).as_bytes())]),
+        )
+        .expect("write png");
+        let out = tmp.path().join("ada-ja.json");
+
+        crate::export_character_card(&src.to_string_lossy(), "ja", &out).expect("exports");
+
+        let exported: CharacterCardV3 =
+            serde_json::from_str(&std::fs::read_to_string(&out).expect("read export"))
+                .expect("export parses as CCv3");
+        assert_eq!(exported.data.description, "日本語の説明");
+        assert_eq!(exported.data.personality, "Base personality");
     }
 }

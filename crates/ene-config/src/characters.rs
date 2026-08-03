@@ -376,6 +376,8 @@ pub fn load_character_card(name_or_path: &str) -> Result<CharacterCardV3, EneCon
 /// [`EneConfigError::UnsafeCharacterPath`] from [`resolve_character_path`],
 /// plus read and parse errors for the card file itself. A missing or
 /// malformed diff never fails the load — the base card is returned.
+/// Encrypted CHARX diff entries are the exception: like `card.json` itself,
+/// they are archive-integrity failures and hard-error.
 pub fn load_character_card_localized(
     name_or_path: &str,
     app_language: &str,
@@ -877,6 +879,7 @@ mod tests {
             "description":"Base description",
             "personality":"Base personality",
             "first_mes":"Hello!",
+            "alternate_greetings":["Hi"],
             "nickname":"Ada",
             "tags":["engineer"],
             "character_book":{
@@ -884,6 +887,7 @@ mod tests {
                     {
                         "id":"lore-1",
                         "keys":["cat","kitty"],
+                        "secondary_keys":["pet"],
                         "content":"Base lore",
                         "enabled":true,
                         "insertion_order":0,
@@ -897,11 +901,17 @@ mod tests {
     const JA_DIFF_JSON: &str = r#"{
         "description":"日本語の説明",
         "first_mes":"やっほー！",
+        "alternate_greetings":["こんにちは"],
         "nickname":"エイダ",
         "tags":["エンジニア"],
         "character_book":{
             "entries":[
-                {"id":"lore-1","keys":["猫","ねこ"],"content":"日本語のロア"}
+                {
+                    "id":"lore-1",
+                    "keys":["猫","ねこ"],
+                    "secondary_keys":["ペット"],
+                    "content":"日本語のロア"
+                }
             ]
         }
     }"#;
@@ -923,10 +933,10 @@ mod tests {
             .expect("localized card loads");
         assert_eq!(card.data.description, "日本語の説明");
         assert_eq!(card.data.personality, "Base personality");
-        assert_eq!(
-            card.data.character_book.expect("book").entries[0].keys,
-            ["猫", "ねこ"]
-        );
+        assert_eq!(card.data.alternate_greetings, ["こんにちは"]);
+        let entry = &card.data.character_book.expect("book").entries[0];
+        assert_eq!(entry.keys, ["猫", "ねこ"]);
+        assert_eq!(entry.secondary_keys, Some(vec!["ペット".to_string()]));
 
         let base = load_character_card(&path.to_string_lossy()).expect("base card loads");
         assert_eq!(base.data.description, "Base description");
@@ -986,10 +996,9 @@ mod tests {
         assert_eq!(exported.spec, "chara_card_v3");
         assert_eq!(exported.data.description, "日本語の説明");
         assert_eq!(exported.data.personality, "Base personality");
-        assert_eq!(
-            exported.data.character_book.expect("book").entries[0].keys,
-            ["猫", "ねこ"]
-        );
+        let entry = &exported.data.character_book.expect("book").entries[0];
+        assert_eq!(entry.keys, ["猫", "ねこ"]);
+        assert_eq!(entry.secondary_keys, Some(vec!["ペット".to_string()]));
         assert!(
             exported
                 .data

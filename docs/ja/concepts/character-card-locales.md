@@ -18,9 +18,9 @@ characters/Alicia/
 | `first_mes` / `alternate_greetings` / `mes_example` | `extensions.ene.motion_catalog` |
 | `system_prompt` / `post_history_instructions` | `extensions.ene.expressions`（VRM 重み） |
 | `creator_notes` / `nickname` / `tags` | `creation_date` / `spec` / `spec_version` |
-| `character_book` エントリの `content` と `keys` | `insertion_order` / `priority` / `position` |
+| `character_book` エントリの `content` / `keys` / `secondary_keys` | `insertion_order` / `priority` / `position` |
 
-ロアブックの `keys` の翻訳は**必須**です。`keys` は会話テキストに対してマッチングされるため、日本語で会話しているのに英語キーのままではエントリが発火しません。
+ロアブックのトリガー（`keys` と `secondary_keys`）の翻訳は**必須**です。トリガーは会話テキストに対してマッチングされ、Ene のマッチャーはプライマリ 1 つ以上かつセカンダリ 1 つ以上の一致を要求するため、翻訳されていないトリガーは基底言語以外の会話では発火しません。
 
 カードの `name` は意図的に翻訳対象外です。発見処理やフォルダー名に使うキャラクターの識別キーだからです。翻訳できるのは表示専用の `nickname` だけです。CCv3 の `creator_notes_multilingual` はレガシーカード用に引き続き対応しますが、新規カードは差分ファイルを使うべきです。
 
@@ -34,7 +34,12 @@ characters/Alicia/
   "nickname": "アリス",
   "character_book": {
     "entries": [
-      { "id": "lore-1", "keys": ["猫", "ねこ"], "content": "日本語のロアエントリ。" }
+      {
+        "id": "lore-1",
+        "keys": ["猫", "ねこ"],
+        "secondary_keys": ["ペット"],
+        "content": "日本語のロアエントリ。"
+      }
     ]
   }
 }
@@ -43,6 +48,8 @@ characters/Alicia/
 全フィールドが省略可能です。値があれば基底を置き換え、キーが無ければ基底言語を維持します。ロアブックのエントリは `id` で基底カードのエントリと照合します。一致する id が無いエントリは警告してスキップし、追加はしません。`alternate_greetings` と `tags` は、存在する場合に基底のリスト全体を置き換えます。
 
 差分ファイルが壊れていてもカードは壊れません。警告してスキップし、基底カードを返します。
+
+未知のフィールドは黙って無視せず拒否します。`"first_mess"` のようなタイポは「未翻訳フィールド」と同じ見た目ではなく、差分全体が警告付きでスキップされます（新しいフィールドを追加した将来版 Ene 向けの差分は、古い Ene では同じ経路でスキップされます）。
 
 ## 実効ロケールの選び方
 

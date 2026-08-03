@@ -6,8 +6,8 @@
 //! such a diff onto the base card: every `Some` field replaces the base
 //! value, every `None` keeps it, so untranslated fields fall back to the
 //! base language. Lorebook entries are matched by `id` and only their `keys`
-//! and `content` are replaced — `keys` must be translated because they are
-//! matched against conversation text.
+//! / `secondary_keys` / `content` are replaced — triggers must be translated
+//! because they are matched against conversation text.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use crate::CharacterCardV3;
 /// discovery and folder naming, so only the display-only `nickname` is
 /// translatable.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde")]
+#[serde(crate = "crate::serde", deny_unknown_fields)]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedCharacterFields {
     /// Localized `data.description`.
@@ -65,7 +65,7 @@ pub struct LocalizedCharacterFields {
 
 /// Lorebook translations: only `keys` and `content` of existing entries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde")]
+#[serde(crate = "crate::serde", deny_unknown_fields)]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedLorebook {
     /// Translated entries; each must reference a base entry `id`.
@@ -75,7 +75,7 @@ pub struct LocalizedLorebook {
 
 /// A single translated lorebook entry.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde")]
+#[serde(crate = "crate::serde", deny_unknown_fields)]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedLorebookEntry {
     /// The base entry's `id`; entries without a matching base id are skipped
@@ -84,6 +84,11 @@ pub struct LocalizedLorebookEntry {
     /// Translated trigger keys (matched against conversation text).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keys: Option<Vec<String>>,
+    /// Translated secondary trigger keys; Ene's matcher requires at least
+    /// one primary AND one secondary key to fire, so untranslated
+    /// `secondary_keys` would leave the entry dead in every other language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_keys: Option<Vec<String>>,
     /// Translated entry content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -148,6 +153,9 @@ pub(crate) fn merge_localized_fields(card: &mut CharacterCardV3, diff: &Localize
             if let Some(keys) = &entry.keys {
                 base_entry.keys.clone_from(keys);
             }
+            if let Some(secondary_keys) = &entry.secondary_keys {
+                base_entry.secondary_keys = Some(secondary_keys.clone());
+            }
             if let Some(content) = &entry.content {
                 base_entry.content.clone_from(content);
             }
@@ -190,6 +198,7 @@ mod tests {
                 description: "Base description".to_string(),
                 personality: "Base personality".to_string(),
                 first_mes: "Hello!".to_string(),
+                alternate_greetings: vec!["Hi".to_string()],
                 nickname: "Ada".to_string(),
                 tags: vec!["engineer".to_string()],
                 character_book: Some(crate::Lorebook {
@@ -232,6 +241,7 @@ mod tests {
         let diff = LocalizedCharacterFields {
             description: Some("日本語の説明".to_string()),
             first_mes: Some("やっほー！".to_string()),
+            alternate_greetings: Some(vec!["こんにちは".to_string()]),
             nickname: Some("エイダ".to_string()),
             tags: Some(vec!["エンジニア".to_string()]),
             ..LocalizedCharacterFields::default()
@@ -241,9 +251,43 @@ mod tests {
 
         assert_eq!(card.data.description, "日本語の説明");
         assert_eq!(card.data.first_mes, "やっほー！");
+        assert_eq!(card.data.alternate_greetings, ["こんにちは"]);
         assert_eq!(card.data.nickname, "エイダ");
         assert_eq!(card.data.tags, ["エンジニア"]);
         assert_eq!(card.data.personality, "Base personality");
+    }
+
+    #[test]
+    fn merge_switches_lorebook_secondary_keys_by_id() {
+        let mut card = base_card();
+        card.data
+            .character_book
+            .as_mut()
+            .expect("book present")
+            .entries[0]
+            .secondary_keys = Some(vec!["pet".to_string()]);
+        let diff = LocalizedCharacterFields {
+            character_book: Some(LocalizedLorebook {
+                entries: vec![LocalizedLorebookEntry {
+                    id: json!("lore-1"),
+                    keys: None,
+                    secondary_keys: Some(vec!["ペット".to_string()]),
+                    content: None,
+                }],
+            }),
+            ..LocalizedCharacterFields::default()
+        };
+
+        merge_localized_fields(&mut card, &diff);
+
+        let entry = &card.data.character_book.expect("book present").entries[0];
+        assert_eq!(entry.secondary_keys, Some(vec!["ペット".to_string()]));
+        assert_eq!(
+            entry.keys,
+            ["cat", "kitty"],
+            "absent keys keep the base value"
+        );
+        assert_eq!(entry.content, "Base lore");
     }
 
     #[test]
@@ -254,6 +298,7 @@ mod tests {
                 entries: vec![LocalizedLorebookEntry {
                     id: json!("lore-1"),
                     keys: Some(vec!["猫".to_string(), "ねこ".to_string()]),
+                    secondary_keys: None,
                     content: Some("日本語のロア".to_string()),
                 }],
             }),
@@ -275,6 +320,7 @@ mod tests {
                 entries: vec![LocalizedLorebookEntry {
                     id: json!("lore-missing"),
                     keys: Some(vec!["猫".to_string()]),
+                    secondary_keys: None,
                     content: Some("無視される".to_string()),
                 }],
             }),
@@ -297,6 +343,7 @@ mod tests {
                 entries: vec![LocalizedLorebookEntry {
                     id: json!("lore-1"),
                     keys: Some(vec!["猫".to_string()]),
+                    secondary_keys: None,
                     content: None,
                 }],
             }),

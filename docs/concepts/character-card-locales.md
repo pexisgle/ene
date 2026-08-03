@@ -23,10 +23,12 @@ characters/Alicia/
 | `first_mes` / `alternate_greetings` / `mes_example` | `extensions.ene.motion_catalog` |
 | `system_prompt` / `post_history_instructions` | `extensions.ene.expressions` (VRM weights) |
 | `creator_notes` / `nickname` / `tags` | `creation_date` / `spec` / `spec_version` |
-| `character_book` entries' `content` and `keys` | `insertion_order` / `priority` / `position` |
+| `character_book` entries' `content`, `keys`, and `secondary_keys` | `insertion_order` / `priority` / `position` |
 
-Lorebook `keys` are translated **mandatorily**: they are matched against
-conversation text, so an English key never fires in a Japanese conversation.
+Lorebook triggers (`keys` and `secondary_keys`) are translated
+**mandatorily**: they are matched against conversation text — and Ene's
+matcher requires at least one primary AND one secondary key to fire — so an
+untranslated trigger never fires in a non-base-language conversation.
 
 The card `name` is deliberately not translatable — it is the character's
 identity key used for discovery and folder naming. Only the display-only
@@ -43,7 +45,12 @@ for legacy cards, but new cards should use diff files.
   "nickname": "アリス",
   "character_book": {
     "entries": [
-      { "id": "lore-1", "keys": ["猫", "ねこ"], "content": "日本語のロアエントリ。" }
+      {
+        "id": "lore-1",
+        "keys": ["猫", "ねこ"],
+        "secondary_keys": ["ペット"],
+        "content": "日本語のロアエントリ。"
+      }
     ]
   }
 }
@@ -56,7 +63,10 @@ appended. `alternate_greetings` and `tags`, when present, replace the whole
 base list.
 
 A malformed diff never breaks the card: it is warned about and skipped, and
-the base card is returned.
+the base card is returned. Unknown fields are rejected rather than silently
+ignored, so a typo like `"first_mess"` makes the whole diff skip with a
+warning instead of looking like an untranslated field (a diff written for a
+newer Ene that adds fields is skipped by an older Ene the same way).
 
 ## How the active locale is chosen
 
