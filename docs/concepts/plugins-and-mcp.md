@@ -134,6 +134,37 @@ The in-process admission budget that serializes local engines contending on the 
 All seven plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.
 
+### Filesystem tool reference (`filesystem.*`)
+
+The filesystem plugin exposes read/write/edit/delete operations, glob and
+regex search, unified-diff patching, and shell execution. The search actions
+are:
+
+**`filesystem.grep`** — search file contents with a regex. Optional
+parameters:
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `pattern` | string | — (required) | Regex to search for |
+| `path` | string | cwd | Base directory or file to search in |
+| `include` | string | none | File name glob filter, one pattern per call (e.g. `*.rs`; `{a,b}` brace expansion is not supported) |
+| `case_insensitive` | boolean | `false` | Match case-insensitively |
+| `line_numbers` | boolean | `true` | Prefix each match with its 1-based line number |
+| `context_lines` | integer | `0` | Non-matching context lines printed around each match |
+| `count` | boolean | `false` | Print only the per-file and total match counts |
+
+When the pattern contains capture groups, the matched group values are
+printed beneath each match as `Captures: 1="…", 2="…"` (non-participating
+groups show `(none)`). Results are capped at 100 matches per call unless
+`count` is set.
+
+**`filesystem.regex.test`** — test whether a regex matches a string, returning
+`true` or `false`. Takes `text` (the string to test) and `pattern` (the
+regex). The pattern is matched anywhere in the string, with the same
+semantics as `filesystem.grep`; an invalid pattern is reported as an error.
+Useful for an agent to decide "does this string match this pattern?" without
+touching the filesystem.
+
 ---
 
 ## 5. Tool Database Schema Declaration & Evolution
