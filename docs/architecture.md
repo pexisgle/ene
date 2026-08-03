@@ -11,7 +11,7 @@
 3. **Pure Cognitive Mind**: `ene-mind` owns prompt packet composition, hybrid memory recall, affect/emotions (PAD model), proactive speech triggers, and output performance arbitration. `ene-mind` **never** depends on `ene-runtime` or `ene-plugin-host`, and its cognitive-logic modules (recall, memory arbiter, forgetting, character sync, journal, self-reflection) call the persistence layer only through the `ene_core::MemoryPort` trait (#270) — never the concrete `ene_store::MemoryStore` — so they can be unit-tested against an in-memory test double without SQLite.
 4. **Isolated Persistence**: `ene-store` owns all SQLite schema, migrations, SeaORM entities, and vector search (`sqlite-vec`). `ene-store` **never** depends on `ene-mind` or `ene-ai`.
 5. **Persistence-Agnostic Domain Vocabulary**: `ene-core` defines the core domain types shared across the cognitive and persistence layers — `AffectState` (PAD affect), typed-memory kinds/statuses/queries, the commitment ledger's vocabulary, and the `MemoryPort` trait itself. It depends on nothing internal to the workspace, so both `ene-store` and `ene-mind` can depend on it without either depending on the other for domain vocabulary.
-6. **Out-of-Process Plugins (Protocol v4)**: Tools, LLM providers, and MCP servers run as child processes communicating over length-prefixed JSON IPC using **Protocol v4**.
+6. **Out-of-Process Plugins (Protocol v6)**: Tools, LLM providers, and MCP servers run as child processes using length-prefixed IPC — a JSON handshake, then MessagePack frames once v6 is negotiated (JSON for v5 peers).
 7. **Decoupled 3D Rendering**: `ene-vrm` renders VRM 1.0 models via `wgpu` without importing any cognitive, memory, or runtime types.
 8. **Fault-Tolerant Actor (#268)**: Actor commands and background tasks are panic-isolated via `catch_unwind`; a panic in one command does not crash the actor or the process. This is a design invariant, not an incidental property — see [§4](#4-fault-tolerance--panic-isolation) for the mechanism and the build-configuration requirement it depends on.
 
@@ -113,12 +113,12 @@ User Message
 
 ---
 
-## 5. Plugin System & IPC Protocol v4
+## 5. Plugin System & IPC Protocol v6
 
-Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate with the host via **IPC Protocol v4**:
+Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate with the host via **IPC Protocol v6**:
 
-- **Framing**: 4-byte little-endian length prefix followed by JSON payload over `stdin`/`stdout`.
-- **Handshake Negotiation**: Version negotiation via `VersionRange { min: 4, max: 4 }`. The host sends supported range; plugin responds with negotiated version in `HandshakeAck`.
+- **Framing**: 4-byte little-endian length prefix over `stdin`/`stdout`. The handshake exchange is JSON; frames after the handshake use the negotiated `WireFormat` (MessagePack for v6, JSON for v5 peers).
+- **Handshake Negotiation**: Version negotiation via `VersionRange { min: 5, max: 6 }` (`VersionRange::host_supported()`). The host sends supported range; plugin responds with negotiated version in `HandshakeAck`.
 - **Request Correlation**: All non-streaming and streaming IPC messages carry a mandatory `request_id` (`Uuid`).
 - **Capabilities Declaration**: `PluginCapabilities` advertises available `tools`, `llm_providers`, `stt_providers`, `tts_providers`.
 - **Host-service `db` passenger**: Stateful tools open the shared host-service socket via `ene-plugin-db` and perform prefix-isolated CRUD inside the host's `memory.db`. All plugins share this single socket, so namespace isolation rests on the per-plugin auth token alone (the per-plugin socket path layer is gone).
@@ -138,7 +138,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-voice` | Local STT (Whisper), TTS, VAD (Silero ONNX), cpal audio I/O |
 | `ene-connector` | External-service credential authority (OAuth2/API-key storage, connector identity, permission scopes); no consumer yet — reintroduced by the MCP credential bridge under #412/#415 |
 | `ene-plugin-host` | Plugin process supervision, MCP server discovery, health checks, circuit breaker |
-| `ene-plugin-proto` | IPC Protocol v4 wire messages, versioning, framing, tool types |
+| `ene-plugin-proto` | IPC Protocol v6 wire messages, versioning, framing, tool types |
 | `ene-plugin` | Plugin authoring SDK: `ToolPlugin`/`LlmPlugin` facade, `ToolAction`/`ActionSetProvider`, prelude |
 | `ene-plugin-db` | Typed IPC client for stateful plugin database operations |
 | `ene-plugin-macros` | Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |

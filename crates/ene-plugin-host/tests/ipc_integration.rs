@@ -19,8 +19,8 @@ use ene_plugin_host::{CredentialRegistry, IpcPluginConnection, PluginHostError};
 use ene_plugin_proto::{
     CallContext, DeferredStatus, IpcListener, PLUGIN_IPC_MIN_SUPPORTED_VERSION,
     PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest, PluginIpcResponse,
-    SandboxConfigData, ToolError, ToolName, ToolResult, ToolSpec, VersionRange, cleanup_path,
-    read_plugin_request, write_plugin_response,
+    SandboxConfigData, ToolError, ToolName, ToolResult, ToolSpec, VersionRange, WireFormat,
+    cleanup_path, read_plugin_request, write_plugin_response,
 };
 use tokio::sync::{Mutex, Notify};
 
@@ -99,10 +99,23 @@ async fn run_mock_server_with_version(
         };
         let state = Arc::clone(&state);
 
+        let mut format = WireFormat::Json;
         loop {
-            let Ok(Some(req)) = read_plugin_request(&mut stream).await else {
+            let Ok(Some(req)) = read_plugin_request(&mut stream, format).await else {
                 break;
             };
+
+            // The negotiated protocol version decides the framing for every
+            // frame after the handshake, mirroring the real plugin server.
+            if let PluginIpcRequest::Handshake {
+                version: host_range,
+                ..
+            } = &req
+            {
+                format = plugin_range
+                    .negotiate(host_range)
+                    .map_or(WireFormat::Json, WireFormat::for_version);
+            }
 
             // Cr-5: a `mock.push` tool call triggers a `DeferredCompleted`
             // push frame ahead of the normal response, exercising the host's
@@ -112,6 +125,11 @@ async fn run_mock_server_with_version(
                 matches!(&req, PluginIpcRequest::CallTool { name, .. } if name == "mock.push");
 
             let resp = dispatch_mock(&state, req, plugin_range).await;
+            let resp_format = if matches!(&resp, PluginIpcResponse::HandshakeAck { .. }) {
+                WireFormat::Json
+            } else {
+                format
+            };
 
             if emit_push {
                 let mut s = state.lock().await;
@@ -121,13 +139,19 @@ async fn run_mock_server_with_version(
                         task_id: "task-push".to_string(),
                         result: Ok(ToolResult::text("pushed result")),
                     };
-                    if write_plugin_response(&mut stream, &push).await.is_err() {
+                    if write_plugin_response(&mut stream, &push, format)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
             }
 
-            if write_plugin_response(&mut stream, &resp).await.is_err() {
+            if write_plugin_response(&mut stream, &resp, resp_format)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -351,10 +375,21 @@ async fn run_dynamic_config_mock(socket_path: PathBuf, state: Arc<Mutex<MockStat
         };
         let state = Arc::clone(&state);
 
+        let mut format = WireFormat::Json;
         loop {
-            let Ok(Some(req)) = read_plugin_request(&mut stream).await else {
+            let Ok(Some(req)) = read_plugin_request(&mut stream, format).await else {
                 break;
             };
+
+            if let PluginIpcRequest::Handshake {
+                version: host_range,
+                ..
+            } = &req
+            {
+                format = our_range
+                    .negotiate(host_range)
+                    .map_or(WireFormat::Json, WireFormat::for_version);
+            }
 
             // Emit a schema-changed push ahead of ListTools so the host
             // router cache can be exercised like DeferredCompleted.
@@ -458,18 +493,29 @@ async fn run_dynamic_config_mock(socket_path: PathBuf, state: Arc<Mutex<MockStat
                     message: format!("unsupported in dynamic mock: {other:?}"),
                 },
             };
+            let resp_format = if matches!(&resp, PluginIpcResponse::HandshakeAck { .. }) {
+                WireFormat::Json
+            } else {
+                format
+            };
 
             if emit_schema_push {
                 let push = PluginIpcResponse::ConfigSchemaChanged {
                     schema: Some(serde_json::json!({"type": "object", "title": "live"})),
                     config_version: 2,
                 };
-                if write_plugin_response(&mut stream, &push).await.is_err() {
+                if write_plugin_response(&mut stream, &push, format)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
 
-            if write_plugin_response(&mut stream, &resp).await.is_err() {
+            if write_plugin_response(&mut stream, &resp, resp_format)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -497,10 +543,21 @@ async fn run_credentials_mock(
         };
         let state = Arc::clone(&state);
 
+        let mut format = WireFormat::Json;
         loop {
-            let Ok(Some(req)) = read_plugin_request(&mut stream).await else {
+            let Ok(Some(req)) = read_plugin_request(&mut stream, format).await else {
                 break;
             };
+
+            if let PluginIpcRequest::Handshake {
+                version: host_range,
+                ..
+            } = &req
+            {
+                format = our_range
+                    .negotiate(host_range)
+                    .map_or(WireFormat::Json, WireFormat::for_version);
+            }
 
             let resp = match req {
                 PluginIpcRequest::Handshake {
@@ -556,8 +613,16 @@ async fn run_credentials_mock(
                     message: format!("unsupported in credentials mock: {other:?}"),
                 },
             };
+            let resp_format = if matches!(&resp, PluginIpcResponse::HandshakeAck { .. }) {
+                WireFormat::Json
+            } else {
+                format
+            };
 
-            if write_plugin_response(&mut stream, &resp).await.is_err() {
+            if write_plugin_response(&mut stream, &resp, resp_format)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -656,10 +721,29 @@ async fn run_concurrent_mock_server(
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = read_half;
     let writer = Arc::new(Mutex::new(write_half));
+    let our_range = VersionRange {
+        min: PLUGIN_IPC_PROTOCOL_VERSION,
+        max: PLUGIN_IPC_PROTOCOL_VERSION,
+    };
 
+    let mut format = WireFormat::Json;
     loop {
-        let Ok(Some(req)) = read_plugin_request(&mut reader).await else {
+        let Ok(Some(req)) = read_plugin_request(&mut reader, format).await else {
             break;
+        };
+        if let PluginIpcRequest::Handshake {
+            version: host_range,
+            ..
+        } = &req
+        {
+            format = our_range
+                .negotiate(host_range)
+                .map_or(WireFormat::Json, WireFormat::for_version);
+        }
+        let resp_format = if matches!(&req, PluginIpcRequest::Handshake { .. }) {
+            WireFormat::Json
+        } else {
+            format
         };
         let state = Arc::clone(&state);
         let in_flight = Arc::clone(&in_flight);
@@ -678,7 +762,7 @@ async fn run_concurrent_mock_server(
             let mut w = writer.lock().await;
             // A write failure only means the host dropped the connection; the
             // mock has nothing to do but stop responding to this request.
-            drop(write_plugin_response(&mut *w, &resp).await);
+            drop(write_plugin_response(&mut *w, &resp, resp_format).await);
         });
     }
 }
@@ -1159,15 +1243,20 @@ async fn handshake_negotiates_min_supported_version_for_older_plugin() {
     let conn = result.expect("handshake with an N-1 plugin should succeed");
     assert_eq!(conn.negotiated_version(), PLUGIN_IPC_MIN_SUPPORTED_VERSION);
 
-    // N-1 is currently v4, so CancelStream is available, but SetConfig (v5)
-    // is not — the gate must report it unsupported and `set_config` must
-    // update the local cache without sending a message the plugin cannot
-    // deserialize.
+    // N-1 is currently v5: CancelStream (v4) and SetConfig (v5) are both
+    // available, but dynamic-config messages additionally require the
+    // capability flags the old mock does not advertise.
     assert!(conn.supports_cancel_stream());
-    assert!(!conn.supports_set_config());
-    conn.set_config(Some(serde_json::json!({"k": 1})), None)
-        .await
-        .expect("set_config must no-op IPC instead of erroring on an old plugin");
+    assert!(conn.supports_set_config());
+    assert!(!conn.supports_list_config_options());
+    assert!(!conn.supports_validate_config());
+    assert!(!conn.supports_migrate_config());
+
+    // A full request/response cycle over the N-1 connection must complete in
+    // the JSON framing (v5 never switches to MessagePack).
+    let tools = conn.list_tools().await.expect("list_tools over v5 JSON");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name.as_str(), "mock.echo");
 
     cleanup_path(&socket_path);
 }

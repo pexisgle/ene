@@ -1,8 +1,11 @@
-//! Plugin IPC wire protocol (protocol version 5).
+//! Plugin IPC wire protocol (protocol version 6).
 //!
 //! Extends the tool IPC (v2) with streaming LLM messages and a richer
 //! handshake that carries [`PluginCapabilities`]. The framing is identical:
-//! 4-byte little-endian length prefix followed by a JSON payload.
+//! a 4-byte little-endian length prefix followed by a payload. The handshake
+//! exchange always uses JSON; every frame after the handshake uses the
+//! negotiated [`WireFormat`] (`MessagePack` for protocol v6, JSON for older
+//! versions — see [`WireFormat::for_version`]).
 
 use crate::capabilities::PluginCapabilities;
 use crate::error::PluginError;
@@ -11,6 +14,7 @@ use crate::tool_error::ToolError;
 use crate::tool_ipc::{CallContext, DeferredStatus};
 use crate::tool_types::{ToolResult, ToolSpec};
 use crate::usage::TokenUsage;
+use crate::wire::WireFormat;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -70,6 +74,12 @@ impl VersionRange {
 
 /// Plugin IPC protocol version.
 ///
+/// v6 changes the wire format: after the JSON handshake exchange, every
+/// frame is `MessagePack` when both sides negotiated v6 (see
+/// [`WireFormat`]). Peers that negotiated v5 or lower keep the original
+/// JSON framing, so N-1 backward compatibility is preserved without any
+/// per-frame format tag.
+///
 /// v5 extends v4 with:
 /// - `SetConfig` / `ConfigApplied` for pushing updated plugin configuration
 ///   to a live plugin without restarting it
@@ -117,7 +127,7 @@ impl VersionRange {
 /// required field, or removing/renaming an enum variant. New fields should
 /// use `#[serde(default)]` so older/newer peers stay wire-compatible without
 /// a version bump.
-pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 5;
+pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 6;
 
 /// The oldest plugin IPC protocol version the host still accepts.
 ///
@@ -255,10 +265,8 @@ pub enum PluginIpcRequest {
     ///
     /// The plugin applies the blob via `ConfigurablePlugin::set_config` (and
     /// `set_profiles`) and replies with
-    /// [`PluginIpcResponse::ConfigApplied`]. Older plugins that negotiated
-    /// below v5 do not know this variant; the host gates on
-    /// `supports_set_config()` and keeps the local cache updated for the
-    /// next reconnect handshake instead.
+    /// [`PluginIpcResponse::ConfigApplied`]. Every peer in the host's N-1
+    /// window (v5+) knows this variant, so the live push always applies.
     SetConfig {
         /// Unique request identifier for correlating the response.
         #[serde(default)]
@@ -655,11 +663,13 @@ pub enum PluginIpcResponse {
     },
 }
 
-/// Reads a [`PluginIpcRequest`] as 4-byte LE length-prefixed JSON.
+/// Reads a [`PluginIpcRequest`] as a 4-byte LE length-prefixed payload in
+/// `format`.
 ///
 /// Returns `Ok(None)` on `UnexpectedEof`, indicating connection closed.
 pub async fn read_plugin_request<R: AsyncReadExt + Unpin>(
     reader: &mut R,
+    format: WireFormat,
 ) -> Result<Option<PluginIpcRequest>, PluginError> {
     let mut len_buf = [0u8; 4];
     match reader.read_exact(&mut len_buf).await {
@@ -678,13 +688,14 @@ pub async fn read_plugin_request<R: AsyncReadExt + Unpin>(
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await?;
-    let req = serde_json::from_slice(&buf).map_err(|e| {
+    let req = format.decode(&buf).map_err(|e| {
         PluginError::protocol(format!("Failed to deserialize PluginIpcRequest: {e}"))
     })?;
     Ok(Some(req))
 }
 
-/// Writes a [`PluginIpcRequest`] as 4-byte LE length-prefixed JSON.
+/// Writes a [`PluginIpcRequest`] as a 4-byte LE length-prefixed payload in
+/// `format`.
 ///
 /// # Errors
 ///
@@ -694,23 +705,26 @@ pub async fn read_plugin_request<R: AsyncReadExt + Unpin>(
 pub async fn write_plugin_request<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     req: &PluginIpcRequest,
+    format: WireFormat,
 ) -> Result<(), PluginError> {
-    let json = serde_json::to_vec(req)
+    let payload = format
+        .encode(req)
         .map_err(|e| PluginError::protocol(format!("Failed to serialize PluginIpcRequest: {e}")))?;
-    if json.len() > MAX_MESSAGE_SIZE {
+    if payload.len() > MAX_MESSAGE_SIZE {
         return Err(PluginError::protocol(format!(
             "Request size {} exceeds maximum {MAX_MESSAGE_SIZE}",
-            json.len()
+            payload.len()
         )));
     }
-    let len = json.len() as u32;
+    let len = payload.len() as u32;
     writer.write_all(&len.to_le_bytes()).await?;
-    writer.write_all(&json).await?;
+    writer.write_all(&payload).await?;
     writer.flush().await?;
     Ok(())
 }
 
-/// Reads a [`PluginIpcResponse`] as 4-byte LE length-prefixed JSON.
+/// Reads a [`PluginIpcResponse`] as a 4-byte LE length-prefixed payload in
+/// `format`.
 ///
 /// Returns `Ok(None)` on `UnexpectedEof`, indicating connection closed.
 ///
@@ -723,6 +737,7 @@ pub async fn write_plugin_request<W: AsyncWriteExt + Unpin>(
 /// carry a `request_id` for correlation.
 pub async fn read_plugin_response<R: AsyncReadExt + Unpin>(
     reader: &mut R,
+    format: WireFormat,
 ) -> Result<Option<PluginIpcResponse>, PluginError> {
     let mut len_buf = [0u8; 4];
     match reader.read_exact(&mut len_buf).await {
@@ -741,13 +756,14 @@ pub async fn read_plugin_response<R: AsyncReadExt + Unpin>(
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await?;
-    let resp = serde_json::from_slice(&buf).map_err(|e| {
+    let resp = format.decode(&buf).map_err(|e| {
         PluginError::protocol(format!("Failed to deserialize PluginIpcResponse: {e}"))
     })?;
     Ok(Some(resp))
 }
 
-/// Writes a [`PluginIpcResponse`] as 4-byte LE length-prefixed JSON.
+/// Writes a [`PluginIpcResponse`] as a 4-byte LE length-prefixed payload in
+/// `format`.
 ///
 /// # Errors
 ///
@@ -757,19 +773,20 @@ pub async fn read_plugin_response<R: AsyncReadExt + Unpin>(
 pub async fn write_plugin_response<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     resp: &PluginIpcResponse,
+    format: WireFormat,
 ) -> Result<(), PluginError> {
-    let json = serde_json::to_vec(resp).map_err(|e| {
+    let payload = format.encode(resp).map_err(|e| {
         PluginError::protocol(format!("Failed to serialize PluginIpcResponse: {e}"))
     })?;
-    if json.len() > MAX_MESSAGE_SIZE {
+    if payload.len() > MAX_MESSAGE_SIZE {
         return Err(PluginError::protocol(format!(
             "Response size {} exceeds maximum {MAX_MESSAGE_SIZE}",
-            json.len()
+            payload.len()
         )));
     }
-    let len = json.len() as u32;
+    let len = payload.len() as u32;
     writer.write_all(&len.to_le_bytes()).await?;
-    writer.write_all(&json).await?;
+    writer.write_all(&payload).await?;
     writer.flush().await?;
     Ok(())
 }
@@ -780,17 +797,37 @@ mod tests {
     use crate::capabilities::LlmProviderSpec;
 
     async fn send_recv_request(req: &PluginIpcRequest) -> PluginIpcRequest {
-        let (mut a, mut b) = tokio::io::duplex(64 * 1024);
-        write_plugin_request(&mut a, req).await.unwrap();
-        drop(a);
-        read_plugin_request(&mut b).await.unwrap().unwrap()
+        send_recv_request_with(req, WireFormat::Json).await;
+        send_recv_request_with(req, WireFormat::MsgPack).await
     }
 
     async fn send_recv_response(resp: &PluginIpcResponse) -> PluginIpcResponse {
+        send_recv_response_with(resp, WireFormat::Json).await;
+        send_recv_response_with(resp, WireFormat::MsgPack).await
+    }
+
+    async fn send_recv_request_with(
+        req: &PluginIpcRequest,
+        format: WireFormat,
+    ) -> PluginIpcRequest {
         let (mut a, mut b) = tokio::io::duplex(64 * 1024);
-        write_plugin_response(&mut a, resp).await.unwrap();
+        write_plugin_request(&mut a, req, format).await.unwrap();
         drop(a);
-        read_plugin_response(&mut b).await.unwrap().unwrap()
+        let got = read_plugin_request(&mut b, format).await.unwrap().unwrap();
+        assert_eq!(&got, req);
+        got
+    }
+
+    async fn send_recv_response_with(
+        resp: &PluginIpcResponse,
+        format: WireFormat,
+    ) -> PluginIpcResponse {
+        let (mut a, mut b) = tokio::io::duplex(64 * 1024);
+        write_plugin_response(&mut a, resp, format).await.unwrap();
+        drop(a);
+        let got = read_plugin_response(&mut b, format).await.unwrap().unwrap();
+        assert_eq!(&got, resp);
+        got
     }
 
     #[tokio::test]
@@ -1404,7 +1441,9 @@ mod tests {
     #[tokio::test]
     async fn read_request_eof_returns_none() {
         let mut buf: &[u8] = &[];
-        let result = read_plugin_request(&mut buf).await.unwrap();
+        let result = read_plugin_request(&mut buf, WireFormat::Json)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -1485,14 +1524,18 @@ mod tests {
     #[tokio::test]
     async fn read_response_eof_returns_none() {
         let mut buf: &[u8] = &[];
-        let result = read_plugin_response(&mut buf).await.unwrap();
+        let result = read_plugin_response(&mut buf, WireFormat::Json)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn zero_length_request_returns_none() {
         let mut buf: &[u8] = &[0u8; 4];
-        let result = read_plugin_request(&mut buf).await.unwrap();
+        let result = read_plugin_request(&mut buf, WireFormat::Json)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -1521,13 +1564,18 @@ mod tests {
         let expected = chunks.clone();
         let write_handle = tokio::spawn(async move {
             for chunk in &chunks {
-                write_plugin_response(&mut writer, chunk).await.unwrap();
+                write_plugin_response(&mut writer, chunk, WireFormat::MsgPack)
+                    .await
+                    .unwrap();
             }
         });
 
         let mut received = Vec::new();
         loop {
-            let resp = read_plugin_response(&mut reader).await.unwrap().unwrap();
+            let resp = read_plugin_response(&mut reader, WireFormat::MsgPack)
+                .await
+                .unwrap()
+                .unwrap();
             let is_terminal = matches!(
                 resp,
                 PluginIpcResponse::StreamEnd { .. } | PluginIpcResponse::StreamError { .. }
@@ -1551,9 +1599,14 @@ mod tests {
             usage: None,
         };
         let (mut a, mut b) = tokio::io::duplex(256 * 1024);
-        write_plugin_response(&mut a, &resp).await.unwrap();
+        write_plugin_response(&mut a, &resp, WireFormat::MsgPack)
+            .await
+            .unwrap();
         drop(a);
-        let got = read_plugin_response(&mut b).await.unwrap().unwrap();
+        let got = read_plugin_response(&mut b, WireFormat::MsgPack)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got, resp);
     }
 
@@ -1579,7 +1632,7 @@ mod tests {
         let mut buf = oversized_len.to_le_bytes().to_vec();
         buf.extend_from_slice(&[0u8; 16]);
         let mut cursor: &[u8] = &buf;
-        let result = read_plugin_request(&mut cursor).await;
+        let result = read_plugin_request(&mut cursor, WireFormat::Json).await;
         let err = result.unwrap_err();
         assert!(matches!(err, PluginError::Protocol(_)));
         assert!(err.to_string().contains("exceeds maximum"));
@@ -1591,7 +1644,7 @@ mod tests {
         let mut buf = oversized_len.to_le_bytes().to_vec();
         buf.extend_from_slice(&[0u8; 16]);
         let mut cursor: &[u8] = &buf;
-        let result = read_plugin_response(&mut cursor).await;
+        let result = read_plugin_response(&mut cursor, WireFormat::Json).await;
         let err = result.unwrap_err();
         assert!(matches!(err, PluginError::Protocol(_)));
         assert!(err.to_string().contains("exceeds maximum"));
@@ -1608,7 +1661,7 @@ mod tests {
             context: None,
         };
         let mut buf = Vec::new();
-        let result = write_plugin_request(&mut buf, &req).await;
+        let result = write_plugin_request(&mut buf, &req, WireFormat::Json).await;
         let err = result.unwrap_err();
         assert!(matches!(err, PluginError::Protocol(_)));
         assert!(err.to_string().contains("exceeds maximum"));
@@ -1623,7 +1676,180 @@ mod tests {
             usage: None,
         };
         let mut buf = Vec::new();
-        let result = write_plugin_response(&mut buf, &resp).await;
+        let result = write_plugin_response(&mut buf, &resp, WireFormat::Json).await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, PluginError::Protocol(_)));
+        assert!(err.to_string().contains("exceeds maximum"));
+        assert!(buf.is_empty(), "nothing must be written on rejection");
+    }
+
+    #[test]
+    fn wire_format_maps_protocol_versions() {
+        assert_eq!(WireFormat::for_version(0), WireFormat::Json);
+        assert_eq!(
+            WireFormat::for_version(PLUGIN_IPC_MIN_SUPPORTED_VERSION),
+            WireFormat::Json
+        );
+        assert_eq!(
+            WireFormat::for_version(PLUGIN_IPC_PROTOCOL_VERSION),
+            WireFormat::MsgPack
+        );
+        assert_eq!(
+            WireFormat::for_version(PLUGIN_IPC_PROTOCOL_VERSION + 1),
+            WireFormat::MsgPack
+        );
+    }
+
+    #[tokio::test]
+    async fn handshake_json_then_msgpack_frames_roundtrip() {
+        let (mut a, mut b) = tokio::io::duplex(64 * 1024);
+
+        // The handshake exchange always uses JSON framing; only frames after
+        // the ack switch to the negotiated format (v6 here).
+        let handshake = PluginIpcRequest::Handshake {
+            version: VersionRange::host_supported(),
+            sandbox: SandboxConfigData::default(),
+            plugin_config: None,
+            plugin_profiles: None,
+        };
+        write_plugin_request(&mut a, &handshake, WireFormat::Json)
+            .await
+            .unwrap();
+        let got = read_plugin_request(&mut b, WireFormat::Json)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, handshake);
+
+        let ack = PluginIpcResponse::HandshakeAck {
+            version: PLUGIN_IPC_PROTOCOL_VERSION,
+            capabilities: PluginCapabilities::default(),
+        };
+        write_plugin_response(&mut a, &ack, WireFormat::Json)
+            .await
+            .unwrap();
+        let got = read_plugin_response(&mut b, WireFormat::Json)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, ack);
+
+        let list = PluginIpcRequest::ListTools {
+            request_id: "r1".into(),
+        };
+        write_plugin_request(&mut a, &list, WireFormat::MsgPack)
+            .await
+            .unwrap();
+        let got = read_plugin_request(&mut b, WireFormat::MsgPack)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, list);
+    }
+
+    #[test]
+    fn msgpack_embeddings_smaller_than_json() {
+        let embeddings = (0..64)
+            .map(|i| {
+                (0..256)
+                    .map(|j| ((i * 256 + j) as f32 * 0.37).sin())
+                    .collect::<Vec<f32>>()
+            })
+            .collect::<Vec<Vec<f32>>>();
+        let resp = PluginIpcResponse::EmbedBatchResult {
+            request_id: "emb-1".into(),
+            embeddings,
+        };
+        let json_len = WireFormat::Json.encode(&resp).unwrap().len();
+        let msgpack_len = WireFormat::MsgPack.encode(&resp).unwrap().len();
+        assert!(
+            msgpack_len < json_len,
+            "msgpack {msgpack_len} bytes >= json {json_len} bytes"
+        );
+    }
+
+    #[test]
+    fn msgpack_embeddings_preserve_non_finite_floats() {
+        let resp = PluginIpcResponse::EmbedBatchResult {
+            request_id: "emb-nan".into(),
+            embeddings: vec![vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.5]],
+        };
+        // JSON encodes non-finite floats as `null`, which cannot decode back
+        // into an `f32`; MessagePack round-trips them natively.
+        let json = serde_json::to_vec(&resp).expect("JSON encodes non-finite floats as null");
+        assert!(
+            serde_json::from_slice::<PluginIpcResponse>(&json).is_err(),
+            "JSON must not round-trip non-finite floats"
+        );
+        let payload = WireFormat::MsgPack.encode(&resp).unwrap();
+        let got: PluginIpcResponse = WireFormat::MsgPack.decode(&payload).unwrap();
+        let PluginIpcResponse::EmbedBatchResult { embeddings, .. } = &got else {
+            panic!("expected EmbedBatchResult, got {got:?}");
+        };
+        assert!(embeddings[0][0].is_nan());
+        assert!(embeddings[0][1].is_infinite() && embeddings[0][1].is_sign_positive());
+        assert!(embeddings[0][2].is_infinite() && embeddings[0][2].is_sign_negative());
+        assert_eq!(embeddings[0][3].to_bits(), 0.5f32.to_bits());
+    }
+
+    #[test]
+    fn msgpack_tools_smaller_than_json() {
+        let tools = (0..8)
+            .map(|i| {
+                ToolSpec::new(
+                    crate::ToolName::new(format!("mock.tool{i}")),
+                    "Echoes arguments back with a reasonably long description string.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "Input text to echo."},
+                            "count": {"type": "integer", "minimum": 1, "maximum": 100},
+                            "enabled": {"type": "boolean", "default": true},
+                        },
+                        "required": ["text"],
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        let resp = PluginIpcResponse::Tools {
+            request_id: "tools-1".into(),
+            tools,
+        };
+        let json_len = WireFormat::Json.encode(&resp).unwrap().len();
+        let msgpack_len = WireFormat::MsgPack.encode(&resp).unwrap().len();
+        assert!(
+            msgpack_len < json_len,
+            "msgpack {msgpack_len} bytes >= json {json_len} bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_request_rejects_oversized_msgpack_message() {
+        let big_arguments = "x".repeat(MAX_MESSAGE_SIZE + 1);
+        let req = PluginIpcRequest::CallTool {
+            request_id: String::new(),
+            name: "test".into(),
+            arguments: big_arguments,
+            deferred: false,
+            context: None,
+        };
+        let mut buf = Vec::new();
+        let result = write_plugin_request(&mut buf, &req, WireFormat::MsgPack).await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, PluginError::Protocol(_)));
+        assert!(err.to_string().contains("exceeds maximum"));
+        assert!(buf.is_empty(), "nothing must be written on rejection");
+    }
+
+    #[tokio::test]
+    async fn write_response_rejects_oversized_msgpack_message() {
+        let resp = PluginIpcResponse::ChatCompletionResult {
+            request_id: "big-1".into(),
+            content: "x".repeat(MAX_MESSAGE_SIZE + 1),
+            usage: None,
+        };
+        let mut buf = Vec::new();
+        let result = write_plugin_response(&mut buf, &resp, WireFormat::MsgPack).await;
         let err = result.unwrap_err();
         assert!(matches!(err, PluginError::Protocol(_)));
         assert!(err.to_string().contains("exceeds maximum"));

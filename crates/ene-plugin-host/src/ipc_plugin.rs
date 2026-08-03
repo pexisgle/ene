@@ -12,7 +12,7 @@ use std::time::Duration;
 use ene_plugin_proto::{
     CallContext, ConfigFieldError, ConfigOption, DeferredOutcome, DeferredStatus, IpcStream,
     PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError,
-    ToolResult, VersionRange, read_plugin_response, write_plugin_request,
+    ToolResult, VersionRange, WireFormat, read_plugin_response, write_plugin_request,
 };
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
@@ -185,9 +185,9 @@ fn response_request_id(resp: &PluginIpcResponse) -> Option<&str> {
 /// Reads responses from the socket in a loop and dispatches each one through
 /// the [`Router`]. Exits on EOF or read error, then fails all pending waiters
 /// so in-flight callers observe the transport failure promptly.
-async fn reader_loop(mut reader: ReadHalf<IpcStream>, router: Arc<Router>) {
+async fn reader_loop(mut reader: ReadHalf<IpcStream>, router: Arc<Router>, format: WireFormat) {
     loop {
-        match read_plugin_response(&mut reader).await {
+        match read_plugin_response(&mut reader, format).await {
             Ok(Some(resp)) => router.dispatch(resp),
             Ok(None) => {
                 tracing::debug!(
@@ -336,6 +336,7 @@ impl IpcPluginConnection {
                 plugin_config: plugin_config.clone(),
                 plugin_profiles: plugin_profiles.clone(),
             },
+            WireFormat::Json,
         )
         .await
         .map_err(|e| PluginHostError::HandshakeFailed {
@@ -343,20 +344,23 @@ impl IpcPluginConnection {
             reason: format!("failed to send Handshake: {e}"),
         })?;
 
-        let resp = tokio::time::timeout(handshake_timeout, read_plugin_response(&mut stream))
-            .await
-            .map_err(|_| PluginHostError::HandshakeFailed {
-                name: name.clone(),
-                reason: format!(
-                    "no HandshakeAck within {} ms (plugin accepted the socket but never \
-                     responded; defer heavy initialization until after the handshake)",
-                    handshake_timeout.as_millis()
-                ),
-            })?
-            .map_err(|e| PluginHostError::HandshakeFailed {
-                name: name.clone(),
-                reason: format!("failed to read HandshakeAck: {e}"),
-            })?;
+        let resp = tokio::time::timeout(
+            handshake_timeout,
+            read_plugin_response(&mut stream, WireFormat::Json),
+        )
+        .await
+        .map_err(|_| PluginHostError::HandshakeFailed {
+            name: name.clone(),
+            reason: format!(
+                "no HandshakeAck within {} ms (plugin accepted the socket but never \
+                         responded; defer heavy initialization until after the handshake)",
+                handshake_timeout.as_millis()
+            ),
+        })?
+        .map_err(|e| PluginHostError::HandshakeFailed {
+            name: name.clone(),
+            reason: format!("failed to read HandshakeAck: {e}"),
+        })?;
 
         let (negotiated_version, capabilities) = match resp {
             Some(PluginIpcResponse::HandshakeAck {
@@ -401,7 +405,11 @@ impl IpcPluginConnection {
 
         let router = Arc::new(Router::new());
         let (reader, writer) = tokio::io::split(stream);
-        let reader_task = tokio::spawn(reader_loop(reader, Arc::clone(&router)));
+        let reader_task = tokio::spawn(reader_loop(
+            reader,
+            Arc::clone(&router),
+            WireFormat::for_version(negotiated_version),
+        ));
 
         Ok(Self {
             socket_path: socket_path.to_path_buf(),
@@ -446,15 +454,23 @@ impl IpcPluginConnection {
         self.negotiated_version.load(Ordering::Acquire)
     }
 
+    /// Returns the payload framing negotiated with the plugin.
+    ///
+    /// The handshake exchange always uses JSON; every later frame uses the
+    /// format negotiated for the agreed protocol version.
+    fn wire_format(&self) -> WireFormat {
+        WireFormat::for_version(self.negotiated_version())
+    }
+
     /// Returns whether the negotiated protocol version supports explicit
     /// stream cancellation via [`PluginIpcRequest::CancelStream`].
     ///
     /// `CancelStream` was introduced in protocol v4 (see the
-    /// `PLUGIN_IPC_PROTOCOL_VERSION` docs in `ene-plugin-proto`). A plugin
-    /// that negotiated v3 does not know this message variant, so
-    /// [`cancel_stream`](Self::cancel_stream) skips sending it and relies on
-    /// the caller's existing timeout-based fallback to end the stream
-    /// instead.
+    /// `PLUGIN_IPC_PROTOCOL_VERSION` docs in `ene-plugin-proto`). Every peer
+    /// in the host's N-1 window (v5+) knows this variant, so
+    /// [`cancel_stream`](Self::cancel_stream) always sends it; the check is
+    /// retained as the version-relative pattern that any feature introduced
+    /// above the minimum must follow.
     ///
     /// This is the pattern to follow for any future version-gated feature:
     /// add a `const fn supports_x(&self) -> bool` here that compares
@@ -467,10 +483,9 @@ impl IpcPluginConnection {
     /// Returns whether the negotiated protocol version supports live config
     /// updates via [`PluginIpcRequest::SetConfig`].
     ///
-    /// `SetConfig` was introduced in protocol v5. A plugin that negotiated
-    /// v4 does not know this message variant, so [`set_config`](Self::set_config)
-    /// updates the local cache (for the next reconnect handshake) and skips
-    /// the IPC send.
+    /// `SetConfig` was introduced in protocol v5. Every peer in the host's
+    /// N-1 window (v5+) knows this variant, so
+    /// [`set_config`](Self::set_config) always sends the live IPC push.
     pub fn supports_set_config(&self) -> bool {
         self.negotiated_version() >= SET_CONFIG_MIN_VERSION
     }
@@ -1146,6 +1161,7 @@ impl IpcPluginConnection {
                 plugin_config,
                 plugin_profiles,
             },
+            WireFormat::Json,
         )
         .await
         .map_err(|e| PluginHostError::HandshakeFailed {
@@ -1153,21 +1169,24 @@ impl IpcPluginConnection {
             reason: format!("failed to send Handshake on reconnect: {e}"),
         })?;
 
-        let resp = tokio::time::timeout(self.handshake_timeout, read_plugin_response(&mut stream))
-            .await
-            .map_err(|_| PluginHostError::HandshakeFailed {
-                name: name.clone(),
-                reason: format!(
-                    "no HandshakeAck within {} ms on reconnect (plugin accepted the \
-                         socket but never responded; defer heavy initialization until \
-                         after the handshake)",
-                    self.handshake_timeout.as_millis()
-                ),
-            })?
-            .map_err(|e| PluginHostError::HandshakeFailed {
-                name: name.clone(),
-                reason: format!("failed to read HandshakeAck on reconnect: {e}"),
-            })?;
+        let resp = tokio::time::timeout(
+            self.handshake_timeout,
+            read_plugin_response(&mut stream, WireFormat::Json),
+        )
+        .await
+        .map_err(|_| PluginHostError::HandshakeFailed {
+            name: name.clone(),
+            reason: format!(
+                "no HandshakeAck within {} ms on reconnect (plugin accepted the \
+                     socket but never responded; defer heavy initialization until \
+                     after the handshake)",
+                self.handshake_timeout.as_millis()
+            ),
+        })?
+        .map_err(|e| PluginHostError::HandshakeFailed {
+            name: name.clone(),
+            reason: format!("failed to read HandshakeAck on reconnect: {e}"),
+        })?;
 
         match resp {
             Some(PluginIpcResponse::HandshakeAck {
@@ -1207,7 +1226,11 @@ impl IpcPluginConnection {
         }
 
         let (reader, writer) = tokio::io::split(stream);
-        let reader_task = tokio::spawn(reader_loop(reader, Arc::clone(&self.router)));
+        let reader_task = tokio::spawn(reader_loop(
+            reader,
+            Arc::clone(&self.router),
+            WireFormat::for_version(self.negotiated_version()),
+        ));
         *writer_guard = Some(writer);
         *self.reader_task.lock().await = Some(reader_task);
 
@@ -1535,7 +1558,7 @@ impl IpcPluginConnection {
         let writer = writer
             .as_mut()
             .ok_or_else(|| PluginHostError::transport("not connected to plugin"))?;
-        write_plugin_request(writer, req)
+        write_plugin_request(writer, req, self.wire_format())
             .await
             .map_err(|e| PluginHostError::transport(format!("write failed: {e}")))
     }
@@ -1571,7 +1594,7 @@ impl IpcPluginConnection {
             .lock()
             .insert(request_id.to_string(), tx);
 
-        match write_plugin_request(writer, req).await {
+        match write_plugin_request(writer, req, self.wire_format()).await {
             Ok(()) => Ok(rx),
             Err(e) => {
                 self.router.waiters.lock().remove(request_id);

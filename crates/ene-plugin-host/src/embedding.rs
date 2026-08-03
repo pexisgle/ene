@@ -125,22 +125,7 @@ impl ene_ai::EmbeddingProvider for IpcEmbeddingProvider {
         // OpenAI returns embeddings in input order. Fail loudly if the count
         // or per-vector dimension is wrong rather than silently truncating,
         // which would mask server-side batching bugs.
-        if embeddings.len() != items.len() {
-            return Err(EmbeddingError::DimensionMismatch(format!(
-                "Embedding response count {} does not match request count {}",
-                embeddings.len(),
-                items.len()
-            )));
-        }
-        for (i, emb) in embeddings.iter().enumerate() {
-            if emb.len() != self.dimensions {
-                return Err(EmbeddingError::DimensionMismatch(format!(
-                    "item {i}: expected {} dims, got {}",
-                    self.dimensions,
-                    emb.len()
-                )));
-            }
-        }
+        validate_embeddings(&embeddings, items.len(), self.dimensions)?;
         Ok(embeddings)
     }
 
@@ -151,6 +136,34 @@ impl ene_ai::EmbeddingProvider for IpcEmbeddingProvider {
     fn model_name(&self) -> &str {
         &self.model
     }
+}
+
+fn validate_embeddings(
+    embeddings: &[Vec<f32>],
+    expected_count: usize,
+    expected_dimensions: usize,
+) -> Result<(), EmbeddingError> {
+    if embeddings.len() != expected_count {
+        return Err(EmbeddingError::DimensionMismatch(format!(
+            "Embedding response count {} does not match request count {}",
+            embeddings.len(),
+            expected_count
+        )));
+    }
+    for (i, emb) in embeddings.iter().enumerate() {
+        if emb.len() != expected_dimensions {
+            return Err(EmbeddingError::DimensionMismatch(format!(
+                "item {i}: expected {expected_dimensions} dims, got {}",
+                emb.len()
+            )));
+        }
+        if emb.iter().any(|value| !value.is_finite()) {
+            return Err(EmbeddingError::DimensionMismatch(format!(
+                "item {i}: embedding contains a non-finite value"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Factory that creates [`IpcEmbeddingProvider`] instances for a provider
@@ -316,5 +329,14 @@ mod tests {
             "non-transport errors must be terminal, got {err:?}"
         );
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn rejects_non_finite_embedding_values() {
+        assert!(matches!(
+            validate_embeddings(&[vec![0.1, f32::NAN, 0.3]], 1, 3),
+            Err(EmbeddingError::DimensionMismatch(message))
+                if message.contains("non-finite")
+        ));
     }
 }
