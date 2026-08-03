@@ -55,9 +55,14 @@ pub enum FlowError {
     /// error, missing code).
     #[error("authorization callback rejected: {0}")]
     Callback(String),
-    /// The token endpoint failed or returned a malformed response.
-    #[error("token endpoint error: {0}")]
-    TokenEndpoint(String),
+    /// The token endpoint rejected the grant as invalid (e.g. `invalid_grant`);
+    /// a fresh authorization is required.
+    #[error("token endpoint rejected the request: {0}")]
+    TokenRejected(String),
+    /// The token endpoint failed transiently (network error, timeout, server
+    /// error, rate limit); a later attempt may succeed.
+    #[error("token endpoint temporarily unavailable: {0}")]
+    TokenTransient(String),
     /// The token response could not be parsed.
     #[error("token response was malformed: {0}")]
     MalformedTokenResponse(String),
@@ -70,6 +75,10 @@ pub enum FlowError {
     /// The credential persistence backend failed.
     #[error("credential persistence failed: {0}")]
     Persist(#[source] PersistError),
+    /// An endpoint URL is not HTTPS and not a loopback address, so tokens
+    /// would travel in plaintext.
+    #[error("{0} must use HTTPS (loopback addresses are the only exception)")]
+    EndpointNotSecure(String),
     /// An internal invariant was violated.
     #[error("authorization flow internal error: {0}")]
     Internal(String),
@@ -136,6 +145,11 @@ pub struct CredentialInfo {
     pub stored: bool,
     /// Whether the stored value is past its expiry (`false` when not stored).
     pub expired: bool,
+    /// Whether the id is declared `shared` — the only declarations the
+    /// desktop settings page can start a flow for
+    /// ([`OAuthFlowManager::start_authorization_by_id`] requires a shared
+    /// declaration).
+    pub shared: bool,
 }
 
 /// Opens the authorization URL in the user's browser; injectable for tests.
@@ -178,7 +192,7 @@ impl OAuthFlowManager {
             persister,
             invalidated_tx,
             pending: Mutex::new(HashMap::new()),
-            http: reqwest::Client::new(),
+            http: exchange::token_client(),
             browser: Arc::new(|url| webbrowser::open(url).map_err(|e| e.to_string())),
         }
     }
@@ -265,12 +279,21 @@ impl OAuthFlowManager {
         let stored = self.vault.read().list();
         let mut infos: Vec<CredentialInfo> = stored
             .into_iter()
-            .map(|summary| CredentialInfo {
-                id: summary.id,
-                kind: CredentialKindName::from(summary.kind),
-                expires_at: summary.expires_at,
-                stored: true,
-                expired: summary.expired,
+            .map(|summary| {
+                let id = summary.id;
+                CredentialInfo {
+                    // A stored shared key is addressable from the settings
+                    // page; private storage keys (`plugin:id`) never resolve
+                    // to a shared declaration and are skipped by
+                    // `start_authorization_by_id`.
+                    shared: CredentialId::try_new(&id)
+                        .is_ok_and(|cid| self.registry.find_shared_declaration(&cid).is_some()),
+                    id,
+                    kind: CredentialKindName::from(summary.kind),
+                    expires_at: summary.expires_at,
+                    stored: true,
+                    expired: summary.expired,
+                }
             })
             .collect();
         let mut seen: std::collections::HashSet<String> =
@@ -285,6 +308,7 @@ impl OAuthFlowManager {
                     expires_at: None,
                     stored: false,
                     expired: false,
+                    shared: declaration.shared,
                 });
             }
         }
@@ -296,10 +320,16 @@ impl OAuthFlowManager {
     /// already running (the caller coalesces).
     fn claim_flow(&self, storage_key: &str) -> bool {
         let mut pending = self.pending.lock();
+        // A flow task that died without running `release_flow` (a panic or
+        // task cancellation) would otherwise pin its slot forever and
+        // coalesce every later authorization into a flow that never
+        // completes; reclaim any slot whose deadline has passed.
+        let now = Instant::now();
+        pending.retain(|_, deadline| *deadline > now);
         if pending.contains_key(storage_key) {
             return false;
         }
-        pending.insert(storage_key.to_string(), Instant::now() + FLOW_TIMEOUT);
+        pending.insert(storage_key.to_string(), now + FLOW_TIMEOUT);
         true
     }
 
@@ -406,7 +436,7 @@ impl OAuthFlowManager {
 }
 
 /// Copies the `OAuth2` fields out of a declaration, rejecting non-`OAuth2`
-/// kinds.
+/// kinds and endpoints that would send credentials over plaintext.
 fn oauth2_endpoints(
     declaration: &ene_connector::CredentialDeclaration,
     id: &str,
@@ -420,12 +450,36 @@ fn oauth2_endpoints(
     else {
         return Err(FlowError::UnsupportedKind(id.to_string()));
     };
+    validate_endpoint_url(auth_url, "auth_url")?;
+    validate_endpoint_url(token_url, "token_url")?;
     Ok(OAuth2Endpoints {
         client_id: client_id.clone(),
         scopes: scopes.clone(),
         auth_url: auth_url.clone(),
         token_url: token_url.clone(),
     })
+}
+
+/// Rejects endpoint URLs that would carry tokens in plaintext: only `https`
+/// is allowed, plus `http` loopback addresses (`127.0.0.1` / `::1`) for
+/// RFC 8252 §8.3 dev servers and the tests' in-process mocks.
+pub(crate) fn validate_endpoint_url(url: &str, what: &str) -> Result<(), FlowError> {
+    let parsed =
+        url::Url::parse(url).map_err(|e| FlowError::Internal(format!("invalid {what}: {e}")))?;
+    if parsed.scheme() == "https" {
+        return Ok(());
+    }
+    // A hostname such as `localhost` is not structurally a loopback address,
+    // so it is refused like any other plaintext host.
+    let loopback = match parsed.host() {
+        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+        _ => false,
+    };
+    if parsed.scheme() == "http" && loopback {
+        return Ok(());
+    }
+    Err(FlowError::EndpointNotSecure(what.to_string()))
 }
 
 /// Builds the authorization URL with the `PKCE` challenge and CSRF state.
@@ -834,6 +888,85 @@ mod tests {
         assert!(matches!(err, FlowError::UnsupportedKind(_)));
     }
 
+    /// Registers an `oauth2` credential and returns a flow manager over it,
+    /// for rejection tests that never run a real flow.
+    fn manager_with_declaration(schema: &serde_json::Value) -> Arc<OAuthFlowManager> {
+        let registry = CredentialRegistry::new();
+        registry.register_from_schema("mock", Some(schema));
+        let vault = Arc::new(CredentialVault::new(Vec::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let persister = Arc::new(FileCredentialPersister::new(
+            dir.path().join("credentials.json"),
+        ));
+        let (tx, _rx) = broadcast::channel(8);
+        Arc::new(OAuthFlowManager::new(
+            Arc::new(registry),
+            vault,
+            persister,
+            tx,
+        ))
+    }
+
+    #[tokio::test]
+    async fn start_authorization_rejects_plaintext_auth_endpoint() {
+        let flow = manager_with_declaration(&serde_json::json!({
+            "x-ene-credentials": [{
+                "id": "google.calendar",
+                "kind": "oauth2",
+                "client_id": "client-id",
+                "auth_url": "http://example.com/authorize",
+                "token_url": "https://token.example.com"
+            }]
+        }));
+        let err = flow
+            .start_authorization("mock", "google.calendar")
+            .unwrap_err();
+        assert!(
+            matches!(err, FlowError::EndpointNotSecure(what) if what == "auth_url"),
+            "expected the auth_url to be rejected, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_authorization_rejects_plaintext_token_endpoint() {
+        let flow = manager_with_declaration(&serde_json::json!({
+            "x-ene-credentials": [{
+                "id": "google.calendar",
+                "kind": "oauth2",
+                "client_id": "client-id",
+                "auth_url": "https://auth.example.com",
+                "token_url": "http://example.com/token"
+            }]
+        }));
+        let err = flow
+            .start_authorization("mock", "google.calendar")
+            .unwrap_err();
+        assert!(
+            matches!(err, FlowError::EndpointNotSecure(what) if what == "token_url"),
+            "expected the token_url to be rejected, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_authorization_by_id_rejects_plaintext_endpoints() {
+        let flow = manager_with_declaration(&serde_json::json!({
+            "x-ene-credentials": [{
+                "id": "google.calendar",
+                "kind": "oauth2",
+                "client_id": "client-id",
+                "auth_url": "https://auth.example.com",
+                "token_url": "http://example.com/token"
+            }]
+        }));
+        let err = flow
+            .start_authorization_by_id("google.calendar")
+            .unwrap_err();
+        assert!(
+            matches!(err, FlowError::EndpointNotSecure(what) if what == "token_url"),
+            "expected the token_url to be rejected, got {err:?}"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn timed_out_flow_releases_the_flow_slot() {
         let server = MockAuthServer::start().await;
@@ -865,5 +998,31 @@ mod tests {
         assert_eq!(ids, vec!["google.calendar".to_string()]);
         // The slot is free again: a fresh start would claim it.
         assert!(!flow.pending.lock().contains_key("google.calendar"));
+    }
+
+    #[tokio::test]
+    async fn stale_pending_slot_is_reclaimed_on_next_claim() {
+        let server = MockAuthServer::start().await;
+        let (registry, vault, persister) = fixtures(&server.addr);
+        let (tx, mut rx) = broadcast::channel(8);
+        let flow = Arc::new(
+            OAuthFlowManager::new(registry, vault.clone(), persister.clone(), tx)
+                .with_browser(redirecting_browser()),
+        );
+        // Simulate a flow task that died without running `release_flow`
+        // (panic or cancellation): a pending entry whose deadline already
+        // passed. The next start must reclaim it instead of coalescing into
+        // a flow that will never complete.
+        flow.pending.lock().insert(
+            "google.calendar".to_string(),
+            Instant::now() - Duration::from_secs(1),
+        );
+        flow.start_authorization("mock", "google.calendar").unwrap();
+        let ids = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("reclaimed flow must complete")
+            .unwrap();
+        assert_eq!(ids, vec!["google.calendar".to_string()]);
+        assert!(vault.resolve("google.calendar").await.is_ok());
     }
 }

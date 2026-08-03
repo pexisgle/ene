@@ -240,8 +240,9 @@ impl CredentialVault {
     /// released, the refresher runs, and only then is the result written
     /// back under a write lock. A concurrent `store`/`invalidate` during the
     /// refresh therefore wins instead of deadlocking or blocking the refresh
-    /// — and the refresh write-back may overwrite a concurrently stored
-    /// fresher value, which the single-flight refresher avoids in practice.
+    /// — and the write-back re-checks under the write lock that the entry
+    /// still exists, so a revocation issued while the refresh was in flight
+    /// is not undone (no resurrected credentials).
     pub async fn resolve(&self, storage_key: &str) -> Result<CredentialStore, ConnectorError> {
         let current = {
             let entries = self.entries.read();
@@ -269,9 +270,15 @@ impl CredentialVault {
             };
         };
         let fresh = refresher.refresh(storage_key, &current).await?;
-        self.entries
-            .write()
-            .insert(storage_key.to_string(), fresh.clone());
+        {
+            let mut entries = self.entries.write();
+            // The refresh result is still returned to this caller, but it is
+            // only written back while the entry exists: a concurrent revoke
+            // (`invalidate`) must not be resurrected.
+            if entries.contains_key(storage_key) {
+                entries.insert(storage_key.to_string(), fresh.clone());
+            }
+        }
         Ok(fresh)
     }
 
@@ -565,6 +572,75 @@ mod tests {
         let _ = resume_tx.send(());
         let resolved = refresh_task.await.unwrap().unwrap();
         assert_eq!(resolved.access_token(), Some("fresh-token"));
+    }
+
+    #[tokio::test]
+    async fn invalidate_during_refresh_is_not_resurrected_by_the_write_back() {
+        // The write-back re-checks existence under the write lock: a revoke
+        // issued while the refresh is in flight must stick even though the
+        // refresh itself succeeded.
+        struct ParkingRefresher {
+            started: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            resume: parking_lot::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        }
+        #[async_trait]
+        impl TokenRefresher for ParkingRefresher {
+            async fn refresh(
+                &self,
+                _id: &str,
+                _current: &CredentialStore,
+            ) -> Result<CredentialStore, ConnectorError> {
+                let started = self.started.lock().take();
+                if let Some(started) = started {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                    )]
+                    let _ = started.send(());
+                }
+                // Drop the guard before awaiting so no lock is held across
+                // the park.
+                let resume = self.resume.lock().take();
+                if let Some(resume) = resume {
+                    drop(resume.await);
+                }
+                Ok(CredentialStore::oauth2(
+                    "fresh-token",
+                    None::<&str>,
+                    Some(Utc::now() + chrono::Duration::hours(1)),
+                ))
+            }
+        }
+
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let store = CredentialStore::oauth2("expired", Some("refresh-tok"), Some(past));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let refresher = Arc::new(ParkingRefresher {
+            started: parking_lot::Mutex::new(Some(started_tx)),
+            resume: parking_lot::Mutex::new(Some(resume_rx)),
+        });
+        let vault = Arc::new(
+            CredentialVault::new(vec![VaultEntry::new("google.calendar", store)])
+                .with_refresher(dyn_refresher(Arc::clone(&refresher))),
+        );
+        let vault_for_refresh = Arc::clone(&vault);
+        let refresh_task =
+            tokio::spawn(async move { vault_for_refresh.resolve("google.calendar").await });
+        started_rx.await.unwrap();
+        // The credential is revoked while the refresh is parked.
+        vault.invalidate(&["google.calendar".to_string()]);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+        )]
+        let _ = resume_tx.send(());
+        // The refresh result still reaches the caller that asked for it…
+        let resolved = refresh_task.await.unwrap().unwrap();
+        assert_eq!(resolved.access_token(), Some("fresh-token"));
+        // …but the revoked entry must not come back.
+        let err = vault.resolve("google.calendar").await.unwrap_err();
+        assert!(matches!(err, ConnectorError::CredentialMissing { .. }));
     }
 
     #[tokio::test]

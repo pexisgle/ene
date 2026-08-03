@@ -338,6 +338,7 @@ credentials-kind-oauth2 = OAuth2
 credentials-kind-api-key = API key
 credentials-kind-none = None
 credentials-authorize = Authorize
+credentials-authorize-private-only = Private credentials can only be authorized by the plugin that declared them.
 credentials-revoke = Revoke
 credentials-action-ok = Done
 credentials-action-error = Failed

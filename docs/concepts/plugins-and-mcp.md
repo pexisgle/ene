@@ -382,7 +382,10 @@ all valid.
   public client identifier the authorization server requires even for PKCE
   flows (a desktop app ships no client secret); `scopes` lists the consent
   scopes, `auth_url` / `token_url` the authorization and token endpoints.
-  See [Credentials](credentials.md) for how the flow, token refresh, and
+  Both endpoints must be HTTPS (plain `http://` is allowed only for loopback
+  addresses, e.g. a local dev server); a plaintext endpoint is rejected when
+  the flow starts or a refresh is attempted. See
+  [Credentials](credentials.md) for how the flow, token refresh, and
   storage work.
 
 **Sharing policy.** Declarations are shared by default: two plugins that both

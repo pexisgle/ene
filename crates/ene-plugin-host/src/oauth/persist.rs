@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ene_connector::CredentialData;
 use thiserror::Error;
@@ -42,6 +43,47 @@ pub trait CredentialPersister: Send + Sync {
     fn remove(&self, ids: &[String]) -> Result<usize, PersistError>;
 }
 
+/// Next sequence number for per-write temporary file names.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A temporary path unique per process and per write, so two concurrent
+/// saves can never clobber each other's temporary file mid-write (the rename
+/// onto the target stays atomic).
+fn unique_tmp_path(target: &Path) -> PathBuf {
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    target.with_extension(format!("json.{}.{seq}.tmp", std::process::id()))
+}
+
+/// Moves the store aside under a `.bak` name and logs the failure, so a
+/// later save cannot overwrite the only copy of a store that could not be
+/// read or parsed, then hands the caller an empty store.
+fn back_up_and_start_empty(
+    path: &Path,
+    error: &dyn std::fmt::Display,
+    reason: &str,
+) -> HashMap<String, CredentialData> {
+    let backup = path.with_extension("json.bak");
+    if let Err(bak_error) = std::fs::rename(path, &backup) {
+        tracing::warn!(
+            component = "CredentialStore",
+            path = %path.display(),
+            backup = %backup.display(),
+            error = %bak_error,
+            reason = %reason,
+            "Could not back up the credential store"
+        );
+    }
+    tracing::warn!(
+        component = "CredentialStore",
+        path = %path.display(),
+        backup = %backup.display(),
+        error = %error,
+        reason = %reason,
+        "The credential store was moved aside and starts empty"
+    );
+    HashMap::new()
+}
+
 /// Plaintext JSON credential store with owner-only permissions on Unix.
 pub struct FileCredentialPersister {
     path: PathBuf,
@@ -66,44 +108,18 @@ impl CredentialPersister for FileCredentialPersister {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
-            Err(e) => {
-                tracing::warn!(
-                    component = "CredentialStore",
-                    path = %self.path.display(),
-                    error = %e,
-                    "Reading the credential store failed; starting from an empty store"
-                );
-                return HashMap::new();
-            }
+            Err(e) => return back_up_and_start_empty(&self.path, &e, "unreadable"),
         };
-        let entries: serde_json::Map<String, serde_json::Value> = match serde_json::from_slice(
-            &bytes,
-        ) {
-            Ok(entries) => entries,
-            Err(e) => {
-                // An interrupted write (crash between truncate and rename) is
-                // the likely cause; keep the evidence under a backup name and
-                // start fresh so the vault can still serve.
-                let backup = self.path.with_extension("json.bak");
-                if let Err(bak_error) = std::fs::rename(&self.path, &backup) {
-                    tracing::warn!(
-                        component = "CredentialStore",
-                        path = %self.path.display(),
-                        backup = %backup.display(),
-                        error = %bak_error,
-                        "Could not back up the corrupt credential store"
-                    );
+        let entries: serde_json::Map<String, serde_json::Value> =
+            match serde_json::from_slice(&bytes) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    // An interrupted write (crash between truncate and rename) is
+                    // the likely cause; keep the evidence under a backup name and
+                    // start fresh so the vault can still serve.
+                    return back_up_and_start_empty(&self.path, &e, "corrupt");
                 }
-                tracing::warn!(
-                    component = "CredentialStore",
-                    path = %self.path.display(),
-                    backup = %backup.display(),
-                    error = %e,
-                    "The credential store was corrupt; it was moved aside and the store starts empty"
-                );
-                return HashMap::new();
-            }
-        };
+            };
         let mut loaded = HashMap::new();
         for (key, value) in entries {
             match serde_json::from_value::<CredentialData>(value) {
@@ -132,7 +148,7 @@ impl CredentialPersister for FileCredentialPersister {
         let json = serde_json::to_vec_pretty(entries).map_err(|e| {
             PersistError::Serialize(format!("serializing the credential store: {e}"))
         })?;
-        let tmp = self.path.with_extension("json.tmp");
+        let tmp = unique_tmp_path(&self.path);
         {
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create(true).truncate(true);
@@ -233,8 +249,27 @@ mod tests {
         let mut entries = HashMap::new();
         entries.insert("a".to_string(), oauth_data());
         persister.save(&entries).unwrap();
-        assert!(!path.with_extension("json.tmp").exists());
         assert!(path.exists());
+        let tmp_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(tmp_files.is_empty(), "save must leave no temporary files");
+    }
+
+    #[test]
+    fn unreadable_store_is_backed_up_and_treated_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        // Point the persister at a directory: reads fail (EISDIR), which is
+        // not NotFound. The store must be moved aside and start empty so a
+        // later save cannot overwrite the only copy of unreadable data.
+        std::fs::create_dir(&path).unwrap();
+        let persister = FileCredentialPersister::new(path.clone());
+        assert!(persister.load().is_empty());
+        assert!(path.with_extension("json.bak").exists());
+        assert!(!path.exists());
     }
 
     #[test]

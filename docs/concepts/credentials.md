@@ -42,6 +42,12 @@ then the resolved credential. A failed or timed-out flow (browser could not
 open, state mismatch, server refused) also invalidates, so the plugin's next
 resolve reports the credential as missing.
 
+**Transport security.** The declared `auth_url` and `token_url` must use
+HTTPS. Plain `http://` is accepted only for loopback addresses (`127.0.0.1`
+/ `::1`) — RFC 8252 §8.3 development servers and the tests' in-process
+mocks. A declaration that violates this is rejected when the flow starts or
+a refresh is attempted, so tokens never cross the wire in cleartext.
+
 ## Automatic refresh
 
 When a resolve finds the access token expired — or within 60 seconds of

@@ -338,6 +338,7 @@ credentials-kind-oauth2 = OAuth2
 credentials-kind-api-key = API キー
 credentials-kind-none = なし
 credentials-authorize = 認可
+credentials-authorize-private-only = private 資格情報は宣言元プラグインからのみ認可できます。
 credentials-revoke = 取り消し
 credentials-action-ok = 完了
 credentials-action-error = 失敗

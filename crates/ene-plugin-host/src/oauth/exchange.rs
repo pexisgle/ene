@@ -1,8 +1,31 @@
 //! Token endpoint client: authorization-code exchange and refresh.
 
+use std::time::Duration;
+
 use serde_json::Value;
 
 use super::FlowError;
+
+/// Total time budget for one token-endpoint call (connect + request +
+/// response body). Bounds how long a flow or a single-flight refresh slot
+/// can pin its resources against a dead endpoint.
+pub(crate) const TOKEN_ENDPOINT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Connect-phase budget; [`TOKEN_ENDPOINT_TIMEOUT`] is the overall bound.
+const TOKEN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Builds the token-endpoint client shared by the flow manager and the
+/// refresher, applying the timeouts above.
+#[must_use]
+pub(crate) fn token_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(TOKEN_CONNECT_TIMEOUT)
+        .timeout(TOKEN_ENDPOINT_TIMEOUT)
+        .build()
+        // Building can only fail on a TLS-backend misconfiguration that the
+        // fixed rustls feature set cannot produce; the default client keeps
+        // the flow manager and refresher constructors infallible.
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// A token endpoint response carrying a (possibly rotated) token set.
 ///
@@ -36,7 +59,7 @@ pub(crate) async fn exchange_code(
         ])
         .send()
         .await
-        .map_err(|e| FlowError::TokenEndpoint(format!("request failed: {e}")))?;
+        .map_err(|e| FlowError::TokenTransient(format!("request failed: {e}")))?;
     parse_token_response(response).await
 }
 
@@ -56,7 +79,7 @@ pub(crate) async fn refresh_token(
         ])
         .send()
         .await
-        .map_err(|e| FlowError::TokenEndpoint(format!("request failed: {e}")))?;
+        .map_err(|e| FlowError::TokenTransient(format!("request failed: {e}")))?;
     parse_token_response(response).await
 }
 
@@ -64,7 +87,11 @@ pub(crate) async fn refresh_token(
 ///
 /// The `error` / `error_description` fields of a rejected exchange are safe
 /// to surface; the raw body is never echoed because a misbehaving server
-/// could place a token there.
+/// could place a token there. A rejected `invalid_grant` (revoked or expired
+/// grant) is reported as [`FlowError::TokenRejected`]; every other failure —
+/// server errors, rate limits, malformed bodies — is
+/// [`FlowError::TokenTransient`] so the refresher can retry after a cooldown
+/// instead of demanding re-authorization.
 async fn parse_token_response(
     response: reqwest::Response,
 ) -> Result<OAuthTokenResponse, FlowError> {
@@ -74,12 +101,16 @@ async fn parse_token_response(
         .await
         .map_err(|e| FlowError::MalformedTokenResponse(format!("unreadable response: {e}")))?;
     if !status.is_success() {
+        let error = body.get("error").and_then(Value::as_str).unwrap_or("");
         let detail = body
             .get("error_description")
             .and_then(Value::as_str)
             .or_else(|| body.get("error").and_then(Value::as_str))
             .unwrap_or("the token endpoint rejected the request");
-        return Err(FlowError::TokenEndpoint(detail.to_string()));
+        if error == "invalid_grant" {
+            return Err(FlowError::TokenRejected(detail.to_string()));
+        }
+        return Err(FlowError::TokenTransient(detail.to_string()));
     }
     let access_token = body
         .get("access_token")
@@ -222,5 +253,41 @@ mod tests {
         server.await.unwrap();
         assert!(err.to_string().contains("code expired"));
         assert!(!err.to_string().contains("invalid_grant"));
+    }
+
+    #[tokio::test]
+    async fn server_error_is_reported_as_transient() {
+        // A 5xx answer is retryable: it must surface as a transient failure,
+        // never as a re-authorization demand.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                match socket.read(&mut chunk).await.unwrap() {
+                    0 => break,
+                    n => buf.extend_from_slice(&chunk[..n]),
+                }
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = r#"{"error":"server_error","error_description":"backend down"}"#;
+            let head = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let err = refresh_token(&client, &format!("http://{addr}"), "c", "rt")
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(matches!(err, FlowError::TokenTransient(_)));
     }
 }

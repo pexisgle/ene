@@ -19,17 +19,23 @@ use crate::oauth::exchange;
 use crate::oauth::persist::CredentialPersister;
 
 /// After a failed refresh, further refresh attempts for the same key are
-/// answered with [`ConnectorError::RefreshRequired`] for this long, so one
-/// revoked refresh token cannot hammer the token endpoint.
+/// refused for this long, so one revoked refresh token cannot hammer the
+/// token endpoint. The refusal mirrors the failure's kind: a rejected grant
+/// stays `RefreshRequired`, a transient failure stays retryable.
 const REFRESH_COOLDOWN: Duration = Duration::from_mins(1);
 
 /// Outcome shared with the callers coalesced onto one refresh, made
 /// clone-able because [`ConnectorError`] is not.
 #[derive(Debug, Clone)]
 enum RefreshFailure {
-    /// The token cannot be refreshed; the user must re-authorize.
+    /// The token endpoint rejected the refresh token as invalid; the user
+    /// must re-authorize.
     RefreshRequired(String),
-    /// The host cannot refresh this key (no declaration, wrong kind).
+    /// The refresh failed transiently (network error, timeout, server error);
+    /// a later attempt after the cooldown may succeed.
+    Transient(String),
+    /// The host cannot refresh this key (no declaration, wrong kind, or an
+    /// endpoint that would carry tokens in plaintext).
     Internal(String),
 }
 
@@ -37,6 +43,7 @@ impl RefreshFailure {
     fn into_connector(self) -> ConnectorError {
         match self {
             Self::RefreshRequired(id) => ConnectorError::refresh_required(id),
+            Self::Transient(message) => ConnectorError::transport(message),
             Self::Internal(message) => ConnectorError::internal(message),
         }
     }
@@ -55,8 +62,9 @@ pub struct OAuthRefresher {
     persister: Arc<dyn CredentialPersister>,
     /// storage key → in-flight refresh slot (single-flight).
     in_flight: AsyncMutex<HashMap<String, RefreshSlot>>,
-    /// storage key → time until which refreshes are refused after a failure.
-    cooldown: Mutex<HashMap<String, Instant>>,
+    /// storage key → (time until which refreshes are refused after a
+    /// failure, whether the failure was permanent).
+    cooldown: Mutex<HashMap<String, (Instant, bool)>>,
 }
 
 impl OAuthRefresher {
@@ -65,7 +73,7 @@ impl OAuthRefresher {
     #[must_use]
     pub fn new(registry: Arc<CredentialRegistry>, persister: Arc<dyn CredentialPersister>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: exchange::token_client(),
             registry,
             persister,
             in_flight: AsyncMutex::new(HashMap::new()),
@@ -73,15 +81,17 @@ impl OAuthRefresher {
         }
     }
 
-    fn in_cooldown(&self, id: &str) -> bool {
+    /// Whether `id` is cooling down after a failed refresh, and whether that
+    /// failure was permanent (`true` → re-authorization is required).
+    fn in_cooldown(&self, id: &str) -> Option<bool> {
         let mut guard = self.cooldown.lock();
         match guard.get(id) {
-            Some(deadline) if *deadline > Instant::now() => true,
+            Some((deadline, permanent)) if *deadline > Instant::now() => Some(*permanent),
             Some(_) => {
                 guard.remove(id);
-                false
+                None
             }
-            None => false,
+            None => None,
         }
     }
 
@@ -111,9 +121,28 @@ impl OAuthRefresher {
                 "credential '{id}' is not an OAuth2 credential"
             )));
         };
-        let response = exchange::refresh_token(&self.client, token_url, client_id, refresh_token)
-            .await
-            .map_err(|_| RefreshFailure::RefreshRequired(id.to_string()))?;
+        // Same plaintext guard as the flow start: a non-loopback `http`
+        // endpoint would send the refresh token in cleartext.
+        crate::oauth::validate_endpoint_url(token_url, "token_url")
+            .map_err(|e| RefreshFailure::Internal(e.to_string()))?;
+        let response = match exchange::refresh_token(
+            &self.client,
+            token_url,
+            client_id,
+            refresh_token,
+        )
+        .await
+        {
+            Ok(response) => response,
+            // A rejected grant means the refresh token is dead and only a
+            // fresh authorization helps; transport-level failures (timeouts,
+            // refused connections, server errors) are transient and retried
+            // after the cooldown.
+            Err(crate::oauth::FlowError::TokenRejected(_)) => {
+                return Err(RefreshFailure::RefreshRequired(id.to_string()));
+            }
+            Err(error) => return Err(RefreshFailure::Transient(error.to_string())),
+        };
         // Token rotation: the server replaces the refresh token when it
         // issues a new one; otherwise the current one stays valid.
         let rotated = response
@@ -139,6 +168,11 @@ impl OAuthRefresher {
 
     fn persist(&self, id: &str, store: &CredentialStore) -> Result<(), crate::oauth::FlowError> {
         let mut entries = self.persister.load();
+        // A revocation that removed the entry while the refresh was in flight
+        // must not be undone by the write-back.
+        if !entries.contains_key(id) {
+            return Ok(());
+        }
         entries.insert(id.to_string(), store.expose_for_persistence());
         self.persister.save(&entries)?;
         Ok(())
@@ -152,8 +186,14 @@ impl TokenRefresher for OAuthRefresher {
         id: &str,
         current: &CredentialStore,
     ) -> Result<CredentialStore, ConnectorError> {
-        if self.in_cooldown(id) {
-            return Err(ConnectorError::refresh_required(id));
+        if let Some(permanent) = self.in_cooldown(id) {
+            return Err(if permanent {
+                ConnectorError::refresh_required(id)
+            } else {
+                ConnectorError::transport(format!(
+                    "token refresh for '{id}' is cooling down after a transient failure"
+                ))
+            });
         }
         let slot = {
             let mut in_flight = self.in_flight.lock().await;
@@ -170,12 +210,21 @@ impl TokenRefresher for OAuthRefresher {
             };
         }
         let result = self.refresh_inner(id, current).await;
-        if result.is_err() {
-            self.cooldown
-                .lock()
-                .insert(id.to_string(), Instant::now() + REFRESH_COOLDOWN);
-        } else {
-            self.cooldown.lock().remove(id);
+        match &result {
+            Ok(_) => {
+                self.cooldown.lock().remove(id);
+            }
+            // A host-side misconfiguration has no endpoint to hammer, so it
+            // gets no cooldown; it fails fast and surfaces as an internal
+            // error.
+            Err(RefreshFailure::Internal(_)) => {}
+            Err(failure) => {
+                let permanent = matches!(failure, RefreshFailure::RefreshRequired(_));
+                self.cooldown.lock().insert(
+                    id.to_string(),
+                    (Instant::now() + REFRESH_COOLDOWN, permanent),
+                );
+            }
         }
         *guard = Some(result.clone());
         drop(guard);
@@ -341,5 +390,248 @@ mod tests {
         assert_eq!(ra.unwrap().unwrap().access_token(), Some("refreshed-at"));
         assert_eq!(rb.unwrap().unwrap().access_token(), Some("refreshed-at"));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Serves a single token-endpoint response with the given status and
+    /// body, returning the endpoint URL.
+    async fn serve_once_response(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            loop {
+                match socket.read(&mut chunk).await.unwrap() {
+                    0 => break,
+                    n => buf.extend_from_slice(&chunk[..n]),
+                }
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// A refresher whose declaration points at `token_url`.
+    fn refresher_for(
+        token_url: &str,
+    ) -> (
+        OAuthRefresher,
+        Arc<crate::oauth::persist::FileCredentialPersister>,
+    ) {
+        let registry = Arc::new(CredentialRegistry::new());
+        registry.register_from_schema(
+            "mock",
+            Some(&json!({
+                "x-ene-credentials": [{
+                    "id": "google.calendar",
+                    "kind": "oauth2",
+                    "client_id": "client-id",
+                    "auth_url": "https://auth.example.com",
+                    "token_url": token_url
+                }]
+            })),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let persister = Arc::new(crate::oauth::persist::FileCredentialPersister::new(
+            dir.path().join("credentials.json"),
+        ));
+        (
+            OAuthRefresher::new(registry, Arc::clone(&persister)),
+            persister,
+        )
+    }
+
+    #[tokio::test]
+    async fn invalid_grant_maps_to_refresh_required() {
+        let (url, server) = serve_once_response(
+            "400 Bad Request",
+            r#"{"error":"invalid_grant","error_description":"refresh token revoked"}"#,
+        )
+        .await;
+        let (refresher, _persister) = refresher_for(&url);
+        let store = CredentialStore::oauth2("expired-at", Some("rt-1"), None);
+        let err = refresher
+            .refresh("google.calendar", &store)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(
+            matches!(err, ConnectorError::RefreshRequired(_)),
+            "a rejected grant must demand re-authorization, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_server_error_is_retryable_not_refresh_required() {
+        let (url, server) =
+            serve_once_response("500 Internal Server Error", r#"{"error":"server_error"}"#).await;
+        let (refresher, _persister) = refresher_for(&url);
+        let store = CredentialStore::oauth2("expired-at", Some("rt-1"), None);
+        let err = refresher
+            .refresh("google.calendar", &store)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(
+            matches!(err, ConnectorError::Transport(_)),
+            "a transient failure must not demand re-authorization, got {err:?}"
+        );
+        // A retry inside the cooldown stays transient rather than turning
+        // into a re-authorization demand.
+        let second = refresher
+            .refresh("google.calendar", &store)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(second, ConnectorError::Transport(_)),
+            "a cooldown after a transient failure must stay transient, got {second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_plaintext_token_endpoint() {
+        // Non-loopback `http`: the refresh token would cross the wire in
+        // cleartext, so the refresh is refused before any network call.
+        let (refresher, _persister) = refresher_for("http://token.example.com/token");
+        let store = CredentialStore::oauth2("expired-at", Some("rt-1"), None);
+        let err = refresher
+            .refresh("google.calendar", &store)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ConnectorError::Internal(ref message) if message.contains("HTTPS")),
+            "expected an internal insecure-endpoint error, got {err:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_times_out_against_unresponsive_token_endpoint() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            // Accept the connection and hold it open without ever answering,
+            // so the refresh request is sent but no response arrives.
+            if listener.accept().await.is_ok() {
+                std::future::pending::<()>().await;
+            }
+        });
+
+        let (refresher, _persister) = refresher_for(&format!("http://{addr}/token"));
+        let store = CredentialStore::oauth2("expired-at", Some("rt-1"), None);
+        let refresh =
+            tokio::spawn(async move { refresher.refresh("google.calendar", &store).await });
+
+        // Drive the mock clock forward so the endpoint timeout fires without
+        // waiting the real 15 seconds.
+        let step = Duration::from_secs(1);
+        let outcome = tokio::time::timeout(
+            crate::oauth::exchange::TOKEN_ENDPOINT_TIMEOUT + Duration::from_secs(5),
+            async {
+                loop {
+                    tokio::task::yield_now().await;
+                    tokio::time::advance(step).await;
+                    if refresh.is_finished() {
+                        return refresh.await;
+                    }
+                }
+            },
+        )
+        .await
+        .expect("refresh must respect the endpoint timeout")
+        .expect("refresh task must not panic")
+        .unwrap_err();
+        server.abort();
+        // A timeout is a transient failure: retryable, never a
+        // re-authorization demand.
+        assert!(
+            matches!(outcome, ConnectorError::Transport(_)),
+            "a timed-out refresh must stay transient, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_does_not_resurrect_a_revoked_credential() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // A token endpoint that parks after receiving the request until the
+        // test lets it answer, so the revoke lands while the refresh is in
+        // flight.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (requested_tx, requested_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            loop {
+                match socket.read(&mut chunk).await.unwrap() {
+                    0 => break,
+                    n => buf.extend_from_slice(&chunk[..n]),
+                }
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+            )]
+            let _ = requested_tx.send(());
+            drop(release_rx.await);
+            let body = r#"{"access_token":"refreshed-at","expires_in":3600}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+
+        let (refresher, persister) = refresher_for(&format!("http://{addr}/token"));
+        // Pre-populate the persisted store with the credential being
+        // refreshed, so the revoke has something to remove.
+        let store = CredentialStore::oauth2("expired-at", Some("rt-1"), None);
+        let mut entries = std::collections::HashMap::new();
+        entries.insert(
+            "google.calendar".to_string(),
+            store.expose_for_persistence(),
+        );
+        persister.save(&entries).unwrap();
+
+        let refresh =
+            tokio::spawn(async move { refresher.refresh("google.calendar", &store).await });
+        requested_rx.await.unwrap();
+        // The credential is revoked while the refresh is in flight.
+        let removed = persister.remove(&["google.calendar".to_string()]).unwrap();
+        assert_eq!(removed, 1);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+        )]
+        let _ = release_tx.send(());
+        let result = refresh.await.unwrap().unwrap();
+        assert_eq!(result.access_token(), Some("refreshed-at"));
+        server.await.unwrap();
+        // The write-back must not resurrect the revoked entry.
+        assert!(!persister.load().contains_key("google.calendar"));
     }
 }

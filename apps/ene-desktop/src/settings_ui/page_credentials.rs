@@ -102,9 +102,13 @@ fn render_row(
             }
             if ui
                 .add_enabled(
-                    matches!(row.kind, CredentialKindName::OAuth2),
+                    matches!(row.kind, CredentialKindName::OAuth2) && row.shared,
                     egui::Button::new(fl!(crate::i18n::loader(), "credentials-authorize")),
                 )
+                .on_disabled_hover_text(fl!(
+                    crate::i18n::loader(),
+                    "credentials-authorize-private-only"
+                ))
                 .clicked()
             {
                 authorize(ai, world, ui_entity, row.id.clone());
