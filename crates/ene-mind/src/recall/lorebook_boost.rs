@@ -1,11 +1,12 @@
 //! Lorebook recall boosts for constant and key-triggered entries.
 
-use ene_config::CharacterCardV3;
+use ene_config::{CharacterCardV3, LorebookEntry};
 use ene_core::{MemoryItem, MemoryPort, MemoryScoreBreakdown, MemorySource};
 
 use crate::character::{
-    LOREBOOK_SOURCE_PREFIX, build_lorebook_scan_text, compile_lorebook_regex_cache,
-    entry_keys_match_with_cache, stable_entry_id,
+    ActivationContext, EntryDecorators, LOREBOOK_SOURCE_PREFIX, build_lorebook_scan_text,
+    compile_lorebook_regex_cache, entry_decorators_accept, entry_keys_match_with_cache,
+    stable_entry_id,
 };
 use crate::error::CognitionError;
 use crate::recall::{RecallReason, RecallTurn, RecalledMemory};
@@ -49,14 +50,18 @@ pub async fn merge_lorebook_recall(
             continue;
         }
 
-        let should_include =
-            item.pinned || lorebook_entry_matches(item, book, &scan_text, &regex_cache);
-        if !should_include {
-            continue;
+        if lorebook_include(
+            item,
+            book,
+            user_input,
+            recent_turns,
+            &scan_text,
+            scan_depth,
+            &regex_cache,
+        ) {
+            seen_ids.insert(id);
+            boosted.push(recalled_memory_from_item(item.clone()));
         }
-
-        seen_ids.insert(id);
-        boosted.push(recalled_memory_from_item(item.clone()));
     }
 
     if book.recursive_scanning.unwrap_or(false) && !boosted.is_empty() {
@@ -72,7 +77,15 @@ pub async fn merge_lorebook_recall(
             if seen_ids.contains(&id) || item.pinned {
                 continue;
             }
-            if lorebook_entry_matches(item, book, &extended_scan, &regex_cache) {
+            if lorebook_include(
+                item,
+                book,
+                user_input,
+                recent_turns,
+                &extended_scan,
+                scan_depth,
+                &regex_cache,
+            ) {
                 seen_ids.insert(id);
                 boosted.push(recalled_memory_from_item(item.clone()));
             }
@@ -82,6 +95,89 @@ pub async fn merge_lorebook_recall(
     let mut merged = boosted;
     merged.extend(recalled);
     Ok(merged)
+}
+
+/// Whether a lorebook memory row belongs in this turn's prompt: pinned
+/// (constant) entries and key-matched entries pass the entry's `@@` decorator
+/// gates. This recall path holds no previous-match state, so the sticky
+/// decorators (`@@keep_activate_after_match` / `@@dont_activate_after_match`)
+/// are inert here — the spec lets applications ignore them when previous
+/// matches are unknowable; the guaranteed-injection path carries real state.
+fn lorebook_include(
+    item: &MemoryItem,
+    book: &ene_config::Lorebook,
+    user_input: &str,
+    recent_turns: &[RecallTurn<'_>],
+    scan_text: &str,
+    scan_depth: u32,
+    regex_cache: &std::collections::HashMap<String, regex::Regex>,
+) -> bool {
+    let Some((entry, index, decorators)) = lorebook_entry_state(item, book) else {
+        return item.pinned;
+    };
+
+    let entry_scan = entry_scan_text(user_input, recent_turns, scan_text, &decorators, scan_depth);
+    let key_match = item.pinned
+        || decorators.activate
+        || entry_keys_match_with_cache(entry, index, &entry_scan, Some(regex_cache));
+    let assistant_count = recent_turns
+        .iter()
+        .filter(|t| t.role == "assistant")
+        .count() as u32;
+
+    key_match
+        && entry_decorators_accept(
+            &decorators,
+            entry,
+            &entry_scan,
+            &ActivationContext {
+                assistant_message_count: assistant_count,
+                ..ActivationContext::default()
+            },
+        )
+}
+
+/// Resolve a lorebook memory row back to its card entry and parsed decorators.
+fn lorebook_entry_state<'a>(
+    item: &MemoryItem,
+    book: &'a ene_config::Lorebook,
+) -> Option<(&'a LorebookEntry, usize, EntryDecorators)> {
+    if item.source != MemorySource::Ccv3 {
+        return None;
+    }
+    let source_ref = item.source_ref.as_deref()?;
+    if !source_ref.starts_with(LOREBOOK_SOURCE_PREFIX) {
+        return None;
+    }
+    let entry_id = source_ref.trim_start_matches(LOREBOOK_SOURCE_PREFIX);
+    book.entries
+        .iter()
+        .enumerate()
+        .find(|(idx, e)| e.enabled && stable_entry_id(e, *idx) == entry_id)
+        .map(|(idx, entry)| {
+            let (decorators, _) = EntryDecorators::parse(&entry.content);
+            (entry, idx, decorators)
+        })
+}
+
+/// Per-entry scan text: the `@@scan_depth` override rebuilds the scan window,
+/// entries without the decorator share the book-level scan text.
+fn entry_scan_text<'a>(
+    user_input: &str,
+    recent_turns: &[RecallTurn<'_>],
+    book_scan_text: &'a str,
+    decorators: &EntryDecorators,
+    book_scan_depth: u32,
+) -> std::borrow::Cow<'a, str> {
+    if decorators.scan_depth.is_none() {
+        std::borrow::Cow::Borrowed(book_scan_text)
+    } else {
+        std::borrow::Cow::Owned(build_lorebook_scan_text(
+            user_input,
+            recent_turns,
+            decorators.effective_scan_depth(book_scan_depth),
+        ))
+    }
 }
 
 fn recalled_memory_from_item(item: MemoryItem) -> RecalledMemory {
@@ -109,31 +205,6 @@ fn recalled_memory_from_item(item: MemoryItem) -> RecalledMemory {
     }
 }
 
-fn lorebook_entry_matches(
-    item: &MemoryItem,
-    book: &ene_config::Lorebook,
-    scan_text: &str,
-    regex_cache: &std::collections::HashMap<String, regex::Regex>,
-) -> bool {
-    if item.source != MemorySource::Ccv3 {
-        return false;
-    }
-    let Some(source_ref) = &item.source_ref else {
-        return false;
-    };
-    if !source_ref.starts_with(LOREBOOK_SOURCE_PREFIX) {
-        return false;
-    }
-    let entry_id = source_ref.trim_start_matches(LOREBOOK_SOURCE_PREFIX);
-    book.entries
-        .iter()
-        .enumerate()
-        .find(|(idx, e)| e.enabled && stable_entry_id(e, *idx) == entry_id)
-        .is_some_and(|(idx, entry)| {
-            entry_keys_match_with_cache(entry, idx, scan_text, Some(regex_cache))
-        })
-}
-
 #[cfg(test)]
 #[expect(
     clippy::default_trait_access,
@@ -147,7 +218,7 @@ mod tests {
     };
 
     #[test]
-    fn lorebook_entry_matches_resolves_card_entry_by_source_ref() {
+    fn lorebook_include_resolves_card_entry_by_source_ref() {
         let item = MemoryItem {
             id: Some(1),
             scope: MemoryScope::Character,
@@ -203,10 +274,152 @@ mod tests {
             }],
         };
         let regex_cache = compile_lorebook_regex_cache(&book);
-        assert!(lorebook_entry_matches(
+        assert!(lorebook_include(
             &item,
             &book,
             "I saw a dragon",
+            &[],
+            "I saw a dragon",
+            4,
+            &regex_cache
+        ));
+    }
+
+    #[test]
+    fn decorator_gates_apply_in_recall_path() {
+        let item = MemoryItem {
+            id: Some(1),
+            scope: MemoryScope::Character,
+            character_id: "Ene".into(),
+            user_id: String::new(),
+            kind: MemoryKind::Semantic,
+            title: "Dragon lore".into(),
+            content: "A dragon.".into(),
+            source: MemorySource::Ccv3,
+            source_ref: Some("ccv3:lorebook:gated".into()),
+            confidence: MemoryConfidence::default(),
+            salience: MemorySalience::default(),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            access_count: 0,
+            last_accessed_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            faded_at: None,
+            commitment_id: None,
+        };
+        let entry = LorebookEntry {
+            keys: vec!["dragon".into()],
+            content: "@@activate_only_after 3\n@@exclude_keys ancient\nA dragon.".into(),
+            extensions: Default::default(),
+            enabled: true,
+            insertion_order: 1,
+            case_sensitive: None,
+            use_regex: false,
+            constant: Some(false),
+            name: Some("Dragon lore".into()),
+            priority: None,
+            id: Some(serde_json::json!("gated")),
+            comment: None,
+            selective: None,
+            secondary_keys: None,
+            position: None,
+            not_keys: Vec::new(),
+            sticky_turns: None,
+            turns_since_match: None,
+        };
+        let book = ene_config::Lorebook {
+            entries: vec![entry],
+            ..Default::default()
+        };
+        let regex_cache = compile_lorebook_regex_cache(&book);
+        let turns = [
+            RecallTurn {
+                role: "assistant",
+                content: "hello",
+            },
+            RecallTurn {
+                role: "user",
+                content: "the ancient dragon flies",
+            },
+        ];
+        // Two assistant messages: `activate_only_after 3` still gates.
+        assert!(!lorebook_include(
+            &item,
+            &book,
+            "the ancient dragon flies",
+            &turns,
+            "the ancient dragon flies",
+            4,
+            &regex_cache
+        ));
+        // The exclude key alone suppresses even with enough assistant turns.
+        let many_turns = vec![
+            RecallTurn {
+                role: "assistant",
+                content: "a",
+            },
+            RecallTurn {
+                role: "user",
+                content: "b",
+            },
+            RecallTurn {
+                role: "assistant",
+                content: "c",
+            },
+            RecallTurn {
+                role: "user",
+                content: "d",
+            },
+        ];
+        assert!(!lorebook_include(
+            &item,
+            &book,
+            "the ancient dragon flies",
+            &many_turns,
+            "the ancient dragon flies",
+            4,
+            &regex_cache
+        ));
+        // Without the exclude key and with enough turns, the entry passes.
+        let clean_turns = vec![
+            RecallTurn {
+                role: "assistant",
+                content: "a",
+            },
+            RecallTurn {
+                role: "user",
+                content: "b",
+            },
+            RecallTurn {
+                role: "assistant",
+                content: "c",
+            },
+            RecallTurn {
+                role: "user",
+                content: "d",
+            },
+            RecallTurn {
+                role: "assistant",
+                content: "e",
+            },
+            RecallTurn {
+                role: "user",
+                content: "the dragon roars",
+            },
+        ];
+        assert!(lorebook_include(
+            &item,
+            &book,
+            "the dragon roars",
+            &clean_turns,
+            "the dragon roars",
+            4,
             &regex_cache
         ));
     }

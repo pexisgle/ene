@@ -8,6 +8,8 @@ use ene_core::{
     MemoryStatus, NewMemoryItem,
 };
 
+use super::lorebook_decorators::EntryDecorators;
+
 /// Prefix for lorebook-derived `source_ref` values.
 pub const LOREBOOK_SOURCE_PREFIX: &str = "ccv3:lorebook:";
 
@@ -84,7 +86,10 @@ fn compile_entry(
     user_name: &str,
     index: usize,
 ) -> NewMemoryItem {
-    let content = expand_cbs_macros(entry.content.trim(), char_name, user_name);
+    // Strip `@@` decorator lines before the content is stored — they control
+    // matching/placement and must never reach the prompt as literal text.
+    let (_, stripped) = EntryDecorators::parse(&entry.content);
+    let content = expand_cbs_macros(&stripped, char_name, user_name);
     let trigger_line = if entry.keys.is_empty() {
         String::new()
     } else {
@@ -446,6 +451,32 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .starts_with(LOREBOOK_SOURCE_PREFIX)
+        );
+    }
+
+    #[test]
+    fn decorators_stripped_before_storage() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.character_book = Some(Lorebook {
+            entries: vec![sample_entry(
+                &["castle"],
+                "@@depth 2\n@@role system\n\nThe castle has a moat.",
+                false,
+            )],
+            ..Default::default()
+        });
+        let items = LorebookIndexer::compile_entries(&card, "User");
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0].content.contains("The castle has a moat."),
+            "body must survive: {}",
+            items[0].content
+        );
+        assert!(
+            !items[0].content.contains("@@"),
+            "decorator lines must never reach stored content: {}",
+            items[0].content
         );
     }
 

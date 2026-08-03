@@ -10,6 +10,7 @@
 - [ターンとセッション](concepts/turn-and-session.md)
 - [長期記憶システム](concepts/memory-system.md)
 - [キャラクターカードマクロ](concepts/character-card-macros.md)
+- [キャラクターカード・ロアブック](concepts/character-card-lorebook.md)
 - [音声とアバター](concepts/voice-and-avatar.md)
 - [プラグインと MCP](concepts/plugins-and-mcp.md)
 
