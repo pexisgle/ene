@@ -414,6 +414,7 @@ impl CognitionEngine {
             user_persona.as_ref(),
             pick_seed,
             available_window,
+            ctx.config.resolved_language(),
         );
 
         let style_examples = if let Some(examples) = prefetch.style_examples {

@@ -9,7 +9,10 @@
     clippy::indexing_slicing,
     reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
 )]
-use ene_config::{CharacterCardV3, MacroContext, UserPersona, expand_cbs_macros_ctx};
+use ene_config::{
+    CharacterCardV3, MacroContext, PolitenessLevel, SpeechLength, UserPersona,
+    expand_cbs_macros_ctx,
+};
 
 use super::kernel::IdentityKernel;
 use crate::context::estimate_tokens_language_aware;
@@ -67,6 +70,10 @@ impl CharacterCompiler {
     /// window leaves for this turn (after the response reserve and safety
     /// margin); the kernel budget is derived from it as a fraction, so larger
     /// models carry a fuller character definition.
+    ///
+    /// `language` localises the kernel's derived speech-style line (defaults
+    /// and structured labels); card-provided speech values keep their own
+    /// language.
     #[must_use]
     pub fn compile(
         card: &CharacterCardV3,
@@ -74,6 +81,7 @@ impl CharacterCompiler {
         user_persona: Option<&UserPersona>,
         pick_seed: Option<u64>,
         available_window: usize,
+        language: &str,
     ) -> IdentityKernel {
         let data = &card.data;
         let char_name = data.get_character_name();
@@ -111,7 +119,7 @@ impl CharacterCompiler {
             String::from("helpful and consistent")
         };
 
-        let speech_style = derive_speech_style(&data.system_prompt, ctx);
+        let speech_style = render_speech_style(card, language);
 
         let anti_impersonation = format!(
             "\n- NEVER speak, act, think, or write for {user_name}. {user_name} controls their own actions.\n\
@@ -205,28 +213,93 @@ fn optional_expanded(raw: &str, ctx: MacroContext<'_>) -> Option<String> {
     }
 }
 
-fn derive_speech_style(system_prompt: &str, ctx: MacroContext<'_>) -> String {
-    // The speech-style probe intentionally ignores `{{user_persona}}` and the
-    // card-field macros (it only sniffs for length keywords), so it reuses the
-    // context with those cleared to avoid pulling persona text into the probe.
-    let probe_ctx = MacroContext {
-        user_persona: None,
-        card: None,
-        ..ctx
+/// Default speech-style phrasing for cards without an
+/// [`ene_config::SpeechStyleDefinition`].
+///
+/// The English wording is the legacy default; the Japanese wording keeps a
+/// Japanese character prompt free of English instructions. `ja` is selected by
+/// primary subtag so `"ja"`, `"ja-JP"`, and `"jp"` all resolve the same way as
+/// [`ene_config::resolve_language_alias`].
+fn default_speech_style(lang: &str) -> &'static str {
+    if ene_config::resolve_language_alias(lang) == "ja" {
+        "自然で温かく、オーバーレイ表示に適した話し方"
+    } else {
+        "natural, warm, suitable for overlay display"
+    }
+}
+
+const fn speech_length_phrase(length: SpeechLength, ja: bool) -> &'static str {
+    match (length, ja) {
+        (SpeechLength::Short, true) => "短めの返答",
+        (SpeechLength::Normal, true) => "普通の長さの返答",
+        (SpeechLength::Long, true) => "長めの返答",
+        (SpeechLength::Short, false) => "short responses",
+        (SpeechLength::Normal, false) => "normal-length responses",
+        (SpeechLength::Long, false) => "long-form responses",
+    }
+}
+
+const fn politeness_phrase(politeness: PolitenessLevel, ja: bool) -> &'static str {
+    match (politeness, ja) {
+        (PolitenessLevel::Casual, true) => "カジュアル",
+        (PolitenessLevel::Polite, true) => "丁寧",
+        (PolitenessLevel::Formal, true) => "改まった",
+        (PolitenessLevel::Casual, false) => "casual",
+        (PolitenessLevel::Polite, false) => "polite",
+        (PolitenessLevel::Formal, false) => "formal",
+    }
+}
+
+/// Renders the Identity Kernel's `Speech style` line from the card's
+/// [`ene_config::SpeechStyleDefinition`].
+///
+/// The speech style is the card author's structured declaration — the
+/// hard-coded keyword inference it replaces could never detect Japanese
+/// wording like `簡潔に`, and the fallback that used the system prompt's first
+/// 160 characters presented unrelated text as the character's speech style.
+/// Cards without a definition (or with an empty one) get the concise default.
+/// Labels and the default follow `lang`; the values themselves are the card
+/// author's own words and keep their language.
+fn render_speech_style(card: &CharacterCardV3, lang: &str) -> String {
+    let Some(speech) = card.data.get_ene_extension().and_then(|ext| ext.speech) else {
+        return default_speech_style(lang).to_string();
     };
-    let expanded = expand_field(system_prompt, probe_ctx);
-    let lower = expanded.to_lowercase();
-    if lower.contains("short")
-        || lower.contains("brief")
-        || lower.contains("overlay")
-        || lower.contains("concise")
-    {
-        return String::from("short, warm, suitable for overlay display");
+
+    let ja = ene_config::resolve_language_alias(lang) == "ja";
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(length) = speech.length {
+        parts.push(speech_length_phrase(length, ja).to_string());
     }
-    if expanded.trim().is_empty() {
-        return String::from("natural, warm, suitable for overlay display");
+    for (label, value) in [
+        (
+            speech.first_person,
+            if ja { "一人称" } else { "first person" },
+        ),
+        (
+            speech.second_person,
+            if ja { "二人称" } else { "second person" },
+        ),
+    ] {
+        if let Some(value) = value
+            && !value.trim().is_empty()
+        {
+            parts.push(format!("{label} {value}"));
+        }
     }
-    truncate_chars(&expanded, 160)
+    if let Some(politeness) = speech.politeness {
+        parts.push(politeness_phrase(politeness, ja).to_string());
+    }
+    if !speech.verbal_tics.is_empty() {
+        let tics = speech.verbal_tics.join(if ja { "、" } else { ", " });
+        parts.push(format!(
+            "{} {tics}",
+            if ja { "口癖" } else { "verbal tics" }
+        ));
+    }
+    if parts.is_empty() {
+        return default_speech_style(lang).to_string();
+    }
+    parts.join(if ja { "；" } else { "; " })
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -263,9 +336,21 @@ fn truncate_preserving_core(head_lines: &[String], hard_line: &str, max_tokens: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_config::CharacterCardV3;
+    use ene_config::{
+        CharacterCardV3, EneExtension, PolitenessLevel, SpeechLength, SpeechStyleDefinition,
+    };
     use std::fs;
     use std::path::PathBuf;
+
+    fn card_with_speech(speech: SpeechStyleDefinition) -> CharacterCardV3 {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.extensions.ene = Some(EneExtension {
+            speech: Some(speech),
+            ..EneExtension::default()
+        });
+        card
+    }
 
     fn alicia_card() -> CharacterCardV3 {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -302,8 +387,8 @@ mod tests {
 
         // 3_200 → budget floor (400 tokens): core block fills the budget, so the
         // optional scenario section is dropped; 128K leaves room for it.
-        let small = CharacterCompiler::compile(&card, "User", None, None, 3_200);
-        let large = CharacterCompiler::compile(&card, "User", None, None, 128_000);
+        let small = CharacterCompiler::compile(&card, "User", None, None, 3_200, "en");
+        let large = CharacterCompiler::compile(&card, "User", None, None, 128_000, "en");
 
         assert!(
             estimate_tokens_language_aware(&large.text)
@@ -329,7 +414,7 @@ mod tests {
         card.data.system_prompt = "Keep responses short for overlay.".into();
         card.data.personality = "Energetic.".into();
 
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400);
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
 
         assert!(kernel.text.contains("Name: Ene"));
         assert!(kernel.text.contains("Core personality: Energetic."));
@@ -343,10 +428,144 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Official".into();
         card.data.nickname = "Ene".into();
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400);
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
 
         assert!(kernel.text.contains("Name: Ene"));
         assert!(!kernel.text.contains("Official"));
+    }
+
+    #[test]
+    fn speech_style_renders_structured_definition_in_english() {
+        let card = card_with_speech(SpeechStyleDefinition {
+            length: Some(SpeechLength::Short),
+            first_person: Some("私".into()),
+            second_person: Some("きみ".into()),
+            politeness: Some(PolitenessLevel::Casual),
+            verbal_tics: vec!["〜だよね".into(), "んだよ".into()],
+        });
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+
+        assert!(
+            kernel.text.contains(
+                "Speech style: short responses; first person 私; second person きみ; casual; verbal tics 〜だよね, んだよ"
+            ),
+            "kernel must render the structured speech style: {}",
+            kernel.text
+        );
+        // The system prompt must not leak into the speech line.
+        assert!(!kernel.text.contains("Speech style: Keep"));
+    }
+
+    #[test]
+    fn speech_style_renders_structured_definition_in_japanese() {
+        let card = card_with_speech(SpeechStyleDefinition {
+            length: Some(SpeechLength::Long),
+            first_person: Some("わたし".into()),
+            politeness: Some(PolitenessLevel::Polite),
+            verbal_tics: vec!["〜ですわ".into()],
+            ..SpeechStyleDefinition::default()
+        });
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "ja");
+
+        assert!(
+            kernel
+                .text
+                .contains("Speech style: 長めの返答；一人称 わたし；丁寧；口癖 〜ですわ"),
+            "a Japanese card must get Japanese speech-style labels: {}",
+            kernel.text
+        );
+    }
+
+    #[test]
+    fn speech_style_without_definition_uses_default_not_system_prompt() {
+        // Regression: the old fallback surfaced the system prompt's first 160
+        // characters as the speech style, so unrelated instructions appeared
+        // under "Speech style:".
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.system_prompt = "First, remember the house rules.".repeat(20);
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+
+        assert!(
+            kernel
+                .text
+                .contains("Speech style: natural, warm, suitable for overlay display")
+        );
+        assert!(
+            !kernel.text.contains("house rules"),
+            "system prompt text must not be used as the speech style: {}",
+            kernel.text
+        );
+    }
+
+    #[test]
+    fn speech_style_english_keywords_no_longer_trigger_detection() {
+        // Regression: the old keyword probe answered "short, warm, suitable
+        // for overlay display" for any prompt containing "short"; the speech
+        // line must now come from the card definition or the default only.
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.system_prompt = "Keep responses short and brief for the overlay.".into();
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+
+        assert!(
+            !kernel.text.contains("short, warm"),
+            "keyword inference must not fire: {}",
+            kernel.text
+        );
+        assert!(
+            kernel
+                .text
+                .contains("Speech style: natural, warm, suitable for overlay display")
+        );
+    }
+
+    #[test]
+    fn speech_style_default_is_localized() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "エネ".into();
+        let kernel = CharacterCompiler::compile(&card, "ユーザー", None, None, 400, "ja");
+
+        assert!(
+            kernel
+                .text
+                .contains("Speech style: 自然で温かく、オーバーレイ表示に適した話し方"),
+            "a Japanese prompt must not get an English default speech style: {}",
+            kernel.text
+        );
+    }
+
+    #[test]
+    fn speech_style_empty_definition_falls_back_to_default() {
+        let card = card_with_speech(SpeechStyleDefinition::default());
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+
+        assert!(
+            kernel
+                .text
+                .contains("Speech style: natural, warm, suitable for overlay display")
+        );
+    }
+
+    #[test]
+    fn speech_style_empty_values_are_omitted() {
+        let card = card_with_speech(SpeechStyleDefinition {
+            first_person: Some("".into()),
+            second_person: Some("   ".into()),
+            ..SpeechStyleDefinition::default()
+        });
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
+
+        assert!(
+            !kernel.text.contains("first person"),
+            "blank values must not produce dangling labels: {}",
+            kernel.text
+        );
+        assert!(
+            kernel
+                .text
+                .contains("Speech style: natural, warm, suitable for overlay display")
+        );
     }
 
     #[test]
@@ -354,7 +573,7 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.personality = "Friends with {{user}}.".into();
-        let kernel = CharacterCompiler::compile(&card, "Alice", None, None, 400);
+        let kernel = CharacterCompiler::compile(&card, "Alice", None, None, 400, "en");
 
         assert!(kernel.text.contains("Friends with Alice."));
         // The anti-impersonation guard is expanded at compile time, so no
@@ -383,7 +602,7 @@ mod tests {
             pronouns: None,
             notes: None,
         };
-        let kernel = CharacterCompiler::compile(&card, "Alice", Some(&persona), None, 400);
+        let kernel = CharacterCompiler::compile(&card, "Alice", Some(&persona), None, 400, "en");
 
         assert!(
             kernel.text.contains("Name: Alice"),
@@ -403,7 +622,7 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.post_history_instructions = "Stay in character.".into();
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400);
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
 
         assert!(!kernel.text.contains("Stay in character."));
         let phi = kernel
@@ -432,9 +651,9 @@ mod tests {
         card.data.personality = "Hair color: {{pick:red,blue,green,gold,silver}}.".into();
 
         let seed = Some(ene_config::session_pick_seed("ene:session-1"));
-        let first = CharacterCompiler::compile(&card, "User", None, seed, 400);
+        let first = CharacterCompiler::compile(&card, "User", None, seed, 400, "en");
         for _ in 0..16 {
-            let again = CharacterCompiler::compile(&card, "User", None, seed, 400);
+            let again = CharacterCompiler::compile(&card, "User", None, seed, 400, "en");
             assert_eq!(
                 again.text, first.text,
                 "seeded {{{{pick}}}} must be stable across recompilations"
@@ -445,7 +664,7 @@ mod tests {
     #[test]
     fn alicia_default_card_compiles() {
         let card = alicia_card();
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400);
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
 
         assert!(kernel.text.contains("Name: Alicia"));
         assert!(kernel.text.contains("cheerful") || kernel.text.contains("Friendly"));
@@ -460,7 +679,7 @@ mod tests {
         card.data.description = "y".repeat(2_000);
         // A small window forces truncation; the core header and the
         // anti-spoofing block must both survive.
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 8_000);
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 8_000, "en");
         assert!(kernel.text.contains("[Identity Kernel]"));
         assert!(kernel.text.contains("Hard instruction: remain Ene"));
     }
@@ -476,7 +695,7 @@ mod tests {
         card.data.description = "彼女は画面の中で暮らし、いつもユーザーを励ましている。".repeat(6);
         card.data.scenario = "今日は一緒に作業しながら、たまに雑談をする場面。".repeat(6);
 
-        let kernel = CharacterCompiler::compile(&card, "ユーザー", None, None, 16_000);
+        let kernel = CharacterCompiler::compile(&card, "ユーザー", None, None, 16_000, "ja");
 
         assert!(
             kernel.text.contains("Name: エネ"),
