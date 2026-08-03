@@ -1776,9 +1776,12 @@ mod tests {
             request_id: "emb-nan".into(),
             embeddings: vec![vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.5]],
         };
+        // JSON encodes non-finite floats as `null`, which cannot decode back
+        // into an `f32`; MessagePack round-trips them natively.
+        let json = serde_json::to_vec(&resp).expect("JSON encodes non-finite floats as null");
         assert!(
-            serde_json::to_vec(&resp).is_err(),
-            "JSON must reject non-finite floats"
+            serde_json::from_slice::<PluginIpcResponse>(&json).is_err(),
+            "JSON must not round-trip non-finite floats"
         );
         let payload = WireFormat::MsgPack.encode(&resp).unwrap();
         let got: PluginIpcResponse = WireFormat::MsgPack.decode(&payload).unwrap();
