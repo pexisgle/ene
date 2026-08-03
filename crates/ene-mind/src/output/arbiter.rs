@@ -1,10 +1,5 @@
 //! Expression resolution: affect mapping, LLM hints, hysteresis.
 
-#![expect(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
-)]
 use ene_config::{ExpressionAffect, ResolvedExpression};
 use ene_core::AffectState;
 
@@ -64,9 +59,8 @@ pub fn resolve_expression(
         .collect();
 
     let affect_candidate = affect_to_expression(input.affect, input.available);
-    let mut candidate = affect_candidate
-        .map(str::to_string)
-        .unwrap_or_else(|| fallback_name(&available_names));
+    let mut candidate =
+        affect_candidate.map_or_else(|| fallback_name(&available_names), str::to_string);
     let mut source = ExpressionSource::AffectFallback;
     let mut reason = format!("mapped from affect (mood={})", input.affect.mood_label);
     if affect_candidate.is_none() {
