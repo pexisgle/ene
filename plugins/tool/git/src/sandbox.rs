@@ -33,6 +33,7 @@ pub fn resolve_sandbox(sandbox_ref: &SandboxRef) -> Arc<RepoScope> {
 pub struct RepoScope {
     allowed_directories: Vec<PathBuf>,
     allowed_patterns: Arc<RwLock<HashSet<(String, String)>>>,
+    max_read_bytes: usize,
 }
 
 impl Default for RepoScope {
@@ -52,6 +53,7 @@ impl RepoScope {
                 .map(|s| canonicalize_existing(Path::new(&s)))
                 .collect(),
             allowed_patterns: Arc::new(RwLock::new(HashSet::new())),
+            max_read_bytes: data.max_read_bytes,
         }
     }
 
@@ -71,8 +73,12 @@ impl RepoScope {
 
     /// Resolves `path_arg` (default `.`) to an open repository whose working
     /// tree lies inside the allowlist.
-    pub fn resolve_repo(&self, path_arg: Option<&str>) -> Result<(Repository, PathBuf), ToolError> {
-        let resolved = self.resolve_path(path_arg)?;
+    pub fn resolve_repo(
+        &self,
+        path_arg: Option<&str>,
+        action: &str,
+    ) -> Result<(Repository, PathBuf), ToolError> {
+        let resolved = self.resolve_path(path_arg, action)?;
         let repo = Repository::discover(&resolved).map_err(|e| not_a_repository(&resolved, e))?;
         let workdir = repo
             .workdir()
@@ -83,8 +89,16 @@ impl RepoScope {
             })?
             .to_path_buf();
         let workdir = canonicalize_existing(&workdir);
-        self.ensure_allowed(&workdir)?;
+        self.ensure_allowed(&workdir, action)?;
+        self.ensure_allowed(&canonicalize_existing(repo.path()), action)?;
+        self.ensure_allowed(&canonicalize_existing(repo.commondir()), action)?;
         Ok((repo, workdir))
+    }
+
+    /// Maximum bytes a single committed blob may contribute to a response.
+    #[must_use]
+    pub const fn max_read_bytes(&self) -> usize {
+        self.max_read_bytes
     }
 
     /// Validates a repository-relative path argument (diff path, blame file).
@@ -108,7 +122,7 @@ impl RepoScope {
         }
     }
 
-    fn resolve_path(&self, path_arg: Option<&str>) -> Result<PathBuf, ToolError> {
+    fn resolve_path(&self, path_arg: Option<&str>, action: &str) -> Result<PathBuf, ToolError> {
         let raw = path_arg.unwrap_or(".");
         let path = Path::new(raw);
         let resolved = if path.exists() {
@@ -134,20 +148,23 @@ impl RepoScope {
                 .unwrap_or_default();
             canonicalize_existing(parent).join(name)
         };
-        self.ensure_allowed(&resolved)?;
+        self.ensure_allowed(&resolved, action)?;
         Ok(resolved)
     }
 
-    fn ensure_allowed(&self, path: &Path) -> Result<(), ToolError> {
+    fn ensure_allowed(&self, path: &Path, action: &str) -> Result<(), ToolError> {
         for dir in &self.allowed_directories {
             if path.starts_with(dir) {
                 return Ok(());
             }
         }
         if let Ok(guard) = self.allowed_patterns.read() {
-            for (_action, target) in guard.iter() {
+            for (allowed_action, target) in guard.iter() {
+                if allowed_action != action {
+                    continue;
+                }
                 let prefix = Path::new(target);
-                if path.starts_with(prefix) || path.starts_with(&canonicalize_existing(prefix)) {
+                if path.starts_with(prefix) || path.starts_with(canonicalize_existing(prefix)) {
                     return Ok(());
                 }
             }
@@ -205,7 +222,9 @@ mod tests {
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
         let scope = scope_allowing(&fixture.path());
-        let (repo, workdir) = scope.resolve_repo(Some(&fixture.path())).unwrap();
+        let (repo, workdir) = scope
+            .resolve_repo(Some(&fixture.path()), "git.status")
+            .unwrap();
         assert!(!repo.is_bare());
         assert_eq!(workdir.to_str().unwrap(), fixture.path());
     }
@@ -216,8 +235,9 @@ mod tests {
         let scope = scope_allowing(&fixture.path());
         let other = tempfile::tempdir().unwrap();
         let err = scope
-            .resolve_repo(Some(other.path().to_str().unwrap()))
-            .unwrap_err();
+            .resolve_repo(Some(other.path().to_str().unwrap()), "git.status")
+            .err()
+            .expect("path outside sandbox should be rejected");
         assert!(is_sandbox_violation(&err), "{err:?}");
     }
 
@@ -233,8 +253,9 @@ mod tests {
 
         let scope = scope_allowing(inner.to_str().unwrap());
         let err = scope
-            .resolve_repo(Some(inner.to_str().unwrap()))
-            .unwrap_err();
+            .resolve_repo(Some(inner.to_str().unwrap()), "git.status")
+            .err()
+            .expect("repository root outside workspace should be rejected");
         assert!(is_sandbox_violation(&err), "{err:?}");
     }
 
@@ -243,8 +264,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let scope = scope_allowing(dir.path().to_str().unwrap());
         let err = scope
-            .resolve_repo(Some(dir.path().to_str().unwrap()))
-            .unwrap_err();
+            .resolve_repo(Some(dir.path().to_str().unwrap()), "git.status")
+            .err()
+            .expect("non-repository path should be rejected");
         assert!(err.to_string().contains("not a git repository"), "{err}");
     }
 
@@ -259,21 +281,23 @@ mod tests {
 
         let scope = scope_allowing(&fixture.path());
         let err = scope
-            .resolve_repo(Some(repo_path.to_str().unwrap()))
-            .unwrap_err();
+            .resolve_repo(Some(repo_path.to_str().unwrap()), "git.status")
+            .err()
+            .expect("ungranted repository should be rejected");
         assert!(is_sandbox_violation(&err));
 
         scope.allow_pattern("git.status", repo_path.to_str().unwrap());
         let (repo, workdir) = scope
-            .resolve_repo(Some(repo_path.to_str().unwrap()))
+            .resolve_repo(Some(repo_path.to_str().unwrap()), "git.status")
             .unwrap();
         assert_eq!(workdir.to_str().unwrap(), repo_path.to_str().unwrap());
         assert_eq!(repo.path().parent().unwrap(), repo_path.as_path());
 
         scope.revoke_pattern("git.status", repo_path.to_str().unwrap());
         let err = scope
-            .resolve_repo(Some(repo_path.to_str().unwrap()))
-            .unwrap_err();
+            .resolve_repo(Some(repo_path.to_str().unwrap()), "git.status")
+            .err()
+            .expect("revoked repository should be rejected");
         assert!(is_sandbox_violation(&err));
     }
 
@@ -296,8 +320,9 @@ mod tests {
     fn missing_parent_is_reported() {
         let scope = RepoScope::default();
         let err = scope
-            .resolve_repo(Some("/definitely/not/a/repo"))
-            .unwrap_err();
+            .resolve_repo(Some("/definitely/not/a/repo"), "git.status")
+            .err()
+            .expect("missing parent should be rejected");
         assert!(
             err.to_string().contains("parent directory does not exist"),
             "{err}"
@@ -307,6 +332,6 @@ mod tests {
     #[test]
     fn resolve_sandbox_falls_back_to_default() {
         let scope = resolve_sandbox(&crate::sandbox::default_sandbox());
-        drop(scope.resolve_repo(None));
+        drop(scope.resolve_repo(None, "git.status"));
     }
 }

@@ -1,3 +1,5 @@
+use chrono::Offset;
+use ene_plugin_proto::ToolError;
 use serde::Serialize;
 
 /// Formats a libgit2 timestamp as RFC3339, preserving the commit's offset.
@@ -5,7 +7,7 @@ pub fn format_time(time: git2::Time) -> String {
     let offset_seconds = time.offset_minutes().saturating_mul(60);
     let offset = chrono::FixedOffset::east_opt(offset_seconds).unwrap_or_else(|| chrono::Utc.fix());
     let dt = chrono::DateTime::from_timestamp(time.seconds(), 0)
-        .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::UNIX_EPOCH);
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH);
     dt.with_timezone(&offset).to_rfc3339()
 }
 
@@ -193,8 +195,5 @@ pub fn to_json<T: Serialize>(value: &T) -> Result<String, ToolError> {
 
 /// Formats a 7-character abbreviated oid from the raw 20 bytes.
 pub fn short_oid(oid: git2::Oid) -> String {
-    oid.as_bytes()[..7]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    oid.to_string().chars().take(7).collect()
 }

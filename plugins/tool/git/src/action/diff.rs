@@ -1,3 +1,4 @@
+use crate::error::from_git2;
 use crate::output::{DiffOutput, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
@@ -44,6 +45,7 @@ pub struct DiffAction {
 }
 
 impl DiffAction {
+    /// Creates a diff action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,
@@ -64,7 +66,7 @@ impl DiffAction {
         let wants_text = format != "stat";
 
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref())?;
+        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.diff")?;
         if let Some(filter) = &self.path_filter {
             scope.validate_relative_path(filter)?;
         }
@@ -73,19 +75,21 @@ impl DiffAction {
         if let Some(filter) = &self.path_filter {
             opts.pathspec(filter);
         }
-        let index = repo.index()?;
+        let index = repo.index().map_err(from_git2)?;
         let head_tree = repo
             .head()
             .ok()
-            .map(|head| head.peel_to_tree())
+            .map(|head| head.peel_to_tree().map_err(from_git2))
             .transpose()?;
         let diff = if self.staged {
-            repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut opts))?
+            repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut opts))
+                .map_err(from_git2)?
         } else {
-            repo.diff_index_to_workdir(Some(&index), Some(&mut opts))?
+            repo.diff_index_to_workdir(Some(&index), Some(&mut opts))
+                .map_err(from_git2)?
         };
 
-        let stats = diff.stats()?;
+        let stats = diff.stats().map_err(from_git2)?;
         let files_changed = stats.files_changed();
         let insertions = stats.insertions();
         let deletions = stats.deletions();
@@ -127,13 +131,28 @@ fn print_patch(diff: &git2::Diff<'_>) -> Result<(Option<String>, bool), ToolErro
         let content = String::from_utf8_lossy(line.content());
         match origin {
             ' ' | '+' | '-' => {
-                buf.push(origin);
+                let remaining = MAX_PATCH_CHARS.saturating_sub(buf.len());
+                let addition = format!("{origin}{content}");
+                if addition.len() > remaining {
+                    buf.push_str(&String::from_utf8_lossy(&addition.as_bytes()[..remaining]));
+                    truncated = true;
+                    return false;
+                }
+                buf.push_str(&addition);
+            }
+            _ => {
+                let remaining = MAX_PATCH_CHARS.saturating_sub(buf.len());
+                if content.len() > remaining {
+                    buf.push_str(&String::from_utf8_lossy(&content.as_bytes()[..remaining]));
+                    truncated = true;
+                    return false;
+                }
                 buf.push_str(&content);
             }
-            _ => buf.push_str(&content),
         }
         true
-    })?;
+    })
+    .map_err(from_git2)?;
     let patch = if buf.is_empty() {
         None
     } else {
@@ -142,7 +161,7 @@ fn print_patch(diff: &git2::Diff<'_>) -> Result<(Option<String>, bool), ToolErro
     Ok((patch, truncated))
 }
 
-const fn plural(count: usize, singular: &str, plural: &str) -> &str {
+const fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
     if count == 1 { singular } else { plural }
 }
 

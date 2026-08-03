@@ -1,3 +1,4 @@
+use crate::error::from_git2;
 use crate::output::{StatusFileEntry, StatusOutput, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
@@ -40,6 +41,7 @@ const fn default_true() -> bool {
 }
 
 impl StatusAction {
+    /// Creates a status action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,
@@ -50,13 +52,13 @@ impl StatusAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref())?;
+        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.status")?;
 
         let mut opts = StatusOptions::new();
         opts.include_untracked(self.include_untracked)
             .recurse_untracked_dirs(self.include_untracked)
             .include_ignored(false);
-        let statuses = repo.statuses(Some(&mut opts))?;
+        let statuses = repo.statuses(Some(&mut opts)).map_err(from_git2)?;
 
         let mut entries: Vec<StatusFileEntry> = Vec::new();
         for entry in statuses.iter() {
@@ -122,7 +124,7 @@ mod tests {
     use crate::fixture::{RepoFixture, sandbox_ref, scope_allowing};
     use serde_json::Value;
 
-    fn run(fixture: &RepoFixture, include_untracked: bool) -> Value {
+    async fn run(fixture: &RepoFixture, include_untracked: bool) -> Value {
         let action = StatusAction {
             path: Some(fixture.path()),
             include_untracked,
@@ -137,7 +139,7 @@ mod tests {
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
-        let out = run(&fixture, true);
+        let out = run(&fixture, true).await;
         assert_eq!(out["clean"], true);
         assert_eq!(out["entries"].as_array().unwrap().len(), 0);
         assert_eq!(out["branch"], "master");
@@ -151,7 +153,7 @@ mod tests {
         fixture.write("tracked.txt", "v2\n");
         fixture.write("new.txt", "hello\n");
 
-        let out = run(&fixture, true);
+        let out = run(&fixture, true).await;
         let entries = out["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 2);
         let tracked = entries.iter().find(|e| e["path"] == "tracked.txt").unwrap();
@@ -159,7 +161,7 @@ mod tests {
         let untracked = entries.iter().find(|e| e["path"] == "new.txt").unwrap();
         assert_eq!(untracked["untracked"], true);
 
-        let out = run(&fixture, false);
+        let out = run(&fixture, false).await;
         let entries = out["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["path"], "tracked.txt");
@@ -175,7 +177,7 @@ mod tests {
         fixture.stage("a.txt");
         fixture.delete("gone.txt");
 
-        let out = run(&fixture, true);
+        let out = run(&fixture, true).await;
         let entries = out["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 2);
         let staged = entries.iter().find(|e| e["path"] == "a.txt").unwrap();

@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 /// A scope whose only allowed directory is `path`.
 pub(crate) fn scope_allowing(path: &str) -> RepoScope {
-    let mut data = SandboxConfigData::default();
-    data.allowed_directories = vec![path.to_string()];
+    let data = SandboxConfigData {
+        allowed_directories: vec![path.to_string()],
+        ..SandboxConfigData::default()
+    };
     RepoScope::new(data)
 }
 
@@ -85,6 +87,10 @@ impl RepoFixture {
     }
 
     pub(crate) fn remote(&self, name: &str, url: &str) {
-        self.repo.remote(name, url).unwrap();
+        let mut config = self.repo.config().unwrap();
+        config.set_str(&format!("remote.{name}.url"), url).unwrap();
+        config
+            .set_str(&format!("remote.{name}.pushurl"), url)
+            .unwrap();
     }
 }

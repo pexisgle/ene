@@ -36,6 +36,14 @@ pub enum GitError {
     /// The repository has no commits yet (unborn `HEAD`).
     #[error("repository has no commits")]
     NoCommits,
+    /// A committed blob exceeds the sandbox's per-read limit.
+    #[error("git blob exceeds the read limit of {limit} bytes: {path}")]
+    ReadLimitExceeded {
+        /// Repository-relative path whose contents were not returned.
+        path: String,
+        /// Maximum permitted blob size.
+        limit: usize,
+    },
     /// Underlying libgit2 failure.
     #[error(transparent)]
     Git2(#[from] git2::Error),
@@ -53,8 +61,7 @@ impl From<GitError> for ToolError {
     }
 }
 
-impl From<git2::Error> for ToolError {
-    fn from(e: git2::Error) -> Self {
-        ToolError::execution_failed(format!("git operation failed: {e}"))
-    }
+/// Converts a libgit2 failure into the plugin's structured tool error.
+pub(crate) fn from_git2(e: git2::Error) -> ToolError {
+    GitError::from(e).into()
 }

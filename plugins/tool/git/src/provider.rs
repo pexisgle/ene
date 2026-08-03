@@ -14,6 +14,7 @@ pub struct GitToolProvider {
 }
 
 impl GitToolProvider {
+    /// Creates the read-only git tool provider and its shared sandbox scope.
     pub fn new() -> Self {
         let scope: SandboxRef = Arc::new(std::sync::RwLock::new(None));
         let actions: Vec<Box<dyn ToolAction>> = vec![

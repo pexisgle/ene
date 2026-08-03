@@ -1,3 +1,4 @@
+use crate::error::from_git2;
 use crate::output::{LogEntry, LogOutput, Person, format_time, short_oid, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
@@ -39,6 +40,7 @@ pub struct LogAction {
 }
 
 impl LogAction {
+    /// Creates a log action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,
@@ -50,28 +52,32 @@ impl LogAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref())?;
+        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.log")?;
         let max_count = usize::try_from(self.max_count.unwrap_or(30))
             .unwrap_or(30)
             .clamp(1, 100);
 
-        let mut walk = repo.revwalk()?;
-        let branch = match &self.branch {
-            Some(name) => {
-                let commit = repo.revparse_single(name)?.peel_to_commit()?;
-                walk.push(commit.id())?;
-                Some(name.clone())
-            }
-            None => {
-                walk.push_head().map_err(super::common::map_head_error)?;
-                super::common::head_info(&repo).0
-            }
+        let mut walk = repo.revwalk().map_err(from_git2)?;
+        let branch = if let Some(name) = &self.branch {
+            let commit = repo
+                .revparse_single(name)
+                .map_err(from_git2)?
+                .peel_to_commit()
+                .map_err(from_git2)?;
+            walk.push(commit.id()).map_err(from_git2)?;
+            Some(name.clone())
+        } else {
+            walk.push_head().map_err(super::common::map_head_error)?;
+            super::common::head_info(&repo).0
         };
-        walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
+        walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
+            .map_err(from_git2)?;
 
         let mut entries: Vec<LogEntry> = Vec::new();
         for oid in walk.take(max_count) {
-            let commit = repo.find_commit(oid?)?;
+            let commit = repo
+                .find_commit(oid.map_err(from_git2)?)
+                .map_err(from_git2)?;
             entries.push(log_entry(&commit));
         }
 
@@ -178,7 +184,7 @@ mod tests {
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
         fixture.write("a.txt", "two\n");
-        fixture.commit_all("second");
+        fixture.commit_all("second commit");
 
         let out = run_json(&fixture, Some(1), None).await;
         assert_eq!(out["entries"].as_array().unwrap().len(), 1);

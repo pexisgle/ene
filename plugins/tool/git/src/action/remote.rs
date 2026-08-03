@@ -1,3 +1,4 @@
+use crate::error::from_git2;
 use crate::output::{RemoteEntry, RemoteOutput, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
@@ -29,6 +30,7 @@ pub struct RemoteAction {
 }
 
 impl RemoteAction {
+    /// Creates a remote action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,
@@ -38,18 +40,19 @@ impl RemoteAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref())?;
+        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.remote")?;
 
         let mut remotes: Vec<RemoteEntry> = Vec::new();
-        for name in repo.remotes()? {
-            let Some(name) = name? else {
+        let remote_names = repo.remotes().map_err(from_git2)?;
+        for name in &remote_names {
+            let Some(name) = name.map_err(from_git2)? else {
                 continue;
             };
-            let remote = repo.find_remote(&name)?;
+            let remote = repo.find_remote(name).map_err(from_git2)?;
             remotes.push(RemoteEntry {
                 name: name.to_string(),
-                fetch_url: remote.url().ok().map(str::to_string),
-                push_url: remote.pushurl().ok().flatten().map(str::to_string),
+                fetch_url: redact_remote_url_bytes(remote.url_bytes()),
+                push_url: remote.pushurl_bytes().and_then(redact_remote_url_bytes),
             });
         }
         remotes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -59,6 +62,23 @@ impl RemoteAction {
             remotes,
         })
     }
+}
+
+fn redact_remote_url_bytes(url: &[u8]) -> Option<String> {
+    (!url.is_empty()).then(|| redact_remote_url(&String::from_utf8_lossy(url)))
+}
+
+fn redact_remote_url(url: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+            return "[redacted]".to_string();
+        }
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        return parsed.to_string();
+    }
+    url.split_once('@')
+        .map_or_else(|| url.to_string(), |(_, rest)| format!("[redacted]@{rest}"))
 }
 
 #[cfg(test)]
@@ -99,5 +119,17 @@ mod tests {
         };
         let out: Value = serde_json::from_str(&action.run().await.unwrap()).unwrap();
         assert_eq!(out["remotes"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn remote_urls_redact_credentials_and_query() {
+        assert_eq!(
+            super::redact_remote_url("https://user:secret@example.com/repo.git?token=hidden#frag"),
+            "https://example.com/repo.git"
+        );
+        assert_eq!(
+            super::redact_remote_url("git@github.com:owner/repo.git"),
+            "[redacted]@github.com:owner/repo.git"
+        );
     }
 }

@@ -1,4 +1,4 @@
-use crate::error::GitError;
+use crate::error::{GitError, from_git2};
 use crate::output::{BlameLine, BlameOutput, format_time, short_oid, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
@@ -43,6 +43,7 @@ pub struct BlameAction {
 }
 
 impl BlameAction {
+    /// Creates a blame action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,
@@ -55,11 +56,11 @@ impl BlameAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref())?;
+        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.blame")?;
         scope.validate_relative_path(&self.file)?;
 
         let head = repo.head().map_err(super::common::map_head_error)?;
-        let tree = head.peel_to_tree()?;
+        let tree = head.peel_to_tree().map_err(from_git2)?;
         let blob = tree
             .get_path(Path::new(&self.file))
             .map_err(|e| {
@@ -72,16 +73,24 @@ impl BlameAction {
                     ToolError::from(GitError::Git2(e))
                 }
             })?
-            .to_object(&repo)?
-            .peel_to_blob()?;
-        let lines: Vec<&str> = String::from_utf8_lossy(blob.content()).lines().collect();
+            .to_object(&repo)
+            .map_err(from_git2)?
+            .peel_to_blob()
+            .map_err(from_git2)?;
+        let content = String::from_utf8_lossy(blob.content()).into_owned();
+        if content.len() > scope.max_read_bytes() {
+            return Err(ToolError::from(GitError::ReadLimitExceeded {
+                path: self.file.clone(),
+                limit: scope.max_read_bytes(),
+            }));
+        }
+        let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
 
         let start = usize::try_from(self.start_line.unwrap_or(1)).unwrap_or(1);
         let end = self
             .end_line
-            .map(|n| usize::try_from(n).unwrap_or(total))
-            .unwrap_or(total);
+            .map_or(total, |n| usize::try_from(n).unwrap_or(total));
         if start < 1 || end < start || end > total {
             return Err(ToolError::InvalidArguments {
                 message: format!("invalid line range {start}-{end}: file has {total} lines"),
@@ -98,7 +107,9 @@ impl BlameAction {
             (end, false)
         };
 
-        let blame = repo.blame_file(Path::new(&self.file), None)?;
+        let blame = repo
+            .blame_file(Path::new(&self.file), None)
+            .map_err(from_git2)?;
         let mut out_lines: Vec<BlameLine> = Vec::new();
         for n in start..=reported_end {
             let hunk = blame.get_line(n).ok_or_else(|| {

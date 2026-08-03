@@ -9,7 +9,8 @@ pub(crate) fn map_head_error(e: git2::Error) -> ToolError {
     if matches!(
         e.code(),
         git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
-    ) {
+    ) || e.class() == git2::ErrorClass::Reference
+    {
         ToolError::from(GitError::NoCommits)
     } else {
         ToolError::from(GitError::Git2(e))

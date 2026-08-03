@@ -1,3 +1,4 @@
+use crate::error::from_git2;
 use crate::output::{BranchEntry, BranchOutput, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
@@ -34,6 +35,7 @@ pub struct BranchAction {
 }
 
 impl BranchAction {
+    /// Creates a branch action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,
@@ -44,40 +46,47 @@ impl BranchAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref())?;
+        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.branch")?;
         let (current, detached_head) = super::common::head_info(&repo);
 
-        let filter = if self.include_remote {
-            Some(BranchType::All)
-        } else {
-            Some(BranchType::Local)
-        };
         let mut branches: Vec<BranchEntry> = Vec::new();
-        for item in repo.branches(filter)? {
-            let (branch, _kind) = item?;
-            let name = branch.name()?.unwrap_or_default().to_string();
-            let upstream_branch = branch.upstream().ok();
-            let upstream = upstream_branch
-                .as_ref()
-                .and_then(|up| up.name().ok().flatten())
-                .map(str::to_string);
-            let (ahead, behind) = match (
-                branch.get().target(),
-                upstream_branch.as_ref().and_then(|up| up.get().target()),
-            ) {
-                (Some(local), Some(remote)) => {
-                    let (a, b) = repo.graph_ahead_behind(local, remote)?;
-                    (Some(a), Some(b))
-                }
-                _ => (None, None),
-            };
-            branches.push(BranchEntry {
-                name,
-                upstream,
-                ahead,
-                behind,
-                current: false,
-            });
+        let branch_types = if self.include_remote {
+            [BranchType::Local, BranchType::Remote]
+        } else {
+            [BranchType::Local, BranchType::Local]
+        };
+        let type_count = if self.include_remote { 2 } else { 1 };
+        for branch_type in branch_types.into_iter().take(type_count) {
+            for item in repo.branches(Some(branch_type)).map_err(from_git2)? {
+                let (branch, _kind) = item.map_err(from_git2)?;
+                let name = branch
+                    .name()
+                    .map_err(from_git2)?
+                    .unwrap_or_default()
+                    .to_string();
+                let upstream_branch = branch.upstream().ok();
+                let upstream = upstream_branch
+                    .as_ref()
+                    .and_then(|up| up.name().ok().flatten())
+                    .map(str::to_string);
+                let (ahead, behind) = match (
+                    branch.get().target(),
+                    upstream_branch.as_ref().and_then(|up| up.get().target()),
+                ) {
+                    (Some(local), Some(remote)) => {
+                        let (a, b) = repo.graph_ahead_behind(local, remote).map_err(from_git2)?;
+                        (Some(a), Some(b))
+                    }
+                    _ => (None, None),
+                };
+                branches.push(BranchEntry {
+                    name,
+                    upstream,
+                    ahead,
+                    behind,
+                    current: false,
+                });
+            }
         }
 
         for entry in &mut branches {
