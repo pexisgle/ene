@@ -18,6 +18,7 @@ Ene ホストアプリケーション (ene-runtime)
         │     ├── ene-plugin-openai    (OpenAI 互換プロバイダプラグイン)
         │     ├── ene-plugin-app       (GUI 起動ツール)
         │     ├── ene-plugin-browser   (CDP ブラウザ自動化ツール)
+        │     ├── ene-plugin-calc      (計算ツール)
         │     ├── ene-plugin-fs        (サンドボックス化ファイルシステムツール)
         │     ├── ene-plugin-utility   (TODO・質問・タイマー・通知ツール)
         │     └── ene-plugin-web       (Web 検索 & スクレイパーツール)
@@ -125,13 +126,14 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 |---|---|---|---|
 | `ene-plugin-app` | `app.*` | システムアプリ起動・ウィンドウ制御 | いいえ |
 | `ene-plugin-browser` | `browser.*` | ヘッドリス Chrome/CDP ブラウザ自動化 | はい (セッションストア) |
+| `ene-plugin-calc` | `calc.*` | 数式評価・単位/通貨/色変換 | いいえ |
 | `ene-plugin-fs` | `fs.*` | サンドボックス化ファイル操作 & Undo 履歴 | はい (ホストサービス `db`) |
 | `ene-plugin-utility` | `utility.*` | 質問プロンプト、TODO リスト管理、日時/システム情報、カウントダウンタイマー & デスクトップ通知（Linux・D-Bus のみ） | はい (ホストサービス `db`) |
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude プロバイダプラグイン | いいえ |
 | `ene-plugin-openai` | Provider | OpenAI 互換プロバイダプラグイン（チャット・ストリーミング・埋め込み） | いいえ |
 
-上記 7 プラグインはすべてデフォルトの `plugins.list` に含まれており、
+上記 8 プラグインはすべてデフォルトの `plugins.list` に含まれており、
 新規インストール時に自動的に起動します。
 
 ### ファイルツールリファレンス (`filesystem.*`)
@@ -340,6 +342,12 @@ trust gate が依拠しているもの) を暗黙に置き換えることを防�
 エントリの `env_passthrough` で明示的に宣言します。セキュリティ上危険な名前
 (`LD_PRELOAD`、`LD_AUDIT`、`DYLD_INSERT_LIBRARIES`、`ENE_PLUGIN_SOCKET` など)
 は設定に関係なくブロックする組み込み拒否リストが適用されます。
+
+プラグインの環境変数フォールバックは、そのエントリが転送して初めて機能します。
+たとえば `calc.currency_convert` は `EXCHANGERATE_HOST_API_KEY` にフォール
+バックしますが、デフォルトの `calc` エントリは変数を一切転送しないため、
+`plugins.list.calc.env_passthrough = ["EXCHANGERATE_HOST_API_KEY"]` を設定するか、
+代わりに `plugins.list.calc.config.exchangerate_host_access_key` を構成してください。
 
 MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passthrough`
 フィールドをサポートしています。
