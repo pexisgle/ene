@@ -92,7 +92,7 @@ pub fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
         let has_assets = card.as_ref().is_some_and(|c| !c.data.assets.is_empty());
 
         let vrm_paths = if has_assets {
-            declared_asset_paths(card.as_ref(), EneAssetKind::Vrm, &path, assets_dir, &folder)
+            declared_asset_paths(card.as_ref(), EneAssetKind::Vrm, &path, assets_dir)
                 .into_iter()
                 .map(|(path, _)| path)
                 .collect()
@@ -113,13 +113,8 @@ pub fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
             let motion_names = motion_names_from_paths(&motion_paths);
             (motion_paths, motion_names)
         } else if has_assets {
-            let declared = declared_asset_paths(
-                card.as_ref(),
-                EneAssetKind::Vrma,
-                &path,
-                assets_dir,
-                &folder,
-            );
+            let declared =
+                declared_asset_paths(card.as_ref(), EneAssetKind::Vrma, &path, assets_dir);
             let motion_paths = declared.iter().map(|(path, _)| path.clone()).collect();
             let motion_names = declared
                 .iter()
@@ -217,7 +212,6 @@ fn declared_asset_paths(
     kind: EneAssetKind,
     card_dir: &Path,
     assets_dir: &Path,
-    folder: &str,
 ) -> Vec<(String, String)> {
     let Some(card) = card else {
         return Vec::new();
@@ -241,7 +235,7 @@ fn declared_asset_paths(
                     );
                     continue;
                 }
-                format!("characters/{folder}/{}", relative.to_string_lossy())
+                relative.to_string_lossy().to_string()
             }
             Ok(ResolvedAssetUri::AppDefault) => {
                 let default = match kind {
