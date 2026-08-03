@@ -15,13 +15,13 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ene_connector::ConnectorError;
-use ene_connector::declaration::ScopeDecision;
+use ene_connector::declaration::{CredentialKind, ScopeDecision};
 use ene_connector::identity::CredentialId;
 use ene_connector::vault::CredentialVault;
 use ene_plugin_proto::transport::IpcStream;
 use ene_plugin_proto::{
     CredentialErrorCode, CredentialRequest, CredentialResponse, HostServiceErrorCode,
-    HostServicePassenger, HostServiceResponse, ResolvedCredential, WireSecret,
+    HostServicePassenger, HostServiceResponse, ResolvedCredential, WireHeaderSpec, WireSecret,
     read_credential_request, write_credential_response, write_host_service_response,
 };
 use parking_lot::{Mutex, RwLock};
@@ -271,6 +271,23 @@ impl CredentialPassenger {
         }
     }
 
+    /// The header override the plugin declared for an API-key credential, so
+    /// the client can inject the declared name/format instead of defaulting
+    /// to `x-api-key`.
+    fn declared_header(&self, plugin: &str, id: &str) -> Option<WireHeaderSpec> {
+        self.registry
+            .declarations(plugin)
+            .into_iter()
+            .find(|decl| decl.id.as_str() == id)
+            .and_then(|decl| match &decl.kind {
+                CredentialKind::ApiKey { header, .. } => header.as_ref().map(|h| WireHeaderSpec {
+                    name: h.name.clone(),
+                    format: h.format.clone(),
+                }),
+                CredentialKind::OAuth2 { .. } => None,
+            })
+    }
+
     fn resolve(&self, plugin: &str, id: &str) -> CredentialResponse {
         let Some(storage_key) = self.scope_allows(plugin, id) else {
             self.vault.read().record_audit(plugin, id, false);
@@ -283,6 +300,7 @@ impl CredentialPassenger {
                     return CredentialResponse::Resolved {
                         credential: ResolvedCredential::ApiKey {
                             key: WireSecret::new(key.to_owned()),
+                            header: self.declared_header(plugin, id),
                         },
                     };
                 }
@@ -528,8 +546,15 @@ mod tests {
         let resp = read_response(&mut client).await;
         match resp {
             CredentialResponse::Resolved {
-                credential: ResolvedCredential::ApiKey { key },
-            } => assert_eq!(key.expose(), SECRET),
+                credential: ResolvedCredential::ApiKey { key, header },
+            } => {
+                assert_eq!(key.expose(), SECRET);
+                // The anthropic declaration carries a header override, which
+                // must travel back so the client injects the declared name.
+                let header = header.expect("declared header must be resolved");
+                assert_eq!(header.name, "x-api-key");
+                assert_eq!(header.format, "{value}");
+            }
             other => panic!("unexpected response: {other:?}"),
         }
     }
@@ -647,8 +672,11 @@ mod tests {
         let resp = read_response(&mut client).await;
         match resp {
             CredentialResponse::Resolved {
-                credential: ResolvedCredential::ApiKey { key },
-            } => assert_eq!(key.expose(), "rotated-secret"),
+                credential: ResolvedCredential::ApiKey { key, header },
+            } => {
+                assert_eq!(key.expose(), "rotated-secret");
+                assert!(header.is_some());
+            }
             other => panic!("unexpected response: {other:?}"),
         }
     }
@@ -802,6 +830,7 @@ mod tests {
         let frame = CredentialResponse::Resolved {
             credential: ResolvedCredential::ApiKey {
                 key: WireSecret::new(SECRET),
+                header: None,
             },
         };
         let debug = format!("{frame:?}");

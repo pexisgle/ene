@@ -396,6 +396,7 @@ mod tests {
                 let response = CredentialResponse::Resolved {
                     credential: ene_plugin_proto::ResolvedCredential::ApiKey {
                         key: ene_plugin_proto::WireSecret::new("echo-key"),
+                        header: None,
                     },
                 };
                 drop(ene_plugin_proto::write_credential_response(&mut stream, &response).await);
