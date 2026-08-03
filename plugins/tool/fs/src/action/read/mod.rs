@@ -85,7 +85,9 @@ pub async fn read(
         let lines: Vec<&str> = text.lines().collect();
         let default_limit = DEFAULT_LINE_LIMIT;
         let start = offset.unwrap_or(1).saturating_sub(1);
-        let end = (start + limit.unwrap_or(default_limit)).min(lines.len());
+        let end = start
+            .saturating_add(limit.unwrap_or(default_limit))
+            .min(lines.len());
         let sliced = &lines[start..end];
 
         let mut output = format!(
@@ -124,7 +126,9 @@ pub async fn read(
     }
 
     let default_limit = DEFAULT_LINE_LIMIT;
-    let end = (start + limit.unwrap_or(default_limit)).min(lines.len());
+    let end = start
+        .saturating_add(limit.unwrap_or(default_limit))
+        .min(lines.len());
     let sliced = &lines[start..end];
 
     let mut output = format!(
@@ -190,7 +194,9 @@ async fn read_directory(
 
     let start = offset.unwrap_or(1).saturating_sub(1);
     let default_limit = DEFAULT_LINE_LIMIT;
-    let end = (start + limit.unwrap_or(default_limit)).min(items.len());
+    let end = start
+        .saturating_add(limit.unwrap_or(default_limit))
+        .min(items.len());
     let sliced = &items[start..end];
     let truncated = end < items.len();
 
