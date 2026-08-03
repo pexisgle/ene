@@ -311,7 +311,7 @@ pub struct FsGrepAction {
     /// Base directory or file to search in (defaults to cwd).
     #[serde(default)]
     path: Option<String>,
-    /// File glob filter (e.g. '*.rs', '*.{ts,tsx}').
+    /// File glob filter (e.g. '*.rs'; one pattern per call, '{a,b}' brace expansion is not supported).
     #[serde(default)]
     include: Option<String>,
     /// Match case-insensitively.
@@ -433,6 +433,27 @@ mod tests {
 
         assert!(out.contains("Captures: 1=\"alice\""));
         assert!(out.contains("Captures: 1=\"bob\""));
+    }
+
+    #[tokio::test]
+    async fn non_participating_groups_render_as_none() {
+        let dir = temp_dir("captures_none");
+        std::fs::write(dir.join("log.txt"), "hello\nhello world\n").expect("write fixture");
+        let config = sandbox_config(&dir);
+        let options = GrepOptions::default();
+
+        let out = grep_search(
+            r"(\w+)( \w+)?",
+            Some(&dir_str(&dir)),
+            None,
+            &options,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert!(out.contains("Captures: 1=\"hello\", 2=\"(none)\""));
+        assert!(out.contains("Captures: 1=\"hello\", 2=\" world\""));
     }
 
     #[tokio::test]
@@ -576,6 +597,25 @@ mod tests {
         assert!(out.contains("Found 120 matches (showing first 100)"));
         assert!(out.contains("showing 100 of 120 matches (20 hidden)"));
         assert_eq!(out.matches("Line ").count(), 100);
+    }
+
+    #[tokio::test]
+    async fn count_mode_is_not_capped_at_max_results() {
+        let dir = temp_dir("count_cap");
+        std::fs::write(dir.join("many.txt"), "match\n".repeat(120)).expect("write fixture");
+        let config = sandbox_config(&dir);
+        let options = GrepOptions {
+            count: true,
+            ..Default::default()
+        };
+
+        let out = grep_search("match", Some(&dir_str(&dir)), None, &options, &config)
+            .await
+            .unwrap();
+
+        assert!(out.contains("Total: 120"));
+        assert!(!out.contains("hidden"));
+        assert!(!out.contains("showing first"));
     }
 
     #[tokio::test]

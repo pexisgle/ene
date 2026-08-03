@@ -146,7 +146,7 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 |---|---|---|---|
 | `pattern` | string | — (必須) | 検索する正規表現 |
 | `path` | string | cwd | 検索対象のベースディレクトリまたはファイル |
-| `include` | string | なし | ファイル名 glob フィルタ (例: `*.rs`, `*.{ts,tsx}`) |
+| `include` | string | なし | ファイル名 glob フィルタ — 1 回の呼び出しにつき 1 パターンのみ (例: `*.rs`; `{a,b}` のブレース展開は非対応) |
 | `case_insensitive` | boolean | `false` | 大文字小文字を区別しない |
 | `line_numbers` | boolean | `true` | 各マッチに 1 始まりの行番号を付ける |
 | `context_lines` | integer | `0` | 各マッチの周囲に出力する非マッチ行数 |

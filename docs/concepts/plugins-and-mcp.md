@@ -147,7 +147,7 @@ parameters:
 |---|---|---|---|
 | `pattern` | string | — (required) | Regex to search for |
 | `path` | string | cwd | Base directory or file to search in |
-| `include` | string | none | File name glob filter (e.g. `*.rs`, `*.{ts,tsx}`) |
+| `include` | string | none | File name glob filter, one pattern per call (e.g. `*.rs`; `{a,b}` brace expansion is not supported) |
 | `case_insensitive` | boolean | `false` | Match case-insensitively |
 | `line_numbers` | boolean | `true` | Prefix each match with its 1-based line number |
 | `context_lines` | integer | `0` | Non-matching context lines printed around each match |
