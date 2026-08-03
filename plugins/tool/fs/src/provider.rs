@@ -28,6 +28,7 @@ impl FsToolProvider {
             Box::new(crate::action::search::search_grep::FsGrepAction::new(
                 sandbox.clone(),
             )),
+            Box::new(crate::action::search::search_regex::FsRegexTestAction::new()),
             Box::new(crate::action::patch::FsPatchAction::new(sandbox.clone())),
             Box::new(crate::action::shell::ShellAction::new(sandbox.clone())),
             Box::new(crate::action::undo::UndoAction::new(sandbox.clone())),
