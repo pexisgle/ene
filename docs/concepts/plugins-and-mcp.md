@@ -49,6 +49,7 @@ Tool and provider plugins ship as independent out-of-process binaries. Bumping `
 - **Bumping the protocol version**: when `PLUGIN_IPC_PROTOCOL_VERSION` is bumped, `PLUGIN_IPC_MIN_SUPPORTED_VERSION` must be bumped by the same amount, dropping support for the oldest previously-supported version.
 - **When a bump is required**: only for changing the meaning of an existing message, adding a required field, or removing/renaming an enum variant. New fields should use `#[serde(default)]` so older/newer peers stay wire-compatible without a version bump.
 - **Feature gating**: the host stores the negotiated version on `IpcPluginConnection` (`ene-plugin-host`) and exposes it via `negotiated_version()`. Behavior that depends on a message introduced after the minimum supported version should gate on it — e.g. `supports_set_config()` gates `PluginIpcRequest::SetConfig` (introduced in v5) so a v4 plugin isn't sent a message it cannot deserialize; the host still updates its local cache so the next reconnect handshake delivers the fresh config. Dynamic-config messages (`ListConfigOptions`, `ValidateConfig`, `MigrateConfig`) also require protocol ≥ v5 **and** the matching `PluginCapabilities` flags (`supports_list_config_options`, etc.; serde-default `false` on older v5 binaries that lack those variants).
+- **Feature gating**: the host stores the negotiated version on `IpcPluginConnection` (`ene-plugin-host`) and exposes it via `negotiated_version()`. Behavior that depends on a message introduced after the minimum supported version should gate on it — e.g. `supports_set_config()` gates `PluginIpcRequest::SetConfig` (introduced in v5). Under the current N-1 window (v5+) every peer knows that variant, so the live push always applies; the check is retained as the version-relative pattern for features introduced above the minimum. Dynamic-config messages (`ListConfigOptions`, `ValidateConfig`, `MigrateConfig`) require protocol ≥ v5 **and** the matching `PluginCapabilities` flags (`supports_list_config_options`, etc.; serde-default `false` on older v5 binaries that lack those variants).
 - **Negotiation failure diagnostics**: when a plugin's proposed range and the host's supported range do not overlap, the plugin's `HandshakeAck` error and the host's `PluginHostError::HandshakeFailed` / `ProtocolMismatch` both name the ranges on both sides (e.g. "host supports 5..=6, plugin supports 3..=3"), so a developer can tell the plugin binary needs rebuilding rather than seeing a generic handshake failure.
 
 ---
@@ -368,10 +369,11 @@ host stores them as-is, never interprets their keys, refreshes the connection
 cache before each push, and re-sends them on reconnect. When a settings
 hot-reload changes a plugin's config/profiles without changing the enable-set,
 the runtime pushes `SetConfig` to the live connection instead of restarting
-the plugin host. A peer that negotiated below v5 gets a warn + local-cache
-update only (no live IPC). Provider plugins (LLM/embed/TTS/STT) get the same
-delivery as tool plugins, so e.g. the Anthropic provider can receive its API
-key at handshake time rather than per request.
+the plugin host. Every peer in the host's N-1 window (v5+) understands
+`SetConfig`, so the live push always applies. Provider plugins
+(LLM/embed/TTS/STT) get the same delivery as tool plugins, so e.g. the
+Anthropic provider can receive its API key at handshake time rather than per
+request.
 
 Do **not** put host-reserved entry keys (`enable`, `checksum`) inside the
 nested `config` object — they collide with `plugins.list.<name>` fields. The

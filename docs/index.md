@@ -13,7 +13,7 @@ The documentation is organized into four clear sections:
 | Section | Target Audience | Description |
 |---|---|---|
 | **[Getting Started](getting-started.md)** | Users & Developers | Installation, dependencies, building, and running CLI & Desktop apps. |
-| **[Architecture](architecture.md)** | System Architects & Contributors | Workspace design, API v1 host contract, turn pipeline, IPC protocol v4. |
+| **[Architecture](architecture.md)** | System Architects & Contributors | Workspace design, API v1 host contract, turn pipeline, IPC protocol v6. |
 | **[Configuration](configuration.md)** | Operators & Developers | Full settings reference (`ENE_*` env vars, config files, character cards). |
 | **[Concepts](concepts/turn-and-session.md)** | Developers | Deep-dives into turns, memory, voice/avatar, plugins, and MCP integration. |
 | **[Crates Reference](crates/runtime.md)** | Developers & Contributors | Public API and internal architecture of the 16 workspace crates. |
@@ -43,7 +43,7 @@ Ene Workspace
 │   ├── ene-util           (Pure utilities: truncation, HTML-to-Markdown)
 │   └── ene-vrm            (3D VRM 1.0 loader & wgpu renderer)
 ├── Plugin Architecture
-│   ├── ene-plugin-proto   (IPC wire protocol v4 definitions)
+│   ├── ene-plugin-proto   (IPC wire protocol v6 definitions)
 │   ├── ene-plugin         (Plugin authoring SDK & adapter facade)
 │   ├── ene-plugin-host    (Plugin process manager & supervisor)
 │   ├── ene-plugin-db      (Plugin host-service `db` client)

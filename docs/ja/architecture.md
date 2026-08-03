@@ -11,7 +11,7 @@
 3. **純粋な認知 Mind**: `ene-mind` はプロンプトパケットの構築、ハイブリッド記憶想起、感情状態 (PADモデル) の更新、プロアクティブ発話トリガー、および出力 Performance 演出の調停を所有します。 `ene-mind` は `ene-runtime` や `ene-plugin-host` に**一切依存しません**。また、その認知ロジック群 (想起、記憶アービター、忘却、キャラクター同期、ジャーナル、自己内省) は永続化層に対して常に `ene_core::MemoryPort` トレイト (#270) 経由でのみアクセスし、具象型 `ene_store::MemoryStore` には直接依存しません。これにより SQLite なしでインメモリのテストダブルに対して単体テストできます。
 4. **孤立した永続化層**: `ene-store` は SQLite スキーマ、マイグレーション、SeaORM エンティティ、およびベクトル検索 (`sqlite-vec`) を所有します。 `ene-store` は `ene-mind` や `ene-ai` に**一切依存しません**。
 5. **永続化に依存しないドメイン語彙**: `ene-core` は認知層と永続化層の双方が共有するコアドメイン型 — `AffectState` (PAD 感情状態)、typed-memory の種別/ステータス/クエリ、コミットメント台帳の語彙、および `MemoryPort` トレイト自体 — を定義します。ワークスペース内部の他クレートに一切依存しないため、`ene-store` と `ene-mind` はどちらも、互いに依存することなくこのクレートに依存できます。
-6. **プロセス外プラグイン (Protocol v4)**: ツール、LLM プロバイダ、MCP サーバーは **Protocol v4** による長さプレフィックス付き JSON IPC を使用して子プロセスとして動作します。
+6. **プロセス外プラグイン (Protocol v6)**: ツール、LLM プロバイダ、MCP サーバーは **Protocol v6** による長さプレフィックス付き IPC を使用して子プロセスとして動作します。ハンドシェイクは JSON、以後のフレームはネゴシエーションされた `WireFormat`（v6 は MessagePack、v5 ピアは JSON）です。
 7. **疎結合な 3D レンダリング**: `ene-vrm` は認知・記憶・ランタイムの型を一切インポートすることなく、 `wgpu` を介して VRM 1.0 モデルを描画します。
 8. **耐障害アクター (#268)**: アクターのコマンドおよびバックグラウンドタスクは `catch_unwind` によってパニック隔離されており、1つのコマンドのパニックがアクターやプロセス全体をクラッシュさせることはありません。これは偶発的な性質ではなく設計上の不変条件です — 仕組みとビルド設定上の前提条件については [§4](#4-耐障害性とパニック隔離) を参照してください。
 
@@ -113,12 +113,12 @@ flowchart TD
 
 ---
 
-## 5. プラグインシステムと IPC Protocol v4
+## 5. プラグインシステムと IPC Protocol v6
 
-プロセス外プラグイン (ツール、カスタム LLM プロバイダ、MCP サーバー) は **IPC Protocol v4** を使用してホストと通信します：
+プロセス外プラグイン (ツール、カスタム LLM プロバイダ、MCP サーバー) は **IPC Protocol v6** を使用してホストと通信します：
 
-- **フレーミング**: `stdin`/`stdout` 上の 4バイト・リトルエンディアン長さプレフィックス＋JSONペイロード。
-- **ハンドシェイクネゴシエーション**: `VersionRange { min: 4, max: 4 }` によるバージョンネゴシエーション。ホストがサポート範囲を送信し、プラグインが合意したバージョンを `HandshakeAck` で報告します。
+- **フレーミング**: `stdin`/`stdout` 上の 4バイト・リトルエンディアン長さプレフィックス。ハンドシェイク交換は JSON、以後のフレームはネゴシエーションされた `WireFormat`（v6 は MessagePack、v5 ピアは JSON）。
+- **ハンドシェイクネゴシエーション**: `VersionRange { min: 5, max: 6 }`（`VersionRange::host_supported()`）によるバージョンネゴシエーション。ホストがサポート範囲を送信し、プラグインが合意したバージョンを `HandshakeAck` で報告します。
 - **リクエスト相関**: 非ストリーミングおよびストリーミングの全 IPC メッセージは必須の `request_id` (`Uuid`) を保持します。
 - **ケーパビリティ宣言**: `PluginCapabilities` により利用可能な `tools`, `llm_providers`, `stt_providers`, `tts_providers` を宣伝します。
 - **ホストサービス `db` 乗客**: 状態を保持するツールは `ene-plugin-db` を介して共有ホストサービスソケットを開き、ホストの `memory.db` 内でプレフィックス隔離された CRUD を行います。全プラグインがこの単一ソケットを共有するため、ネームスペースの隔離はプラグインごとの認証トークンのみに依存します (プラグインごとのソケットパス層は廃止されました)。
@@ -138,7 +138,7 @@ flowchart TD
 | `ene-voice` | ローカル STT (Whisper)、TTS、VAD (Silero ONNX)、cpal オーディオ I/O |
 | `ene-connector` | 外部サービスの認証情報権威 (OAuth2/API キー保管、コネクタアイデンティティ、許可スコープ)。現時点で利用クレートなし — #412/#415 の MCP 認証情報ブリッジにより再導入予定 |
 | `ene-plugin-host` | プラグインプロセス監視、MCP サーバー発見、ヘルスチェック、サーキットブレーカー |
-| `ene-plugin-proto` | IPC Protocol v4 ワイヤーメッセージ、バージョン定義、フレーミング |
+| `ene-plugin-proto` | IPC Protocol v6 ワイヤーメッセージ、バージョン定義、フレーミング |
 | `ene-plugin` | プラグイン開発 SDK: `ToolPlugin`/`LlmPlugin` ファサード、`ToolAction`/`ActionSetProvider`、prelude |
 | `ene-plugin-db` | ステートフルプラグインの DB 操作用型付き IPC クライアント |
 | `ene-plugin-macros` | Proc-macro: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |

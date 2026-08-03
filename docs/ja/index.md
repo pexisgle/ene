@@ -13,7 +13,7 @@
 | セクション | 対象者 | 概要 |
 |---|---|---|
 | **[スタートアップ](getting-started.md)** | ユーザー・開発者 | インストール、依存関係、ビルド、CLI / Desktop アプリの起動方法。 |
-| **[アーキテクチャ](architecture.md)** | 開発者・アーキテクト | ワークスペース設計、API v1 ホスト契約、ターンパイプライン、IPC Protocol v4。 |
+| **[アーキテクチャ](architecture.md)** | 開発者・アーキテクト | ワークスペース設計、API v1 ホスト契約、ターンパイプライン、IPC Protocol v6。 |
 | **[設定リファレンス](configuration.md)** | 運用者・開発者 | 全設定項目 (`ENE_*` 環境変数、設定ファイル、キャラクターカード)。 |
 | **[主要概念](concepts/turn-and-session.md)** | 開発者 | ターン、記憶、音声/アバター、プラグイン、MCP連携の解説。 |
 | **[クレートリファレンス](crates/runtime.md)** | 開発者 | ワークスペース内全 16 クレートの公開 API と設計。 |
@@ -43,7 +43,7 @@ Ene ワークスペース
 │   ├── ene-util           (純粋ユーティリティ: 切り詰め、HTML→Markdown)
 │   └── ene-vrm            (3D VRM 1.0 ローダー & wgpu レンダラー)
 ├── プラグインシステム
-│   ├── ene-plugin-proto   (IPC ワイヤープロトコル v4 定義)
+│   ├── ene-plugin-proto   (IPC ワイヤープロトコル v6 定義)
 │   ├── ene-plugin         (プラグイン開発 SDK & アダプタファサード)
 │   ├── ene-plugin-host    (プラグインプロセス管理 & スーパーバイザ)
 │   ├── ene-plugin-db      (プラグイン用ホストサービス `db` クライアント)

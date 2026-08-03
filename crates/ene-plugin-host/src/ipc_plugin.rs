@@ -466,11 +466,11 @@ impl IpcPluginConnection {
     /// stream cancellation via [`PluginIpcRequest::CancelStream`].
     ///
     /// `CancelStream` was introduced in protocol v4 (see the
-    /// `PLUGIN_IPC_PROTOCOL_VERSION` docs in `ene-plugin-proto`). A plugin
-    /// that negotiated v3 does not know this message variant, so
-    /// [`cancel_stream`](Self::cancel_stream) skips sending it and relies on
-    /// the caller's existing timeout-based fallback to end the stream
-    /// instead.
+    /// `PLUGIN_IPC_PROTOCOL_VERSION` docs in `ene-plugin-proto`). Every peer
+    /// in the host's N-1 window (v5+) knows this variant, so
+    /// [`cancel_stream`](Self::cancel_stream) always sends it; the check is
+    /// retained as the version-relative pattern that any feature introduced
+    /// above the minimum must follow.
     ///
     /// This is the pattern to follow for any future version-gated feature:
     /// add a `const fn supports_x(&self) -> bool` here that compares
@@ -483,10 +483,9 @@ impl IpcPluginConnection {
     /// Returns whether the negotiated protocol version supports live config
     /// updates via [`PluginIpcRequest::SetConfig`].
     ///
-    /// `SetConfig` was introduced in protocol v5. A plugin that negotiated
-    /// v4 does not know this message variant, so [`set_config`](Self::set_config)
-    /// updates the local cache (for the next reconnect handshake) and skips
-    /// the IPC send.
+    /// `SetConfig` was introduced in protocol v5. Every peer in the host's
+    /// N-1 window (v5+) knows this variant, so
+    /// [`set_config`](Self::set_config) always sends the live IPC push.
     pub fn supports_set_config(&self) -> bool {
         self.negotiated_version() >= SET_CONFIG_MIN_VERSION
     }
