@@ -97,6 +97,10 @@ impl ResolvedEmbedding {
     ///
     /// `(kind, base_url, api_key, model, dimensions, query_prefix)`.
     #[must_use]
+    #[expect(
+        clippy::type_complexity,
+        reason = "fixed-arity tuple mirrors the ResolvedEmbedding::Cloud fields; consumers destructure it positionally"
+    )]
     pub fn cloud_fields(&self) -> Option<(&str, &str, &str, &str, usize, Option<&str>)> {
         match self {
             Self::Cloud {

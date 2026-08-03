@@ -22,7 +22,7 @@ pub enum AiTaskKind {
 
 /// The [`TaskRef`] backing a cognitive task kind (classifier and proactive
 /// fall back to the chat task when unconfigured).
-fn task_ref_for_kind<'a>(ai: &'a AiConfig, kind: AiTaskKind) -> &'a TaskRef {
+fn task_ref_for_kind(ai: &AiConfig, kind: AiTaskKind) -> &TaskRef {
     match kind {
         AiTaskKind::Chat => &ai.tasks.chat,
         AiTaskKind::Classifier => ai.tasks.classifier.as_ref().unwrap_or(&ai.tasks.chat),
@@ -32,9 +32,9 @@ fn task_ref_for_kind<'a>(ai: &'a AiConfig, kind: AiTaskKind) -> &'a TaskRef {
 
 /// Build a chat provider for a named cognitive task.
 ///
-/// The task's own model / max_tokens overrides are forwarded so the provider
-/// honors task-specific config instead of the `tasks.chat` defaults. Local
-/// providers are rejected (chat requires a cloud backend).
+/// The task's own model / `max_tokens` overrides are forwarded so the
+/// provider honors task-specific config instead of the `tasks.chat`
+/// defaults. Local providers are rejected (chat requires a cloud backend).
 pub fn create_task_chat_provider(
     config: &ene_config::EneConfig,
     kind: AiTaskKind,
@@ -50,7 +50,7 @@ pub fn create_task_chat_provider(
 /// Resolves the task's provider definition and routes through the global
 /// [`LlmProviderRegistry`] by kind (with the legacy `openai_compatible`
 /// alias folded onto the `openai` plugin kind), so plugin-provided backends
-/// (OpenAI, Anthropic) all resolve the same way. A local provider is
+/// (`OpenAI`, Anthropic) all resolve the same way. A local provider is
 /// rejected — chat workloads require a cloud backend.
 pub fn create_chat_provider_for_task(
     config: &ene_config::EneConfig,
@@ -126,7 +126,12 @@ mod tests {
         let config = config_with_provider("custom", "not-a-plugin-kind");
         let mut task = TaskRef::default();
         task.provider = "custom".to_string();
-        let err = create_chat_provider_for_task(&config, &task).unwrap_err();
+        // `unwrap_err` needs `Debug` on the boxed provider, which trait
+        // objects do not provide; match the error instead.
+        let err = match create_chat_provider_for_task(&config, &task) {
+            Ok(_) => panic!("expected an error, got a provider"),
+            Err(e) => e,
+        };
         assert!(err.to_string().contains("not-a-plugin-kind"), "err: {err}");
     }
 
