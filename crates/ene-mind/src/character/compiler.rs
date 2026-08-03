@@ -166,13 +166,6 @@ impl CharacterCompiler {
                 expand_field(&data.scenario, ctx)
             ));
         }
-        if !data.creator_notes.trim().is_empty() {
-            optional_sections.push(format!(
-                "## Creator Notes\n{}",
-                expand_field(&data.creator_notes, ctx)
-            ));
-        }
-
         // Fit greedily in token space (language-aware), not character space, so
         // a Japanese card is measured against the same budget as an English one.
         let mut text = core_block.clone();

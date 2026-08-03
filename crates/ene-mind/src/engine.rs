@@ -568,8 +568,6 @@ impl CognitionEngine {
                 .system()
                 .render_mascot_context(char_name, ctx.user_name),
         );
-        let behavior_contract = build_behavior_contract(ctx.card, ctx.user_name);
-
         let recent_limit = ctx.config.context.recent_turns.saturating_mul(2).max(2);
         let history: Vec<_> = if ctx.history.len() > recent_limit {
             ctx.history[ctx.history.len() - recent_limit..].to_vec()
@@ -599,7 +597,6 @@ impl CognitionEngine {
         let pack_input = PackInput {
             platform_contract,
             identity_kernel: kernel,
-            behavior_contract,
             style_examples,
             recalled,
             commitments,
@@ -928,23 +925,6 @@ impl CognitionEngine {
         let mut updated = affect.clone();
         updated.last_expression.clone_from(&decision.expression);
         (decision, updated)
-    }
-}
-
-fn build_behavior_contract(card: &CharacterCardV3, user_name: &str) -> Option<String> {
-    let data = &card.data;
-    let char_name = data.get_character_name();
-    let mut parts = Vec::new();
-    if !data.creator_notes.trim().is_empty() {
-        parts.push(format!(
-            "## Creator Notes\n{}",
-            ene_config::expand_cbs_macros(&data.creator_notes, char_name, user_name)
-        ));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
     }
 }
 

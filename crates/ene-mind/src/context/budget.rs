@@ -99,8 +99,6 @@ pub struct PackInput {
     pub platform_contract: Option<String>,
     /// Compiled identity kernel.
     pub identity_kernel: IdentityKernel,
-    /// Optional behavior contract (runtime rules).
-    pub behavior_contract: Option<String>,
     /// Style examples selected for this turn.
     pub style_examples: Vec<StyleExample>,
     /// Recalled typed memories.
@@ -414,13 +412,6 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
             )
             .with_item_count(input.lorebook.after_char.len()),
         );
-    }
-
-    if let Some(text) = &input.behavior_contract {
-        sections.push(PromptSection::new(
-            PromptSectionKind::BehaviorContract,
-            text.clone(),
-        ));
     }
 
     if let Some(text) = &input.affect_summary {
@@ -764,7 +755,6 @@ mod tests {
                 text: "KERNEL".into(),
                 post_history_instructions: None,
             },
-            behavior_contract: None,
             style_examples: vec![],
             recalled,
             commitments: vec![],
@@ -1020,7 +1010,6 @@ mod tests {
         let input = PackInput {
             platform_contract: None,
             identity_kernel: kernel,
-            behavior_contract: Some("rules".repeat(200)),
             style_examples: vec![StyleExample {
                 text: "style".repeat(200),
                 intent: StyleIntent::Greeting,
@@ -1082,7 +1071,6 @@ mod tests {
         let input = PackInput {
             platform_contract: None,
             identity_kernel: kernel,
-            behavior_contract: None,
             style_examples: vec![],
             recalled: vec![],
             commitments: vec![],
@@ -1206,7 +1194,6 @@ mod tests {
         let input = PackInput {
             platform_contract: None,
             identity_kernel: kernel,
-            behavior_contract: Some("rules ".repeat(40)),
             style_examples: vec![],
             recalled: vec![],
             commitments: vec![],
@@ -1303,7 +1290,6 @@ mod tests {
         let budget = ContextBudget::with_capacity(5);
         let input = PackInput {
             platform_contract: Some("platform ".repeat(100)),
-            behavior_contract: Some("rules ".repeat(100)),
             affect_summary: Some("mood ".repeat(100)),
             scene_summary: Some("scene ".repeat(100)),
             style_examples: vec![StyleExample {
@@ -1337,7 +1323,6 @@ mod tests {
             );
         }
         for kind in [
-            PromptSectionKind::BehaviorContract,
             PromptSectionKind::CharacterState,
             PromptSectionKind::SceneState,
             PromptSectionKind::StyleExamples,

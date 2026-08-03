@@ -17,8 +17,6 @@ pub enum PromptSectionKind {
     /// (the default `position`, `@@position after_desc`, and section-fallback
     /// placements).
     LorebookAfterChar,
-    /// Behavior rules and card system instructions.
-    BehaviorContract,
     /// Current affect / mood summary.
     CharacterState,
     /// Active rolling scene summary.
@@ -62,12 +60,10 @@ impl PromptSectionKind {
     /// regardless of this value (it checks [`Self::is_required`] directly).
     /// The lorebook sections are required by the guaranteed-injection
     /// contract: key-matched and `constant` entries may only fall to the
-    /// book's own `token_budget`, never to packing. Among droppable sections,
-    /// packing sheds the lowest priority first, so the advisory
-    /// [`Self::InterruptionNote`] goes before the structural
-    /// [`Self::BehaviorContract`]. Content producers — not packing — bound each
-    /// section's size (recall result limit, lorebook token budget, identity
-    /// kernel cap), so packing only decides *which* sections survive.
+    /// book's own `token_budget`, never to packing. Content producers — not
+    /// packing — bound each section's size (recall result limit, lorebook
+    /// token budget, identity kernel cap), so packing only decides *which*
+    /// sections survive.
     pub const fn priority(self) -> u8 {
         match self {
             Self::PlatformContract
@@ -84,7 +80,6 @@ impl PromptSectionKind {
             Self::ActiveCommitments => 60,
             Self::CharacterState => 70,
             Self::SceneState => 80,
-            Self::BehaviorContract => 90,
         }
     }
 
@@ -97,7 +92,6 @@ impl PromptSectionKind {
             | Self::UserInput => None,
             Self::LorebookBeforeChar => Some("## Character Lore (Before Description)"),
             Self::LorebookAfterChar => Some("## Character Lore"),
-            Self::BehaviorContract => Some("## Behavior Contract"),
             Self::CharacterState => Some("## Current Mood"),
             Self::SceneState => Some("## Current Scene"),
             Self::SemanticContext => Some("## Semantic Context"),
@@ -116,7 +110,6 @@ impl PromptSectionKind {
             Self::LorebookBeforeChar,
             Self::IdentityKernel,
             Self::LorebookAfterChar,
-            Self::BehaviorContract,
             Self::CharacterState,
             Self::SceneState,
             Self::SemanticContext,
