@@ -86,7 +86,7 @@ pub(crate) fn import_character_file_in(
 /// Reads a card from a resolved path, sniffing PNG / CHARX / JSON content.
 pub(crate) fn load_card_from_path(path: &Path) -> Result<CharacterCardV3, EneConfigError> {
     let bytes = read_card_file(path)?;
-    parse_card_bytes(&bytes, None)
+    load_card_from_bytes(&bytes)
 }
 
 /// Reads a card with `code`'s diff layered over the base.
@@ -99,9 +99,10 @@ pub(crate) fn load_card_from_path_localized(
     code: &str,
 ) -> Result<CharacterCardV3, EneConfigError> {
     let bytes = read_card_file(path)?;
-    let mut card = load_card_from_bytes_localized(&bytes, code)?;
+    let code = crate::resolve_language_alias(code);
+    let mut card = load_card_from_bytes_localized(&bytes, &code)?;
     if !is_container(&bytes)
-        && let Some(diff) = read_sidecar_diff(path.parent(), code)?
+        && let Some(diff) = read_sidecar_diff(path.parent(), &code)
     {
         merge_localized_fields(&mut card, &diff);
     }
@@ -126,7 +127,8 @@ pub(crate) fn load_card_from_bytes_localized(
     bytes: &[u8],
     code: &str,
 ) -> Result<CharacterCardV3, EneConfigError> {
-    let mut card = parse_card_bytes(bytes, Some(code))?;
+    let code = crate::resolve_language_alias(code);
+    let mut card = parse_card_bytes(bytes, Some(&code))?;
     strip_locales(&mut card);
     Ok(card)
 }
@@ -199,31 +201,28 @@ fn merge_embedded_locale(card: &mut CharacterCardV3, code: &str) {
 /// A missing file is the normal case and yields `None`; a malformed or
 /// oversized diff is warned about and skipped so a broken translation never
 /// sinks the base card.
-fn read_sidecar_diff(
-    card_dir: Option<&Path>,
-    code: &str,
-) -> Result<Option<LocalizedCharacterFields>, EneConfigError> {
+fn read_sidecar_diff(card_dir: Option<&Path>, code: &str) -> Option<LocalizedCharacterFields> {
     let Some(dir) = card_dir else {
-        return Ok(None);
+        return None;
     };
     let path = dir.join(format!("character.{code}.json"));
     let bytes = match read_card_file(&path) {
         Ok(bytes) => bytes,
         Err(EneConfigError::CardFileTooLarge(_)) => {
             tracing::warn!(path = %path.display(), "Skipping oversized localized card diff");
-            return Ok(None);
+            return None;
         }
-        Err(_) => return Ok(None),
+        Err(_) => return None,
     };
     match serde_json::from_slice(&bytes) {
-        Ok(diff) => Ok(Some(diff)),
+        Ok(diff) => Some(diff),
         Err(e) => {
             tracing::warn!(
                 path = %path.display(),
                 error = %e,
                 "Skipping malformed localized card diff"
             );
-            Ok(None)
+            None
         }
     }
 }

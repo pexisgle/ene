@@ -366,7 +366,7 @@ pub fn load_character_card(name_or_path: &str) -> Result<CharacterCardV3, EneCon
 /// `character_settings.json` (`language`) takes precedence when set. The
 /// resolved locale's diff is applied from the folder sidecar, CHARX root
 /// entry, or PNG-embedded locale bag; untranslated fields keep the base
-/// language. The returned card is a merged single-language CCv3 card with
+/// language. The returned card is a merged single-language `CCv3` card with
 /// the locale bag stripped, so every container form normalizes to the same
 /// in-memory shape.
 ///
@@ -386,9 +386,9 @@ pub fn load_character_card_localized(
 }
 
 /// Merges the base card with `language`'s diff and writes the resulting
-/// complete single-language CCv3 card to `out_path` (atomic).
+/// complete single-language `CCv3` card to `out_path` (atomic).
 ///
-/// The exported card carries no `extensions.ene.locales` bag, so any CCv3
+/// The exported card carries no `extensions.ene.locales` bag, so any `CCv3`
 /// reader parses it as an ordinary single-language card. Unlike
 /// [`load_character_card_localized`], the language is taken literally — the
 /// per-card `character_settings.json` override does not apply.
@@ -413,9 +413,9 @@ pub fn export_character_card(
 /// override — CHARX / PNG cards have no settings file.
 fn effective_locale(card_path: &Path, app_language: &str) -> String {
     let mut code = resolve_language_alias(app_language);
-    if !card_path
+    if card_path
         .file_name()
-        .is_some_and(|name| name == "character.json")
+        .is_none_or(|name| name != "character.json")
     {
         return code;
     }

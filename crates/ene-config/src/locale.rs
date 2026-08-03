@@ -2,7 +2,7 @@
 //!
 //! A `character.{lang}.json` sidecar (or the embedded
 //! `extensions.ene.locales` bag used by PNG distribution) carries only the
-//! translatable subset of a CCv3 card. [`merge_localized_fields`] overlays
+//! translatable subset of a `CCv3` card. [`merge_localized_fields`] overlays
 //! such a diff onto the base card: every `Some` field replaces the base
 //! value, every `None` keeps it, so untranslated fields fall back to the
 //! base language. Lorebook entries are matched by `id` and only their `keys`
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::CharacterCardV3;
 
-/// Translatable subset of a CCv3 card, layered over `character.json`.
+/// Translatable subset of a `CCv3` card, layered over `character.json`.
 ///
 /// Language-independent data (`assets`, motion/expression definitions,
 /// timestamps) is intentionally absent so a diff cannot drift from the base
