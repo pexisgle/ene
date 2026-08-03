@@ -41,14 +41,16 @@ pub struct ConversationSummaryResult {
 /// comparison, allowing updates, deletions, and retentions via the
 /// `key_facts` output.
 ///
-/// All prompt strings are sourced from `PromptLibrary::load("en")` so they
-/// can be localised by swapping the locale file.
+/// Prompt strings are sourced from `PromptLibrary::load(language)`; callers
+/// should pass `MindConfig::resolved_compression_language()` so the summary
+/// follows the configured language instead of being hard-coded to English.
 pub async fn summarize_conversation(
     provider: &dyn ene_ai::LlmProvider,
     history: &[ene_ai::LlmMessage],
     character_name: &str,
     user_name: &str,
     existing_facts: &[KeyFact],
+    language: &str,
 ) -> Result<ConversationSummaryResult, CognitionError> {
     if history.is_empty() {
         return Ok(ConversationSummaryResult {
@@ -57,7 +59,7 @@ pub async fn summarize_conversation(
         });
     }
 
-    let prompts = PromptLibrary::load("en");
+    let prompts = PromptLibrary::load(language);
 
     // Build conversation text from message history (tool messages excluded —
     // their content is already attributed to the assistant turn).
@@ -271,5 +273,82 @@ mod tests {
         );
         assert!(system.contains("key_facts"), "should mention key_facts");
         assert!(system.contains("summary"), "should mention summary");
+    }
+
+    /// Captures the system prompt and answers with valid summary JSON so the
+    /// language choice is observable from what the provider receives.
+    struct SystemPromptCaptureProvider {
+        captured: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ene_ai::LlmProvider for SystemPromptCaptureProvider {
+        fn name(&self) -> &'static str {
+            "summarizer-capture"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn tokio_stream::Stream<
+                            Item = Result<ene_ai::LlmResponseChunk, ene_ai::LlmProviderError>,
+                        > + Send,
+                >,
+            >,
+            ene_ai::LlmProviderError,
+        > {
+            Err(ene_ai::LlmProviderError::Provider("stream unused".into()))
+        }
+
+        async fn chat_completion(
+            &self,
+            messages: &[ene_ai::LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<ene_ai::LlmCompletion, ene_ai::LlmProviderError> {
+            if let Some(ene_ai::LlmMessage::System { content }) = messages.first()
+                && let Ok(mut guard) = self.captured.lock()
+            {
+                guard.push(content.clone());
+            }
+            Ok(ene_ai::LlmCompletion::text_only(
+                r#"{"summary":"test","key_facts":[]}"#.to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_uses_requested_language_pack() {
+        let provider = SystemPromptCaptureProvider {
+            captured: std::sync::Mutex::new(Vec::new()),
+        };
+        let history = vec![ene_ai::LlmMessage::User {
+            parts: vec![ene_ai::UserMessagePart::Text {
+                text: "こんにちは".into(),
+            }],
+        }];
+
+        summarize_conversation(&provider, &history, "Ene", "Alice", &[], "ja")
+            .await
+            .expect("valid summary JSON");
+        summarize_conversation(&provider, &history, "Ene", "Alice", &[], "en")
+            .await
+            .expect("valid summary JSON");
+
+        let captured = provider.captured.lock().expect("capture lock");
+        assert_eq!(captured.len(), 2);
+        assert!(
+            captured[0].contains("会話アナリスト"),
+            "ja pack should reach the model, got: {}",
+            captured[0].chars().take(80).collect::<String>()
+        );
+        assert!(
+            captured[1].contains("conversation analyst"),
+            "en pack should reach the model, got: {}",
+            captured[1].chars().take(80).collect::<String>()
+        );
     }
 }
