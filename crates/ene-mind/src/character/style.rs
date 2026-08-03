@@ -185,6 +185,7 @@ impl StyleExampleSelector {
         }
 
         let intent = infer_style_intent(user_input).unwrap_or(StyleIntent::Greeting);
+        let char_name = card.data.get_character_name();
         let character_id = card.data.get_character_id();
 
         // Labeled examples are structured, so selection is card-direct and

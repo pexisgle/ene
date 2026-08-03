@@ -943,23 +943,6 @@ impl CognitionEngine {
     }
 }
 
-fn build_behavior_contract(card: &CharacterCardV3, user_name: &str) -> Option<String> {
-    let data = &card.data;
-    let char_name = data.get_character_name();
-    let mut parts = Vec::new();
-    if !data.creator_notes.trim().is_empty() {
-        parts.push(format!(
-            "## Creator Notes\n{}",
-            ene_config::expand_cbs_macros(&data.creator_notes, char_name, user_name)
-        ));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
-    }
-}
-
 /// Merges the post-history PHI block with the card's NG-expression list into
 /// the output contract section.
 ///
