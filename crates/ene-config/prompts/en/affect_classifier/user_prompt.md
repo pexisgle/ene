@@ -9,4 +9,4 @@ Estimate the character's post-conversation affect from the turn-start state and 
 ## Available expressions
 {available_expressions}
 
-`recommended_expression` must be exactly one of the names above.
+`recommended_expression` must be exactly one of the names above; when no names are listed (the line reads "none"), the field is ignored and the runtime falls back.
