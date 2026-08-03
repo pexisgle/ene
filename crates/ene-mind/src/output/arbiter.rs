@@ -25,25 +25,24 @@ pub fn affect_to_expression<'a>(
     available
         .iter()
         .filter_map(|e| e.affect.map(|a| (e, a)))
-        .min_by(|(_, a), (_, b)| a.distance_to(state).total_cmp(&b.distance_to(state)))
+        .min_by(|(_, a), (_, b)| affect_distance(a, state).total_cmp(&affect_distance(b, state)))
         .map(|(e, _)| e.name.as_str())
 }
 
-impl ExpressionAffect {
-    /// Squared Euclidean distance to an affect state over all four dimensions.
-    ///
-    /// The annotation's default-zero dimensions make partial annotations
-    /// meaningful: an omitted dimension votes for the state's own value.
-    fn distance_to(&self, state: &AffectState) -> f32 {
-        let d_valence = self.valence - state.valence;
-        let d_arousal = self.arousal - state.arousal;
-        let d_irritation = self.irritation - state.irritation;
-        let d_fatigue = self.fatigue - state.fatigue;
-        d_valence * d_valence
-            + d_arousal * d_arousal
-            + d_irritation * d_irritation
-            + d_fatigue * d_fatigue
-    }
+/// Squared Euclidean distance between an affect annotation and a state over
+/// all four dimensions.
+///
+/// The annotation's default-zero dimensions make partial annotations
+/// meaningful: an omitted dimension votes for the state's own value.
+fn affect_distance(annotation: &ExpressionAffect, state: &AffectState) -> f32 {
+    let d_valence = annotation.valence - state.valence;
+    let d_arousal = annotation.arousal - state.arousal;
+    let d_irritation = annotation.irritation - state.irritation;
+    let d_fatigue = annotation.fatigue - state.fatigue;
+    d_valence * d_valence
+        + d_arousal * d_arousal
+        + d_irritation * d_irritation
+        + d_fatigue * d_fatigue
 }
 
 /// Resolve the final expression from affect, LLM hints, and constraints.
@@ -65,7 +64,9 @@ pub fn resolve_expression(
         .collect();
 
     let affect_candidate = affect_to_expression(input.affect, input.available);
-    let mut candidate = affect_candidate.unwrap_or_else(|| fallback_name(&available_names));
+    let mut candidate = affect_candidate
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback_name(&available_names));
     let mut source = ExpressionSource::AffectFallback;
     let mut reason = format!("mapped from affect (mood={})", input.affect.mood_label);
     if affect_candidate.is_none() {
