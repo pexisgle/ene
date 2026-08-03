@@ -236,8 +236,7 @@ pub fn evaluate_capability_gate(
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "tests use unwrap/expect for concise failure messages"
+    reason = "tests use unwrap for concise failure messages"
 )]
 mod tests {
     use super::*;

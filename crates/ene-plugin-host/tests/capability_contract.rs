@@ -7,8 +7,7 @@
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic,
-    reason = "integration tests use expect/panic for assertions"
+    reason = "integration tests use unwrap/expect for assertions"
 )]
 
 use std::path::PathBuf;
@@ -43,7 +42,7 @@ fn test_socket_path(name: &str) -> PathBuf {
 /// connection per accept until the listener is dropped.
 async fn run_mock_server(socket_path: PathBuf, capabilities: PluginCapabilities) {
     cleanup_path(&socket_path);
-    let Ok(listener) = IpcListener::bind(&socket_path) else {
+    let Ok(mut listener) = IpcListener::bind(&socket_path) else {
         return;
     };
     loop {
