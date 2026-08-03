@@ -29,6 +29,8 @@ const MAX_CHARX_TOTAL_BYTES: u64 = 4 * MAX_CHARX_ENTRY_BYTES;
 const MAX_DATA_URI_ASSET_BYTES: u64 = 256 * 1024 * 1024;
 /// Maximum characters kept in an import-derived folder/file name.
 const MAX_IMPORT_NAME_CHARS: usize = 64;
+/// Whole-file cap applied before a card file is read into memory.
+const MAX_CARD_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Result of a successful character card import.
 #[derive(Debug, Clone, Serialize)]
@@ -62,7 +64,7 @@ pub(crate) fn import_character_file_in(
     src: &Path,
     assets_dir: &Path,
 ) -> Result<ImportedCharacter, EneConfigError> {
-    let bytes = std::fs::read(src).map_err(EneConfigError::CardReadError)?;
+    let bytes = read_card_file(src)?;
     let extension = src
         .extension()
         .and_then(|e| e.to_str())
@@ -82,8 +84,16 @@ pub(crate) fn import_character_file_in(
 
 /// Reads a card from a resolved path, sniffing PNG / CHARX / JSON content.
 pub(crate) fn load_card_from_path(path: &Path) -> Result<CharacterCardV3, EneConfigError> {
-    let bytes = std::fs::read(path).map_err(EneConfigError::CardReadError)?;
+    let bytes = read_card_file(path)?;
     load_card_from_bytes(&bytes)
+}
+
+fn read_card_file(path: &Path) -> Result<Vec<u8>, EneConfigError> {
+    let metadata = std::fs::metadata(path).map_err(EneConfigError::CardReadError)?;
+    if metadata.len() > MAX_CARD_FILE_BYTES {
+        return Err(EneConfigError::CardFileTooLarge(MAX_CARD_FILE_BYTES));
+    }
+    std::fs::read(path).map_err(EneConfigError::CardReadError)
 }
 
 /// Parses card bytes by magic: PNG signature, zip signature, else JSON.
@@ -227,8 +237,17 @@ fn parse_itext_chunk(data: &[u8]) -> Option<TextChunk> {
 }
 
 fn inflate(data: &[u8], limit: u64) -> Result<Vec<u8>, EneConfigError> {
+    // The PNG spec wraps zTXt/iTXt text in a zlib datastream; raw deflate is
+    // accepted as a fallback for writers that skip the wrapper.
+    match inflate_with(flate2::read::ZlibDecoder::new(data), limit) {
+        Ok(out) => Ok(out),
+        Err(_) => inflate_with(flate2::read::DeflateDecoder::new(data), limit),
+    }
+}
+
+fn inflate_with<R: std::io::Read>(decoder: R, limit: u64) -> Result<Vec<u8>, EneConfigError> {
     let mut out = Vec::new();
-    flate2::read::DeflateDecoder::new(data)
+    decoder
         .take(limit + 1)
         .read_to_end(&mut out)
         .map_err(|_| EneConfigError::InvalidPngCard("invalid compressed text".to_string()))?;
@@ -300,11 +319,12 @@ fn validate_zip_entry_name(name: &str) -> Result<(), EneConfigError> {
     {
         return Err(EneConfigError::CharxUnsafePath(name.to_string()));
     }
-    for (index, component) in name.split('/').enumerate() {
-        if component.is_empty() || component == "." || component == ".." {
-            return Err(EneConfigError::CharxUnsafePath(name.to_string()));
-        }
-        if index == 0 && is_drive_prefix(component) {
+    for component in name.split('/') {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || is_drive_prefix(component)
+        {
             return Err(EneConfigError::CharxUnsafePath(name.to_string()));
         }
     }
@@ -329,15 +349,26 @@ fn import_png(
     validate_card_assets(&card)?;
     let folder = import_folder_name(&card, src)?;
     let target = assets_dir.join("characters").join(&folder);
-    ensure_import_target(&target, &folder)?;
-    materialize_data_assets(&mut card, &target)?;
-    write_card_json(&card, &target.join("character.json"))?;
-    std::fs::write(target.join("avatar.png"), bytes).map_err(EneConfigError::IoError)?;
-    Ok(ImportedCharacter {
-        name: card.data.get_character_name().to_string(),
-        card_path: format!("characters/{folder}/character.json"),
-        folder,
-    })
+    if target.exists() {
+        return Err(EneConfigError::CharacterImportExists(folder));
+    }
+    let staging = staging_dir(assets_dir, &folder);
+    let outcome = (|| -> Result<ImportedCharacter, EneConfigError> {
+        std::fs::create_dir_all(&staging).map_err(EneConfigError::IoError)?;
+        materialize_data_assets(&mut card, &staging)?;
+        write_card_json(&card, &staging.join("character.json"))?;
+        std::fs::write(staging.join("avatar.png"), bytes).map_err(EneConfigError::IoError)?;
+        std::fs::rename(&staging, &target).map_err(EneConfigError::IoError)?;
+        Ok(ImportedCharacter {
+            name: card.data.get_character_name().to_string(),
+            card_path: format!("characters/{folder}/character.json"),
+            folder,
+        })
+    })();
+    if outcome.is_err() {
+        drop(std::fs::remove_dir_all(&staging));
+    }
+    outcome
 }
 
 fn import_charx(
@@ -350,13 +381,61 @@ fn import_charx(
     validate_card_assets(&card)?;
     let folder = import_folder_name(&card, src)?;
     let target = assets_dir.join("characters").join(&folder);
-    ensure_import_target(&target, &folder)?;
+    if target.exists() {
+        return Err(EneConfigError::CharacterImportExists(folder));
+    }
+    let staging = staging_dir(assets_dir, &folder);
+    let outcome = (|| -> Result<ImportedCharacter, EneConfigError> {
+        std::fs::create_dir_all(&staging).map_err(EneConfigError::IoError)?;
+        let mut archive =
+            ZipArchive::new(std::io::Cursor::new(bytes)).map_err(EneConfigError::CharxError)?;
+        validate_charx_entries(&mut archive)?;
+        for index in 0..archive.len() {
+            let mut file = archive
+                .by_index(index)
+                .map_err(EneConfigError::CharxError)?;
+            let name = file.name().to_string();
+            if file.is_dir() {
+                continue;
+            }
+            let mut content = Vec::new();
+            file.by_ref()
+                .take(file.size() + 1)
+                .read_to_end(&mut content)
+                .map_err(|e| EneConfigError::CharxError(zip::result::ZipError::Io(e)))?;
+            if content.len() as u64 > file.size() {
+                return Err(EneConfigError::CharxTooLarge(name));
+            }
+            let relative = if name == "card.json" {
+                Path::new("character.json")
+            } else {
+                Path::new(&name)
+            };
+            write_import_entry(&staging, relative, &content)?;
+        }
+        materialize_data_assets(&mut card, &staging)?;
+        write_card_json(&card, &staging.join("character.json"))?;
+        std::fs::rename(&staging, &target).map_err(EneConfigError::IoError)?;
+        Ok(ImportedCharacter {
+            name: card.data.get_character_name().to_string(),
+            card_path: format!("characters/{folder}/character.json"),
+            folder,
+        })
+    })();
+    if outcome.is_err() {
+        drop(std::fs::remove_dir_all(&staging));
+    }
+    outcome
+}
 
-    let mut archive =
-        ZipArchive::new(std::io::Cursor::new(bytes)).map_err(EneConfigError::CharxError)?;
+/// Rejects unsafe, encrypted, symlink, and oversized entries before any
+/// bytes are written during extraction.
+fn validate_charx_entries(
+    archive: &mut ZipArchive<std::io::Cursor<&[u8]>>,
+) -> Result<(), EneConfigError> {
     let mut total = 0u64;
     for index in 0..archive.len() {
-        let mut file = archive
+        let file = archive
             .by_index(index)
             .map_err(EneConfigError::CharxError)?;
         let name = file.name().to_string();
@@ -381,36 +460,20 @@ fn import_charx(
         if total > MAX_CHARX_TOTAL_BYTES {
             return Err(EneConfigError::CharxTooLarge(name));
         }
-        let mut content = Vec::new();
-        file.by_ref()
-            .take(size + 1)
-            .read_to_end(&mut content)
-            .map_err(|e| EneConfigError::CharxError(zip::result::ZipError::Io(e)))?;
-        if content.len() as u64 > size {
-            return Err(EneConfigError::CharxTooLarge(name));
-        }
-        let relative = if name == "card.json" {
-            Path::new("character.json")
-        } else {
-            Path::new(&name)
-        };
-        write_import_entry(&target, relative, &content)?;
     }
-
-    materialize_data_assets(&mut card, &target)?;
-    write_card_json(&card, &target.join("character.json"))?;
-    Ok(ImportedCharacter {
-        name: card.data.get_character_name().to_string(),
-        card_path: format!("characters/{folder}/character.json"),
-        folder,
-    })
+    Ok(())
 }
 
-fn ensure_import_target(target: &Path, folder: &str) -> Result<(), EneConfigError> {
-    if target.exists() {
-        return Err(EneConfigError::CharacterImportExists(folder.to_string()));
-    }
-    std::fs::create_dir_all(target).map_err(EneConfigError::IoError)
+/// Unique staging directory for an atomic import; renamed over the target
+/// only after every file is written.
+fn staging_dir(assets_dir: &Path, folder: &str) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    assets_dir
+        .join("characters")
+        .join(format!(".import-{folder}-{}-{nonce}", std::process::id()))
 }
 
 fn write_import_entry(
@@ -434,9 +497,7 @@ fn write_card_json(card: &CharacterCardV3, path: &Path) -> Result<(), EneConfigE
 /// schemes are skipped per the spec's MAY-ignore rule.
 fn validate_card_assets(card: &CharacterCardV3) -> Result<(), EneConfigError> {
     for asset in &card.data.assets {
-        if asset.ene_kind().is_none() {
-            continue;
-        }
+        let consumed = asset.ene_kind().is_some();
         match resolve_asset_uri(&asset.uri) {
             Ok(_) => {}
             Err(EneConfigError::UnsupportedAssetUriScheme(scheme)) => {
@@ -444,6 +505,14 @@ fn validate_card_assets(card: &CharacterCardV3) -> Result<(), EneConfigError> {
                     scheme = %scheme,
                     asset = %asset.name,
                     "Skipping asset with unsupported URI scheme"
+                );
+            }
+            // A malformed URI on a type Ene does not consume is not a
+            // security boundary; unsafe paths above still fail the import.
+            Err(EneConfigError::InvalidAssetUri(_)) if !consumed => {
+                tracing::warn!(
+                    asset = %asset.name,
+                    "Skipping malformed asset URI on an unconsumed asset type"
                 );
             }
             Err(e) => return Err(e),
@@ -477,11 +546,19 @@ fn materialize_data_assets(
             continue;
         };
         let bytes = decode_data_payload(is_base64, &payload, MAX_DATA_URI_ASSET_BYTES)?;
-        let file_name = data_asset_file_name(asset, media_type.as_deref(), index);
-        let relative = PathBuf::from("assets")
-            .join(kind_type(kind))
-            .join("3d")
-            .join(&file_name);
+        let mut file_name = data_asset_file_name(asset, media_type.as_deref(), index);
+        let mut collision = 1u32;
+        let relative = loop {
+            let relative = PathBuf::from("assets")
+                .join(kind_type(kind))
+                .join("3d")
+                .join(&file_name);
+            if !target.join(&relative).exists() {
+                break relative;
+            }
+            file_name = disambiguated_name(&file_name, collision);
+            collision += 1;
+        };
         write_import_entry(target, &relative, &bytes)?;
         asset.uri = format!("embeded://{}", relative.to_string_lossy());
         changed = true;
@@ -505,6 +582,17 @@ fn data_asset_file_name(asset: &CharacterAsset, media_type: Option<&str>, index:
         .or_else(|| media_type.and_then(extension_from_media_type))
         .unwrap_or_else(|| "bin".to_string());
     format!("{base}.{ext}")
+}
+
+fn disambiguated_name(file_name: &str, counter: u32) -> String {
+    let path = Path::new(file_name);
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path.extension().unwrap_or_default().to_string_lossy();
+    if extension.is_empty() {
+        format!("{stem}_{counter}")
+    } else {
+        format!("{stem}_{counter}.{extension}")
+    }
 }
 
 fn sanitize_extension(ext: &str) -> Option<String> {
@@ -567,7 +655,7 @@ mod tests {
 
     use base64::Engine as _;
     use flate2::Compression;
-    use flate2::write::DeflateEncoder;
+    use flate2::write::ZlibEncoder;
     use zip::write::SimpleFileOptions;
 
     use super::*;
@@ -608,7 +696,7 @@ mod tests {
     }
 
     fn ztext_chunk(keyword: &str, payload: &[u8]) -> Vec<u8> {
-        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(payload).expect("deflate text");
         let compressed = encoder.finish().expect("finish deflate");
         let mut chunk = Vec::new();
@@ -624,7 +712,7 @@ mod tests {
     }
 
     fn itext_chunk(keyword: &str, payload: &[u8]) -> Vec<u8> {
-        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(payload).expect("deflate text");
         let compressed = encoder.finish().expect("finish deflate");
         let mut chunk = Vec::new();
@@ -662,6 +750,184 @@ mod tests {
             writer.finish().expect("finish zip");
         }
         buf
+    }
+
+    /// Minimal stored zip with one entry per tuple. `external_attrs` is the
+    /// central-directory unix mode shifted into the high bits and `flags`
+    /// the general-purpose bitfield (bit 0 = encrypted); this exercises
+    /// entry metadata that [`ZipWriter`] cannot produce.
+    fn raw_zip(entries: &[(&str, &[u8], u32, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, content, external_attrs, flags) in entries {
+            let name_bytes = name.as_bytes();
+            let local_offset = out.len() as u32;
+            let mut crc = flate2::Crc::new();
+            crc.update(content);
+            let crc_sum = crc.sum();
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&flags.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&crc_sum.to_le_bytes());
+            out.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name_bytes);
+            out.extend_from_slice(content);
+
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            central.extend_from_slice(&0x031eu16.to_le_bytes());
+            central.extend_from_slice(&20u16.to_le_bytes());
+            central.extend_from_slice(&flags.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u32.to_le_bytes());
+            central.extend_from_slice(&crc_sum.to_le_bytes());
+            central.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&external_attrs.to_le_bytes());
+            central.extend_from_slice(&local_offset.to_le_bytes());
+            central.extend_from_slice(name_bytes);
+        }
+        let central_offset = out.len() as u32;
+        let central_size = central.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&central_size.to_le_bytes());
+        out.extend_from_slice(&central_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn png_ztext_raw_deflate_is_tolerated() {
+        let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(base64(CARD_JSON).as_bytes())
+            .expect("deflate text");
+        let compressed = encoder.finish().expect("finish deflate");
+        let mut chunk = Vec::new();
+        let len = "ccv3".len() + 1 + 1 + compressed.len();
+        chunk.extend_from_slice(&(len as u32).to_be_bytes());
+        chunk.extend_from_slice(b"zTXt");
+        chunk.extend_from_slice(b"ccv3");
+        chunk.push(0);
+        chunk.push(0);
+        chunk.extend_from_slice(&compressed);
+        chunk.extend_from_slice(&[0; 4]);
+
+        let card = load_card_from_bytes(&png(&[chunk])).expect("raw-deflate card loads");
+        assert_eq!(card.data.name, "Ada");
+    }
+
+    #[test]
+    fn oversized_card_file_is_rejected_before_reading() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let src = tmp.path().join("big.png");
+        let file = std::fs::File::create(&src).expect("create sparse file");
+        file.set_len(MAX_CARD_FILE_BYTES + 1).expect("extend file");
+        drop(file);
+
+        assert!(matches!(
+            import_character_file_in(&src, &assets),
+            Err(EneConfigError::CardFileTooLarge(_))
+        ));
+        assert!(matches!(
+            load_card_from_path(&src),
+            Err(EneConfigError::CardFileTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn import_charx_rejects_symlink_entries() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let src = tmp.path().join("evil.charx");
+        let bytes = raw_zip(&[
+            ("card.json", CARD_JSON.as_bytes(), 0o100_644 << 16, 0),
+            ("link", b"", 0o120_777 << 16, 0),
+        ]);
+        std::fs::write(&src, bytes).expect("write charx");
+
+        assert!(matches!(
+            import_character_file_in(&src, &assets),
+            Err(EneConfigError::CharxUnsafePath(_))
+        ));
+        assert!(
+            !assets.join("characters/Ada").exists(),
+            "failed import must leave no partial folder"
+        );
+    }
+
+    #[test]
+    fn import_charx_rejects_encrypted_entries() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let src = tmp.path().join("evil.charx");
+        let bytes = raw_zip(&[("card.json", CARD_JSON.as_bytes(), 0o100_644 << 16, 1)]);
+        std::fs::write(&src, bytes).expect("write charx");
+
+        assert!(matches!(
+            import_character_file_in(&src, &assets),
+            Err(EneConfigError::CharxEncrypted(_))
+        ));
+    }
+
+    #[test]
+    fn data_url_assets_with_same_name_are_disambiguated() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let src = tmp.path().join("ada.png");
+        let card_json = r#"{
+            "spec":"chara_card_v3",
+            "spec_version":"3.0",
+            "data":{
+                "name":"Ada",
+                "assets":[
+                    {"type":"x_vrm","uri":"data:model/vrm;base64,QUJD","name":"Model","ext":"vrm"},
+                    {"type":"x_vrm","uri":"data:model/vrm;base64,REVG","name":"Model","ext":"vrm"}
+                ]
+            }
+        }"#;
+        std::fs::write(
+            &src,
+            png(&[text_chunk("ccv3", base64(card_json).as_bytes())]),
+        )
+        .expect("write png");
+
+        import_character_file_in(&src, &assets).expect("imports");
+        assert_eq!(
+            std::fs::read(assets.join("characters/Ada/assets/x_vrm/3d/Model.vrm"))
+                .expect("first asset"),
+            b"ABC"
+        );
+        assert_eq!(
+            std::fs::read(assets.join("characters/Ada/assets/x_vrm/3d/Model_1.vrm"))
+                .expect("second asset"),
+            b"DEF"
+        );
+        let card = load_card_from_path(&assets.join("characters/Ada/character.json"))
+            .expect("card readable");
+        assert_eq!(
+            card.data.assets[0].uri,
+            "embeded://assets/x_vrm/3d/Model.vrm"
+        );
+        assert_eq!(
+            card.data.assets[1].uri,
+            "embeded://assets/x_vrm/3d/Model_1.vrm"
+        );
     }
 
     #[test]
@@ -859,6 +1125,10 @@ mod tests {
             import_character_file_in(&src, &assets),
             Err(EneConfigError::CharxUnsafePath(_))
         ));
+        assert!(
+            !assets.join("characters/Ada").exists(),
+            "failed import must leave no partial folder"
+        );
     }
 
     #[test]

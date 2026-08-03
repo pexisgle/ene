@@ -160,22 +160,13 @@ fn validate_embedded_path(path: &str) -> Result<PathBuf, EneConfigError> {
     {
         return Err(EneConfigError::InvalidAssetUri(path.to_string()));
     }
-    let mut components = path.split('/');
-    let first = components.next().unwrap_or_default();
-    if first == ".." || is_drive_prefix(first) {
-        return Err(EneConfigError::UnsafeAssetPath(path.to_string()));
-    }
-    if first.is_empty() || first == "." {
-        return Err(EneConfigError::InvalidAssetUri(path.to_string()));
-    }
     let mut out = PathBuf::new();
-    out.push(first);
-    for component in components {
+    for component in path.split('/') {
+        if component == ".." || is_drive_prefix(component) {
+            return Err(EneConfigError::UnsafeAssetPath(path.to_string()));
+        }
         if component.is_empty() || component == "." {
             return Err(EneConfigError::InvalidAssetUri(path.to_string()));
-        }
-        if component == ".." {
-            return Err(EneConfigError::UnsafeAssetPath(path.to_string()));
         }
         out.push(component);
     }
@@ -299,6 +290,7 @@ mod tests {
         for uri in [
             "embeded:///etc/passwd",
             "embeded://C:model.vrm",
+            "embeded://a/C:model.vrm",
             "embeded://C:\\model.vrm",
             "embeded://a\\b.vrm",
             "embeded://",

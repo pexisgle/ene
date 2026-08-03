@@ -54,6 +54,9 @@ pub enum EneConfigError {
     /// The card file format is not an importable container.
     #[error("Unsupported character card file: {0}")]
     UnsupportedCardFile(String),
+    /// The card file exceeds the size cap and is rejected before reading.
+    #[error("Character card file exceeds the {0} byte limit")]
+    CardFileTooLarge(u64),
     /// A CHARX archive could not be read (corrupt or unsupported zip).
     #[error("CHARX archive error: {0}")]
     CharxError(#[from] zip::result::ZipError),

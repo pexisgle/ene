@@ -51,9 +51,9 @@ pub struct CharacterEntry {
 ///
 /// A folder counts as a character when it contains `character.json`; folders
 /// without one are skipped. VRM/motion resolution is declaration-based when
-/// the card lists `assets` (`x_vrm` / `x_vrma`), otherwise the legacy
-/// extension scan over the folder (recursively, symlinks excluded) applies.
-/// Entries are sorted by name.
+/// the card's `assets` resolve to files (`x_vrm` / `x_vrma`); the legacy
+/// extension scan over the folder (recursively, symlinks excluded) applies
+/// when nothing is declared or nothing resolves. Entries are sorted by name.
 #[must_use]
 pub fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
     let mut out = Vec::new();
@@ -89,15 +89,13 @@ pub fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
             .unwrap_or(folder.as_str())
             .to_string();
         let default_motion_name = read_default_motion(assets_dir, &folder);
-        let has_assets = card.as_ref().is_some_and(|c| !c.data.assets.is_empty());
 
-        let vrm_paths = if has_assets {
-            declared_asset_paths(card.as_ref(), EneAssetKind::Vrm, &path, assets_dir)
-                .into_iter()
-                .map(|(path, _)| path)
-                .collect()
-        } else {
+        let declared_vrm =
+            declared_asset_paths(card.as_ref(), EneAssetKind::Vrm, &path, assets_dir);
+        let vrm_paths = if declared_vrm.is_empty() {
             scan_assets(&path, &folder, "vrm")
+        } else {
+            declared_vrm.into_iter().map(|(path, _)| path).collect()
         };
 
         let (motion_paths, motion_names) = if let Some(catalog) = card
@@ -112,25 +110,27 @@ pub fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
                 .collect::<Vec<_>>();
             let motion_names = motion_names_from_paths(&motion_paths);
             (motion_paths, motion_names)
-        } else if has_assets {
+        } else {
             let declared =
                 declared_asset_paths(card.as_ref(), EneAssetKind::Vrma, &path, assets_dir);
-            let motion_paths = declared.iter().map(|(path, _)| path.clone()).collect();
-            let motion_names = declared
-                .iter()
-                .map(|(path, name)| {
-                    if name.is_empty() {
-                        file_stem(path)
-                    } else {
-                        name.clone()
-                    }
-                })
-                .collect();
-            (motion_paths, motion_names)
-        } else {
-            let motion_paths = scan_assets(&path, &folder, "vrma");
-            let motion_names = motion_names_from_paths(&motion_paths);
-            (motion_paths, motion_names)
+            if declared.is_empty() {
+                let motion_paths = scan_assets(&path, &folder, "vrma");
+                let motion_names = motion_names_from_paths(&motion_paths);
+                (motion_paths, motion_names)
+            } else {
+                let motion_paths = declared.iter().map(|(path, _)| path.clone()).collect();
+                let motion_names = declared
+                    .iter()
+                    .map(|(path, name)| {
+                        if name.is_empty() {
+                            file_stem(path)
+                        } else {
+                            name.clone()
+                        }
+                    })
+                    .collect();
+                (motion_paths, motion_names)
+            }
         };
 
         out.push(CharacterEntry {
@@ -227,11 +227,11 @@ fn declared_asset_paths(
                 let Some(relative) = full.strip_prefix(assets_dir).ok() else {
                     continue;
                 };
-                if !full.exists() {
+                if !is_regular_file(&full) {
                     tracing::warn!(
                         path = %full.display(),
                         asset = %asset.name,
-                        "Declared asset is missing on disk"
+                        "Declared asset is missing on disk or is a symlink"
                     );
                     continue;
                 }
@@ -242,8 +242,11 @@ fn declared_asset_paths(
                     EneAssetKind::Vrm => DEFAULT_VRM_PATH,
                     EneAssetKind::Vrma => DEFAULT_VRMA_PATH,
                 };
-                if !assets_dir.join(default).exists() {
-                    tracing::warn!(asset = %asset.name, "Default asset is missing on disk");
+                if !is_regular_file(&assets_dir.join(default)) {
+                    tracing::warn!(
+                        asset = %asset.name,
+                        "Default asset is missing on disk or is a symlink"
+                    );
                     continue;
                 }
                 default.to_string()
@@ -264,6 +267,13 @@ fn declared_asset_paths(
         out.push((entry_path, asset.name.clone()));
     }
     out
+}
+
+/// `true` when the path names a regular file without going through symlinks.
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
 }
 
 /// Reads the per-character default motion from `character_settings.json`.
@@ -578,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_declared_asset_is_skipped() {
+    fn unresolved_declared_assets_fall_back_to_scanning() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let assets = tmp.path().join("assets");
         let dir = assets.join("characters/ada");
@@ -586,12 +596,61 @@ mod tests {
             &dir,
             &v3_card(
                 "Ada",
-                r#"[{"type":"x_vrm","uri":"embeded://missing.vrm","name":"Model","ext":"vrm"}]"#,
+                r#"[{"type":"x_vrm","uri":"embeded://missing.vrm","name":"Model","ext":"vrm"},{"type":"x_vrma","uri":"embeded://missing.vrma","name":"Wave","ext":"vrma"}]"#,
             ),
         );
+        std::fs::write(dir.join("loose.vrm"), "x").expect("write loose vrm");
+        std::fs::write(dir.join("loose.vrma"), "x").expect("write loose vrma");
 
         let found = discover_characters(&assets);
-        assert!(found[0].vrm_paths.is_empty());
+        assert_eq!(found[0].vrm_paths, ["characters/ada/loose.vrm"]);
+        assert_eq!(found[0].motion_paths, ["characters/ada/loose.vrma"]);
+    }
+
+    #[test]
+    fn unconsumed_asset_types_fall_back_to_scanning() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            &v3_card(
+                "Ada",
+                r#"[{"type":"icon","uri":"ccdefault:","name":"Icon","ext":"png"}]"#,
+            ),
+        );
+        std::fs::write(dir.join("model.vrm"), "x").expect("write vrm");
+        std::fs::write(dir.join("wave.vrma"), "x").expect("write vrma");
+
+        let found = discover_characters(&assets);
+        assert_eq!(found[0].vrm_paths, ["characters/ada/model.vrm"]);
+        assert_eq!(found[0].motion_paths, ["characters/ada/wave.vrma"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_symlink_asset_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            &v3_card(
+                "Ada",
+                r#"[{"type":"x_vrm","uri":"embeded://model.vrm","name":"Model","ext":"vrm"}]"#,
+            ),
+        );
+        let outside = tmp.path().join("outside.vrm");
+        std::fs::write(&outside, "x").expect("write outside file");
+        symlink(&outside, dir.join("model.vrm")).expect("create symlink");
+
+        let found = discover_characters(&assets);
+        assert!(
+            found[0].vrm_paths.is_empty(),
+            "declared symlink must not resolve through the link"
+        );
     }
 
     #[test]
