@@ -157,12 +157,29 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    match value {
-        Some(serde_json::Value::Object(map)) => {
-            Ok(serde_json::from_value(serde_json::Value::Object(map)).ok())
+    let Some(serde_json::Value::Object(mut map)) = value else {
+        return Ok(None);
+    };
+    let locales = map.remove("locales");
+    let mut ene: EneExtension =
+        serde_json::from_value(serde_json::Value::Object(map)).unwrap_or_default();
+    if let Some(serde_json::Value::Object(locales)) = locales {
+        let mut parsed = indexmap::IndexMap::new();
+        for (code, value) in locales {
+            match serde_json::from_value(value) {
+                Ok(diff) => {
+                    parsed.insert(code, diff);
+                }
+                Err(error) => {
+                    tracing::warn!(%code, %error, "Skipping malformed localized card diff");
+                }
+            }
         }
-        _ => Ok(None),
+        if !parsed.is_empty() {
+            ene.locales = Some(parsed);
+        }
     }
+    Ok(Some(ene))
 }
 
 impl schemars::JsonSchema for Extensions {
@@ -582,6 +599,14 @@ impl CharacterCardData {
                 .map(|(i, text)| (i as u32 + 1, text.trim().to_string())),
         );
         options
+    }
+
+    /// Returns the stable character identity used for persisted state.
+    ///
+    /// Localization may change `nickname`, but it must never change this key.
+    #[must_use]
+    pub fn get_character_id(&self) -> &str {
+        &self.name
     }
 
     /// Returns the `EneExtension` object if defined under `extensions.ene`.

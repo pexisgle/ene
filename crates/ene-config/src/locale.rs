@@ -22,7 +22,7 @@ use crate::CharacterCardV3;
 /// discovery and folder naming, so only the display-only `nickname` is
 /// translatable.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde", deny_unknown_fields)]
+#[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedCharacterFields {
     /// Localized `data.description`.
@@ -65,7 +65,7 @@ pub struct LocalizedCharacterFields {
 
 /// Lorebook translations: only `keys` and `content` of existing entries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde", deny_unknown_fields)]
+#[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedLorebook {
     /// Translated entries; each must reference a base entry `id`.
@@ -75,7 +75,7 @@ pub struct LocalizedLorebook {
 
 /// A single translated lorebook entry.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde", deny_unknown_fields)]
+#[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedLorebookEntry {
     /// The base entry's `id`; entries without a matching base id are skipped

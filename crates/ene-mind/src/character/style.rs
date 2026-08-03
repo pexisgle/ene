@@ -94,7 +94,7 @@ impl StyleExampleSelector {
     /// Compile style chunks into typed memory items for indexing.
     pub fn compile_items(card: &CharacterCardV3, user_name: &str) -> Vec<NewMemoryItem> {
         let char_name = card.data.get_character_name();
-        let character_id = char_name.to_string();
+        let character_id = card.data.get_character_id().to_string();
         Self::chunk_mes_example(&card.data.mes_example, char_name, user_name)
             .into_iter()
             .enumerate()
@@ -137,10 +137,10 @@ impl StyleExampleSelector {
         }
 
         let intent = infer_style_intent(user_input).unwrap_or(StyleIntent::Greeting);
-        let char_name = card.data.get_character_name();
+        let character_id = card.data.get_character_id();
 
         if let (Some(store), Some(_embedder)) = (store, embedder)
-            && let Ok(selected) = select_from_store(store, char_name, intent, max_examples).await
+            && let Ok(selected) = select_from_store(store, character_id, intent, max_examples).await
             && !selected.is_empty()
         {
             return selected;

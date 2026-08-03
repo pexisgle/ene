@@ -821,7 +821,7 @@ impl EneHandle {
         &self.diagnostics
     }
 
-    /// Current character-card name.
+    /// Current stable character-card identity.
     ///
     /// Mailbox-free: reads the shared card-name slot the actor keeps in sync
     /// on every `SetCharacter` (the same slot

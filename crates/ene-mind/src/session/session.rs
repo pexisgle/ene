@@ -494,11 +494,11 @@ impl ConversationSession {
         (Cow::Borrowed(&affect.last_expression), elapsed)
     }
 
-    /// Returns the current character name, or `"default"` if no card is loaded.
+    /// Returns the stable current character identity, or `"default"` if no card is loaded.
     pub fn card_name(&self) -> &str {
         self.character_card
             .as_ref()
-            .map_or("default", |c| c.data.get_character_name())
+            .map_or("default", |c| c.data.get_character_id())
     }
 
     /// Returns a reference to the conversation history entries.

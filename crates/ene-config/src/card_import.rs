@@ -549,7 +549,7 @@ fn import_png(
         std::fs::write(staging.join("avatar.png"), bytes).map_err(EneConfigError::IoError)?;
         std::fs::rename(&staging, &target).map_err(EneConfigError::IoError)?;
         Ok(ImportedCharacter {
-            name: card.data.get_character_name().to_string(),
+            name: card.data.get_character_id().to_string(),
             card_path: format!("characters/{folder}/character.json"),
             folder,
         })
@@ -608,7 +608,7 @@ fn import_charx(
         write_card_json(&card, &staging.join("character.json"))?;
         std::fs::rename(&staging, &target).map_err(EneConfigError::IoError)?;
         Ok(ImportedCharacter {
-            name: card.data.get_character_name().to_string(),
+            name: card.data.get_character_id().to_string(),
             card_path: format!("characters/{folder}/character.json"),
             folder,
         })
@@ -844,7 +844,7 @@ fn extension_from_media_type(media_type: &str) -> Option<String> {
 }
 
 fn import_folder_name(card: &CharacterCardV3, src: &Path) -> Result<String, EneConfigError> {
-    if let Some(name) = sanitize_name(card.data.get_character_name()) {
+    if let Some(name) = sanitize_name(card.data.get_character_id()) {
         return Ok(name);
     }
     if let Some(stem) = src
