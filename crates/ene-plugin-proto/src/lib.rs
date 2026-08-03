@@ -46,8 +46,9 @@
     test,
     expect(
         clippy::expect_used,
+        clippy::panic,
         clippy::unwrap_used,
-        reason = "unit tests use expect/unwrap for concise assertions"
+        reason = "unit tests use expect/unwrap/panic for concise assertions"
     )
 )]
 

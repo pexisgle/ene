@@ -265,10 +265,8 @@ pub enum PluginIpcRequest {
     ///
     /// The plugin applies the blob via `ConfigurablePlugin::set_config` (and
     /// `set_profiles`) and replies with
-    /// [`PluginIpcResponse::ConfigApplied`]. Older plugins that negotiated
-    /// below v5 do not know this variant; the host gates on
-    /// `supports_set_config()` and keeps the local cache updated for the
-    /// next reconnect handshake instead.
+    /// [`PluginIpcResponse::ConfigApplied`]. Every peer in the host's N-1
+    /// window (v5+) knows this variant, so the live push always applies.
     SetConfig {
         /// Unique request identifier for correlating the response.
         #[serde(default)]
@@ -1785,12 +1783,76 @@ mod tests {
         );
         let payload = WireFormat::MsgPack.encode(&resp).unwrap();
         let got: PluginIpcResponse = WireFormat::MsgPack.decode(&payload).unwrap();
-        let PluginIpcResponse::EmbedBatchResult { embeddings, .. } = got else {
-            return;
+        let PluginIpcResponse::EmbedBatchResult { embeddings, .. } = &got else {
+            panic!("expected EmbedBatchResult, got {got:?}");
         };
         assert!(embeddings[0][0].is_nan());
         assert!(embeddings[0][1].is_infinite() && embeddings[0][1].is_sign_positive());
         assert!(embeddings[0][2].is_infinite() && embeddings[0][2].is_sign_negative());
         assert_eq!(embeddings[0][3].to_bits(), 0.5f32.to_bits());
+    }
+
+    #[test]
+    fn msgpack_tools_smaller_than_json() {
+        let tools = (0..8)
+            .map(|i| {
+                ToolSpec::new(
+                    crate::ToolName::new(format!("mock.tool{i}")),
+                    "Echoes arguments back with a reasonably long description string.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "Input text to echo."},
+                            "count": {"type": "integer", "minimum": 1, "maximum": 100},
+                            "enabled": {"type": "boolean", "default": true},
+                        },
+                        "required": ["text"],
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        let resp = PluginIpcResponse::Tools {
+            request_id: "tools-1".into(),
+            tools,
+        };
+        let json_len = WireFormat::Json.encode(&resp).unwrap().len();
+        let msgpack_len = WireFormat::MsgPack.encode(&resp).unwrap().len();
+        assert!(
+            msgpack_len < json_len,
+            "msgpack {msgpack_len} bytes >= json {json_len} bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_request_rejects_oversized_msgpack_message() {
+        let big_arguments = "x".repeat(MAX_MESSAGE_SIZE + 1);
+        let req = PluginIpcRequest::CallTool {
+            request_id: String::new(),
+            name: "test".into(),
+            arguments: big_arguments,
+            deferred: false,
+            context: None,
+        };
+        let mut buf = Vec::new();
+        let result = write_plugin_request(&mut buf, &req, WireFormat::MsgPack).await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, PluginError::Protocol(_)));
+        assert!(err.to_string().contains("exceeds maximum"));
+        assert!(buf.is_empty(), "nothing must be written on rejection");
+    }
+
+    #[tokio::test]
+    async fn write_response_rejects_oversized_msgpack_message() {
+        let resp = PluginIpcResponse::ChatCompletionResult {
+            request_id: "big-1".into(),
+            content: "x".repeat(MAX_MESSAGE_SIZE + 1),
+            usage: None,
+        };
+        let mut buf = Vec::new();
+        let result = write_plugin_response(&mut buf, &resp, WireFormat::MsgPack).await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, PluginError::Protocol(_)));
+        assert!(err.to_string().contains("exceeds maximum"));
+        assert!(buf.is_empty(), "nothing must be written on rejection");
     }
 }
