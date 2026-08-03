@@ -29,7 +29,7 @@ With `integer: false` the result is a float in the half-open interval
 less than `max`. With `integer: true` the result is a whole number in
 the closed interval `[min, max]`; fractional bounds are rounded inward
 (`ceil(min)` to `floor(max)`), and a range containing no whole numbers
-is an error.
+is an error, as is a range outside the 64-bit signed integer bounds.
 
 ```json
 { "min": 1, "max": 6, "integer": true }

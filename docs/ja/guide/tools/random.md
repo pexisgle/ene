@@ -21,7 +21,7 @@
 | `max` | number | `1` | 上限。有限値である必要があります |
 | `integer` | boolean | `false` | `true` の場合、浮動小数ではなく整数を返します |
 
-`integer: false` の場合、半開区間 `[min, max)` の浮動小数を返します — `min` は含み、`max` は含みません。`min` は `max` より小さくなければなりません。`integer: true` の場合、閉区間 `[min, max]` の整数を返します。小数の境界は内側に丸められ (`ceil(min)` から `floor(max)` まで)、整数が 1 つも含まれない範囲はエラーになります。
+`integer: false` の場合、半開区間 `[min, max)` の浮動小数を返します — `min` は含み、`max` は含みません。`min` は `max` より小さくなければなりません。`integer: true` の場合、閉区間 `[min, max]` の整数を返します。小数の境界は内側に丸められ (`ceil(min)` から `floor(max)` まで)、整数が 1 つも含まれない範囲はエラーになります。64 ビット符号付き整数の範囲を超える範囲もエラーになります。
 
 ```json
 { "min": 1, "max": 6, "integer": true }

@@ -137,7 +137,7 @@ The in-process admission budget that serializes local engines contending on the 
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
 
-All nine plugins above are included in the default `plugins.list` and start
+All ten plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.
 
 ### Filesystem tool reference (`filesystem.*`)
