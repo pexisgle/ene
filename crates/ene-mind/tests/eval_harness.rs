@@ -147,6 +147,7 @@ async fn run_before_turn(
         post_history_block: None,
         compression_pending: false,
         packing_budget_override: None,
+        proactive_topic: None,
     };
     engine.before_turn(ctx).await.unwrap()
 }
@@ -279,6 +280,7 @@ async fn scenario_identity_kernel_survives_long_history() {
                 post_history_block: None,
                 compression_pending: false,
                 packing_budget_override: None,
+                proactive_topic: None,
             },
             pre,
             ene_mind::ComposePrefetch::default(),
@@ -368,6 +370,7 @@ async fn scenario_compression_pending_detaches_oldest_recent_exchange() {
                 post_history_block: None,
                 compression_pending: true,
                 packing_budget_override: Some(60),
+                proactive_topic: None,
             },
             pre,
             ene_mind::ComposePrefetch::default(),

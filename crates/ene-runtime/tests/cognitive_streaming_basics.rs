@@ -129,6 +129,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         post_history_block: None,
         compression_pending: false,
         packing_budget_override: None,
+        proactive_topic: None,
     };
 
     let pre = engine
@@ -158,6 +159,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         post_history_block: None,
         compression_pending: false,
         packing_budget_override: None,
+        proactive_topic: None,
     };
 
     let composed = engine
@@ -235,6 +237,7 @@ async fn cognitive_compose_includes_post_history_phi_block() {
         post_history_block: phi.as_deref(),
         compression_pending: false,
         packing_budget_override: None,
+        proactive_topic: None,
     };
     let pre = engine
         .before_turn(pre_ctx)
@@ -257,6 +260,7 @@ async fn cognitive_compose_includes_post_history_phi_block() {
         post_history_block: phi.as_deref(),
         compression_pending: false,
         packing_budget_override: None,
+        proactive_topic: None,
     };
     let composed = engine
         .compose_prompt_packet(compose_ctx, pre, ene_mind::ComposePrefetch::default())
@@ -317,6 +321,7 @@ async fn cognitive_compose_includes_active_scene_summary() {
         post_history_block: None,
         compression_pending: false,
         packing_budget_override: None,
+        proactive_topic: None,
     };
     let pre = engine
         .before_turn(pre_ctx)
@@ -339,6 +344,7 @@ async fn cognitive_compose_includes_active_scene_summary() {
         post_history_block: None,
         compression_pending: false,
         packing_budget_override: None,
+        proactive_topic: None,
     };
     let composed = engine
         .compose_prompt_packet(compose_ctx, pre, ene_mind::ComposePrefetch::default())

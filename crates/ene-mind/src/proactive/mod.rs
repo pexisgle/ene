@@ -16,10 +16,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ene_ai::LlmProvider;
-use ene_core::{ActiveCommitmentPrompt, AffectState};
+use ene_core::{ActiveCommitmentPrompt, AffectState, MemoryKind, MemoryPort, MemoryStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ProactiveConfig;
+use crate::error::CognitionError;
 use crate::lifecycle::HistoryEntry;
 
 /// Privacy-safe activity snapshot from the host (desktop).
@@ -98,6 +99,13 @@ pub struct ProactiveContext {
     pub fatigue: Option<f32>,
     /// Active commitment one-liners (optional).
     pub commitments: Vec<String>,
+    /// User-stored standing rules one-liners (optional).
+    ///
+    /// `Preference` / `UserProfile` memories ("don't talk while I work", …)
+    /// loaded deterministically — never through recall score competition — so
+    /// a suppression condition cannot be dropped by a low score. Serialized
+    /// as the trusted `user_instructions` field of the decision context.
+    pub user_instructions: Vec<String>,
     /// Suppression counters at decision time.
     pub suppression: ProactiveSuppressionState,
 }
@@ -212,6 +220,7 @@ pub fn build_proactive_context(
     observation: &ProactiveObservation,
     affect: Option<&AffectState>,
     commitments: &[ActiveCommitmentPrompt],
+    user_instructions: &[String],
     suppression: ProactiveSuppressionState,
 ) -> ProactiveContext {
     let history = if config.sources.conversation {
@@ -219,7 +228,6 @@ pub fn build_proactive_context(
     } else {
         Vec::new()
     };
-
     let activity = if config.sources.activity {
         observation.activity.as_ref().map(|snap| ActivitySnapshot {
             idle_seconds: snap.idle_seconds,
@@ -274,6 +282,15 @@ pub fn build_proactive_context(
         })
         .collect();
 
+    let user_instructions = if config.sources.memory {
+        user_instructions
+            .iter()
+            .map(|line| truncate_chars(line, 160))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     ProactiveContext {
         history,
         seconds_since_user_input: suppression.seconds_since_user_input,
@@ -282,8 +299,54 @@ pub fn build_proactive_context(
         affect_summary,
         fatigue,
         commitments,
+        user_instructions,
         suppression,
     }
+}
+
+/// Deterministically load user standing-rule one-liners for a proactive decision.
+///
+/// Reads the user's `Preference` / `UserProfile` memories directly from the
+/// store — bypassing hybrid recall scoring entirely — so a suppression
+/// condition ("don't talk while I work") can never be dropped by a low recall
+/// score. User scope is honored (plus character-level rows that carry no user
+/// id), `Active` status only, newest first, capped at `max_notes`.
+pub async fn load_proactive_memory_notes(
+    store: &dyn MemoryPort,
+    character_id: &str,
+    user_id: &str,
+    max_notes: usize,
+) -> Result<Vec<String>, CognitionError> {
+    if max_notes == 0 {
+        return Ok(Vec::new());
+    }
+    let mut notes = Vec::new();
+    for kind in [MemoryKind::Preference, MemoryKind::UserProfile] {
+        if notes.len() >= max_notes {
+            break;
+        }
+        let rows = store
+            .get_typed_memories_by_character(character_id, Some(kind), max_notes, 0)
+            .await
+            .map_err(CognitionError::MemoryPort)?;
+        for row in rows {
+            if notes.len() >= max_notes {
+                break;
+            }
+            if row.status != MemoryStatus::Active
+                || (!row.user_id.is_empty() && row.user_id != user_id)
+            {
+                continue;
+            }
+            let line = if row.content.trim().is_empty() {
+                row.title
+            } else {
+                format!("{}: {}", row.title, row.content)
+            };
+            notes.push(truncate_chars(&line, 160));
+        }
+    }
+    Ok(notes)
 }
 
 /// Run deterministic gates + optional LLM decision. Always fail-closed.
@@ -507,6 +570,155 @@ mod tests {
         }
     }
 
+    fn memory_item(
+        character: &str,
+        user: &str,
+        kind: ene_core::MemoryKind,
+        title: &str,
+        content: &str,
+        status: ene_core::MemoryStatus,
+    ) -> ene_core::NewMemoryItem {
+        use ene_core::{
+            AffectAnnotation, MemoryConfidence, MemorySalience, MemoryScope, MemorySource,
+        };
+        ene_core::NewMemoryItem {
+            scope: if user.is_empty() {
+                MemoryScope::Character
+            } else {
+                MemoryScope::User
+            },
+            character_id: character.into(),
+            user_id: user.into(),
+            kind,
+            title: title.into(),
+            content: content.into(),
+            source: MemorySource::Conversation,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.9),
+            salience: MemorySalience::new(0.9),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_notes_load_only_the_users_standing_rules() {
+        use crate::memory_writer::test_support::InMemoryMemoryPort;
+        use ene_core::MemoryKind;
+
+        let port = InMemoryMemoryPort::default();
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "alice",
+            MemoryKind::Preference,
+            "Do not disturb",
+            "don't talk while I work",
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "alice",
+            MemoryKind::UserProfile,
+            "Night owl",
+            "quiet at night",
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+        // Character-level row without a user id still counts for the user.
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "",
+            MemoryKind::Preference,
+            "House rule",
+            "no singing in the office",
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+        // Wrong user, wrong kind, and archived rows must never surface.
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "bob",
+            MemoryKind::Preference,
+            "Bob rule",
+            "loud music only",
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "alice",
+            MemoryKind::Semantic,
+            "Fact",
+            "the sky is blue",
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+        port.insert_typed_memory(&memory_item(
+            "ene",
+            "alice",
+            MemoryKind::Preference,
+            "Old rule",
+            "call me in the morning",
+            MemoryStatus::Archived,
+        ))
+        .await
+        .unwrap();
+
+        let notes = load_proactive_memory_notes(&port, "ene", "alice", 12)
+            .await
+            .expect("load memory notes");
+        assert_eq!(notes.len(), 3);
+        assert!(notes.iter().any(|n| n.contains("don't talk while I work")));
+        assert!(notes.iter().any(|n| n.contains("quiet at night")));
+        assert!(notes.iter().any(|n| n.contains("no singing in the office")));
+        assert!(!notes.iter().any(|n| n.contains("loud music")));
+        assert!(!notes.iter().any(|n| n.contains("sky is blue")));
+        assert!(!notes.iter().any(|n| n.contains("morning")));
+    }
+
+    #[tokio::test]
+    async fn memory_notes_respect_the_cap() {
+        use crate::memory_writer::test_support::InMemoryMemoryPort;
+        use ene_core::MemoryKind;
+
+        let port = InMemoryMemoryPort::default();
+        for i in 0..4i64 {
+            port.insert_typed_memory(&memory_item(
+                "ene",
+                "alice",
+                MemoryKind::Preference,
+                &format!("rule {i}"),
+                "some standing rule",
+                MemoryStatus::Active,
+            ))
+            .await
+            .unwrap();
+        }
+        let notes = load_proactive_memory_notes(&port, "ene", "alice", 2)
+            .await
+            .expect("load memory notes");
+        assert_eq!(notes.len(), 2);
+        assert!(
+            load_proactive_memory_notes(&port, "ene", "alice", 0)
+                .await
+                .expect("zero cap is a no-op")
+                .is_empty()
+        );
+    }
+
     #[test]
     fn disabled_sources_are_omitted_from_context() {
         let mut config = base_config();
@@ -514,6 +726,7 @@ mod tests {
             conversation: false,
             activity: false,
             screen_summary: false,
+            memory: false,
             window_title_level: crate::config::WindowTitleLevel::AppOnly,
         };
         let history = vec![HistoryEntry {
@@ -535,6 +748,7 @@ mod tests {
             &history,
             &observation,
             None,
+            &[],
             &[],
             ProactiveSuppressionState {
                 seconds_since_user_input: 120,
@@ -559,6 +773,7 @@ mod tests {
             affect_summary: None,
             fatigue: None,
             commitments: vec![],
+            user_instructions: vec![],
             suppression: ProactiveSuppressionState {
                 seconds_since_user_input: 5,
                 seconds_since_proactive: 1000,
@@ -596,6 +811,7 @@ mod tests {
             affect_summary: Some("valence=0.10 arousal=0.10 dominance=0.10 fatigue=0.85".into()),
             fatigue: Some(0.85),
             commitments: vec![],
+            user_instructions: vec![],
             suppression: ProactiveSuppressionState {
                 seconds_since_user_input: 200,
                 seconds_since_proactive: 1000,
@@ -633,6 +849,7 @@ mod tests {
             affect_summary: None,
             fatigue: None,
             commitments: vec![],
+            user_instructions: vec![],
             suppression: ProactiveSuppressionState {
                 seconds_since_user_input: 200,
                 seconds_since_proactive: 1000,
@@ -673,6 +890,7 @@ mod tests {
             affect_summary: None,
             fatigue: None,
             commitments: vec![],
+            user_instructions: vec![],
             suppression: ProactiveSuppressionState {
                 seconds_since_user_input: 200,
                 seconds_since_proactive: 1000,
@@ -722,6 +940,7 @@ mod tests {
             affect_summary: None,
             fatigue: None,
             commitments: vec![],
+            user_instructions: vec![],
             suppression: ProactiveSuppressionState {
                 seconds_since_user_input: 200,
                 seconds_since_proactive: 1000,

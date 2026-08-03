@@ -233,6 +233,7 @@ async fn deferred_tool_execution_emits_completion_event() {
         runtime_directive: None,
         proactive_screen_image: None,
         generation_timeout: None,
+        proactive_topic: None,
         classifier_tx: mpsc::unbounded_channel().0,
         memory_writer_tx: mpsc::unbounded_channel().0,
         deferred_tool_tx,

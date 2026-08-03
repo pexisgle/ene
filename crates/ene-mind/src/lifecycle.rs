@@ -92,6 +92,13 @@ pub struct TurnContext<'a> {
     /// deterministic budget and force drop/trim behaviour without depending on
     /// the global AI config or a live provider.
     pub packing_budget_override: Option<usize>,
+    /// Raw topic hint from the proactive decision, used to recall memories
+    /// relevant to what the generation turn will talk about.
+    ///
+    /// `Some` only on proactive generation turns; `None` for ordinary turns
+    /// and tests. The recall is lexical-only (`Query::embedding = None`) so
+    /// the proactive path never blocks on an embedder.
+    pub proactive_topic: Option<&'a str>,
 }
 
 /// Output of pre-turn analysis and recall planning.

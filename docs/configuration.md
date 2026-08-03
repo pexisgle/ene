@@ -224,6 +224,18 @@ consistent. Set it to `1.0` to disable the gate and let the decision model weigh
 alone. The full affect state (all eight dimensions plus the mood label) is always passed
 to the decision model regardless of this threshold.
 
+Proactive decisions also consult stored memory. `mind.proactive.sources.memory` (default
+`true`) feeds the user's `Preference` / `UserProfile` memories — "don't talk while I work",
+"quiet at night" — into the decision context as `user_instructions`. These are injected
+deterministically (newest first, up to `mind.proactive.max_memory_notes`, default 12) and
+never pass through recall score competition, so a suppression condition cannot be dropped
+by a low score; the decision model is instructed to honor a matching standing rule with
+`should_speak=false`. The same setting enables topic recall during generation: the
+decision's `topic_hint` becomes a lexical-only search query (no embedding provider is
+involved), so the companion can refer to what it remembers about the topic. Setting
+`sources.memory` to `false` restores the memory-free behaviour for cost/latency-sensitive
+setups.
+
 `redacted_title` filters the title field by field. It splits on whitespace and on the
 punctuation window titles are built from (`_ - | 、 ・ 【】 「」 ｜ ：` …), so titles that
 carry no spaces — the norm in Japanese and Chinese — are still filtered per field rather

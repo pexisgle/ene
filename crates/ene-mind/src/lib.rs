@@ -141,7 +141,7 @@ pub use proactive::{
     ProactiveDecisionOutcome, ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState,
     ProactiveUrgency, ScreenSummaryStatus, build_decision_messages, build_proactive_context,
     decide_proactive_speech, decision_schema_object, evaluate_deterministic_gates,
-    parse_decision_json,
+    load_proactive_memory_notes, parse_decision_json,
 };
 /// Prompt packet section types.
 #[doc(no_inline)]

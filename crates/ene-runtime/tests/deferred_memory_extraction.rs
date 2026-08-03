@@ -154,6 +154,7 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
         runtime_directive: None,
         proactive_screen_image: None,
         generation_timeout: None,
+        proactive_topic: None,
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
