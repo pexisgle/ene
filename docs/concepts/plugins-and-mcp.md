@@ -21,6 +21,7 @@ Ene Host Application (ene-runtime)
         │     ├── ene-plugin-calc      (Calculation Tool)
         │     ├── ene-plugin-calendar  (Calendar Tool)
         │     ├── ene-plugin-fs        (Sandboxed Filesystem Tool)
+        │     ├── ene-plugin-random    (Random Generation Tool)
         │     ├── ene-plugin-utility   (Todo, Question, Timer & Notify Tool)
         │     └── ene-plugin-web       (Web Search & Scraper Tool)
         │
@@ -131,12 +132,13 @@ The in-process admission budget that serializes local engines contending on the 
 | `ene-plugin-calc` | `calc.*` | Math expression evaluation, unit/currency/color conversion | No |
 | `ene-plugin-calendar` | `calendar.*` | Local calendar with per-calendar permissions, write confirmation, free-slot search | Yes (host-service `db`) |
 | `ene-plugin-fs` | `fs.*` | Sandboxed filesystem operations with undo ledger | Yes (host-service `db`) |
+| `ene-plugin-random` | `random.*` | Random numbers, UUID v4, list picks, and hex colors | No |
 | `ene-plugin-utility` | `utility.*` | Question prompts, todo list management, time/system info, countdown timers & desktop notifications (Linux, D-Bus only) | Yes (host-service `db`) |
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
 
-All eight plugins above are included in the default `plugins.list` and start
+All ten plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.
 
 ### Filesystem tool reference (`filesystem.*`)

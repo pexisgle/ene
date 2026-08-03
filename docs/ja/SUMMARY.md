@@ -8,6 +8,7 @@
 # ガイド
 
 - [MCP サーバー設定ガイド](guide/tools/mcp-servers.md)
+- [ランダム生成ツールガイド](guide/tools/random.md)
 
 # コア概念
 

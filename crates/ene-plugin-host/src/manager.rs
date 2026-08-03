@@ -1480,6 +1480,7 @@ pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] = &[
     "calendar",
     "fs",
     "openai",
+    "random",
     "utility",
     "web",
 ];
@@ -1910,6 +1911,7 @@ mod tests {
                 "calendar",
                 "fs",
                 "openai",
+                "random",
                 "utility",
                 "web"
             ]
