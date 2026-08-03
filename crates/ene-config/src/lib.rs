@@ -40,8 +40,7 @@ pub mod store;
 
 pub use character_card::{
     AffectBaseline, CharacterAsset, CharacterCardData, CharacterCardV3, EneExtension,
-    ExpressionAffect, ExpressionDefinition, Lorebook, LorebookEntry, MacroContext,
-    PolitenessLevel,
+    ExpressionAffect, ExpressionDefinition, Lorebook, LorebookEntry, MacroContext, PolitenessLevel,
     ResolvedExpression, SpeechLength, SpeechStyleDefinition, UserPersona, expand_cbs_macros,
     expand_cbs_macros_ctx, expand_cbs_macros_with, resolve_expressions, session_pick_seed,
 };
