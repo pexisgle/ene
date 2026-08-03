@@ -2498,13 +2498,13 @@ async fn reconfigure_plugin_host_bg(
     };
 
     let old_llm_factory_names: Vec<String> = old_llm_factories.keys().cloned().collect();
-    let stale_llm_factory_names = stale_llm_factory_names(
+    let stale_llm_kinds = stale_llm_factory_names(
         &old_llm_factory_names,
         new_host
             .as_ref()
             .map(ene_plugin_host::PluginHostManager::llm_factories),
     );
-    for kind in stale_llm_factory_names {
+    for kind in stale_llm_kinds {
         if let Some(factory) = old_llm_factories.get(&kind)
             && LlmProviderRegistry::deregister_if_matches(&kind, factory)
         {

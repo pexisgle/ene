@@ -38,10 +38,10 @@ once_cell = { workspace = true }
 ene-rag = { workspace = true, features = ["tool"] }
 ene-plugin-proto = { workspace = true }
 ene-plugin-host = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 cargo-husky = { workspace = true }
-async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 tracing-subscriber = { workspace = true }
 # `test-util` gates `tokio::time::pause`/`advance` and the

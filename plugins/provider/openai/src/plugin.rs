@@ -14,6 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ene_plugin::prelude::*;
 use serde_json::{Value, json};
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::convert;
@@ -256,6 +257,7 @@ fn resolve_api_key_with_host(
 fn resolve_base_url(config: &Value) -> String {
     let host_config = PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner);
     host_config
+        .as_ref()
         .and_then(|cfg| cfg.get("base_url"))
         .or_else(|| config.get("base_url"))
         .and_then(Value::as_str)
@@ -352,12 +354,13 @@ async fn post_with_retry(
                 if response.status().is_success() {
                     return Ok(response);
                 }
+                let status = response.status().as_u16();
                 let retry_after = retry_after_secs(&response);
                 let raw = response.text().await.map_err(|e| {
                     PluginError::provider(format!("failed to read error response: {e}"))
                 })?;
                 UpstreamError::Http {
-                    status: response.status().as_u16(),
+                    status,
                     body: raw,
                     retry_after,
                 }
