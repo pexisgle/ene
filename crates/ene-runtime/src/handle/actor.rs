@@ -4249,12 +4249,12 @@ mod tests {
     /// A declaration cannot turn an arbitrary host environment variable into
     /// a credential source without an explicit host allowlist entry.
     #[cfg(any(unix, windows))]
-    #[test]
+    #[tokio::test]
     #[expect(
         clippy::undocumented_unsafe_blocks,
         reason = "test-only set_var/remove_var on a unique variable name"
     )]
-    fn vault_ignores_unallowlisted_declared_env_fallback() {
+    async fn vault_ignores_unallowlisted_declared_env_fallback() {
         unsafe { std::env::set_var("ENE_VAULT_TEST_UNALLOWLISTED_VAR", "sk-secret") };
         let config = vault_test_config(&[], &[]);
         let registry = CredentialRegistry::new();
@@ -4268,9 +4268,9 @@ mod tests {
                 }]
             })),
         );
-        let vault = build_credential_vault(&config, &registry);
+        let vault = build_credential_vault(&config, &registry, &*vault_test_persister(), None);
         unsafe { std::env::remove_var("ENE_VAULT_TEST_UNALLOWLISTED_VAR") };
-        assert!(vault.resolve("unallowlisted-key").is_err());
+        assert!(vault.resolve("unallowlisted-key").await.is_err());
     }
 
     /// Without a declared `env_fallback`, the conventional `{ID}_API_KEY`
