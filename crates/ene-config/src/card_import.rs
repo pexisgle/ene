@@ -417,8 +417,8 @@ fn charx_card_json_localized(
     let mut archive =
         ZipArchive::new(std::io::Cursor::new(bytes)).map_err(EneConfigError::CharxError)?;
     let diff_name = code.map(|code| format!("character.{code}.json"));
-    let mut card_json: Option<serde_json::Value> = None;
-    let mut diff_json: Option<LocalizedCharacterFields> = None;
+    let mut card: Option<serde_json::Value> = None;
+    let mut diff: Option<LocalizedCharacterFields> = None;
     for index in 0..archive.len() {
         let name = {
             let file = archive
@@ -455,14 +455,11 @@ fn charx_card_json_localized(
         if content.len() as u64 > MAX_CHARX_ENTRY_BYTES {
             return Err(EneConfigError::CharxTooLarge(name));
         }
-        if name == "card.json" {
-            if card_json.is_none() {
-                card_json =
-                    Some(serde_json::from_slice(&content).map_err(EneConfigError::JsonError)?);
-            }
-        } else if diff_json.is_none() {
+        if name == "card.json" && card.is_none() {
+            card = Some(serde_json::from_slice(&content).map_err(EneConfigError::JsonError)?);
+        } else if name != "card.json" && diff.is_none() {
             match serde_json::from_slice(&content) {
-                Ok(diff) => diff_json = Some(diff),
+                Ok(parsed) => diff = Some(parsed),
                 Err(e) => tracing::warn!(
                     name = %name,
                     error = %e,
@@ -470,12 +467,12 @@ fn charx_card_json_localized(
                 ),
             }
         }
-        if card_json.is_some() && (diff_name.is_none() || diff_json.is_some()) {
+        if card.is_some() && (diff_name.is_none() || diff.is_some()) {
             break;
         }
     }
-    let card_json = card_json.ok_or(EneConfigError::CharxMissingCard)?;
-    Ok((card_json, diff_json))
+    let card = card.ok_or(EneConfigError::CharxMissingCard)?;
+    Ok((card, diff))
 }
 
 /// Rejects zip entry names that could escape the extraction directory.
