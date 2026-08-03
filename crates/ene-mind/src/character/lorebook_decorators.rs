@@ -977,7 +977,8 @@ mod tests {
     fn greeting_decorator_parses_and_gates_on_active_index() {
         let (decorators, _) = parse("@@is_greeting 2\n@@@activate_only_after 4\nBody");
         assert_eq!(decorators.is_greeting, Some(2));
-        assert_eq!(decorators.activate_only_after, Some(4));
+        // The honored primary wins; the `@@@` fallback is not consulted.
+        assert_eq!(decorators.activate_only_after, None);
 
         let matching = ActivationContext {
             greeting_index: Some(2),
