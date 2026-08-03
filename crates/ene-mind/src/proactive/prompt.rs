@@ -140,23 +140,22 @@ pub(crate) fn parse_affect_summary(summary: &str) -> Option<AffectSummary> {
         let Some((key, raw)) = token.split_once('=') else {
             continue;
         };
-        match key {
-            "mood" => mood = raw.to_string(),
-            _ => {
-                let Ok(value) = raw.parse::<f64>() else {
-                    continue;
-                };
-                match key {
-                    "valence" => valence = Some(value),
-                    "arousal" => arousal = Some(value),
-                    "dominance" => dominance = Some(value),
-                    "trust" => trust = Some(value),
-                    "affinity" => affinity = Some(value),
-                    "irritation" => irritation = Some(value),
-                    "curiosity" => curiosity = Some(value),
-                    "fatigue" => fatigue = Some(value),
-                    _ => {}
-                }
+        if key == "mood" {
+            mood = raw.to_string();
+        } else {
+            let Ok(value) = raw.parse::<f64>() else {
+                continue;
+            };
+            match key {
+                "valence" => valence = Some(value),
+                "arousal" => arousal = Some(value),
+                "dominance" => dominance = Some(value),
+                "trust" => trust = Some(value),
+                "affinity" => affinity = Some(value),
+                "irritation" => irritation = Some(value),
+                "curiosity" => curiosity = Some(value),
+                "fatigue" => fatigue = Some(value),
+                _ => {}
             }
         }
     }
