@@ -1,5 +1,6 @@
 mod affect;
 mod card;
+mod characters;
 mod clear;
 mod commitments;
 mod config;
@@ -55,6 +56,7 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &affect::AffectCommand as &dyn CliCommand,
     &prompt::PromptCommand as &dyn CliCommand,
     &card::CardCommand as &dyn CliCommand,
+    &characters::CharactersCommand as &dyn CliCommand,
     &config::ConfigCommand as &dyn CliCommand,
     &history::HistoryCommand as &dyn CliCommand,
     &help::HelpCommand as &dyn CliCommand,

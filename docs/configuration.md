@@ -565,6 +565,33 @@ Ene loads character personalities and prompt templates via JSON character cards:
 }
 ```
 
+### Character resolution and discovery
+
+A character lives in a folder under `assets/characters/` and its card file is
+`character.json`:
+
+```
+assets/characters/<name>/
+  character.json
+  character_settings.json
+  model.vrm
+  motions/VRMA_01.vrma
+```
+
+- The `character` setting is a **bare name** (`"Alicia"`), resolved to
+  `assets/characters/Alicia/character.json`, or a **card path** (relative or
+  absolute, e.g. `assets/cards/ene.json`).
+- Discovery (`ene characters list`, the desktop character picker) uses the
+  same rule: a folder counts as a character only when it contains
+  `character.json`. The legacy misspelled `charactor.json` filename is no
+  longer accepted.
+- **Unset vs. missing.** An empty `character` value is a distinct error
+  ("no character selected"); it no longer silently falls back to a hardcoded
+  default. A non-empty name whose card file is absent reports the missing
+  file instead.
+- **Path validation.** `..` traversal components are rejected, since
+  character names come from third-party card distributions.
+
 ---
 
 ## 4. Schema Generation

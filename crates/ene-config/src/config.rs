@@ -876,39 +876,6 @@ pub fn generate_character_card_schema_json() -> Result<String, serde_json::Error
     serde_json::to_string_pretty(&root_schema)
 }
 
-/// Resolves a character name to a full card path.
-#[must_use]
-pub fn resolve_character_path(name: &str) -> PathBuf {
-    let assets_dir = crate::paths::assets_dir();
-    if name.trim().is_empty() {
-        assets_dir
-            .join("characters")
-            .join("Alicia")
-            .join("character.json")
-    } else if !name.contains('/') && !name.contains('\\') {
-        assets_dir
-            .join("characters")
-            .join(name)
-            .join("character.json")
-    } else {
-        PathBuf::from(name)
-    }
-}
-
-/// Loads a [`CharacterCardV3`] from a resolved path (or bare character name).
-///
-/// Host apps (`ene-cli`, `ene-desktop`) load the card via this helper (or their
-/// own I/O) and pass it to [`ene_runtime::EneHandle::open`] — the runtime does
-/// not perform character-card file I/O on the product path.
-pub fn load_character_card(
-    name_or_path: &str,
-) -> Result<crate::CharacterCardV3, crate::EneConfigError> {
-    let path = resolve_character_path(name_or_path);
-    let file_content =
-        std::fs::read_to_string(&path).map_err(crate::EneConfigError::CardReadError)?;
-    serde_json::from_str(&file_content).map_err(crate::EneConfigError::JsonError)
-}
-
 /// Serializes `card` and atomically writes it to `path`.
 ///
 /// The counterpart of [`load_character_card`]. The write goes through an

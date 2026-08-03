@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const APP_ID: &str = "dev.pexisgle.ene";
 
@@ -154,11 +154,21 @@ pub fn plugin_socket_dir() -> PathBuf {
 /// Gets the path to the character-specific settings file
 /// `assets_dir/characters/{name}/character_settings.json`
 pub fn character_settings_path(character_name: &str) -> PathBuf {
-    character_dir(character_name).join("character_settings.json")
+    character_settings_path_in(assets_dir(), character_name)
+}
+
+/// `character_settings_path` for an explicit base assets directory.
+pub(crate) fn character_settings_path_in(base: &Path, character_name: &str) -> PathBuf {
+    character_dir_in(base, character_name).join("character_settings.json")
 }
 
 /// Returns the directory containing the character card and runtime data
 /// (`assets_dir/characters/{name}/`).
 pub fn character_dir(character_name: &str) -> PathBuf {
-    assets_dir().join("characters").join(character_name)
+    character_dir_in(assets_dir(), character_name)
+}
+
+/// `character_dir` for an explicit base assets directory.
+pub(crate) fn character_dir_in(base: &Path, character_name: &str) -> PathBuf {
+    base.join("characters").join(character_name)
 }

@@ -31,9 +31,26 @@ RUST_LOG=info cargo run -p ene-cli
 | `/memory clear` | アクティブセッションの記憶をリセット |
 | `/tool list` | 登録済み IPC ツールプラグインおよび MCP サーバーを表示 |
 | `/tool call <名> <json>` | REPL から直接ツールアクションを実行 |
+| `/characters` | `assets/characters/` 配下で見つかったキャラクターを一覧表示 |
 | `/session list` | SQLite 内の過去・現在のセッション一覧を表示 |
 | `/session split` | 手動で即時にセッション境界を分割 |
 | `/quit` または `/exit` | `ene-runtime` を安全にシャットダウンして終了 |
+
+---
+
+## 非対話サブコマンド
+
+### `ene characters list`
+
+`assets/characters/` 配下で見つかったキャラクターを一覧表示します（デスクトップと同じ規則を使用: `character.json` を含むフォルダーをキャラクターとして扱います）。
+
+```bash
+# 人間向け表示
+ene characters list
+
+# 機械可読な JSON（name, folder, card/vrm/motion パス, デフォルトモーション）
+ene characters list --json
+```
 
 ---
 

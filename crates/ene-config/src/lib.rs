@@ -21,6 +21,8 @@ extern crate self as ene_config;
 pub mod character_card;
 /// Per-character configuration (position, motion, expressions).
 pub mod character_config;
+/// Character card enumeration and name-to-path resolution.
+pub mod characters;
 /// Configuration loading, schema generation, and the global config registry.
 pub mod config;
 /// Configuration-related error types.
@@ -46,12 +48,15 @@ pub use character_card::{
 };
 
 pub use character_config::{CharacterConfig, MotionCatalog, MotionEntry, MotionLayer};
+pub use characters::{
+    CharacterEntry, discover_characters, load_character_card, resolve_character_path,
+};
 pub use config::{
     ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_character_schema_json,
-    generate_schema_json, get_global_config, get_global_section, load_character_card, load_config,
-    load_config_from, load_full_config, load_full_config_from, register_config_schema,
-    register_runtime_schema, register_tool_schema, resolve_character_path, save_character_card,
-    save_full_config, update_global_config, update_section, write_schemas,
+    generate_schema_json, get_global_config, get_global_section, load_config, load_config_from,
+    load_full_config, load_full_config_from, register_config_schema, register_runtime_schema,
+    register_tool_schema, save_character_card, save_full_config, update_global_config,
+    update_section, write_schemas,
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;

@@ -14,7 +14,7 @@ use ene_runtime::{
 };
 use serde::Serialize;
 
-use crate::cli::{Command, MemoryAction, SessionAction, StoreAction, ToolAction};
+use crate::cli::{CharactersAction, Command, MemoryAction, SessionAction, StoreAction, ToolAction};
 use crate::context::AppContext;
 use crate::output::{
     self, EXIT_OK, EXIT_RUNTIME, ErrorCode, OutputError, OutputFormat, PerfCue, StreamEvent,
@@ -40,6 +40,7 @@ pub async fn execute(cmd: &Command, ctx: &mut AppContext) -> i32 {
         }
         Command::Tool { action, json } => tool_command(ctx, action, *json).await,
         Command::Session { action, json } => session_command(ctx, action, *json).await,
+        Command::Characters { action, json } => characters_command(ctx, action, *json),
         Command::Memory { action, json } => memory_command(ctx, action, *json).await,
         Command::Doctor { json } => doctor_command(ctx, *json).await,
         Command::Store { action, json } => store_command(ctx, action, *json).await,
@@ -60,6 +61,7 @@ pub async fn execute(cmd: &Command, ctx: &mut AppContext) -> i32 {
                 }
                 Command::Tool { json, .. }
                 | Command::Session { json, .. }
+                | Command::Characters { json, .. }
                 | Command::Memory { json, .. }
                 | Command::Doctor { json }
                 | Command::Store { json, .. } => {
@@ -635,6 +637,36 @@ fn print_session_search(matches: &[(String, ene_runtime::PublicExportedMessage)]
     }
     for (session_id, msg) in matches {
         println!("[{session_id}] {}: {}", msg.role, msg.content);
+    }
+}
+
+// ── characters ──────────────────────────────────────────────────────────────
+
+fn characters_command(
+    _ctx: &mut AppContext,
+    action: &CharactersAction,
+    json: bool,
+) -> Result<i32, OutputError> {
+    match action {
+        CharactersAction::List => {
+            let characters = ene_config::discover_characters(ene_config::assets_dir());
+            if json {
+                output::print_json(&characters)?;
+            } else {
+                print_character_list(&characters);
+            }
+            Ok(EXIT_OK)
+        }
+    }
+}
+
+fn print_character_list(characters: &[ene_config::CharacterEntry]) {
+    if characters.is_empty() {
+        println!("No characters found under assets/characters/.");
+        return;
+    }
+    for entry in characters {
+        println!("- {} ({})", entry.name, entry.card_path);
     }
 }
 
