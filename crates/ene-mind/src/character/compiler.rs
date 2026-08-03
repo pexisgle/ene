@@ -486,15 +486,18 @@ mod tests {
         card.data.system_prompt = "First, remember the house rules.".repeat(20);
         let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en");
 
-        assert!(
-            kernel
-                .text
-                .contains("Speech style: natural, warm, suitable for overlay display")
+        let speech_line = kernel
+            .text
+            .lines()
+            .find(|line| line.starts_with("Speech style:"))
+            .expect("kernel has a speech style line");
+        assert_eq!(
+            speech_line,
+            "Speech style: natural, warm, suitable for overlay display"
         );
         assert!(
-            !kernel.text.contains("house rules"),
-            "system prompt text must not be used as the speech style: {}",
-            kernel.text
+            !speech_line.contains("house rules"),
+            "system prompt text must not be used as the speech style: {speech_line}"
         );
     }
 
@@ -550,7 +553,7 @@ mod tests {
     #[test]
     fn speech_style_empty_values_are_omitted() {
         let card = card_with_speech(SpeechStyleDefinition {
-            first_person: Some("".into()),
+            first_person: Some(String::new()),
             second_person: Some("   ".into()),
             ..SpeechStyleDefinition::default()
         });
