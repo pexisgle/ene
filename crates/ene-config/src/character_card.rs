@@ -324,6 +324,26 @@ fn vrm_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     serde_json::from_value(value).unwrap_or(schema)
 }
 
+/// Affect point an expression maps to, used for affect-to-expression resolution.
+///
+/// A card author places each expression in affect space; the runtime picks the
+/// nearest annotated expression to the current affect state (PAD nearest
+/// neighbour over `valence` / `arousal` / `irritation` / `fatigue`). Missing
+/// dimensions default to `0.0`, so partial annotations are allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "crate::schemars")]
+pub struct ExpressionAffect {
+    /// Pleasure–displeasure (-1.0 ..= 1.0).
+    pub valence: f32,
+    /// Excitement–calm (-1.0 ..= 1.0).
+    pub arousal: f32,
+    /// Irritation / annoyance level (0.0 ..= 1.0).
+    pub irritation: f32,
+    /// Fatigue / energy depletion (0.0 ..= 1.0).
+    pub fatigue: f32,
+}
+
 /// A single expression override in `extensions.expressions`.
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "crate::serde")]
@@ -341,6 +361,10 @@ pub struct ExpressionDefinition {
     /// Whether this expression is enabled. If false, it is removed from the active set.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Affect point used for affect-to-expression mapping. Expressions without
+    /// an annotation are never selected by the affect path.
+    #[serde(default)]
+    pub affect: Option<ExpressionAffect>,
 }
 
 /// A fully resolved expression ready for use at runtime.
@@ -352,30 +376,84 @@ pub struct ResolvedExpression {
     pub description: String,
     /// VRM blend-shape weights: `expression_name` → weight.
     pub vrm: HashMap<String, f32>,
+    /// Affect point used for affect-to-expression mapping.
+    pub affect: Option<ExpressionAffect>,
 }
 
 /// Built-in default expressions. Used when the card has no `extensions.expressions`,
 /// and as the base that card overrides are merged on top of.
+///
+/// The affect annotations mirror the legacy threshold mapping (angry≈irritated,
+/// relaxed≈fatigued, happy≈positive valence + arousal, sad≈negative valence,
+/// surprised≈high arousal) so default cards keep their previous behaviour
+/// without hardcoding expression names in the mind crate.
 fn default_expressions() -> &'static [ResolvedExpression] {
     use std::sync::LazyLock;
     static DEFAULT: LazyLock<Vec<ResolvedExpression>> = LazyLock::new(|| {
         [
-            ("neutral", "Default resting expression", "neutral"),
-            ("happy", "Feeling joyful, excited, or pleased", "happy"),
-            ("sad", "Feeling down, disappointed, or sorrowful", "sad"),
-            ("angry", "Feeling frustrated or upset", "angry"),
-            ("relaxed", "Feeling calm, content, or at ease", "relaxed"),
+            ("neutral", "Default resting expression", "neutral", None),
+            (
+                "happy",
+                "Feeling joyful, excited, or pleased",
+                "happy",
+                Some(ExpressionAffect {
+                    valence: 0.6,
+                    arousal: 0.3,
+                    irritation: 0.0,
+                    fatigue: 0.0,
+                }),
+            ),
+            (
+                "sad",
+                "Feeling down, disappointed, or sorrowful",
+                "sad",
+                Some(ExpressionAffect {
+                    valence: -0.5,
+                    arousal: 0.0,
+                    irritation: 0.0,
+                    fatigue: 0.0,
+                }),
+            ),
+            (
+                "angry",
+                "Feeling frustrated or upset",
+                "angry",
+                Some(ExpressionAffect {
+                    valence: -0.2,
+                    arousal: 0.3,
+                    irritation: 0.7,
+                    fatigue: 0.0,
+                }),
+            ),
+            (
+                "relaxed",
+                "Feeling calm, content, or at ease",
+                "relaxed",
+                Some(ExpressionAffect {
+                    valence: 0.2,
+                    arousal: -0.3,
+                    irritation: 0.0,
+                    fatigue: 0.7,
+                }),
+            ),
             (
                 "surprised",
                 "Feeling shocked or caught off guard",
                 "surprised",
+                Some(ExpressionAffect {
+                    valence: 0.1,
+                    arousal: 0.6,
+                    irritation: 0.0,
+                    fatigue: 0.0,
+                }),
             ),
         ]
         .into_iter()
-        .map(|(name, desc, vrm_key)| ResolvedExpression {
+        .map(|(name, desc, vrm_key, affect)| ResolvedExpression {
             name: name.to_string(),
             description: desc.to_string(),
             vrm: std::iter::once((vrm_key.to_string(), 1.0f32)).collect(),
+            affect,
         })
         .collect()
     });
@@ -402,6 +480,9 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
             if !ovr.vrm.is_empty() {
                 existing.vrm.clone_from(&ovr.vrm);
             }
+            if ovr.affect.is_some() {
+                existing.affect = ovr.affect;
+            }
         } else {
             let vrm = if ovr.vrm.is_empty() {
                 std::iter::once((ovr.name.clone(), 1.0f32)).collect()
@@ -414,6 +495,7 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
                     name: ovr.name.clone(),
                     description: ovr.description.clone(),
                     vrm,
+                    affect: ovr.affect,
                 },
             );
         }
@@ -463,6 +545,10 @@ impl CharacterCardData {
 }
 
 /// Default expressions for the schema.
+///
+/// Mirrors [`default_expressions`] (including affect annotations) so cards
+/// written against the schema behave identically to cards without
+/// `extensions.expressions`.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "schemars default factory must return Option to match field type"
@@ -474,36 +560,67 @@ fn default_ene_expressions() -> Option<Vec<ExpressionDefinition>> {
             description: "Default resting expression".to_string(),
             vrm: std::iter::once(("neutral".to_string(), 1.0)).collect(),
             enabled: true,
+            affect: None,
         },
         ExpressionDefinition {
             name: "happy".to_string(),
             description: "Feeling joyful, excited, or pleased".to_string(),
             vrm: std::iter::once(("happy".to_string(), 1.0)).collect(),
             enabled: true,
+            affect: Some(ExpressionAffect {
+                valence: 0.6,
+                arousal: 0.3,
+                irritation: 0.0,
+                fatigue: 0.0,
+            }),
         },
         ExpressionDefinition {
             name: "sad".to_string(),
             description: "Feeling down, disappointed, or sorrowful".to_string(),
             vrm: std::iter::once(("sad".to_string(), 1.0)).collect(),
             enabled: true,
+            affect: Some(ExpressionAffect {
+                valence: -0.5,
+                arousal: 0.0,
+                irritation: 0.0,
+                fatigue: 0.0,
+            }),
         },
         ExpressionDefinition {
             name: "angry".to_string(),
             description: "Feeling frustrated or upset".to_string(),
             vrm: std::iter::once(("angry".to_string(), 1.0)).collect(),
             enabled: true,
+            affect: Some(ExpressionAffect {
+                valence: -0.2,
+                arousal: 0.3,
+                irritation: 0.7,
+                fatigue: 0.0,
+            }),
         },
         ExpressionDefinition {
             name: "relaxed".to_string(),
             description: "Feeling calm, content, or at ease".to_string(),
             vrm: std::iter::once(("relaxed".to_string(), 1.0)).collect(),
             enabled: true,
+            affect: Some(ExpressionAffect {
+                valence: 0.2,
+                arousal: -0.3,
+                irritation: 0.0,
+                fatigue: 0.7,
+            }),
         },
         ExpressionDefinition {
             name: "surprised".to_string(),
             description: "Feeling shocked or caught off guard".to_string(),
             vrm: std::iter::once(("surprised".to_string(), 1.0)).collect(),
             enabled: true,
+            affect: Some(ExpressionAffect {
+                valence: 0.1,
+                arousal: 0.6,
+                irritation: 0.0,
+                fatigue: 0.0,
+            }),
         },
     ])
 }
