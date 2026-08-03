@@ -36,9 +36,10 @@ impl CapabilityRegistry {
     ///
     /// Rejected entries are warned about individually and dropped — one bad
     /// declaration never affects the rest, and the plugin itself is never
-    /// involved. A `None` schema registers nothing.
+    /// involved. A `None` schema clears any previous entry for `plugin`.
     pub fn register_from_schema(&self, plugin: &str, schema: Option<&Value>) {
         let Some(schema) = schema else {
+            self.register(plugin, Vec::new(), Vec::new());
             return;
         };
         let parse = parse_capabilities(schema);
@@ -227,6 +228,25 @@ mod tests {
                 .providers(&CapabilityId::try_new("anything").unwrap())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn none_schema_clears_previous_declarations() {
+        let registry = CapabilityRegistry::new();
+        let schema = json_capabilities(&["tts/synthesize@1"], &["g2p/ja@^1"]);
+        registry.register_from_schema("mock", Some(&schema));
+        let tts = CapabilityId::try_new("tts/synthesize").unwrap();
+        assert_eq!(registry.providers(&tts).len(), 1);
+        assert_eq!(
+            registry.resolve(&tts, &"^1".parse().unwrap()),
+            Some("mock".to_string())
+        );
+        assert_eq!(registry.unmet_requires("mock").len(), 1);
+
+        registry.register_from_schema("mock", None);
+        assert!(registry.providers(&tts).is_empty());
+        assert_eq!(registry.resolve(&tts, &"^1".parse().unwrap()), None);
+        assert!(registry.unmet_requires("mock").is_empty());
     }
 
     #[test]
