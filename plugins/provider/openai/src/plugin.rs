@@ -96,6 +96,11 @@ impl ene_plugin::ConfigurablePlugin for OpenAiPlugin {
                 "base_url": {
                     "type": "string",
                     "description": "API base URL override (defaults to https://api.openai.com/v1)"
+                },
+                "context_window": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Advertised context window override in tokens"
                 }
             }
         }))
@@ -573,7 +578,19 @@ async fn stream_sse_response(
 #[async_trait]
 impl LlmPlugin for OpenAiPlugin {
     fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
-        vec![Self::llm_spec()]
+        let mut spec = Self::llm_spec();
+        let configured_window = PLUGIN_CONFIG
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|config| config.get("context_window"))
+            .and_then(Value::as_u64)
+            .and_then(|window| u32::try_from(window).ok())
+            .filter(|window| *window > 0);
+        if let Some(window) = configured_window {
+            spec.context_window = Some(window);
+        }
+        vec![spec]
     }
 
     async fn create_chat_stream(
@@ -1010,6 +1027,15 @@ mod tests {
         assert_eq!(provider.concurrency.max_in_flight, 8);
         assert_eq!(provider.concurrency.queue_depth, 16);
         assert_eq!(provider.context_window, Some(128_000));
+    }
+
+    #[test]
+    fn configured_context_window_overrides_static_advertisement() {
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let plugin = OpenAiPlugin;
+        plugin.set_config(&json!({"context_window": 1_000_000}));
+        assert_eq!(plugin.llm_capabilities()[0].context_window, Some(1_000_000));
+        plugin.set_config(&json!({}));
     }
 
     #[test]
