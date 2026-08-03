@@ -222,3 +222,105 @@ impl ToolProvider for UtilityToolProvider {
         self.inner.set_sandbox(sandbox);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider() -> UtilityToolProvider {
+        UtilityToolProvider::new()
+    }
+
+    #[tokio::test]
+    async fn deferred_dispatch_starts_polls_and_cancels_timer() {
+        let provider = provider();
+        let outcome = provider
+            .call_tool_deferred(
+                action::TimerStartAction::TOOL_NAME,
+                r#"{"name":"pasta","seconds":300}"#,
+            )
+            .await
+            .unwrap();
+        let DeferredOutcome::Deferred { task_id } = outcome else {
+            unreachable!("timer_start is background-capable");
+        };
+
+        assert_eq!(provider.poll_deferred(&task_id), DeferredStatus::Pending);
+        provider.cancel_deferred(&task_id);
+        assert_eq!(provider.poll_deferred(&task_id), DeferredStatus::Cancelled);
+        assert_eq!(provider.poll_deferred(&task_id), DeferredStatus::Unknown);
+    }
+
+    #[tokio::test]
+    async fn deferred_dispatch_accepts_notify() {
+        let provider = provider();
+        let outcome = provider
+            .call_tool_deferred(
+                action::NotifySendAction::TOOL_NAME,
+                r#"{"title":"Heads up","message":"Done"}"#,
+            )
+            .await
+            .unwrap();
+        let DeferredOutcome::Deferred { task_id } = outcome else {
+            unreachable!("notify_send is background-capable");
+        };
+        // Best-effort abort: keeps a real notification from popping up on
+        // developer machines while exercising `cancel_deferred`.
+        provider.cancel_deferred(&task_id);
+    }
+
+    #[tokio::test]
+    async fn deferred_dispatch_falls_back_to_sync() {
+        let provider = provider();
+        let outcome = provider
+            .call_tool_deferred(action::TimerStopAction::TOOL_NAME, r"{}")
+            .await
+            .unwrap();
+        let DeferredOutcome::Sync(result) = outcome else {
+            unreachable!("timer_stop is not background-capable");
+        };
+        assert!(
+            result.text_for_llm().contains("\"running\""),
+            "sync fallback must run the action, got: {}",
+            result.text_for_llm()
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_dispatch_unknown_tool_is_not_found() {
+        let provider = provider();
+        let err = provider
+            .call_tool_deferred("utility.nope", "{}")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn timer_stop_via_execute_uses_shared_registry() {
+        // `TimerStopAction` carries the registry in a `#[tool(skip)]` field
+        // that `execute()` re-copies from `self` after deserialization; the
+        // serde default would otherwise fall back to a fresh empty registry
+        // and silently report every timer as not found.
+        let provider = provider();
+        let outcome = provider
+            .call_tool_deferred(
+                action::TimerStartAction::TOOL_NAME,
+                r#"{"name":"pasta","seconds":300}"#,
+            )
+            .await
+            .unwrap();
+        let DeferredOutcome::Deferred { .. } = outcome else {
+            unreachable!("timer_start is background-capable");
+        };
+
+        let result = provider
+            .call_tool(action::TimerStopAction::TOOL_NAME, r#"{"name":"pasta"}"#)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("\"status\": \"stopped\""),
+            "timer_stop must see the timer started through the provider, got: {result}"
+        );
+    }
+}

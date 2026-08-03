@@ -17,11 +17,25 @@ use uuid::Uuid;
 /// Sends a desktop notification, returning a human-readable error on failure.
 ///
 /// Injectable so tests can exercise the registry without a D-Bus session.
+///
+/// Notification copy ("Timer finished: …" etc.) is English-hardcoded for
+/// now — plugin binaries have no i18n infrastructure, so the strings a
+/// user actually sees cannot be localized yet.
 type Notifier = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
 
 /// Maximum number of finished-timer names retained for status lookups
 /// (oldest dropped first).
 const MAX_FINISHED_TIMERS: usize = 64;
+
+/// Maximum number of unconsumed terminal statuses retained for
+/// `poll_deferred` (oldest dropped first).
+///
+/// The host stops polling 60 s after a task starts
+/// (`tools.deferred_max_polls`), so timers that outlive that budget leave
+/// their final status unconsumed; without a bound these would accumulate
+/// for the whole session. Eviction is safe: an evicted entry would never
+/// have been polled.
+const MAX_TERMINAL_STATUSES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskKind {
@@ -45,6 +59,8 @@ struct State {
     /// `task_id` → (name, terminal status) awaiting one `poll_deferred`.
     /// Terminal statuses are reported once, then forgotten.
     terminal: HashMap<String, (String, DeferredStatus)>,
+    /// `task_id`s in `terminal` in insertion order, for oldest-first eviction.
+    terminal_order: VecDeque<String>,
     /// Names of successfully finished timers, oldest first.
     finished: VecDeque<(String, Instant)>,
 }
@@ -67,6 +83,29 @@ pub enum TimerStopOutcome {
         /// Name that matched nothing.
         name: String,
     },
+}
+
+/// Records a terminal status for one `poll_deferred`, evicting the oldest
+/// unconsumed entry when the bound is exceeded.
+fn insert_terminal(state: &mut State, task_id: String, name: String, status: DeferredStatus) {
+    state.terminal.insert(task_id.clone(), (name, status));
+    state.terminal_order.push_back(task_id);
+    if state.terminal_order.len() > MAX_TERMINAL_STATUSES
+        && let Some(evicted) = state.terminal_order.pop_front()
+    {
+        state.terminal.remove(&evicted);
+    }
+}
+
+/// Extracts a human-readable message from a `catch_unwind` payload.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 /// A running timer as reported by [`TaskRegistry::list`].
@@ -117,6 +156,16 @@ impl TaskRegistry {
         }
     }
 
+    /// Runs the notifier, converting a panicking notifier into an error so
+    /// the task still reaches a terminal state instead of staying `Pending`
+    /// forever.
+    fn notify(&self, summary: &str, body: &str) -> Result<(), String> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.notifier)(summary, body)
+        }))
+        .unwrap_or_else(|payload| Err(format!("notifier panicked: {}", panic_message(&payload))))
+    }
+
     /// Starts a countdown timer that fires a desktop notification after
     /// `duration`, and returns its `task_id`.
     ///
@@ -152,7 +201,7 @@ impl TaskRegistry {
         let task_id_task = task_id.clone();
         let handle = tokio::spawn(async move {
             tokio::time::sleep(duration).await;
-            match (registry.notifier)(
+            match registry.notify(
                 &format!("Timer finished: {task_name}"),
                 &format!("{seconds} seconds elapsed."),
             ) {
@@ -170,9 +219,12 @@ impl TaskRegistry {
             && let Some(old) = state.running.remove(&old_id)
         {
             old.handle.abort();
-            state
-                .terminal
-                .insert(old_id, (name_owned.clone(), DeferredStatus::Cancelled));
+            insert_terminal(
+                &mut state,
+                old_id,
+                name_owned.clone(),
+                DeferredStatus::Cancelled,
+            );
         }
         state.running.insert(
             task_id.clone(),
@@ -202,7 +254,7 @@ impl TaskRegistry {
         let task_title = title_owned.clone();
         let task_id_task = task_id.clone();
         let handle = tokio::spawn(async move {
-            match (registry.notifier)(&task_title, &body_owned) {
+            match registry.notify(&task_title, &body_owned) {
                 Ok(()) => registry.complete_notify(
                     task_id_task,
                     task_title.clone(),
@@ -231,9 +283,12 @@ impl TaskRegistry {
             && let Some(task) = state.running.remove(&task_id)
         {
             task.handle.abort();
-            state
-                .terminal
-                .insert(task_id, (name.to_string(), DeferredStatus::Cancelled));
+            insert_terminal(
+                &mut state,
+                task_id,
+                name.to_string(),
+                DeferredStatus::Cancelled,
+            );
             return TimerStopOutcome::Stopped {
                 name: name.to_string(),
             };
@@ -264,9 +319,12 @@ impl TaskRegistry {
         {
             state.timer_names.remove(&task.name);
         }
-        state
-            .terminal
-            .insert(task_id.to_string(), (task.name, DeferredStatus::Cancelled));
+        insert_terminal(
+            &mut state,
+            task_id.to_string(),
+            task.name,
+            DeferredStatus::Cancelled,
+        );
         true
     }
 
@@ -300,6 +358,7 @@ impl TaskRegistry {
     pub fn poll(&self, task_id: &str) -> DeferredStatus {
         let mut state = self.state.lock();
         if let Some((_, status)) = state.terminal.remove(task_id) {
+            state.terminal_order.retain(|id| id != task_id);
             return status;
         }
         if state.running.contains_key(task_id) {
@@ -322,14 +381,13 @@ impl TaskRegistry {
         if state.finished.len() > MAX_FINISHED_TIMERS {
             state.finished.pop_front();
         }
-        state.terminal.insert(
+        insert_terminal(
+            &mut state,
             task_id,
-            (
-                name,
-                DeferredStatus::Completed {
-                    result: ToolResult::text(result),
-                },
-            ),
+            name,
+            DeferredStatus::Completed {
+                result: ToolResult::text(result),
+            },
         );
     }
 
@@ -338,14 +396,13 @@ impl TaskRegistry {
         if state.running.remove(&task_id).is_none() {
             return;
         }
-        state.terminal.insert(
+        insert_terminal(
+            &mut state,
             task_id,
-            (
-                name,
-                DeferredStatus::Completed {
-                    result: ToolResult::text(result),
-                },
-            ),
+            name,
+            DeferredStatus::Completed {
+                result: ToolResult::text(result),
+            },
         );
     }
 
@@ -357,9 +414,7 @@ impl TaskRegistry {
         if state.timer_names.get(&name) == Some(&task_id) {
             state.timer_names.remove(&name);
         }
-        state
-            .terminal
-            .insert(task_id, (name, DeferredStatus::Failed { error }));
+        insert_terminal(&mut state, task_id, name, DeferredStatus::Failed { error });
     }
 }
 
@@ -557,6 +612,90 @@ mod tests {
         }
         let (_running, finished) = registry.list();
         assert_eq!(finished.len(), MAX_FINISHED_TIMERS);
+    }
+
+    #[tokio::test]
+    async fn terminal_statuses_are_bounded() {
+        let registry = registry_with(ok_notifier());
+        let mut task_ids = Vec::new();
+        for i in 0..(MAX_TERMINAL_STATUSES + 10) {
+            let task_id = Uuid::new_v4().to_string();
+            let handle = tokio::spawn(async {});
+            registry.state.lock().running.insert(
+                task_id.clone(),
+                RunningTask {
+                    name: format!("t{i}"),
+                    kind: TaskKind::Timer,
+                    ends_at: None,
+                    handle,
+                },
+            );
+            registry.complete_timer(task_id.clone(), format!("t{i}"), "done".to_string());
+            task_ids.push(task_id);
+        }
+        {
+            let state = registry.state.lock();
+            assert_eq!(state.terminal.len(), MAX_TERMINAL_STATUSES);
+            assert_eq!(state.terminal_order.len(), MAX_TERMINAL_STATUSES);
+        }
+        // The ten oldest statuses were evicted; the newest is still pollable.
+        assert_eq!(
+            registry.poll(&task_ids[0]),
+            DeferredStatus::Unknown,
+            "oldest terminal status must be evicted"
+        );
+        assert!(
+            matches!(
+                registry.poll(&task_ids[MAX_TERMINAL_STATUSES + 9]),
+                DeferredStatus::Completed { .. }
+            ),
+            "newest terminal status must survive"
+        );
+        assert_eq!(
+            registry.state.lock().terminal.len(),
+            MAX_TERMINAL_STATUSES - 1
+        );
+    }
+
+    fn panicking_notifier() -> impl Fn(&str, &str) -> Result<(), String> + Send + Sync + 'static {
+        // `unwrap` on a `None` panics without using the `panic!` macro,
+        // which the workspace lints reject even in test code.
+        |_, _| {
+            "".chars().next().unwrap();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn notifier_panic_reports_failed() {
+        let registry = registry_with(panicking_notifier());
+        let task_id = registry.start_notify("Oops", "x").unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            matches!(
+                registry.poll(&task_id),
+                DeferredStatus::Failed { error }
+                    if error.contains("notifier panicked")
+            ),
+            "notifier panic must surface as Failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn notifier_panic_on_timer_reports_failed() {
+        let registry = registry_with(panicking_notifier());
+        let task_id = registry
+            .start_timer("x", Duration::from_millis(20))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            matches!(
+                registry.poll(&task_id),
+                DeferredStatus::Failed { error }
+                    if error.contains("notifier panicked")
+            ),
+            "notifier panic must surface as Failed"
+        );
     }
 
     #[tokio::test]
