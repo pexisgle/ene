@@ -516,7 +516,7 @@ fn sanitize_extension(ext: &str) -> Option<String> {
 }
 
 fn extension_from_media_type(media_type: &str) -> Option<String> {
-    let suffix = media_type.split(';').next()?.split('/').last()?;
+    let suffix = media_type.split(';').next()?.split('/').next_back()?;
     sanitize_extension(suffix)
 }
 

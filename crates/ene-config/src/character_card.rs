@@ -11,11 +11,21 @@ use std::collections::HashMap;
 /// [Character Card Spec V3](https://github.com/kwaroran/character-card-spec-v3).
 pub struct CharacterCardV3 {
     /// Spec identifier (e.g. `"chara_card_v3"`).
+    #[serde(default = "default_spec")]
     pub spec: String,
     /// Spec version (e.g. `"3.0"`).
+    #[serde(default = "default_spec_version")]
     pub spec_version: String,
     /// The card's data payload.
     pub data: CharacterCardData,
+}
+
+fn default_spec() -> String {
+    "chara_card_v3".to_string()
+}
+
+fn default_spec_version() -> String {
+    "3.0".to_string()
 }
 
 impl Default for CharacterCardV3 {
@@ -143,11 +153,10 @@ where
 {
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
     match value {
-        None => Ok(None),
         Some(serde_json::Value::Object(map)) => {
             Ok(serde_json::from_value(serde_json::Value::Object(map)).ok())
         }
-        Some(_) => Ok(None),
+        _ => Ok(None),
     }
 }
 
@@ -181,8 +190,7 @@ impl schemars::JsonSchema for Extensions {
 /// A reference to an external asset (VRM model, VRMA animation, etc.).
 pub struct CharacterAsset {
     /// The type of asset (e.g. `"vrm"`, `"vrma"`, `"png"`).
-    #[serde(default)]
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type")]
     pub asset_type: String,
     /// URI pointing to the asset file.
     #[serde(default)]

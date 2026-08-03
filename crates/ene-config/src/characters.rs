@@ -312,13 +312,12 @@ fn scan_assets(card_dir: &Path, folder: &str, extension: &str) -> Vec<String> {
                 && path
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+                && let Ok(relative) = path.strip_prefix(card_dir)
             {
-                if let Ok(relative) = path.strip_prefix(card_dir) {
-                    found.push(format!(
-                        "characters/{folder}/{}",
-                        relative.to_string_lossy()
-                    ));
-                }
+                found.push(format!(
+                    "characters/{folder}/{}",
+                    relative.to_string_lossy()
+                ));
             }
         }
     }

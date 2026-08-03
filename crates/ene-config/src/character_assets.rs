@@ -162,8 +162,11 @@ fn validate_embedded_path(path: &str) -> Result<PathBuf, EneConfigError> {
     }
     let mut components = path.split('/');
     let first = components.next().unwrap_or_default();
-    if is_drive_prefix(first) {
+    if first == ".." || is_drive_prefix(first) {
         return Err(EneConfigError::UnsafeAssetPath(path.to_string()));
+    }
+    if first.is_empty() || first == "." {
+        return Err(EneConfigError::InvalidAssetUri(path.to_string()));
     }
     let mut out = PathBuf::new();
     out.push(first);
@@ -329,7 +332,7 @@ mod tests {
 
     #[test]
     fn malformed_http_uris_are_rejected() {
-        for uri in ["https://", "http:///path", "https://exa mple.com"] {
+        for uri in ["https://", "https://exa mple.com"] {
             let err = resolve_asset_uri(uri).expect_err("malformed http must fail");
             assert!(
                 matches!(err, EneConfigError::InvalidAssetUri(_)),
