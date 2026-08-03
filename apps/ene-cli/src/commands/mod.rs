@@ -7,6 +7,7 @@ mod config;
 mod doctor;
 mod help;
 mod history;
+mod import;
 mod memory;
 mod permissions;
 mod prompt;
@@ -57,6 +58,7 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &prompt::PromptCommand as &dyn CliCommand,
     &card::CardCommand as &dyn CliCommand,
     &characters::CharactersCommand as &dyn CliCommand,
+    &import::ImportCommand as &dyn CliCommand,
     &config::ConfigCommand as &dyn CliCommand,
     &history::HistoryCommand as &dyn CliCommand,
     &help::HelpCommand as &dyn CliCommand,

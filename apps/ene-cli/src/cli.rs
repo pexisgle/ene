@@ -176,6 +176,11 @@ pub enum SessionAction {
 pub enum CharactersAction {
     /// List discovered characters.
     List,
+    /// Import a character card (PNG or CHARX) into the characters directory.
+    Import {
+        /// Path to the card file.
+        path: PathBuf,
+    },
 }
 
 /// `memory` subcommands.
