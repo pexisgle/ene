@@ -19,7 +19,7 @@ Ene Host Application (ene-runtime)
         │     ├── ene-plugin-app       (GUI Launcher Tool)
         │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
         │     ├── ene-plugin-fs        (Sandboxed Filesystem Tool)
-        │     ├── ene-plugin-utility   (Calculator & Todo Tool)
+        │     ├── ene-plugin-utility   (Todo, Question, Timer & Notify Tool)
         │     └── ene-plugin-web       (Web Search & Scraper Tool)
         │
         └── Model Context Protocol (MCP) Bridge (ene-plugin-host)
@@ -126,7 +126,7 @@ The in-process admission budget that serializes local engines contending on the 
 | `ene-plugin-app` | `app.*` | System application launcher & window control | No |
 | `ene-plugin-browser` | `browser.*` | Headless Chrome/CDP web browser automation | Yes (Session store) |
 | `ene-plugin-fs` | `fs.*` | Sandboxed filesystem operations with undo ledger | Yes (host-service `db`) |
-| `ene-plugin-utility` | `utility.*` | Calculator, datetime, active todo list manager | Yes (host-service `db`) |
+| `ene-plugin-utility` | `utility.*` | Question prompts, todo list management, time/system info, countdown timers & desktop notifications | Yes (host-service `db`) |
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
@@ -559,3 +559,29 @@ async fn main() {
     }
 }
 ```
+
+### Deferred (background) execution
+
+`#[derive(ToolAction)]` actions are synchronous request–response tools.
+Tools that must return immediately and deliver their result later — a
+countdown timer that fires a desktop notification, or a notification send —
+advertise `background_capable` in the `#[tool(...)]` attribute. The host
+then invokes them through the deferred IPC path (`call_tool_deferred` →
+`task_id` → `poll_deferred` until a terminal status), so the LLM turn is
+not blocked.
+
+`ActionSetProvider` intentionally does **not** implement the deferred
+methods: task spawning, polling state, and cancellation are specific to
+each binary's concurrency model. A plugin that needs background tools
+implements `ToolProvider` manually, delegates the synchronous surface to
+an inner `ActionSetProvider`, and overrides `call_tool_deferred`,
+`poll_deferred`, and `cancel_deferred`. See `plugins/tool/utility`
+(`TaskRegistry`, `TimerStartAction`, `NotifySendAction`) for a working
+example.
+
+On the host side a deferred task is polled at 100 ms intervals for at most
+`tools.deferred_max_polls` polls (default 600 ≈ 60 s). Work that outlives
+that budget still runs — the timer keeps counting down and its notification
+still fires — but no completion event is delivered to the LLM. Late
+outcomes can be checked through the tool's own status surface (e.g.
+`utility.timer_stop` with no name lists running and finished timers).

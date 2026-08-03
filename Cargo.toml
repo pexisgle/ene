@@ -68,6 +68,7 @@ quick-xml = { version = "0.41", features = ["serialize"] }
 url = "2"
 
 # ── IPC / Tool System ──
+notify-rust = "4.11"
 proc-macro2 = "1"
 quote = "1"
 rmcp = { version = "2", features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }

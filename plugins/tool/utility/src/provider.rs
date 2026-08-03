@@ -1,8 +1,12 @@
 use crate::action;
+use crate::task_registry::TaskRegistry;
 use crate::todo_store::TodoStore;
 use async_trait::async_trait;
 use ene_plugin::{ActionSetProvider, ToolAction};
-use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
+use ene_plugin_proto::{
+    DeferredOutcome, DeferredStatus, SandboxConfigData, ToolError, ToolProvider, ToolResult,
+    ToolSpec,
+};
 use std::sync::Arc;
 
 /// Shared state for the todo actions.
@@ -109,8 +113,15 @@ impl Default for UtilityState {
 /// generically, and the two utility-specific pieces of `ToolProvider`
 /// state — session ID and the DB sandbox socket/token — are threaded into
 /// `UtilityState` via hooks instead of a hand-written `ToolProvider` impl.
+///
+/// Deferred (background) execution is the exception: [`ActionSetProvider`]
+/// deliberately leaves `call_tool_deferred`/`poll_deferred`/`cancel_deferred`
+/// at their synchronous defaults (see its module docs), so this provider
+/// overrides the three deferred methods to dispatch `utility.timer_start`
+/// and `utility.notify_send` onto the shared [`TaskRegistry`].
 pub struct UtilityToolProvider {
     inner: ActionSetProvider,
+    tasks: Arc<TaskRegistry>,
 }
 
 impl UtilityToolProvider {
@@ -118,6 +129,7 @@ impl UtilityToolProvider {
     #[must_use]
     pub fn new() -> Self {
         let state = Arc::new(UtilityState::new());
+        let tasks = Arc::new(TaskRegistry::new());
         let actions: Vec<Box<dyn ToolAction>> = vec![
             Box::new(action::AskQuestionAction::default()),
             Box::new(action::TodoListAction::new(state.clone())),
@@ -127,6 +139,9 @@ impl UtilityToolProvider {
             Box::new(action::TodoDeleteAction::new(state.clone())),
             Box::new(action::GetCurrentTimeAction::default()),
             Box::new(action::GetSystemInfoAction::default()),
+            Box::new(action::TimerStartAction::default()),
+            Box::new(action::TimerStopAction::new(tasks.clone())),
+            Box::new(action::NotifySendAction::default()),
         ];
 
         let session_state = state.clone();
@@ -142,8 +157,14 @@ impl UtilityToolProvider {
                 sandbox_state.set_db_auth_token(sandbox.db_auth_token.clone());
             });
 
-        Self { inner }
+        Self { inner, tasks }
     }
+}
+
+fn parse_args<T: serde::de::DeserializeOwned>(name: &str, arguments: &str) -> Result<T, ToolError> {
+    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
+        message: format!("Invalid arguments for {name}: {e}"),
+    })
 }
 
 impl Default for UtilityToolProvider {
@@ -160,6 +181,37 @@ impl ToolProvider for UtilityToolProvider {
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         self.inner.call_tool(name, arguments).await
+    }
+
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<DeferredOutcome, ToolError> {
+        let task_id = match name {
+            action::TimerStartAction::TOOL_NAME => {
+                let args: action::TimerStartAction = parse_args(name, arguments)?;
+                args.schedule(&self.tasks)?
+            }
+            action::NotifySendAction::TOOL_NAME => {
+                let args: action::NotifySendAction = parse_args(name, arguments)?;
+                args.dispatch(&self.tasks)?
+            }
+            _ => {
+                return Ok(DeferredOutcome::Sync(ToolResult::text(
+                    self.inner.call_tool(name, arguments).await?,
+                )));
+            }
+        };
+        Ok(DeferredOutcome::Deferred { task_id })
+    }
+
+    fn poll_deferred(&self, task_id: &str) -> DeferredStatus {
+        self.tasks.poll(task_id)
+    }
+
+    fn cancel_deferred(&self, task_id: &str) {
+        self.tasks.cancel(task_id);
     }
 
     fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {

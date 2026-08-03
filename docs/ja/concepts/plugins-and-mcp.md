@@ -19,7 +19,7 @@ Ene ホストアプリケーション (ene-runtime)
         │     ├── ene-plugin-app       (GUI 起動ツール)
         │     ├── ene-plugin-browser   (CDP ブラウザ自動化ツール)
         │     ├── ene-plugin-fs        (サンドボックス化ファイルシステムツール)
-        │     ├── ene-plugin-utility   (電卓 & TODO 管理ツール)
+        │     ├── ene-plugin-utility   (TODO・質問・タイマー・通知ツール)
         │     └── ene-plugin-web       (Web 検索 & スクレイパーツール)
         │
         └── Model Context Protocol (MCP) ブリッジ (ene-plugin-host)
@@ -126,7 +126,7 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 | `ene-plugin-app` | `app.*` | システムアプリ起動・ウィンドウ制御 | いいえ |
 | `ene-plugin-browser` | `browser.*` | ヘッドリス Chrome/CDP ブラウザ自動化 | はい (セッションストア) |
 | `ene-plugin-fs` | `fs.*` | サンドボックス化ファイル操作 & Undo 履歴 | はい (ホストサービス `db`) |
-| `ene-plugin-utility` | `utility.*` | 電卓、日時、TODO リスト管理 | はい (ホストサービス `db`) |
+| `ene-plugin-utility` | `utility.*` | 質問プロンプト、TODO リスト管理、日時/システム情報、カウントダウンタイマー & デスクトップ通知 | はい (ホストサービス `db`) |
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude プロバイダプラグイン | いいえ |
 | `ene-plugin-openai` | Provider | OpenAI 互換プロバイダプラグイン（チャット・ストリーミング・埋め込み） | いいえ |
@@ -530,3 +530,11 @@ async fn main() {
     }
 }
 ```
+
+### 遅延（バックグラウンド）実行
+
+`#[derive(ToolAction)]` アクションは同期的なリクエスト–レスポンスツールです。即座に戻って結果を後から届けるツール — デスクトップ通知を発火するカウントダウンタイマーや通知送信 — は `#[tool(...)]` 属性で `background_capable` を指定します。ホストはこれらを遅延 IPC 経路（`call_tool_deferred` → `task_id` → `poll_deferred` で終端状態まで）で呼び出すため、LLM のターンはブロックされません。
+
+`ActionSetProvider` は意図的に遅延メソッドを実装しません。タスク生成・ポーリング状態・キャンセルは各バイナリの並行モデルに固有だからです。バックグラウンドツールが必要なプラグインは `ToolProvider` を手書きで実装し、同期サーフェスを内部の `ActionSetProvider` に委譲しつつ `call_tool_deferred`・`poll_deferred`・`cancel_deferred` をオーバーライドします。実装例は `plugins/tool/utility`（`TaskRegistry`・`TimerStartAction`・`NotifySendAction`）を参照してください。
+
+ホスト側では遅延タスクは 100 ms 間隔で最大 `tools.deferred_max_polls` 回ポーリングされます（デフォルト 600 ≈ 60 秒）。この予算を超える処理は実行自体は継続されます — タイマーは数え続け、通知は発火します — が、完了イベントは LLM に配信されません。後発の結果はツール自身のステータス面で確認できます（例: `utility.timer_stop` を名前なしで呼ぶと実行中・完了済みのタイマー一覧が返ります）。
