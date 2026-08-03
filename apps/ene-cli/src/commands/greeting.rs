@@ -1,3 +1,4 @@
+use crate::commands::session::session_error;
 use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use crate::terminal_ui::TerminalUi;
@@ -21,19 +22,29 @@ impl CliCommand for GreetingCommand {
 
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let Some(card) = ctx.handle.character_card() else {
-            return Err(CliError::ExecutionFailed(
-                "No character card loaded.".to_string(),
-            ));
+            return Err(CliError::ExecutionFailed(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "greeting-no-card"
+            )));
         };
-        let greetings = greeting_options(&card);
+        let greetings = card.data.greeting_options();
         if greetings.is_empty() {
-            println!("This character has no greetings.");
+            println!(
+                "{}",
+                i18n_embed_fl::fl!(crate::i18n::loader(), "greeting-no-greetings")
+            );
             return Ok(CommandOutcome::Continue);
         }
-        if !ctx.handle.history().await.map_err(cli_error)?.is_empty() {
+        if !ctx
+            .handle
+            .history()
+            .await
+            .map_err(session_error)?
+            .is_empty()
+        {
             println!(
-                "Greetings can only be chosen before the first message. \
-                 Restart the REPL to open a new session."
+                "{}",
+                i18n_embed_fl::fl!(crate::i18n::loader(), "greeting-history-not-empty")
             );
             return Ok(CommandOutcome::Continue);
         }
@@ -55,39 +66,36 @@ impl CliCommand for GreetingCommand {
 
         match selection {
             None => {
-                println!("No greeting selected.");
+                println!(
+                    "{}",
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "greeting-none-selected")
+                );
             }
             Some(index) => match ctx.handle.set_greeting(index).await {
                 Ok(text) => {
-                    println!("{}", crate::style::success("Greeting selected:"));
+                    println!(
+                        "{}",
+                        crate::style::success(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "greeting-selected"
+                        ))
+                    );
                     println!("{text}");
                 }
                 Err(e) => {
                     println!(
                         "{}",
-                        crate::style::error(format!("Failed to set greeting: {e}"))
+                        crate::style::error(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "greeting-failed",
+                            error = e.to_string()
+                        ))
                     );
                 }
             },
         }
         Ok(CommandOutcome::Continue)
     }
-}
-
-fn greeting_options(card: &ene_config::CharacterCardV3) -> Vec<(u32, String)> {
-    let mut options = Vec::new();
-    if !card.data.first_mes.trim().is_empty() {
-        options.push((0, card.data.first_mes.trim().to_string()));
-    }
-    options.extend(
-        card.data
-            .alternate_greetings
-            .iter()
-            .enumerate()
-            .filter(|(_, text)| !text.trim().is_empty())
-            .map(|(i, text)| (i as u32 + 1, text.trim().to_string())),
-    );
-    options
 }
 
 fn select_interactively(greetings: &[(u32, String)]) -> Option<u32> {
@@ -99,11 +107,11 @@ fn select_interactively(greetings: &[(u32, String)]) -> Option<u32> {
         .iter()
         .map(|(index, text)| format!("[{index}] {}", first_line(text)))
         .collect();
-    let mut items = vec!["(none)".to_string()];
+    let mut items = vec![i18n_embed_fl::fl!(crate::i18n::loader(), "greeting-none")];
     items.extend(labels);
     ui.pause_for_external_prompt();
     let choice = dialoguer::Select::new()
-        .with_prompt("Choose a greeting (Enter to confirm)")
+        .with_prompt(i18n_embed_fl::fl!(crate::i18n::loader(), "greeting-choose"))
         .items(&items)
         .default(0)
         .interact()
@@ -114,13 +122,4 @@ fn select_interactively(greetings: &[(u32, String)]) -> Option<u32> {
 
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
-}
-
-fn cli_error(e: ene_runtime::PublicApiError) -> CliError {
-    match e {
-        ene_runtime::PublicApiError::ActorDead => {
-            CliError::ActorError("actor is no longer running".to_string())
-        }
-        other => CliError::ExecutionFailed(other.to_string()),
-    }
 }

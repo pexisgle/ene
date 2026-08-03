@@ -6,7 +6,7 @@ use ene_util::Truncate;
 /// Map an API v1 [`ene_runtime::PublicApiError`] onto the CLI's own error
 /// type, preserving the actor-dead vs. execution-failure distinction so
 /// callers can tell the actor has shut down from an ordinary failure.
-fn session_error(e: ene_runtime::PublicApiError) -> CliError {
+pub(crate) fn session_error(e: ene_runtime::PublicApiError) -> CliError {
     match e {
         ene_runtime::PublicApiError::ActorDead => {
             CliError::ActorError("actor is no longer running".to_string())
