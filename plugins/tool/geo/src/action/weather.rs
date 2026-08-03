@@ -45,7 +45,7 @@ struct CurrentCondition {
 #[derive(Debug, Deserialize)]
 struct Area {
     #[serde(rename = "areaName", default)]
-    area_name: Vec<WeatherValue>,
+    names: Vec<WeatherValue>,
     #[serde(default)]
     region: Vec<WeatherValue>,
     #[serde(default)]
@@ -132,7 +132,7 @@ fn build_weather_url(location: Option<&str>) -> Result<reqwest::Url, GeoError> {
         .map_err(|e| GeoError::Internal(format!("invalid wttr.in URL: {e}")))?;
     if let Some(location) = location {
         url.path_segments_mut()
-            .map_err(|_| GeoError::Internal("wttr.in URL has no path".to_string()))?
+            .map_err(|()| GeoError::Internal("wttr.in URL has no path".to_string()))?
             .push(location.trim());
     }
     url.query_pairs_mut().append_pair("format", "j1");
@@ -163,7 +163,7 @@ fn format_weather(response: &WeatherResponse) -> Result<String, GeoError> {
     if let Some(area) = response.nearest_area.first() {
         let mut parts: Vec<&str> = Vec::new();
         for part in [
-            area.area_name.first().map(|v| v.value.as_str()),
+            area.names.first().map(|v| v.value.as_str()),
             area.region.first().map(|v| v.value.as_str()),
             area.country.first().map(|v| v.value.as_str()),
         ]

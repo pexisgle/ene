@@ -1,5 +1,4 @@
 use super::{format_coord, validate_latitude, validate_longitude};
-use crate::error::GeoError;
 use ene_plugin::prelude::*;
 
 /// Calculates the solar UTC offset for a longitude.

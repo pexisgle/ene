@@ -5,10 +5,6 @@
 //! and sunrise/sunset times.
 #![warn(missing_docs)]
 #![expect(
-    clippy::arithmetic_side_effects,
-    reason = "timezone offset and day-length formatting perform intentional arithmetic"
-)]
-#![expect(
     clippy::unused_async,
     reason = "tool IPC handlers are async for uniform provider dispatch"
 )]
@@ -16,8 +12,9 @@
     test,
     expect(
         clippy::unwrap_used,
+        clippy::expect_used,
         clippy::panic,
-        reason = "unit tests use unwrap/panic for concise failure paths"
+        reason = "unit tests use unwrap/expect/panic for concise failure paths"
     )
 )]
 

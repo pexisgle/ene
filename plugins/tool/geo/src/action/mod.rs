@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn truncate_counts_chars_not_bytes() {
-        let long = "あ".repeat(150);
+        let long = "あ".repeat(300);
         let out = truncate(&long);
         assert!(out.ends_with("..."));
         assert!(out.chars().count() <= MAX_FIELD_CHARS + 3);
