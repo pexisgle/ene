@@ -19,6 +19,7 @@ Ene ホストアプリケーション (ene-runtime)
         │     ├── ene-plugin-app       (GUI 起動ツール)
         │     ├── ene-plugin-browser   (CDP ブラウザ自動化ツール)
         │     ├── ene-plugin-calc      (計算ツール)
+        │     ├── ene-plugin-calendar  (カレンダーツール)
         │     ├── ene-plugin-fs        (サンドボックス化ファイルシステムツール)
         │     ├── ene-plugin-utility   (TODO・質問・タイマー・通知ツール)
         │     └── ene-plugin-web       (Web 検索 & スクレイパーツール)
@@ -127,6 +128,7 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 | `ene-plugin-app` | `app.*` | システムアプリ起動・ウィンドウ制御 | いいえ |
 | `ene-plugin-browser` | `browser.*` | ヘッドリス Chrome/CDP ブラウザ自動化 | はい (セッションストア) |
 | `ene-plugin-calc` | `calc.*` | 数式評価・単位/通貨/色変換 | いいえ |
+| `ene-plugin-calendar` | `calendar.*` | カレンダー単位のパーミッション・書き込み確認・空き時間検索付きローカルカレンダー | はい (ホストサービス `db`) |
 | `ene-plugin-fs` | `fs.*` | サンドボックス化ファイル操作 & Undo 履歴 | はい (ホストサービス `db`) |
 | `ene-plugin-utility` | `utility.*` | 質問プロンプト、TODO リスト管理、日時/システム情報、カウントダウンタイマー & デスクトップ通知（Linux・D-Bus のみ） | はい (ホストサービス `db`) |
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
@@ -170,8 +172,9 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 
 ## 5. ツール DB スキーマの宣言と進化
 
-ステートフルなツールプラグイン (`ene-plugin-fs`、`ene-plugin-utility`) は、
-共有**ホストサービス**ソケット (`ene-host-service.sock` / named pipe) を
+ステートフルなツールプラグイン (`ene-plugin-fs`、`ene-plugin-utility`、
+`ene-plugin-calendar`) は、共有**ホストサービス**ソケット
+(`ene-host-service.sock` / named pipe) を
 介してデータをホストの `memory.db` に永続化します。最初のフレームで
 事前共有トークン付きの乗客サービスを開き、現状実装されているのは `db`
 のみです (`ene-store` の `host_service` + `db_server`)。予約 ID
@@ -475,6 +478,46 @@ credential サービス側にあり、要求プラグインの登録済み宣言
 レジストリごとのサーキットブレーカーが連続した呼び出し失敗でトリップするため、
 ping ベースの回復が壊れたプラグインにトラフィックを提供させ続けることは
 ありません。
+
+### カレンダーツール: 確認とプライバシー制御
+
+`ene-plugin-calendar` は、上記の対話型パーミッション契約をすべての変更系
+操作に適用し、さらに**カレンダー単位のパーミッションフラグ**を重ねます:
+
+- **カレンダー単位のパーミッション。** 各カレンダーアカウント行には
+  `read_allowed` / `write_allowed` フラグがあります。新規カレンダーは
+  読み取り許可・書き込み拒否が既定です (deny-by-default)。
+  `calendar.set_permission` でフラグを変更できますが、これ自体もユーザー
+  承認が必要です。読み取り (`calendar.list_events`、
+  `calendar.find_free_slots`) は読み取り権限のないカレンダーに対して
+  fail-closed となり、書き込み (`calendar.create_event`、
+  `calendar.update_event`、`calendar.cancel_event`、
+  `calendar.remove_account`) は書き込み権限がないと実行できません。
+- **プレビュー付き書き込み確認。** すべての変更系アクションはストアに
+  触れる**前**に `PermissionRequired` を返します。ユーザーに表示される
+  `description` にはタイムゾーン・対象カレンダー・変更内容がプレビュー
+  され、`update_event` は変更前 → 変更後の差分を表示します（タイムゾーン
+  のみの変更も含む）。リクエスト ID は `(action, target, description)` の
+  決定的ハッシュなので、承認後の再呼び出し（同一引数のリプレイ）は
+  記録済みの承認と一致して再プロンプトされません。一方で説明文が変われば
+  （イベント内容が異なれば）新しい承認が必要です。1回限りの承認はターン
+  境界で失効します（プラグインがホストのコールコンテキスト更新時に消去）。
+  「セッション中許可」は `(action, target-prefix)` パターンとして記録され、
+  会話の間ゲートを通過します。
+- **プライバシー。** 予定の本文（タイトル・メモ・参加者）はプラグインの
+  ログやホストの監査ログに一切登場しません。パーミッションの `target` は
+  `calendar:<id>` / `calendar:<id>#<イベントID>` のような安定した識別子で、
+  監査ログには `action`・`target`・決定のみが記録され、カレンダーの引数
+  ペイロード（タイトル・メモ・参加者・場所）は永続化前にマスクされます。
+  本文が表に出るのは必要な場所だけです: 承認プロンプト（ユーザー向け表示）と、
+  LLM に渡るツール結果。アカウントの連携解除 (`calendar.remove_account`)
+  はアカウント行と全イベントを1トランザクションで削除するため、
+  即座に反映されます。
+- **プロバイダ抽象化。** イベントへのアクセスはアカウント種別をキーとする
+  `CalendarProvider` トレイト経由です。現時点では `local` 種別のみ
+  （イベントはプラグインの `calendar_events` テーブルに保存）。外部サービス
+  （Google Calendar、CalDAV 等）は、コネクターフレームワークが資格情報の
+  取り扱いを提供した後、同じトレイトの新しいプロバイダとして追加できます。
 
 ---
 

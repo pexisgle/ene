@@ -111,6 +111,14 @@ const SENSITIVE_KEYS: &[&str] = &[
     "content",
 ];
 
+/// Tool namespaces whose arguments carry personal event content (calendar
+/// event titles, notes, attendee addresses, locations).
+const EVENT_CONTENT_TOOL_PREFIXES: &[&str] = &["calendar."];
+
+/// Argument keys masked for event-content tools only; the keys are too
+/// generic to redact globally (e.g. `title` on a file-metadata tool).
+const EVENT_CONTENT_KEYS: &[&str] = &["title", "description", "location", "attendees"];
+
 /// Redacts sensitive values from a JSON argument payload.
 ///
 /// Object values under a sensitive key are replaced with `"[redacted]"`.
@@ -118,10 +126,20 @@ const SENSITIVE_KEYS: &[&str] = &[
 /// raw prompt text never lands in the audit trail.
 #[must_use]
 pub fn redact_arguments(arguments: &str) -> String {
+    redact_arguments_for_tool("", arguments)
+}
+
+/// Like [`redact_arguments`], additionally masking event-content keys when
+/// `tool_name` belongs to an event-content namespace (e.g. `calendar.*`).
+#[must_use]
+pub fn redact_arguments_for_tool(tool_name: &str, arguments: &str) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return format!("[non-json args, {} bytes]", arguments.len());
     };
-    redact_value(&mut value);
+    let redact_event_content = EVENT_CONTENT_TOOL_PREFIXES
+        .iter()
+        .any(|prefix| tool_name.starts_with(prefix));
+    redact_value(&mut value, redact_event_content);
     serde_json::to_string(&value).unwrap_or_else(|_| "[unserializable args]".to_string())
 }
 
@@ -130,20 +148,26 @@ fn is_sensitive_key(key: &str) -> bool {
     SENSITIVE_KEYS.iter().any(|k| lower.contains(k))
 }
 
-fn redact_value(value: &mut serde_json::Value) {
+fn is_event_content_key(key: &str) -> bool {
+    EVENT_CONTENT_KEYS
+        .iter()
+        .any(|k| key.eq_ignore_ascii_case(k))
+}
+
+fn redact_value(value: &mut serde_json::Value, redact_event_content: bool) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, val) in map.iter_mut() {
-                if is_sensitive_key(key) {
+                if is_sensitive_key(key) || (redact_event_content && is_event_content_key(key)) {
                     *val = serde_json::Value::String("[redacted]".to_string());
                 } else {
-                    redact_value(val);
+                    redact_value(val, redact_event_content);
                 }
             }
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                redact_value(item);
+                redact_value(item, redact_event_content);
             }
         }
         _ => {}
@@ -175,6 +199,42 @@ mod tests {
     fn non_json_is_summarized() {
         let redacted = redact_arguments("not json at all");
         assert!(redacted.starts_with("[non-json args"));
+    }
+
+    #[test]
+    fn calendar_event_content_is_redacted_for_calendar_tools() {
+        let args = r#"{"calendar_id":"cal-1","title":"Board meeting","description":"revenue plans","location":"HQ","attendees":["alice@example.com"]}"#;
+        let redacted = redact_arguments_for_tool("calendar.create_event", args);
+        assert!(!redacted.contains("Board meeting"));
+        assert!(!redacted.contains("revenue plans"));
+        assert!(!redacted.contains("HQ"));
+        assert!(!redacted.contains("alice@example.com"));
+        assert!(redacted.contains("cal-1"), "ids stay visible");
+    }
+
+    #[test]
+    fn calendar_event_content_is_redacted_in_nested_args() {
+        let args = r#"{"event":{"title":"secret title","attendees":["a@b.c"]},"ok":true}"#;
+        let redacted = redact_arguments_for_tool("calendar.update_event", args);
+        assert!(!redacted.contains("secret title"));
+        assert!(!redacted.contains("a@b.c"));
+        assert!(redacted.contains("true"));
+    }
+
+    #[test]
+    fn event_content_keys_stay_visible_for_other_tools() {
+        let args = r#"{"title":"Board meeting","description":"revenue plans","location":"HQ","attendees":["alice@example.com"]}"#;
+        let redacted = redact_arguments_for_tool("notes.write", args);
+        assert!(redacted.contains("Board meeting"));
+        assert!(redacted.contains("revenue plans"));
+        assert!(redacted.contains("alice@example.com"));
+    }
+
+    #[test]
+    fn generic_redaction_is_unchanged_for_calendar_tools() {
+        let args = r#"{"title":"Board meeting","token":"sk-123"}"#;
+        let redacted = redact_arguments_for_tool("calendar.create_event", args);
+        assert!(!redacted.contains("sk-123"));
     }
 
     #[test]

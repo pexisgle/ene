@@ -42,7 +42,10 @@ impl MemoryStore {
             target: Set(entry.target.clone()),
             decision: Set(entry.decision.as_str().to_string()),
             success: Set(i32::from(entry.success)),
-            redacted_args: Set(crate::audit::redact_arguments(&entry.arguments)),
+            redacted_args: Set(crate::audit::redact_arguments_for_tool(
+                &entry.tool_name,
+                &entry.arguments,
+            )),
             created_at: Set(now),
             ..Default::default()
         };

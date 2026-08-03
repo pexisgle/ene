@@ -19,6 +19,7 @@ Ene Host Application (ene-runtime)
         │     ├── ene-plugin-app       (GUI Launcher Tool)
         │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
         │     ├── ene-plugin-calc      (Calculation Tool)
+        │     ├── ene-plugin-calendar  (Calendar Tool)
         │     ├── ene-plugin-fs        (Sandboxed Filesystem Tool)
         │     ├── ene-plugin-utility   (Todo, Question, Timer & Notify Tool)
         │     └── ene-plugin-web       (Web Search & Scraper Tool)
@@ -127,6 +128,7 @@ The in-process admission budget that serializes local engines contending on the 
 | `ene-plugin-app` | `app.*` | System application launcher & window control | No |
 | `ene-plugin-browser` | `browser.*` | Headless Chrome/CDP web browser automation | Yes (Session store) |
 | `ene-plugin-calc` | `calc.*` | Math expression evaluation, unit/currency/color conversion | No |
+| `ene-plugin-calendar` | `calendar.*` | Local calendar with per-calendar permissions, write confirmation, free-slot search | Yes (host-service `db`) |
 | `ene-plugin-fs` | `fs.*` | Sandboxed filesystem operations with undo ledger | Yes (host-service `db`) |
 | `ene-plugin-utility` | `utility.*` | Question prompts, todo list management, time/system info, countdown timers & desktop notifications (Linux, D-Bus only) | Yes (host-service `db`) |
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
@@ -171,8 +173,9 @@ touching the filesystem.
 
 ## 5. Tool Database Schema Declaration & Evolution
 
-Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`) persist their
-data into the host's `memory.db` through the shared **host-service** socket
+Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`,
+`ene-plugin-calendar`) persist their data into the host's `memory.db`
+through the shared **host-service** socket
 (`ene-host-service.sock` / named pipe). The first framed message opens a
 passenger service with a pre-shared token; today only `db` is implemented
 (`ene-store`'s `host_service` + `db_server`). Reserved ids (`assets`,
@@ -503,6 +506,49 @@ long-running desktop companion. A plugin that answers pings but fails real
 work is still contained: the per-registry circuit breaker trips on consecutive
 call failures, so ping-based recovery cannot keep a broken plugin serving
 traffic indefinitely.
+
+### Calendar tool: confirmation and privacy controls
+
+`ene-plugin-calendar` implements the interactive permission contract
+described above for every mutating operation, layered on top of
+**per-calendar permission flags**:
+
+- **Per-calendar permissions.** Every calendar account row carries
+  `read_allowed` / `write_allowed` flags. New calendars allow reads and deny
+  writes by default (deny-by-default); `calendar.set_permission` changes the
+  flags, itself gated behind user approval. Reads (`calendar.list_events`,
+  `calendar.find_free_slots`) fail closed on calendars without read
+  permission; writes (`calendar.create_event`, `calendar.update_event`,
+  `calendar.cancel_event`, `calendar.remove_account`) fail closed without
+  write permission.
+- **Write confirmation with preview.** Every mutating action returns
+  `PermissionRequired` *before* touching the store. The `description` shown
+  to the user previews the timezone, the target calendar, and the change —
+  `update_event` renders a before/after diff (including timezone-only
+  changes). The request id is a deterministic hash of
+  `(action, target, description)`, so the host's post-approval
+  re-invocation — which replays identical arguments — resolves against the
+  recorded approval instead of prompting again, while a changed description
+  (different event content) requires a fresh approval. Allow-once approvals
+  expire at the turn boundary (the plugin clears them on the host's
+  call-context update); "allow for this session" records an
+  `(action, target-prefix)` pattern that passes the gate for the rest of
+  the conversation.
+- **Privacy.** Event *content* (titles, notes, attendees) never appears in
+  the plugin's logs or in the host's audit trail: the permission `target` is
+  a stable `calendar:<id>` / `calendar:<id>#<event-id>` identifier, and the
+  audit log records only `action`, `target`, and the decision, with calendar
+  argument payloads (title, notes, attendees, location) masked before
+  persistence. Content is surfaced only where it must be: in the approval
+  prompt (user-facing) and in the tool result delivered to the LLM. Unlinking
+  an account (`calendar.remove_account`) deletes the account row and all of
+  its events in one transaction, so the disconnect is reflected immediately.
+- **Provider abstraction.** Events are accessed through a
+  `CalendarProvider` trait keyed by account kind. Today only the `local`
+  kind exists (events stored in the plugin's `calendar_events` table);
+  external services (Google Calendar, CalDAV) can be added later as new
+  providers behind the same trait once the connector framework provides
+  credential handling.
 
 ---
 
