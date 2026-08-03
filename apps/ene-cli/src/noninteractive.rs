@@ -660,6 +660,20 @@ fn characters_command(
             }
             Ok(EXIT_OK)
         }
+        CharactersAction::Import { path } => {
+            let imported = ene_config::import_character_file(path).map_err(|e| {
+                OutputError::new(ErrorCode::Runtime, format!("import character card: {e}"))
+            })?;
+            if json {
+                output::print_json(&imported)?;
+            } else {
+                println!(
+                    "Imported character '{}' to {}",
+                    imported.name, imported.card_path
+                );
+            }
+            Ok(EXIT_OK)
+        }
     }
 }
 

@@ -1,10 +1,12 @@
 //! Character card enumeration and name-to-path resolution.
 //!
 //! Both discovery ([`discover_characters`]) and resolution
-//! ([`resolve_character_path`]) live here so host apps share one rule set:
-//! a character is a subdirectory of `assets/characters/` containing
-//! `character.json`. Enumeration and resolution read that single filename,
-//! so a character that shows up in a list always resolves.
+//! ([`resolve_character_path`]) live here so host apps share one rule set.
+//! A character is a subdirectory of `assets/characters/` containing
+//! `character.json`; resolution additionally falls back to a
+//! `characters/{name}.charx` or `characters/{name}.png` file so cards in
+//! those containers can be loaded without an import. A character that shows
+//! up in a list always resolves.
 
 use std::path::{Path, PathBuf};
 
@@ -12,8 +14,15 @@ use serde::Serialize;
 
 use crate::CharacterCardV3;
 use crate::CharacterConfig;
+use crate::card_import::load_card_from_path;
+use crate::character_assets::{
+    DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH, EneAssetKind, ResolvedAssetUri, resolve_asset_uri,
+};
 use crate::error::EneConfigError;
 use crate::paths;
+
+/// Maximum recursion depth for the legacy extension-scan fallback.
+const MAX_SCAN_DEPTH: usize = 16;
 
 /// A character discovered under `assets/characters/{folder}/`.
 ///
@@ -29,7 +38,8 @@ pub struct CharacterEntry {
     pub vrm_paths: Vec<String>,
     /// VRMA motion paths relative to the assets directory.
     pub motion_paths: Vec<String>,
-    /// Motion file stems, aligned with `motion_paths`.
+    /// Motion names (card-declared asset names or file stems), aligned with
+    /// `motion_paths`.
     pub motion_names: Vec<String>,
     /// Card path relative to the assets directory.
     pub card_path: String,
@@ -40,7 +50,10 @@ pub struct CharacterEntry {
 /// Enumerates the characters under `assets_dir/characters/`.
 ///
 /// A folder counts as a character when it contains `character.json`; folders
-/// without one are skipped. Entries are sorted by name.
+/// without one are skipped. VRM/motion resolution is declaration-based when
+/// the card's `assets` resolve to files (`x_vrm` / `x_vrma`); the legacy
+/// extension scan over the folder (recursively, symlinks excluded) applies
+/// when nothing is declared or nothing resolves. Entries are sorted by name.
 #[must_use]
 pub fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
     let mut out = Vec::new();
@@ -68,86 +81,57 @@ pub fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
         if !card_path.exists() {
             continue;
         }
-        let (name, default_motion_name, card_motions) =
-            read_character_json_meta(&card_path, assets_dir, &folder)
-                .unwrap_or_else(|| (folder.clone(), None, None));
+        let card = load_card_from_path(&card_path).ok();
+        let name = card
+            .as_ref()
+            .map(|c| c.data.name.as_str())
+            .filter(|n| !n.is_empty())
+            .unwrap_or(folder.as_str())
+            .to_string();
+        let default_motion_name = read_default_motion(assets_dir, &folder);
 
-        let mut vrm_paths = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&path) {
-            for file in entries {
-                let file = match file {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::warn!(error = %e, path = %path.display(), "Failed to read file in character dir");
-                        continue;
-                    }
-                };
-                let file_path = file.path();
-                if file_path.is_dir() {
-                    continue;
-                }
-                let Some(file_name_os) = file_path.file_name() else {
-                    continue;
-                };
-                let relative = format!("characters/{folder}/{}", file_name_os.to_string_lossy());
-                if file_path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("vrm"))
-                {
-                    vrm_paths.push(relative);
-                }
-            }
-        }
-        vrm_paths.sort();
-
-        let mut motion_paths = Vec::new();
-        if let Some(card_motions) = card_motions {
-            for m in card_motions {
-                motion_paths.push(format!("characters/{folder}/{}", m.path));
-            }
+        let declared_vrm =
+            declared_asset_paths(card.as_ref(), EneAssetKind::Vrm, &path, assets_dir);
+        let vrm_paths = if declared_vrm.is_empty() {
+            scan_assets(&path, &folder, "vrm")
         } else {
-            let motions_dir = path.join("motions");
-            if let Ok(entries) = std::fs::read_dir(&motions_dir) {
-                for file in entries {
-                    let file = match file {
-                        Ok(f) => f,
-                        Err(e) => {
-                            tracing::warn!(error = %e, path = %motions_dir.display(), "Failed to read motion file");
-                            continue;
-                        }
-                    };
-                    let file_path = file.path();
-                    if file_path.is_dir() {
-                        continue;
-                    }
-                    let Some(file_name_os) = file_path.file_name() else {
-                        continue;
-                    };
-                    let relative = format!(
-                        "characters/{folder}/motions/{}",
-                        file_name_os.to_string_lossy()
-                    );
-                    if file_path
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("vrma"))
-                    {
-                        motion_paths.push(relative);
-                    }
-                }
-            }
-        }
-        motion_paths.sort();
+            declared_vrm.into_iter().map(|(path, _)| path).collect()
+        };
 
-        let motion_names = motion_paths
-            .iter()
-            .map(|p| {
-                Path::new(p)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            })
-            .collect();
+        let (motion_paths, motion_names) = if let Some(catalog) = card
+            .as_ref()
+            .and_then(|c| c.data.extensions.ene.as_ref())
+            .and_then(|ene| ene.motion_catalog.as_ref())
+        {
+            let motion_paths = catalog
+                .motions
+                .iter()
+                .map(|m| format!("characters/{folder}/{}", m.path))
+                .collect::<Vec<_>>();
+            let motion_names = motion_names_from_paths(&motion_paths);
+            (motion_paths, motion_names)
+        } else {
+            let declared =
+                declared_asset_paths(card.as_ref(), EneAssetKind::Vrma, &path, assets_dir);
+            if declared.is_empty() {
+                let motion_paths = scan_assets(&path, &folder, "vrma");
+                let motion_names = motion_names_from_paths(&motion_paths);
+                (motion_paths, motion_names)
+            } else {
+                let motion_paths = declared.iter().map(|(path, _)| path.clone()).collect();
+                let motion_names = declared
+                    .iter()
+                    .map(|(path, name)| {
+                        if name.is_empty() {
+                            file_stem(path)
+                        } else {
+                            name.clone()
+                        }
+                    })
+                    .collect();
+                (motion_paths, motion_names)
+            }
+        };
 
         out.push(CharacterEntry {
             name,
@@ -192,7 +176,19 @@ pub(crate) fn resolve_character_path_in(
         return Err(EneConfigError::UnsafeCharacterPath(trimmed.to_string()));
     }
     if !has_path_separator(trimmed) {
-        return Ok(paths::character_dir_in(assets_dir, trimmed).join("character.json"));
+        let folder_card = paths::character_dir_in(assets_dir, trimmed).join("character.json");
+        if folder_card.exists() {
+            return Ok(folder_card);
+        }
+        for extension in ["charx", "png"] {
+            let candidate = assets_dir
+                .join("characters")
+                .join(format!("{trimmed}.{extension}"));
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+        return Ok(folder_card);
     }
     Ok(PathBuf::from(trimmed))
 }
@@ -207,46 +203,148 @@ fn contains_traversal(name: &str) -> bool {
     name.split(is_separator).any(|component| component == "..")
 }
 
-/// Reads the card's display name, per-character default motion, and the
-/// motion catalog from `extensions.ene.motion_catalog`.
-fn read_character_json_meta(
-    card_path: &Path,
+/// Resolves declared `x_vrm` / `x_vrma` assets to relative paths plus the
+/// card-declared asset name. `embeded://` paths resolve against the card
+/// directory; `ccdefault:` maps to the bundled default; remote and data URLs
+/// are not playable from discovery and are skipped with a warning.
+fn declared_asset_paths(
+    card: Option<&CharacterCardV3>,
+    kind: EneAssetKind,
+    card_dir: &Path,
     assets_dir: &Path,
-    folder: &str,
-) -> Option<(String, Option<String>, Option<Vec<crate::MotionEntry>>)> {
-    let content = std::fs::read_to_string(card_path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let name = v.get("data")?.get("name")?.as_str()?.to_string();
+) -> Vec<(String, String)> {
+    let Some(card) = card else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for asset in &card.data.assets {
+        if asset.ene_kind() != Some(kind) {
+            continue;
+        }
+        let entry_path = match resolve_asset_uri(&asset.uri) {
+            Ok(ResolvedAssetUri::Embedded(path)) => {
+                let full = card_dir.join(path);
+                let Some(relative) = full.strip_prefix(assets_dir).ok() else {
+                    continue;
+                };
+                if !is_regular_file(&full) {
+                    tracing::warn!(
+                        path = %full.display(),
+                        asset = %asset.name,
+                        "Declared asset is missing on disk or is a symlink"
+                    );
+                    continue;
+                }
+                relative.to_string_lossy().to_string()
+            }
+            Ok(ResolvedAssetUri::AppDefault) => {
+                let default = match kind {
+                    EneAssetKind::Vrm => DEFAULT_VRM_PATH,
+                    EneAssetKind::Vrma => DEFAULT_VRMA_PATH,
+                };
+                if !is_regular_file(&assets_dir.join(default)) {
+                    tracing::warn!(
+                        asset = %asset.name,
+                        "Default asset is missing on disk or is a symlink"
+                    );
+                    continue;
+                }
+                default.to_string()
+            }
+            Ok(ResolvedAssetUri::Remote(_)) => {
+                tracing::warn!(asset = %asset.name, "Skipping remote asset at discovery; import it to materialize");
+                continue;
+            }
+            Ok(ResolvedAssetUri::Data { .. }) => {
+                tracing::warn!(asset = %asset.name, "Skipping data-URL asset at discovery; import it to materialize");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(asset = %asset.name, error = %e, "Skipping undeclared asset");
+                continue;
+            }
+        };
+        out.push((entry_path, asset.name.clone()));
+    }
+    out
+}
 
-    let default_motion = (|| {
-        let settings_path = paths::character_settings_path_in(assets_dir, folder);
-        if settings_path.exists() {
-            let s = std::fs::read_to_string(settings_path).ok()?;
-            let per: CharacterConfig = serde_json::from_str(&s).ok()?;
-            if !per.default_motion.is_empty() {
-                return Some(per.default_motion);
+/// `true` when the path names a regular file without going through symlinks.
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+/// Reads the per-character default motion from `character_settings.json`.
+fn read_default_motion(assets_dir: &Path, folder: &str) -> Option<String> {
+    let settings_path = paths::character_settings_path_in(assets_dir, folder);
+    if settings_path.exists() {
+        let s = std::fs::read_to_string(settings_path).ok()?;
+        let per: CharacterConfig = serde_json::from_str(&s).ok()?;
+        if !per.default_motion.is_empty() {
+            return Some(per.default_motion);
+        }
+    }
+    None
+}
+
+/// Recursive extension scan for legacy cards without `assets` declarations.
+/// Symlinks are never followed so a card cannot smuggle a read outside its
+/// directory through the fallback path.
+fn scan_assets(card_dir: &Path, folder: &str, extension: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![(card_dir.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth >= MAX_SCAN_DEPTH {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if file_type.is_dir() {
+                stack.push((path, depth + 1));
+            } else if file_type.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+                && let Ok(relative) = path.strip_prefix(card_dir)
+            {
+                found.push(format!(
+                    "characters/{folder}/{}",
+                    relative.to_string_lossy()
+                ));
             }
         }
-        None
-    })();
+    }
+    found.sort();
+    found
+}
 
-    let motions = (|| {
-        let extensions = v.get("data")?.get("extensions")?;
-        let ene = extensions.get("ene")?;
-        let catalog = ene.get("motion_catalog")?;
-        let motions_val = catalog.get("motions")?;
-        let motions: Vec<crate::MotionEntry> = serde_json::from_value(motions_val.clone()).ok()?;
-        Some(motions)
-    })();
+fn motion_names_from_paths(paths: &[String]) -> Vec<String> {
+    paths.iter().map(|path| file_stem(path)).collect()
+}
 
-    Some((name, default_motion, motions))
+fn file_stem(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Loads a [`CharacterCardV3`] from a resolved path (or bare character name).
 ///
 /// Host apps (`ene-cli`, `ene-desktop`) load the card via this helper (or their
 /// own I/O) and pass it to [`ene_runtime::EneHandle::open`] — the runtime does
-/// not perform character-card file I/O on the product path.
+/// not perform character-card file I/O on the product path. JSON, CHARX
+/// (zip), and PNG (ccv3/chara chunk) cards are all accepted.
 ///
 /// # Errors
 ///
@@ -255,8 +353,7 @@ fn read_character_json_meta(
 /// plus read and parse errors for the card file itself.
 pub fn load_character_card(name_or_path: &str) -> Result<CharacterCardV3, EneConfigError> {
     let path = resolve_character_path(name_or_path)?;
-    let file_content = std::fs::read_to_string(&path).map_err(EneConfigError::CardReadError)?;
-    serde_json::from_str(&file_content).map_err(EneConfigError::JsonError)
+    load_card_from_path(&path)
 }
 
 #[cfg(test)]
@@ -433,5 +530,256 @@ mod tests {
             load_character_card("../evil"),
             Err(EneConfigError::UnsafeCharacterPath(_))
         ));
+    }
+
+    fn v3_card(name: &str, assets: &str) -> String {
+        format!(
+            r#"{{"spec":"chara_card_v3","spec_version":"3.0","data":{{"name":"{name}","assets":{assets}}}}}"#
+        )
+    }
+
+    #[test]
+    fn declared_assets_drive_discovery() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            &v3_card(
+                "Ada",
+                r#"[{"type":"x_vrm","uri":"embeded://model.vrm","name":"Model","ext":"vrm"},{"type":"x_vrma","uri":"embeded://motions/wave.vrma","name":"wave","ext":"vrma"}]"#,
+            ),
+        );
+        std::fs::create_dir_all(dir.join("motions")).expect("create motions dir");
+        std::fs::write(dir.join("model.vrm"), "x").expect("write vrm");
+        std::fs::write(dir.join("motions/wave.vrma"), "x").expect("write vrma");
+        std::fs::write(dir.join("loose.vrm"), "x").expect("write loose vrm");
+
+        let found = discover_characters(&assets);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].vrm_paths, ["characters/ada/model.vrm"]);
+        assert_eq!(found[0].motion_paths, ["characters/ada/motions/wave.vrma"]);
+        assert_eq!(found[0].motion_names, ["wave"]);
+    }
+
+    #[test]
+    fn declared_assets_are_authoritative_over_scan() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            &v3_card(
+                "Ada",
+                r#"[{"type":"x_vrm","uri":"embeded://model.vrm","name":"Model","ext":"vrm"}]"#,
+            ),
+        );
+        std::fs::write(dir.join("model.vrm"), "x").expect("write vrm");
+        std::fs::write(dir.join("loose.vrm"), "x").expect("write loose vrm");
+
+        let found = discover_characters(&assets);
+        assert_eq!(found[0].vrm_paths, ["characters/ada/model.vrm"]);
+        assert!(
+            found[0].motion_paths.is_empty(),
+            "declared assets must not fall back to scanning"
+        );
+    }
+
+    #[test]
+    fn unresolved_declared_assets_fall_back_to_scanning() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            &v3_card(
+                "Ada",
+                r#"[{"type":"x_vrm","uri":"embeded://missing.vrm","name":"Model","ext":"vrm"},{"type":"x_vrma","uri":"embeded://missing.vrma","name":"Wave","ext":"vrma"}]"#,
+            ),
+        );
+        std::fs::write(dir.join("loose.vrm"), "x").expect("write loose vrm");
+        std::fs::write(dir.join("loose.vrma"), "x").expect("write loose vrma");
+
+        let found = discover_characters(&assets);
+        assert_eq!(found[0].vrm_paths, ["characters/ada/loose.vrm"]);
+        assert_eq!(found[0].motion_paths, ["characters/ada/loose.vrma"]);
+    }
+
+    #[test]
+    fn unconsumed_asset_types_fall_back_to_scanning() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            &v3_card(
+                "Ada",
+                r#"[{"type":"icon","uri":"ccdefault:","name":"Icon","ext":"png"}]"#,
+            ),
+        );
+        std::fs::write(dir.join("model.vrm"), "x").expect("write vrm");
+        std::fs::write(dir.join("wave.vrma"), "x").expect("write vrma");
+
+        let found = discover_characters(&assets);
+        assert_eq!(found[0].vrm_paths, ["characters/ada/model.vrm"]);
+        assert_eq!(found[0].motion_paths, ["characters/ada/wave.vrma"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_symlink_asset_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            &v3_card(
+                "Ada",
+                r#"[{"type":"x_vrm","uri":"embeded://model.vrm","name":"Model","ext":"vrm"}]"#,
+            ),
+        );
+        let outside = tmp.path().join("outside.vrm");
+        std::fs::write(&outside, "x").expect("write outside file");
+        symlink(&outside, dir.join("model.vrm")).expect("create symlink");
+
+        let found = discover_characters(&assets);
+        assert!(
+            found[0].vrm_paths.is_empty(),
+            "declared symlink must not resolve through the link"
+        );
+    }
+
+    #[test]
+    fn ccdefault_assets_resolve_to_bundled_defaults() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            &v3_card(
+                "Ada",
+                r#"[{"type":"x_vrm","uri":"ccdefault:","name":"Default","ext":"vrm"},{"type":"x_vrma","uri":"ccdefault:","name":"DefaultMotion","ext":"vrma"}]"#,
+            ),
+        );
+        std::fs::create_dir_all(assets.join("characters/Alicia/motions")).expect("create alicia");
+        std::fs::write(assets.join(DEFAULT_VRM_PATH), "x").expect("write default vrm");
+        std::fs::write(assets.join(DEFAULT_VRMA_PATH), "x").expect("write default vrma");
+
+        let found = discover_characters(&assets);
+        assert_eq!(found[0].vrm_paths, ["characters/Alicia/AliciaSolid.vrm"]);
+        assert_eq!(
+            found[0].motion_paths,
+            ["characters/Alicia/motions/VRMA_01.vrma"]
+        );
+    }
+
+    #[test]
+    fn remote_and_data_url_assets_are_skipped_at_discovery() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            &v3_card(
+                "Ada",
+                r#"[{"type":"x_vrm","uri":"https://example.com/model.vrm","name":"Remote","ext":"vrm"},{"type":"x_vrm","uri":"data:model/vrm;base64,QUJD","name":"Inline","ext":"vrm"}]"#,
+            ),
+        );
+
+        let found = discover_characters(&assets);
+        assert!(found[0].vrm_paths.is_empty());
+    }
+
+    #[test]
+    fn unsafe_declared_uri_is_skipped_at_discovery() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            &v3_card(
+                "Ada",
+                r#"[{"type":"x_vrm","uri":"embeded://../secret.vrm","name":"Evil","ext":"vrm"}]"#,
+            ),
+        );
+
+        let found = discover_characters(&assets);
+        assert!(found[0].vrm_paths.is_empty());
+    }
+
+    #[test]
+    fn motion_catalog_precedes_declared_motion_assets() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(
+            &dir,
+            r#"{
+                "spec":"chara_card_v3",
+                "spec_version":"3.0",
+                "data":{
+                    "name":"Ada",
+                    "assets":[{"type":"x_vrma","uri":"embeded://motions/wave.vrma","name":"wave","ext":"vrma"}],
+                    "extensions":{"ene":{"motion_catalog":{"motions":[{"name":"catalog","path":"motions/catalog.vrma"}]}}}
+                }
+            }"#,
+        );
+        std::fs::create_dir_all(dir.join("motions")).expect("create motions dir");
+        std::fs::write(dir.join("motions/wave.vrma"), "x").expect("write wave");
+        std::fs::write(dir.join("motions/catalog.vrma"), "x").expect("write catalog");
+
+        let found = discover_characters(&assets);
+        assert_eq!(
+            found[0].motion_paths,
+            ["characters/ada/motions/catalog.vrma"]
+        );
+    }
+
+    #[test]
+    fn fallback_scan_finds_nested_assets() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        let dir = assets.join("characters/ada");
+        write_card(&dir, r#"{"data":{"name":"Ada"}}"#);
+        std::fs::create_dir_all(dir.join("models/deep")).expect("create nested dir");
+        std::fs::create_dir_all(dir.join("motions")).expect("create motions dir");
+        std::fs::write(dir.join("models/deep/model.vrm"), "x").expect("write nested vrm");
+        std::fs::write(dir.join("motions/VRMA_01.vrma"), "x").expect("write motion");
+
+        let found = discover_characters(&assets);
+        assert_eq!(found[0].vrm_paths, ["characters/ada/models/deep/model.vrm"]);
+        assert_eq!(
+            found[0].motion_paths,
+            ["characters/ada/motions/VRMA_01.vrma"]
+        );
+    }
+
+    #[test]
+    fn bare_name_resolves_charx_and_png_fallbacks() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        std::fs::create_dir_all(assets.join("characters")).expect("create characters dir");
+        std::fs::write(assets.join("characters/Ada.charx"), b"PK").expect("write charx");
+        std::fs::write(assets.join("characters/Ada.png"), b"png").expect("write png");
+
+        let resolved = resolve_character_path_in(&assets, "Ada").expect("charx resolves");
+        assert_eq!(resolved, assets.join("characters/Ada.charx"));
+
+        std::fs::remove_file(assets.join("characters/Ada.charx")).expect("remove charx");
+        let resolved = resolve_character_path_in(&assets, "Ada").expect("png resolves");
+        assert_eq!(resolved, assets.join("characters/Ada.png"));
+    }
+
+    #[test]
+    fn character_folder_takes_precedence_over_container_files() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let assets = tmp.path().join("assets");
+        write_card(&assets.join("characters/Ada"), r#"{"data":{"name":"Ada"}}"#);
+        std::fs::write(assets.join("characters/Ada.charx"), b"PK").expect("write charx");
+
+        let resolved = resolve_character_path_in(&assets, "Ada").expect("folder wins");
+        assert_eq!(resolved, assets.join("characters/Ada/character.json"));
     }
 }

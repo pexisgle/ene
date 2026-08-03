@@ -136,8 +136,7 @@ pub use GraphicsSection as GraphicsSettings;
 // ── Defaults & cycle choices ──
 
 pub const DEFAULT_CHARACTER_NAME: &str = "Alicia";
-pub const DEFAULT_VRM_PATH: &str = "characters/Alicia/AliciaSolid.vrm";
-pub const DEFAULT_VRMA_PATH: &str = "characters/Alicia/motions/VRMA_01.vrma";
+pub use ene_config::{DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH};
 #[expect(
     dead_code,
     reason = "legacy window constants retained for transitional callers"

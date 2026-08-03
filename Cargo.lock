@@ -2474,11 +2474,13 @@ dependencies = [
 name = "ene-config"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.0",
  "blake3",
  "chrono",
  "ctor",
  "directories",
  "figment",
+ "flate2",
  "indexmap",
  "parking_lot",
  "rand 0.10.2",
@@ -2490,6 +2492,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tracing",
+ "url",
+ "zip",
 ]
 
 [[package]]
