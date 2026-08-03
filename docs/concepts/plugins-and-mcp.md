@@ -270,17 +270,8 @@ searches a fixed order and the **first match wins**:
 Because the built-in directory is searched first, a binary a user places under
 the user plugins directory can **never** shadow a built-in of the same name —
 the shipped binary always runs. This is the deliberate, security-conservative
-choice: an untrusted drop-in cannot silently replace a trusted built-in (which
-is what the credential trust gate relies on). The practical consequence is that
-a user who drops a binary named after a built-in will see the built-in run
-instead of theirs; choose a distinct plugin name to override behavior.
-
-Whether a name counts as a *built-in* for the trust gate is decided by a
-compiled-in list of shipped plugin names, **not** by probing the filesystem.
-In debug builds the built-in directory resolves to the running executable's
-directory (`target/debug/...`), so a filesystem check would let any
-`ene-plugin-*` binary dropped there masquerade as a trusted built-in; the
-fixed list keeps the trust gate independent of whatever happens to be on disk.
+choice: a user who drops a binary named after a built-in will see the built-in
+run instead of theirs; choose a distinct plugin name to override behavior.
 
 ### Environment hardening (`env_clear`)
 

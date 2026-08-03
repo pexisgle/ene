@@ -2659,11 +2659,15 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.0",
+ "chrono",
  "ene-infer",
  "ene-plugin-proto",
  "ene-tool-macros",
+ "http",
  "parking_lot",
+ "reqwest",
  "schemars",
+ "secrecy",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -2679,6 +2683,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ene-plugin",
+ "ene-plugin-proto",
  "reqwest",
  "serde_json",
  "tokio",

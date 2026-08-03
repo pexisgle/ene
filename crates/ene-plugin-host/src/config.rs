@@ -53,14 +53,10 @@ const fn default_db_quota_mb() -> Option<u64> {
 
 /// Default plugin list containing the builtin tool and provider plugins.
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
-    let mut list: HashMap<String, PluginEntry> = ["app", "browser", "fs", "utility", "web"]
+    ["app", "browser", "fs", "utility", "web", "anthropic"]
         .into_iter()
         .map(|name| (name.to_string(), PluginEntry::default()))
-        .collect();
-
-    list.insert("anthropic".to_string(), PluginEntry::default());
-
-    list
+        .collect()
 }
 
 /// A single plugin entry in the `plugins.list` map.
@@ -79,8 +75,9 @@ pub struct PluginEntry {
     /// to the plugin child process. All other inherited environment
     /// variables are cleared for security (`env_clear()`).
     ///
-    /// This is an interim mechanism until a proper credential service
-    /// is implemented. Credential-looking names are rejected by the host.
+    /// Never used for credentials: secrets resolve through the host's
+    /// `credential` service instead of the plugin environment, and
+    /// credential-looking names are rejected by the host.
     #[serde(default)]
     pub env_passthrough: Vec<String>,
     /// Environment variable names permitted as custom credential fallbacks

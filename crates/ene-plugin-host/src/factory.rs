@@ -4,15 +4,11 @@
 //! that plugin-provided LLM providers integrate with the global
 //! [`LlmProviderRegistry`](ene_ai::LlmProviderRegistry).
 //!
-//! ## API key trust gate
+//! ## Credentials
 //!
-//! Resolved API credentials are only forwarded to plugins that are either
-//! **built-in** (one of the compiled-in shipped plugin names, see
-//! [`BUILTIN_PLUGIN_NAMES`](crate::manager::BUILTIN_PLUGIN_NAMES)) or
-//! **explicitly listed** under `plugins.list.<name>` in configuration. Any
-//! other plugin receives the provider definition *without* an `api_key`, so
-//! an arbitrary user-supplied plugin binary can never silently harvest
-//! credentials it was never meant to see.
+//! Provider definitions are forwarded to plugins **without** any `api_key`:
+//! secrets resolve exclusively through the host's `credential` passenger, so
+//! they never travel over provider IPC config or plugin process env.
 
 use std::sync::Arc;
 
@@ -21,7 +17,6 @@ use ene_ai::traits::{LlmProvider, LlmProviderFactory};
 use ene_ai::{AiProviderDef, TaskRef};
 use ene_plugin_proto::ConcurrencyHint;
 
-use crate::config::PluginConfig;
 use crate::ipc_plugin::IpcPluginConnection;
 use crate::ipc_provider::{ConcurrencyLimiter, IpcLlmProvider};
 
@@ -30,15 +25,6 @@ use crate::ipc_provider::{ConcurrencyLimiter, IpcLlmProvider};
 pub struct IpcLlmProviderFactory {
     kind: String,
     conn: Arc<IpcPluginConnection>,
-    /// Name of the plugin binary serving this provider kind. Used for the
-    /// `plugins.list.<name>` trust lookup and diagnostics.
-    plugin_name: String,
-    /// Whether the plugin is one of the trusted built-ins that ship with Ene
-    /// (matched against the compiled-in
-    /// [`BUILTIN_PLUGIN_NAMES`](crate::manager::BUILTIN_PLUGIN_NAMES) list,
-    /// not a filesystem location). Built-in plugins are always trusted to
-    /// receive credentials.
-    builtin: bool,
     /// Context window the plugin advertised for this provider kind
     /// (`LlmProviderSpec.context_window`), forwarded to every
     /// [`IpcLlmProvider`] this factory creates so prompt packing can budget
@@ -55,10 +41,6 @@ impl IpcLlmProviderFactory {
     /// Creates a new factory for the given provider kind, sharing the
     /// plugin connection.
     ///
-    /// `plugin_name` and `builtin` drive the API key trust gate: credentials
-    /// are only forwarded when `builtin` is `true` or the plugin has an
-    /// explicit entry in `plugins.list` (see [`Self::create_provider`]).
-    ///
     /// `concurrency` is the [`ConcurrencyHint`] the plugin declared for this
     /// provider kind during the handshake (or the safe serial default if it
     /// declared none); it is built into a single [`ConcurrencyLimiter`]
@@ -66,27 +48,15 @@ impl IpcLlmProviderFactory {
     pub fn new(
         kind: String,
         conn: Arc<IpcPluginConnection>,
-        plugin_name: String,
-        builtin: bool,
         context_window: Option<u32>,
         concurrency: ConcurrencyHint,
     ) -> Self {
         Self {
             kind,
             conn,
-            plugin_name,
-            builtin,
             context_window,
             limiter: Arc::new(ConcurrencyLimiter::new(concurrency)),
         }
-    }
-
-    /// Whether this plugin is trusted to receive resolved API credentials.
-    ///
-    /// Trust is granted to built-in plugins and to any plugin explicitly
-    /// listed under `plugins.list.<name>`.
-    fn is_trusted(&self, plugin_config: &PluginConfig) -> bool {
-        self.builtin || plugin_config.list.contains_key(&self.plugin_name)
     }
 }
 
@@ -101,7 +71,6 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
         task: &TaskRef,
     ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
         let ai_config = config.get_section::<ene_ai::AiConfig>().unwrap_or_default();
-        let plugin_config = config.get_section::<PluginConfig>().unwrap_or_default();
 
         // Honor the active cognitive task's own model / max_tokens overrides
         // rather than always falling back to `tasks.chat`. When the task
@@ -113,27 +82,11 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
             .unwrap_or_else(|| "unknown".to_string());
         let max_tokens = task.max_tokens.or(ai_config.tasks.chat.max_tokens);
 
-        let trusted = self.is_trusted(&plugin_config);
-
         let provider_config = ai_config
             .providers
             .values()
             .find(|def| def.kind == self.kind)
-            .map_or_else(
-                || serde_json::json!({}),
-                |def| {
-                    if !trusted {
-                        tracing::warn!(
-                            component = "IpcLlmProviderFactory",
-                            plugin = %self.plugin_name,
-                            kind = %self.kind,
-                            "plugin is neither built-in nor listed in plugins.list; \
-                             withholding API credentials"
-                        );
-                    }
-                    build_provider_config(def, trusted)
-                },
-            );
+            .map_or_else(|| serde_json::json!({}), build_provider_config);
 
         // Apply the same retry policy as the OpenAI path so plugin providers
         // retry transient (transport / rate-limit) failures consistently.
@@ -156,24 +109,16 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
 
 /// Builds the `provider_config` JSON forwarded to a plugin LLM provider.
 ///
-/// The API key — when present and `trusted` — is sent as a **plain JSON
-/// string** under `api_key`, matching the plugin-side contract (see the
-/// Anthropic plugin's `resolve_api_key`). When `trusted` is `false`, no
-/// `api_key` field is emitted at all, so credentials never reach an
-/// untrusted plugin.
-fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde_json::Value {
+/// Never includes an `api_key` field: secrets resolve exclusively through the
+/// host's `credential` passenger, so they must not travel over provider IPC
+/// config. `base_url` and `extra` are not secrets and are always forwarded.
+fn build_provider_config(def: &AiProviderDef) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     if !def.base_url.is_empty() {
         map.insert(
             "base_url".to_string(),
             serde_json::Value::String(def.base_url.clone()),
         );
-    }
-    if trusted {
-        let api_key = def.api_key.resolve_api_key();
-        if !api_key.is_empty() {
-            map.insert("api_key".to_string(), serde_json::Value::String(api_key));
-        }
     }
     for (k, v) in &def.extra {
         map.insert(k.clone(), v.clone());
@@ -182,10 +127,6 @@ fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde_json::Valu
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "tests use expect for concise failure messages"
-)]
 mod tests {
     use super::*;
     use ene_ai::ApiKeyConfig;
@@ -204,38 +145,24 @@ mod tests {
         }
     }
 
-    /// Contract: a trusted plugin receives the API key as a *plain JSON
-    /// string* (not a `{source, inline}` object).
+    /// Contract: the provider config never carries an `api_key` field, even
+    /// when the provider definition has a resolvable key — secrets travel
+    /// only through the host's credential service.
     #[test]
-    fn trusted_plugin_receives_plain_string_api_key() {
+    fn provider_config_never_emits_api_key() {
         let def = anthropic_def_with_inline_key();
-        let config = build_provider_config(&def, true);
-
-        let api_key = config.get("api_key").expect("api_key present when trusted");
-        assert!(
-            api_key.is_string(),
-            "api_key must be a plain JSON string, got {api_key:?}"
-        );
-        assert_eq!(api_key.as_str(), Some("sk-test-123"));
-    }
-
-    /// Contract: an untrusted plugin never receives an `api_key` field, even
-    /// when the provider definition has a resolvable key.
-    #[test]
-    fn untrusted_plugin_does_not_receive_api_key() {
-        let def = anthropic_def_with_inline_key();
-        let config = build_provider_config(&def, false);
+        let config = build_provider_config(&def);
 
         assert!(
             config.get("api_key").is_none(),
-            "api_key must be withheld from untrusted plugins, got {config:?}"
+            "api_key must never be emitted, got {config:?}"
         );
     }
 
-    /// `base_url` and `extra` fields are forwarded regardless of trust, since
-    /// they are not secrets.
+    /// `base_url` and `extra` fields are forwarded since they are not
+    /// secrets.
     #[test]
-    fn non_secret_fields_forwarded_regardless_of_trust() {
+    fn non_secret_fields_forwarded() {
         let mut def = anthropic_def_with_inline_key();
         def.base_url = "https://api.example.com".to_string();
         def.extra.insert(
@@ -243,16 +170,14 @@ mod tests {
             serde_json::Value::String("us-east-1".to_string()),
         );
 
-        for trusted in [true, false] {
-            let config = build_provider_config(&def, trusted);
-            assert_eq!(
-                config.get("base_url").and_then(serde_json::Value::as_str),
-                Some("https://api.example.com")
-            );
-            assert_eq!(
-                config.get("region").and_then(serde_json::Value::as_str),
-                Some("us-east-1")
-            );
-        }
+        let config = build_provider_config(&def);
+        assert_eq!(
+            config.get("base_url").and_then(serde_json::Value::as_str),
+            Some("https://api.example.com")
+        );
+        assert_eq!(
+            config.get("region").and_then(serde_json::Value::as_str),
+            Some("us-east-1")
+        );
     }
 }
