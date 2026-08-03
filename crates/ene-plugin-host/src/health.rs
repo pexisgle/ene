@@ -79,6 +79,20 @@ pub enum PluginHealthEvent {
         /// Why the plugin was disabled.
         reason: DisabledReason,
     },
+    /// A plugin was not registered because its hard capability requirements
+    /// have no provider (see `capability_registry`).
+    ///
+    /// Emitted once at startup, before the plugin's tools or providers would
+    /// be registered. The plugin process is not supervised; recovery is a
+    /// host restart (or a `plugins.list` reconfiguration with a provider
+    /// present). Soft requirements never produce this event — the plugin
+    /// starts and is expected to fall back.
+    RequirementsUnmet {
+        /// Plugin name.
+        plugin: String,
+        /// The unmet hard requirements, as `name@[^]major` strings.
+        requirements: Vec<String>,
+    },
 }
 
 impl PluginHealthEvent {
@@ -91,7 +105,8 @@ impl PluginHealthEvent {
             | Self::Recovered { plugin }
             | Self::CircuitOpened { plugin, .. }
             | Self::CircuitClosed { plugin }
-            | Self::Disabled { plugin, .. } => plugin,
+            | Self::Disabled { plugin, .. }
+            | Self::RequirementsUnmet { plugin, .. } => plugin,
         }
     }
 }
