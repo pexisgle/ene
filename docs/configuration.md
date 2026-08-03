@@ -174,6 +174,7 @@ Configures context-window packing, hybrid memory recall, emotion decay, characte
       "enabled": true,
       "interval_seconds": 600,
       "fatigue_suppression_threshold": 0.7,
+      "confirmation_enabled": false,
       "sources": {
         "window_title_level": "app_only"
       }
@@ -223,6 +224,25 @@ label boundary (`compute_mood_label`), so the gate and the character's visible m
 consistent. Set it to `1.0` to disable the gate and let the decision model weigh fatigue
 alone. The full affect state (all eight dimensions plus the mood label) is always passed
 to the decision model regardless of this threshold.
+
+`mind.proactive.confirmation_enabled` (default `false`) makes the main generation
+model confirm the decision inside the same generation call — no extra round trip.
+The generation prompt instructs the model that it may decline by emitting
+`<|silent|>` as the very first token; when that token arrives before any visible
+text, the runtime cancels the stream immediately and nothing is displayed or
+spoken. Confirmation only raises precision: it can catch a false "speak" from the
+decision model, but it cannot recover opportunities the decision model already
+rejected. When confirmation is enabled, the decision threshold
+(`mind.proactive.decision.min_confidence`, currently fixed at 0.55 during the
+staged rollout) is therefore **automatically lowered by 0.15** — the cheap
+decision model becomes a recall-first stage that lets borderline candidates
+through, and the main model is the precision stage that rejects them. The
+decision/main-model agreement (accepted vs. declined among decisions that reached
+generation) is recorded in structured logs under `event="confirmation"`; empty
+responses (no visible text) are logged with `confirmation=empty` and excluded
+from the rate. Early cancellation applies to token-streaming providers; the
+non-streaming local adapter buffers the full completion before its first chunk,
+so a refusal there discards a completed generation rather than saving tokens.
 
 Proactive decisions also consult stored memory. `mind.proactive.sources.memory` (default
 `true`) feeds the user's `Preference` / `UserProfile` memories — "don't talk while I work",

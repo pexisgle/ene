@@ -773,7 +773,9 @@ async fn pump_events(
                 origin: _,
                 reason:
                     reason
-                    @ (ene_runtime::TerminalReason::Done | ene_runtime::TerminalReason::Cancelled),
+                    @ (ene_runtime::TerminalReason::Done
+                    | ene_runtime::TerminalReason::Cancelled
+                    | ene_runtime::TerminalReason::Declined),
             }) => {
                 if !turn_matches(&active_turn, &turn) {
                     continue;

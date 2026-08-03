@@ -142,6 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match reason {
                     TerminalReason::Done => println!("\n\n[Done]"),
                     TerminalReason::Cancelled => println!("\n\n[Cancelled]"),
+                    TerminalReason::Declined => println!("\n\n[Declined]"),
                     TerminalReason::Failed { message } => {
                         eprintln!("\n\n[Failed] {message}");
                     }

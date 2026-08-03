@@ -592,9 +592,15 @@ impl TurnActor {
                             // (possibly incremented) turn count.
                             self.sync_shared_session_state();
                             if self.active_origin == crate::types::TurnOrigin::Proactive
-                                && outcome.terminal == TerminalReason::Done
+                                && let Some(decision) = self.proactive.last_decision.take()
                             {
-                                self.proactive.on_proactive_completed();
+                                let confirmation = crate::proactive::apply_proactive_completion(
+                                    &mut self.proactive,
+                                    &decision,
+                                    &outcome.terminal,
+                                    outcome.spoke_visible_text,
+                                );
+                                crate::proactive::log_confirmation(&decision, confirmation);
                             }
                             // Retroactive topic-boundary compression: a
                             // boundary detected on the just-completed turn
@@ -1201,6 +1207,7 @@ impl TurnActor {
             confidence = result.confidence,
             topic_hint = %result.topic_hint,
             detail = %result.detail,
+            confirmation = %result.confirmation,
             "Proactive will speak"
         );
         let mind = self
@@ -1210,7 +1217,9 @@ impl TurnActor {
         let hint = crate::proactive::proactive_generation_hint(
             &result.topic_hint,
             mind.resolved_classifier_language(),
+            mind.proactive.confirmation_enabled,
         );
+        self.proactive.last_decision = Some(result.clone());
         let screen_image = self
             .config
             .get_section::<ene_ai::AiConfig>()
@@ -1861,6 +1870,10 @@ impl TurnActor {
                 }
                 self.active_turn = None;
                 self.turn_gate.end();
+                if origin == crate::types::TurnOrigin::Proactive {
+                    // No stream will run, so no completion arm will consume it.
+                    self.proactive.last_decision = None;
+                }
                 drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Idle,
                 }));

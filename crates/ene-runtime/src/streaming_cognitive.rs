@@ -1038,6 +1038,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let mut timed_cues: Vec<PerformanceCue> = Vec::new();
     // `[cancel:expr]` also cancels the timed path, mirroring `expr_cancelled`.
     let mut timed_expr_suppressed = false;
+    // Integrated confirmation: proactive turns may decline by emitting the
+    // refusal token before any visible text. Kept outside the round loop so a
+    // decline in a later tool round still cancels the whole turn.
+    let confirmation_enabled = is_proactive && mind.proactive.confirmation_enabled;
+    let mut spoke_visible_text = false;
+    let mut refused = false;
 
     loop {
         if cancel_token.is_cancelled() {
@@ -1104,7 +1110,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         let mut expr_cancelled = false;
 
         let mut is_first_chunk = true;
-        while let Some(chunk_res) = stream.next().await {
+        'stream: while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
                 let spoken = session.display.display_buffer.clone();
                 spawn_interrupted_memory_work(
@@ -1146,6 +1152,9 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                         for piece in session.process_delta_ordered(content_delta) {
                             match piece {
                                 StreamPiece::Text(text) => {
+                                    if !text.trim().is_empty() {
+                                        spoke_visible_text = true;
+                                    }
                                     // Mirror streamed text into the shared buffer so a
                                     // hard-aborted turn can recover its partial response
                                     // for interruption recording.
@@ -1180,6 +1189,15 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                     }
                                 }
                                 StreamPiece::Marker(token) => {
+                                    if confirmation_enabled
+                                        && token == ene_mind::SILENT_TOKEN
+                                        && round == 0
+                                        && turn_tool_results.is_empty()
+                                        && !spoke_visible_text
+                                    {
+                                        refused = true;
+                                        break 'stream;
+                                    }
                                     accumulated_emotion_tokens.push(token.clone());
 
                                     // When emotion is enabled, expression markers are
@@ -1229,6 +1247,20 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     );
                 }
             }
+        }
+
+        if refused {
+            session.reset_display_buffer();
+            partial_text.lock().clear();
+            return stream_finish(
+                session,
+                &event_tx,
+                &terminal_emitted,
+                &turn,
+                origin,
+                TerminalReason::Declined,
+                None,
+            );
         }
 
         let clean_content = if !mind.emotion.enabled && !assistant_content.is_empty() {
@@ -1577,7 +1609,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             }
             drop(tts_tx);
 
-            return stream_finish(
+            let mut outcome = stream_finish(
                 session,
                 &event_tx,
                 &terminal_emitted,
@@ -1586,6 +1618,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 TerminalReason::Done,
                 topic_boundary_score,
             );
+            outcome.spoke_visible_text = spoke_visible_text;
+            return outcome;
         }
 
         let tool_calls = finalize_tool_calls(current_tool_calls);

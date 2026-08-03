@@ -258,6 +258,9 @@ pub struct StreamOutcome {
     /// completed turn, if any. The actor consumes this to compress
     /// the span before the boundary without delaying the response.
     pub topic_boundary_score: Option<f32>,
+    /// Whether the turn streamed any visible (non-whitespace) text. Used to
+    /// tell a confirmed acceptance from an empty or marker-only `Done`.
+    pub spoke_visible_text: bool,
 }
 
 pub(crate) fn stream_finish(
@@ -274,6 +277,7 @@ pub(crate) fn stream_finish(
         session,
         terminal: reason,
         topic_boundary_score,
+        spoke_visible_text: false,
     }
 }
 

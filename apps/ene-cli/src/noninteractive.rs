@@ -337,6 +337,9 @@ async fn process_turn(
                     TerminalReason::Cancelled => {
                         terminal_reason = "cancelled".to_string();
                     }
+                    TerminalReason::Declined => {
+                        terminal_reason = "declined".to_string();
+                    }
                 }
                 if format == OutputFormat::Jsonl {
                     output::print_jsonl(&StreamEvent::Terminal {

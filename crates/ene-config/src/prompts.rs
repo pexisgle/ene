@@ -431,6 +431,10 @@ pub struct ProactivePrompts {
     pub generation_hint_idle: String,
     /// Generation hint template with `{topic}` when a topic hint is present.
     pub generation_hint_with_topic: String,
+    /// Instruction appended to the generation hint when main-model
+    /// confirmation is enabled: how to decline with the `<|silent|>` token.
+    #[serde(default)]
+    pub confirmation_note: String,
     /// System prompt for local screen-image summarization.
     pub screen_summary_system: String,
     /// User prompt for local screen-image summarization.
@@ -453,6 +457,8 @@ struct RawProactivePrompts {
     generation_hint_idle_path: String,
     #[serde(default = "default_proactive_generation_hint_with_topic_path")]
     generation_hint_with_topic_path: String,
+    #[serde(default = "default_proactive_confirmation_note_path")]
+    confirmation_note_path: String,
     #[serde(default = "default_proactive_screen_summary_system_path")]
     screen_summary_system_path: String,
     #[serde(default = "default_proactive_screen_summary_user_path")]
@@ -481,6 +487,10 @@ fn default_proactive_generation_hint_with_topic_path() -> String {
     "en/proactive/generation_hint_with_topic.md".into()
 }
 
+fn default_proactive_confirmation_note_path() -> String {
+    "en/proactive/confirmation_note.md".into()
+}
+
 fn default_proactive_screen_summary_system_path() -> String {
     "en/proactive/screen_summary_system.md".into()
 }
@@ -495,14 +505,24 @@ fn default_compression_system_path() -> String {
 
 impl ProactivePrompts {
     /// Renders the generation hint, choosing idle vs topic template.
-    pub fn render_generation_hint(&self, topic_hint: &str) -> String {
-        let topic = topic_hint.trim();
-        if topic.is_empty() {
+    ///
+    /// When `confirmation_enabled` is set, the refusal note is appended so
+    /// the model knows it may decline with the `<|silent|>` token.
+    pub fn render_generation_hint(&self, topic_hint: &str, confirmation_enabled: bool) -> String {
+        let base = if topic_hint.trim().is_empty() {
             self.generation_hint_idle.trim().to_string()
         } else {
-            substitute(&self.generation_hint_with_topic, &[("topic", topic)])
-                .trim()
-                .to_string()
+            substitute(
+                &self.generation_hint_with_topic,
+                &[("topic", topic_hint.trim())],
+            )
+            .trim()
+            .to_string()
+        };
+        if confirmation_enabled {
+            format!("{base}\n\n{}", self.confirmation_note.trim())
+        } else {
+            base
         }
     }
 
@@ -700,6 +720,13 @@ macro_rules! embedded_pack {
                     "/prompts/",
                     $lang,
                     "/proactive/generation_hint_with_topic.md"
+                ))
+                .to_string(),
+                confirmation_note: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/confirmation_note.md"
                 ))
                 .to_string(),
                 screen_summary_system: include_str!(concat!(
@@ -1008,6 +1035,12 @@ mod tests {
         assert!(
             gen_topic.contains("{topic}"),
             "[{source}] proactive.generation_hint_with_topic must contain {{topic}}"
+        );
+
+        let note = &lib.proactive().confirmation_note;
+        assert!(
+            note.contains("<|silent|>"),
+            "[{source}] proactive.confirmation_note must name the <|silent|> token"
         );
     }
 

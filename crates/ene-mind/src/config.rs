@@ -937,9 +937,23 @@ impl ProactiveSourcesConfig {
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ProactiveDecisionConfig {
     /// Minimum confidence required before generation starts.
+    ///
+    /// When `confirmation_enabled` is set, the effective gate is this value
+    /// minus [`CONFIRMATION_CONFIDENCE_OFFSET`] — see
+    /// [`ProactiveConfig::effective_decision_min_confidence`] — so borderline
+    /// candidates reach the main model instead of being dropped here.
     #[serde(deserialize_with = "deserialize_unit_interval")]
     pub min_confidence: f64,
 }
+
+/// Amount the decision threshold is lowered while main-model confirmation is
+/// enabled (0.55 -> 0.40 at the default).
+///
+/// The pipeline becomes a recall-first / precision-last filter: the cheap
+/// decision model passes borderline cases through, and the main generation
+/// model — which sees the full character, memory, and scene context — is the
+/// stage that rejects them.
+pub const CONFIRMATION_CONFIDENCE_OFFSET: f64 = 0.15;
 
 impl Default for ProactiveDecisionConfig {
     fn default() -> Self {
@@ -1004,6 +1018,13 @@ pub struct ProactiveConfig {
     #[serde(skip_deserializing, default, skip_serializing)]
     #[schemars(skip)]
     pub decision: ProactiveDecisionConfig,
+    /// Have the main generation model confirm the decision inside the same
+    /// generation call: it may decline by emitting `<|silent|>` as its first
+    /// token, cancelling the stream without display or speech.
+    ///
+    /// When enabled, [`Self::effective_decision_min_confidence`] lowers the
+    /// decision threshold so borderline candidates reach the main model.
+    pub confirmation_enabled: bool,
     /// When true, proactive generation may select tools (default false).
     #[serde(skip_deserializing, default, skip_serializing)]
     #[schemars(skip)]
@@ -1060,12 +1081,29 @@ impl Default for ProactiveConfig {
             generation_timeout_seconds: 60,
             sources: ProactiveSourcesConfig::default(),
             decision: ProactiveDecisionConfig::default(),
+            confirmation_enabled: false,
             allow_tools: false,
             max_conversation_chars: 4_000,
             max_activity_chars: 500,
             max_screen_summary_chars: 800,
             max_memory_notes: 12,
             fatigue_suppression_threshold: 0.7,
+        }
+    }
+}
+
+impl ProactiveConfig {
+    /// The decision confidence gate actually applied.
+    ///
+    /// With `confirmation_enabled` the threshold is lowered by
+    /// [`CONFIRMATION_CONFIDENCE_OFFSET`] (never below zero) so the decision
+    /// model acts as a recall stage; without it the configured value applies.
+    #[must_use]
+    pub fn effective_decision_min_confidence(&self) -> f64 {
+        if self.confirmation_enabled {
+            (self.decision.min_confidence - CONFIRMATION_CONFIDENCE_OFFSET).max(0.0)
+        } else {
+            self.decision.min_confidence
         }
     }
 }
@@ -1548,6 +1586,37 @@ mod tests {
         let cfg: ProactiveConfig =
             serde_json::from_str(r#"{"decision":{"min_confidence": 1.5}}"#).expect("deserialize");
         assert!((cfg.decision.min_confidence - 0.55).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn confirmation_enabled_deserializes_and_defaults_off() {
+        let default = ProactiveConfig::default();
+        assert!(!default.confirmation_enabled);
+        let cfg: ProactiveConfig =
+            serde_json::from_str(r#"{"confirmation_enabled": true}"#).expect("deserialize");
+        assert!(cfg.confirmation_enabled);
+        assert_eq!(cfg.decision, ProactiveDecisionConfig::default());
+    }
+
+    #[test]
+    fn effective_decision_confidence_lowers_with_confirmation() {
+        let default = ProactiveConfig::default();
+        assert!((default.effective_decision_min_confidence() - 0.55).abs() < f64::EPSILON);
+
+        let mut confirmed = default.clone();
+        confirmed.confirmation_enabled = true;
+        assert!(
+            (confirmed.effective_decision_min_confidence()
+                - (0.55 - CONFIRMATION_CONFIDENCE_OFFSET))
+                .abs()
+                < f64::EPSILON
+        );
+
+        // The effective gate never goes below zero.
+        let mut low = default;
+        low.decision.min_confidence = 0.1;
+        low.confirmation_enabled = true;
+        assert!(low.effective_decision_min_confidence().abs() < f64::EPSILON);
     }
 
     #[test]

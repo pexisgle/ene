@@ -213,6 +213,9 @@ pub enum TerminalReason {
     },
     /// The run was cancelled by the user via `EneCommand::Cancel`.
     Cancelled,
+    /// A proactive run ended before any visible text because the main model
+    /// declined with the `<|silent|>` token (integrated confirmation).
+    Declined,
 }
 
 /// A snapshot of the current actor state for read-only queries.
