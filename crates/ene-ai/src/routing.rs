@@ -70,10 +70,6 @@ pub fn create_chat_provider_for_task(
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    reason = "unit tests use unwrap for concise assertions"
-)]
 mod tests {
     use super::*;
     use crate::config::{AiProviderDef, ApiKeyConfig};
@@ -124,13 +120,14 @@ mod tests {
     #[test]
     fn unregistered_kind_reports_missing_factory() {
         let config = config_with_provider("custom", "not-a-plugin-kind");
-        let mut task = TaskRef::default();
-        task.provider = "custom".to_string();
+        let task = TaskRef {
+            provider: "custom".to_string(),
+            ..TaskRef::default()
+        };
         // `unwrap_err` needs `Debug` on the boxed provider, which trait
         // objects do not provide; match the error instead.
-        let err = match create_chat_provider_for_task(&config, &task) {
-            Ok(_) => panic!("expected an error, got a provider"),
-            Err(e) => e,
+        let Err(err) = create_chat_provider_for_task(&config, &task) else {
+            panic!("expected an error, got a provider")
         };
         assert!(err.to_string().contains("not-a-plugin-kind"), "err: {err}");
     }
@@ -138,8 +135,10 @@ mod tests {
     #[test]
     fn local_provider_is_rejected() {
         let config = ene_config::EneConfig::default();
-        let mut task = TaskRef::default();
-        task.provider = crate::config::LOCAL_PROVIDER.to_string();
+        let task = TaskRef {
+            provider: crate::config::LOCAL_PROVIDER.to_string(),
+            ..TaskRef::default()
+        };
         assert!(create_chat_provider_for_task(&config, &task).is_err());
     }
 }

@@ -2520,7 +2520,7 @@ async fn reconfigure_plugin_host_bg(
     // discipline as LLM factories, so a restarted host cannot leave
     // embeddings pointing at a dead plugin connection.
     let old_embedding_factories: HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>> = {
-        let mut guard = plugin_host.lock().await;
+        let guard = plugin_host.lock().await;
         guard.as_ref().map_or_else(HashMap::new, |host| {
             host.embedding_factories()
                 .iter()
@@ -3387,7 +3387,8 @@ pub(super) async fn init_memory_store(
         .unwrap_or_default();
     let db_path = store_config.resolve_memory_db_path(&config.character);
 
-    if let Some(parent) = db_path.parent()
+    if db_path != std::path::Path::new(":memory:")
+        && let Some(parent) = db_path.parent()
         && !parent.exists()
     {
         std::fs::create_dir_all(parent)
