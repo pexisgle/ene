@@ -873,7 +873,7 @@ pub fn expand_cbs_macros_with(
 /// Unknown macros are left untouched so card authors can spot typos, matching
 /// the long-standing behaviour of the simpler entry points. `{{persona}}` is
 /// deliberately not expanded: `creator_notes` is creator-to-user guidance and
-/// never reaches prompts (`CCv3` "creator_notes").
+/// never reaches prompts (`CCv3` "`creator_notes`").
 pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
     let mut result = text.to_string();
 
