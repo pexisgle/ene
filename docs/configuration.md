@@ -238,7 +238,11 @@ staged rollout) is therefore **automatically lowered by 0.15** — the cheap
 decision model becomes a recall-first stage that lets borderline candidates
 through, and the main model is the precision stage that rejects them. The
 decision/main-model agreement (accepted vs. declined among decisions that reached
-generation) is recorded in structured logs under `event="confirmation"`.
+generation) is recorded in structured logs under `event="confirmation"`; empty
+responses (no visible text) are logged with `confirmation=empty` and excluded
+from the rate. Early cancellation applies to token-streaming providers; the
+non-streaming local adapter buffers the full completion before its first chunk,
+so a refusal there discards a completed generation rather than saving tokens.
 
 Proactive decisions also consult stored memory. `mind.proactive.sources.memory` (default
 `true`) feeds the user's `Preference` / `UserProfile` memories — "don't talk while I work",
