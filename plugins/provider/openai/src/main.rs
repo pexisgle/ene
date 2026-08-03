@@ -2,10 +2,10 @@
 //!
 //! OpenAI-compatible provider plugin binary for the ene unified plugin system.
 //!
-//! Exposes the OpenAI Chat Completions and Embeddings APIs as provider
+//! Exposes the `OpenAI` Chat Completions and Embeddings APIs as provider
 //! traits over the plugin IPC protocol, supporting SSE streaming, tool use,
 //! vision inputs, structured output, and batch embeddings. Any
-//! OpenAI-compatible endpoint (OpenAI, OpenRouter, local servers) can be
+//! OpenAI-compatible endpoint (`OpenAI`, `OpenRouter`, local servers) can be
 //! targeted via the `base_url` configuration.
 
 mod convert;

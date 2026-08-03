@@ -3,7 +3,7 @@
 use super::{LocalGgufLoadParams, LocalLlamaCppProvider};
 use crate::gguf::{ensure_gguf_available, ensure_mmproj_available};
 use async_trait::async_trait;
-use ene_ai::config::{AiConfig, AiProviderDef, TaskRef};
+use ene_ai::config::{AiConfig, AiProviderDef};
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk};
 use ene_ai::traits::LlmProvider;

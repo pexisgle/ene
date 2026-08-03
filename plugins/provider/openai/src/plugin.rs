@@ -253,7 +253,7 @@ fn resolve_api_key_with_host(
 }
 
 /// Resolves the effective API base URL, with the same precedence as the API
-/// key, falling back to the OpenAI default.
+/// key, falling back to the `OpenAI` default.
 fn resolve_base_url(config: &Value) -> String {
     let host_config = PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner);
     host_config
@@ -413,7 +413,7 @@ fn backoff_delay(retry_index: u32) -> Duration {
 fn build_chat_body(
     model: &str,
     max_tokens: Option<u32>,
-    messages: Vec<Value>,
+    messages: &[Value],
     tools: Vec<Value>,
     json_schema: Option<Value>,
     stream: bool,
@@ -547,7 +547,7 @@ impl LlmPlugin for OpenAiPlugin {
         let body = build_chat_body(
             &model,
             max_tokens,
-            oa_messages,
+            &oa_messages,
             oa_tools,
             None,
             true,
@@ -581,7 +581,7 @@ impl LlmPlugin for OpenAiPlugin {
         let body = build_chat_body(
             &model,
             max_tokens,
-            oa_messages,
+            &oa_messages,
             Vec::new(),
             json_schema,
             false,
@@ -788,7 +788,7 @@ mod tests {
         let body = build_chat_body(
             "gpt-4o-mini",
             Some(512),
-            vec![json!({"role": "user", "content": "Hi"})],
+            &[json!({"role": "user", "content": "Hi"})],
             Vec::new(),
             None,
             false,
@@ -806,7 +806,7 @@ mod tests {
         let body = build_chat_body(
             "gpt-4o-mini",
             None,
-            vec![json!({"role": "user", "content": "Hi"})],
+            &[json!({"role": "user", "content": "Hi"})],
             Vec::new(),
             None,
             true,
@@ -821,7 +821,7 @@ mod tests {
         let body = build_chat_body(
             "mimo-1",
             None,
-            vec![json!({"role": "user", "content": "Hi"})],
+            &[json!({"role": "user", "content": "Hi"})],
             Vec::new(),
             None,
             false,
@@ -836,7 +836,7 @@ mod tests {
         let body = build_chat_body(
             "gpt-4o-mini",
             None,
-            vec![json!({"role": "user", "content": "Hi"})],
+            &[json!({"role": "user", "content": "Hi"})],
             Vec::new(),
             Some(schema),
             false,
@@ -858,7 +858,7 @@ mod tests {
         let body = build_chat_body(
             "gpt-4o-mini",
             None,
-            vec![json!({"role": "user", "content": "Hi"})],
+            &[json!({"role": "user", "content": "Hi"})],
             tools.clone(),
             None,
             false,

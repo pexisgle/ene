@@ -3479,7 +3479,8 @@ mod tests {
     #[test]
     fn stale_factory_diff_keeps_kinds_served_by_new_host() {
         let old_kinds = vec!["openai".to_string(), "stale-plugin".to_string()];
-        let mut new_factories: HashMap<String, Arc<ene_ai::LlmProviderFactory>> = HashMap::new();
+        let mut new_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
+            HashMap::new();
         new_factories.insert("openai".to_string(), stub_llm_factory("openai"));
 
         assert_eq!(
@@ -3491,7 +3492,7 @@ mod tests {
 
     /// A factory whose `create_provider` always fails, standing in for a
     /// plugin-backed factory in tests that only exercise registry plumbing.
-    fn stub_llm_factory(kind: &'static str) -> Arc<ene_ai::LlmProviderFactory> {
+    fn stub_llm_factory(kind: &'static str) -> Arc<dyn ene_ai::LlmProviderFactory> {
         struct StubFactory {
             kind: &'static str,
         }

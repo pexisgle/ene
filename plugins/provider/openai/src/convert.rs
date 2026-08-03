@@ -1,8 +1,8 @@
 //! Message, tool, and SSE-chunk conversion between the ene provider-agnostic
-//! JSON format and the OpenAI Chat Completions wire format.
+//! JSON format and the `OpenAI` Chat Completions wire format.
 //!
 //! The ene `LlmMessage` serializes as `{"role": "system"|"user"|"assistant"|"tool", ...}`
-//! (see `ene-ai`'s `message` module); the OpenAI API expects a flat message
+//! (see `ene-ai`'s `message` module); the `OpenAI` API expects a flat message
 //! array with the same roles plus typed content parts for multimodal inputs.
 
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use ene_plugin::{PluginError, PluginStreamChunk, TokenUsage};
 use serde_json::{Value, json};
 
-/// Converts ene chat messages to OpenAI Chat Completions messages.
+/// Converts ene chat messages to `OpenAI` Chat Completions messages.
 ///
 /// Accepts the `LlmMessage` wire shape. A user message with exactly one text
 /// part becomes a plain string `content`; anything else becomes a content
@@ -106,7 +106,7 @@ fn assistant_content(msg: &Value) -> Value {
     out
 }
 
-/// Replaces characters the OpenAI API rejects in tool names with `_`, so
+/// Replaces characters the `OpenAI` API rejects in tool names with `_`, so
 /// namespaced tool names (`namespace.action`) keep a stable, callable shape.
 pub(crate) fn sanitize_tool_name(name: &str) -> String {
     name.chars()
@@ -120,7 +120,7 @@ pub(crate) fn sanitize_tool_name(name: &str) -> String {
         .collect()
 }
 
-/// Converts ene `ToolSpec` wire values to OpenAI `tools` entries.
+/// Converts ene `ToolSpec` wire values to `OpenAI` `tools` entries.
 pub(crate) fn to_openai_tools(tools: &[Value]) -> Vec<Value> {
     tools
         .iter()
@@ -154,7 +154,7 @@ pub(crate) fn tool_name_mapping(tools: &[Value]) -> HashMap<String, String> {
 ///
 /// Returns `None` for chunks that carry no text delta, tool-call delta, or
 /// usage (e.g. role-only start chunks). Tool-call indices are used as-is;
-/// the host renumbers nothing, matching the OpenAI delta contract where
+/// the host renumbers nothing, matching the `OpenAI` delta contract where
 /// `index` identifies the tool call within the array.
 pub(crate) fn process_sse_chunk(
     chunk: &Value,
