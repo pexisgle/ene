@@ -1,6 +1,6 @@
 # IPC Plugin System & MCP Integration
 
-This document covers Ene's out-of-process IPC plugin architecture, Protocol v5 wire specs, Model Context Protocol (MCP) server integration, and built-in tool plugins.
+This document covers Ene's out-of-process IPC plugin architecture, Protocol v6 wire specs, Model Context Protocol (MCP) server integration, and built-in tool plugins.
 
 ---
 
@@ -13,7 +13,7 @@ Ene Host Application (ene-runtime)
   │
   └── PluginHostManager (ene-plugin-host)
         │
-        ├── IPC Protocol v5 (Length-prefixed JSON over stdio)
+        ├── IPC Protocol v6 (Length-prefixed frames over stdio)
         │     ├── ene-plugin-anthropic (Anthropic LLM Provider Plugin)
         │     ├── ene-plugin-openai    (OpenAI-Compatible Provider Plugin)
         │     ├── ene-plugin-app       (GUI Launcher Tool)
@@ -30,12 +30,12 @@ Ene Host Application (ene-runtime)
 
 ---
 
-## 2. IPC Protocol v5 Specification
+## 2. IPC Protocol v6 Specification
 
-Plugins communicate over `stdin`/`stdout` using **IPC Protocol v5**:
+Plugins communicate over `stdin`/`stdout` using **IPC Protocol v6**:
 
-- **Framing**: Every packet begins with a 4-byte little-endian `u32` payload size followed by UTF-8 JSON.
-- **Handshake Negotiation**: The host sends `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`, i.e. `VersionRange { min: 4, max: 5 }` — not a single pinned value. The plugin intersects that range with its own supported range via `VersionRange::negotiate` and responds with `HandshakeAck { version, capabilities: PluginCapabilities }`, where `version` is the highest version common to both sides.
+- **Framing**: Every packet begins with a 4-byte little-endian `u32` payload size followed by a payload in the negotiated `WireFormat`. The handshake exchange (request and ack) always uses UTF-8 JSON; once both sides negotiated protocol v6, every later frame is MessagePack (`rmp-serde`, map-encoded). Peers that negotiated v5 or lower keep the original JSON framing for the whole connection, so N-1 plugins are byte-compatible with the pre-v6 wire.
+- **Handshake Negotiation**: The host sends `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`, i.e. `VersionRange { min: 5, max: 6 }` — not a single pinned value. The plugin intersects that range with its own supported range via `VersionRange::negotiate` and responds with `HandshakeAck { version, capabilities: PluginCapabilities }`, where `version` is the highest version common to both sides.
 - **Handshake Timeout**: The host bounds how long it waits for the `HandshakeAck` (`plugins.handshake_timeout_ms`, default 10 s). A plugin that accepts the socket but never replies fails the handshake with `PluginHostError::HandshakeFailed` instead of blocking startup of the remaining plugins. Plugin authors must answer the handshake promptly and defer heavy initialization (model loading, etc.) until afterwards — see `run_plugin_server` in `ene-plugin`.
 - **Request Correlation**: All async requests and responses include a mandatory `request_id` (`Uuid`).
 - **Capabilities**: Plugins advertise supported capabilities (`tools`, `llm_providers`, `stt_providers`, `tts_providers`), each provider spec also declaring a `concurrency: ConcurrencyHint` (see [§3](#3-provider-concurrency-concurrencyhint)).
@@ -49,7 +49,7 @@ Tool and provider plugins ship as independent out-of-process binaries. Bumping `
 - **Bumping the protocol version**: when `PLUGIN_IPC_PROTOCOL_VERSION` is bumped, `PLUGIN_IPC_MIN_SUPPORTED_VERSION` must be bumped by the same amount, dropping support for the oldest previously-supported version.
 - **When a bump is required**: only for changing the meaning of an existing message, adding a required field, or removing/renaming an enum variant. New fields should use `#[serde(default)]` so older/newer peers stay wire-compatible without a version bump.
 - **Feature gating**: the host stores the negotiated version on `IpcPluginConnection` (`ene-plugin-host`) and exposes it via `negotiated_version()`. Behavior that depends on a message introduced after the minimum supported version should gate on it — e.g. `supports_set_config()` gates `PluginIpcRequest::SetConfig` (introduced in v5) so a v4 plugin isn't sent a message it cannot deserialize; the host still updates its local cache so the next reconnect handshake delivers the fresh config. Dynamic-config messages (`ListConfigOptions`, `ValidateConfig`, `MigrateConfig`) also require protocol ≥ v5 **and** the matching `PluginCapabilities` flags (`supports_list_config_options`, etc.; serde-default `false` on older v5 binaries that lack those variants).
-- **Negotiation failure diagnostics**: when a plugin's proposed range and the host's supported range do not overlap, the plugin's `HandshakeAck` error and the host's `PluginHostError::HandshakeFailed` / `ProtocolMismatch` both name the ranges on both sides (e.g. "host supports 4..=5, plugin supports 3..=3"), so a developer can tell the plugin binary needs rebuilding rather than seeing a generic handshake failure.
+- **Negotiation failure diagnostics**: when a plugin's proposed range and the host's supported range do not overlap, the plugin's `HandshakeAck` error and the host's `PluginHostError::HandshakeFailed` / `ProtocolMismatch` both name the ranges on both sides (e.g. "host supports 5..=6, plugin supports 3..=3"), so a developer can tell the plugin binary needs rebuilding rather than seeing a generic handshake failure.
 
 ---
 

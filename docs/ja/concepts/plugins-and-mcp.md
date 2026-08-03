@@ -1,6 +1,6 @@
 # IPC プラグインシステムと MCP 連携
 
-本ドキュメントでは、Ene のプロセス外 IPC プラグインアーキテクチャ、Protocol v5 ワイヤー仕様、Model Context Protocol (MCP) サーバー連携、および組み込みツールプラグインについて解説します。
+本ドキュメントでは、Ene のプロセス外 IPC プラグインアーキテクチャ、Protocol v6 ワイヤー仕様、Model Context Protocol (MCP) サーバー連携、および組み込みツールプラグインについて解説します。
 
 ---
 
@@ -13,7 +13,7 @@ Ene ホストアプリケーション (ene-runtime)
   │
   └── PluginHostManager (ene-plugin-host)
         │
-        ├── IPC Protocol v5 (stdio 上の長さプレフィックス付き JSON)
+        ├── IPC Protocol v6 (stdio 上の長さプレフィックス付きフレーム)
         │     ├── ene-plugin-anthropic (Anthropic LLM プロバイダプラグイン)
         │     ├── ene-plugin-openai    (OpenAI 互換プロバイダプラグイン)
         │     ├── ene-plugin-app       (GUI 起動ツール)
@@ -30,12 +30,12 @@ Ene ホストアプリケーション (ene-runtime)
 
 ---
 
-## 2. IPC Protocol v5 仕様
+## 2. IPC Protocol v6 仕様
 
-プラグインは `stdin`/`stdout` 上で **IPC Protocol v5** を使用して通信します：
+プラグインは `stdin`/`stdout` 上で **IPC Protocol v6** を使用して通信します：
 
-- **フレーミング**: すべてのパケットは 4 バイトのリトルエンディアン `u32` パケットサイズで始まり、UTF-8 JSON ペイロードが続きます。
-- **ハンドシェイクネゴシエーション**: ホストは `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`、すなわち単一の固定値ではなく `VersionRange { min: 4, max: 5 }` を送信します。プラグインは `VersionRange::negotiate` でその範囲と自身がサポートする範囲の共通部分を取り、両者に共通する最大バージョンを `HandshakeAck { version, capabilities: PluginCapabilities }` として返します。
+- **フレーミング**: すべてのパケットは 4 バイトのリトルエンディアン `u32` パケットサイズで始まり、ネゴシエーションされた `WireFormat` のペイロードが続きます。ハンドシェイクのやり取り（リクエストと ack）は常に UTF-8 JSON を使用し、両者がプロトコル v6 をネゴシエーションした場合、以降のすべてのフレームは MessagePack（`rmp-serde`、マップエンコード）になります。v5 以下でネゴシエーションしたピアは接続全体で従来どおりの JSON フレーミングのままであり、N-1 プラグインは v6 以前のワイヤーとバイト互換です。
+- **ハンドシェイクネゴシエーション**: ホストは `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`、すなわち単一の固定値ではなく `VersionRange { min: 5, max: 6 }` を送信します。プラグインは `VersionRange::negotiate` でその範囲と自身がサポートする範囲の共通部分を取り、両者に共通する最大バージョンを `HandshakeAck { version, capabilities: PluginCapabilities }` として返します。
 - **ハンドシェイクタイムアウト**: ホストは `HandshakeAck` の待ち時間に上限を設けています（`plugins.handshake_timeout_ms`、既定 10 秒）。ソケットを accept しながら応答しないプラグインは、残りのプラグインの起動をブロックする代わりに `PluginHostError::HandshakeFailed` でハンドシェイクに失敗します。プラグイン作者はハンドシェイクに即応答し、重い初期化（モデル読み込み等）はその後へ遅延させる必要があります——`ene-plugin` の `run_plugin_server` を参照してください。
 - **リクエスト相関**: 非同期リクエストおよびレスポンスはすべて必須の `request_id` (`Uuid`) を保持します。
 - **ケーパビリティ**: プラグインはサポートする機能 (`tools`, `llm_providers`, `stt_providers`, `tts_providers`) を宣伝し、各プロバイダ仕様はさらに `concurrency: ConcurrencyHint` を宣言します ([§3](#3-プロバイダの並行度-concurrencyhint) 参照)。
@@ -49,7 +49,7 @@ Ene ホストアプリケーション (ene-runtime)
 - **プロトコルバージョンのバンプ**: `PLUGIN_IPC_PROTOCOL_VERSION` を上げる際は `PLUGIN_IPC_MIN_SUPPORTED_VERSION` も同じ数だけ繰り上げ、最も古いサポート対象バージョンのサポートを打ち切ります。
 - **バンプが必要なケース**: 既存メッセージの意味変更、必須フィールドの追加、enum variant の削除・リネームの場合のみです。新しいフィールドは `#[serde(default)]` を使うことで、バージョンバンプなしに新旧のピア間で互換性を保てます。
 - **機能ゲート**: ホストはネゴシエート済みバージョンを `ene-plugin-host` の `IpcPluginConnection` に保持し、`negotiated_version()` で参照できます。最小サポートバージョンより後に追加されたメッセージに依存する挙動はこれをもとにゲートすべきです。たとえば `supports_set_config()` は v5 で追加された `PluginIpcRequest::SetConfig` をゲートしており、v4 のプラグインには理解できないメッセージを送らず、ローカルキャッシュのみ更新して次回再接続ハンドシェイクで新しい設定を届けます。動的設定メッセージ（`ListConfigOptions`、`ValidateConfig`、`MigrateConfig`）はプロトコル ≥ v5 **かつ** 対応する `PluginCapabilities` フラグ（`supports_list_config_options` など。当該 variant を知らない古い v5 バイナリでは serde デフォルトの `false`）が必要です。
-- **ネゴシエーション失敗の診断**: プラグインが提示する範囲とホストのサポート範囲が重ならない場合、プラグイン側の `HandshakeAck` エラーおよびホスト側の `PluginHostError::HandshakeFailed` / `ProtocolMismatch` はいずれも双方の範囲を明記します（例: "host supports 4..=5, plugin supports 3..=3"）。これにより、単なる汎用的なハンドシェイク失敗ではなく、プラグインバイナリの再ビルドが必要であることが開発者に伝わります。
+- **ネゴシエーション失敗の診断**: プラグインが提示する範囲とホストのサポート範囲が重ならない場合、プラグイン側の `HandshakeAck` エラーおよびホスト側の `PluginHostError::HandshakeFailed` / `ProtocolMismatch` はいずれも双方の範囲を明記します（例: "host supports 5..=6, plugin supports 3..=3"）。これにより、単なる汎用的なハンドシェイク失敗ではなく、プラグインバイナリの再ビルドが必要であることが開発者に伝わります。
 
 ---
 
