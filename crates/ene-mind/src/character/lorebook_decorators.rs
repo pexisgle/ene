@@ -64,7 +64,8 @@ pub struct ActivationContext {
     pub previously_matched: bool,
     /// Index of the greeting this session started with (`0` = `first_mes`,
     /// `i+1` = `alternate_greetings[i]`); `None` when no greeting was chosen.
-    /// Drives `@@is_greeting` (`CCv3` `SPEC_V3.md`).
+    /// Drives `@@is_greeting` (`CCv3` `SPEC_V3.md`); `None` means the
+    /// decorator cannot be checked and is ignored.
     pub greeting_index: Option<u32>,
 }
 
@@ -98,8 +99,9 @@ pub struct EntryDecorators {
     /// `@@scan_depth N` — per-entry scan depth override.
     pub scan_depth: Option<u32>,
     /// `@@is_greeting N` — only match when the session's active greeting
-    /// index equals `N`. Inert when no greeting was chosen (spec: ignore the
-    /// decorator when checking the active greeting is not possible).
+    /// index equals `N`. Resolved only while a greeting is active; without
+    /// one, checking is not possible, so the decorator is ignored and its
+    /// `@@@` fallback chain applies (spec).
     pub is_greeting: Option<u32>,
     /// `@@additional_keys` — extra keys, at least one must match (accumulates
     /// across multiple decorator lines, per spec).
@@ -129,6 +131,16 @@ impl EntryDecorators {
     /// multiple times.
     #[must_use]
     pub fn parse(content: &str) -> (Self, String) {
+        Self::parse_with_greeting(content, None)
+    }
+
+    /// [`Self::parse`] with the session's active greeting index.
+    ///
+    /// `@@is_greeting N` can only be honored while a greeting is active; with
+    /// `greeting_index: None` the decorator is ignored per spec ("checking the
+    /// active greeting is not possible") and its `@@@` fallback chain applies.
+    #[must_use]
+    pub fn parse_with_greeting(content: &str, greeting_index: Option<u32>) -> (Self, String) {
         let mut decorators = Self::default();
         let mut seen_names = Vec::new();
         let mut chain = ChainGroup::default();
@@ -143,16 +155,16 @@ impl EntryDecorators {
                     chain.fallbacks.push((name, value));
                 } else {
                     // New decorator group; resolve the previous group first.
-                    chain.resolve(&mut decorators, &mut seen_names);
+                    chain.resolve(&mut decorators, &mut seen_names, greeting_index);
                     let (name, value) = split_name_value(rest);
                     chain.primary = Some((name, value));
                 }
             } else {
-                chain.resolve(&mut decorators, &mut seen_names);
+                chain.resolve(&mut decorators, &mut seen_names, greeting_index);
                 kept.push(line);
             }
         }
-        chain.resolve(&mut decorators, &mut seen_names);
+        chain.resolve(&mut decorators, &mut seen_names, greeting_index);
 
         (decorators, kept.join("\n").trim().to_string())
     }
@@ -240,7 +252,12 @@ impl ChainGroup {
     /// decorator is not recognized ... or decorator is ignored, check if the
     /// fallback decorator is present"). A group without a primary (`@@@` with
     /// no preceding `@@`) never resolves.
-    fn resolve(&mut self, decorators: &mut EntryDecorators, seen_names: &mut Vec<String>) {
+    fn resolve(
+        &mut self,
+        decorators: &mut EntryDecorators,
+        seen_names: &mut Vec<String>,
+        greeting_index: Option<u32>,
+    ) {
         let Some((name, value)) = self.primary.take() else {
             // `@@@` lines without a preceding `@@` are not decorators.
             self.fallbacks.clear();
@@ -258,7 +275,7 @@ impl ChainGroup {
             return;
         }
         seen_names.push(name.clone());
-        if let Some(resolved) = resolve_decorator(&name, value.as_deref()) {
+        if let Some(resolved) = resolve_decorator(&name, value.as_deref(), greeting_index) {
             apply_resolved(decorators, resolved);
             self.fallbacks.clear();
             return;
@@ -275,7 +292,9 @@ impl ChainGroup {
                 continue;
             }
             seen_names.push(fallback_name.clone());
-            if let Some(resolved) = resolve_decorator(&fallback_name, fallback_value.as_deref()) {
+            if let Some(resolved) =
+                resolve_decorator(&fallback_name, fallback_value.as_deref(), greeting_index)
+            {
                 apply_resolved(decorators, resolved);
                 return;
             }
@@ -337,9 +356,13 @@ fn is_context_ignored(name: &str) -> bool {
 }
 
 /// Resolve one decorator chain element, or `None` when the name is unknown,
-/// ignored in Ene's context, or the value is invalid (the spec's "ignore the
-/// decorator" case).
-fn resolve_decorator(name: &str, value: Option<&str>) -> Option<ResolvedDecorator> {
+/// ignored in Ene's context (or uncheckable for `greeting_index`), or the
+/// value is invalid (the spec's "ignore the decorator" case).
+fn resolve_decorator(
+    name: &str,
+    value: Option<&str>,
+    greeting_index: Option<u32>,
+) -> Option<ResolvedDecorator> {
     if is_context_ignored(name) {
         return None;
     }
@@ -373,7 +396,11 @@ fn resolve_decorator(name: &str, value: Option<&str>) -> Option<ResolvedDecorato
             Some(ResolvedDecorator::Position(position))
         }
         "scan_depth" => Some(ResolvedDecorator::ScanDepth(value?.parse::<u32>().ok()?)),
-        "is_greeting" => Some(ResolvedDecorator::IsGreeting(value?.parse::<u32>().ok()?)),
+        // Without an active greeting the index cannot be checked, so the
+        // decorator is ignored and the `@@@` fallback chain applies.
+        "is_greeting" if greeting_index.is_some() => {
+            Some(ResolvedDecorator::IsGreeting(value?.parse::<u32>().ok()?))
+        }
         "additional_keys" => Some(ResolvedDecorator::AdditionalKeys(split_values(value)?)),
         "exclude_keys" => Some(ResolvedDecorator::ExcludeKeys(split_values(value)?)),
         "role" => {
@@ -975,7 +1002,10 @@ mod tests {
 
     #[test]
     fn greeting_decorator_parses_and_gates_on_active_index() {
-        let (decorators, _) = parse("@@is_greeting 2\n@@@activate_only_after 4\nBody");
+        let (decorators, _) = EntryDecorators::parse_with_greeting(
+            "@@is_greeting 2\n@@@activate_only_after 4\nBody",
+            Some(2),
+        );
         assert_eq!(decorators.is_greeting, Some(2));
         // The honored primary wins; the `@@@` fallback is not consulted.
         assert_eq!(decorators.activate_only_after, None);
@@ -993,11 +1023,21 @@ mod tests {
     }
 
     #[test]
-    fn greeting_decorator_inert_without_active_greeting() {
-        // Spec: ignore the decorator when checking the active greeting is not
-        // possible, so `@@@` fallbacks still apply.
-        let (decorators, _) = parse("@@is_greeting 0\nBody");
-        assert!(!decorators.activation_passes(&ActivationContext::default()));
+    fn greeting_decorator_ignored_without_active_greeting_consults_fallback() {
+        // No greeting chosen: checking the active greeting is not possible,
+        // so `@@is_greeting` is ignored and the `@@@` fallback applies.
+        let (decorators, _) = parse("@@is_greeting 0\n@@@activate_only_after 4\nBody");
+        assert_eq!(decorators.is_greeting, None);
+        assert_eq!(decorators.activate_only_after, Some(4));
+        let ctx = |count: u32| ActivationContext {
+            assistant_message_count: count,
+            ..ActivationContext::default()
+        };
+        assert!(!decorators.activation_passes(&ctx(3)));
+        assert!(decorators.activation_passes(&ctx(4)));
+        // Without a fallback the gate is gone entirely.
+        let (bare, _) = parse("@@is_greeting 0\nBody");
+        assert!(bare.activation_passes(&ActivationContext::default()));
     }
 
     #[test]
