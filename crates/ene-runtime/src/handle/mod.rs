@@ -1509,6 +1509,30 @@ mod tests {
         assert!(matches!(err, PublicApiError::Invalid { .. }));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_greeting_rejected_while_turn_in_flight() {
+        let (config, _hanging) = test_config_hanging_provider().await;
+        let mut card = test_card();
+        card.data.name = "Ene".into();
+        card.data.first_mes = "Hello!".into();
+        let handle = EneHandle::open(config, card)
+            .await
+            .expect("open initializes handle");
+
+        // The hanging provider keeps this turn in flight; the actor processes
+        // `Run` before the queued `SetGreeting`, so the in-flight guard fires.
+        let turn = handle.run("hello").expect("run claims the gate");
+        let err = handle
+            .set_greeting(0)
+            .await
+            .expect_err("in-flight greeting rejected");
+        assert!(matches!(err, PublicApiError::Invalid { .. }));
+
+        handle.turn_gate.end();
+        drop(handle.cancel(&turn));
+        drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+    }
+
     /// Config whose chat provider points at a local listener that completes
     /// the TCP handshake (via the kernel backlog) but never writes a response,
     /// so any started turn hangs on the per-request timeout instead of
