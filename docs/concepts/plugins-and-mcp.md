@@ -38,7 +38,7 @@ Plugins communicate over `stdin`/`stdout` using **IPC Protocol v5**:
 - **Handshake Negotiation**: The host sends `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`, i.e. `VersionRange { min: 4, max: 5 }` — not a single pinned value. The plugin intersects that range with its own supported range via `VersionRange::negotiate` and responds with `HandshakeAck { version, capabilities: PluginCapabilities }`, where `version` is the highest version common to both sides.
 - **Handshake Timeout**: The host bounds how long it waits for the `HandshakeAck` (`plugins.handshake_timeout_ms`, default 10 s). A plugin that accepts the socket but never replies fails the handshake with `PluginHostError::HandshakeFailed` instead of blocking startup of the remaining plugins. Plugin authors must answer the handshake promptly and defer heavy initialization (model loading, etc.) until afterwards — see `run_plugin_server` in `ene-plugin`.
 - **Request Correlation**: All async requests and responses include a mandatory `request_id` (`Uuid`).
-- **Capabilities**: Plugins advertise supported capabilities (`tools`, `llm_providers`, `stt_providers`, `tts_providers`), each provider spec also declaring a `concurrency: ConcurrencyHint` (see [§3](#3-provider-concurrency-concurrencyhint)).
+- **Capabilities**: Plugins advertise supported capabilities (`tools`, `llm_providers`, `stt_providers`, `tts_providers`), each provider spec also declaring a `concurrency: ConcurrencyHint` (see [§3](#3-provider-concurrency-concurrencyhint)). Plugin-to-plugin capability sharing is declared via `provides` / `requires` (see [§4](#4-capability-declarations-provides--requires)).
 
 ### Versioning policy (N-1 backward compatibility)
 
@@ -121,7 +121,111 @@ The in-process admission budget that serializes local engines contending on the 
 
 ---
 
-## 4. Built-In Plugin Catalog
+## 4. Capability Declarations (`provides` / `requires`)
+
+Plugins can share *capabilities* with each other: a plugin that owns a heavy
+runtime (an inference engine, a speech synthesizer) declares it in `provides`,
+and other plugins declare in `requires` that they need it. The host indexes
+every declaration at startup, resolves each `requires` to a provider plugin,
+and refuses to register a plugin whose hard requirements are unmet — the
+declaration mechanism is the foundation of plugin-to-plugin capability
+mediation (see the `gguf-runner` contract below).
+
+### 4.1 Declaration form
+
+`PluginCapabilities` carries two new handshake fields, both `#[serde(default)]`
+(older plugin binaries omit them and are treated as declaring nothing — no
+protocol version bump was needed):
+
+```json
+provides: ["llm/chat@1", "embed@1", "gguf-runner@1"]
+requires: ["gguf-runner@^1", "g2p/ja@^1?"]
+```
+
+- `provides` entries are capability **references**: `name@major`.
+- `requires` entries are capability **requirements**: `name@[^]major[?]`.
+
+The `^` prefix declares compatibility intent (`^1` = "any 1.x"). On today's
+wire the reference version is a bare major, so `^1` and `1` match the same
+set; the prefix exists so consumers state their intent before minor versions
+exist. A trailing `?` marks a **soft** requirement: the plugin can start and
+fall back to a built-in implementation when no provider is present. Without
+`?` the requirement is **hard**: the host disables the plugin when no provider
+matches.
+
+### 4.2 Capability naming and versioning policy
+
+Names are one or more lowercase `[a-z0-9-]` segments joined by `/`, for
+example `llm/chat`, `g2p/ja`, `gguf-runner`. The version is a single major
+integer — deliberately no minor/patch on the wire. Policy:
+
+- Capability versions are **semver-ish**, not semver: compatible additions
+  (new methods, optional fields) stay within a major; any change that breaks
+  an existing consumer bumps the major. Treat a capability's ABI with the
+  same care as the wire ABI — a third-party declaration is a promise that
+  outlives your release.
+- Majors start at `1` by convention. `0` parses but is not a published
+  contract; a capability in pre-1.0 flux must not be relied on by consumers.
+- Adding a capability is compatible; *changing its meaning* (not just its
+  implementation) is a major bump.
+- Malformed entries (bad charset, missing `@`, non-numeric major, leading
+  zeros) are dropped individually with a host warning — one typo never fails
+  a plugin's handshake.
+
+### 4.3 Host-side resolution
+
+The host builds a capability registry from every plugin's handshake
+declarations before registering any tools or providers:
+
+- **Hard requirement unmet** → the plugin is not registered at all (no tools,
+  no providers, no supervision) and a `RequirementsUnmet` health diagnostic
+  is emitted listing the missing requirements. Recovery is a host restart or
+  reconfiguration with a provider present.
+- **Soft requirement unmet** → the plugin starts normally; a warning is
+  logged. Falling back is the plugin's responsibility.
+- **Deterministic winner**: when several plugins provide the same
+  capability, resolution picks the lexicographically smallest plugin name.
+  (Config order is not a valid tie-breaker — `plugins.list` is a map.)
+  Explicit provider preference is future work.
+- **Transitive**: a plugin disabled for unmet requirements does not count as
+  a provider, so consumers of its capabilities are disabled too (the gate is
+  evaluated to a fixpoint).
+- **Self-resolution is allowed**: a plugin's `requires` may be satisfied by
+  its own `provides`. Whether a plugin may *call* its own capability through
+  mediation is a separate ACL decision.
+
+### 4.4 The `gguf-runner@1` capability contract
+
+`gguf-runner@1` is the capability for **loading any GGUF model and running
+inference on it** — the runtime that third-party GGUF model providers borrow
+instead of bundling their own llama.cpp (N bundled runtimes would mean N GPU
+contexts and N× VRAM). A plugin that wants to serve GGUF models declares
+
+```json
+requires: ["gguf-runner@^1"]
+```
+
+The runner API is **non-streaming** by design; consumers that need token
+streaming should require `llm/chat@1` from the model provider directly.
+Mediation (a plugin calling `gguf-runner` through the host) lands together
+with the runner implementation; the capability-level contract is fixed here:
+
+| Method | Request | Response |
+|---|---|---|
+| `generate` | `{ model, prompt, json_schema? }` | `{ text }` |
+| `embed` | `{ model, texts: [string] }` | `{ embeddings: [[number]] }` |
+| `unload` | `{ model }` | `{ ok: true }` |
+
+`model` identifies a model profile configured on the provider plugin.
+`json_schema` (when present) constrains `generate` to structured output.
+`unload` releases a loaded model's resident memory (VRAM); it is the hook for
+future resource-residency management. These method names and payload shapes
+are the contract third parties build against; the wire encoding is defined
+with the mediation layer.
+
+---
+
+## 5. Built-In Plugin Catalog
 
 | Plugin Binary | Namespace | Description | Stateful? |
 |---|---|---|---|
@@ -171,7 +275,7 @@ touching the filesystem.
 
 ---
 
-## 5. Tool Database Schema Declaration & Evolution
+## 6. Tool Database Schema Declaration & Evolution
 
 Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`,
 `ene-plugin-calendar`) persist their data into the host's `memory.db`
@@ -275,7 +379,7 @@ legitimately needs unbounded storage.
 
 ---
 
-## 6. Plugin Security Model
+## 7. Plugin Security Model
 
 ### Opt-in discovery
 
@@ -552,7 +656,7 @@ described above for every mutating operation, layered on top of
 
 ---
 
-## 7. MCP (Model Context Protocol) Integration
+## 8. MCP (Model Context Protocol) Integration
 
 `ene-plugin-host` integrates external MCP servers (the former `ene-connector`
 bridge layer was removed in #416 — connection lifecycle lives entirely in the
@@ -604,7 +708,7 @@ validation on the live connect path at all.
 
 ---
 
-## 8. Writing a Custom Tool Plugin
+## 9. Writing a Custom Tool Plugin
 
 Developers can quickly author new tool plugins using `ene-plugin`'s `#[derive(ToolAction)]` (via `ene-plugin-macros`) and server entry point. This sketch is illustrative — see an existing plugin under `plugins/tool/*` (e.g. `plugins/tool/app/src/main.rs`) for the current, compiling pattern, or `cargo doc -p ene-plugin-macros --open` for the derive macro's exact requirements:
 
