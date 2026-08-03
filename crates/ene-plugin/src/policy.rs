@@ -180,9 +180,16 @@ impl RateLimiter {
     }
 
     /// Waits until a token is available, then consumes it.
+    ///
+    /// Re-checks after each sleep so concurrent waiters are spaced out by the
+    /// refill rate instead of all passing together on the first refill: only
+    /// the first caller to wake consumes the refilled token, the rest re-wait.
     pub async fn acquire(&self) {
-        let wait = self.check();
-        if wait > Duration::ZERO {
+        loop {
+            let wait = self.check();
+            if wait.is_zero() {
+                return;
+            }
             tokio::time::sleep(wait).await;
         }
     }
@@ -469,6 +476,38 @@ mod tests {
         assert_eq!(limiter.check(), Duration::ZERO);
         // Second call within the same instant must wait.
         assert!(limiter.check() > Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn concurrent_acquire_spaces_out_after_depletion() {
+        // After the initial token is gone, concurrent waiters must be released
+        // one per refill window rather than all at once after the first refill.
+        let limiter = RateLimiter::new(1.0, 100.0).expect("valid limiter");
+        limiter.acquire().await;
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let limiter = limiter.clone();
+            handles.push(tokio::spawn(async move {
+                let start = std::time::Instant::now();
+                limiter.acquire().await;
+                start.elapsed()
+            }));
+        }
+        let mut elapsed: Vec<Duration> = Vec::new();
+        for handle in handles {
+            elapsed.push(handle.await.expect("join"));
+        }
+        elapsed.sort_unstable();
+        // Refill rate 100 tokens/s → one token every 10 ms; the spacing
+        // between consecutive releases must be a meaningful fraction of that.
+        assert!(
+            elapsed[1].saturating_sub(elapsed[0]) >= Duration::from_millis(5),
+            "second caller must wait its own refill window: {elapsed:?}"
+        );
+        assert!(
+            elapsed[2].saturating_sub(elapsed[1]) >= Duration::from_millis(5),
+            "third caller must wait its own refill window: {elapsed:?}"
+        );
     }
 
     #[test]
