@@ -591,10 +591,56 @@ impl TurnActor {
                             // response on its session clone; publish the
                             // (possibly incremented) turn count.
                             self.sync_shared_session_state();
-                            if self.active_origin == crate::types::TurnOrigin::Proactive
-                                && outcome.terminal == TerminalReason::Done
-                            {
-                                self.proactive.on_proactive_completed();
+                            if self.active_origin == crate::types::TurnOrigin::Proactive {
+                                match outcome.terminal {
+                                    TerminalReason::Done => {
+                                        self.proactive.on_proactive_completed();
+                                    }
+                                    TerminalReason::Declined => {
+                                        self.proactive.on_proactive_declined();
+                                    }
+                                    _ => {}
+                                }
+                                if let Some(decision) = self.proactive.last_decision.take() {
+                                    let confirmation = match outcome.terminal {
+                                        TerminalReason::Declined => {
+                                            ene_mind::ProactiveConfirmation::Declined
+                                        }
+                                        TerminalReason::Done
+                                            if decision.confirmation
+                                                == ene_mind::ProactiveConfirmation::Pending =>
+                                        {
+                                            ene_mind::ProactiveConfirmation::Accepted
+                                        }
+                                        _ => decision.confirmation,
+                                    };
+                                    match confirmation {
+                                        ene_mind::ProactiveConfirmation::Declined => {
+                                            tracing::info!(
+                                                component = "Proactive",
+                                                event = "confirmation",
+                                                decision_should_speak = decision.should_speak,
+                                                decision_confidence = decision.confidence,
+                                                decision_llm_invoked = decision.llm_invoked,
+                                                confirmation = %confirmation,
+                                                skip = %ene_mind::ProactiveSkipReason::ConfirmationDeclined,
+                                                "Proactive main model declined"
+                                            );
+                                        }
+                                        ene_mind::ProactiveConfirmation::Accepted => {
+                                            tracing::info!(
+                                                component = "Proactive",
+                                                event = "confirmation",
+                                                decision_should_speak = decision.should_speak,
+                                                decision_confidence = decision.confidence,
+                                                decision_llm_invoked = decision.llm_invoked,
+                                                confirmation = %confirmation,
+                                                "Proactive decision/main-model agreement"
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
                             // Retroactive topic-boundary compression: a
                             // boundary detected on the just-completed turn
@@ -1201,6 +1247,7 @@ impl TurnActor {
             confidence = result.confidence,
             topic_hint = %result.topic_hint,
             detail = %result.detail,
+            confirmation = %result.confirmation,
             "Proactive will speak"
         );
         let mind = self
@@ -1210,7 +1257,9 @@ impl TurnActor {
         let hint = crate::proactive::proactive_generation_hint(
             &result.topic_hint,
             mind.resolved_classifier_language(),
+            mind.proactive.confirmation_enabled,
         );
+        self.proactive.last_decision = Some(result.clone());
         let screen_image = self
             .config
             .get_section::<ene_ai::AiConfig>()

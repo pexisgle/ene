@@ -494,6 +494,7 @@ impl PublicChatEvent {
                         ("failed".to_string(), Some(redact_text(message)))
                     }
                     TerminalReason::Cancelled => ("cancelled".to_string(), None),
+                    TerminalReason::Declined => ("declined".to_string(), None),
                 };
                 Self::Terminal {
                     turn: turn.to_string(),

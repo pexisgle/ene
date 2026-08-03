@@ -25,6 +25,11 @@ struct EchoProvider {
     response: String,
 }
 
+struct ChunkedProvider {
+    chunks: Vec<String>,
+    last_messages: Mutex<Vec<LlmMessage>>,
+}
+
 #[async_trait]
 impl LlmProvider for EchoProvider {
     fn name(&self) -> &'static str {
@@ -54,6 +59,40 @@ impl LlmProvider for EchoProvider {
         _json_schema: Option<serde_json::Value>,
     ) -> Result<LlmCompletion, LlmProviderError> {
         Ok(LlmCompletion::text_only(self.response.clone()))
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ChunkedProvider {
+    fn name(&self) -> &'static str {
+        "chunked"
+    }
+
+    async fn create_chat_stream(
+        &self,
+        messages: &[LlmMessage],
+        _tools: &[ene_plugin_proto::ToolSpec],
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+        LlmProviderError,
+    > {
+        *self.last_messages.lock().expect("lock") = messages.to_vec();
+        let stream = tokio_stream::iter(self.chunks.clone().into_iter().map(|text_delta| {
+            Ok(LlmResponseChunk {
+                text_delta: Some(text_delta),
+                tool_calls_delta: None,
+                usage: None,
+            })
+        }));
+        Ok(Box::pin(stream))
+    }
+
+    async fn chat_completion(
+        &self,
+        _messages: &[LlmMessage],
+        _json_schema: Option<serde_json::Value>,
+    ) -> Result<LlmCompletion, LlmProviderError> {
+        Ok(LlmCompletion::text_only(String::new()))
     }
 }
 
@@ -307,6 +346,232 @@ async fn proactive_stream_without_memory_store() {
 
     let outcome = run_stream_cognitive(ctx).await;
     assert_eq!(outcome.terminal, TerminalReason::Done);
+    assert_eq!(outcome.session.history().len(), 1);
+}
+
+#[tokio::test]
+async fn proactive_stream_declines_on_leading_silent_token() {
+    let mut card = CharacterCardV3::default();
+    card.data.name = "Ene".into();
+    card.data.system_prompt = "Be helpful.".into();
+
+    let mut session = ene_mind::ConversationSession::new();
+    session.character_card = Some(card);
+
+    let mut config = EneConfig::default();
+    let mut mind = MindConfig::default();
+    mind.proactive.enabled = true;
+    mind.proactive.confirmation_enabled = true;
+    config.set_section(&mind).expect("mind");
+
+    let provider = Arc::new(ChunkedProvider {
+        chunks: vec!["<|silent|>".into(), "SHOULD NOT APPEAR".into()],
+        last_messages: Mutex::new(Vec::new()),
+    });
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+    let (diag_tx, _diag_rx) = tokio::sync::broadcast::channel(8);
+    let partial_text = Arc::new(parking_lot::Mutex::new(String::new()));
+    let partial_for_assert = Arc::clone(&partial_text);
+
+    let ctx = StreamContext {
+        config,
+        session,
+        user_input: String::new(),
+        embedder: None,
+        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
+        tool_rag: None,
+        provider,
+        event_tx: event_tx.clone(),
+        audio_tx: tokio::sync::mpsc::channel(8).0,
+        diag_tx,
+        cancel_token: CancellationToken::new(),
+        pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        permission_scopes: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        undo_stack: Arc::new(tokio::sync::Mutex::new(ene_runtime::undo::UndoStack::new(
+            8,
+        ))),
+        terminal_emitted: Arc::new(AtomicBool::new(false)),
+        turn: TurnId::new(),
+        origin: TurnOrigin::Proactive,
+        allow_tools: false,
+        runtime_directive: Some("Speak briefly.".into()),
+        proactive_screen_image: None,
+        generation_timeout: Some(std::time::Duration::from_secs(30)),
+        proactive_topic: None,
+        classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
+        memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
+        deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
+        tts_provider: None,
+        partial_text,
+        compression_pending: false,
+        concrete_store: None,
+    };
+
+    let outcome = run_stream_cognitive(ctx).await;
+    assert_eq!(outcome.terminal, TerminalReason::Declined);
+    assert_eq!(
+        outcome.session.history().len(),
+        0,
+        "a declined turn must not commit history"
+    );
+    assert!(
+        partial_for_assert.lock().expect("lock").is_empty(),
+        "no text may survive a declined turn"
+    );
+
+    let mut terminal_seen = false;
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            ene_runtime::EneEvent::TextDelta { delta, .. } => {
+                assert!(
+                    delta.trim().is_empty(),
+                    "no visible text may reach consumers, got {delta:?}"
+                );
+            }
+            ene_runtime::EneEvent::Terminal { reason, .. } => {
+                assert_eq!(reason, TerminalReason::Declined);
+                terminal_seen = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(terminal_seen, "a Declined terminal event must be emitted");
+}
+
+#[tokio::test]
+async fn proactive_stream_speaks_when_text_precedes_silent_token() {
+    let mut card = CharacterCardV3::default();
+    card.data.name = "Ene".into();
+    card.data.system_prompt = "Be helpful.".into();
+
+    let mut session = ene_mind::ConversationSession::new();
+    session.character_card = Some(card);
+
+    let mut config = EneConfig::default();
+    let mut mind = MindConfig::default();
+    mind.proactive.enabled = true;
+    mind.proactive.confirmation_enabled = true;
+    config.set_section(&mind).expect("mind");
+
+    let provider = Arc::new(ChunkedProvider {
+        chunks: vec!["Hello <|silent|> there".into()],
+        last_messages: Mutex::new(Vec::new()),
+    });
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+    let (diag_tx, _diag_rx) = tokio::sync::broadcast::channel(8);
+
+    let ctx = StreamContext {
+        config,
+        session,
+        user_input: String::new(),
+        embedder: None,
+        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
+        tool_rag: None,
+        provider,
+        event_tx,
+        audio_tx: tokio::sync::mpsc::channel(8).0,
+        diag_tx,
+        cancel_token: CancellationToken::new(),
+        pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        permission_scopes: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        undo_stack: Arc::new(tokio::sync::Mutex::new(ene_runtime::undo::UndoStack::new(
+            8,
+        ))),
+        terminal_emitted: Arc::new(AtomicBool::new(false)),
+        turn: TurnId::new(),
+        origin: TurnOrigin::Proactive,
+        allow_tools: false,
+        runtime_directive: Some("Speak briefly.".into()),
+        proactive_screen_image: None,
+        generation_timeout: Some(std::time::Duration::from_secs(30)),
+        proactive_topic: None,
+        classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
+        memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
+        deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
+        tts_provider: None,
+        partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        compression_pending: false,
+        concrete_store: None,
+    };
+
+    let outcome = run_stream_cognitive(ctx).await;
+    assert_eq!(outcome.terminal, TerminalReason::Done);
+    let updated = outcome.session;
+    assert_eq!(updated.history().len(), 1);
+    assert_eq!(
+        updated.history()[0].content,
+        "Hello  there",
+        "a late refusal token must be stripped, not spoken"
+    );
+}
+
+#[tokio::test]
+async fn proactive_stream_ignores_silent_token_without_confirmation() {
+    let mut card = CharacterCardV3::default();
+    card.data.name = "Ene".into();
+    card.data.system_prompt = "Be helpful.".into();
+
+    let mut session = ene_mind::ConversationSession::new();
+    session.character_card = Some(card);
+
+    let mut config = EneConfig::default();
+    let mut mind = MindConfig::default();
+    mind.proactive.enabled = true;
+    config.set_section(&mind).expect("mind");
+
+    let provider = Arc::new(ChunkedProvider {
+        chunks: vec!["<|silent|>".into()],
+        last_messages: Mutex::new(Vec::new()),
+    });
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+    let (diag_tx, _diag_rx) = tokio::sync::broadcast::channel(8);
+
+    let ctx = StreamContext {
+        config,
+        session,
+        user_input: String::new(),
+        embedder: None,
+        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
+        tool_rag: None,
+        provider,
+        event_tx,
+        audio_tx: tokio::sync::mpsc::channel(8).0,
+        diag_tx,
+        cancel_token: CancellationToken::new(),
+        pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        permission_scopes: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        undo_stack: Arc::new(tokio::sync::Mutex::new(ene_runtime::undo::UndoStack::new(
+            8,
+        ))),
+        terminal_emitted: Arc::new(AtomicBool::new(false)),
+        turn: TurnId::new(),
+        origin: TurnOrigin::Proactive,
+        allow_tools: false,
+        runtime_directive: Some("Speak briefly.".into()),
+        proactive_screen_image: None,
+        generation_timeout: Some(std::time::Duration::from_secs(30)),
+        proactive_topic: None,
+        classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
+        memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
+        deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
+        tts_provider: None,
+        partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        compression_pending: false,
+        concrete_store: None,
+    };
+
+    let outcome = run_stream_cognitive(ctx).await;
+    assert_eq!(
+        outcome.terminal,
+        TerminalReason::Done,
+        "without confirmation the token is an ordinary marker"
+    );
     assert_eq!(outcome.session.history().len(), 1);
 }
 

@@ -23,6 +23,9 @@ pub(crate) struct ProactiveScheduler {
     /// Tick counter for periodic world state memory writes.
     #[expect(dead_code, reason = "planned for #209 world-state persistence")]
     pub world_state_tick: usize,
+    /// Decision behind the proactive generation currently in flight, kept so
+    /// the stream-completion path can log decision/main-model agreement.
+    pub last_decision: Option<ProactiveDecisionResult>,
 }
 
 impl Default for ProactiveScheduler {
@@ -35,6 +38,7 @@ impl Default for ProactiveScheduler {
             proactive_turns: 0,
             epoch: 0,
             world_state_tick: 0,
+            last_decision: None,
         }
     }
 }
@@ -51,6 +55,13 @@ impl ProactiveScheduler {
         self.proactive_turns = self.proactive_turns.saturating_add(1);
     }
 
+    /// Record a main-model decline: apply the cooldown so the next tick does
+    /// not immediately re-run generation, without consuming the per-session
+    /// utterance budget.
+    pub fn on_proactive_declined(&mut self) {
+        self.last_proactive_at = Some(Instant::now());
+    }
+
     /// Reset per-session counters (character / session change).
     pub fn reset_session(&mut self) {
         self.proactive_turns = 0;
@@ -59,6 +70,7 @@ impl ProactiveScheduler {
         self.observation = ProactiveObservation::default();
         self.last_screen_image_data_uri = None;
         self.last_user_input_at = Instant::now();
+        self.last_decision = None;
     }
 
     /// Take the stashed screen image for a generation turn (clears the stash).
@@ -122,6 +134,9 @@ pub(crate) struct ProactiveDecisionResult {
     pub llm_invoked: bool,
     pub topic_hint: String,
     pub detail: String,
+    /// Main-model confirmation state (disabled / pending at decision time;
+    /// the actor resolves it once the generation stream ends).
+    pub confirmation: ene_mind::ProactiveConfirmation,
 }
 
 /// Drop stale activity/screen payloads so decisions do not act on old host signals.
@@ -185,7 +200,7 @@ pub(crate) async fn run_decision_task(
     let should_generate = outcome.skip.is_none()
         && outcome
             .decision
-            .allows_generation(config.decision.min_confidence);
+            .allows_generation(config.effective_decision_min_confidence());
     let detail = if let Some(skip) = &outcome.skip {
         skip.to_string()
     } else if outcome.decision.should_speak {
@@ -208,15 +223,20 @@ pub(crate) async fn run_decision_task(
         llm_invoked: outcome.llm_invoked,
         topic_hint: outcome.decision.topic_hint,
         detail,
+        confirmation: outcome.confirmation,
     }
 }
 
 /// Build the internal generation hint (never stored as a user message).
 #[must_use]
-pub(crate) fn proactive_generation_hint(topic_hint: &str, prompt_language: &str) -> String {
+pub(crate) fn proactive_generation_hint(
+    topic_hint: &str,
+    prompt_language: &str,
+    confirmation_enabled: bool,
+) -> String {
     ene_config::PromptLibrary::load(prompt_language)
         .proactive()
-        .render_generation_hint(topic_hint)
+        .render_generation_hint(topic_hint, confirmation_enabled)
 }
 
 /// Interval duration from config (minimum 1s).
@@ -347,6 +367,108 @@ mod tests {
         assert!(
             text.contains("\"user_instructions\":[\"don't talk while I work\"]"),
             "user instructions must reach the decision context JSON"
+        );
+    }
+
+    struct FixedBodyProvider {
+        body: String,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for FixedBodyProvider {
+        fn name(&self) -> &'static str {
+            "fixed-body"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn tokio_stream::Stream<
+                            Item = Result<ene_ai::LlmResponseChunk, ene_ai::LlmProviderError>,
+                        > + Send,
+                >,
+            >,
+            ene_ai::LlmProviderError,
+        > {
+            Err(ene_ai::LlmProviderError::Provider("stream unused".into()))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<ene_ai::LlmCompletion, ene_ai::LlmProviderError> {
+            Ok(ene_ai::LlmCompletion::text_only(self.body.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn decision_task_reports_confirmation_state() {
+        let history = vec![ene_mind::HistoryEntry {
+            role: ene_ai::Role::User,
+            content: "hi".into(),
+        }];
+        let suppression = ProactiveSuppressionState {
+            seconds_since_user_input: 300,
+            seconds_since_proactive: 1000,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        };
+        let speak = r#"{"should_speak":true,"confidence":0.9,"reason":"idle","topic_hint":"hi","urgency":"normal"}"#;
+        let base = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            ..ProactiveConfig::default()
+        };
+
+        let result = run_decision_task(
+            base.clone(),
+            history.clone(),
+            ProactiveObservation::default(),
+            suppression,
+            Some(Arc::new(FixedBodyProvider {
+                body: speak.to_string(),
+            }) as Arc<dyn LlmProvider>),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            "en".to_string(),
+        )
+        .await;
+        assert!(result.should_generate);
+        assert_eq!(
+            result.confirmation,
+            ene_mind::ProactiveConfirmation::Disabled
+        );
+
+        let mut confirmed = base;
+        confirmed.confirmation_enabled = true;
+        let result = run_decision_task(
+            confirmed,
+            history,
+            ProactiveObservation::default(),
+            suppression,
+            Some(Arc::new(FixedBodyProvider {
+                body: speak.to_string(),
+            }) as Arc<dyn LlmProvider>),
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+            "en".to_string(),
+        )
+        .await;
+        assert!(result.should_generate);
+        assert_eq!(
+            result.confirmation,
+            ene_mind::ProactiveConfirmation::Pending
         );
     }
 }
