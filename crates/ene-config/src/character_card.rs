@@ -902,6 +902,9 @@ pub struct SpeechStyleDefinition {
 pub struct LabeledStyleExample {
     /// Stable identifier used to match localized diff entries.
     pub id: String,
+    /// Stable non-localized intent key used for selection after translation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
     /// Situation label (e.g. `"angry"`, `"first_meeting"`, `"怒っているとき"`).
     pub label: String,
     /// Example dialogue text.
@@ -1752,6 +1755,7 @@ mod tests {
             ng_expressions: Some(vec!["死ね".into(), "バカ".into()]),
             style_examples: Some(vec![LabeledStyleExample {
                 id: "angry-1".into(),
+                intent: Some("greeting".into()),
                 label: "怒っているとき".into(),
                 text: "{{char}}: 今はそういう気分じゃない。".into(),
             }]),

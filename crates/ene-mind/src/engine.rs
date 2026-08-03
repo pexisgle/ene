@@ -529,7 +529,7 @@ impl CognitionEngine {
             let scenario = ctx.card.data.scenario.trim();
             (!scenario.is_empty()).then_some(scenario)
         });
-        let kernel = CharacterProcessor::compile_kernel(
+        let kernel = CharacterProcessor::compile_kernel_with_context(
             ctx.card,
             ctx.user_name,
             user_persona.as_ref(),

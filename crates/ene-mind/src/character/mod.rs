@@ -57,10 +57,28 @@ impl CharacterProcessor {
     ///
     /// `language` localises the speech-style line derived for the kernel.
     ///
-    /// `ctx` carries per-turn state (affinity, wall clock, active scene) for
-    /// the optional relationship/time/scene kernel lines; pass
-    /// [`KernelContext::default`] when the state is unknown.
+    /// The compatibility entry point uses [`KernelContext::default`].
     pub fn compile_kernel(
+        card: &CharacterCardV3,
+        user_name: &str,
+        user_persona: Option<&UserPersona>,
+        pick_seed: Option<u64>,
+        available_window: usize,
+        language: &str,
+    ) -> IdentityKernel {
+        Self::compile_kernel_with_context(
+            card,
+            user_name,
+            user_persona,
+            pick_seed,
+            available_window,
+            language,
+            KernelContext::default(),
+        )
+    }
+
+    /// Compile an identity kernel with per-turn roleplay context.
+    pub fn compile_kernel_with_context(
         card: &CharacterCardV3,
         user_name: &str,
         user_persona: Option<&UserPersona>,
@@ -69,7 +87,7 @@ impl CharacterProcessor {
         language: &str,
         ctx: KernelContext<'_>,
     ) -> IdentityKernel {
-        CharacterCompiler::compile(
+        CharacterCompiler::compile_with_context(
             card,
             user_name,
             user_persona,
@@ -87,7 +105,7 @@ impl CharacterProcessor {
     /// token count. The speech-style line follows the system locale.
     pub fn compile_kernel_default(card: &CharacterCardV3, user_name: &str) -> IdentityKernel {
         let window = usize::try_from(ene_ai::DEFAULT_CONTEXT_WINDOW).unwrap_or(usize::MAX);
-        Self::compile_kernel(
+        Self::compile_kernel_with_context(
             card,
             user_name,
             None,

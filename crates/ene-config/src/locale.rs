@@ -80,7 +80,7 @@ pub struct LocalizedCharacterFields {
 /// entry-matched overlays (`style_examples`, `relationship_stages`,
 /// `time_periods`, `scene_behaviors`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde", deny_unknown_fields)]
+#[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedEneRoleplay {
     /// Localized speech-style text fields.
@@ -109,7 +109,7 @@ pub struct LocalizedEneRoleplay {
 /// are intentionally absent (mirroring the non-translated relationship
 /// thresholds).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde", deny_unknown_fields)]
+#[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedSpeechStyle {
     /// Localized first-person pronoun.
@@ -125,7 +125,7 @@ pub struct LocalizedSpeechStyle {
 
 /// Localized label/text of one labeled style example.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde", deny_unknown_fields)]
+#[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedStyleExample {
     /// The base example's `id`.
@@ -140,7 +140,7 @@ pub struct LocalizedStyleExample {
 
 /// Localized label/tone of one relationship stage.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde", deny_unknown_fields)]
+#[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedRelationshipStage {
     /// The base stage's threshold (the non-translated matching key).
@@ -155,7 +155,7 @@ pub struct LocalizedRelationshipStage {
 
 /// Localized behavior of one time period.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde", deny_unknown_fields)]
+#[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedTimePeriodBehavior {
     /// The base behavior's period (the non-translated matching key).
@@ -167,7 +167,7 @@ pub struct LocalizedTimePeriodBehavior {
 
 /// Localized keywords/behavior of one scene behavior.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde", deny_unknown_fields)]
+#[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedSceneBehavior {
     /// The base behavior's `name` (the non-translated matching key).
@@ -704,6 +704,7 @@ mod tests {
             ng_expressions: Some(vec!["死ね".into()]),
             style_examples: Some(vec![crate::LabeledStyleExample {
                 id: "angry-1".into(),
+                intent: Some("greeting".into()),
                 label: "怒っているとき".into(),
                 text: "Base angry text".into(),
             }]),

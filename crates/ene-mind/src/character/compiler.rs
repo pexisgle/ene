@@ -94,11 +94,30 @@ impl CharacterCompiler {
     /// and structured labels); card-provided speech values keep their own
     /// language.
     ///
-    /// `kernel_ctx` carries per-turn state (affinity, wall clock, active
-    /// scene) that gates the optional relationship/time/scene lines; use
-    /// [`KernelContext::default`] when the state is unknown.
+    /// This compatibility entry point uses [`KernelContext::default`].
     #[must_use]
     pub fn compile(
+        card: &CharacterCardV3,
+        user_name: &str,
+        user_persona: Option<&UserPersona>,
+        pick_seed: Option<u64>,
+        available_window: usize,
+        language: &str,
+    ) -> IdentityKernel {
+        Self::compile_with_context(
+            card,
+            user_name,
+            user_persona,
+            pick_seed,
+            available_window,
+            language,
+            KernelContext::default(),
+        )
+    }
+
+    /// Compile an Identity Kernel with per-turn roleplay context.
+    #[must_use]
+    pub fn compile_with_context(
         card: &CharacterCardV3,
         user_name: &str,
         user_persona: Option<&UserPersona>,
@@ -528,7 +547,7 @@ mod tests {
 
         // 3_200 → budget floor (400 tokens): core block fills the budget, so the
         // optional scenario section is dropped; 128K leaves room for it.
-        let small = CharacterCompiler::compile(
+        let small = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -537,7 +556,7 @@ mod tests {
             "en",
             KernelContext::default(),
         );
-        let large = CharacterCompiler::compile(
+        let large = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -571,7 +590,7 @@ mod tests {
         card.data.system_prompt = "Keep responses short for overlay.".into();
         card.data.personality = "Energetic.".into();
 
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -620,7 +639,7 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Official".into();
         card.data.nickname = "Ene".into();
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -643,7 +662,7 @@ mod tests {
             politeness: Some(PolitenessLevel::Casual),
             verbal_tics: vec!["〜だよね".into(), "んだよ".into()],
         });
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -673,7 +692,7 @@ mod tests {
             verbal_tics: vec!["〜ですわ".into()],
             ..SpeechStyleDefinition::default()
         });
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -700,7 +719,7 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.system_prompt = "First, remember the house rules.".repeat(20);
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -733,7 +752,7 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.system_prompt = "Keep responses short and brief for the overlay.".into();
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -759,7 +778,7 @@ mod tests {
     fn speech_style_default_is_localized() {
         let mut card = CharacterCardV3::default();
         card.data.name = "エネ".into();
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "ユーザー",
             None,
@@ -781,7 +800,7 @@ mod tests {
     #[test]
     fn speech_style_empty_definition_falls_back_to_default() {
         let card = card_with_speech(SpeechStyleDefinition::default());
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -805,7 +824,7 @@ mod tests {
             second_person: Some("   ".into()),
             ..SpeechStyleDefinition::default()
         });
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -831,7 +850,7 @@ mod tests {
     fn speech_style_language_aliases_and_fallbacks_are_resolved() {
         let card = CharacterCardV3::default();
         for language in ["ja", "ja-JP", "jp"] {
-            let kernel = CharacterCompiler::compile(
+            let kernel = CharacterCompiler::compile_with_context(
                 &card,
                 "User",
                 None,
@@ -843,7 +862,7 @@ mod tests {
             assert!(kernel.text.contains("Speech style: 自然で温かく"));
         }
         for language in ["fr", ""] {
-            let kernel = CharacterCompiler::compile(
+            let kernel = CharacterCompiler::compile_with_context(
                 &card,
                 "User",
                 None,
@@ -862,7 +881,7 @@ mod tests {
             verbal_tics: vec![String::new(), "  ".into(), "だよね".into()],
             ..SpeechStyleDefinition::default()
         });
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -880,7 +899,7 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.personality = "Friends with {{user}}.".into();
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "Alice",
             None,
@@ -917,7 +936,7 @@ mod tests {
             pronouns: None,
             notes: None,
         };
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "Alice",
             Some(&persona),
@@ -945,7 +964,7 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.post_history_instructions = "Stay in character.".into();
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -982,7 +1001,7 @@ mod tests {
         card.data.personality = "Hair color: {{pick:red,blue,green,gold,silver}}.".into();
 
         let seed = Some(ene_config::session_pick_seed("ene:session-1"));
-        let first = CharacterCompiler::compile(
+        let first = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -992,7 +1011,7 @@ mod tests {
             KernelContext::default(),
         );
         for _ in 0..16 {
-            let again = CharacterCompiler::compile(
+            let again = CharacterCompiler::compile_with_context(
                 &card,
                 "User",
                 None,
@@ -1011,7 +1030,7 @@ mod tests {
     #[test]
     fn alicia_default_card_compiles() {
         let card = alicia_card();
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1035,7 +1054,7 @@ mod tests {
         card.data.description = "y".repeat(2_000);
         // A small window forces truncation; the core header and the
         // anti-spoofing block must both survive.
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1059,7 +1078,7 @@ mod tests {
         card.data.description = "彼女は画面の中で暮らし、いつもユーザーを励ましている。".repeat(6);
         card.data.scenario = "今日は一緒に作業しながら、たまに雑談をする場面。".repeat(6);
 
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "ユーザー",
             None,
@@ -1173,7 +1192,8 @@ mod tests {
             affinity: Some(0.3),
             ..KernelContext::default()
         };
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 400, "en", ctx);
+        let kernel =
+            CharacterCompiler::compile_with_context(&card, "User", None, None, 400, "en", ctx);
         assert!(
             kernel
                 .text
@@ -1187,7 +1207,7 @@ mod tests {
     #[test]
     fn relationship_tone_omitted_below_all_thresholds_or_without_affinity() {
         let card = roleplay_card();
-        let below = CharacterCompiler::compile(
+        let below = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1201,7 +1221,7 @@ mod tests {
         );
         assert!(!below.text.contains("Relationship tone"));
 
-        let no_affinity = CharacterCompiler::compile(
+        let no_affinity = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1216,7 +1236,7 @@ mod tests {
     #[test]
     fn relationship_tone_renders_japanese_label() {
         let card = roleplay_card();
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1240,7 +1260,7 @@ mod tests {
     #[test]
     fn time_behavior_renders_for_matching_local_period() {
         let card = roleplay_card();
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1266,7 +1286,7 @@ mod tests {
             .with_ymd_and_hms(2026, 8, 4, 8, 0, 0)
             .single()
             .expect("fixed local instant");
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1279,7 +1299,7 @@ mod tests {
             },
         );
         assert!(!kernel.text.contains("Time-of-day behavior"));
-        let no_clock = CharacterCompiler::compile(
+        let no_clock = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1294,7 +1314,7 @@ mod tests {
     #[test]
     fn scene_behavior_renders_on_keyword_match() {
         let card = roleplay_card();
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1316,7 +1336,7 @@ mod tests {
     #[test]
     fn scene_behavior_omitted_without_match_or_scene() {
         let card = roleplay_card();
-        let unmatched = CharacterCompiler::compile(
+        let unmatched = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1329,7 +1349,7 @@ mod tests {
             },
         );
         assert!(!unmatched.text.contains("Scene behavior"));
-        let no_scene = CharacterCompiler::compile(
+        let no_scene = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1344,7 +1364,7 @@ mod tests {
     #[test]
     fn default_context_renders_no_roleplay_lines() {
         let card = roleplay_card();
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
@@ -1379,7 +1399,7 @@ mod tests {
             }]),
             ..EneExtension::default()
         });
-        let kernel = CharacterCompiler::compile(
+        let kernel = CharacterCompiler::compile_with_context(
             &card,
             "User",
             None,
