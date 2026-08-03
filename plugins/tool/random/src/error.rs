@@ -24,9 +24,17 @@ pub enum RandomError {
     #[error("integer range is empty: ceil(min)={lo} > floor(max)={hi}")]
     EmptyIntRange {
         /// Smallest whole number in the range.
-        lo: i64,
+        lo: f64,
         /// Largest whole number in the range.
-        hi: i64,
+        hi: f64,
+    },
+    /// The integer range lies outside the `i64` representable range.
+    #[error("integer range exceeds i64 bounds: ceil(min)={lo}, floor(max)={hi}")]
+    IntRangeOutOfBounds {
+        /// Smallest whole number in the range.
+        lo: f64,
+        /// Largest whole number in the range.
+        hi: f64,
     },
     /// `random.pick` was given no options.
     #[error("options must not be empty")]

@@ -11,7 +11,7 @@ use ene_plugin::prelude::*;
     namespace = "random",
     name = "number",
     summary = "Generate a random number within a range.",
-    description = "Generates a random number between min and max. With integer=false (default) the result is a float in [min, max) (min included, max excluded). With integer=true the result is a whole number in [min, max] (both ends included, bounds are rounded inward with ceil/floor). Both bounds must be finite and min must be less than max in float mode; an integer range with no whole numbers is an error.",
+    description = "Generates a random number between min and max. With integer=false (default) the result is a float in [min, max) (min included, max excluded). With integer=true the result is a whole number in [min, max] (both ends included, bounds are rounded inward with ceil/floor). Both bounds must be finite and min must be less than max in float mode; an integer range with no whole numbers, or outside the 64-bit signed integer range, is an error.",
     category = "Utility",
     keywords_primary = "random, number, integer, float, dice, roll, lottery",
     side_effects = "ReadOnly"
@@ -59,12 +59,27 @@ fn random_integer(min: f64, max: f64) -> Result<i64, RandomError> {
     if !min.is_finite() || !max.is_finite() {
         return Err(RandomError::NonFiniteBound { min, max });
     }
-    let lo = min.ceil() as i64;
-    let hi = max.floor() as i64;
+    // The emptiness and range checks run in f64 because `as i64`
+    // saturates: a range beyond ±2^63 would otherwise pass the checks
+    // and then sample outside the requested bounds.
+    let lo = min.ceil();
+    let hi = max.floor();
     if lo > hi {
         return Err(RandomError::EmptyIntRange { lo, hi });
     }
-    Ok(rand::random_range(lo..=hi))
+    // `i64::MAX as f64` rounds up to 2^63, so the upper bound must be
+    // exclusive; ceil/floor results inside these bounds are integral
+    // and convert losslessly.
+    if lo < i64::MIN as f64
+        || lo >= i64::MAX as f64
+        || hi < i64::MIN as f64
+        || hi >= i64::MAX as f64
+    {
+        return Err(RandomError::IntRangeOutOfBounds { lo, hi });
+    }
+    let lo_int = lo as i64;
+    let hi_int = hi as i64;
+    Ok(rand::random_range(lo_int..=hi_int))
 }
 
 #[cfg(test)]
@@ -151,6 +166,33 @@ mod tests {
             random_integer(f64::NEG_INFINITY, 1.0),
             Err(RandomError::NonFiniteBound { .. })
         ));
+    }
+
+    #[test]
+    fn integer_rejects_bounds_beyond_i64_range() {
+        assert!(matches!(
+            random_integer(9.3e18, 9.4e18),
+            Err(RandomError::IntRangeOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            random_integer(-2.0e300, -1.0e300),
+            Err(RandomError::IntRangeOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            random_integer(-1.0e300, 1.0e300),
+            Err(RandomError::IntRangeOutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn integer_supports_large_i64_ranges() {
+        for _ in 0..200 {
+            let value = random_integer(9.0e18, 9.2e18).unwrap();
+            assert!(
+                (9_000_000_000_000_000_000..=9_200_000_000_000_000_000).contains(&value),
+                "{value} outside [9e18, 9.2e18]"
+            );
+        }
     }
 
     #[test]
