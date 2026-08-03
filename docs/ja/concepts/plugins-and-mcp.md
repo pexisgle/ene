@@ -15,6 +15,7 @@ Ene ホストアプリケーション (ene-runtime)
         │
         ├── IPC Protocol v5 (stdio 上の長さプレフィックス付き JSON)
         │     ├── ene-plugin-anthropic (Anthropic LLM プロバイダプラグイン)
+        │     ├── ene-plugin-openai    (OpenAI 互換プロバイダプラグイン)
         │     ├── ene-plugin-app       (GUI 起動ツール)
         │     ├── ene-plugin-browser   (CDP ブラウザ自動化ツール)
         │     ├── ene-plugin-fs        (サンドボックス化ファイルシステムツール)
@@ -128,8 +129,9 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 | `ene-plugin-utility` | `utility.*` | 電卓、日時、TODO リスト管理 | はい (ホストサービス `db`) |
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude プロバイダプラグイン | いいえ |
+| `ene-plugin-openai` | Provider | OpenAI 互換プロバイダプラグイン（チャット・ストリーミング・埋め込み） | いいえ |
 
-上記 6 プラグインはすべてデフォルトの `plugins.list` に含まれており、
+上記 7 プラグインはすべてデフォルトの `plugins.list` に含まれており、
 新規インストール時に自動的に起動します。
 
 ---
@@ -252,7 +254,8 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
   "plugins": {
     "list": {
       "fs": { "enable": true },
-      "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] }
+      "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] },
+      "openai": { "enable": true, "env_passthrough": ["OPENAI_API_KEY"] }
     }
   }
 }

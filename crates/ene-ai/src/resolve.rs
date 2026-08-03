@@ -75,6 +75,8 @@ impl ResolvedLocalModel {
 pub enum ResolvedEmbedding {
     /// Cloud embedding via OpenAI-compatible API.
     Cloud {
+        /// Canonical provider kind (the plugin registry key, e.g. `"openai"`).
+        kind: String,
         /// API base URL.
         base_url: String,
         /// Resolved API key.
@@ -92,16 +94,20 @@ pub enum ResolvedEmbedding {
 
 impl ResolvedEmbedding {
     /// Cloud embedding fields, or `None` if this is a local embedding.
+    ///
+    /// `(kind, base_url, api_key, model, dimensions, query_prefix)`.
     #[must_use]
-    pub fn cloud_fields(&self) -> Option<(&str, &str, &str, usize, Option<&str>)> {
+    pub fn cloud_fields(&self) -> Option<(&str, &str, &str, &str, usize, Option<&str>)> {
         match self {
             Self::Cloud {
+                kind,
                 base_url,
                 api_key,
                 model,
                 dimensions,
                 query_prefix,
             } => Some((
+                kind.as_str(),
                 base_url.as_str(),
                 api_key.as_str(),
                 model.as_str(),
@@ -195,6 +201,8 @@ pub struct ResolvedTaskRef<'a> {
 pub struct ChatCandidate {
     /// Provider name (key in [`AiConfig::providers`]).
     pub provider: String,
+    /// Canonical provider kind (the plugin registry key, e.g. `"openai"`).
+    pub kind: String,
     /// Effective API base URL.
     pub base_url: String,
     /// Resolved API key.
@@ -782,6 +790,12 @@ impl AiConfig {
         {
             candidates.push(ChatCandidate {
                 provider: self.tasks.chat.provider.clone(),
+                kind: self
+                    .providers
+                    .get(&self.tasks.chat.provider)
+                    .map_or_else(String::new, |def| {
+                        crate::config::canonical_provider_kind(&def.kind).to_string()
+                    }),
                 base_url: resolved.base_url,
                 api_key: resolved.api_key,
                 model: resolved.model,
@@ -812,6 +826,7 @@ impl AiConfig {
             };
             candidates.push(ChatCandidate {
                 provider: name.clone(),
+                kind: crate::config::canonical_provider_kind(&def.kind).to_string(),
                 base_url: resolved_url,
                 api_key: def.api_key.resolve_api_key(),
                 model: model.to_string(),
@@ -869,17 +884,21 @@ impl AiConfig {
         let def = resolved.provider;
         if !def.is_openai_compatible() {
             return Err(LlmProviderError::Provider(format!(
-                "embedding provider {:?} has kind {:?}; only openai_compatible providers are supported here (plugin providers resolve via the plugin registry)",
-                self.tasks.embedding.provider, def.kind
+                "embedding provider {:?} has kind {:?}; only openai-family kinds ({:?} / {:?}) are supported here",
+                self.tasks.embedding.provider,
+                def.kind,
+                crate::config::OPENAI_PROVIDER_KIND,
+                crate::config::LEGACY_OPENAI_COMPATIBLE_KIND
             )));
         }
         let model = resolved.model.ok_or_else(|| {
             LlmProviderError::Provider(
-                "embedding task requires model for openai_compatible provider".to_string(),
+                "embedding task requires model for an openai-family provider".to_string(),
             )
         })?;
         let dimensions = resolved.dimensions.unwrap_or(1536);
         Ok(ResolvedEmbedding::Cloud {
+            kind: crate::config::canonical_provider_kind(&def.kind).to_string(),
             base_url: resolve_base_url(&def.base_url)?,
             api_key: def.api_key.resolve_api_key(),
             model: model.to_string(),
@@ -903,8 +922,11 @@ impl AiConfig {
         let def = resolved.provider;
         if !def.is_openai_compatible() {
             return Err(LlmProviderError::Provider(format!(
-                "chat provider {:?} has kind {:?}; only openai_compatible providers are supported here (plugin providers resolve via the plugin registry)",
-                task.provider, def.kind
+                "chat provider {:?} has kind {:?}; only openai-family kinds ({:?} / {:?}) are supported here",
+                task.provider,
+                def.kind,
+                crate::config::OPENAI_PROVIDER_KIND,
+                crate::config::LEGACY_OPENAI_COMPATIBLE_KIND
             )));
         }
         let model = resolved.model.ok_or_else(|| {

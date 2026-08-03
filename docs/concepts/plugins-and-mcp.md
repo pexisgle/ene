@@ -15,6 +15,7 @@ Ene Host Application (ene-runtime)
         │
         ├── IPC Protocol v5 (Length-prefixed JSON over stdio)
         │     ├── ene-plugin-anthropic (Anthropic LLM Provider Plugin)
+        │     ├── ene-plugin-openai    (OpenAI-Compatible Provider Plugin)
         │     ├── ene-plugin-app       (GUI Launcher Tool)
         │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
         │     ├── ene-plugin-fs        (Sandboxed Filesystem Tool)
@@ -128,8 +129,9 @@ The in-process admission budget that serializes local engines contending on the 
 | `ene-plugin-utility` | `utility.*` | Calculator, datetime, active todo list manager | Yes (host-service `db`) |
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
+| `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
 
-All six plugins above are included in the default `plugins.list` and start
+All seven plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.
 
 ---
@@ -253,7 +255,8 @@ auto-execute" attack vector.
   "plugins": {
     "list": {
       "fs": { "enable": true },
-      "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] }
+      "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] },
+      "openai": { "enable": true, "env_passthrough": ["OPENAI_API_KEY"] }
     }
   }
 }

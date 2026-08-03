@@ -4,7 +4,9 @@
 //!
 //! Defines generic message and streaming types (`LlmMessage`, `LlmResponseChunk`),
 //! provider traits (`LlmProvider`, `EmbeddingProvider`, `LlmProviderFactory`),
-//! a global provider registry, and the built-in OpenAI-compatible implementation.
+//! and global provider registries. Concrete provider backends ship as
+//! plugins (`plugins/provider/*`); this crate owns only the traits,
+//! configuration routing, health probing, retry policy, and model fetching.
 //!
 //! Local providers are in [`ene-ai-local`] (GGUF/llama.cpp) and
 //! [`ene-voice`] (STT/TTS/VAD).
@@ -46,8 +48,6 @@ pub mod message;
 /// HTTPS-only enforcement, pluggable post-download validation, and progress
 /// reporting.
 pub mod model_fetch;
-/// OpenAI-compatible provider implementation.
-pub mod openai;
 /// Provider-specific settings relocated into the `plugins.list.<name>`
 /// sections (llama.cpp mmproj/acceleration, ONNX dylib path, Kokoro profiles).
 pub mod plugin_config;
@@ -57,13 +57,16 @@ pub mod resolve;
 pub mod retry;
 /// Conversation role enum (User, Assistant, System, Tool).
 pub mod role;
+/// Chat provider routing: task kinds to registry-backed provider instances.
+pub mod routing;
 /// Provider trait definitions (`LlmProvider`, `EmbeddingProvider`, etc.).
 pub mod traits;
 
 pub use config::{
     AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, BUILTIN_PROVIDER_KINDS, FallbackConfig,
-    LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, RetryConfig, SttConfig, TaskRef,
-    TtsConfig, VadConfig, is_builtin_kind, kind_typo_suggestion,
+    LEGACY_OPENAI_COMPATIBLE_KIND, LOCAL_PROVIDER, LocalModelDef, OPENAI_PROVIDER_KIND,
+    ProactiveAcceleration, RetryConfig, SttConfig, TaskRef, TtsConfig, VadConfig,
+    canonical_provider_kind, is_builtin_kind, kind_typo_suggestion,
 };
 pub use context_window::{
     DEFAULT_CONTEXT_WINDOW, DEFAULT_SAFETY_MARGIN_FRACTION, EffectiveWindow, effective_window,
@@ -86,10 +89,6 @@ pub use model_fetch::{
     MagicBytesValidator, ModelFetchError, ModelFetcher, ModelValidator, PrefixPredicateValidator,
     SizeMultipleValidator, sanitize_basename, strip_url_path, validate_https_url,
 };
-pub use openai::{
-    AiTaskKind, CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
-    create_chat_provider_from_resolved, create_task_chat_provider,
-};
 pub use resolve::{
     ChatCandidate, ContextBudgetIssue, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel,
     ResolvedStt, ResolvedTaskRef, ResolvedTts, ResolvedVad, SettingsIssue, needs_onboarding,
@@ -98,11 +97,12 @@ pub use resolve::{
 };
 pub use retry::RetryPolicy;
 pub use role::Role;
+pub use routing::{AiTaskKind, create_chat_provider_for_task, create_task_chat_provider};
 pub use traits::{
     AudioProviderError, AudioProviderRegistry, EmbeddingError, EmbeddingKind, EmbeddingProvider,
-    LlmProvider, LlmProviderFactory, LlmProviderRegistry, SttProvider, SttProviderFactory,
-    SttResult, TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent, VadFactory,
-    cosine_similarity, embed, embed_query,
+    EmbeddingProviderFactory, EmbeddingProviderRegistry, LlmProvider, LlmProviderFactory,
+    LlmProviderRegistry, SttProvider, SttProviderFactory, SttResult, TtsChunk, TtsProvider,
+    TtsProviderFactory, VadEngine, VadEvent, VadFactory, cosine_similarity, embed, embed_query,
 };
 
 /// Token usage accounting for LLM responses.

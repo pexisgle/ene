@@ -72,25 +72,34 @@ pub async fn classify_for_config(
             let ai_cfg = config.get_section::<ene_ai::AiConfig>().map_err(|e| {
                 ClassifierError::Config(format!("Failed to parse AI config: {e}"))
             })?;
-            let mut resolved = ai_cfg
-                .resolve_classifier()
-                .map_err(|e| ClassifierError::Config(e.to_string()))?;
+            // Route the classifier task (falling back to the chat task)
+            // through the plugin-backed provider registry, honoring the
+            // model override and the token cap like the previous
+            // resolved-settings path did.
+            let mut task = ai_cfg
+                .tasks
+                .classifier
+                .clone()
+                .unwrap_or_else(|| ai_cfg.tasks.chat.clone());
             if let Some(override_model) = model_override.as_deref() {
-                resolved.model = override_model.to_string();
+                task.model = Some(override_model.to_string());
             }
-            if resolved.model.trim().is_empty() {
+            if task.model.as_deref().is_none_or(|m| m.trim().is_empty()) {
                 return Err(ClassifierError::Config(
                     "affect classifier requires a model (set ai.tasks.classifier.model or ai.tasks.chat.model)"
                         .to_string(),
                 ));
             }
             if let Some(max) = cap {
-                resolved.max_tokens = Some(max);
+                task.max_tokens = Some(max);
             }
-            Ok(
-                Box::new(ene_ai::create_chat_provider_from_resolved(&resolved))
-                    as Box<dyn ene_ai::LlmProvider>,
-            )
+            // A provider that cannot be constructed (unknown provider,
+            // plugin not loaded) is a configuration problem, not a
+            // transport failure: classify it as `Config` so the resilient
+            // fallback does not burn retries on it.
+            let provider = ene_ai::create_chat_provider_for_task(&config, &task)
+                .map_err(|e| ClassifierError::Config(e.to_string()))?;
+            Ok(Box::new(provider) as Box<dyn ene_ai::LlmProvider>)
         },
         &current_affect,
         &conversation,

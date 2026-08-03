@@ -27,6 +27,15 @@ pub struct PluginCapabilities {
     #[serde(default)]
     pub llm_providers: Vec<LlmProviderSpec>,
 
+    /// Provider kinds for which this plugin serves batch embeddings
+    /// ([`crate::PluginIpcRequest::EmbedBatch`]).
+    ///
+    /// Unlike the provider traits above there is no per-kind embedding spec —
+    /// the model and dimensions come from the host's configuration per
+    /// request — so the capability is a bare kind list.
+    #[serde(default)]
+    pub embed_providers: Vec<String>,
+
     /// TTS providers (reserved for future use).
     #[serde(default)]
     pub tts_providers: Vec<TtsProviderSpec>,
@@ -68,7 +77,7 @@ pub struct PluginCapabilities {
 /// Specification of an LLM provider exposed by a plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmProviderSpec {
-    /// Provider kind identifier (e.g. `"anthropic"`, `"openai_compatible"`).
+    /// Provider kind identifier (e.g. `"anthropic"`, `"openai"`).
     pub kind: String,
 
     /// Model identifiers this provider supports.

@@ -118,7 +118,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
         let provider_config = ai_config
             .providers
             .values()
-            .find(|def| def.kind == self.kind)
+            .find(|def| provider_def_kind_matches(def, &self.kind))
             .map_or_else(
                 || serde_json::json!({}),
                 |def| {
@@ -154,6 +154,14 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
     }
 }
 
+/// Whether a provider definition serves the plugin factory's `kind`.
+///
+/// The legacy `openai_compatible` alias is folded onto the `openai` plugin
+/// kind so pre-plugin configs keep resolving to the OpenAI plugin.
+pub(crate) fn provider_def_kind_matches(def: &AiProviderDef, kind: &str) -> bool {
+    ene_ai::canonical_provider_kind(&def.kind) == kind
+}
+
 /// Builds the `provider_config` JSON forwarded to a plugin LLM provider.
 ///
 /// The API key — when present and `trusted` — is sent as a **plain JSON
@@ -161,7 +169,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
 /// Anthropic plugin's `resolve_api_key`). When `trusted` is `false`, no
 /// `api_key` field is emitted at all, so credentials never reach an
 /// untrusted plugin.
-fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde_json::Value {
+pub(crate) fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     if !def.base_url.is_empty() {
         map.insert(

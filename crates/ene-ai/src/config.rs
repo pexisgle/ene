@@ -9,12 +9,40 @@ use ene_config::schemars;
 /// Reserved task provider name that resolves against [`AiConfig::local_models`].
 pub const LOCAL_PROVIDER: &str = "local";
 
-/// Built-in provider [`AiProviderDef::kind`] values recognized without a plugin.
+/// Provider kind served by the OpenAI-compatible provider plugin
+/// (`plugins/provider/openai`).
+pub const OPENAI_PROVIDER_KIND: &str = "openai";
+
+/// Legacy `kind` value for OpenAI-compatible providers, accepted as an alias
+/// for [`OPENAI_PROVIDER_KIND`] so pre-plugin configs keep working. The
+/// canonical registry kind is always [`OPENAI_PROVIDER_KIND`].
+pub const LEGACY_OPENAI_COMPATIBLE_KIND: &str = "openai_compatible";
+
+/// The canonical provider kind for `kind`, folding the legacy
+/// `openai_compatible` alias onto the `openai` plugin kind.
 ///
-/// Any other `kind` is assumed to name a plugin-provided backend and is
-/// validated leniently (see [`crate::resolve::validate_provider_kinds`]). Use
-/// [`kind_typo_suggestion`] to catch near-misses of these built-in kinds.
-pub const BUILTIN_PROVIDER_KINDS: &[&str] = &["openai_compatible", "anthropic"];
+/// Registry lookups and factory def-matching must go through this mapping so
+/// both spellings resolve to the same plugin-backed provider.
+#[must_use]
+pub fn canonical_provider_kind(kind: &str) -> &str {
+    if kind == LEGACY_OPENAI_COMPATIBLE_KIND {
+        OPENAI_PROVIDER_KIND
+    } else {
+        kind
+    }
+}
+
+/// Well-known provider [`AiProviderDef::kind`] values.
+///
+/// Provider backends ship as plugins; this list only exists to catch typos
+/// of the well-known kinds (see [`kind_typo_suggestion`]). Any other kind is
+/// assumed to name a plugin-provided backend and is validated leniently (see
+/// [`crate::resolve::validate_provider_kinds`]).
+pub const BUILTIN_PROVIDER_KINDS: &[&str] = &[
+    OPENAI_PROVIDER_KIND,
+    LEGACY_OPENAI_COMPATIBLE_KIND,
+    "anthropic",
+];
 
 ene_config::define_config!(
     AiConfig,
@@ -89,10 +117,14 @@ pub struct AiProviderDef {
 }
 
 impl AiProviderDef {
-    /// True when this definition is an OpenAI-compatible HTTP provider.
+    /// True when this definition targets an OpenAI-compatible HTTP provider
+    /// (kind `"openai"`, or the legacy `"openai_compatible"` alias).
     #[must_use]
     pub fn is_openai_compatible(&self) -> bool {
-        self.kind == "openai_compatible"
+        matches!(
+            self.kind.as_str(),
+            OPENAI_PROVIDER_KIND | LEGACY_OPENAI_COMPATIBLE_KIND
+        )
     }
 }
 

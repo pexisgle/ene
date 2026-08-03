@@ -1156,6 +1156,10 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
             .llm
             .as_ref()
             .map_or(Vec::new(), |l| l.llm_capabilities()),
+        embed_providers: dispatch
+            .embed
+            .as_ref()
+            .map_or(Vec::new(), |e| e.embed_providers()),
         tts_providers: dispatch
             .tts
             .as_ref()

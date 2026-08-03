@@ -58,7 +58,9 @@ use ene_ai::LlmProviderRegistry;
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::{ConversationSession, SessionId};
-use ene_plugin_host::{DisabledReason, LlmFactoriesByPlugin, PluginHealthEvent};
+use ene_plugin_host::{
+    DisabledReason, EmbeddingFactoriesByPlugin, LlmFactoriesByPlugin, PluginHealthEvent,
+};
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -449,8 +451,6 @@ impl EneHandle {
         let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
         let (diag_tx, diag_rx) = broadcast::channel(256);
 
-        LlmProviderRegistry::register(Arc::new(ene_ai::OpenAiProviderFactory));
-
         // Register the local whisper/kokoro/silero factories with
         // `ene_ai::AudioProviderRegistry` before anything below (this
         // function's own TTS provider resolution, or a later
@@ -550,6 +550,14 @@ impl EneHandle {
                         );
                         LlmProviderRegistry::register(Arc::clone(factory));
                     }
+                    for (kind, factory) in host.embedding_factories() {
+                        tracing::info!(
+                            component = "Bootstrap",
+                            kind = %kind,
+                            "Registered plugin-provided embedding provider factory"
+                        );
+                        ene_ai::EmbeddingProviderRegistry::register(Arc::clone(factory));
+                    }
                     tracing::info!(
                         component = "Bootstrap",
                         tool_registries = host.tool_registries().len(),
@@ -577,10 +585,15 @@ impl EneHandle {
         {
             let diag_tx = diag_tx.clone();
             let llm_factories_by_plugin = host.llm_factories_by_plugin();
+            let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
             health_bridge_handle = Some(tokio::spawn(async move {
                 while let Some(event) = health_rx.recv().await {
                     if let PluginHealthEvent::Disabled { plugin, .. } = &event {
                         deregister_disabled_plugin_factories(plugin, &llm_factories_by_plugin);
+                        deregister_disabled_embedding_factories(
+                            plugin,
+                            &embedding_factories_by_plugin,
+                        );
                     }
                     emit_diag(&diag_tx, plugin_health_event_to_diag(event));
                 }
@@ -1266,6 +1279,24 @@ fn deregister_disabled_plugin_factories(plugin: &str, factories_by_plugin: &LlmF
                     plugin = %plugin,
                     kind = %kind,
                     "Deregistered LLM provider factory for permanently disabled plugin"
+                );
+            }
+        }
+    }
+}
+
+fn deregister_disabled_embedding_factories(
+    plugin: &str,
+    factories_by_plugin: &EmbeddingFactoriesByPlugin,
+) {
+    if let Some(factories) = factories_by_plugin.get(plugin) {
+        for (kind, factory) in factories {
+            if ene_ai::EmbeddingProviderRegistry::deregister_if_matches(kind, factory) {
+                tracing::info!(
+                    component = "PluginHealthBridge",
+                    plugin = %plugin,
+                    kind = %kind,
+                    "Deregistered embedding provider factory for permanently disabled plugin"
                 );
             }
         }
