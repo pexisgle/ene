@@ -233,9 +233,9 @@ fn declared_asset_paths(
                 let Some(relative) = full.strip_prefix(assets_dir).ok() else {
                     continue;
                 };
-                if !relative.exists() {
+                if !full.exists() {
                     tracing::warn!(
-                        path = %relative.display(),
+                        path = %full.display(),
                         asset = %asset.name,
                         "Declared asset is missing on disk"
                     );

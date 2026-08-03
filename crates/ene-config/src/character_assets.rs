@@ -321,10 +321,10 @@ mod tests {
     #[test]
     fn http_and_https_uris_parse() {
         let uri = resolve_asset_uri("https://example.com/model.vrm").expect("https resolves");
-        let ResolvedAssetUri::Remote(url) = uri else {
-            panic!("expected remote URI");
-        };
-        assert_eq!(url.as_str(), "https://example.com/model.vrm");
+        assert!(
+            matches!(&uri, ResolvedAssetUri::Remote(url) if url.as_str() == "https://example.com/model.vrm"),
+            "expected remote URL, got {uri:?}"
+        );
 
         let uri = resolve_asset_uri("http://example.com/model.vrm").expect("http resolves");
         assert!(matches!(uri, ResolvedAssetUri::Remote(_)));
