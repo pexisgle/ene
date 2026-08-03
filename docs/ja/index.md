@@ -50,7 +50,7 @@ Ene ワークスペース
 │   └── ene-plugin-macros  (プラグイン用 Proc-macro)
 └── プロセス外プラグイン
     ├── plugins/provider/* (プロバイダプラグイン: anthropic)
-    └── plugins/tool/*     (ツールプラグイン: app, browser, fs, utility, web)
+    └── plugins/tool/*     (ツールプラグイン: app, browser, calc, calendar, fs, geo, utility, web)
 ```
 
 ---
