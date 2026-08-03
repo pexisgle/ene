@@ -1911,6 +1911,7 @@ mod tests {
                 "calendar",
                 "fs",
                 "openai",
+                "random",
                 "utility",
                 "web"
             ]
