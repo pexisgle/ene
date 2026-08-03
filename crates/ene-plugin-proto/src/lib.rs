@@ -21,7 +21,7 @@
 //! - [`IpcStream`] / [`IpcListener`] / [`cleanup_path`] — cross-platform
 //!   transport layer (UDS / Named Pipe).
 //!
-//! ### Plugin types (protocol v5)
+//! ### Plugin types (protocol v6)
 //!
 //! - [`PluginCapabilities`] — advertised during the handshake so the host can
 //!   route tool registrations and provider factories.
@@ -32,7 +32,9 @@
 //!   `StreamEnd`, `StreamError`).
 //! - [`read_plugin_request`] / [`write_plugin_request`] /
 //!   [`read_plugin_response`] / [`write_plugin_response`] — framing helpers
-//!   that reuse the same 4-byte little-endian length-prefixed JSON pattern.
+//!   that reuse the same 4-byte little-endian length-prefixed pattern. The
+//!   handshake exchange always uses JSON; frames after the handshake use the
+//!   negotiated [`WireFormat`] (MessagePack for protocol v6, JSON below).
 //! - [`PluginError`] — the plugin crate's error type.
 //!
 //! ## Crate boundaries
@@ -71,6 +73,7 @@ pub mod tool_types;
 pub mod transport;
 /// Token usage accounting for LLM responses.
 pub mod usage;
+mod wire;
 
 /// Capability and provider spec types.
 pub use capabilities::{
@@ -113,6 +116,8 @@ pub use tool_types::{
     EmbeddingField, KeywordSet, Reversibility, SideEffects, ToolCategory, ToolContent, ToolExample,
     ToolName, ToolRagProfile, ToolResult, ToolSpec, ToolVersion, UndoMetadata,
 };
+/// Negotiated payload encoding for plugin IPC frames.
+pub use wire::WireFormat;
 
 // Re-export the transport layer so downstream plugin crates only need to
 // depend on `ene-plugin-proto` for the wire + transport.

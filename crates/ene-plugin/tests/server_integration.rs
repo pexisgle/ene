@@ -21,7 +21,7 @@ use ene_plugin_proto::PluginCapabilities;
 use ene_plugin_proto::{
     CallContext, DeferredOutcome, DeferredStatus, IpcListener, IpcStream,
     PLUGIN_IPC_PROTOCOL_VERSION, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError,
-    ToolName, ToolResult, ToolSpec, VersionRange, cleanup_path, read_plugin_request,
+    ToolName, ToolResult, ToolSpec, VersionRange, WireFormat, cleanup_path, read_plugin_request,
     read_plugin_response, write_plugin_request, write_plugin_response,
 };
 use tokio::sync::Mutex;
@@ -465,12 +465,24 @@ async fn run_test_server(socket_path: PathBuf, dispatch: Arc<PluginDispatch>) {
         };
         let dispatch_clone = Arc::clone(&dispatch);
 
+        let mut format = WireFormat::Json;
         loop {
-            let Ok(Some(req)) = read_plugin_request(&mut stream).await else {
+            let Ok(Some(req)) = read_plugin_request(&mut stream, format).await else {
                 break;
             };
+            if matches!(&req, PluginIpcRequest::Handshake { .. }) {
+                format = WireFormat::for_version(PLUGIN_IPC_PROTOCOL_VERSION);
+            }
             let resp = dispatch_fn(dispatch_clone.as_ref(), &req).await;
-            if write_plugin_response(&mut stream, &resp).await.is_err() {
+            let resp_format = if matches!(&resp, PluginIpcResponse::HandshakeAck { .. }) {
+                WireFormat::Json
+            } else {
+                format
+            };
+            if write_plugin_response(&mut stream, &resp, resp_format)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -507,56 +519,75 @@ async fn spawn_and_connect(name: &str) -> (IpcStream, Arc<TestPluginState>, Path
     (stream, state, socket_path)
 }
 
-/// Performs the handshake on a raw stream and returns the capabilities.
-async fn do_handshake(stream: &mut IpcStream) -> PluginCapabilities {
-    write_plugin_request(
-        stream,
-        &PluginIpcRequest::Handshake {
-            version: VersionRange {
-                min: PLUGIN_IPC_PROTOCOL_VERSION,
-                max: PLUGIN_IPC_PROTOCOL_VERSION,
-            },
-            sandbox: SandboxConfigData::default(),
-            plugin_config: Some(serde_json::json!({"test_key": "test_value"})),
-            plugin_profiles: None,
-        },
-    )
-    .await
-    .expect("write handshake");
-
-    let resp = read_plugin_response(stream)
-        .await
-        .expect("read handshake ack")
-        .expect("non-EOF");
-
-    match resp {
-        PluginIpcResponse::HandshakeAck {
-            version,
-            capabilities,
-        } => {
-            assert_eq!(version, PLUGIN_IPC_PROTOCOL_VERSION);
-            capabilities
-        }
-        other => panic!("expected HandshakeAck, got: {other:?}"),
-    }
+/// Raw-stream test peer that tracks the negotiated wire format, mirroring
+/// how the host switches framing after the handshake ack.
+struct TestPeer<'a> {
+    stream: &'a mut IpcStream,
+    format: WireFormat,
 }
 
-/// Sends a request and reads the single response.
-async fn round_trip(stream: &mut IpcStream, req: &PluginIpcRequest) -> PluginIpcResponse {
-    write_plugin_request(stream, req)
+impl TestPeer<'_> {
+    fn new(stream: &mut IpcStream) -> TestPeer<'_> {
+        TestPeer {
+            stream,
+            format: WireFormat::Json,
+        }
+    }
+
+    /// Performs the handshake on a raw stream and returns the capabilities.
+    async fn handshake(&mut self) -> PluginCapabilities {
+        write_plugin_request(
+            self.stream,
+            &PluginIpcRequest::Handshake {
+                version: VersionRange {
+                    min: PLUGIN_IPC_PROTOCOL_VERSION,
+                    max: PLUGIN_IPC_PROTOCOL_VERSION,
+                },
+                sandbox: SandboxConfigData::default(),
+                plugin_config: Some(serde_json::json!({"test_key": "test_value"})),
+                plugin_profiles: None,
+            },
+            WireFormat::Json,
+        )
         .await
-        .expect("write request");
-    read_plugin_response(stream)
-        .await
-        .expect("read response")
-        .expect("non-EOF")
+        .expect("write handshake");
+
+        let resp = read_plugin_response(self.stream, WireFormat::Json)
+            .await
+            .expect("read handshake ack")
+            .expect("non-EOF");
+
+        match resp {
+            PluginIpcResponse::HandshakeAck {
+                version,
+                capabilities,
+            } => {
+                assert_eq!(version, PLUGIN_IPC_PROTOCOL_VERSION);
+                self.format = WireFormat::for_version(version);
+                capabilities
+            }
+            other => panic!("expected HandshakeAck, got: {other:?}"),
+        }
+    }
+
+    /// Sends a request and reads the single response.
+    async fn round_trip(&mut self, req: &PluginIpcRequest) -> PluginIpcResponse {
+        write_plugin_request(self.stream, req, self.format)
+            .await
+            .expect("write request");
+        read_plugin_response(self.stream, self.format)
+            .await
+            .expect("read response")
+            .expect("non-EOF")
+    }
 }
 
 #[tokio::test]
 async fn server_handshake_advertises_capabilities() {
     let (mut stream, state, socket_path) = spawn_and_connect("hs").await;
 
-    let caps = do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    let caps = peer.handshake().await;
     assert_eq!(caps.tools, 1);
 
     assert!(state.sandbox_received.load(Ordering::SeqCst));
@@ -568,19 +599,18 @@ async fn server_handshake_advertises_capabilities() {
 #[tokio::test]
 async fn server_call_tool_echo() {
     let (mut stream, _state, socket_path) = spawn_and_connect("echo").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::CallTool {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::CallTool {
             request_id: "req-1".to_string(),
             name: "test.echo".to_string(),
             arguments: r#"{"data":"value"}"#.to_string(),
             deferred: false,
             context: None,
-        },
-    )
-    .await;
+        })
+        .await;
 
     match resp {
         PluginIpcResponse::CallResult { request_id, result } => {
@@ -596,19 +626,18 @@ async fn server_call_tool_echo() {
 #[tokio::test]
 async fn server_call_tool_structured_error() {
     let (mut stream, _state, socket_path) = spawn_and_connect("err").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::CallTool {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::CallTool {
             request_id: "req-1".to_string(),
             name: "test.permission".to_string(),
             arguments: "{}".to_string(),
             deferred: false,
             context: None,
-        },
-    )
-    .await;
+        })
+        .await;
 
     match resp {
         PluginIpcResponse::CallResult { result, .. } => {
@@ -632,20 +661,19 @@ async fn server_call_tool_structured_error() {
 #[tokio::test]
 async fn server_set_call_context_deprecated_noop() {
     let (mut stream, state, socket_path) = spawn_and_connect("ctx").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
     // SetCallContext is deprecated — it returns Ack but does NOT
     // forward the context to the plugin. Per-call context is now
     // passed directly via the `CallTool` request.
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::SetCallContext {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::SetCallContext {
             request_id: "req-1".to_string(),
             conversation_id: "conv-xyz".to_string(),
             turn_id: "turn-3".to_string(),
-        },
-    )
-    .await;
+        })
+        .await;
     assert_eq!(
         resp,
         PluginIpcResponse::Ack {
@@ -662,11 +690,11 @@ async fn server_set_call_context_deprecated_noop() {
 #[tokio::test]
 async fn server_call_tool_receives_per_call_context() {
     let (mut stream, state, socket_path) = spawn_and_connect("per-call-ctx").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::CallTool {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::CallTool {
             request_id: "req-1".to_string(),
             name: "test.echo".to_string(),
             arguments: r#"{"hello":"world"}"#.to_string(),
@@ -675,9 +703,8 @@ async fn server_call_tool_receives_per_call_context() {
                 conversation_id: "conv-abc".to_string(),
                 turn_id: "turn-7".to_string(),
             }),
-        },
-    )
-    .await;
+        })
+        .await;
 
     match resp {
         PluginIpcResponse::CallResult { request_id, result } => {
@@ -698,16 +725,15 @@ async fn server_call_tool_receives_per_call_context() {
 #[tokio::test]
 async fn server_approve_permission_forwarded() {
     let (mut stream, state, socket_path) = spawn_and_connect("approve").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::ApprovePermission {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::ApprovePermission {
             request_id: "req-1".to_string(),
             permission_request_id: "req-abc".to_string(),
-        },
-    )
-    .await;
+        })
+        .await;
     assert_eq!(
         resp,
         PluginIpcResponse::Ack {
@@ -724,17 +750,16 @@ async fn server_approve_permission_forwarded() {
 #[tokio::test]
 async fn server_allow_and_revoke_pattern_forwarded() {
     let (mut stream, state, socket_path) = spawn_and_connect("patterns").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::AllowPattern {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::AllowPattern {
             request_id: "req-1".to_string(),
             action: "net_access".to_string(),
             target_pattern: "*.example.com".to_string(),
-        },
-    )
-    .await;
+        })
+        .await;
     assert_eq!(
         resp,
         PluginIpcResponse::Ack {
@@ -742,15 +767,13 @@ async fn server_allow_and_revoke_pattern_forwarded() {
         }
     );
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::RevokePattern {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::RevokePattern {
             request_id: "req-2".to_string(),
             action: "net_access".to_string(),
             target_pattern: "*.example.com".to_string(),
-        },
-    )
-    .await;
+        })
+        .await;
     assert_eq!(
         resp,
         PluginIpcResponse::Ack {
@@ -775,19 +798,18 @@ async fn server_allow_and_revoke_pattern_forwarded() {
 #[tokio::test]
 async fn server_deferred_call_and_poll() {
     let (mut stream, _state, socket_path) = spawn_and_connect("deferred").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::CallTool {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::CallTool {
             request_id: "req-1".to_string(),
             name: "test.background".to_string(),
             arguments: "{}".to_string(),
             deferred: true,
             context: None,
-        },
-    )
-    .await;
+        })
+        .await;
     match resp {
         PluginIpcResponse::DeferredAccepted {
             request_id,
@@ -799,14 +821,12 @@ async fn server_deferred_call_and_poll() {
         other => panic!("expected DeferredAccepted, got: {other:?}"),
     }
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::PollDeferred {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::PollDeferred {
             request_id: "req-2".to_string(),
             task_id: "bg-task-1".to_string(),
-        },
-    )
-    .await;
+        })
+        .await;
     match resp {
         PluginIpcResponse::DeferredStatus {
             request_id,
@@ -831,19 +851,18 @@ async fn server_deferred_call_and_poll() {
 #[tokio::test]
 async fn server_deferred_sync_fallback() {
     let (mut stream, _state, socket_path) = spawn_and_connect("def-sync").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::CallTool {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::CallTool {
             request_id: "req-1".to_string(),
             name: "test.echo".to_string(),
             arguments: r#"{"sync":true}"#.to_string(),
             deferred: true,
             context: None,
-        },
-    )
-    .await;
+        })
+        .await;
     match resp {
         PluginIpcResponse::CallResult { request_id, result } => {
             assert_eq!(request_id, "req-1");
@@ -858,16 +877,15 @@ async fn server_deferred_sync_fallback() {
 #[tokio::test]
 async fn server_cancel_deferred_forwarded() {
     let (mut stream, state, socket_path) = spawn_and_connect("cancel").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::CancelDeferred {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::CancelDeferred {
             request_id: "req-1".to_string(),
             task_id: "bg-task-1".to_string(),
-        },
-    )
-    .await;
+        })
+        .await;
     assert_eq!(
         resp,
         PluginIpcResponse::Ack {
@@ -884,15 +902,14 @@ async fn server_cancel_deferred_forwarded() {
 #[tokio::test]
 async fn server_ping_pong() {
     let (mut stream, _state, socket_path) = spawn_and_connect("ping").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::Ping {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::Ping {
             request_id: "ping-1".into(),
-        },
-    )
-    .await;
+        })
+        .await;
     assert_eq!(
         resp,
         PluginIpcResponse::Pong {
@@ -906,15 +923,14 @@ async fn server_ping_pong() {
 #[tokio::test]
 async fn server_config_schema() {
     let (mut stream, _state, socket_path) = spawn_and_connect("schema").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::GetConfigSchema {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::GetConfigSchema {
             request_id: "req-1".to_string(),
-        },
-    )
-    .await;
+        })
+        .await;
     match resp {
         PluginIpcResponse::ConfigSchema {
             request_id, schema, ..
@@ -932,15 +948,14 @@ async fn server_config_schema() {
 #[tokio::test]
 async fn server_list_tools() {
     let (mut stream, _state, socket_path) = spawn_and_connect("list").await;
-    do_handshake(&mut stream).await;
+    let mut peer = TestPeer::new(&mut stream);
+    peer.handshake().await;
 
-    let resp = round_trip(
-        &mut stream,
-        &PluginIpcRequest::ListTools {
+    let resp = peer
+        .round_trip(&PluginIpcRequest::ListTools {
             request_id: "req-1".to_string(),
-        },
-    )
-    .await;
+        })
+        .await;
     match resp {
         PluginIpcResponse::Tools { request_id, tools } => {
             assert_eq!(request_id, "req-1");

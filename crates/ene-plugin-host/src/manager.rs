@@ -2248,7 +2248,7 @@ mod tests {
 
         use ene_plugin_proto::{
             IpcListener, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest,
-            PluginIpcResponse, read_plugin_request, write_plugin_response,
+            PluginIpcResponse, WireFormat, read_plugin_request, write_plugin_response,
         };
 
         ene_plugin_proto::cleanup_path(&socket_path);
@@ -2263,9 +2263,16 @@ mod tests {
             tokio::spawn(async move {
                 let (mut read_half, write_half) = tokio::io::split(stream);
                 let writer = Arc::new(Mutex::new(write_half));
+                let mut format = WireFormat::Json;
                 loop {
-                    let Ok(Some(req)) = read_plugin_request(&mut read_half).await else {
+                    let Ok(Some(req)) = read_plugin_request(&mut read_half, format).await else {
                         break;
+                    };
+                    let resp_format = if matches!(&req, PluginIpcRequest::Handshake { .. }) {
+                        format = WireFormat::for_version(PLUGIN_IPC_PROTOCOL_VERSION);
+                        WireFormat::Json
+                    } else {
+                        format
                     };
                     let writer = Arc::clone(&writer);
                     let pings = Arc::clone(&pings);
@@ -2291,7 +2298,7 @@ mod tests {
                             },
                         };
                         let mut w = writer.lock().await;
-                        drop(write_plugin_response(&mut *w, &resp).await);
+                        drop(write_plugin_response(&mut *w, &resp, resp_format).await);
                     });
                 }
             });
@@ -2307,7 +2314,7 @@ mod tests {
     async fn run_dead_mock_server(socket_path: PathBuf) {
         use ene_plugin_proto::{
             IpcListener, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest,
-            PluginIpcResponse, read_plugin_request, write_plugin_response,
+            PluginIpcResponse, WireFormat, read_plugin_request, write_plugin_response,
         };
 
         ene_plugin_proto::cleanup_path(&socket_path);
@@ -2324,7 +2331,7 @@ mod tests {
                 // Answer only the handshake, then drop the stream so the host
                 // observes a closed connection on its next request.
                 if let Ok(Some(PluginIpcRequest::Handshake { .. })) =
-                    read_plugin_request(&mut read_half).await
+                    read_plugin_request(&mut read_half, WireFormat::Json).await
                 {
                     let mut w = writer.lock().await;
                     drop(
@@ -2340,6 +2347,7 @@ mod tests {
                                     ..PluginCapabilities::default()
                                 },
                             },
+                            WireFormat::Json,
                         )
                         .await,
                     );

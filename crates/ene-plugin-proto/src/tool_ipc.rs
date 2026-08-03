@@ -1,6 +1,7 @@
 use crate::sandbox::SandboxConfigData;
 use crate::tool_error::ToolError;
 use crate::tool_types::{ToolRagProfile, ToolResult, ToolSpec};
+use crate::wire::WireFormat;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -277,9 +278,11 @@ pub async fn read_ipc_request<R: AsyncReadExt + Unpin>(
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await.map_err(ToolError::from)?;
-    let req = serde_json::from_slice(&buf).map_err(|e| ToolError::InvalidArguments {
-        message: format!("Failed to deserialize IpcRequest: {e}"),
-    })?;
+    let req = WireFormat::Json
+        .decode(&buf)
+        .map_err(|e| ToolError::InvalidArguments {
+            message: format!("Failed to deserialize IpcRequest: {e}"),
+        })?;
     Ok(Some(req))
 }
 
@@ -288,9 +291,11 @@ pub async fn write_ipc_request<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     req: &IpcRequest,
 ) -> Result<(), ToolError> {
-    let json = serde_json::to_vec(req).map_err(|e| ToolError::InvalidArguments {
-        message: format!("Failed to serialize IpcRequest: {e}"),
-    })?;
+    let json = WireFormat::Json
+        .encode(req)
+        .map_err(|e| ToolError::InvalidArguments {
+            message: format!("Failed to serialize IpcRequest: {e}"),
+        })?;
     let len = json.len() as u32;
     writer
         .write_all(&len.to_le_bytes())
@@ -324,9 +329,11 @@ pub async fn read_ipc_response<R: AsyncReadExt + Unpin>(
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await.map_err(ToolError::from)?;
-    let resp = serde_json::from_slice(&buf).map_err(|e| ToolError::InvalidArguments {
-        message: format!("Failed to deserialize IpcResponse: {e}"),
-    })?;
+    let resp = WireFormat::Json
+        .decode(&buf)
+        .map_err(|e| ToolError::InvalidArguments {
+            message: format!("Failed to deserialize IpcResponse: {e}"),
+        })?;
     Ok(Some(resp))
 }
 
@@ -335,9 +342,11 @@ pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     resp: &IpcResponse,
 ) -> Result<(), ToolError> {
-    let json = serde_json::to_vec(resp).map_err(|e| ToolError::InvalidArguments {
-        message: format!("Failed to serialize IpcResponse: {e}"),
-    })?;
+    let json = WireFormat::Json
+        .encode(resp)
+        .map_err(|e| ToolError::InvalidArguments {
+            message: format!("Failed to serialize IpcResponse: {e}"),
+        })?;
     let len = json.len() as u32;
     writer
         .write_all(&len.to_le_bytes())
