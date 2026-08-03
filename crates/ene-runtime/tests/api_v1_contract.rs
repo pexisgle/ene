@@ -611,7 +611,72 @@ async fn hanging_provider_config() -> (EneConfig, tokio::net::TcpListener) {
     let mut ai = ene_ai::AiConfig::default();
     if let Some(provider) = ai.providers.get_mut("default") {
         provider.base_url = format!("http://{addr}");
+        // The OpenAI backend ships as a plugin binary and the plugin host is
+        // disabled in tests, so route the chat turn to an in-process factory
+        // that never completes.
+        provider.kind = HangingFactory::KIND.to_string();
     }
     drop(config.set_section(&ai));
+    ene_ai::LlmProviderRegistry::register(std::sync::Arc::new(HangingFactory));
     (config, hanging)
+}
+
+/// A chat provider that never completes, standing in for the plugin-backed
+/// backend so the turn stays in flight long enough to observe the
+/// synchronously published turn count.
+struct HangingProvider;
+
+#[async_trait::async_trait]
+impl ene_ai::LlmProvider for HangingProvider {
+    fn name(&self) -> &str {
+        HangingFactory::KIND
+    }
+
+    async fn create_chat_stream(
+        &self,
+        _messages: &[ene_ai::message::LlmMessage],
+        _tools: &[ene_plugin_proto::ToolSpec],
+    ) -> Result<
+        std::pin::Pin<
+            Box<
+                dyn tokio_stream::Stream<
+                        Item = Result<
+                            ene_ai::message::LlmResponseChunk,
+                            ene_ai::error::LlmProviderError,
+                        >,
+                    > + Send,
+            >,
+        >,
+        ene_ai::error::LlmProviderError,
+    > {
+        std::future::pending().await
+    }
+
+    async fn chat_completion(
+        &self,
+        _messages: &[ene_ai::message::LlmMessage],
+        _json_schema: Option<serde_json::Value>,
+    ) -> Result<ene_ai::message::LlmCompletion, ene_ai::error::LlmProviderError> {
+        std::future::pending().await
+    }
+}
+
+struct HangingFactory;
+
+impl HangingFactory {
+    const KIND: &'static str = "test-hanging";
+}
+
+impl ene_ai::LlmProviderFactory for HangingFactory {
+    fn provider_name(&self) -> &str {
+        Self::KIND
+    }
+
+    fn create_provider(
+        &self,
+        _config: &EneConfig,
+        _task: &ene_ai::config::TaskRef,
+    ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::error::LlmProviderError> {
+        Ok(Box::new(HangingProvider))
+    }
 }

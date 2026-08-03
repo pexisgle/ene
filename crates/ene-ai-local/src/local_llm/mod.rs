@@ -286,7 +286,7 @@ mod tests {
     struct StubCloudFactory;
 
     impl ene_ai::LlmProviderFactory for StubCloudFactory {
-        fn provider_name(&self) -> &str {
+        fn provider_name(&self) -> &'static str {
             "openai"
         }
 
@@ -304,7 +304,7 @@ mod tests {
 
     #[async_trait]
     impl ene_ai::LlmProvider for StubCloudProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "openai-stub"
         }
 
