@@ -68,9 +68,10 @@ pub use tool_provider::{ActionSetProvider, SingleActionProvider};
 // Re-export key types from ene-plugin-proto so plugin authors only need
 // to depend on `ene-plugin` for the full authoring surface.
 pub use ene_plugin_proto::{
-    ConcurrencyHint, ConfigFieldError, ConfigOption, LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION,
-    PluginCapabilities, PluginError, PluginIpcRequest, PluginIpcResponse, ProviderErrorKind,
-    SttProviderSpec, TokenUsage, TtsProviderSpec, VersionRange,
+    CapabilityParseError, CapabilityRef, CapabilityRequirement, ConcurrencyHint, ConfigFieldError,
+    ConfigOption, LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
+    PluginIpcRequest, PluginIpcResponse, ProviderErrorKind, SttProviderSpec, TokenUsage,
+    TtsProviderSpec, VersionRange,
 };
 /// Cross-platform IPC transport (re-exported from `ene-plugin-proto`).
 pub use ene_plugin_proto::{IpcListener, IpcStream, cleanup_path};

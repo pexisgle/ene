@@ -5,6 +5,9 @@
 //! TTS/STT providers appropriately.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
+use thiserror::Error;
 
 /// Capabilities advertised by a plugin during the handshake.
 ///
@@ -72,6 +75,274 @@ pub struct PluginCapabilities {
     /// [`supports_migrate_config`](Self::supports_migrate_config) is set.
     #[serde(default)]
     pub config_version: u32,
+
+    /// Capabilities this plugin provides to other plugins, each written
+    /// `name@major` (e.g. `gguf-runner@1`).
+    ///
+    /// Absent on older binaries (`#[serde(default)]` → empty); the host then
+    /// indexes nothing for this plugin. The host validates each entry at
+    /// registration and drops invalid ones individually with a warning —
+    /// a bad string never fails the whole handshake.
+    #[serde(default)]
+    pub provides: Vec<CapabilityRef>,
+
+    /// Capabilities this plugin requires from other plugins, each written
+    /// `name@[^]major[?]` (e.g. `gguf-runner@^1`; a trailing `?` marks a
+    /// soft requirement the plugin can fall back from).
+    ///
+    /// Absent on older binaries (`#[serde(default)]` → empty); the host then
+    /// gates nothing for this plugin. Invalid entries are dropped
+    /// individually with a warning (see [`CapabilityRef`]).
+    #[serde(default)]
+    pub requires: Vec<CapabilityRequirement>,
+}
+
+/// A capability reference: `name@major` (e.g. `gguf-runner@1`).
+///
+/// `name` is one or more lowercase segments of `[a-z0-9]` plus `-`, joined by
+/// `/` (`llm/chat`, `g2p/ja`, `gguf-runner`). `major` is a decimal integer
+/// without leading zeros. Versions beyond the major are deliberately absent
+/// from the wire form: capability evolution policy (what a major means, when
+/// it must change) lives in the host documentation, not in this type.
+///
+/// The serde form is transparent, so `provides: ["gguf-runner@1"]` on the
+/// wire deserializes losslessly. Serde intentionally does **not** validate:
+/// the host validates each declaration entry and drops invalid ones
+/// individually (see [`PluginCapabilities::provides`]) so one typo cannot
+/// fail a plugin's whole handshake. Use [`Self::parse`] for validated
+/// construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CapabilityRef(String);
+
+impl CapabilityRef {
+    /// Parses and validates a `name@major` capability reference.
+    ///
+    /// # Errors
+    /// Returns [`CapabilityParseError`] when the string is not a valid
+    /// `name@major` reference.
+    pub fn parse(raw: &str) -> Result<Self, CapabilityParseError> {
+        let (name, major) = raw
+            .split_once('@')
+            .ok_or_else(|| CapabilityParseError::InvalidRef(raw.to_string()))?;
+        if !is_valid_capability_name(name) {
+            return Err(CapabilityParseError::InvalidName(name.to_string()));
+        }
+        if parse_major(major).is_none() {
+            return Err(CapabilityParseError::InvalidMajor(major.to_string()));
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    /// Returns the raw `name@major` string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the capability name (the part before `@`).
+    ///
+    /// `None` only for a string that was deserialized without validation —
+    /// values constructed via [`Self::parse`] always have one.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.0.split_once('@').map(|(name, _)| name)
+    }
+
+    /// Returns the major version (the part after `@`).
+    ///
+    /// `None` only for a string that was deserialized without validation —
+    /// values constructed via [`Self::parse`] always have one.
+    #[must_use]
+    pub fn major(&self) -> Option<u32> {
+        self.0
+            .split_once('@')
+            .and_then(|(_, major)| parse_major(major))
+    }
+}
+
+impl FromStr for CapabilityRef {
+    type Err = CapabilityParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+impl TryFrom<&str> for CapabilityRef {
+    type Error = CapabilityParseError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::parse(s)
+    }
+}
+
+impl fmt::Display for CapabilityRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A capability requirement: `name@[^]major[?]` (e.g. `gguf-runner@^1`).
+///
+/// The optional `^` prefix declares compatibility intent (`^1` = "any 1.x");
+/// on today's wire — where the reference version is a bare major — it matches
+/// the same set as `@1` and exists so consumers state their intent before
+/// minor versions exist. The optional trailing `?` marks a **soft**
+/// requirement: the plugin can start and degrade gracefully when no provider
+/// is present. Without it the requirement is hard: the host disables the
+/// plugin when no provider matches.
+///
+/// Like [`CapabilityRef`], serde is transparent and unvalidated; use
+/// [`Self::parse`] for validated construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CapabilityRequirement(String);
+
+impl CapabilityRequirement {
+    /// Parses and validates a `name@[^]major[?]` capability requirement.
+    ///
+    /// # Errors
+    /// Returns [`CapabilityParseError`] when the string is not a valid
+    /// requirement.
+    pub fn parse(raw: &str) -> Result<Self, CapabilityParseError> {
+        let without_soft = raw.strip_suffix('?').unwrap_or(raw);
+        let (name, rest) = without_soft
+            .split_once('@')
+            .ok_or_else(|| CapabilityParseError::InvalidRef(raw.to_string()))?;
+        if !is_valid_capability_name(name) {
+            return Err(CapabilityParseError::InvalidName(name.to_string()));
+        }
+        let major = rest.strip_prefix('^').unwrap_or(rest);
+        if parse_major(major).is_none() {
+            return Err(CapabilityParseError::InvalidMajor(major.to_string()));
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    /// Returns the raw `name@[^]major[?]` string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the capability name (the part before `@`).
+    ///
+    /// `None` only for a string that was deserialized without validation.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.0
+            .strip_suffix('?')
+            .unwrap_or(&self.0)
+            .split_once('@')
+            .map(|(name, _)| name)
+    }
+
+    /// Returns the required major version.
+    ///
+    /// `None` only for a string that was deserialized without validation.
+    #[must_use]
+    pub fn major(&self) -> Option<u32> {
+        let without_soft = self.0.strip_suffix('?').unwrap_or(&self.0);
+        without_soft
+            .split_once('@')
+            .and_then(|(_, rest)| parse_major(rest.strip_prefix('^').unwrap_or(rest)))
+    }
+
+    /// Returns whether the requirement is soft (`?` suffix) — the plugin may
+    /// start and fall back when no provider matches.
+    #[must_use]
+    pub fn is_soft(&self) -> bool {
+        self.0.ends_with('?')
+    }
+
+    /// Returns whether the requirement declared `^` compatibility intent.
+    #[must_use]
+    pub fn is_compatible(&self) -> bool {
+        self.0
+            .strip_suffix('?')
+            .unwrap_or(&self.0)
+            .split_once('@')
+            .is_some_and(|(_, rest)| rest.starts_with('^'))
+    }
+}
+
+impl FromStr for CapabilityRequirement {
+    type Err = CapabilityParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+impl TryFrom<&str> for CapabilityRequirement {
+    type Error = CapabilityParseError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::parse(s)
+    }
+}
+
+impl fmt::Display for CapabilityRequirement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Errors from parsing [`CapabilityRef`] / [`CapabilityRequirement`] strings.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CapabilityParseError {
+    /// The string has no `@` separating name and version.
+    #[error("capability must be `name@version`, got `{0}`")]
+    InvalidRef(String),
+    /// The name violates the `[a-z0-9-]` segment / `/`-joined shape.
+    #[error("capability name `{0}` must be lowercase `[a-z0-9-]` segments joined by `/`")]
+    InvalidName(String),
+    /// The version is not a decimal integer without leading zeros.
+    #[error("capability version `{0}` must be a non-negative integer without leading zeros")]
+    InvalidMajor(String),
+}
+
+/// Validates a capability name: one or more `[a-z0-9]+(-[a-z0-9]+)*` segments
+/// joined by single `/` separators. The charset deliberately excludes `.` and
+/// `_` so capability namespaces stay free-form rather than colliding with
+/// connector/credential id conventions.
+fn is_valid_capability_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    name.split('/').all(is_valid_capability_segment)
+}
+
+fn is_valid_capability_segment(segment: &str) -> bool {
+    let mut parts = segment.split('-');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if first.is_empty()
+        || !first
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return false;
+    }
+    parts.all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    })
+}
+
+/// Parses a decimal major version: digits only, no leading zeros.
+fn parse_major(raw: &str) -> Option<u32> {
+    if raw.is_empty()
+        || !raw.bytes().all(|b| b.is_ascii_digit())
+        || (raw.len() > 1 && raw.starts_with('0'))
+    {
+        return None;
+    }
+    raw.parse().ok()
 }
 
 /// Specification of an LLM provider exposed by a plugin.
@@ -222,6 +493,8 @@ mod tests {
         assert!(!caps.supports_validate_config);
         assert!(!caps.supports_migrate_config);
         assert_eq!(caps.config_version, 0);
+        assert!(caps.provides.is_empty());
+        assert!(caps.requires.is_empty());
     }
 
     #[test]
@@ -246,6 +519,12 @@ mod tests {
             supports_validate_config: true,
             supports_migrate_config: true,
             config_version: 2,
+            provides: vec![
+                CapabilityRef::parse("llm/chat@1").unwrap(),
+                CapabilityRef::parse("embed@1").unwrap(),
+                CapabilityRef::parse("gguf-runner@1").unwrap(),
+            ],
+            requires: vec![CapabilityRequirement::parse("gguf-runner@^1").unwrap()],
         };
         let json = serde_json::to_string(&caps).unwrap();
         let deser: PluginCapabilities = serde_json::from_str(&json).unwrap();
@@ -260,6 +539,8 @@ mod tests {
         assert!(!caps.supports_validate_config);
         assert!(!caps.supports_migrate_config);
         assert_eq!(caps.config_version, 0);
+        assert!(caps.provides.is_empty());
+        assert!(caps.requires.is_empty());
     }
 
     #[test]
@@ -267,6 +548,145 @@ mod tests {
         let json = r"{}";
         let caps: PluginCapabilities = serde_json::from_str(json).unwrap();
         assert_eq!(caps, PluginCapabilities::default());
+    }
+
+    /// Load-bearing contract: a plugin binary that predates capability
+    /// declarations omits `provides`/`requires` on the wire; they must
+    /// deserialize as empty, not error — this is what lets the fields ship
+    /// without a protocol version bump.
+    #[test]
+    fn capabilities_missing_declarations_default_empty() {
+        let json = r#"{"tools":1}"#;
+        let caps: PluginCapabilities = serde_json::from_str(json).unwrap();
+        assert!(caps.provides.is_empty());
+        assert!(caps.requires.is_empty());
+    }
+
+    #[test]
+    fn capability_ref_parse_accepts_canonical_forms() {
+        for raw in [
+            "gguf-runner@1",
+            "llm/chat@1",
+            "embed@1",
+            "g2p/ja@0",
+            "a@4294967295",
+        ] {
+            let parsed = CapabilityRef::parse(raw).unwrap();
+            assert_eq!(parsed.as_str(), raw);
+            let (name, major) = raw.split_once('@').unwrap();
+            assert_eq!(parsed.name(), Some(name));
+            assert_eq!(parsed.major(), major.parse().ok());
+        }
+    }
+
+    #[test]
+    fn capability_ref_parse_rejects_malformed() {
+        for raw in [
+            "gguf-runner",
+            "gguf-runner@",
+            "@1",
+            "gguf-runner@x",
+            "gguf-runner@1.0",
+            "gguf-runner@01",
+            "gguf-runner@-1",
+            "gguf-runner@1?",
+            "gguf-runner@^1",
+            "GGUF-runner@1",
+            "gguf_runner@1",
+            "gguf.runner@1",
+            "/runner@1",
+            "gguf//runner@1",
+            "gguf-runner/@1",
+            "-gguf@1",
+            "gguf-@1",
+            "gguf runner@1",
+            "gguf-runner@1 ",
+            "",
+        ] {
+            assert!(
+                CapabilityRef::parse(raw).is_err(),
+                "expected {raw:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_requirement_parse_accepts_canonical_forms() {
+        for (raw, soft, compatible) in [
+            ("gguf-runner@^1", false, true),
+            ("gguf-runner@1", false, false),
+            ("gguf-runner@1?", true, false),
+            ("gguf-runner@^1?", true, true),
+            ("g2p/ja@^2", false, true),
+        ] {
+            let parsed = CapabilityRequirement::parse(raw).unwrap();
+            assert_eq!(parsed.as_str(), raw);
+            assert_eq!(parsed.is_soft(), soft);
+            assert_eq!(parsed.is_compatible(), compatible);
+            let (name, major) = raw
+                .strip_suffix('?')
+                .unwrap_or(raw)
+                .split_once('@')
+                .unwrap();
+            assert_eq!(parsed.name(), Some(name));
+            assert_eq!(parsed.major(), major.trim_start_matches('^').parse().ok());
+        }
+    }
+
+    #[test]
+    fn capability_requirement_parse_rejects_malformed() {
+        for raw in [
+            "gguf-runner",
+            "gguf-runner@",
+            "gguf-runner@^",
+            "gguf-runner@?1",
+            "gguf-runner@1^",
+            "gguf-runner@1?x",
+            "gguf-runner@01",
+            "gguf-runner@^01?",
+            "gguf-runner@1..",
+            "@^1",
+            "gguf-runner@1? ",
+            "",
+        ] {
+            assert!(
+                CapabilityRequirement::parse(raw).is_err(),
+                "expected {raw:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_ref_serde_is_transparent() {
+        let json = r#""gguf-runner@1""#;
+        let parsed: CapabilityRef = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.name(), Some("gguf-runner"));
+        assert_eq!(parsed.major(), Some(1));
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn capability_requirement_serde_is_transparent() {
+        let json = r#""gguf-runner@^1?""#;
+        let parsed: CapabilityRequirement = serde_json::from_str(json).unwrap();
+        assert!(parsed.is_soft());
+        assert!(parsed.is_compatible());
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn capability_declarations_serde_roundtrip() {
+        let caps = PluginCapabilities {
+            provides: vec![CapabilityRef::parse("gguf-runner@1").unwrap()],
+            requires: vec![
+                CapabilityRequirement::parse("gguf-runner@^1").unwrap(),
+                CapabilityRequirement::parse("g2p/ja@^1?").unwrap(),
+            ],
+            ..PluginCapabilities::default()
+        };
+        let json = serde_json::to_string(&caps).unwrap();
+        let deser: PluginCapabilities = serde_json::from_str(&json).unwrap();
+        assert_eq!(caps, deser);
     }
 
     #[test]
