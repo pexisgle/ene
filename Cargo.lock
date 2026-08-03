@@ -2830,6 +2830,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-random"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-plugin",
+ "ene-plugin-proto",
+ "rand 0.10.2",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ene-plugin-utility"
 version = "0.1.0"
 dependencies = [
