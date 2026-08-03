@@ -234,6 +234,17 @@ pub enum ProactiveConfirmation {
     Declined,
 }
 
+impl fmt::Display for ProactiveConfirmation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => write!(f, "disabled"),
+            Self::Pending => write!(f, "pending"),
+            Self::Accepted => write!(f, "accepted"),
+            Self::Declined => write!(f, "declined"),
+        }
+    }
+}
+
 /// Outcome of [`decide_proactive_speech`].
 #[derive(Debug, Clone)]
 pub struct ProactiveDecisionOutcome {
@@ -1213,5 +1224,13 @@ mod tests {
             ProactiveSkipReason::ConfirmationDeclined.to_string(),
             "confirmation declined"
         );
+    }
+
+    #[test]
+    fn confirmation_display_uses_stable_english_labels() {
+        assert_eq!(ProactiveConfirmation::Disabled.to_string(), "disabled");
+        assert_eq!(ProactiveConfirmation::Pending.to_string(), "pending");
+        assert_eq!(ProactiveConfirmation::Accepted.to_string(), "accepted");
+        assert_eq!(ProactiveConfirmation::Declined.to_string(), "declined");
     }
 }
