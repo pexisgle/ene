@@ -27,6 +27,11 @@ pub struct ExecuteRecallInput<'a> {
     pub user_input: &'a str,
     /// Recent conversation turns for planning.
     pub recent_turns: &'a [RecallTurn<'a>],
+    /// Total assistant (character) messages in the chat log, counted over the
+    /// full history — feeds the `@@activate_only_after` /
+    /// `@@activate_only_every` lorebook decorators, whose spec counts the
+    /// whole log rather than the recent-turn window.
+    pub assistant_message_count: u32,
     /// Query embedding vector.
     pub query_embedding: &'a [f32],
     /// Embedding model name.
@@ -190,6 +195,7 @@ async fn maybe_merge_lorebook_recall(
         input.card,
         input.user_input,
         input.recent_turns,
+        input.assistant_message_count,
         recalled,
     )
     .await
@@ -279,9 +285,6 @@ mod tests {
                 selective: None,
                 secondary_keys: None,
                 position: None,
-                not_keys: Vec::new(),
-                sticky_turns: None,
-                turns_since_match: None,
             }],
             ..Default::default()
         });
@@ -299,6 +302,7 @@ mod tests {
             user_id: "User",
             user_input: "How is the weather?",
             recent_turns: &[],
+            assistant_message_count: 0,
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
@@ -384,6 +388,7 @@ mod tests {
             user_id: "User",
             user_input: "warm greeting",
             recent_turns: &[],
+            assistant_message_count: 0,
             query_embedding: &embedding,
             embedding_model: "mock",
             affect: None,
@@ -464,6 +469,7 @@ mod tests {
             user_id: "User",
             user_input: "warm greeting",
             recent_turns: &[],
+            assistant_message_count: 0,
             query_embedding: &embedding,
             embedding_model: "mock",
             affect: None,
@@ -543,6 +549,7 @@ mod tests {
             user_id: "User",
             user_input: "What does the user like to drink?",
             recent_turns: &[],
+            assistant_message_count: 0,
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
@@ -615,6 +622,7 @@ mod tests {
             user_id: "User",
             user_input: "topic related",
             recent_turns: &[],
+            assistant_message_count: 0,
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
@@ -700,6 +708,7 @@ mod tests {
             user_id: "alice",
             user_input: "topic related",
             recent_turns: &[],
+            assistant_message_count: 0,
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,

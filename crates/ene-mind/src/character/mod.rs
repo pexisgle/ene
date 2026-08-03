@@ -4,6 +4,7 @@ mod authors_note;
 mod compiler;
 mod kernel;
 mod lorebook;
+mod lorebook_decorators;
 mod style;
 mod sync;
 
@@ -13,6 +14,10 @@ pub use kernel::IdentityKernel;
 pub use lorebook::{
     LOREBOOK_SOURCE_PREFIX, LorebookIndexer, build_lorebook_scan_text,
     compile_lorebook_regex_cache, entry_keys_match, entry_keys_match_with_cache, stable_entry_id,
+};
+pub use lorebook_decorators::{
+    ActivationContext, DecoratorRole, EntryDecorators, EntryPlacement, SemanticPosition,
+    decorator_filters_pass, entry_decorators_accept,
 };
 pub use style::{
     STYLE_SOURCE_PREFIX, StyleExample, StyleExampleSelector, StyleIntent, infer_style_intent,

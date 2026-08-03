@@ -8,6 +8,8 @@ use ene_core::{
     MemoryStatus, NewMemoryItem,
 };
 
+use super::lorebook_decorators::EntryDecorators;
+
 /// Prefix for lorebook-derived `source_ref` values.
 pub const LOREBOOK_SOURCE_PREFIX: &str = "ccv3:lorebook:";
 
@@ -56,6 +58,13 @@ impl LorebookIndexer {
     }
 
     /// Canonical hash of enabled lorebook entries for change detection.
+    ///
+    /// The Ene-proprietary `not_keys` / `sticky_turns` fields were consolidated
+    /// into the spec's `@@exclude_keys` / `@@keep_activate_after_match`
+    /// decorators: NOT logic must live in one place, and `not_keys` diverged
+    /// from `@@exclude_keys` under `use_regex` (the spec ignores the latter).
+    /// Cards carrying the old fields still load — serde drops unknown JSON
+    /// fields — but the decorators are now the only mechanism.
     pub fn content_hash(card: &CharacterCardV3) -> u64 {
         let Some(book) = card.data.character_book.as_ref() else {
             return 0;
@@ -64,14 +73,12 @@ impl LorebookIndexer {
         for (index, entry) in book.entries.iter().enumerate().filter(|(_, e)| e.enabled) {
             stable_entry_id(entry, index).hash(&mut StableHasher(&mut buf));
             entry.keys.hash(&mut StableHasher(&mut buf));
-            entry.not_keys.hash(&mut StableHasher(&mut buf));
             entry.content.hash(&mut StableHasher(&mut buf));
             entry.constant.hash(&mut StableHasher(&mut buf));
             entry.selective.hash(&mut StableHasher(&mut buf));
             if let Some(ref sk) = entry.secondary_keys {
                 sk.hash(&mut StableHasher(&mut buf));
             }
-            entry.sticky_turns.hash(&mut StableHasher(&mut buf));
         }
         stable_hash_u64(&buf)
     }
@@ -84,7 +91,10 @@ fn compile_entry(
     user_name: &str,
     index: usize,
 ) -> NewMemoryItem {
-    let content = expand_cbs_macros(entry.content.trim(), char_name, user_name);
+    // Strip `@@` decorator lines before the content is stored — they control
+    // matching/placement and must never reach the prompt as literal text.
+    let (_, stripped) = EntryDecorators::parse(&entry.content);
+    let content = expand_cbs_macros(&stripped, char_name, user_name);
     let trigger_line = if entry.keys.is_empty() {
         String::new()
     } else {
@@ -184,10 +194,14 @@ pub fn entry_keys_match(entry: &LorebookEntry, scan_text: &str) -> bool {
 ///
 /// Supports:
 /// - **Constant entries** always match.
-/// - **NOT keys** — if any NOT key matches, the entry is suppressed.
 /// - **Selective mode** (`entry.selective == true`) — ALL keys must match (AND logic).
 /// - **Secondary keys** — at least one primary AND at least one secondary must match.
 /// - **Default** — any key match (OR logic).
+///
+/// Negative matching (NOT logic) lives in the `@@exclude_keys` decorator, not
+/// here: the Ene-proprietary `not_keys` field was consolidated into it so the
+/// two mechanisms cannot diverge (the spec ignores `@@exclude_keys` under
+/// `use_regex`).
 ///
 /// When `entry.use_regex` is `true`, keys are treated as regular expressions
 /// and the optional `regex_cache` is checked first for precompiled patterns.
@@ -207,31 +221,12 @@ pub fn entry_keys_match_with_cache(
     }
 
     // An entry with no keys and no constant flag cannot match
-    if entry.keys.is_empty() && entry.not_keys.is_empty() {
+    if entry.keys.is_empty() {
         return false;
     }
 
     let case_sensitive = entry.case_sensitive.unwrap_or(false);
     let entry_id = stable_entry_id(entry, entry_index);
-
-    // Check NOT keys first: if any NOT key matches, suppress entry
-    for not_key in &entry.not_keys {
-        if key_matches(
-            not_key,
-            scan_text,
-            case_sensitive,
-            entry.use_regex,
-            regex_cache,
-            &entry_id,
-        ) {
-            return false; // Suppressed by NOT key
-        }
-    }
-
-    // If there are no positive keys to match, the entry passes (no NOT keys matched)
-    if entry.keys.is_empty() {
-        return true;
-    }
 
     // Selective mode: ALL keys must match (AND logic)
     if entry.selective.unwrap_or(false) && !entry.keys.is_empty() {
@@ -303,12 +298,15 @@ pub fn compile_lorebook_regex_cache(
         }
         let entry_id = stable_entry_id(entry, index);
         let case_sensitive = entry.case_sensitive.unwrap_or(false);
+        let (decorators, _) = EntryDecorators::parse(&entry.content);
 
-        // Compile regexes for all key types: keys, not_keys, and secondary_keys
+        // Compile regexes for all key types: keys, additional_keys
+        // (`@@additional_keys`), and secondary_keys. `@@exclude_keys` is
+        // skipped: the spec ignores it under `use_regex`.
         let all_keys: Vec<&String> = entry
             .keys
             .iter()
-            .chain(entry.not_keys.iter())
+            .chain(decorators.additional_keys.iter())
             .chain(
                 entry
                     .secondary_keys
@@ -393,9 +391,6 @@ mod tests {
             selective: None,
             secondary_keys: None,
             position: None,
-            not_keys: Vec::new(),
-            sticky_turns: None,
-            turns_since_match: None,
         }
     }
 
@@ -420,9 +415,6 @@ mod tests {
                 selective: None,
                 secondary_keys: None,
                 position: None,
-                not_keys: Vec::new(),
-                sticky_turns: None,
-                turns_since_match: None,
             }],
             ..Default::default()
         });
@@ -450,18 +442,41 @@ mod tests {
     }
 
     #[test]
+    fn decorators_stripped_before_storage() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.character_book = Some(Lorebook {
+            entries: vec![sample_entry(
+                &["castle"],
+                "@@depth 2\n@@role system\n\nThe castle has a moat.",
+                false,
+            )],
+            ..Default::default()
+        });
+        let items = LorebookIndexer::compile_entries(&card, "User");
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0].content.contains("The castle has a moat."),
+            "body must survive: {}",
+            items[0].content
+        );
+        assert!(
+            !items[0].content.contains("@@"),
+            "decorator lines must never reach stored content: {}",
+            items[0].content
+        );
+    }
+
+    #[test]
     fn key_match_is_case_insensitive_by_default() {
         let entry = sample_entry(&["Dragon"], "A dragon appears.", false);
         assert!(entry_keys_match(&entry, "I saw a dragon yesterday"));
     }
 
     #[test]
-    fn not_key_suppresses_entry() {
-        let mut entry = sample_entry(&["sword"], "A shiny sword.", false);
-        entry.not_keys = vec!["rusty".to_string()];
-        assert!(!entry_keys_match(&entry, "There is a rusty sword here"));
-        // Without the NOT key, it would match
-        assert!(entry_keys_match(&entry, "There is a shiny sword here"));
+    fn no_keys_entry_without_constant_never_matches() {
+        let entry = sample_entry(&[], "Mysterious lore.", false);
+        assert!(!entry_keys_match(&entry, "anything at all"));
     }
 
     #[test]
@@ -480,16 +495,5 @@ mod tests {
         assert!(entry_keys_match(&entry, "The king lives in the castle"));
         assert!(!entry_keys_match(&entry, "The castle is empty"));
         assert!(!entry_keys_match(&entry, "The king is away"));
-    }
-
-    #[test]
-    fn not_keys_checked_before_positive_match() {
-        let mut entry = sample_entry(&["magic"], "Magic lore.", false);
-        entry.not_keys = vec!["anti-magic".to_string()];
-        // The scan text contains both "magic" and "anti-magic" - NOT key wins
-        assert!(!entry_keys_match(
-            &entry,
-            "anti-magic field suppresses magic"
-        ));
     }
 }
