@@ -2417,6 +2417,12 @@ fn stale_llm_factory_names<T>(
         .collect()
 }
 
+/// Factory snapshots taken from the old host before reconfiguration.
+type OldFactorySnapshot = (
+    HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
+    HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
+);
+
 /// Background plugin host reconfiguration.
 ///
 /// Performs the heavy I/O (host shutdown, DB IPC spawn, host start, health
@@ -2437,10 +2443,7 @@ async fn reconfigure_plugin_host_bg(
     // Stop the previous host (and its health bridge) first. Keep the factory
     // handles so stale removal below cannot evict a replacement installed by
     // another runtime handle.
-    let (old_llm_factories, old_embedding_factories): (
-        HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
-        HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
-    ) = {
+    let (old_llm_factories, old_embedding_factories): OldFactorySnapshot = {
         let mut guard = plugin_host.lock().await;
         let (llm_factories, embedding_factories) = guard.as_ref().map_or_else(
             || (HashMap::new(), HashMap::new()),
