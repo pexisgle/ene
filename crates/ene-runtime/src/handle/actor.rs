@@ -868,7 +868,7 @@ impl TurnActor {
     /// Lists every stored credential plus every currently declared `OAuth2`
     /// credential, as non-secret summaries.
     #[cfg(any(unix, windows))]
-    async fn list_credentials(&self) -> Vec<ene_plugin_host::oauth::CredentialInfo> {
+    fn list_credentials(&self) -> Vec<ene_plugin_host::oauth::CredentialInfo> {
         let Some(passenger) = &self.credential_passenger else {
             return Vec::new();
         };
@@ -881,7 +881,7 @@ impl TurnActor {
     /// Revokes credentials by storage key: vault entries are dropped, the
     /// persistence file entry is removed, and clients are invalidated.
     #[cfg(any(unix, windows))]
-    async fn revoke_credential(&self, ids: &[String]) -> usize {
+    fn revoke_credential(&self, ids: &[String]) -> usize {
         let Some(passenger) = &self.credential_passenger else {
             return 0;
         };
@@ -901,7 +901,7 @@ impl TurnActor {
     /// Starts the OAuth authorization flow for `id` (desktop settings page);
     /// the flow completes out-of-band.
     #[cfg(any(unix, windows))]
-    async fn authorize_credential(&self, id: &str) -> Result<(), String> {
+    fn authorize_credential(&self, id: &str) -> Result<(), String> {
         let Some(passenger) = &self.credential_passenger else {
             return Err(
                 "no plugin host is running; cannot start an authorization flow".to_string(),
@@ -1622,13 +1622,13 @@ impl TurnActor {
             }
             #[cfg(any(unix, windows))]
             EneCommand::ListCredentials { reply } => {
-                let infos = self.list_credentials().await;
+                let infos = self.list_credentials();
                 drop(reply.send(infos));
                 true
             }
             #[cfg(any(unix, windows))]
             EneCommand::RevokeCredential { ids, reply } => {
-                let removed = self.revoke_credential(&ids).await;
+                let removed = self.revoke_credential(&ids);
                 // A oneshot send error is `Copy` here (it's just the unsent
                 // `usize`), so `drop()` would itself trip
                 // `clippy::dropping_copy_types`; a dropped receiver just
@@ -1642,7 +1642,7 @@ impl TurnActor {
             }
             #[cfg(any(unix, windows))]
             EneCommand::AuthorizeCredential { id, reply } => {
-                let result = self.authorize_credential(&id).await;
+                let result = self.authorize_credential(&id);
                 drop(reply.send(result));
                 true
             }
