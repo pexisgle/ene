@@ -6,8 +6,6 @@ use async_trait::async_trait;
 use ene_ai::config::{AiConfig, AiProviderDef};
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk};
-use ene_ai::openai::OpenAiProvider;
-use ene_ai::resolve::ResolvedChat;
 use ene_ai::traits::LlmProvider;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -94,21 +92,24 @@ impl ProactiveLlmHandles {
     }
 }
 
-/// Build decision + generation routing from [`AiConfig`].
+/// Build decision + generation routing from the full configuration.
 ///
 /// When `tasks.proactive` requests `provider: "local"`, GGUF load failures
 /// fail-closed to [`DisabledDecisionProvider`] — never silently route
 /// observation context to a cloud decision provider.
 pub async fn build_proactive_llm_handles(
-    config: &AiConfig,
+    config: &ene_config::EneConfig,
 ) -> Result<ProactiveLlmHandles, LlmProviderError> {
-    let generation = config.resolve_proactive_generation()?;
+    let ai_config = config
+        .get_section::<AiConfig>()
+        .map_err(|e| LlmProviderError::Provider(format!("Failed to parse AI config: {e}")))?;
+    let generation = ai_config.resolve_proactive_generation()?;
     let generation_model = generation.model.clone();
 
-    if let Some(proactive) = config.tasks.proactive.as_ref()
+    if let Some(proactive) = ai_config.tasks.proactive.as_ref()
         && AiConfig::is_local_provider(&proactive.provider)
     {
-        let local = config.resolve_local_model_for_task(proactive)?;
+        let local = ai_config.resolve_local_model_for_task(proactive)?;
         let resolved_path = match ensure_gguf_available(&local).await {
             Ok(path) => path,
             Err(e) => {
@@ -220,26 +221,30 @@ async fn start_local(
 }
 
 fn build_cloud_decision_provider(
-    config: &AiConfig,
+    config: &ene_config::EneConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmProviderError> {
-    let resolved = match config.tasks.proactive.as_ref() {
+    let ai_config = config.get_section::<AiConfig>().unwrap_or_default();
+    let task = match ai_config.tasks.proactive.as_ref() {
         Some(proactive)
             if !AiConfig::is_local_provider(&proactive.provider)
-                && config
+                && ai_config
                     .get_provider(&proactive.provider)
                     .is_ok_and(AiProviderDef::is_openai_compatible) =>
         {
-            config.resolve_chat_task(Some(proactive))?
+            proactive
         }
-        _ => config.resolve_chat()?,
+        _ => &ai_config.tasks.chat,
     };
-    Ok(Arc::new(cloud_decision_from_resolved(&resolved)))
-}
-
-fn cloud_decision_from_resolved(chat: &ResolvedChat) -> OpenAiProvider {
-    OpenAiProvider::new(&chat.base_url, &chat.api_key, &chat.model)
-        .with_chat_max_tokens(DECISION_MAX_TOKENS)
-        .with_thinking_disabled(true)
+    // The decision classifier is a short structured-output call: cap the
+    // completion at `DECISION_MAX_TOKENS` via the task override, which the
+    // plugin-backed provider honors, and disable thinking so reasoning models
+    // (o3-class, deepseek-reasoner, gpt-5, not just MiMo) answer in `content`
+    // instead of stalling on `reasoning_content`.
+    let mut decision_task = task.clone();
+    decision_task.max_tokens = Some(DECISION_MAX_TOKENS);
+    decision_task.thinking_disabled = true;
+    let provider = ene_ai::create_chat_provider_for_task(config, &decision_task)?;
+    Ok(Arc::from(provider))
 }
 
 /// Optional env-gated smoke: only runs when `ENE_LOCAL_LLM_MODEL` is set.
@@ -270,8 +275,8 @@ mod smoke {
         let Some((model, _accel)) = env_smoke_enabled() else {
             return;
         };
-        let mut cfg = AiConfig::default();
-        cfg.local_models.insert(
+        let mut ai = AiConfig::default();
+        ai.local_models.insert(
             "smoke".to_string(),
             LocalModelDef {
                 model_path: model,
@@ -280,14 +285,17 @@ mod smoke {
                 ..LocalModelDef::default()
             },
         );
-        cfg.tasks.proactive = Some(TaskRef {
+        ai.tasks.proactive = Some(TaskRef {
             provider: LOCAL_PROVIDER.to_string(),
             model: Some("smoke".to_string()),
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
             supports_vision: false,
+            thinking_disabled: false,
         });
+        let mut cfg = ene_config::EneConfig::default();
+        cfg.set_section(&ai).expect("ai config merges");
         let handles = build_proactive_llm_handles(&cfg)
             .await
             .expect("local llama smoke start");

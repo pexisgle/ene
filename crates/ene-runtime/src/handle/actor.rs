@@ -856,21 +856,17 @@ impl TurnActor {
             return;
         }
 
-        let ai_cfg = match self.config.get_section::<ene_ai::AiConfig>() {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                // Reset so a later call (e.g. after a config hot-reload fixes
-                // the section) can retry rather than being permanently stuck.
-                self.proactive_llm_init_spawned
-                    .store(false, Ordering::Release);
-                tracing::warn!(
-                    component = "Proactive",
-                    error = %e,
-                    "Cannot init proactive LLM: config error"
-                );
-                return;
-            }
-        };
+        if self.config.get_section::<ene_ai::AiConfig>().is_err() {
+            // Reset so a later call (e.g. after a config hot-reload fixes
+            // the section) can retry rather than being permanently stuck.
+            self.proactive_llm_init_spawned
+                .store(false, Ordering::Release);
+            tracing::warn!(
+                component = "Proactive",
+                "Cannot init proactive LLM: config error"
+            );
+            return;
+        }
         if !admit_task(
             &mut self.bg_command_tasks,
             self.task_caps.bg_command_cap,
@@ -886,8 +882,9 @@ impl TurnActor {
         }
         let cell = Arc::clone(&self.proactive_llm);
         let init_spawned = Arc::clone(&self.proactive_llm_init_spawned);
+        let config = self.config.clone();
         self.bg_command_tasks.spawn(async move {
-            match ene_ai_local::build_proactive_llm_handles(&ai_cfg).await {
+            match ene_ai_local::build_proactive_llm_handles(&config).await {
                 Ok(handles) => {
                     tracing::info!(
                         component = "Proactive",
@@ -2041,10 +2038,20 @@ impl TurnActor {
             );
         }
 
-        let resolved = selection.candidate.to_resolved();
-        let provider = ene_ai::create_chat_provider_from_resolved(&resolved)
-            .with_retry_policy(ai_config.retry.to_policy());
-        Ok(Arc::new(provider))
+        // Route the selected candidate through the plugin-backed provider
+        // registry by kind; the candidate's provider name, model, and token
+        // cap are forwarded so the produced provider matches the probed
+        // candidate exactly.
+        let candidate = &selection.candidate;
+        let mut task = ene_ai::TaskRef {
+            provider: candidate.provider.clone(),
+            max_tokens: candidate.max_tokens,
+            ..ene_ai::TaskRef::default()
+        };
+        task.model = Some(candidate.model.clone());
+        let provider = ene_ai::create_chat_provider_for_task(&self.config, &task)
+            .map_err(EneRuntimeError::from)?;
+        Ok(Arc::from(provider))
     }
 
     fn create_proactive_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
@@ -2397,9 +2404,11 @@ fn finish_vision_prep(
     })
 }
 
-fn stale_llm_factory_names(
+/// Kinds that were served by the old host's factories but are no longer
+/// served by the new host (or there is no new host at all).
+fn stale_llm_factory_names<T>(
     old_kinds: &[String],
-    new_factories: Option<&HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>>,
+    new_factories: Option<&HashMap<String, T>>,
 ) -> Vec<String> {
     old_kinds
         .iter()
@@ -2428,14 +2437,27 @@ async fn reconfigure_plugin_host_bg(
     // Stop the previous host (and its health bridge) first. Keep the factory
     // handles so stale removal below cannot evict a replacement installed by
     // another runtime handle.
-    let old_llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> = {
+    let (old_llm_factories, old_embedding_factories): (
+        HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
+        HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
+    ) = {
         let mut guard = plugin_host.lock().await;
-        let factories = guard.as_ref().map_or_else(HashMap::new, |host| {
-            host.llm_factories()
-                .iter()
-                .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
-                .collect()
-        });
+        let (llm_factories, embedding_factories) = guard.as_ref().map_or_else(
+            || (HashMap::new(), HashMap::new()),
+            |host| {
+                let llm_factories = host
+                    .llm_factories()
+                    .iter()
+                    .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
+                    .collect();
+                let embedding_factories = host
+                    .embedding_factories()
+                    .iter()
+                    .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
+                    .collect();
+                (llm_factories, embedding_factories)
+            },
+        );
         if let Some(mut host) = guard.take() {
             host.shutdown().await;
         }
@@ -2445,7 +2467,7 @@ async fn reconfigure_plugin_host_bg(
         if let Some(handle) = bridge.take() {
             handle.abort();
         }
-        factories
+        (llm_factories, embedding_factories)
     };
 
     // Abort the previous host-service accept loop before rebinding the shared
@@ -2489,14 +2511,13 @@ async fn reconfigure_plugin_host_bg(
     };
 
     let old_llm_factory_names: Vec<String> = old_llm_factories.keys().cloned().collect();
-    let stale_llm_factory_names = stale_llm_factory_names(
+    let stale_llm_kinds = stale_llm_factory_names(
         &old_llm_factory_names,
         new_host
             .as_ref()
             .map(ene_plugin_host::PluginHostManager::llm_factories),
     );
-    let mut restore_builtin_openai = false;
-    for kind in stale_llm_factory_names {
+    for kind in stale_llm_kinds {
         if let Some(factory) = old_llm_factories.get(&kind)
             && LlmProviderRegistry::deregister_if_matches(&kind, factory)
         {
@@ -2505,15 +2526,29 @@ async fn reconfigure_plugin_host_bg(
                 kind = %kind,
                 "Deregistered stale plugin-provided LLM provider factory during reconfiguration"
             );
-            restore_builtin_openai |= kind == "openai-compatible";
         }
     }
 
-    // Plugin kinds are allowed to shadow the built-in factory at registration
-    // time. If that plugin disappears, restore the built-in before registering
-    // any replacement from the new host.
-    if restore_builtin_openai {
-        LlmProviderRegistry::register(Arc::new(ene_ai::OpenAiProviderFactory));
+    // Embedding factories follow the same stale-removal / re-registration
+    // discipline as LLM factories, so a restarted host cannot leave
+    // embeddings pointing at a dead plugin connection.
+    let old_embedding_kinds: Vec<String> = old_embedding_factories.keys().cloned().collect();
+    let stale_embedding_kinds = stale_llm_factory_names(
+        &old_embedding_kinds,
+        new_host
+            .as_ref()
+            .map(ene_plugin_host::PluginHostManager::embedding_factories),
+    );
+    for kind in stale_embedding_kinds {
+        if let Some(factory) = old_embedding_factories.get(&kind)
+            && ene_ai::EmbeddingProviderRegistry::deregister_if_matches(&kind, factory)
+        {
+            tracing::info!(
+                component = "TurnActor",
+                kind = %kind,
+                "Deregistered stale plugin-provided embedding provider factory during reconfiguration"
+            );
+        }
     }
 
     if let Some(host) = new_host.as_ref() {
@@ -2525,6 +2560,14 @@ async fn reconfigure_plugin_host_bg(
             );
             LlmProviderRegistry::register(Arc::clone(factory));
         }
+        for (kind, factory) in host.embedding_factories() {
+            tracing::info!(
+                component = "TurnActor",
+                kind = %kind,
+                "Re-registered plugin-provided embedding provider factory after Features update"
+            );
+            ene_ai::EmbeddingProviderRegistry::register(Arc::clone(factory));
+        }
     }
 
     let mut bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -2533,10 +2576,15 @@ async fn reconfigure_plugin_host_bg(
     {
         let diag_tx = diag_tx.clone();
         let llm_factories_by_plugin = host.llm_factories_by_plugin();
+        let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
         bridge_handle = Some(tokio::spawn(async move {
             while let Some(event) = health_rx.recv().await {
                 if let PluginHealthEvent::Disabled { plugin, .. } = &event {
                     super::deregister_disabled_plugin_factories(plugin, &llm_factories_by_plugin);
+                    super::deregister_disabled_embedding_factories(
+                        plugin,
+                        &embedding_factories_by_plugin,
+                    );
                 }
                 emit_diag(&diag_tx, plugin_health_event_to_diag(event));
             }
@@ -3270,21 +3318,67 @@ pub(super) fn init_embedding(
             Ok(Arc::from(provider))
         }
         ResolvedEmbedding::Cloud {
-            base_url,
-            api_key,
+            kind,
             model,
             dimensions,
-            query_prefix,
-        } => Ok(Arc::new(
-            ene_ai::CloudEmbeddingProvider::new(
-                &base_url,
-                &api_key,
-                &model,
-                dimensions,
-                query_prefix,
-            )
-            .with_retry_policy(ai_config.retry.to_policy()),
-        )),
+            ..
+        } => Ok(Arc::new(PluginEmbeddingProxy::new(
+            kind,
+            model,
+            dimensions,
+            Arc::new(config.clone()),
+        ))),
+    }
+}
+
+/// A cloud embedding provider that resolves its backend lazily from the
+/// global [`ene_ai::EmbeddingProviderRegistry`] on first use.
+///
+/// Bootstrap ordering forces this indirection: the plugin host (which
+/// registers plugin embedding factories) starts *after* the embedder is
+/// created, because the host needs DB tokens that are derived from the
+/// memory store, which in turn needs the embedder's dimensions. Model and
+/// dimensions are config-derived, so the proxy answers those synchronously
+/// and only touches the registry when a real embedding is requested — by
+/// which time the host has started. Resolution is per-call, so a plugin host
+/// restart (with re-registered factories) is picked up automatically.
+struct PluginEmbeddingProxy {
+    kind: String,
+    model: String,
+    dimensions: usize,
+    config: Arc<EneConfig>,
+}
+
+impl PluginEmbeddingProxy {
+    fn new(kind: String, model: String, dimensions: usize, config: Arc<EneConfig>) -> Self {
+        Self {
+            kind,
+            model,
+            dimensions,
+            config,
+        }
+    }
+
+    fn resolve(&self) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+        ene_ai::EmbeddingProviderRegistry::create_provider(&self.kind, &self.config)
+    }
+}
+
+#[async_trait::async_trait]
+impl ene_ai::EmbeddingProvider for PluginEmbeddingProxy {
+    async fn embed_batch(
+        &self,
+        items: &[(&str, ene_ai::EmbeddingKind)],
+    ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
+        self.resolve()?.embed_batch(items).await
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
     }
 }
 
@@ -3297,7 +3391,8 @@ pub(super) async fn init_memory_store(
         .unwrap_or_default();
     let db_path = store_config.resolve_memory_db_path(&config.character);
 
-    if let Some(parent) = db_path.parent()
+    if db_path != std::path::Path::new(":memory:")
+        && let Some(parent) = db_path.parent()
         && !parent.exists()
     {
         std::fs::create_dir_all(parent)
@@ -3388,18 +3483,41 @@ mod tests {
 
     #[test]
     fn stale_factory_diff_keeps_kinds_served_by_new_host() {
-        let old_kinds = vec!["openai-compatible".to_string(), "stale-plugin".to_string()];
-        let mut new_factories = HashMap::new();
-        new_factories.insert(
-            "openai-compatible".to_string(),
-            Arc::new(ene_ai::OpenAiProviderFactory) as Arc<dyn ene_ai::LlmProviderFactory>,
-        );
+        let old_kinds = vec!["openai".to_string(), "stale-plugin".to_string()];
+        let mut new_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
+            HashMap::new();
+        new_factories.insert("openai".to_string(), stub_llm_factory("openai"));
 
         assert_eq!(
             stale_llm_factory_names(&old_kinds, Some(&new_factories)),
             vec!["stale-plugin"]
         );
-        assert_eq!(stale_llm_factory_names(&old_kinds, None), old_kinds);
+        assert_eq!(
+            stale_llm_factory_names::<Arc<dyn ene_ai::LlmProviderFactory>>(&old_kinds, None),
+            old_kinds
+        );
+    }
+
+    /// A factory whose `create_provider` always fails, standing in for a
+    /// plugin-backed factory in tests that only exercise registry plumbing.
+    fn stub_llm_factory(kind: &'static str) -> Arc<dyn ene_ai::LlmProviderFactory> {
+        struct StubFactory {
+            kind: &'static str,
+        }
+        impl ene_ai::LlmProviderFactory for StubFactory {
+            fn provider_name(&self) -> &str {
+                self.kind
+            }
+
+            fn create_provider(
+                &self,
+                _config: &ene_config::EneConfig,
+                _task: &ene_ai::TaskRef,
+            ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::LlmProviderError> {
+                Err(ene_ai::LlmProviderError::Provider("stub".to_string()))
+            }
+        }
+        Arc::new(StubFactory { kind })
     }
 
     /// Regression test: a worker routed through `aux_task_tx` is

@@ -136,7 +136,7 @@ async fn cancel_emits_terminal_exactly_once_with_matching_turn() {
 }
 
 #[tokio::test]
-async fn memory_enabled_without_embedder_fails_closed_on_open() {
+async fn memory_enabled_without_embedder_fails_closed_on_use() {
     let mut config = EneConfig::default();
     let mut store = ene_store::StoreConfig::default();
     store.enabled = true;
@@ -144,12 +144,50 @@ async fn memory_enabled_without_embedder_fails_closed_on_open() {
     let mut tools = ene_plugin_host::PluginConfig::default();
     tools.enabled = false;
     drop(config.set_section(&tools));
-    // Cloud embedder with no base URL → init fails → open fails closed.
+    // Default AI config (no base_url, no OPENAI_BASE_URL): base URL
+    // resolution falls back to the OpenAI plugin default, so open succeeds
+    // and the embedder is a lazy proxy that fails closed at first use.
     let ai = ene_ai::AiConfig::default();
     drop(config.set_section(&ai));
 
-    let err = EneHandle::open(config, test_card()).await;
-    assert!(err.is_err(), "expected open to fail closed, got {err:?}");
+    let handle = EneHandle::open(config, test_card())
+        .await
+        .expect("open defers embedder creation; embedding fails closed at first use");
+    let mut rx = handle.subscribe();
+    let turn = handle
+        .run("memory enabled, no embedder")
+        .expect("run starts the turn");
+    let mut saw_failed = false;
+    for _ in 0..200 {
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                EneEvent::Terminal {
+                    turn: ref t,
+                    origin: _,
+                    reason: TerminalReason::Failed { .. },
+                } if t == &turn => {
+                    saw_failed = true;
+                }
+                EneEvent::Terminal {
+                    turn: ref t,
+                    origin: _,
+                    reason: TerminalReason::Done,
+                } if t == &turn => {
+                    panic!("memory-enabled turn must not complete Done without a usable embedder");
+                }
+                _ => {}
+            }
+        }
+        if saw_failed {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        saw_failed,
+        "memory enabled without an embedder must fail the turn closed, not hang"
+    );
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]
@@ -611,7 +649,72 @@ async fn hanging_provider_config() -> (EneConfig, tokio::net::TcpListener) {
     let mut ai = ene_ai::AiConfig::default();
     if let Some(provider) = ai.providers.get_mut("default") {
         provider.base_url = format!("http://{addr}");
+        // The OpenAI backend ships as a plugin binary and the plugin host is
+        // disabled in tests, so route the chat turn to an in-process factory
+        // that never completes.
+        provider.kind = HangingFactory::KIND.to_string();
     }
     drop(config.set_section(&ai));
+    ene_ai::LlmProviderRegistry::register(std::sync::Arc::new(HangingFactory));
     (config, hanging)
+}
+
+/// A chat provider that never completes, standing in for the plugin-backed
+/// backend so the turn stays in flight long enough to observe the
+/// synchronously published turn count.
+struct HangingProvider;
+
+#[async_trait::async_trait]
+impl ene_ai::LlmProvider for HangingProvider {
+    fn name(&self) -> &str {
+        HangingFactory::KIND
+    }
+
+    async fn create_chat_stream(
+        &self,
+        _messages: &[ene_ai::message::LlmMessage],
+        _tools: &[ene_plugin_proto::ToolSpec],
+    ) -> Result<
+        std::pin::Pin<
+            Box<
+                dyn tokio_stream::Stream<
+                        Item = Result<
+                            ene_ai::message::LlmResponseChunk,
+                            ene_ai::error::LlmProviderError,
+                        >,
+                    > + Send,
+            >,
+        >,
+        ene_ai::error::LlmProviderError,
+    > {
+        std::future::pending().await
+    }
+
+    async fn chat_completion(
+        &self,
+        _messages: &[ene_ai::message::LlmMessage],
+        _json_schema: Option<serde_json::Value>,
+    ) -> Result<ene_ai::message::LlmCompletion, ene_ai::error::LlmProviderError> {
+        std::future::pending().await
+    }
+}
+
+struct HangingFactory;
+
+impl HangingFactory {
+    const KIND: &'static str = "test-hanging";
+}
+
+impl ene_ai::LlmProviderFactory for HangingFactory {
+    fn provider_name(&self) -> &str {
+        Self::KIND
+    }
+
+    fn create_provider(
+        &self,
+        _config: &EneConfig,
+        _task: &ene_ai::config::TaskRef,
+    ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::error::LlmProviderError> {
+        Ok(Box::new(HangingProvider))
+    }
 }

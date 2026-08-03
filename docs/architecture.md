@@ -62,6 +62,7 @@ flowchart TD
   Tool --> Macros[crates/ene-plugin-macros]
 
   ToolHost -.spawns IPC.-> Anthropic[plugins/provider/anthropic]
+  ToolHost -.spawns IPC.-> OpenAi[plugins/provider/openai]
   ToolHost -.spawns IPC.-> ToolApp[plugins/tool/app]
   ToolHost -.spawns IPC.-> ToolBrowser[plugins/tool/browser]
   ToolHost -.spawns IPC.-> ToolFs[plugins/tool/fs]
@@ -132,7 +133,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-mind` | Session manager, prompt packing, affect (PAD model), memory recall, proactive speech, performance arbitration |
 | `ene-store` | SQLite / SeaORM database entities, migrations, vector recall (`sqlite-vec`), commitment ledger |
 | `ene-core` | Persistence-agnostic domain vocabulary (`AffectState`, typed-memory kinds/statuses/queries, commitment ledger types) and the `MemoryPort` trait abstraction |
-| `ene-ai` | `AiProvider` trait, OpenAI provider, Anthropic IPC provider adapter, provider factory |
+| `ene-ai` | Provider traits and registries, message/streaming types, config routing, health probing, retry policy |
 | `ene-ai-local` | Local GGUF LLM inference via `llama-cpp-4` |
 | `ene-voice` | Local STT (Whisper), TTS, VAD (Silero ONNX), cpal audio I/O |
 | `ene-connector` | External-service credential authority (OAuth2/API-key storage, connector identity, permission scopes); no consumer yet — reintroduced by the MCP credential bridge under #412/#415 |

@@ -300,6 +300,16 @@ pub trait LlmPlugin: ConfigurablePlugin + Send + Sync {
 /// Plugin trait for batch embedding computation.
 #[async_trait]
 pub trait EmbedPlugin: ConfigurablePlugin + Send + Sync {
+    /// Provider kinds this plugin serves batch embeddings for.
+    ///
+    /// Advertised in the handshake `PluginCapabilities.embed_providers` so
+    /// the host can register an embedding factory per kind. The default
+    /// returns an empty list — a plugin that only implements `embed_batch`
+    /// without advertising a kind is never routed to.
+    fn embed_providers(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Computes embeddings for a batch of text items.
     ///
     /// The default returns [`PluginError::NotSupported`] for plugins that

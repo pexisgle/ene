@@ -68,6 +68,17 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
         },
     );
 
+    // The OpenAI-compatible provider plugin needs OPENAI_API_KEY and
+    // OPENAI_BASE_URL forwarded from the host environment, mirroring the
+    // anthropic entry.
+    list.insert(
+        "openai".to_string(),
+        PluginEntry {
+            env_passthrough: vec!["OPENAI_API_KEY".to_string(), "OPENAI_BASE_URL".to_string()],
+            ..PluginEntry::default()
+        },
+    );
+
     list
 }
 

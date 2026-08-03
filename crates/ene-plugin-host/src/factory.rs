@@ -118,7 +118,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
         let provider_config = ai_config
             .providers
             .values()
-            .find(|def| def.kind == self.kind)
+            .find(|def| provider_def_kind_matches(def, &self.kind))
             .map_or_else(
                 || serde_json::json!({}),
                 |def| {
@@ -134,6 +134,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
                     build_provider_config(def, trusted)
                 },
             );
+        let provider_config = apply_task_overrides(provider_config, task);
 
         // Apply the same retry policy as the OpenAI path so plugin providers
         // retry transient (transport / rate-limit) failures consistently.
@@ -154,6 +155,14 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
     }
 }
 
+/// Whether a provider definition serves the plugin factory's `kind`.
+///
+/// The legacy `openai_compatible` alias is folded onto the `openai` plugin
+/// kind so pre-plugin configs keep resolving to the `openai` plugin.
+pub(crate) fn provider_def_kind_matches(def: &AiProviderDef, kind: &str) -> bool {
+    ene_ai::canonical_provider_kind(&def.kind) == kind
+}
+
 /// Builds the `provider_config` JSON forwarded to a plugin LLM provider.
 ///
 /// The API key — when present and `trusted` — is sent as a **plain JSON
@@ -161,7 +170,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
 /// Anthropic plugin's `resolve_api_key`). When `trusted` is `false`, no
 /// `api_key` field is emitted at all, so credentials never reach an
 /// untrusted plugin.
-fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde_json::Value {
+pub(crate) fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     if !def.base_url.is_empty() {
         map.insert(
@@ -179,6 +188,24 @@ fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde_json::Valu
         map.insert(k.clone(), v.clone());
     }
     serde_json::Value::Object(map)
+}
+
+/// Applies per-task overrides onto the provider config forwarded to a plugin.
+///
+/// Currently the `thinking_disabled` instruction (set by the decision
+/// classifier) is forwarded as a plain boolean so the plugin can override its
+/// model-name heuristic; plugin-side handling of the key is the plugin's
+/// contract, and other plugin kinds ignore it.
+pub(crate) fn apply_task_overrides(
+    mut provider_config: serde_json::Value,
+    task: &TaskRef,
+) -> serde_json::Value {
+    if task.thinking_disabled
+        && let Some(obj) = provider_config.as_object_mut()
+    {
+        obj.insert("thinking_disabled".to_string(), serde_json::json!(true));
+    }
+    provider_config
 }
 
 #[cfg(test)]
@@ -254,5 +281,37 @@ mod tests {
                 Some("us-east-1")
             );
         }
+    }
+
+    /// The decision task's `thinking_disabled` flag is forwarded into the
+    /// provider config so the plugin can disable thinking unconditionally
+    /// (beyond its model-name heuristic).
+    #[test]
+    fn thinking_disabled_task_forwarded_to_plugin_config() {
+        let def = anthropic_def_with_inline_key();
+        let base = build_provider_config(&def, true);
+        let task = ene_ai::TaskRef {
+            thinking_disabled: true,
+            ..ene_ai::TaskRef::default()
+        };
+        let config = apply_task_overrides(base, &task);
+        assert_eq!(
+            config.get("thinking_disabled"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    /// Regular tasks (the default) leave the provider config untouched, so
+    /// the plugin keeps its model-name heuristic for normal chat.
+    #[test]
+    fn thinking_enabled_task_leaves_config_untouched() {
+        let def = anthropic_def_with_inline_key();
+        let base = build_provider_config(&def, true);
+        let task = ene_ai::TaskRef::default();
+        let config = apply_task_overrides(base, &task);
+        assert!(
+            config.get("thinking_disabled").is_none(),
+            "default tasks must not inject thinking_disabled, got {config:?}"
+        );
     }
 }

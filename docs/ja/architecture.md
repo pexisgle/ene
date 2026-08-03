@@ -62,6 +62,7 @@ flowchart TD
   Tool --> Macros[crates/ene-plugin-macros]
 
   ToolHost -.IPC生成.-> Anthropic[plugins/provider/anthropic]
+  ToolHost -.IPC生成.-> OpenAi[plugins/provider/openai]
   ToolHost -.IPC生成.-> ToolApp[plugins/tool/app]
   ToolHost -.IPC生成.-> ToolBrowser[plugins/tool/browser]
   ToolHost -.IPC生成.-> ToolFs[plugins/tool/fs]
@@ -132,7 +133,7 @@ flowchart TD
 | `ene-mind` | セッション管理、プロンプトパッキング、感情 (PADモデル)、記憶想起、プロアクティブ発話、演出調停 |
 | `ene-store` | SQLite / SeaORM エンティティ、マイグレーション、ベクトル検索 (`sqlite-vec`)、コミットメント台帳 |
 | `ene-core` | 永続化に依存しないドメイン語彙 (`AffectState`、typed-memory の種別/ステータス/クエリ、コミットメント台帳の型) および `MemoryPort` トレイト抽象 |
-| `ene-ai` | `AiProvider` トレイト、OpenAI プロバイダ、Anthropic IPC アダプタ、プロバイダファクトリ |
+| `ene-ai` | プロバイダトレイトとレジストリ、メッセージ/ストリーミング型、設定ルーティング、ヘルスプローブ、リトライポリシー |
 | `ene-ai-local` | `llama-cpp-4` によるローカル GGUF LLM 推論 |
 | `ene-voice` | ローカル STT (Whisper)、TTS、VAD (Silero ONNX)、cpal オーディオ I/O |
 | `ene-connector` | 外部サービスの認証情報権威 (OAuth2/API キー保管、コネクタアイデンティティ、許可スコープ)。現時点で利用クレートなし — #412/#415 の MCP 認証情報ブリッジにより再導入予定 |

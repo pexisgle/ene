@@ -22,6 +22,7 @@ use sha2::Digest;
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::credential_registry::CredentialRegistry;
+use crate::embedding::IpcEmbeddingProviderFactory;
 use crate::error::PluginHostError;
 use crate::factory::IpcLlmProviderFactory;
 use crate::health::PluginHealthEvent;
@@ -588,6 +589,12 @@ pub type LlmFactoryHandle = Arc<dyn ene_ai::LlmProviderFactory>;
 /// LLM provider factories grouped by the plugin that provides them.
 pub type LlmFactoriesByPlugin = HashMap<String, Vec<(String, LlmFactoryHandle)>>;
 
+/// Embedding provider factories grouped by the plugin that provides them.
+pub type EmbeddingFactoriesByPlugin = HashMap<String, Vec<(String, EmbeddingFactoryHandle)>>;
+
+/// A handle to a plugin-provided embedding factory.
+pub type EmbeddingFactoryHandle = Arc<dyn ene_ai::EmbeddingProviderFactory>;
+
 /// Orchestrates the lifecycle of all plugin processes and MCP connections.
 ///
 /// Starts only plugins explicitly listed in `plugins.list` with
@@ -613,6 +620,8 @@ pub struct PluginHostManager {
     tool_registries: Vec<Arc<dyn ToolRegistry>>,
     llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
     llm_factory_plugins: HashMap<String, String>,
+    embedding_factories: HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
+    embedding_factory_plugins: HashMap<String, String>,
     /// Credential declarations parsed from each plugin's `x-ene-credentials`
     /// schema block at startup. Populated by [`start`](Self::start) alongside
     /// connection registration; consumed by the credential service for
@@ -682,6 +691,8 @@ impl PluginHostManager {
                 tool_registries: Vec::new(),
                 llm_factories: HashMap::new(),
                 llm_factory_plugins: HashMap::new(),
+                embedding_factories: HashMap::new(),
+                embedding_factory_plugins: HashMap::new(),
                 credential_registry: CredentialRegistry::new(),
                 health_tasks: Vec::new(),
                 health_rx: None,
@@ -698,6 +709,9 @@ impl PluginHostManager {
         let mut llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
             HashMap::new();
         let mut llm_factory_plugins: HashMap<String, String> = HashMap::new();
+        let mut embedding_factories: HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>> =
+            HashMap::new();
+        let mut embedding_factory_plugins: HashMap<String, String> = HashMap::new();
         // (plugin name, fetched schema) pairs; the schemas are registered after
         // `Self` exists so the registration step is a `&self` method that unit
         // tests can drive without a plugin process.
@@ -879,6 +893,29 @@ impl PluginHostManager {
                         llm_factory_plugins.insert(spec.kind.clone(), name.clone());
                     }
 
+                    for kind in &caps.embed_providers {
+                        if embedding_factories.contains_key(kind) {
+                            tracing::warn!(
+                                component = "PluginHostManager",
+                                plugin = %name,
+                                kind = %kind,
+                                "Duplicate embedding provider kind; skipping"
+                            );
+                            continue;
+                        }
+                        let factory = IpcEmbeddingProviderFactory::new(
+                            kind.clone(),
+                            Arc::clone(&conn),
+                            name.clone(),
+                            is_builtin_plugin(name),
+                        );
+                        embedding_factories.insert(
+                            kind.clone(),
+                            Arc::new(factory) as Arc<dyn ene_ai::EmbeddingProviderFactory>,
+                        );
+                        embedding_factory_plugins.insert(kind.clone(), name.clone());
+                    }
+
                     supervised.push(plugin);
                     connections.push(conn);
                     names.push(name.clone());
@@ -1020,6 +1057,8 @@ impl PluginHostManager {
             tool_registries,
             llm_factories,
             llm_factory_plugins,
+            embedding_factories,
+            embedding_factory_plugins,
             credential_registry: CredentialRegistry::new(),
             health_tasks,
             health_rx: Some(health_rx),
@@ -1040,6 +1079,29 @@ impl PluginHostManager {
     /// provider kind.
     pub fn llm_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> {
         &self.llm_factories
+    }
+
+    /// Returns the embedding provider factories contributed by plugins,
+    /// keyed by provider kind.
+    pub fn embedding_factories(
+        &self,
+    ) -> &HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>> {
+        &self.embedding_factories
+    }
+
+    /// Returns the embedding factories grouped by the plugin that provides
+    /// them, mirroring [`llm_factories_by_plugin`](Self::llm_factories_by_plugin).
+    pub fn embedding_factories_by_plugin(&self) -> EmbeddingFactoriesByPlugin {
+        let mut grouped = EmbeddingFactoriesByPlugin::new();
+        for (kind, factory) in &self.embedding_factories {
+            if let Some(plugin) = self.embedding_factory_plugins.get(kind) {
+                grouped
+                    .entry(plugin.clone())
+                    .or_default()
+                    .push((kind.clone(), Arc::clone(factory)));
+            }
+        }
+        grouped
     }
 
     /// Returns the LLM factories grouped by the plugin that provides them.
@@ -1297,6 +1359,8 @@ impl PluginHostManager {
             tool_registries: Vec::new(),
             llm_factories: HashMap::new(),
             llm_factory_plugins: HashMap::new(),
+            embedding_factories: HashMap::new(),
+            embedding_factory_plugins: HashMap::new(),
             credential_registry: CredentialRegistry::new(),
             health_tasks: Vec::new(),
             health_rx: None,
@@ -1408,8 +1472,15 @@ fn is_valid_plugin_name(name: &str) -> bool {
 /// Keep in sync with the `plugins/` directory, the default `plugins.list` in
 /// [`config`](crate::config), and the built-in catalog in
 /// `docs/concepts/plugins-and-mcp.md`.
-pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] =
-    &["anthropic", "app", "browser", "fs", "utility", "web"];
+pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] = &[
+    "anthropic",
+    "app",
+    "browser",
+    "fs",
+    "openai",
+    "utility",
+    "web",
+];
 
 /// Returns `true` when the plugin is one of the trusted built-ins that ship
 /// with Ene. Used by the API key trust gate: only builtin or explicitly
@@ -1829,7 +1900,15 @@ mod tests {
         // ...and the list is exactly the shipped set (no accidental drift).
         assert_eq!(
             BUILTIN_PLUGIN_NAMES,
-            &["anthropic", "app", "browser", "fs", "utility", "web"]
+            &[
+                "anthropic",
+                "app",
+                "browser",
+                "fs",
+                "openai",
+                "utility",
+                "web"
+            ]
         );
 
         // An arbitrary binary dropped into the plugins directory must NOT be

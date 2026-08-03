@@ -280,16 +280,69 @@ mod tests {
     use crate::local_llm::routing::build_proactive_llm_handles;
     use ene_ai::config::{AiConfig, LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, TaskRef};
 
-    fn test_config() -> AiConfig {
-        let mut cfg = AiConfig::default();
-        if let Some(def) = cfg.providers.get_mut("default") {
+    /// A stub `openai`-kind factory standing in for the plugin-provided
+    /// backend, so cloud-decision routing can be exercised without a plugin
+    /// host. Registered for the duration of the cloud tests below.
+    struct StubCloudFactory;
+
+    impl ene_ai::LlmProviderFactory for StubCloudFactory {
+        fn provider_name(&self) -> &'static str {
+            "openai"
+        }
+
+        fn create_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+            _task: &TaskRef,
+        ) -> Result<Box<dyn ene_ai::LlmProvider>, LlmProviderError> {
+            Ok(Box::new(StubCloudProvider))
+        }
+    }
+
+    /// A stub `LlmProvider` that never talks to a network.
+    struct StubCloudProvider;
+
+    #[async_trait]
+    impl ene_ai::LlmProvider for StubCloudProvider {
+        fn name(&self) -> &'static str {
+            "openai-stub"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+            LlmProviderError,
+        > {
+            Err(LlmProviderError::Provider(
+                "stub provider does not stream".to_string(),
+            ))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<LlmCompletion, LlmProviderError> {
+            Ok(LlmCompletion::text_only("stub".to_string()))
+        }
+    }
+
+    fn test_config() -> ene_config::EneConfig {
+        let mut ai = AiConfig::default();
+        if let Some(def) = ai.providers.get_mut("default") {
             def.base_url = "https://api.openai.com/v1".to_string();
         }
-        cfg
+        let mut config = ene_config::EneConfig::default();
+        config.set_section(&ai).expect("ai config merges");
+        config
     }
 
     #[tokio::test]
     async fn cloud_provider_returns_cloud_decision() {
+        ene_ai::LlmProviderRegistry::register(std::sync::Arc::new(StubCloudFactory));
         let cfg = test_config();
         let handles = build_proactive_llm_handles(&cfg).await.expect("build");
         assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
@@ -299,15 +352,19 @@ mod tests {
 
     #[tokio::test]
     async fn proactive_openai_task_drives_generation_model() {
+        ene_ai::LlmProviderRegistry::register(std::sync::Arc::new(StubCloudFactory));
         let mut cfg = test_config();
-        cfg.tasks.proactive = Some(TaskRef {
+        let mut ai = cfg.get_section::<AiConfig>().expect("ai config");
+        ai.tasks.proactive = Some(TaskRef {
             provider: "default".to_string(),
             model: Some("gpt-4o".to_string()),
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
             supports_vision: false,
+            thinking_disabled: false,
         });
+        cfg.set_section(&ai).expect("ai config merges");
         let handles = build_proactive_llm_handles(&cfg).await.expect("build");
         assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
         assert_eq!(handles.generation_model, "gpt-4o");
@@ -317,21 +374,24 @@ mod tests {
     #[tokio::test]
     async fn local_missing_weights_fails_closed_to_disabled() {
         let mut cfg = test_config();
-        cfg.local_models.insert(
+        let mut ai = cfg.get_section::<AiConfig>().expect("ai config");
+        ai.local_models.insert(
             "missing".to_string(),
             LocalModelDef {
                 model_path: "/nonexistent/ene-missing-decision.gguf".to_string(),
                 ..LocalModelDef::default()
             },
         );
-        cfg.tasks.proactive = Some(TaskRef {
+        ai.tasks.proactive = Some(TaskRef {
             provider: LOCAL_PROVIDER.to_string(),
             model: Some("missing".to_string()),
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
             supports_vision: false,
+            thinking_disabled: false,
         });
+        cfg.set_section(&ai).expect("ai config merges");
         let handles = build_proactive_llm_handles(&cfg)
             .await
             .expect("missing weights fail-closed to disabled");
@@ -342,20 +402,23 @@ mod tests {
     #[tokio::test]
     async fn missing_model_path_fails_closed_to_disabled() {
         let mut cfg = test_config();
-        cfg.local_models.insert(
+        let mut ai = cfg.get_section::<AiConfig>().expect("ai config");
+        ai.local_models.insert(
             "empty".to_string(),
             LocalModelDef {
                 ..LocalModelDef::default()
             },
         );
-        cfg.tasks.proactive = Some(TaskRef {
+        ai.tasks.proactive = Some(TaskRef {
             provider: LOCAL_PROVIDER.to_string(),
             model: Some("empty".to_string()),
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
             supports_vision: false,
+            thinking_disabled: false,
         });
+        cfg.set_section(&ai).expect("ai config merges");
         let handles = build_proactive_llm_handles(&cfg)
             .await
             .expect("empty model_path fail-closed to disabled");

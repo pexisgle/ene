@@ -58,7 +58,9 @@ use ene_ai::LlmProviderRegistry;
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::{ConversationSession, SessionId};
-use ene_plugin_host::{DisabledReason, LlmFactoriesByPlugin, PluginHealthEvent};
+use ene_plugin_host::{
+    DisabledReason, EmbeddingFactoriesByPlugin, LlmFactoriesByPlugin, PluginHealthEvent,
+};
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -449,8 +451,6 @@ impl EneHandle {
         let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
         let (diag_tx, diag_rx) = broadcast::channel(256);
 
-        LlmProviderRegistry::register(Arc::new(ene_ai::OpenAiProviderFactory));
-
         // Register the local whisper/kokoro/silero factories with
         // `ene_ai::AudioProviderRegistry` before anything below (this
         // function's own TTS provider resolution, or a later
@@ -550,6 +550,14 @@ impl EneHandle {
                         );
                         LlmProviderRegistry::register(Arc::clone(factory));
                     }
+                    for (kind, factory) in host.embedding_factories() {
+                        tracing::info!(
+                            component = "Bootstrap",
+                            kind = %kind,
+                            "Registered plugin-provided embedding provider factory"
+                        );
+                        ene_ai::EmbeddingProviderRegistry::register(Arc::clone(factory));
+                    }
                     tracing::info!(
                         component = "Bootstrap",
                         tool_registries = host.tool_registries().len(),
@@ -577,10 +585,15 @@ impl EneHandle {
         {
             let diag_tx = diag_tx.clone();
             let llm_factories_by_plugin = host.llm_factories_by_plugin();
+            let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
             health_bridge_handle = Some(tokio::spawn(async move {
                 while let Some(event) = health_rx.recv().await {
                     if let PluginHealthEvent::Disabled { plugin, .. } = &event {
                         deregister_disabled_plugin_factories(plugin, &llm_factories_by_plugin);
+                        deregister_disabled_embedding_factories(
+                            plugin,
+                            &embedding_factories_by_plugin,
+                        );
                     }
                     emit_diag(&diag_tx, plugin_health_event_to_diag(event));
                 }
@@ -1272,6 +1285,24 @@ fn deregister_disabled_plugin_factories(plugin: &str, factories_by_plugin: &LlmF
     }
 }
 
+fn deregister_disabled_embedding_factories(
+    plugin: &str,
+    factories_by_plugin: &EmbeddingFactoriesByPlugin,
+) {
+    if let Some(factories) = factories_by_plugin.get(plugin) {
+        for (kind, factory) in factories {
+            if ene_ai::EmbeddingProviderRegistry::deregister_if_matches(kind, factory) {
+                tracing::info!(
+                    component = "PluginHealthBridge",
+                    plugin = %plugin,
+                    kind = %kind,
+                    "Deregistered embedding provider factory for permanently disabled plugin"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1411,12 +1442,150 @@ mod tests {
             .expect("bind a local hanging listener");
         let addr = hanging.local_addr().expect("listener has a local address");
         let mut config = test_config_memory_off();
+        // The pre-turn phase fails fast without a store, so give the turn a
+        // functional in-memory store: it keeps every DB operation off disk
+        // while letting the turn actually reach the hanging provider.
+        let store = ene_store::StoreConfig {
+            enabled: true,
+            in_memory: true,
+            ..Default::default()
+        };
+        config.set_section(&store).expect("store config merges");
         let mut ai = ene_ai::AiConfig::default();
         if let Some(provider) = ai.providers.get_mut("default") {
             provider.base_url = format!("http://{addr}");
+            // The OpenAI backend ships as a plugin binary and the plugin host
+            // is disabled in tests, so route the chat turn to an in-process
+            // factory that never completes.
+            provider.kind = HangingLlmFactory::KIND.to_string();
         }
+        // Embeddings resolve through the same registry indirection as chat
+        // providers; a never-arriving vector keeps the turn in flight at the
+        // pre-turn embedding step, deterministically, for both tests below.
+        ai.providers.insert(
+            "embed-stub".to_string(),
+            ene_ai::config::AiProviderDef {
+                kind: ene_ai::config::OPENAI_PROVIDER_KIND.to_string(),
+                base_url: format!("http://{addr}"),
+                api_key: ene_ai::config::ApiKeyConfig {
+                    source: "inline".to_string(),
+                    inline: "sk-test".to_string(),
+                    env: String::new(),
+                },
+                ..ene_ai::config::AiProviderDef::default()
+            },
+        );
+        ai.tasks.embedding = ene_ai::config::TaskRef {
+            provider: "embed-stub".to_string(),
+            model: Some("test-embedding-model".to_string()),
+            dimensions: Some(8),
+            ..ene_ai::config::TaskRef::default()
+        };
         drop(config.set_section(&ai));
+        ene_ai::LlmProviderRegistry::register(Arc::new(HangingLlmFactory));
+        ene_ai::EmbeddingProviderRegistry::register(Arc::new(HangingEmbeddingFactory));
         (config, hanging)
+    }
+
+    /// A chat provider that never completes, standing in for a plugin-backed
+    /// provider in tests that need the single-flight gate to stay held while
+    /// the turn is in flight.
+    struct HangingLlmProvider;
+
+    #[async_trait::async_trait]
+    impl ene_ai::LlmProvider for HangingLlmProvider {
+        fn name(&self) -> &str {
+            HangingLlmFactory::KIND
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[ene_ai::message::LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn tokio_stream::Stream<
+                            Item = Result<
+                                ene_ai::message::LlmResponseChunk,
+                                ene_ai::error::LlmProviderError,
+                            >,
+                        > + Send,
+                >,
+            >,
+            ene_ai::error::LlmProviderError,
+        > {
+            std::future::pending().await
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[ene_ai::message::LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<ene_ai::message::LlmCompletion, ene_ai::error::LlmProviderError> {
+            std::future::pending().await
+        }
+    }
+
+    /// Factory producing [`HangingLlmProvider`] under the kind the hanging
+    /// provider test config selects.
+    struct HangingLlmFactory;
+
+    impl HangingLlmFactory {
+        const KIND: &'static str = "test-hanging";
+    }
+
+    impl ene_ai::LlmProviderFactory for HangingLlmFactory {
+        fn provider_name(&self) -> &str {
+            Self::KIND
+        }
+
+        fn create_provider(
+            &self,
+            _config: &EneConfig,
+            _task: &ene_ai::config::TaskRef,
+        ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::error::LlmProviderError> {
+            Ok(Box::new(HangingLlmProvider))
+        }
+    }
+
+    /// An embedding provider whose vectors never arrive, keeping the turn in
+    /// flight at the pre-turn embedding step (see [`HangingLlmFactory`]).
+    struct HangingEmbeddingProvider;
+
+    #[async_trait::async_trait]
+    impl ene_ai::EmbeddingProvider for HangingEmbeddingProvider {
+        async fn embed_batch(
+            &self,
+            _items: &[(&str, ene_ai::EmbeddingKind)],
+        ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
+            std::future::pending().await
+        }
+
+        fn dimensions(&self) -> usize {
+            8
+        }
+
+        fn model_name(&self) -> &'static str {
+            "test-hanging"
+        }
+    }
+
+    /// Factory producing [`HangingEmbeddingProvider`] under the `openai` kind
+    /// the test config's embedding task selects.
+    struct HangingEmbeddingFactory;
+
+    impl ene_ai::EmbeddingProviderFactory for HangingEmbeddingFactory {
+        fn provider_kind(&self) -> &str {
+            ene_ai::config::OPENAI_PROVIDER_KIND
+        }
+
+        fn create_embedding_provider(
+            &self,
+            _config: &EneConfig,
+        ) -> Result<std::sync::Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+            Ok(std::sync::Arc::new(HangingEmbeddingProvider))
+        }
     }
 
     /// `active_turn()` is a lock-only read of the shared single-flight gate:

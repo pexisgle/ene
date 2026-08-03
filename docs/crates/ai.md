@@ -1,8 +1,8 @@
 # `ene-ai` & `ene-ai-local`
 
-> **Crates**: `ene-ai` (provider traits, message/streaming types, OpenAI-compatible provider, registry) | `ene-ai-local` (local GGUF inference via `llama-cpp-4`)
+> **Crates**: `ene-ai` (provider traits, message/streaming types, registries) | `ene-ai-local` (local GGUF inference via `llama-cpp-4`)
 
-Together, `ene-ai` and `ene-ai-local` provide LLM chat-completion and text-embedding abstractions for Ene. `ene-ai` defines the generic message/streaming types and provider traits plus a global provider registry and the built-in OpenAI-compatible implementation; local inference (GGUF/llama.cpp) lives in `ene-ai-local`, and local audio (STT/TTS/VAD) lives in the separate `ene-voice` crate.
+Together, `ene-ai` and `ene-ai-local` provide LLM chat-completion and text-embedding abstractions for Ene. `ene-ai` defines the generic message/streaming types, the provider traits, and the global provider registries; concrete cloud providers ship as plugin binaries (`plugins/provider/*`) and are bridged into the same traits by `ene-plugin-host`. Local inference (GGUF/llama.cpp) lives in `ene-ai-local`, and local audio (STT/TTS/VAD) lives in the separate `ene-voice` crate.
 
 ---
 
@@ -15,7 +15,7 @@ Together, `ene-ai` and `ene-ai-local` provide LLM chat-completion and text-embed
 
 ## Design rationale
 
-- **Why a provider trait instead of a concrete client type**: `LlmProvider`/`EmbeddingProvider` let cloud providers (OpenAI-compatible), local GGUF inference, and out-of-process plugin providers (via IPC) all satisfy the same interface, so `ene-mind`/`ene-runtime` code that streams a completion or embeds text does not need to know which backend is serving the request.
+- **Why a provider trait instead of a concrete client type**: `LlmProvider`/`EmbeddingProvider` let cloud providers (OpenAI-compatible and Anthropic plugins), local GGUF inference, and out-of-process plugin providers (via IPC) all satisfy the same interface, so `ene-mind`/`ene-runtime` code that streams a completion or embeds text does not need to know which backend is serving the request.
 - **Why local inference is a separate crate**: `llama-cpp-4` pulls in GPU backend build complexity (`vulkan`/`cuda` Cargo features) that cloud-only deployments don't need; splitting it out keeps `ene-ai` lightweight for consumers that only use remote providers.
 
 ## API reference

@@ -1023,6 +1023,39 @@ impl IpcPluginConnection {
         }
     }
 
+    /// Sends an `EmbedBatch` request and awaits the result.
+    ///
+    /// Returns the per-item embeddings in input order; the plugin validates
+    /// nothing about dimensions (the caller does), so a provider that
+    /// ignores `dimensions` is fine.
+    pub async fn embed_batch(
+        &self,
+        request_id: String,
+        provider_kind: String,
+        provider_config: serde_json::Value,
+        model: String,
+        dimensions: Option<u32>,
+        items: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::EmbedBatch {
+                request_id,
+                provider_kind,
+                provider_config,
+                model,
+                dimensions,
+                items,
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::EmbedBatchResult { embeddings, .. } => Ok(embeddings),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to EmbedBatch: {other:?}"
+            ))),
+        }
+    }
+
     /// Sends a graceful `Shutdown` request (best-effort; ignores errors).
     pub async fn shutdown(&self) {
         drop(self.send_request(&PluginIpcRequest::Shutdown).await);

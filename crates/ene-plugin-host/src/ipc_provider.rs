@@ -199,11 +199,44 @@ impl IpcLlmProvider {
 /// Transport failures become [`LlmProviderError::Network`] (retryable);
 /// all other host errors become [`LlmProviderError::Provider`] (not
 /// retried by the policy).
+const PROVIDER_ERROR_PREFIX: &str = "[ene-provider-error:";
+
+fn decode_provider_error(message: &str) -> Option<LlmProviderError> {
+    let rest = message.strip_prefix(PROVIDER_ERROR_PREFIX)?;
+    let (kind, detail) = rest.split_once("] ")?;
+    let detail = detail
+        .strip_prefix("provider error: ")
+        .unwrap_or(detail)
+        .to_string();
+    match kind {
+        "auth" => Some(LlmProviderError::Auth(detail)),
+        "rate_limit" => Some(LlmProviderError::RateLimit(detail)),
+        "truncated" => Some(LlmProviderError::Truncated {
+            reason: detail,
+            partial_chars: 0,
+        }),
+        "content_filter" => Some(LlmProviderError::ContentFilter(detail)),
+        _ => None,
+    }
+}
+
+fn map_stream_error(message: String) -> LlmProviderError {
+    decode_provider_error(&message).unwrap_or(LlmProviderError::Provider(message))
+}
+
 fn map_host_error(e: PluginHostError) -> LlmProviderError {
     match e {
         PluginHostError::TransportFailed { message } => LlmProviderError::Network(message),
+        PluginHostError::ExecutionFailed { message } => decode_provider_error(&message)
+            .unwrap_or_else(|| {
+                LlmProviderError::Provider(format!("plugin execution failed: {message}"))
+            }),
         other => LlmProviderError::Provider(other.to_string()),
     }
+}
+
+fn is_ipc_retryable(error: &LlmProviderError) -> bool {
+    matches!(error, LlmProviderError::Network(_))
 }
 
 /// A chat stream that aborts its background reader task when dropped.
@@ -315,50 +348,46 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
         // only for the duration of the write.
         let mut stream_rx = self
             .retry_policy
-            .run_with_retry_after(
-                LlmProviderError::is_retryable,
-                LlmProviderError::retry_after_secs,
-                || {
-                    let conn = Arc::clone(&self.conn);
-                    let request_id = request_id.clone();
-                    let kind = self.kind.clone();
-                    let provider_config = self.provider_config.clone();
-                    let model = self.model.clone();
-                    let max_tokens = self.max_tokens;
-                    let messages_json = messages_json.clone();
-                    let tools_json = tools_json.clone();
-                    async move {
-                        match conn
-                            .send_create_chat_stream(
-                                request_id,
-                                kind,
-                                provider_config,
-                                model,
-                                max_tokens,
-                                messages_json,
-                                tools_json,
-                            )
-                            .await
-                        {
-                            Ok(rx) => Ok(rx),
-                            Err(e @ PluginHostError::TransportFailed { .. }) => {
-                                // The stream is likely broken; reconnect so the
-                                // next retry attempt starts from a clean
-                                // connection (mirrors `do_request_with_timeout`).
-                                if let Err(re) = conn.reconnect().await {
-                                    tracing::warn!(
-                                        component = "IpcLlmProvider",
-                                        error = %re,
-                                        "reconnect after stream transport failure failed"
-                                    );
-                                }
-                                Err(map_host_error(e))
+            .run_with_retry_after(is_ipc_retryable, LlmProviderError::retry_after_secs, || {
+                let conn = Arc::clone(&self.conn);
+                let request_id = request_id.clone();
+                let kind = self.kind.clone();
+                let provider_config = self.provider_config.clone();
+                let model = self.model.clone();
+                let max_tokens = self.max_tokens;
+                let messages_json = messages_json.clone();
+                let tools_json = tools_json.clone();
+                async move {
+                    match conn
+                        .send_create_chat_stream(
+                            request_id,
+                            kind,
+                            provider_config,
+                            model,
+                            max_tokens,
+                            messages_json,
+                            tools_json,
+                        )
+                        .await
+                    {
+                        Ok(rx) => Ok(rx),
+                        Err(e @ PluginHostError::TransportFailed { .. }) => {
+                            // The stream is likely broken; reconnect so the
+                            // next retry attempt starts from a clean
+                            // connection (mirrors `do_request_with_timeout`).
+                            if let Err(re) = conn.reconnect().await {
+                                tracing::warn!(
+                                    component = "IpcLlmProvider",
+                                    error = %re,
+                                    "reconnect after stream transport failure failed"
+                                );
                             }
-                            Err(e) => Err(map_host_error(e)),
+                            Err(map_host_error(e))
                         }
+                        Err(e) => Err(map_host_error(e)),
                     }
-                },
-            )
+                }
+            })
             .await?;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmResponseChunk, LlmProviderError>>(32);
@@ -424,12 +453,12 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                         message,
                     } if err_rid == rid => {
                         completed_clone.store(true, std::sync::atomic::Ordering::Release);
-                        drop(tx.send(Err(LlmProviderError::Provider(message))).await);
+                        drop(tx.send(Err(map_stream_error(message))).await);
                         break;
                     }
                     PluginIpcResponse::Error { message, .. } => {
                         completed_clone.store(true, std::sync::atomic::Ordering::Release);
-                        drop(tx.send(Err(LlmProviderError::Provider(message))).await);
+                        drop(tx.send(Err(map_stream_error(message))).await);
                         break;
                     }
                     _ => {
@@ -472,33 +501,29 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
         // reconnects once on transport failure; this outer policy adds
         // backoff and additional attempts for persistent transient errors.
         self.retry_policy
-            .run_with_retry_after(
-                LlmProviderError::is_retryable,
-                LlmProviderError::retry_after_secs,
-                || {
-                    let conn = Arc::clone(&self.conn);
-                    let kind = self.kind.clone();
-                    let provider_config = self.provider_config.clone();
-                    let model = self.model.clone();
-                    let max_tokens = self.max_tokens;
-                    let messages_json = messages_json.clone();
-                    let json_schema = json_schema.clone();
-                    async move {
-                        let request_id = uuid::Uuid::new_v4().to_string();
-                        conn.chat_completion(
-                            request_id,
-                            kind,
-                            provider_config,
-                            model,
-                            max_tokens,
-                            messages_json,
-                            json_schema,
-                        )
-                        .await
-                        .map_err(map_host_error)
-                    }
-                },
-            )
+            .run_with_retry_after(is_ipc_retryable, LlmProviderError::retry_after_secs, || {
+                let conn = Arc::clone(&self.conn);
+                let kind = self.kind.clone();
+                let provider_config = self.provider_config.clone();
+                let model = self.model.clone();
+                let max_tokens = self.max_tokens;
+                let messages_json = messages_json.clone();
+                let json_schema = json_schema.clone();
+                async move {
+                    let request_id = uuid::Uuid::new_v4().to_string();
+                    conn.chat_completion(
+                        request_id,
+                        kind,
+                        provider_config,
+                        model,
+                        max_tokens,
+                        messages_json,
+                        json_schema,
+                    )
+                    .await
+                    .map_err(map_host_error)
+                }
+            })
             .await
             .map(|(text, usage)| LlmCompletion { text, usage })
     }
@@ -539,13 +564,50 @@ mod concurrency_limiter_tests {
     use ene_ai::error::LlmProviderError;
     use ene_plugin_proto::ConcurrencyHint;
 
-    use super::ConcurrencyLimiter;
+    use super::{ConcurrencyLimiter, is_ipc_retryable, map_host_error};
+    use crate::error::PluginHostError;
 
     #[test]
     fn default_hint_is_serial_with_shallow_queue() {
         let hint = ConcurrencyHint::default();
         assert_eq!(hint.max_in_flight, 1);
         assert_eq!(hint.queue_depth, 2);
+    }
+
+    #[test]
+    fn typed_plugin_errors_restore_user_visible_categories() {
+        let cases = [
+            (
+                "auth",
+                "authentication failed",
+                LlmProviderError::Auth("authentication failed".into()),
+            ),
+            (
+                "rate_limit",
+                "rate limited",
+                LlmProviderError::RateLimit("rate limited".into()),
+            ),
+            (
+                "truncated",
+                "finish_reason=length",
+                LlmProviderError::Truncated {
+                    reason: "finish_reason=length".into(),
+                    partial_chars: 0,
+                },
+            ),
+            (
+                "content_filter",
+                "finish_reason=content_filter",
+                LlmProviderError::ContentFilter("finish_reason=content_filter".into()),
+            ),
+        ];
+        for (kind, detail, expected) in cases {
+            let error = map_host_error(PluginHostError::ExecutionFailed {
+                message: format!("[ene-provider-error:{kind}] provider error: {detail}"),
+            });
+            assert_eq!(format!("{error}"), format!("{expected}"));
+            assert!(!is_ipc_retryable(&error));
+        }
     }
 
     #[tokio::test]

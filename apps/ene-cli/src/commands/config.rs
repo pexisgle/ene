@@ -86,7 +86,7 @@ async fn show_config(ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
             if let Some((local_model, _, _)) = embed.local_fields() {
                 println!("Embedding Backend: local");
                 println!("Local Embedding Model: {local_model}");
-            } else if let Some((_, _, cloud_model, dimensions, _)) = embed.cloud_fields() {
+            } else if let Some((_, _, _, cloud_model, dimensions, _)) = embed.cloud_fields() {
                 println!("Embedding Backend: cloud");
                 println!("Cloud Embedding Model: {cloud_model}");
                 println!("Cloud Embedding Dims: {dimensions}");

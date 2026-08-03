@@ -433,7 +433,7 @@ pub enum PluginIpcRequest {
     EmbedBatch {
         /// Unique request identifier.
         request_id: String,
-        /// Provider kind (e.g. `"openai_compatible"`).
+        /// Provider kind (e.g. `"openai"`).
         provider_kind: String,
         /// Provider-specific configuration JSON.
         provider_config: serde_json::Value,

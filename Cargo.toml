@@ -19,7 +19,6 @@ tokio-stream = "0.1"
 tokio-util = "0.7"
 
 # ── AI / LLM ──
-async-openai = { version = "0.41", default-features = false, features = ["chat-completion", "embedding", "byot"] }
 llama-cpp-4 = { version = "0.4.2", default-features = false }
 encoding_rs = "0.8"
 # Local voice pipeline (STT/TTS/VAD); opt-in via ene-ai feature flags.

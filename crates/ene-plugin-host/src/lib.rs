@@ -38,6 +38,8 @@ pub mod circuit_breaker;
 pub mod config;
 /// Host-side registry of per-plugin credential declarations.
 pub mod credential_registry;
+/// IPC-backed embedding provider bridging to `ene_ai::EmbeddingProvider`.
+pub mod embedding;
 /// Plugin host error types.
 pub mod error;
 /// LLM provider factory backed by a plugin IPC connection.
@@ -65,6 +67,8 @@ pub use circuit_breaker::{BreakerState, CircuitBreaker};
 pub use config::{PluginConfig, PluginEntry};
 /// Host-side registry of per-plugin credential declarations.
 pub use credential_registry::CredentialRegistry;
+/// IPC-backed embedding provider and factory.
+pub use embedding::{IpcEmbeddingProvider, IpcEmbeddingProviderFactory};
 /// Plugin host error type.
 pub use error::PluginHostError;
 /// Backward-compatible alias for [`PluginHostError`].
@@ -78,7 +82,10 @@ pub use ipc_plugin::{IpcPluginConnection, SetConfigOutcome};
 /// IPC-backed LLM provider.
 pub use ipc_provider::IpcLlmProvider;
 /// Plugin host manager.
-pub use manager::{LlmFactoriesByPlugin, LlmFactoryHandle, PluginHostManager};
+pub use manager::{
+    EmbeddingFactoriesByPlugin, EmbeddingFactoryHandle, LlmFactoriesByPlugin, LlmFactoryHandle,
+    PluginHostManager,
+};
 /// MCP server configuration types.
 pub use mcp_config::{McpServerConfig, McpTransport};
 /// MCP client for external servers.

@@ -60,11 +60,22 @@ Contains provider definitions, task routing, retry/fallback rules, and voice (ST
 }
 ```
 
+Provider backends ship as plugins: the OpenAI-compatible backend is the
+`openai` provider plugin (`plugins/provider/openai`, kind `"openai"`),
+included in the default `plugins.list` with `OPENAI_API_KEY` and
+`OPENAI_BASE_URL` passed through to its process. The legacy kind value
+`"openai_compatible"` is still accepted as an alias, and per-provider
+`base_url` / `api_key` are forwarded to the plugin per request, so existing
+OpenAI-compatible configurations (OpenRouter, local servers, …) keep working
+unchanged. The `openai` plugin is also the embedding backend: point
+`tasks.embedding` at an `"openai"`-kind provider for cloud embeddings. With
+the plugin system disabled (`plugins.enabled = false`) no cloud provider is
+available.
+
 Each provider entry may set an optional `context_window` (integer, tokens) to
 cap the context window the backend advertises (#364). The effective window is
 `min(advertised, context_window)`, so an override can only *shrink* a model's
-stated limit, never exceed it; omit it to defer entirely to the provider. A
-plugin provider advertises its window through `LlmProviderSpec.context_window`,
+stated limit, never exceed it; omit it to defer entirely to the provider. A plugin provider advertises its window through `LlmProviderSpec.context_window`,
 and a local model reports `LocalModelDef.context_size`. From that effective
 window the runtime reserves the task's `max_tokens` (`tasks.<task>.max_tokens`)
 as headroom for the model's reply, plus a safety margin that absorbs

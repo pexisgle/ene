@@ -112,6 +112,12 @@ pub enum EmbeddingError {
     /// error (HTTP 4xx/5xx, network failure) prevented the request.
     #[error("embedding provider error: {0}")]
     Provider(String),
+    /// An upstream plugin rejected the request with a non-transport error
+    /// (e.g. authentication or rate-limit after the plugin exhausted its own
+    /// retry budget). Terminal from the host's perspective — the plugin
+    /// already retried — so the host policy must not re-issue the call.
+    #[error("embedding provider rejected the request: {0}")]
+    Other(String),
     /// The supplied text is empty or whitespace-only. We
     /// refuse to produce an embedding for it because
     /// every implementation would either return the
@@ -130,8 +136,9 @@ pub enum EmbeddingError {
 impl EmbeddingError {
     /// Whether this error is transient and may succeed on retry.
     ///
-    /// Transport / API failures (`Provider`) are retryable; init, empty-input,
-    /// and dimension-mismatch errors are deterministic and not retried.
+    /// Transport / API failures (`Provider`) are retryable; init, other
+    /// provider rejections, empty-input, and dimension-mismatch errors are
+    /// deterministic and not retried.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         matches!(self, Self::Provider(_))
@@ -336,10 +343,121 @@ impl LlmProviderRegistry {
     }
 }
 
+/// Factory that creates [`EmbeddingProvider`] instances for a provider kind.
+///
+/// Plugin-provided embedding backends implement this on the host side
+/// (`ene-plugin-host`'s `IpcEmbeddingProviderFactory`) and register
+/// themselves in [`EmbeddingProviderRegistry`].
+pub trait EmbeddingProviderFactory: Send + Sync {
+    /// Provider kind this factory serves.
+    fn provider_kind(&self) -> &str;
+
+    /// Creates an embedding provider for the configured embedding task.
+    fn create_embedding_provider(
+        &self,
+        config: &ene_config::EneConfig,
+    ) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError>;
+}
+
+/// Global registry of embedding provider factories, keyed by provider kind.
+///
+/// Mirrors [`LlmProviderRegistry`]: the runtime registers plugin-provided
+/// embedding factories when the plugin host starts (and re-registers them on
+/// host reconfiguration), and embedding creation looks the factory up by the
+/// embedding task's provider kind.
+pub struct EmbeddingProviderRegistry {
+    factories: Mutex<HashMap<String, Arc<dyn EmbeddingProviderFactory>>>,
+}
+
+impl EmbeddingProviderRegistry {
+    fn global() -> &'static Self {
+        static REGISTRY: OnceLock<EmbeddingProviderRegistry> = OnceLock::new();
+        REGISTRY.get_or_init(|| Self {
+            factories: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Registers a new embedding provider factory.
+    pub fn register(factory: Arc<dyn EmbeddingProviderFactory>) {
+        let kind = factory.provider_kind().to_string();
+        if let Ok(mut guard) = Self::global().factories.lock() {
+            guard.insert(kind, factory);
+        } else {
+            tracing::warn!(
+                component = "EmbeddingProviderRegistry",
+                provider = %kind,
+                "Cannot register embedding provider factory because the registry lock is poisoned"
+            );
+        }
+    }
+
+    /// Removes a registered factory by provider kind.
+    ///
+    /// Returns `true` when a factory was actually removed, `false` when no
+    /// factory was registered under `kind`. Deregistration is what lets a
+    /// factory whose backing plugin has died or been unloaded be evicted.
+    pub fn deregister(kind: &str) -> bool {
+        let Ok(mut guard) = Self::global().factories.lock() else {
+            tracing::warn!(
+                component = "EmbeddingProviderRegistry",
+                provider = %kind,
+                "Cannot deregister embedding provider factory because the registry lock is poisoned"
+            );
+            return false;
+        };
+        guard.remove(kind).is_some()
+    }
+
+    /// Removes a factory only when `kind` still points to `expected`.
+    ///
+    /// The identity check prevents one runtime handle from deregistering a
+    /// replacement factory installed by another handle during concurrent host
+    /// reconfiguration.
+    pub fn deregister_if_matches(kind: &str, expected: &Arc<dyn EmbeddingProviderFactory>) -> bool {
+        let Ok(mut guard) = Self::global().factories.lock() else {
+            tracing::warn!(
+                component = "EmbeddingProviderRegistry",
+                provider = %kind,
+                "Cannot conditionally deregister embedding provider factory because the registry lock is poisoned"
+            );
+            return false;
+        };
+        if guard
+            .get(kind)
+            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
+        {
+            guard.remove(kind).is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Tries to instantiate an embedding provider by kind using the
+    /// registered factories.
+    pub fn create_provider(
+        kind: &str,
+        config: &ene_config::EneConfig,
+    ) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError> {
+        let factory = {
+            if let Ok(guard) = Self::global().factories.lock() {
+                guard.get(kind).cloned()
+            } else {
+                None
+            }
+        };
+
+        match factory {
+            Some(f) => f.create_embedding_provider(config),
+            None => Err(EmbeddingError::Init(format!(
+                "No embedding provider factory registered for provider kind: '{kind}'"
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod registry_tests {
     use super::*;
-    use crate::openai::OpenAiProviderFactory;
 
     /// A factory whose `create_provider` always fails with a recognizable
     /// error, so a lookup that resolves it can be told apart from the
@@ -435,8 +553,17 @@ mod registry_tests {
     }
 
     #[test]
-    fn built_in_openai_factory_name_remains_stable() {
-        assert_eq!(OpenAiProviderFactory.provider_name(), "openai-compatible");
+    fn registry_lookup_uses_registered_name() {
+        const NAME: &str = "registry-test-named";
+        LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
+
+        let err = unwrap_err(LlmProviderRegistry::create_provider(
+            NAME,
+            &config(),
+            &task(),
+        ));
+        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
+        assert!(LlmProviderRegistry::deregister(NAME));
     }
 
     #[test]
