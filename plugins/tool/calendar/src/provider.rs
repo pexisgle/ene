@@ -37,8 +37,8 @@ impl CalendarToolProvider {
         let allow_state = state.clone();
         let revoke_state = state;
         let inner = ActionSetProvider::new(actions)
-            .with_set_call_context_hook(move |conv_id, _turn_id| {
-                session_state.set_session_id(conv_id);
+            .with_set_call_context_hook(move |conv_id, turn_id| {
+                session_state.gate().on_call_context(conv_id, turn_id);
             })
             .with_sandbox_hook(move |sandbox: &SandboxConfigData| {
                 if let Some(socket) = &sandbox.db_socket {

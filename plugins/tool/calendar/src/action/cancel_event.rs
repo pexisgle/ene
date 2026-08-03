@@ -13,11 +13,11 @@ fn default_state() -> Arc<CalendarState> {
 #[tool(
     namespace = "calendar",
     name = "cancel_event",
-    summary = "Cancel an event and remove it from the calendar.",
-    description = "Cancels an event by removing it from the calendar. Requires write permission on the calendar and explicit user approval showing the event before it is removed.",
+    summary = "Cancel an event and mark it cancelled.",
+    description = "Cancels an event by marking it cancelled (soft delete): the event stays stored, is excluded from listings and free-slot search, and can be restored later via `calendar.update_event`. Requires write permission on the calendar and explicit user approval showing the event before it is cancelled.",
     category = "Utility",
     keywords_primary = "calendar, cancel, delete, remove, event, appointment",
-    side_effects = "Destructive"
+    side_effects = "Network { external: false }"
 )]
 /// Action to cancel (remove) an event.
 pub struct CancelEventAction {

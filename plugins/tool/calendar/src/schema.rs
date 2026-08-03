@@ -20,7 +20,7 @@ pub fn calendar_db_schema() -> DbSchema {
                         nullable: false,
                         primary_key: false,
                         auto_increment: false,
-                        unique: false,
+                        unique: true,
                         default: None,
                     },
                     DbColumn {

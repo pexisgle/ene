@@ -44,6 +44,12 @@ impl AddCalendarAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Err(ToolError::InvalidArguments {
+                message: "calendar name must not be empty".to_string(),
+            });
+        }
         let kind = match self.kind.trim() {
             "" | "local" => CalendarKind::Local,
             other => {
@@ -61,22 +67,18 @@ impl AddCalendarAction {
         // per name, matching its `Idempotent` side-effect declaration.
         let account_id = uuid::Uuid::new_v5(
             &uuid::Uuid::NAMESPACE_URL,
-            format!("calendar:{}", self.name.trim()).as_bytes(),
+            format!("calendar:{name}").as_bytes(),
         )
         .to_string();
         let target = format!("calendar:{account_id}");
-        let description = format!(
-            "Add a new calendar named '{}' (kind: {})",
-            self.name.trim(),
-            kind,
-        );
+        let description = format!("Add a new calendar named '{name}' (kind: {kind})");
         self.state
             .gate()
             .check(CALENDAR_ADD, &target, &description)?;
 
         let store = self.state.ensure_store().await?;
         let account = store
-            .add_account(&account_id, &self.name, kind)
+            .add_account(&account_id, name, kind)
             .await
             .map_err(|e| super::store_err(&e))?;
         ok_json(&account)

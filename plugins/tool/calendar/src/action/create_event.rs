@@ -17,7 +17,7 @@ fn default_state() -> Arc<CalendarState> {
     description = "Adds an event to a calendar. The event time window is given as RFC3339 timestamps with offset (start and end); an optional IANA timezone name is used for display. Requires write permission on the calendar and explicit user approval showing the timezone, the target calendar, and the event content before the event is created.",
     category = "Utility",
     keywords_primary = "calendar, create, add, event, appointment, schedule",
-    side_effects = "Network { external: true }"
+    side_effects = "Network { external: false }"
 )]
 /// Action to create an event in a calendar.
 pub struct CreateEventAction {

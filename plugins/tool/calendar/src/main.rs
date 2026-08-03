@@ -27,6 +27,8 @@ pub mod schema;
 pub mod state;
 /// DB-backed calendar store.
 pub mod store;
+#[cfg(test)]
+mod test_db;
 
 use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};
 use std::sync::Arc;

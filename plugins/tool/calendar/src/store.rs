@@ -176,6 +176,12 @@ pub enum CalendarStoreError {
     /// Unknown event status string.
     #[error("invalid status '{0}'; expected 'confirmed', 'tentative', or 'cancelled'")]
     InvalidStatus(String),
+    /// `create_event` was asked for a status that is a lifecycle state only.
+    #[error("invalid status '{0}' for a new event; use 'confirmed' or 'tentative'")]
+    InvalidNewStatus(String),
+    /// `add_calendar` was given an empty name.
+    #[error("calendar name must not be empty")]
+    EmptyAccountName,
     /// A stored row could not be interpreted.
     #[error("corrupt row: {0}")]
     CorruptRow(String),
@@ -289,7 +295,7 @@ impl CalendarStore {
     ) -> Result<CalendarAccount, CalendarStoreError> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(CalendarStoreError::DuplicateName(String::new()));
+            return Err(CalendarStoreError::EmptyAccountName);
         }
         if self.find_account_by_name(name).await?.is_some() {
             return Err(CalendarStoreError::DuplicateName(name.to_string()));
@@ -461,6 +467,44 @@ impl CalendarStore {
         CalendarEvent::from_row(row)
     }
 
+    /// Lists events whose time range overlaps `[start_ms, end_ms)`, excluding
+    /// cancelled ones.
+    ///
+    /// Unlike [`Self::list_events`], whose `start_at`-based window drops
+    /// events that start before the window, this predicate also returns
+    /// events that *span* the window — the set busy-time search needs, so a
+    /// 9:00–11:00 meeting blocks a 10:00 slot in a 10:00–12:00 search.
+    pub async fn list_events_overlapping(
+        &self,
+        account_id: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<CalendarEvent>, CalendarStoreError> {
+        let rows = self
+            .client()
+            .await
+            .select(
+                "calendar_events",
+                &[],
+                DbFilter::And(vec![
+                    DbFilter::eq("account_id", DbValue::Text(account_id.to_string())),
+                    DbFilter::ne("status", DbValue::Text("cancelled".to_string())),
+                    DbFilter::Gt {
+                        column: "end_at".to_string(),
+                        value: DbValue::Int(start_ms),
+                    },
+                    DbFilter::Lt {
+                        column: "start_at".to_string(),
+                        value: DbValue::Int(end_ms),
+                    },
+                ]),
+                &[ene_plugin_db::DbOrderBy::asc("start_at")],
+                None,
+            )
+            .await?;
+        rows.iter().map(CalendarEvent::from_row).collect()
+    }
+
     /// Creates an event in an account.
     pub async fn create_event(
         &self,
@@ -501,7 +545,7 @@ impl CalendarStore {
         let attendees_json = serde_json::to_string(&input.attendees)
             .map_err(|e| CalendarStoreError::CorruptRow(format!("attendees serialize: {e}")))?;
         row.insert("attendees".to_string(), DbValue::Text(attendees_json));
-        let status = validate_status(&input.status)?;
+        let status = validate_new_status(&input.status)?;
         row.insert("status".to_string(), DbValue::Text(status));
         row.insert("created_at".to_string(), DbValue::Text(now.clone()));
         row.insert("updated_at".to_string(), DbValue::Text(now));
@@ -591,24 +635,32 @@ impl CalendarStore {
         self.get_event(account_id, event_id).await
     }
 
-    /// Cancels an event by deleting it, and returns the removed event.
+    /// Cancels an event by marking it `cancelled` (soft delete).
+    ///
+    /// The row is kept so a cancellation stays inspectable via
+    /// `include_cancelled` and reversible through `update_event`; plain
+    /// listings and free-slot search exclude it. Returns the updated event.
     pub async fn cancel_event(
         &self,
         account_id: &str,
         event_id: &str,
     ) -> Result<CalendarEvent, CalendarStoreError> {
-        let event = self.get_event(account_id, event_id).await?;
+        self.get_event(account_id, event_id).await?;
+        let mut set: Row = BTreeMap::new();
+        set.insert("status".to_string(), DbValue::Text("cancelled".to_string()));
+        set.insert("updated_at".to_string(), DbValue::Text(now_rfc3339()));
         self.client()
             .await
-            .delete(
+            .update(
                 "calendar_events",
+                set,
                 DbFilter::And(vec![
                     DbFilter::eq("id", DbValue::Text(event_id.to_string())),
                     DbFilter::eq("account_id", DbValue::Text(account_id.to_string())),
                 ]),
             )
             .await?;
-        Ok(event)
+        self.get_event(account_id, event_id).await
     }
 }
 
@@ -634,6 +686,19 @@ fn validate_status(status: &str) -> Result<String, CalendarStoreError> {
     match status {
         "confirmed" | "tentative" | "cancelled" => Ok(status.to_string()),
         _ => Err(CalendarStoreError::InvalidStatus(status.to_string())),
+    }
+}
+
+/// Statuses accepted when creating an event; `cancelled` is a lifecycle
+/// state reached via `cancel_event`/`update_event`, not a creation input.
+fn validate_new_status(status: &str) -> Result<String, CalendarStoreError> {
+    let status = status.trim();
+    if status.is_empty() {
+        return Ok("confirmed".to_string());
+    }
+    match status {
+        "confirmed" | "tentative" => Ok(status.to_string()),
+        _ => Err(CalendarStoreError::InvalidNewStatus(status.to_string())),
     }
 }
 
@@ -676,11 +741,19 @@ pub fn format_event_changes(
     if let Some(title) = &changes.title {
         parts.push(format!("title: '{}' -> '{}'", event.title, title.trim()));
     }
-    if changes.description.is_some() {
-        parts.push("notes updated".to_string());
+    if let Some(description) = &changes.description {
+        parts.push(format!(
+            "notes: '{}' -> '{}'",
+            truncate_preview(&event.description),
+            truncate_preview(description),
+        ));
     }
-    if changes.location.is_some() {
-        parts.push("location updated".to_string());
+    if let Some(location) = &changes.location {
+        parts.push(format!(
+            "location: '{}' -> '{}'",
+            truncate_preview(&event.location),
+            truncate_preview(location),
+        ));
     }
     match (&changes.start, &changes.end) {
         (Some(start), Some(end)) => {
@@ -711,6 +784,11 @@ pub fn format_event_changes(
         }
         (None, None) => {}
     }
+    if let Some(tz) = &changes.timezone
+        && tz.trim() != event.timezone
+    {
+        parts.push(format!("timezone: {} -> {}", event.timezone, tz.trim()));
+    }
     if let Some(attendees) = &changes.attendees {
         parts.push(format!(
             "attendees: [{}] -> [{}]",
@@ -731,6 +809,20 @@ pub fn format_event_changes(
             parts.join("; ")
         )
     }
+}
+
+/// Shortens a value for preview lines; long notes keep their start so the
+/// user can spot the change without flooding the prompt.
+fn truncate_preview(value: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 60;
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= MAX_PREVIEW_CHARS {
+        return trimmed.to_string();
+    }
+    format!(
+        "{}...",
+        trimmed.chars().take(MAX_PREVIEW_CHARS).collect::<String>()
+    )
 }
 
 /// Formats an event time range for approval previews.
@@ -820,8 +912,9 @@ impl CalendarEvent {
 
 /// Computes free slots of `duration_min` minutes within `[start_ms, end_ms)`,
 /// skipping windows occupied by any of `events` (overlapping events are
-/// merged). Pure function so the free-slot search is unit-testable without
-/// a database.
+/// merged). Returned slots are aligned to the window start in
+/// `duration_min` steps. Pure function so the free-slot search is
+/// unit-testable without a database.
 pub fn find_free_slots(
     events: &[CalendarEvent],
     start_ms: i64,
@@ -880,14 +973,8 @@ fn emit_slots(slots: &mut Vec<FreeSlot>, gap_start: i64, gap_end: i64, duration_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_plugin_db::{DbRequest, DbResponse};
-    use ene_plugin_proto::transport::{IpcListener, IpcStream, cleanup_path};
-    use ene_plugin_proto::{
-        HostServiceId, HostServiceRequest, HostServiceResponse, read_host_service_request,
-        write_host_service_response,
-    };
-    use std::path::PathBuf;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use crate::test_db::make_store;
+    use ene_plugin_proto::transport::cleanup_path;
 
     fn sample_input(title: &str, start: &str, end: &str) -> CalendarEventInput {
         CalendarEventInput {
@@ -1027,274 +1114,69 @@ mod tests {
     }
 
     #[test]
+    fn preview_shows_timezone_only_changes() {
+        let event = base_event(1_785_718_800_000, 1_785_722_400_000);
+        let changes = CalendarEventChanges {
+            timezone: Some("America/New_York".to_string()),
+            ..CalendarEventChanges::default()
+        };
+        let preview = format_event_changes("work", &event, &changes);
+        assert!(
+            preview.contains("timezone: UTC -> America/New_York"),
+            "timezone-only updates must not read as 'no changes': {preview}"
+        );
+        assert!(!preview.contains("no changes"));
+    }
+
+    #[test]
+    fn preview_ignores_noop_timezone() {
+        let event = CalendarEvent {
+            timezone: "Asia/Tokyo".to_string(),
+            ..base_event(0, 0)
+        };
+        let changes = CalendarEventChanges {
+            timezone: Some("Asia/Tokyo".to_string()),
+            ..CalendarEventChanges::default()
+        };
+        let preview = format_event_changes("work", &event, &changes);
+        assert_eq!(preview, "no changes");
+    }
+
+    #[test]
+    fn preview_shows_notes_and_location_content() {
+        let event = base_event(0, 0);
+        let changes = CalendarEventChanges {
+            description: Some("bring slides".to_string()),
+            location: Some("room 7".to_string()),
+            ..CalendarEventChanges::default()
+        };
+        let preview = format_event_changes("work", &event, &changes);
+        assert!(preview.contains("notes"), "preview labels the notes change");
+        assert!(
+            preview.contains("bring slides"),
+            "preview shows the new notes"
+        );
+        assert!(preview.contains("room 7"), "preview shows the new location");
+    }
+
+    #[test]
+    fn preview_truncates_long_notes() {
+        let event = base_event(0, 0);
+        let long = "x".repeat(200);
+        let changes = CalendarEventChanges {
+            description: Some(long.clone()),
+            ..CalendarEventChanges::default()
+        };
+        let preview = format_event_changes("work", &event, &changes);
+        assert!(preview.contains("..."));
+        assert!(!preview.contains(&long), "long notes must be truncated");
+    }
+
+    #[test]
     fn preview_empty_changes() {
         let event = base_event(0, 0);
         let preview = format_event_changes("work", &event, &CalendarEventChanges::default());
         assert_eq!(preview, "no changes");
-    }
-
-    struct MockDb {
-        accounts: Vec<Row>,
-        events: Vec<Row>,
-    }
-
-    impl MockDb {
-        fn new() -> Self {
-            Self {
-                accounts: Vec::new(),
-                events: Vec::new(),
-            }
-        }
-
-        fn handle_request(&mut self, req: &DbRequest) -> DbResponse {
-            match req {
-                DbRequest::Handshake { .. } => DbResponse::HandshakeAck,
-                DbRequest::DeclareSchema(_) => DbResponse::SchemaAccepted {
-                    tables: vec![
-                        "calendar_accounts".to_string(),
-                        "calendar_events".to_string(),
-                    ],
-                    indexes: vec!["idx_calendar_events_account_start".to_string()],
-                },
-                DbRequest::Insert { table, row } => {
-                    let rows = match table.as_str() {
-                        "calendar_accounts" => &mut self.accounts,
-                        "calendar_events" => &mut self.events,
-                        other => {
-                            return DbResponse::Error {
-                                code: ene_plugin_db::DbErrorCode::Internal,
-                                message: format!("unknown table {other}"),
-                            };
-                        }
-                    };
-                    rows.push(row.clone());
-                    DbResponse::Insert {
-                        rowid: rows.len() as i64,
-                    }
-                }
-                DbRequest::Select {
-                    table,
-                    filter,
-                    order_by,
-                    limit,
-                    ..
-                } => {
-                    let source = match table.as_str() {
-                        "calendar_accounts" => self.accounts.as_slice(),
-                        "calendar_events" => self.events.as_slice(),
-                        other => {
-                            return DbResponse::Error {
-                                code: ene_plugin_db::DbErrorCode::Internal,
-                                message: format!("unknown table {other}"),
-                            };
-                        }
-                    };
-                    let mut matched: Vec<Row> = source
-                        .iter()
-                        .filter(|r| matches_filter(r, filter))
-                        .cloned()
-                        .collect();
-                    for ob in order_by.iter().rev() {
-                        matched.sort_by(|a, b| {
-                            let av = a.get(&ob.column);
-                            let bv = b.get(&ob.column);
-                            let cmp = compare_values(av, bv);
-                            match ob.direction {
-                                ene_plugin_db::DbOrderDirection::Desc => cmp.reverse(),
-                                ene_plugin_db::DbOrderDirection::Asc => cmp,
-                            }
-                        });
-                    }
-                    if let Some(lim) = limit {
-                        matched.truncate(*lim as usize);
-                    }
-                    DbResponse::Select { rows: matched }
-                }
-                DbRequest::Update { table, set, filter } => {
-                    let rows = match table.as_str() {
-                        "calendar_accounts" => &mut self.accounts,
-                        "calendar_events" => &mut self.events,
-                        other => {
-                            return DbResponse::Error {
-                                code: ene_plugin_db::DbErrorCode::Internal,
-                                message: format!("unknown table {other}"),
-                            };
-                        }
-                    };
-                    let mut affected = 0u64;
-                    for row in rows.iter_mut() {
-                        if matches_filter(row, filter) {
-                            for (k, v) in set {
-                                row.insert(k.clone(), v.clone());
-                            }
-                            affected += 1;
-                        }
-                    }
-                    DbResponse::Update { affected }
-                }
-                DbRequest::Delete { table, filter } => {
-                    let rows = match table.as_str() {
-                        "calendar_accounts" => &mut self.accounts,
-                        "calendar_events" => &mut self.events,
-                        other => {
-                            return DbResponse::Error {
-                                code: ene_plugin_db::DbErrorCode::Internal,
-                                message: format!("unknown table {other}"),
-                            };
-                        }
-                    };
-                    let before = rows.len();
-                    rows.retain(|r| !matches_filter(r, filter));
-                    DbResponse::Delete {
-                        affected: (before - rows.len()) as u64,
-                    }
-                }
-                DbRequest::Batch { ops } => {
-                    let mut results = Vec::with_capacity(ops.len());
-                    for op in ops {
-                        match op {
-                            ene_plugin_db::DbWriteOp::Delete { table, filter } => {
-                                let rows = match table.as_str() {
-                                    "calendar_accounts" => &mut self.accounts,
-                                    "calendar_events" => &mut self.events,
-                                    other => {
-                                        return DbResponse::Error {
-                                            code: ene_plugin_db::DbErrorCode::Internal,
-                                            message: format!("unknown table {other}"),
-                                        };
-                                    }
-                                };
-                                let before = rows.len();
-                                rows.retain(|r| !matches_filter(r, filter));
-                                results.push(ene_plugin_db::DbBatchOpResult::Delete {
-                                    affected: (before - rows.len()) as u64,
-                                });
-                            }
-                            other => {
-                                return DbResponse::Error {
-                                    code: ene_plugin_db::DbErrorCode::Internal,
-                                    message: format!("unsupported batch op {other:?}"),
-                                };
-                            }
-                        }
-                    }
-                    DbResponse::Batch { results }
-                }
-                DbRequest::Ping => DbResponse::Pong,
-                _ => DbResponse::Error {
-                    code: ene_plugin_db::DbErrorCode::Internal,
-                    message: "unsupported request in mock".to_string(),
-                },
-            }
-        }
-    }
-
-    fn compare_values(a: Option<&DbValue>, b: Option<&DbValue>) -> std::cmp::Ordering {
-        match (a, b) {
-            (Some(DbValue::Int(x)), Some(DbValue::Int(y))) => x.cmp(y),
-            (Some(DbValue::Text(x)), Some(DbValue::Text(y))) => x.cmp(y),
-            (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(_), None) => std::cmp::Ordering::Greater,
-            _ => std::cmp::Ordering::Equal,
-        }
-    }
-
-    fn matches_filter(row: &Row, filter: &DbFilter) -> bool {
-        match filter {
-            DbFilter::Always => true,
-            DbFilter::And(filters) => filters.iter().all(|f| matches_filter(row, f)),
-            DbFilter::Or(filters) => filters.iter().any(|f| matches_filter(row, f)),
-            DbFilter::Not(f) => !matches_filter(row, f),
-            DbFilter::Eq { column, value } => row.get(column) == Some(value),
-            DbFilter::Ne { column, value } => row.get(column) != Some(value),
-            DbFilter::Lt { column, value } => compare_values(row.get(column), Some(value)).is_lt(),
-            DbFilter::Le { column, value } => compare_values(row.get(column), Some(value)).is_le(),
-            DbFilter::Gt { column, value } => compare_values(row.get(column), Some(value)).is_gt(),
-            DbFilter::Ge { column, value } => compare_values(row.get(column), Some(value)).is_ge(),
-            DbFilter::In { column, values } => row.get(column).is_some_and(|v| values.contains(v)),
-            DbFilter::Like { column, pattern } => row
-                .get(column)
-                .and_then(DbValue::as_str)
-                .is_some_and(|v| v.contains(&pattern.replace('%', ""))),
-            DbFilter::IsNull { column } => matches!(row.get(column), None | Some(DbValue::Null)),
-            DbFilter::IsNotNull { column } => {
-                !matches!(row.get(column), None | Some(DbValue::Null))
-            }
-        }
-    }
-
-    async fn read_framed(stream: &mut IpcStream) -> Option<DbRequest> {
-        let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).await.ok()?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; len];
-        stream.read_exact(&mut buf).await.ok()?;
-        serde_json::from_slice(&buf).ok()
-    }
-
-    async fn write_framed(stream: &mut IpcStream, resp: &DbResponse) {
-        let json = serde_json::to_vec(resp).expect("serialize mock response");
-        let len = json.len() as u32;
-        stream
-            .write_all(&len.to_le_bytes())
-            .await
-            .expect("write len");
-        stream.write_all(&json).await.expect("write body");
-        stream.flush().await.expect("flush");
-    }
-
-    fn spawn_mock_db() -> (PathBuf, tokio::task::JoinHandle<()>) {
-        let socket_path = std::env::temp_dir().join(format!(
-            "ene-calendar-test-{}-{}.sock",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock before epoch")
-                .as_nanos()
-        ));
-        cleanup_path(&socket_path);
-
-        let mut listener = IpcListener::bind(&socket_path).expect("bind mock socket");
-
-        let handle = tokio::spawn(async move {
-            let mut db = MockDb::new();
-            loop {
-                let Ok(mut stream) = listener.accept().await else {
-                    break;
-                };
-                match read_host_service_request(&mut stream).await {
-                    Ok(Some(HostServiceRequest::Open {
-                        service: HostServiceId::Db,
-                        ..
-                    })) => {
-                        if write_host_service_response(&mut stream, &HostServiceResponse::OpenAck)
-                            .await
-                            .is_err()
-                        {
-                            continue;
-                        }
-                    }
-                    _ => continue,
-                }
-                loop {
-                    let Some(req) = read_framed(&mut stream).await else {
-                        break;
-                    };
-                    let resp = db.handle_request(&req);
-                    write_framed(&mut stream, &resp).await;
-                }
-            }
-        });
-
-        (socket_path, handle)
-    }
-
-    async fn make_store() -> (CalendarStore, PathBuf, tokio::task::JoinHandle<()>) {
-        let (path, handle) = spawn_mock_db();
-        let store = CalendarStore::new(&path, Some("test-token"))
-            .await
-            .expect("connect to mock db");
-        (store, path, handle)
     }
 
     async fn seed_account(store: &CalendarStore, id: &str, name: &str) -> CalendarAccount {
@@ -1409,11 +1291,117 @@ mod tests {
             .await
             .expect("cancel event");
         assert_eq!(cancelled.id, event.id);
+        assert_eq!(cancelled.status, "cancelled");
+        let after_cancel = store
+            .get_event("a1", &event.id)
+            .await
+            .expect("soft-cancelled event stays stored");
+        assert_eq!(after_cancel.status, "cancelled");
+        assert!(
+            store
+                .list_events("a1", None, None, false)
+                .await
+                .expect("list after cancel")
+                .is_empty(),
+            "plain listings exclude cancelled events"
+        );
+        assert_eq!(
+            store
+                .list_events("a1", None, None, true)
+                .await
+                .expect("list with cancelled")
+                .len(),
+            1,
+            "include_cancelled still surfaces the event"
+        );
+        let revived = store
+            .update_event(
+                "a1",
+                &event.id,
+                &CalendarEventChanges {
+                    status: Some("confirmed".to_string()),
+                    ..CalendarEventChanges::default()
+                },
+            )
+            .await
+            .expect("cancellation is reversible via update_event");
+        assert_eq!(revived.status, "confirmed");
+
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn create_event_rejects_lifecycle_only_status() {
+        let (store, path, handle) = make_store().await;
+        seed_account(&store, "a1", "Work").await;
+
+        let mut input = sample_input(
+            "Doomed",
+            "2026-08-03T10:00:00+09:00",
+            "2026-08-03T11:00:00+09:00",
+        );
+        input.status = "cancelled".to_string();
         assert!(matches!(
-            store.get_event("a1", &event.id).await,
-            Err(CalendarStoreError::EventNotFoundInAccount { .. })
+            store.create_event("a1", &input).await,
+            Err(CalendarStoreError::InvalidNewStatus(_))
         ));
 
+        input.status = "tentative".to_string();
+        let event = store
+            .create_event("a1", &input)
+            .await
+            .expect("tentative is a valid creation status");
+        assert_eq!(event.status, "tentative");
+
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn overlapping_query_catches_events_spanning_the_window() {
+        let (store, path, handle) = make_store().await;
+        seed_account(&store, "a1", "Work").await;
+        store
+            .create_event(
+                "a1",
+                &sample_input(
+                    "Crosser",
+                    "2026-08-03T09:00:00+09:00",
+                    "2026-08-03T11:00:00+09:00",
+                ),
+            )
+            .await
+            .expect("seed spanning event");
+
+        let window_start = 1_785_718_800_000; // 10:00+09:00
+        let window_end = window_start + 2 * 3_600_000; // 12:00+09:00
+        assert!(
+            store
+                .list_events("a1", Some(window_start), Some(window_end), false)
+                .await
+                .expect("start_at-window listing")
+                .is_empty(),
+            "the start_at-based window excludes events starting before it"
+        );
+        let overlapping = store
+            .list_events_overlapping("a1", window_start, window_end)
+            .await
+            .expect("overlap query");
+        assert_eq!(overlapping.len(), 1);
+        assert_eq!(overlapping[0].title, "Crosser");
+
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn add_account_rejects_empty_names() {
+        let (store, path, handle) = make_store().await;
+        assert!(matches!(
+            store.add_account("a1", "   ", CalendarKind::Local).await,
+            Err(CalendarStoreError::EmptyAccountName)
+        ));
         handle.abort();
         cleanup_path(&path);
     }

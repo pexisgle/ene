@@ -13,7 +13,7 @@ fn default_state() -> Arc<CalendarState> {
     namespace = "calendar",
     name = "find_free_slots",
     summary = "Find free time slots of a given length in a calendar.",
-    description = "Searches a calendar for contiguous free intervals of at least duration_min minutes within the given window (RFC3339 with offset). Returns every slot long enough to fit the duration. Requires read permission on the calendar.",
+    description = "Searches a calendar for contiguous free intervals of at least duration_min minutes within the given window (RFC3339 with offset). Returned slots are aligned to the window start in steps of duration_min; each slot is free of events for its whole length. Requires read permission on the calendar.",
     category = "Utility",
     keywords_primary = "calendar, free, available, slot, schedule, meeting, find",
     side_effects = "ReadOnly"

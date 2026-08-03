@@ -13,7 +13,6 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct CalendarState {
     store: Arc<tokio::sync::Mutex<Option<Arc<CalendarStore>>>>,
-    session_id: Arc<parking_lot::RwLock<String>>,
     db_socket: Arc<parking_lot::RwLock<Option<String>>>,
     db_auth_token: Arc<parking_lot::RwLock<Option<String>>>,
     gate: ApprovalGate,
@@ -29,22 +28,11 @@ impl CalendarState {
         registry.register(Arc::new(LocalCalendarProvider::new()));
         Self {
             store: Arc::new(tokio::sync::Mutex::new(None)),
-            session_id: Arc::new(parking_lot::RwLock::new(String::new())),
             db_socket: Arc::new(parking_lot::RwLock::new(None)),
             db_auth_token: Arc::new(parking_lot::RwLock::new(None)),
             gate: ApprovalGate::new(),
             registry,
         }
-    }
-
-    /// Returns the current session ID.
-    pub fn session_id(&self) -> String {
-        self.session_id.read().clone()
-    }
-
-    /// Sets the session ID.
-    pub fn set_session_id(&self, session_id: &str) {
-        *self.session_id.write() = session_id.to_string();
     }
 
     /// Sets the DB IPC socket path and resets the cached store.

@@ -18,6 +18,9 @@ pub use remove_account::RemoveAccountAction;
 pub use set_permission::SetPermissionAction;
 pub use update_event::UpdateEventAction;
 
+#[cfg(test)]
+mod tests;
+
 use crate::store::{CalendarStoreError, parse_rfc3339_ms};
 use ene_plugin::prelude::*;
 
@@ -41,7 +44,9 @@ fn store_err(e: &CalendarStoreError) -> ToolError {
         | CalendarStoreError::DuplicateName(_)
         | CalendarStoreError::InvalidTimeRange
         | CalendarStoreError::InvalidTimestamp(_)
-        | CalendarStoreError::InvalidStatus(_) => ToolError::InvalidArguments {
+        | CalendarStoreError::InvalidStatus(_)
+        | CalendarStoreError::InvalidNewStatus(_)
+        | CalendarStoreError::EmptyAccountName => ToolError::InvalidArguments {
             message: e.to_string(),
         },
         CalendarStoreError::ReadDenied(_) | CalendarStoreError::WriteDenied(_) => {

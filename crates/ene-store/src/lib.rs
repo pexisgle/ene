@@ -105,7 +105,9 @@ pub mod typed_memory;
 /// Affect state types.
 pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
 /// Audit log types.
-pub use audit::{AuditDecision, AuditEntry, NewAuditEntry, redact_arguments};
+pub use audit::{
+    AuditDecision, AuditEntry, NewAuditEntry, redact_arguments, redact_arguments_for_tool,
+};
 /// Backup / integrity open options.
 pub use backup::{OpenOptions, list_backups, restore_database};
 /// Commitment ledger types.

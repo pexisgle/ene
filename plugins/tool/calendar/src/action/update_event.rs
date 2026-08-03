@@ -17,7 +17,7 @@ fn default_state() -> Arc<CalendarState> {
     description = "Applies partial changes to an existing event; only the provided fields are modified. Timestamps are RFC3339 with offset. Requires write permission on the calendar and explicit user approval showing a diff of the change (before -> after) before the event is modified.",
     category = "Utility",
     keywords_primary = "calendar, update, edit, change, modify, reschedule, event",
-    side_effects = "Network { external: true }"
+    side_effects = "Network { external: false }"
 )]
 /// Action to update an existing calendar event.
 pub struct UpdateEventAction {

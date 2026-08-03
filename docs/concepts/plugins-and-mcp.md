@@ -524,19 +524,25 @@ described above for every mutating operation, layered on top of
 - **Write confirmation with preview.** Every mutating action returns
   `PermissionRequired` *before* touching the store. The `description` shown
   to the user previews the timezone, the target calendar, and the change —
-  `update_event` renders a before/after diff. The request id is a
-  deterministic hash of `(action, target)`, so the host's post-approval
-  re-invocation resolves against the recorded approval instead of prompting
-  again; "allow for this session" records an `(action, target-prefix)` pattern
-  that then passes the gate.
+  `update_event` renders a before/after diff (including timezone-only
+  changes). The request id is a deterministic hash of
+  `(action, target, description)`, so the host's post-approval
+  re-invocation — which replays identical arguments — resolves against the
+  recorded approval instead of prompting again, while a changed description
+  (different event content) requires a fresh approval. Allow-once approvals
+  expire at the turn boundary (the plugin clears them on the host's
+  call-context update); "allow for this session" records an
+  `(action, target-prefix)` pattern that passes the gate for the rest of
+  the conversation.
 - **Privacy.** Event *content* (titles, notes, attendees) never appears in
   the plugin's logs or in the host's audit trail: the permission `target` is
   a stable `calendar:<id>` / `calendar:<id>#<event-id>` identifier, and the
-  audit log records only `action`, `target`, and the decision. Content is
-  surfaced only where it must be: in the approval prompt (user-facing) and in
-  the tool result delivered to the LLM. Unlinking an account
-  (`calendar.remove_account`) deletes the account row and all of its events
-  in one transaction, so the disconnect is reflected immediately.
+  audit log records only `action`, `target`, and the decision, with calendar
+  argument payloads (title, notes, attendees, location) masked before
+  persistence. Content is surfaced only where it must be: in the approval
+  prompt (user-facing) and in the tool result delivered to the LLM. Unlinking
+  an account (`calendar.remove_account`) deletes the account row and all of
+  its events in one transaction, so the disconnect is reflected immediately.
 - **Provider abstraction.** Events are accessed through a
   `CalendarProvider` trait keyed by account kind. Today only the `local`
   kind exists (events stored in the plugin's `calendar_events` table);
