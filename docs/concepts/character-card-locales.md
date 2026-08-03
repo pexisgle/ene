@@ -24,11 +24,26 @@ characters/Alicia/
 | `system_prompt` / `post_history_instructions` | `extensions.ene.expressions` (VRM weights) |
 | `creator_notes` / `nickname` / `tags` | `creation_date` / `spec` / `spec_version` |
 | `character_book` entries' `content`, `keys`, and `secondary_keys` | `insertion_order` / `priority` / `position` |
+| `extensions.ene.speech` text fields (`first_person` / `second_person` / `verbal_tics`) | `extensions.ene.speech.length` / `politeness` (enum selects) |
+| `extensions.ene.ng_expressions` (full list replacement) | `extensions.ene.relationship_stages` thresholds |
+| `extensions.ene.style_examples` `label` / `text` (by `id`) | `extensions.ene.relationship_stages` matching `threshold` keys |
+| `extensions.ene.relationship_stages` `label` / `tone` (by `threshold`) | `extensions.ene.time_periods` `period` keys |
+| `extensions.ene.time_periods` `behavior` (by `period`) | `extensions.ene.scene_behaviors` `name` keys |
+| `extensions.ene.scene_behaviors` `keywords` / `behavior` (by `name`) | |
 
 Lorebook triggers (`keys` and `secondary_keys`) are translated
 **mandatorily**: they are matched against conversation text — and Ene's
 matcher requires at least one primary AND one secondary key to fire — so an
 untranslated trigger never fires in a non-base-language conversation.
+
+The same rule applies to roleplay definitions under `extensions.ene`: scene
+behavior `keywords` are matched against localized scene text and labeled
+style-example `label`s against user input, so both are translated. Matching
+keys (`id`, `threshold`, `period`, `name`) are never translated — they exist
+only to tie a diff entry to its base entry. Like lorebook entries, a diff
+that references an absent roleplay block or an unknown key is skipped with a
+warning: a locale diff can overlay existing structure, never add new
+structure.
 
 The card `name` is deliberately not translatable — it is the character's
 identity key used for discovery and folder naming. Only the display-only
