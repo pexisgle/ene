@@ -398,13 +398,25 @@ fn default_natural_dialogue_contract_path_en() -> String {
 }
 
 impl AffectClassifierPrompts {
-    /// Renders the classifier user prompt replacing `{current_affect}` and `{conversation}`.
-    pub fn render_user_prompt(&self, current_affect: &str, conversation: &str) -> String {
+    /// Renders the classifier user prompt replacing `{current_affect}`,
+    /// `{conversation}`, and `{available_expressions}` placeholders.
+    pub fn render_user_prompt(
+        &self,
+        current_affect: &str,
+        conversation: &str,
+        available_expressions: &[String],
+    ) -> String {
+        let list = if available_expressions.is_empty() {
+            "none".to_string()
+        } else {
+            available_expressions.join(", ")
+        };
         substitute(
             &self.user_prompt,
             &[
                 ("current_affect", current_affect),
                 ("conversation", conversation),
+                ("available_expressions", &list),
             ],
         )
     }

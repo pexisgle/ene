@@ -10,7 +10,8 @@ use ene_core::AffectState;
 pub enum ExpressionSource {
     /// LLM proposal is canonical when present.
     Llm,
-    /// Affect mapping used when no LLM proposal was available.
+    /// Affect mapping used when no usable LLM proposal was available,
+    /// including out-of-list proposals that were rejected.
     AffectFallback,
     /// Previous expression held due to hysteresis.
     HysteresisHold,
@@ -45,8 +46,6 @@ pub struct ExpressionInput<'a> {
     pub previous_expression: &'a str,
     /// Elapsed time since the last expression change.
     pub elapsed_since_change: Option<Duration>,
-    /// Assistant response text (lightweight sentiment hints).
-    pub response_text: &'a str,
     /// Current irritation level spike overrides hysteresis when true.
     pub irritation_spike: bool,
 }

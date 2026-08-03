@@ -23,7 +23,7 @@
 - `arousal` (number): 覚醒・落ち着き [-1.0, 1.0]。
 - `irritation` (number): イライラ [0.0, 1.0]。
 - `affinity` (number): 親しみ [-1.0, 1.0]。
-- `recommended_expression` (string): neutral, happy, sad, angry, relaxed, surprised のいずれか。
+- `recommended_expression` (string): ユーザープロンプトの `## Available expressions` に列挙された利用可能な表情名のいずれか。一覧にない名前を勝手に作らないこと。
 - `confidence` (number): 0.0–1.0（不確かな場合は 0.5 未満）。
 
 ## Decision rules

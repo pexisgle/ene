@@ -5,3 +5,8 @@
 
 ## Conversation history
 {conversation}
+
+## Available expressions
+{available_expressions}
+
+`recommended_expression` は上記の名前のうちのいずれか 1 つを正確に選んでください。名前が列挙されていない場合（一覧が "none" のとき）はこのフィールドは無視され、ランタイムがフォールバックします。

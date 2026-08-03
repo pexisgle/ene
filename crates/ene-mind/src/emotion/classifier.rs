@@ -52,6 +52,7 @@ pub async fn classify_for_config(
     context: &ClassifierContext,
     timeout_secs: u64,
     lang: &str,
+    available_expressions: &[String],
 ) -> Result<AffectProposal, CognitionError> {
     let config = config.clone();
     let model_override = model_override
@@ -61,6 +62,7 @@ pub async fn classify_for_config(
     let conversation = context.conversation.clone();
     let lang = lang.to_owned();
     let configured_max_tokens = max_tokens;
+    let available_expressions = available_expressions.to_vec();
 
     classify_with_resilient_fallback(
         move |attempt_cap| {
@@ -105,6 +107,7 @@ pub async fn classify_for_config(
         &conversation,
         timeout_secs,
         &lang,
+        &available_expressions,
     )
     .await
     .map_err(Into::into)
@@ -128,8 +131,21 @@ const fn classifier_failure_reason(error: &ClassifierError) -> &'static str {
     }
 }
 
-/// JSON Schema for `response_format` with `strict: true` (OpenAI-compatible providers).
-fn proposal_json_schema() -> serde_json::Value {
+/// JSON Schema for `response_format` (OpenAI-compatible providers).
+///
+/// `recommended_expression` is constrained to the card's expression names so
+/// the model cannot emit names the arbiter would have to guess at. An empty
+/// list keeps the field unconstrained; the arbiter then rejects any proposal
+/// and falls back.
+fn proposal_json_schema(available_expressions: &[String]) -> serde_json::Value {
+    let recommended_expression = if available_expressions.is_empty() {
+        serde_json::json!({ "type": "string" })
+    } else {
+        serde_json::json!({
+            "type": "string",
+            "enum": available_expressions,
+        })
+    };
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -140,7 +156,7 @@ fn proposal_json_schema() -> serde_json::Value {
             "arousal": { "type": "number" },
             "irritation": { "type": "number" },
             "affinity": { "type": "number" },
-            "recommended_expression": { "type": "string" },
+            "recommended_expression": recommended_expression,
             "confidence": { "type": "number" }
         },
         "required": [
@@ -164,11 +180,12 @@ async fn classify_with_resilient_fallback<F>(
     conversation: &str,
     timeout_secs: u64,
     lang: &str,
+    available_expressions: &[String],
 ) -> Result<AffectProposal, ClassifierError>
 where
     F: FnMut(Option<u32>) -> Result<Box<dyn LlmProvider>, ClassifierError>,
 {
-    let json_schema = proposal_json_schema();
+    let json_schema = proposal_json_schema(available_expressions);
     let attempts: [(ClassifierTransport, Option<u32>); 2] = [
         (ClassifierTransport::NonStreaming, None),
         (
@@ -195,6 +212,7 @@ where
             lang,
             transport,
             &json_schema,
+            available_expressions,
         )
         .await
         {
@@ -217,11 +235,14 @@ async fn classify_with_timeout(
     lang: &str,
     transport: ClassifierTransport,
     json_schema: &serde_json::Value,
+    available_expressions: &[String],
 ) -> Result<AffectProposal, ClassifierError> {
     let prompts = PromptLibrary::load(lang);
-    let user_prompt = prompts
-        .affect_classifier()
-        .render_user_prompt(current_affect, conversation);
+    let user_prompt = prompts.affect_classifier().render_user_prompt(
+        current_affect,
+        conversation,
+        available_expressions,
+    );
 
     let messages = vec![
         LlmMessage::System {
@@ -409,5 +430,26 @@ mod tests {
 
         let empty = CognitionError::Classifier(ClassifierError::EmptyResponse);
         assert_eq!(classify_failure_reason(&empty), "empty_response");
+    }
+
+    #[test]
+    fn proposal_schema_constrains_expression_enum() {
+        let schema = proposal_json_schema(&["にっこり".to_string(), "むすっ".to_string()]);
+        let expr = schema
+            .get("properties")
+            .and_then(|p| p.get("recommended_expression"));
+        assert_eq!(
+            expr.and_then(|e| e.get("enum")),
+            Some(&serde_json::json!(["にっこり", "むすっ"]))
+        );
+    }
+
+    #[test]
+    fn proposal_schema_omits_enum_without_expressions() {
+        let schema = proposal_json_schema(&[]);
+        let expr = schema
+            .get("properties")
+            .and_then(|p| p.get("recommended_expression"));
+        assert!(expr.and_then(|e| e.get("enum")).is_none());
     }
 }
