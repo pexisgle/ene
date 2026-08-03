@@ -12,10 +12,10 @@ use async_trait::async_trait;
 use ene_ai::{EmbeddingKind, EmbeddingProvider};
 use ene_config::{CharacterCardV3, Lorebook, LorebookEntry};
 use ene_mind::character::{
-    CharacterProcessor, LorebookIndexer, StyleExampleSelector, sync_character_memories,
+    CharacterProcessor, LorebookIndexer, StyleExampleSelector, build_lorebook_injection,
+    sync_character_memories,
 };
 use ene_mind::config::CharacterMemoryConfig;
-use ene_mind::recall::merge_lorebook_recall;
 use ene_store::MemoryStore;
 
 struct MockEmbedder;
@@ -84,7 +84,7 @@ fn lorebook_card() -> CharacterCardV3 {
 }
 
 #[tokio::test]
-async fn lorebook_sync_and_constant_recall_merge() {
+async fn lorebook_sync_and_guaranteed_injection() {
     let store = MemoryStore::open_in_memory(4).await.unwrap();
     let card = lorebook_card();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(MockEmbedder);
@@ -98,23 +98,14 @@ async fn lorebook_sync_and_constant_recall_merge() {
     assert!(!report.skipped);
     assert!(report.lorebook_inserted >= 2);
 
-    let merged = merge_lorebook_recall(
-        &store,
-        "Ene",
-        Some(&card),
-        "Tell me about the weather",
-        &[],
-        0,
-        vec![],
-    )
-    .await
-    .expect("merge");
-
+    // The constant entry is guaranteed-injected without any key.
+    let injection = build_lorebook_injection(&card, "User", "Tell me about the weather", &[]);
     assert!(
-        merged
+        injection
+            .after_char
             .iter()
-            .any(|m| m.item.content.contains("always sunny")),
-        "constant lorebook entry should be merged"
+            .any(|c| c.contains("always sunny")),
+        "constant lorebook entry should be injected without a key"
     );
 
     let (report2, hash2) =
@@ -124,22 +115,11 @@ async fn lorebook_sync_and_constant_recall_merge() {
     assert!(report2.skipped);
     assert_eq!(hash, hash2);
 
-    let key_merged = merge_lorebook_recall(
-        &store,
-        "Ene",
-        Some(&card),
-        "I met a dragon today",
-        &[],
-        0,
-        vec![],
-    )
-    .await
-    .expect("key merge");
+    // Key-matched entries are injected; unmatched entries are not.
+    let keyed = build_lorebook_injection(&card, "User", "I met a dragon today", &[]);
     assert!(
-        key_merged
-            .iter()
-            .any(|m| m.item.content.contains("northern pass")),
-        "key-triggered lorebook entry should merge"
+        keyed.after_char.iter().any(|c| c.contains("northern pass")),
+        "key-triggered lorebook entry should be injected"
     );
 }
 
@@ -196,22 +176,10 @@ async fn lorebook_content_update_supersedes_existing_row() {
             .expect("resync after edit");
     assert_eq!(report.lorebook_updated, 1);
 
-    let merged = merge_lorebook_recall(
-        &store,
-        "Ene",
-        Some(&card),
-        "I met a dragon today",
-        &[],
-        0,
-        vec![],
-    )
-    .await
-    .expect("merge");
+    let keyed = build_lorebook_injection(&card, "User", "I met a dragon today", &[]);
     assert!(
-        merged
-            .iter()
-            .any(|m| m.item.content.contains("eastern gate")),
-        "updated lorebook content should be recalled"
+        keyed.after_char.iter().any(|c| c.contains("eastern gate")),
+        "updated lorebook content should be injected"
     );
 }
 
@@ -262,21 +230,9 @@ async fn disabled_lorebook_entry_is_archived_on_resync() {
             .expect("resync after disable");
     assert!(report.archived >= 1);
 
-    let key_merged = merge_lorebook_recall(
-        &store,
-        "Ene",
-        Some(&card),
-        "I met a dragon today",
-        &[],
-        0,
-        vec![],
-    )
-    .await
-    .expect("merge");
+    let keyed = build_lorebook_injection(&card, "User", "I met a dragon today", &[]);
     assert!(
-        !key_merged
-            .iter()
-            .any(|m| m.item.content.contains("northern pass")),
-        "disabled lorebook entry should not be recalled"
+        !keyed.after_char.iter().any(|c| c.contains("northern pass")),
+        "disabled lorebook entry should not be injected"
     );
 }

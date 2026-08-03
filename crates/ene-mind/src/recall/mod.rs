@@ -8,7 +8,6 @@ mod diversify;
 mod executor;
 mod input;
 mod intent;
-mod lorebook_boost;
 mod pending;
 mod plan;
 mod planner;
@@ -23,8 +22,6 @@ pub use diversify::{MemoryDiversifyOptions, MemoryDiversifyPipeline};
 pub use executor::RecallResultMapper;
 /// Recall planner input DTOs.
 pub use input::{RecallPlannerInput, RecallTurn};
-/// Lorebook constant/key recall merge.
-pub use lorebook_boost::merge_lorebook_recall;
 /// Unconfirmed pending-candidate recall merge.
 pub use pending::gather_pending_candidates;
 /// Recall plan output DTOs.

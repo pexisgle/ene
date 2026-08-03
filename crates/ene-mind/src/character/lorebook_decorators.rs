@@ -84,6 +84,10 @@ pub struct EntryDecorators {
     /// `@@depth N` — message insertion depth from the most recent message.
     pub depth: Option<i64>,
     /// `@@reverse_depth N` — message insertion depth from the oldest message.
+    ///
+    /// The spec says chat contexts should ignore `@@reverse_depth`
+    /// (`SPEC_V3.md`, "Decorators"); Ene follows `SillyTavern`'s reading of it
+    /// (count from the oldest) so cards relying on ST behavior keep working.
     pub reverse_depth: Option<i64>,
     /// `@@position` semantic insertion position.
     pub position: Option<SemanticPosition>,
@@ -97,7 +101,7 @@ pub struct EntryDecorators {
     /// `@@role` — role of the injected message.
     pub role: Option<DecoratorRole>,
     /// `@@ignore_on_max_context` — drop first when the prompt exceeds the
-    /// lorebook token budget.
+    /// lorebook token budget. Inert on cards without a `token_budget`.
     pub ignore_on_max_context: bool,
 }
 

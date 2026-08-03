@@ -8,8 +8,15 @@
 pub enum PromptSectionKind {
     /// Platform / tool contract (desktop mascot framing).
     PlatformContract,
+    /// Guaranteed lorebook entries placed before the character description
+    /// (`position: before_char` or `@@position before_desc`).
+    LorebookBeforeChar,
     /// Immutable character identity kernel.
     IdentityKernel,
+    /// Guaranteed lorebook entries placed after the character description
+    /// (the default `position`, `@@position after_desc`, and section-fallback
+    /// placements).
+    LorebookAfterChar,
     /// Behavior rules and card system instructions.
     BehaviorContract,
     /// Current affect / mood summary.
@@ -39,7 +46,12 @@ impl PromptSectionKind {
     pub const fn is_required(self) -> bool {
         matches!(
             self,
-            Self::PlatformContract | Self::IdentityKernel | Self::OutputContract | Self::UserInput
+            Self::PlatformContract
+                | Self::LorebookBeforeChar
+                | Self::LorebookAfterChar
+                | Self::IdentityKernel
+                | Self::OutputContract
+                | Self::UserInput
         )
     }
 
@@ -48,14 +60,19 @@ impl PromptSectionKind {
     ///
     /// Required sections report [`u8::MAX`] — packing never drops them
     /// regardless of this value (it checks [`Self::is_required`] directly).
-    /// Among droppable sections, packing sheds the lowest priority first, so
-    /// the advisory [`Self::InterruptionNote`] goes before the structural
+    /// The lorebook sections are required by the guaranteed-injection
+    /// contract: key-matched and `constant` entries may only fall to the
+    /// book's own `token_budget`, never to packing. Among droppable sections,
+    /// packing sheds the lowest priority first, so the advisory
+    /// [`Self::InterruptionNote`] goes before the structural
     /// [`Self::BehaviorContract`]. Content producers — not packing — bound each
     /// section's size (recall result limit, lorebook token budget, identity
     /// kernel cap), so packing only decides *which* sections survive.
     pub const fn priority(self) -> u8 {
         match self {
             Self::PlatformContract
+            | Self::LorebookBeforeChar
+            | Self::LorebookAfterChar
             | Self::IdentityKernel
             | Self::OutputContract
             | Self::UserInput => u8::MAX,
@@ -78,6 +95,8 @@ impl PromptSectionKind {
             | Self::IdentityKernel
             | Self::OutputContract
             | Self::UserInput => None,
+            Self::LorebookBeforeChar => Some("## Character Lore (Before Description)"),
+            Self::LorebookAfterChar => Some("## Character Lore"),
             Self::BehaviorContract => Some("## Behavior Contract"),
             Self::CharacterState => Some("## Current Mood"),
             Self::SceneState => Some("## Current Scene"),
@@ -94,7 +113,9 @@ impl PromptSectionKind {
     pub const fn render_order() -> &'static [Self] {
         &[
             Self::PlatformContract,
+            Self::LorebookBeforeChar,
             Self::IdentityKernel,
+            Self::LorebookAfterChar,
             Self::BehaviorContract,
             Self::CharacterState,
             Self::SceneState,
