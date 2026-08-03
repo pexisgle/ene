@@ -86,10 +86,11 @@ pub mod lifecycle;
 pub use commitments::{CommitmentLedger, CommitmentSyncContext};
 /// Mind configuration section.
 pub use config::{
-    CharacterMemoryConfig, ContextConfig, EmotionConfig, MindConfig, MindMemoryConfig,
-    MindMemoryLimitsConfig, ProactiveConfig, ProactiveDecisionConfig, ProactiveIntervalIssue,
-    ProactiveSourcesConfig, SessionConfig, ToolGroundingConfig, TopicBoundaryConfig,
-    WindowTitleLevel, validate_proactive_intervals, warn_on_proactive_interval_issues,
+    CONFIRMATION_CONFIDENCE_OFFSET, CharacterMemoryConfig, ContextConfig, EmotionConfig,
+    MindConfig, MindMemoryConfig, MindMemoryLimitsConfig, ProactiveConfig, ProactiveDecisionConfig,
+    ProactiveIntervalIssue, ProactiveSourcesConfig, SessionConfig, ToolGroundingConfig,
+    TopicBoundaryConfig, WindowTitleLevel, validate_proactive_intervals,
+    warn_on_proactive_interval_issues,
 };
 /// Context budget and compression types.
 #[doc(no_inline)]
@@ -140,11 +141,11 @@ pub use output::{
 /// Proactive companion speech decision types.
 #[doc(no_inline)]
 pub use proactive::{
-    ActivitySnapshot, GateRejectReason, ProactiveContext, ProactiveDecision,
+    ActivitySnapshot, GateRejectReason, ProactiveConfirmation, ProactiveContext, ProactiveDecision,
     ProactiveDecisionOutcome, ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState,
-    ProactiveUrgency, ScreenSummaryStatus, build_decision_messages, build_proactive_context,
-    decide_proactive_speech, decision_schema_object, evaluate_deterministic_gates,
-    load_proactive_memory_notes, parse_decision_json,
+    ProactiveUrgency, SILENT_TOKEN, ScreenSummaryStatus, build_decision_messages,
+    build_proactive_context, decide_proactive_speech, decision_schema_object,
+    evaluate_deterministic_gates, load_proactive_memory_notes, parse_decision_json,
 };
 /// Prompt packet section types.
 #[doc(no_inline)]

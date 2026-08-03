@@ -23,6 +23,15 @@ use crate::config::ProactiveConfig;
 use crate::error::CognitionError;
 use crate::lifecycle::HistoryEntry;
 
+/// First-token refusal marker the main generation model emits when it declines
+/// a proactive utterance during integrated confirmation.
+///
+/// The stream cancels as soon as this marker appears before any visible text.
+/// The prompt library's `confirmation_note` instructs the model to emit it
+/// first; the token literal is duplicated there on purpose and locked by
+/// tests on both sides.
+pub const SILENT_TOKEN: &str = "<|silent|>";
+
 /// Privacy-safe activity snapshot from the host (desktop).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivitySnapshot {
@@ -187,6 +196,9 @@ pub enum ProactiveSkipReason {
     BelowConfidence,
     /// Model returned `should_speak: false` — it judged speaking unnecessary.
     ModelDeclined,
+    /// The main model declined during integrated confirmation; the generation
+    /// stream was cancelled before any visible text.
+    ConfirmationDeclined,
 }
 
 impl fmt::Display for ProactiveSkipReason {
@@ -197,8 +209,29 @@ impl fmt::Display for ProactiveSkipReason {
             Self::DecisionFailed(error) => write!(f, "decision failed: {error}"),
             Self::BelowConfidence => write!(f, "below confidence"),
             Self::ModelDeclined => write!(f, "model declined"),
+            Self::ConfirmationDeclined => write!(f, "confirmation declined"),
         }
     }
+}
+
+/// Main-model confirmation state for a proactive decision.
+///
+/// The verdict is only observable while the generation stream runs, so the
+/// decision stage records the initial state and the runtime resolves it to
+/// [`ProactiveConfirmation::Accepted`] or [`ProactiveConfirmation::Declined`]
+/// once the stream ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProactiveConfirmation {
+    /// Confirmation was not requested: either the config flag is off or the
+    /// pipeline stopped before generation started.
+    Disabled,
+    /// Generation started with confirmation enabled; the verdict is unknown.
+    Pending,
+    /// The main model accepted: generation completed with visible speech.
+    Accepted,
+    /// The main model declined with the refusal token; the stream was
+    /// cancelled before any visible text.
+    Declined,
 }
 
 /// Outcome of [`decide_proactive_speech`].
@@ -210,6 +243,12 @@ pub struct ProactiveDecisionOutcome {
     pub skip: Option<ProactiveSkipReason>,
     /// True when the lightweight LLM was actually invoked.
     pub llm_invoked: bool,
+    /// Main-model confirmation state at decision time.
+    ///
+    /// `Disabled` when the feature is off or the pipeline stopped before
+    /// generation; `Pending` when generation started with confirmation
+    /// enabled. The runtime records the final verdict on its result and logs.
+    pub confirmation: ProactiveConfirmation,
 }
 
 /// Build a [`ProactiveContext`] from session history + host observation.
@@ -370,6 +409,7 @@ pub async fn decide_proactive_speech(
             decision: ProactiveDecision::silent("proactive disabled"),
             skip: Some(ProactiveSkipReason::Disabled),
             llm_invoked: false,
+            confirmation: ProactiveConfirmation::Disabled,
         };
     }
 
@@ -378,6 +418,7 @@ pub async fn decide_proactive_speech(
             decision: ProactiveDecision::silent(reason.to_string()),
             skip: Some(ProactiveSkipReason::Gate(reason)),
             llm_invoked: false,
+            confirmation: ProactiveConfirmation::Disabled,
         };
     }
 
@@ -388,6 +429,7 @@ pub async fn decide_proactive_speech(
                 "decision provider unavailable".to_string(),
             )),
             llm_invoked: false,
+            confirmation: ProactiveConfirmation::Disabled,
         };
     };
 
@@ -405,6 +447,7 @@ pub async fn decide_proactive_speech(
                 decision: ProactiveDecision::silent(format!("decision provider error: {e}")),
                 skip: Some(ProactiveSkipReason::DecisionFailed(e.to_string())),
                 llm_invoked: true,
+                confirmation: ProactiveConfirmation::Disabled,
             };
         }
         Err(_) => {
@@ -414,6 +457,7 @@ pub async fn decide_proactive_speech(
                     "decision timed out".to_string(),
                 )),
                 llm_invoked: true,
+                confirmation: ProactiveConfirmation::Disabled,
             };
         }
     };
@@ -424,7 +468,7 @@ pub async fn decide_proactive_speech(
     if context.screen_summary.is_none() {
         decision.screen_digest.clear();
     }
-    if !decision.allows_generation(config.decision.min_confidence) {
+    if !decision.allows_generation(config.effective_decision_min_confidence()) {
         let skip = Some(if decision.should_speak {
             ProactiveSkipReason::BelowConfidence
         } else {
@@ -434,6 +478,7 @@ pub async fn decide_proactive_speech(
             decision,
             skip,
             llm_invoked: true,
+            confirmation: ProactiveConfirmation::Disabled,
         };
     }
 
@@ -441,6 +486,11 @@ pub async fn decide_proactive_speech(
         decision,
         skip: None,
         llm_invoked: true,
+        confirmation: if config.confirmation_enabled {
+            ProactiveConfirmation::Pending
+        } else {
+            ProactiveConfirmation::Disabled
+        },
     }
 }
 
@@ -1071,6 +1121,97 @@ mod tests {
         assert_eq!(
             ProactiveSkipReason::ModelDeclined.to_string(),
             "model declined"
+        );
+    }
+
+    fn speak_context() -> ProactiveContext {
+        ProactiveContext {
+            history: vec![HistoryEntry {
+                role: Role::User,
+                content: "hey".into(),
+            }],
+            seconds_since_user_input: 200,
+            activity: Some(ActivitySnapshot {
+                idle_seconds: Some(200),
+                active_window_label: "Browser".into(),
+                recent_change: String::new(),
+            }),
+            screen_summary: None,
+            affect_summary: None,
+            fatigue: None,
+            commitments: vec![],
+            user_instructions: vec![],
+            suppression: ProactiveSuppressionState {
+                seconds_since_user_input: 200,
+                seconds_since_proactive: 1000,
+                proactive_turns_this_session: 0,
+                user_turn_busy: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmation_is_disabled_by_default() {
+        let config = base_config();
+        let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
+            body: r#"{"should_speak":true,"confidence":0.9,"reason":"idle","topic_hint":"check in","urgency":"low"}"#.into(),
+        });
+        let outcome =
+            decide_proactive_speech(&config, &speak_context(), Some(provider), "en").await;
+        assert!(outcome.skip.is_none());
+        assert_eq!(outcome.confirmation, ProactiveConfirmation::Disabled);
+    }
+
+    #[tokio::test]
+    async fn confirmation_is_pending_when_enabled_and_generation_starts() {
+        let mut config = base_config();
+        config.confirmation_enabled = true;
+        let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
+            body: r#"{"should_speak":true,"confidence":0.9,"reason":"idle","topic_hint":"check in","urgency":"low"}"#.into(),
+        });
+        let outcome =
+            decide_proactive_speech(&config, &speak_context(), Some(provider), "en").await;
+        assert!(outcome.skip.is_none());
+        assert_eq!(outcome.confirmation, ProactiveConfirmation::Pending);
+    }
+
+    #[tokio::test]
+    async fn confirmation_enabled_passes_borderline_confidence_to_main_model() {
+        let mut config = base_config();
+        config.confirmation_enabled = true;
+        // 0.50 is below the configured 0.55 gate but above the effective 0.40
+        // gate; the borderline case must reach the main model, not be dropped.
+        let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
+            body: r#"{"should_speak":true,"confidence":0.5,"reason":"unsure","topic_hint":"check in","urgency":"low"}"#.into(),
+        });
+        let outcome =
+            decide_proactive_speech(&config, &speak_context(), Some(provider), "en").await;
+        assert!(outcome.skip.is_none());
+        assert!(
+            outcome
+                .decision
+                .allows_generation(config.effective_decision_min_confidence())
+        );
+        assert_eq!(outcome.confirmation, ProactiveConfirmation::Pending);
+    }
+
+    #[tokio::test]
+    async fn confirmation_disabled_rejects_borderline_confidence() {
+        let config = base_config();
+        let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
+            body: r#"{"should_speak":true,"confidence":0.5,"reason":"unsure","topic_hint":"check in","urgency":"low"}"#.into(),
+        });
+        let outcome =
+            decide_proactive_speech(&config, &speak_context(), Some(provider), "en").await;
+        assert_eq!(outcome.skip, Some(ProactiveSkipReason::BelowConfidence));
+        assert_eq!(outcome.confirmation, ProactiveConfirmation::Disabled);
+    }
+
+    #[test]
+    fn confirmation_declined_display_matches_runtime_detail() {
+        assert_eq!(
+            ProactiveSkipReason::ConfirmationDeclined.to_string(),
+            "confirmation declined"
         );
     }
 }
