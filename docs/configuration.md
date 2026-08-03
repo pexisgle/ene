@@ -348,19 +348,69 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
     "mcp_servers": [
       {
         "name": "filesystem",
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/allowed"]
+        "enabled": true,
+        "transport": {
+          "type": "stdio",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/allowed"]
+        }
       }
     ]
   }
 }
 ```
 
+#### `plugins.mcp_servers` — MCP server entries
+
+Each entry declares one MCP server and takes the fields `name` (used verbatim
+for routing and tool namespacing), `enabled`, `transport`, and the optional
+`env_passthrough` list:
+
+```jsonc
+"mcp_servers": [
+  {
+    "name": "github",
+    "enabled": true,
+    "transport": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
+    },
+    "env_passthrough": ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+  },
+  {
+    "name": "local-dev",
+    "enabled": true,
+    "transport": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "auth_header": "Bearer <token>"
+    }
+  }
+]
+```
+
+- `enabled` and `transport` are required; `enabled: false` skips the server.
+- `transport.type` is `"stdio"` (spawn `command` with `args` as a child
+  process) or `"http"` (connect to `url`, sending `auth_header` as the
+  `Authorization` header; a malformed header refuses the connection rather
+  than downgrading to unauthenticated).
+- Stdio children run with a **cleared environment**: only `PATH`, `HOME`,
+  `TMPDIR`, `LANG`, `TZ`, `LD_LIBRARY_PATH` and the Windows essentials are
+  forwarded. Everything else — API keys in particular — must be exported in
+  the host environment and whitelisted in `env_passthrough`; there is no
+  per-server inline `env` map.
+- `mcp_servers` is an array, so entries are declared in `settings.json`:
+  `ENE_` env vars can override scalar options (e.g.
+  `ENE_PLUGINS__MCP_ALLOW_INSECURE_URLS`) but cannot add array elements.
+
 HTTP MCP endpoints validate their URL before connecting (HTTPS-only by default;
 loopback and cloud-metadata/link-local addresses refused). Set
 `"mcp_allow_insecure_urls": true` inside `plugins` to permit plain-`http://` and
 loopback URLs for local development; link-local addresses stay refused. See
-[Plugins & MCP](concepts/plugins-and-mcp.md).
+[Plugins & MCP](concepts/plugins-and-mcp.md) and the
+[MCP Server Setup Guide](guide/tools/mcp-servers.md) for per-service examples
+(Calendar, Mail/Chat, Notes, Map, RSS).
 
 `max_concurrent` bounds the number of concurrent in-flight IPC requests **per
 plugin connection**, across *all* request types (tool calls, pings,
