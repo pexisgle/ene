@@ -417,7 +417,7 @@ async fn proactive_stream_declines_on_leading_silent_token() {
         "a declined turn must not commit history"
     );
     assert!(
-        partial_for_assert.lock().expect("lock").is_empty(),
+        partial_for_assert.lock().is_empty(),
         "no text may survive a declined turn"
     );
 
