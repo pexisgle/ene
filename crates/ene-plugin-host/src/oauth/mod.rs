@@ -922,7 +922,7 @@ mod tests {
             .start_authorization("mock", "google.calendar")
             .unwrap_err();
         assert!(
-            matches!(err, FlowError::EndpointNotSecure(what) if what == "auth_url"),
+            matches!(err, FlowError::EndpointNotSecure(ref what) if what == "auth_url"),
             "expected the auth_url to be rejected, got {err:?}"
         );
     }
@@ -942,7 +942,7 @@ mod tests {
             .start_authorization("mock", "google.calendar")
             .unwrap_err();
         assert!(
-            matches!(err, FlowError::EndpointNotSecure(what) if what == "token_url"),
+            matches!(err, FlowError::EndpointNotSecure(ref what) if what == "token_url"),
             "expected the token_url to be rejected, got {err:?}"
         );
     }
@@ -962,7 +962,7 @@ mod tests {
             .start_authorization_by_id("google.calendar")
             .unwrap_err();
         assert!(
-            matches!(err, FlowError::EndpointNotSecure(what) if what == "token_url"),
+            matches!(err, FlowError::EndpointNotSecure(ref what) if what == "token_url"),
             "expected the token_url to be rejected, got {err:?}"
         );
     }

@@ -431,7 +431,7 @@ mod tests {
         token_url: &str,
     ) -> (
         OAuthRefresher,
-        Arc<crate::oauth::persist::FileCredentialPersister>,
+        Arc<dyn crate::oauth::persist::CredentialPersister>,
     ) {
         let registry = Arc::new(CredentialRegistry::new());
         registry.register_from_schema(
@@ -447,9 +447,10 @@ mod tests {
             })),
         );
         let dir = tempfile::tempdir().unwrap();
-        let persister = Arc::new(crate::oauth::persist::FileCredentialPersister::new(
-            dir.path().join("credentials.json"),
-        ));
+        let persister: Arc<dyn crate::oauth::persist::CredentialPersister> =
+            Arc::new(crate::oauth::persist::FileCredentialPersister::new(
+                dir.path().join("credentials.json"),
+            ));
         (
             OAuthRefresher::new(registry, Arc::clone(&persister)),
             persister,
