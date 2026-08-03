@@ -18,6 +18,7 @@ Ene Host Application (ene-runtime)
         │     ├── ene-plugin-openai    (OpenAI-Compatible Provider Plugin)
         │     ├── ene-plugin-app       (GUI Launcher Tool)
         │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
+        │     ├── ene-plugin-calc      (Calculation Tool)
         │     ├── ene-plugin-fs        (Sandboxed Filesystem Tool)
         │     ├── ene-plugin-utility   (Todo, Question, Timer & Notify Tool)
         │     └── ene-plugin-web       (Web Search & Scraper Tool)
@@ -125,13 +126,14 @@ The in-process admission budget that serializes local engines contending on the 
 |---|---|---|---|
 | `ene-plugin-app` | `app.*` | System application launcher & window control | No |
 | `ene-plugin-browser` | `browser.*` | Headless Chrome/CDP web browser automation | Yes (Session store) |
+| `ene-plugin-calc` | `calc.*` | Math expression evaluation, unit/currency/color conversion | No |
 | `ene-plugin-fs` | `fs.*` | Sandboxed filesystem operations with undo ledger | Yes (host-service `db`) |
 | `ene-plugin-utility` | `utility.*` | Question prompts, todo list management, time/system info, countdown timers & desktop notifications (Linux, D-Bus only) | Yes (host-service `db`) |
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
 
-All seven plugins above are included in the default `plugins.list` and start
+All eight plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.
 
 ### Filesystem tool reference (`filesystem.*`)

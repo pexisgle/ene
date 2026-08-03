@@ -96,6 +96,9 @@
       "browser": {
         "enable": true
       },
+      "calc": {
+        "enable": true
+      },
       "fs": {
         "enable": true
       },
