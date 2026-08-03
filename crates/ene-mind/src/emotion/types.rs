@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use ene_config::AffectBaseline;
 use ene_core::AffectState;
 
 /// Optional LLM affect classifier proposal.
@@ -55,6 +56,8 @@ pub struct TurnAffectInput<'a> {
     pub elapsed_since_update: Duration,
     /// Number of recent conversation turns (for fatigue heuristic).
     pub recent_turn_count: usize,
+    /// Resting affect that decay converges toward; all zeros when undefined.
+    pub baseline: AffectBaseline,
     /// Optional LLM classifier proposal (advisory only).
     pub classifier_proposal: Option<AffectProposal>,
     /// Minimum confidence to blend classifier absolute estimates.

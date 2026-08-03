@@ -500,6 +500,58 @@ fn default_ene_expressions() -> Option<Vec<ExpressionDefinition>> {
     ])
 }
 
+/// Per-character affect resting point that emotion decay converges toward.
+///
+/// Lives on the card (not in app config) because a character's resting mood is
+/// part of the character's nature. Undefined cards use all-zero baselines,
+/// which makes decay mathematically identical to the pre-baseline behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "crate::schemars")]
+pub struct AffectBaseline {
+    /// Pleasure–displeasure (-1.0 ..= 1.0).
+    pub valence: f32,
+    /// Excitement–calm (-1.0 ..= 1.0).
+    pub arousal: f32,
+    /// Control–submission (-1.0 ..= 1.0).
+    pub dominance: f32,
+    /// Trust toward the user (-1.0 ..= 1.0).
+    pub trust: f32,
+    /// Affinity / liking toward the user (-1.0 ..= 1.0).
+    pub affinity: f32,
+    /// Irritation / annoyance level (0.0 ..= 1.0).
+    pub irritation: f32,
+    /// Curiosity / interest level (0.0 ..= 1.0).
+    pub curiosity: f32,
+    /// Fatigue / energy depletion (0.0 ..= 1.0).
+    pub fatigue: f32,
+}
+
+impl AffectBaseline {
+    /// Clamp all dimensions to their valid ranges.
+    ///
+    /// NaN and infinite inputs are replaced with 0.0.
+    #[must_use]
+    pub fn clamp(mut self) -> Self {
+        const fn clamp_finite(v: &mut f32, min: f32, max: f32) {
+            if v.is_finite() {
+                *v = v.clamp(min, max);
+            } else {
+                *v = 0.0;
+            }
+        }
+        clamp_finite(&mut self.valence, -1.0, 1.0);
+        clamp_finite(&mut self.arousal, -1.0, 1.0);
+        clamp_finite(&mut self.dominance, -1.0, 1.0);
+        clamp_finite(&mut self.trust, -1.0, 1.0);
+        clamp_finite(&mut self.affinity, -1.0, 1.0);
+        clamp_finite(&mut self.irritation, 0.0, 1.0);
+        clamp_finite(&mut self.curiosity, 0.0, 1.0);
+        clamp_finite(&mut self.fatigue, 0.0, 1.0);
+        self
+    }
+}
+
 /// Ene extension block stored in character.json under `data.extensions.ene`.
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
 #[serde(crate = "crate::serde", rename_all = "snake_case", default)]
@@ -511,6 +563,9 @@ pub struct EneExtension {
     /// Optional expressions list
     #[schemars(default = "default_ene_expressions")]
     pub expressions: Option<Vec<ExpressionDefinition>>,
+    /// Resting affect that decay converges toward; all zeros when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affect_baseline: Option<AffectBaseline>,
 }
 
 /// Context for expanding CBS (Character Book Spec) template macros.
@@ -1069,5 +1124,56 @@ mod tests {
             expand_cbs_macros_ctx("{{not_a_macro}}", &ctx),
             "{{not_a_macro}}"
         );
+    }
+
+    #[test]
+    fn affect_baseline_serde_roundtrip() {
+        let mut card = CharacterCardV3::default();
+        card.data.extensions.ene = Some(EneExtension {
+            affect_baseline: Some(AffectBaseline {
+                valence: 0.3,
+                curiosity: 0.4,
+                ..AffectBaseline::default()
+            }),
+            ..EneExtension::default()
+        });
+
+        let json = serde_json::to_string(&card).expect("serialise card");
+        assert!(json.contains("\"affect_baseline\""));
+        let back: CharacterCardV3 = serde_json::from_str(&json).expect("valid JSON");
+        let baseline = back
+            .data
+            .get_ene_extension()
+            .and_then(|ext| ext.affect_baseline)
+            .expect("baseline preserved");
+        assert!((baseline.valence - 0.3).abs() < f32::EPSILON);
+        assert!((baseline.curiosity - 0.4).abs() < f32::EPSILON);
+        assert!((baseline.fatigue - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn affect_baseline_absent_card_roundtrips_stable() {
+        let card = CharacterCardV3::default();
+        let first = serde_json::to_string(&card).expect("serialise card");
+        assert!(!first.contains("affect_baseline"));
+        let back: CharacterCardV3 = serde_json::from_str(&first).expect("valid JSON");
+        let second = serde_json::to_string(&back).expect("serialise card again");
+        assert_eq!(first, second, "absent baseline must not be materialised");
+    }
+
+    #[test]
+    fn affect_baseline_clamps_out_of_range_values() {
+        let baseline = AffectBaseline {
+            valence: 2.0,
+            arousal: -5.0,
+            irritation: 1.5,
+            fatigue: f32::NAN,
+            ..AffectBaseline::default()
+        }
+        .clamp();
+        assert!((baseline.valence - 1.0).abs() < f32::EPSILON);
+        assert!((baseline.arousal + 1.0).abs() < f32::EPSILON);
+        assert!((baseline.irritation - 1.0).abs() < f32::EPSILON);
+        assert!((baseline.fatigue - 0.0).abs() < f32::EPSILON);
     }
 }
