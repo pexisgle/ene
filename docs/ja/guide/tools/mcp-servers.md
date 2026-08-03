@@ -48,7 +48,7 @@ HTTP トランスポートは既定で HTTPS のみを許可し、SSRF 対策と
 
 `mcp_servers` は配列のため、エントリは `settings.json` で宣言します — `ENE_` 環境変数で配列要素を追加することはできません。スカラー値のプラグイン設定は起動時に上書きできます（例：`ENE_PLUGINS__MCP_ALLOW_INSECURE_URLS=true`）。
 
-サーバーを追加・編集したら Ene を再起動します。CLI の `/tool list` でサーバーのツールが表示されれば正常です（各 MCP ツールはサーバー名の下に表示されます）。接続に失敗したサーバーはログに "MCP server failed to connect" と記録されてスキップされるため、ツールは一覧から黙って消えます。読み込みを疑うときはログ出力を確認してください。
+サーバーを追加・編集したら Ene を再起動します。CLI の `/tool list` でサーバーのツールが表示されれば正常です（各 MCP ツールはサーバー名の下に表示されます）。接続に失敗したサーバーはログに記録されてスキップされるため、ツールは一覧から黙って消えます。読み込みを疑うときはログ出力を確認してください — 文言はトランスポートごとに異なり、stdio の失敗は "MCP server failed to connect"、HTTP の失敗は "MCP HTTP connection failed" です。
 
 ## 2. 前提条件
 
@@ -335,8 +335,8 @@ export PRIORITY_RSSHUB_INSTANCE="https://my-rsshub.example.com"
 
 | 症状 | 原因 / 対処 |
 |---|---|
-| `/tool list` に MCP ツールが無い | サーバーの接続に失敗してスキップされました。"MCP server failed to connect" のログを探し、宣言した `command` / `args` を手動でターミナル実行してサーバー自身のエラーを確認してください。 |
-| `command not found: npx` | 子プロセスの環境にはホストの `PATH` だけが転送されます — npx がインストールされ、見つかる必要があります。初回の遅いダウンロードは一度手動で実行（`npx -y <package>`）してウォームアップしておくと、Ene の起動時にパッケージ取得が含まれません。 |
+| `/tool list` に MCP ツールが無い | サーバーの接続に失敗してスキップされました。ログを探してください — stdio の失敗は "MCP server failed to connect"、HTTP の失敗は "MCP HTTP connection failed" です。stdio サーバーの場合は、宣言した `command` / `args` を手動でターミナル実行してサーバー自身のエラーを確認できます。 |
+| `command not found: npx` | 子プロセスの環境にはホスト側の小さな許可リスト（`PATH` を含む）だけが転送されます — npx がインストールされ、見つかる必要があります。初回の遅いダウンロードは一度手動で実行（`npx -y <package>`）してウォームアップしておくと、Ene の起動時にパッケージ取得が含まれません。 |
 | サーバーは起動するがリクエストを拒否（"missing API key"） | キーが転送されていません：ホスト環境にエクスポート**かつ** `env_passthrough` に列挙してください。Ene にはインラインの `env` マップがありません。 |
 | OAuth サーバーがブラウザを要求する | 先にターミナルでサーバーの `auth` 手順を完了してください。Ene は stdio 経由でサーバーを起動するため、同意画面を操作できません。 |
 | ローカルサーバーへの HTTP 接続が拒否される | ループバックとプレーン `http://` は既定で拒否されます（SSRF 対策）。ローカル開発用に `plugins.mcp_allow_insecure_urls: true` を設定してください。 |

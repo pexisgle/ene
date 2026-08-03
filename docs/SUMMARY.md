@@ -7,7 +7,7 @@
 
 # Guides
 
-- [MCP Server Setup](guide/tools/mcp-servers.md)
+- [MCP Server Setup Guide](guide/tools/mcp-servers.md)
 
 # Concepts
 

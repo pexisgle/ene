@@ -76,9 +76,10 @@ options can still be overridden per launch, e.g.
 
 After adding or editing servers, restart Ene. Verify that a server's tools
 are live with the CLI command `/tool list` (each MCP tool appears under its
-server name). A server that fails to connect is logged — "MCP server failed
-to connect" — and skipped, so its tools silently disappear from the list;
-check the log output rather than assuming the server loaded.
+server name). A server that fails to connect is logged and skipped, so its tools silently
+disappear from the list; check the log output rather than assuming the
+server loaded. The message differs by transport: stdio children log "MCP
+server failed to connect", HTTP endpoints "MCP HTTP connection failed".
 
 ## 2. Prerequisites
 
@@ -422,8 +423,8 @@ arbitrary feeds without configuration changes.
 
 | Symptom | Cause / fix |
 |---|---|
-| No MCP tools in `/tool list` | The server failed to connect and was skipped. Look for the "MCP server failed to connect" log entry; run the declared `command`/`args` in a terminal by hand to see the server's own error. |
-| `command not found: npx` | The child's environment only forwards `PATH` from the host — npx must be installed and findable. Pre-warm a slow first run (`npx -y <package>`) once manually so the package download is not part of Ene's startup. |
+| No MCP tools in `/tool list` | The server failed to connect and was skipped. Look for the "MCP server failed to connect" log entry (stdio) or "MCP HTTP connection failed" (HTTP). For stdio servers, run the declared `command`/`args` in a terminal by hand to see the server's own error. |
+| `command not found: npx` | The child's environment only forwards a small allowlist from the host — `PATH` among them — so npx must be installed and findable. Pre-warm a slow first run (`npx -y <package>`) once manually so the package download is not part of Ene's startup. |
 | Server starts but rejects requests ("missing API key") | The key was not forwarded: export it in the host environment **and** list it in `env_passthrough`. Ene defines no inline `env` map. |
 | OAuth server needs a browser | Complete the server's interactive `auth` step in a terminal first; Ene spawns the server over stdio and cannot drive consent screens. |
 | HTTP connection refused for a local server | Loopback and plain-`http://` are refused by default (SSRF guard). Set `plugins.mcp_allow_insecure_urls: true` for local development. |
