@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 ene-plugin-proto = { workspace = true }
 ene-infer = { workspace = true }
-ene-tool-macros = { workspace = true }
+ene-plugin-macros = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 schemars = { workspace = true }

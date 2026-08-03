@@ -59,7 +59,7 @@ flowchart TD
   Store --> PluginDb[crates/ene-plugin-db]
 
   Tool[crates/ene-plugin] --> Proto
-  Tool --> Macros[crates/ene-tool-macros]
+  Tool --> Macros[crates/ene-plugin-macros]
 
   ToolHost -.IPC生成.-> Anthropic[plugins/provider/anthropic]
   ToolHost -.IPC生成.-> ToolApp[plugins/tool/app]
@@ -140,7 +140,7 @@ flowchart TD
 | `ene-plugin-proto` | IPC Protocol v4 ワイヤーメッセージ、バージョン定義、フレーミング |
 | `ene-plugin` | プラグイン開発 SDK: `ToolPlugin`/`LlmPlugin` ファサード、`ToolAction`/`ActionSetProvider`、prelude |
 | `ene-plugin-db` | ステートフルプラグインの DB 操作用型付き IPC クライアント |
-| `ene-tool-macros` | Proc-macro: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
+| `ene-plugin-macros` | Proc-macro: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
 | `ene-rag` | RAG ポリシー層: 記憶想起のスコアリング/減衰、ツール選択と再ランク (旧 `ene-tool-rag` を吸収) |
 | `ene-vrm` | VRM 1.0 アバター読み込みおよび wgpu レンダラー |
 | `ene-config` | 設定読み込み、設定スキーマ、キャラクターカード定義 |

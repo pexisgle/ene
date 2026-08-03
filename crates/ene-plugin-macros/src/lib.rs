@@ -1,13 +1,17 @@
-//! # ene-tool-macros
+//! # ene-plugin-macros
 //!
-//! Proc-macro crate for tool plugins. Generates `ToolSpec` / `ToolRagProfile`
+//! Proc-macro crate for plugin authoring. Generates `ToolSpec` / `ToolRagProfile`
 //! implementations and `ToolAction` glue code from declarative attributes on
-//! tool argument structs.
+//! tool argument structs, plus static provider-capability declarations
+//! (`#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]`).
 //!
 //! - `#[derive(ToolSpec)]` — spec/profile construction from `#[tool(...)]`/`#[arg(...)]`
 //! - `#[derive(ToolAction)]` — `ToolSpec` + an automatic `impl ToolAction`
 //! - `#[tool_action(args = ...)]` — fills `name()`/`definition()`/`rag_profile()`
 //!   forwarders on a hand-written `ToolAction` impl
+//! - `#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]` —
+//!   static spec constructors (`llm_spec()` / `tts_spec()` / `stt_spec()`) and
+//!   per-trait kind consts from a `#[provider(...)]` attribute
 //!
 //! See `docs/reference/tools/derive-macro.md` for the full attribute reference.
 
@@ -23,8 +27,45 @@ use syn::parse::{Parse, ParseStream};
 use syn::{DeriveInput, parse_macro_input};
 
 mod attr;
+mod provider;
 
 use attr::{ArgAttrs, ToolSpecAttrs, has_tool_skip};
+
+/// Derive macro generating the static LLM capability declaration (an
+/// inherent `llm_spec()` constructor and `LLM_PROVIDER_KIND` const) from a
+/// `#[provider(...)]` attribute.
+///
+/// The `impl LlmPlugin` block stays hand-written: a one-line
+/// `fn llm_capabilities(&self) -> Vec<LlmProviderSpec> { vec![Self::llm_spec()] }`
+/// alongside the async handlers (`create_chat_stream`, `chat_completion`).
+#[proc_macro_derive(LlmPlugin, attributes(provider))]
+pub fn derive_llm_plugin(input: TokenStream) -> TokenStream {
+    provider::expand_plugin(input, provider::ProviderKind::Llm)
+}
+
+/// Derive macro generating the static TTS capability declaration (an
+/// inherent `tts_spec()` constructor and `TTS_PROVIDER_KIND` const) from a
+/// `#[provider(...)]` attribute.
+///
+/// The `impl TtsPlugin` block stays hand-written: a one-line
+/// `fn tts_capabilities(&self) -> Vec<TtsProviderSpec> { vec![Self::tts_spec()] }`
+/// alongside the async `synthesize` handler.
+#[proc_macro_derive(TtsPlugin, attributes(provider))]
+pub fn derive_tts_plugin(input: TokenStream) -> TokenStream {
+    provider::expand_plugin(input, provider::ProviderKind::Tts)
+}
+
+/// Derive macro generating the static STT capability declaration (an
+/// inherent `stt_spec()` constructor and `STT_PROVIDER_KIND` const) from a
+/// `#[provider(...)]` attribute.
+///
+/// The `impl SttPlugin` block stays hand-written: a one-line
+/// `fn stt_capabilities(&self) -> Vec<SttProviderSpec> { vec![Self::stt_spec()] }`
+/// alongside the async `transcribe` handler.
+#[proc_macro_derive(SttPlugin, attributes(provider))]
+pub fn derive_stt_plugin(input: TokenStream) -> TokenStream {
+    provider::expand_plugin(input, provider::ProviderKind::Stt)
+}
 
 /// Derive macro that generates `ToolSpec::spec()` on the args struct.
 ///

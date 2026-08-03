@@ -8,7 +8,7 @@ use quote::quote;
 use syn::{DeriveInput, Path};
 
 /// Extract a readable string from a `Path` for error messages.
-fn path_ident_str(path: &Path) -> String {
+pub(crate) fn path_ident_str(path: &Path) -> String {
     path.get_ident()
         .map_or_else(|| format!("{path:?}"), ToString::to_string)
 }
@@ -18,7 +18,7 @@ fn path_ident_str(path: &Path) -> String {
 /// `background_capable` (bare) → `true`
 /// `background_capable = true` → `true`
 /// `background_capable = false` → `false`
-fn parse_flag(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<bool> {
+pub(crate) fn parse_flag(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<bool> {
     if meta.input.peek(syn::Token![=]) {
         let lit: syn::LitStr = meta.value()?.parse()?;
         match lit.value().as_str() {

@@ -124,9 +124,9 @@ pub mod prelude {
         #[doc(no_inline)]
         pub use async_trait::async_trait;
         #[doc(no_inline)]
-        pub use ene_plugin_proto::ToolError;
+        pub use ene_plugin_macros::{ToolAction, ToolSpec, tool_action};
         #[doc(no_inline)]
-        pub use ene_tool_macros::{ToolAction, ToolSpec, tool_action};
+        pub use ene_plugin_proto::ToolError;
         #[doc(no_inline)]
         pub use schemars::JsonSchema;
         #[doc(no_inline)]
@@ -148,6 +148,9 @@ pub mod prelude {
         pub use ene_infer::{
             EngineConfig, EngineError, EngineHandle, JobContext, LocalModel, StopReason,
         };
+
+        #[doc(no_inline)]
+        pub use ene_plugin_macros::{LlmPlugin, SttPlugin, TtsPlugin};
 
         #[doc(no_inline)]
         pub use crate::{
