@@ -219,7 +219,11 @@ fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
             set_editor_errors(
                 world,
                 ui_entity,
-                vec![format!("Failed to read card: {error}")],
+                vec![i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "character-editor-read-error",
+                    error = error.to_string()
+                )],
             );
             return;
         }
@@ -230,7 +234,11 @@ fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
             set_editor_errors(
                 world,
                 ui_entity,
-                vec![format!("Failed to parse card: {error}")],
+                vec![i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "character-editor-parse-error",
+                    error = error.to_string()
+                )],
             );
             return;
         }
@@ -293,7 +301,11 @@ fn save_character_card(path: &str, world: &mut World, ui_entity: Entity) {
                 set_editor_errors(
                     world,
                     ui_entity,
-                    vec![format!("Failed to parse card: {error}")],
+                    vec![i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-parse-error",
+                        error = error.to_string()
+                    )],
                 );
                 return;
             }
@@ -305,7 +317,11 @@ fn save_character_card(path: &str, world: &mut World, ui_entity: Entity) {
             set_editor_errors(
                 world,
                 ui_entity,
-                vec![format!("Failed to read card: {error}")],
+                vec![i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "character-editor-read-error",
+                    error = error.to_string()
+                )],
             );
             return;
         }
@@ -322,7 +338,11 @@ fn save_character_card(path: &str, world: &mut World, ui_entity: Entity) {
         set_editor_errors(
             world,
             ui_entity,
-            vec![format!("Failed to save card: {error}")],
+            vec![i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "character-editor-save-error",
+                error = error.to_string()
+            )],
         );
         return;
     }
@@ -343,7 +363,10 @@ fn validate_character_card(world: &mut World, ui_entity: Entity) {
     };
     let mut errors = Vec::new();
     if snapshot.character_editor_name.trim().is_empty() {
-        errors.push("Name must not be empty".to_string());
+        errors.push(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "character-editor-name-required"
+        ));
     }
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
         state.0.character_editor_validation_errors = errors;

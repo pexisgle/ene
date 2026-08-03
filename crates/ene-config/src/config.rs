@@ -911,8 +911,8 @@ pub fn load_character_card(
 
 /// Serializes `card` and atomically writes it to `path`.
 ///
-/// The counterpart of [`load_character_card`]. The write goes through
-/// [`atomic_write`] (temp file + rename) so a crash mid-write can never leave
+/// The counterpart of [`load_character_card`]. The write goes through an
+/// atomic temp-file-and-rename operation so a crash mid-write can never leave
 /// a truncated card behind; host apps must not use a plain `fs::write` here.
 pub fn save_character_card(
     path: &Path,
