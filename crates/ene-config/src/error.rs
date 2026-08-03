@@ -20,6 +20,19 @@ pub enum EneConfigError {
     /// No character card has been loaded yet.
     #[error("Character card not loaded")]
     NoCharacterCard,
+    /// The `character` setting is empty: no character has been selected.
+    ///
+    /// Distinct from [`Self::CardReadError`], which reports a configured
+    /// character whose card file is missing or unreadable.
+    #[error("No character selected: the `character` setting is empty")]
+    CharacterNotConfigured,
+    /// A character name that escapes the working directory was rejected.
+    ///
+    /// Character cards are third-party artifacts, so `..` traversal
+    /// components must not turn a card reference into a read outside the
+    /// assets tree.
+    #[error("Unsafe character path: {0}")]
+    UnsafeCharacterPath(String),
     /// I/O error while reading a character card file.
     #[error("Failed to read character card: {0}")]
     CardReadError(#[from] std::io::Error),

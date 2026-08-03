@@ -213,20 +213,7 @@ pub fn read_cli_paths() -> (String, String) {
 
 // ── Discovered character entries ──
 
-#[derive(Debug, Clone)]
-pub struct CharacterEntry {
-    pub name: String,
-    #[expect(
-        dead_code,
-        reason = "character folder path retained for future character browser UI"
-    )]
-    pub folder: String,
-    pub vrm_paths: Vec<String>,
-    pub motion_paths: Vec<String>,
-    pub motion_names: Vec<String>,
-    pub card_path: String,
-    pub default_motion: Option<String>,
-}
+pub type CharacterEntry = ene_config::CharacterEntry;
 
 // ── Runtime state shapes (not persisted as JSON) ──
 
@@ -492,7 +479,7 @@ impl CharacterSettings {
     /// Build the initial settings: discover characters on disk,
     /// load the persisted JSON, clamp runtime values.
     pub fn discover(assets_dir: &Path, default_vrm: &str) -> Self {
-        let mut characters = discover_characters(assets_dir);
+        let mut characters = ene_config::discover_characters(assets_dir);
         if characters.is_empty() {
             characters.push(CharacterEntry {
                 name: DEFAULT_CHARACTER_NAME.to_string(),
@@ -856,9 +843,10 @@ impl CharacterSettings {
         *self.store.write() = ene_config::ConfigStore::from_config(full.clone());
 
         // Resolve `full.character` (a card name or full path) to
-        // a card path on disk.
-        let card_path = ene_config::resolve_character_path(&full.character);
-        if let Some(parent) = card_path.parent()
+        // a card path on disk. An unset character keeps the default
+        // selection instead of resolving to a hardcoded fallback.
+        if let Ok(card_path) = ene_config::resolve_character_path(&full.character)
+            && let Some(parent) = card_path.parent()
             && let Some(name_os) = parent.file_name()
         {
             let name = name_os.to_string_lossy();
@@ -892,171 +880,6 @@ impl CharacterSettings {
             }
         });
     }
-}
-
-// ── File-system discovery (private) ──
-
-fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
-    let mut out = Vec::new();
-    let characters_dir = assets_dir.join("characters");
-    let Ok(dir) = std::fs::read_dir(&characters_dir) else {
-        return out;
-    };
-    for entry in dir {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to read character directory entry");
-                continue;
-            }
-        };
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(folder_name_os) = path.file_name() else {
-            continue;
-        };
-        let folder = folder_name_os.to_string_lossy().to_string();
-        let card_path = path
-            .join("character.json")
-            .exists()
-            .then(|| path.join("character.json"))
-            .or_else(|| {
-                path.join("charactor.json")
-                    .exists()
-                    .then(|| path.join("charactor.json"))
-            })
-            .unwrap_or_else(|| path.join("character.json"));
-        if !card_path.exists() {
-            continue;
-        }
-        let (name, default_motion_name, card_motions) =
-            read_character_json_meta(&card_path).unwrap_or_else(|| (folder.clone(), None, None));
-
-        let mut vrm_paths = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&path) {
-            for file in entries {
-                let file = match file {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::warn!(error = %e, path = %path.display(), "Failed to read file in character dir");
-                        continue;
-                    }
-                };
-                let file_path = file.path();
-                if file_path.is_dir() {
-                    continue;
-                }
-                let Some(file_name_os) = file_path.file_name() else {
-                    continue;
-                };
-                let relative = format!("characters/{folder}/{}", file_name_os.to_string_lossy());
-                if file_path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("vrm"))
-                {
-                    vrm_paths.push(relative);
-                }
-            }
-        }
-        vrm_paths.sort();
-
-        let mut motion_paths = Vec::new();
-        if let Some(motions) = card_motions {
-            for m in motions {
-                motion_paths.push(format!("characters/{folder}/{}", m.path));
-            }
-        } else {
-            let motions_dir = path.join("motions");
-            if let Ok(entries) = std::fs::read_dir(&motions_dir) {
-                for file in entries {
-                    let file = match file {
-                        Ok(f) => f,
-                        Err(e) => {
-                            tracing::warn!(error = %e, path = %motions_dir.display(), "Failed to read motion file");
-                            continue;
-                        }
-                    };
-                    let file_path = file.path();
-                    if file_path.is_dir() {
-                        continue;
-                    }
-                    let Some(file_name_os) = file_path.file_name() else {
-                        continue;
-                    };
-                    let relative = format!(
-                        "characters/{folder}/motions/{}",
-                        file_name_os.to_string_lossy()
-                    );
-                    if file_path
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("vrma"))
-                    {
-                        motion_paths.push(relative);
-                    }
-                }
-            }
-        }
-        motion_paths.sort();
-
-        let motion_names = motion_paths
-            .iter()
-            .map(|p| {
-                std::path::Path::new(p)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            })
-            .collect();
-
-        out.push(CharacterEntry {
-            name,
-            folder: folder.clone(),
-            vrm_paths,
-            motion_names,
-            motion_paths,
-            card_path: format!("characters/{folder}/character.json"),
-            default_motion: default_motion_name,
-        });
-    }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
-}
-
-fn read_character_json_meta(
-    path: &Path,
-) -> Option<(String, Option<String>, Option<Vec<ene_config::MotionEntry>>)> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let name = v.get("data")?.get("name")?.as_str()?.to_string();
-
-    let default_motion = (|| {
-        let parent = path.parent()?;
-        let folder = parent.file_name()?.to_string_lossy();
-        let settings_path = ene_config::character_settings_path(&folder);
-        if settings_path.exists() {
-            let s = std::fs::read_to_string(settings_path).ok()?;
-            let per: CharacterConfig = serde_json::from_str(&s).ok()?;
-            if !per.default_motion.is_empty() {
-                return Some(per.default_motion);
-            }
-        }
-        None
-    })();
-
-    let motions = (|| {
-        let extensions = v.get("data")?.get("extensions")?;
-        let ene = extensions.get("ene")?;
-        let catalog = ene.get("motion_catalog")?;
-        let motions_val = catalog.get("motions")?;
-        let motions: Vec<ene_config::MotionEntry> =
-            serde_json::from_value(motions_val.clone()).ok()?;
-        Some(motions)
-    })();
-
-    Some((name, default_motion, motions))
 }
 
 #[cfg(test)]

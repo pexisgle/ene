@@ -31,9 +31,28 @@ Inside the `ene-cli` interactive prompt, type `/` to access commands:
 | `/memory clear` | Purge or reset active session memories |
 | `/tool list` | List registered IPC tool plugins & active MCP servers |
 | `/tool call <name> <json>` | Execute a tool action directly from REPL |
+| `/characters` | List characters discovered under `assets/characters/` |
 | `/session list` | List active & past sessions in SQLite |
 | `/session split` | Force an immediate session boundary split |
 | `/quit` or `/exit` | Safely shutdown `ene-runtime` and exit |
+
+---
+
+## Non-interactive subcommands
+
+### `ene characters list`
+
+Lists the characters discovered under `assets/characters/` (the same rule the
+desktop uses: a folder counts as a character when it contains
+`character.json`).
+
+```bash
+# Human-readable
+ene characters list
+
+# Machine-readable JSON (name, folder, card/vrm/motion paths, default motion)
+ene characters list --json
+```
 
 ---
 

@@ -476,6 +476,23 @@ Ene は JSON キャラクターカードを介して、キャラクターのパ�
 }
 ```
 
+### キャラクターの解決と列挙
+
+キャラクターは `assets/characters/` 配下のフォルダーに格納され、カードファイル名は `character.json` です：
+
+```
+assets/characters/<name>/
+  character.json
+  character_settings.json
+  model.vrm
+  motions/VRMA_01.vrma
+```
+
+- `character` 設定は**ベア名**（`"Alicia"` など）を指定すると `assets/characters/Alicia/character.json` に解決され、**カードパス**（例: `assets/cards/ene.json`、相対・絶対どちらも可）を指定するとそのままカードとして読み込みます。
+- 列挙（`ene characters list`、デスクトップのキャラクター選択）も同じ規則を使用します: `character.json` を含むフォルダーのみがキャラクターとして扱われます。旧来の誤記 `charactor.json` は受け付けません。
+- **未設定と不在の区別。** 空の `character` 値は「キャラクター未選択」のエラーとなり、ハードコードされた既定キャラクターへ黙ってフォールバックしません。空でない名前でカードファイルが存在しない場合は「ファイル不在」として報告されます。
+- **パス検証。** `..` によるパストラバーサルは拒否されます（キャラクター名は第三者製のカード配布物から来るため）。
+
 ---
 
 ## 4. スキーマ自動生成

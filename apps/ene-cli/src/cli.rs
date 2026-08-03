@@ -72,6 +72,16 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
+    /// List discovered characters.
+    Characters {
+        /// Character subcommand.
+        #[command(subcommand)]
+        action: CharactersAction,
+
+        /// Emit machine-readable JSON on stdout.
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Inspect and manage cognitive memories.
     Memory {
         /// Memory subcommand.
@@ -159,6 +169,13 @@ pub enum SessionAction {
         /// Session id.
         id: String,
     },
+}
+
+/// `characters` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum CharactersAction {
+    /// List discovered characters.
+    List,
 }
 
 /// `memory` subcommands.
