@@ -305,6 +305,18 @@ mod tests {
     }
 
     #[test]
+    fn hostile_location_stays_in_a_single_path_segment() {
+        let url = build_weather_url(Some("../../etc")).unwrap();
+        assert_eq!(url.host_str(), Some("wttr.in"));
+        assert_eq!(url.path(), "/..%2F..%2Fetc");
+
+        let url = build_weather_url(Some("a?b#c")).unwrap();
+        assert_eq!(url.host_str(), Some("wttr.in"));
+        assert_eq!(url.path(), "/a%3Fb%23c");
+        assert_eq!(url.query(), Some("format=j1"));
+    }
+
+    #[test]
     fn omitted_location_keeps_the_root_path() {
         let url = build_weather_url(None).unwrap();
         assert_eq!(url.as_str(), "https://wttr.in/?format=j1");

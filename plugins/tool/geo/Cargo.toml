@@ -15,6 +15,7 @@ path = "src/main.rs"
 ene-plugin = { workspace = true }
 ene-plugin-proto = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 parking_lot = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
@@ -26,10 +27,15 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-reqwest = { workspace = true, features = ["rustls", "json"] }
+reqwest = { workspace = true, features = ["rustls", "json", "stream"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-reqwest = { workspace = true, features = ["native-tls", "json"] }
+reqwest = { workspace = true, features = ["native-tls", "json", "stream"] }
+
+[dev-dependencies]
+http = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+tokio-util = { workspace = true, features = ["io"] }
 
 [lints]
 workspace = true

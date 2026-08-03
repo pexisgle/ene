@@ -23,6 +23,24 @@ impl GeoState {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .user_agent("EneGeo/0.1")
+            // The tools only trust their fixed API hosts; a cross-host
+            // redirect would forward the request and its query parameters
+            // to an upstream-controlled host, so redirects stay on the
+            // original host.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                let same_host = match (
+                    attempt.previous().last().and_then(|url| url.host_str()),
+                    attempt.url().host_str(),
+                ) {
+                    (Some(previous), Some(next)) => previous == next,
+                    _ => false,
+                };
+                if same_host {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             .build()
             .expect("reqwest client builder should not fail");
         Self {

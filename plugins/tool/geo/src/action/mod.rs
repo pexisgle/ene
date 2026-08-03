@@ -41,7 +41,10 @@ pub(crate) async fn fetch_json(
 }
 
 /// Reads a response body, rejecting it when the declared or actual size
-/// exceeds [`MAX_BODY_BYTES`] or when it is not valid UTF-8.
+/// exceeds [`MAX_BODY_BYTES`] or when it is not valid UTF-8. The body is
+/// consumed in chunks and the running total is checked before each chunk is
+/// buffered, so a body without a known size (e.g. chunked transfer) cannot
+/// force the whole body into memory.
 async fn read_bounded_body(response: reqwest::Response) -> Result<String, ToolError> {
     if let Some(len) = response.content_length()
         && let Ok(len) = usize::try_from(len)
@@ -51,19 +54,22 @@ async fn read_bounded_body(response: reqwest::Response) -> Result<String, ToolEr
             "API response too large ({len} bytes, max {MAX_BODY_BYTES})"
         )));
     }
-    let bytes = response.bytes().await.map_err(|e| {
+    let mut body = Vec::new();
+    let mut response = response;
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
         ToolError::execution_failed(format!(
             "Failed to read API response: {}",
             sanitize_reqwest_error(e)
         ))
-    })?;
-    if bytes.len() > MAX_BODY_BYTES {
-        return Err(ToolError::execution_failed(format!(
-            "API response too large ({} bytes, max {MAX_BODY_BYTES})",
-            bytes.len()
-        )));
+    })? {
+        if body.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+            return Err(ToolError::execution_failed(format!(
+                "API response too large (max {MAX_BODY_BYTES} bytes)"
+            )));
+        }
+        body.extend_from_slice(&chunk);
     }
-    std::str::from_utf8(&bytes)
+    std::str::from_utf8(&body)
         .map(str::to_string)
         .map_err(|_| ToolError::execution_failed("API response is not valid UTF-8"))
 }
@@ -75,12 +81,13 @@ fn sanitize_reqwest_error(e: reqwest::Error) -> String {
     e.without_url().to_string()
 }
 
-/// Truncates an API-provided string to [`MAX_FIELD_CHARS`] characters.
+/// Truncates an API-provided string to at most [`MAX_FIELD_CHARS`]
+/// characters, including the trailing `...`.
 pub(crate) fn truncate(value: &str) -> String {
     if value.chars().count() <= MAX_FIELD_CHARS {
         return value.to_string();
     }
-    let mut truncated: String = value.chars().take(MAX_FIELD_CHARS).collect();
+    let mut truncated: String = value.chars().take(MAX_FIELD_CHARS - 3).collect();
     truncated.push_str("...");
     truncated
 }
@@ -88,6 +95,7 @@ pub(crate) fn truncate(value: &str) -> String {
 /// Formats a coordinate for display, trimming trailing zeros
 /// (`35.680` -> `35.68`).
 pub(crate) fn format_coord(value: f64) -> String {
+    let value = if value == 0.0 { 0.0 } else { value };
     format!("{value:.3}")
         .trim_end_matches('0')
         .trim_end_matches('.')
@@ -131,6 +139,7 @@ pub(crate) fn validate_longitude(value: f64) -> Result<(), GeoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     #[test]
     fn truncate_keeps_short_strings() {
@@ -141,7 +150,7 @@ mod tests {
     fn truncate_caps_long_strings() {
         let long = "x".repeat(300);
         let out = truncate(&long);
-        assert_eq!(out.len(), MAX_FIELD_CHARS + 3);
+        assert_eq!(out.len(), MAX_FIELD_CHARS);
         assert!(out.ends_with("..."));
     }
 
@@ -150,7 +159,7 @@ mod tests {
         let long = "あ".repeat(300);
         let out = truncate(&long);
         assert!(out.ends_with("..."));
-        assert!(out.chars().count() <= MAX_FIELD_CHARS + 3);
+        assert_eq!(out.chars().count(), MAX_FIELD_CHARS);
     }
 
     #[test]
@@ -158,6 +167,7 @@ mod tests {
         assert_eq!(format_coord(35.680), "35.68");
         assert_eq!(format_coord(139.0), "139");
         assert_eq!(format_coord(-0.5), "-0.5");
+        assert_eq!(format_coord(-0.0), "0");
     }
 
     #[test]
@@ -180,5 +190,46 @@ mod tests {
         assert!(validate_longitude(180.1).is_err());
         assert!(validate_latitude(f64::NAN).is_err());
         assert!(validate_longitude(f64::INFINITY).is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_body_rejects_known_oversize() {
+        let http_response = http::Response::builder()
+            .body(reqwest::Body::from(vec![
+                0u8;
+                MAX_BODY_BYTES.saturating_add(1)
+            ]))
+            .unwrap();
+        let err = read_bounded_body(reqwest::Response::from(http_response))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn bounded_body_rejects_unknown_size_stream() {
+        // A body with no size hint (as with chunked transfer) must still
+        // bail on the running total instead of buffering past the cap.
+        let reader = tokio::io::repeat(0)
+            .take(u64::try_from(MAX_BODY_BYTES.saturating_add(64 * 1024)).unwrap());
+        let stream = tokio_util::io::ReaderStream::new(reader);
+        let http_response = http::Response::builder()
+            .body(reqwest::Body::wrap_stream(stream))
+            .unwrap();
+        let err = read_bounded_body(reqwest::Response::from(http_response))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn bounded_body_accepts_small_bodies() {
+        let http_response = http::Response::builder()
+            .body(reqwest::Body::from(br#"{"ok":true}"#.to_vec()))
+            .unwrap();
+        let body = read_bounded_body(reqwest::Response::from(http_response))
+            .await
+            .unwrap();
+        assert_eq!(body, r#"{"ok":true}"#);
     }
 }

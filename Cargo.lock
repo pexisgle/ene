@@ -2770,8 +2770,10 @@ name = "ene-plugin-geo"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ene-plugin",
  "ene-plugin-proto",
+ "http",
  "parking_lot",
  "reqwest",
  "schemars",
@@ -2779,6 +2781,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
  "uuid",

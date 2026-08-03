@@ -11,10 +11,23 @@ fn default_state() -> Arc<GeoState> {
 /// Response envelope of the sunrise-sunset.org JSON endpoint.
 #[derive(Debug, Deserialize)]
 struct SunResponse {
-    results: SunResults,
+    #[serde(default, deserialize_with = "deserialize_results")]
+    results: Option<SunResults>,
     status: String,
     #[serde(default)]
     tzid: Option<String>,
+}
+
+/// Tolerates the API's error envelope, where `results` is an empty string
+/// (`{"results":"","status":"INVALID_DATE"}`) instead of an object; any
+/// non-object value is treated as absent and the status field carries the
+/// error.
+fn deserialize_results<'de, D>(deserializer: D) -> Result<Option<SunResults>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,7 +63,7 @@ struct SunResults {
     namespace = "geo",
     name = "sunrise_sunset",
     summary = "Get sunrise and sunset times for coordinates.",
-    description = "Returns sunrise, sunset, solar noon, day length, and twilight times for the given latitude/longitude from sunrise-sunset.org. An optional date (YYYY-MM-DD, default today UTC) and IANA timezone name (e.g. \"Asia/Tokyo\", default UTC) can be given; times are returned as ISO 8601 timestamps in that timezone.",
+    description = "Returns sunrise, sunset, solar noon, day length, and twilight times for the given latitude/longitude from sunrise-sunset.org. An optional date (YYYY-MM-DD; default today in UTC, computed by the tool) and IANA timezone name (e.g. \"Asia/Tokyo\", default UTC) can be given; times are returned as ISO 8601 timestamps in that timezone.",
     category = "Utility",
     keywords_primary = "sunrise, sunset, sun, daylight, twilight, dawn, dusk, solar noon",
     side_effects = "Network { external: true }"
@@ -87,12 +100,14 @@ impl SunAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let url = build_sun_url(
-            self.latitude,
-            self.longitude,
-            self.date.as_deref(),
-            self.tzid.as_deref(),
-        )?;
+        // The service's own no-date default is its server-local day, which
+        // can be the previous UTC day; the tool always sends an explicit
+        // client-computed UTC date so "today" means the caller's today.
+        let date = match self.date.as_deref() {
+            Some(date) => date.to_string(),
+            None => chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        };
+        let url = build_sun_url(self.latitude, self.longitude, &date, self.tzid.as_deref())?;
         let body = fetch_json(self.state.client(), url, "sunrise-sunset.org").await?;
         let parsed: SunResponse = serde_json::from_str(&body).map_err(|e| {
             ToolError::execution_failed(format!("Invalid sunrise-sunset.org response: {e}"))
@@ -109,14 +124,12 @@ impl SunAction {
 fn build_sun_url(
     latitude: f64,
     longitude: f64,
-    date: Option<&str>,
+    date: &str,
     tzid: Option<&str>,
 ) -> Result<reqwest::Url, GeoError> {
     validate_latitude(latitude)?;
     validate_longitude(longitude)?;
-    if let Some(date) = date {
-        validate_date(date)?;
-    }
+    validate_date(date)?;
     if let Some(tzid) = tzid {
         validate_tzid(tzid)?;
     }
@@ -126,18 +139,16 @@ fn build_sun_url(
     url.query_pairs_mut()
         .append_pair("lat", &latitude.to_string())
         .append_pair("lng", &longitude.to_string())
+        .append_pair("date", date)
         .append_pair("formatted", "0");
-    if let Some(date) = date {
-        url.query_pairs_mut().append_pair("date", date);
-    }
     if let Some(tzid) = tzid {
         url.query_pairs_mut().append_pair("tzid", tzid);
     }
     Ok(url)
 }
 
-/// Validates a `YYYY-MM-DD` date; the day-of-month range check is coarse
-/// (1..=31) and the service rejects month-specific overflow like Feb 31.
+/// Validates a `YYYY-MM-DD` date against the Gregorian calendar, including
+/// month lengths and leap years.
 fn validate_date(date: &str) -> Result<(), GeoError> {
     let mut parts = date.split('-');
     let (Some(year), Some(month), Some(day), None) =
@@ -147,14 +158,26 @@ fn validate_date(date: &str) -> Result<(), GeoError> {
             "date must be YYYY-MM-DD, got '{date}'"
         )));
     };
-    let valid = year.len() == 4
+    let well_formed = year.len() == 4
         && month.len() == 2
         && day.len() == 2
         && year.bytes().all(|b| b.is_ascii_digit())
         && month.bytes().all(|b| b.is_ascii_digit())
-        && day.bytes().all(|b| b.is_ascii_digit())
-        && month.parse::<u32>().is_ok_and(|m| (1..=12).contains(&m))
-        && day.parse::<u32>().is_ok_and(|d| (1..=31).contains(&d));
+        && day.bytes().all(|b| b.is_ascii_digit());
+    if !well_formed {
+        return Err(GeoError::InvalidArguments(format!(
+            "date must be YYYY-MM-DD, got '{date}'"
+        )));
+    }
+    let parse = |part: &str| {
+        part.parse::<u32>().map_err(|_| {
+            GeoError::InvalidArguments(format!("date must be YYYY-MM-DD, got '{date}'"))
+        })
+    };
+    let year = parse(year)?;
+    let month = parse(month)?;
+    let day = parse(day)?;
+    let valid = (1..=12).contains(&month) && (1..=days_in_month(year, month)).contains(&day);
     if valid {
         Ok(())
     } else {
@@ -162,6 +185,22 @@ fn validate_date(date: &str) -> Result<(), GeoError> {
             "date must be YYYY-MM-DD, got '{date}'"
         )))
     }
+}
+
+/// Days in a Gregorian month; invalid months return 0.
+const fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Gregorian leap-year rule: every 4 years, except every 100, except every 400.
+const fn is_leap_year(year: u32) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// Validates an IANA timezone name against the characters the tz database
@@ -188,7 +227,9 @@ fn format_sun(response: &SunResponse) -> Result<String, GeoError> {
         )));
     }
 
-    let results = &response.results;
+    let results = response.results.as_ref().ok_or_else(|| {
+        GeoError::InvalidResponse("sunrise-sunset.org response contains no sun data".to_string())
+    })?;
     let mut lines = Vec::new();
     if let Some(sunrise) = results.sunrise.as_deref() {
         lines.push(format!("Sunrise: {sunrise}"));
@@ -285,15 +326,18 @@ mod tests {
     }
 
     #[test]
-    fn api_failure_is_reported() {
-        let fixture =
-            r#"{"results":{"sunrise":"2026-08-04T04:50:02+00:00"},"status":"INVALID_REQUEST"}"#;
+    fn api_error_envelope_is_reported() {
+        // The live API returns the results field as an empty string on
+        // errors (verified with an invalid date); the status check must
+        // win over the unparseable results shape.
+        let fixture = r#"{"results":"","status":"INVALID_DATE"}"#;
         let err = format_sun(&parse(fixture)).unwrap_err();
         assert!(matches!(err, GeoError::ApiFailure(_)));
+        assert!(err.to_string().contains("INVALID_DATE"), "{err}");
     }
 
     #[test]
-    fn empty_results_are_rejected() {
+    fn missing_results_are_rejected() {
         let fixture = r#"{"results":{},"status":"OK"}"#;
         let err = format_sun(&parse(fixture)).unwrap_err();
         assert!(matches!(err, GeoError::InvalidResponse(_)));
@@ -301,16 +345,16 @@ mod tests {
 
     #[test]
     fn url_includes_coordinates_and_format() {
-        let url = build_sun_url(35.68, 139.69, None, None).unwrap();
+        let url = build_sun_url(35.68, 139.69, "2026-08-04", None).unwrap();
         assert_eq!(
             url.as_str(),
-            "https://api.sunrise-sunset.org/json?lat=35.68&lng=139.69&formatted=0"
+            "https://api.sunrise-sunset.org/json?lat=35.68&lng=139.69&date=2026-08-04&formatted=0"
         );
     }
 
     #[test]
     fn url_includes_date_and_tzid_when_given() {
-        let url = build_sun_url(35.68, 139.69, Some("2026-08-04"), Some("Asia/Tokyo")).unwrap();
+        let url = build_sun_url(35.68, 139.69, "2026-08-04", Some("Asia/Tokyo")).unwrap();
         let params: Vec<(String, String)> = url.query_pairs().into_owned().collect();
         assert!(params.contains(&("date".to_string(), "2026-08-04".to_string())));
         assert!(params.contains(&("tzid".to_string(), "Asia/Tokyo".to_string())));
@@ -318,20 +362,32 @@ mod tests {
 
     #[test]
     fn invalid_coordinates_are_rejected() {
-        assert!(build_sun_url(90.1, 0.0, None, None).is_err());
-        assert!(build_sun_url(0.0, 180.1, None, None).is_err());
+        assert!(build_sun_url(90.1, 0.0, "2026-08-04", None).is_err());
+        assert!(build_sun_url(0.0, 180.1, "2026-08-04", None).is_err());
     }
 
     #[test]
     fn date_validation() {
         assert!(validate_date("2026-08-04").is_ok());
-        assert!(validate_date("2026-02-29").is_ok());
+        assert!(validate_date("2024-02-29").is_ok());
+        assert!(validate_date("2026-02-28").is_ok());
+        assert!(validate_date("2026-02-29").is_err());
+        assert!(validate_date("2026-04-30").is_ok());
+        assert!(validate_date("2026-04-31").is_err());
         assert!(validate_date("2026-8-4").is_err());
         assert!(validate_date("2026-13-01").is_err());
         assert!(validate_date("2026-08-32").is_err());
         assert!(validate_date("26-08-04").is_err());
         assert!(validate_date("2026/08/04").is_err());
         assert!(validate_date("").is_err());
+    }
+
+    #[test]
+    fn century_leap_year_rules() {
+        assert!(is_leap_year(2000));
+        assert!(!is_leap_year(1900));
+        assert!(is_leap_year(2024));
+        assert!(!is_leap_year(2026));
     }
 
     #[test]

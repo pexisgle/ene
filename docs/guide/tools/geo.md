@@ -62,9 +62,10 @@ timezone boundaries and daylight saving time are not reflected.
 
 Returns sunrise, sunset, solar noon, day length, and twilight times for
 coordinates from [sunrise-sunset.org](https://sunrise-sunset.org/). An
-optional date (`YYYY-MM-DD`, default today UTC) and IANA timezone name
-(default `UTC`) select the reference day and the offset of the returned
-timestamps:
+optional date (`YYYY-MM-DD`; when omitted, the tool computes today's date in
+UTC and always sends it explicitly, since the service's own no-date default
+is its server-local day) and IANA timezone name (default `UTC`) select the
+reference day and the offset of the returned timestamps:
 
 ```json
 {"latitude": 35.68, "longitude": 139.69, "date": "2026-08-04", "tzid": "Asia/Tokyo"}
