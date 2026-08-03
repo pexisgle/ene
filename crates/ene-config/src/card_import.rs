@@ -114,7 +114,7 @@ fn png_card_json(bytes: &[u8]) -> Result<serde_json::Value, EneConfigError> {
     let Some(chunk) = ccv3.or(chara) else {
         return Err(EneConfigError::PngCardMissingChunk);
     };
-    let value = decode_chunk_json(chunk.payload)?;
+    let value = decode_chunk_json(&chunk.payload)?;
     if ccv3.is_some() {
         return Ok(value);
     }
@@ -335,8 +335,8 @@ fn import_png(
     std::fs::write(target.join("avatar.png"), bytes).map_err(EneConfigError::IoError)?;
     Ok(ImportedCharacter {
         name: card.data.get_character_name().to_string(),
-        folder,
         card_path: format!("characters/{folder}/character.json"),
+        folder,
     })
 }
 
@@ -369,7 +369,7 @@ fn import_charx(
         }
         if file
             .unix_mode()
-            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+            .is_some_and(|mode| mode & 0o170_000 == 0o120_000)
         {
             return Err(EneConfigError::CharxUnsafePath(name));
         }
@@ -401,8 +401,8 @@ fn import_charx(
     write_card_json(&card, &target.join("character.json"))?;
     Ok(ImportedCharacter {
         name: card.data.get_character_name().to_string(),
-        folder,
         card_path: format!("characters/{folder}/character.json"),
+        folder,
     })
 }
 

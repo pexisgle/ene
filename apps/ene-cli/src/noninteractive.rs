@@ -658,7 +658,7 @@ fn characters_command(
             Ok(EXIT_OK)
         }
         CharactersAction::Import { path } => {
-            let imported = ene_config::import_character_file(&path).map_err(|e| {
+            let imported = ene_config::import_character_file(path).map_err(|e| {
                 OutputError::new(ErrorCode::Runtime, format!("import character card: {e}"))
             })?;
             if json {

@@ -222,10 +222,10 @@ fn percent_decode(payload: &str, max_bytes: u64) -> Result<Vec<u8>, EneConfigErr
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' {
-            let Some(hi) = bytes.get(index + 1).and_then(hex_value) else {
+            let Some(hi) = bytes.get(index + 1).copied().and_then(hex_value) else {
                 return Err(EneConfigError::InvalidAssetUri(payload.to_string()));
             };
-            let Some(lo) = bytes.get(index + 2).and_then(hex_value) else {
+            let Some(lo) = bytes.get(index + 2).copied().and_then(hex_value) else {
                 return Err(EneConfigError::InvalidAssetUri(payload.to_string()));
             };
             out.push((hi << 4) | lo);
