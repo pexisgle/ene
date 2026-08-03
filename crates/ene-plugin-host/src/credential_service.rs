@@ -350,7 +350,10 @@ impl CredentialPassenger {
             self.vault.read().record_audit(plugin, id, false);
             return Self::scope_denied(plugin, id);
         };
-        match self.vault.read().resolve(&storage_key).await {
+        // The guard must not span the async resolve, so clone the current
+        // vault under the lock and release it first.
+        let vault = Arc::clone(&self.vault.read());
+        match vault.resolve(&storage_key).await {
             Ok(store) => {
                 self.vault.read().record_audit(plugin, id, true);
                 if let Some(key) = store.api_key() {

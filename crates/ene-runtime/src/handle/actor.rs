@@ -4100,6 +4100,16 @@ mod tests {
         );
     }
 
+    /// A persister over a non-existent temp file, so vault-builder tests
+    /// seed only from config and registry declarations (never OAuth
+    /// persistence).
+    #[cfg(any(unix, windows))]
+    fn vault_test_persister() -> Arc<dyn CredentialPersister> {
+        Arc::new(FileCredentialPersister::new(
+            std::env::temp_dir().join(format!("ene-vault-test-{}.json", std::process::id())),
+        ))
+    }
+
     /// Clean config for vault-builder tests: an empty plugin list (so the
     /// built-in `default_plugin_list()` entries cannot add stray candidate
     /// ids) and only the providers given as `(alias, kind)`, so no ambient
@@ -4148,8 +4158,8 @@ mod tests {
     /// request-time scope resolution produces; the plain candidate id alone
     /// would leave private credentials permanently missing.
     #[cfg(any(unix, windows))]
-    #[test]
-    fn vault_resolves_private_declaration_storage_key() {
+    #[tokio::test]
+    async fn vault_resolves_private_declaration_storage_key() {
         let config = vault_test_config(&[("anthropic", "sk-plugin")], &[]);
         let registry = CredentialRegistry::new();
         registry.register_from_schema(
@@ -4162,9 +4172,10 @@ mod tests {
                 }]
             })),
         );
-        let vault = build_credential_vault(&config, &registry);
+        let vault = build_credential_vault(&config, &registry, &*vault_test_persister(), None);
         let store = vault
             .resolve("anthropic:anthropic")
+            .await
             .expect("private declaration seeded under its storage key");
         assert_eq!(store.api_key(), Some("sk-plugin"));
     }
@@ -4173,8 +4184,8 @@ mod tests {
     /// the same plain storage key; the vault must not create a duplicate
     /// entry for it.
     #[cfg(any(unix, windows))]
-    #[test]
-    fn vault_deduplicates_shared_declaration_with_candidate() {
+    #[tokio::test]
+    async fn vault_deduplicates_shared_declaration_with_candidate() {
         let config = vault_test_config(&[], &[("my-anthropic", "anthropic")]);
         let registry = CredentialRegistry::new();
         registry.register_from_schema(
@@ -4183,9 +4194,10 @@ mod tests {
                 "x-ene-credentials": [{ "id": "anthropic", "kind": "api_key" }]
             })),
         );
-        let vault = build_credential_vault(&config, &registry);
+        let vault = build_credential_vault(&config, &registry, &*vault_test_persister(), None);
         let store = vault
             .resolve("anthropic")
+            .await
             .expect("shared declaration seeded");
         assert_eq!(store.api_key(), Some("sk-my-anthropic"));
         assert_eq!(vault.storage_keys(), vec!["anthropic".to_string()]);
@@ -4194,12 +4206,12 @@ mod tests {
     /// The declaration's `env_fallback` wins over the conventional
     /// `{ID}_API_KEY` variable when both are set.
     #[cfg(any(unix, windows))]
-    #[test]
+    #[tokio::test]
     #[expect(
         clippy::undocumented_unsafe_blocks,
         reason = "test-only set_var/remove_var on a unique variable name"
     )]
-    fn vault_prefers_declared_env_fallback_over_convention() {
+    async fn vault_prefers_declared_env_fallback_over_convention() {
         unsafe { std::env::set_var("ENE_VAULT_TEST_FALLBACK_VAR", "sk-fallback") };
         unsafe { std::env::set_var("FALLBACK_KEY_API_KEY", "sk-convention") };
         let mut config = vault_test_config(&[], &[]);
@@ -4224,11 +4236,12 @@ mod tests {
                 }]
             })),
         );
-        let vault = build_credential_vault(&config, &registry);
+        let vault = build_credential_vault(&config, &registry, &*vault_test_persister(), None);
         unsafe { std::env::remove_var("ENE_VAULT_TEST_FALLBACK_VAR") };
         unsafe { std::env::remove_var("FALLBACK_KEY_API_KEY") };
         let store = vault
             .resolve("fallback-key")
+            .await
             .expect("env_fallback seeded the entry");
         assert_eq!(store.api_key(), Some("sk-fallback"));
     }
@@ -4263,12 +4276,12 @@ mod tests {
     /// Without a declared `env_fallback`, the conventional `{ID}_API_KEY`
     /// variable backs the credential.
     #[cfg(any(unix, windows))]
-    #[test]
+    #[tokio::test]
     #[expect(
         clippy::undocumented_unsafe_blocks,
         reason = "test-only set_var/remove_var on a unique variable name"
     )]
-    fn vault_falls_back_to_conventional_env_var() {
+    async fn vault_falls_back_to_conventional_env_var() {
         unsafe { std::env::set_var("PLAIN_KEY_API_KEY", "sk-plain") };
         let config = vault_test_config(&[], &[]);
         let registry = CredentialRegistry::new();
@@ -4278,10 +4291,11 @@ mod tests {
                 "x-ene-credentials": [{ "id": "plain-key", "kind": "api_key" }]
             })),
         );
-        let vault = build_credential_vault(&config, &registry);
+        let vault = build_credential_vault(&config, &registry, &*vault_test_persister(), None);
         unsafe { std::env::remove_var("PLAIN_KEY_API_KEY") };
         let store = vault
             .resolve("plain-key")
+            .await
             .expect("conventional env var seeded the entry");
         assert_eq!(store.api_key(), Some("sk-plain"));
     }
