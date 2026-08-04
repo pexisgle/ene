@@ -2535,8 +2535,11 @@ mod tests {
         let (mut actor, mut event_rx, _gate) =
             build_bare_actor_with_store(store.clone(), Arc::new(EmptyRegistry));
         let schedule = add_schedule_via_actor(&mut actor, new_test_schedule("daily")).await;
-        let fire = schedule.next_run_at.expect("first fire time");
-        let missed = fire - chrono::Duration::hours(2);
+        let _fire = schedule.next_run_at.expect("first fire time");
+        // The actor's late check compares against the real wall clock, so
+        // the backdated occurrence must be built from `Utc::now()`, not the
+        // schedule's (future) first fire time.
+        let missed = chrono::Utc::now() - chrono::Duration::hours(2);
         store
             .connection()
             .execute_raw(Statement::from_sql_and_values(
