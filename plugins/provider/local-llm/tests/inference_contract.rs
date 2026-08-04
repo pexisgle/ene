@@ -256,11 +256,19 @@ impl PluginSession {
     /// Drains a chat stream until `StreamEnd`, returning (text deltas seen,
     /// full text, final chunk as (text-delta-empty, usage-present)).
     async fn drain_chat_stream(&mut self, request_id: &str) -> (usize, String, (bool, bool)) {
+        let deadline = tokio::time::Instant::now() + Duration::from_mins(2);
         let mut deltas = 0_usize;
         let mut full_text = String::new();
         let mut final_chunk = (false, false);
         loop {
-            let response = self.read_response().await;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "draining chat stream {request_id:?} exceeded the 2 min deadline"
+            );
+            let response = tokio::time::timeout(remaining, self.read_response())
+                .await
+                .expect("drain deadline exceeded while waiting for a stream frame");
             match response {
                 PluginIpcResponse::StreamChunk {
                     request_id: chunk_rid,
@@ -523,6 +531,9 @@ async fn plugin_crash_isolation_recovers() {
     let status = first
         .kill_plugin()
         .expect("killed plugin reports an exit status");
+    let first_socket = first.socket_path.clone();
+    drop(first);
+    cleanup_path(&first_socket);
     assert!(
         !status.success(),
         "plugin process must not exit successfully after SIGKILL"

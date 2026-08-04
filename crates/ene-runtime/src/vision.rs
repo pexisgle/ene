@@ -118,77 +118,84 @@ impl VisionHandle {
             .map_err(|_| PublicApiError::ActorDead)?;
         let prepared = rx.await.map_err(|_| PublicApiError::ActorDead)??;
 
+        // Encode once: the same data URI feeds the stash and the inference
+        // message (a 1080p frame takes ~100 ms to encode).
+        let data_uri = crate::proactive::rgb_to_jpeg_data_uri(width, height, &rgb)
+            .map_err(|e| PublicApiError::Internal { message: e })?;
         // Best-effort stash of the *encoded* frame for the next proactive
         // generation turn (never the raw buffer, and never blocks this
         // call or the actor on failure).
-        let stash = crate::proactive::rgb_to_jpeg_data_uri(width, height, &rgb).ok();
-        if stash.is_none() {
-            tracing::warn!(
-                component = "Proactive",
-                "Failed to stash screen frame for generation; continuing text-only"
-            );
-        }
-        drop(
-            self.cmd_tx
-                .send(EneCommand::StashProactiveScreenImage { data_uri: stash }),
-        );
+        drop(self.cmd_tx.send(EneCommand::StashProactiveScreenImage {
+            data_uri: Some(data_uri.clone()),
+        }));
 
         // The actual (potentially multi-second) inference call happens
         // here, entirely outside the actor's command loop. `prepared.cancel`
         // lets a new user turn abort it early (see `VisionPrepared::cancel`).
-        let data_uri = crate::proactive::rgb_to_jpeg_data_uri(width, height, &rgb)
-            .map_err(|e| PublicApiError::Internal { message: e })?;
-        let messages = vec![
-            LlmMessage::System {
-                content: prepared.system,
-            },
-            LlmMessage::User {
-                parts: vec![
-                    UserMessagePart::Text {
-                        text: prepared.user,
-                    },
-                    UserMessagePart::Image {
-                        base64_image_data: data_uri,
-                    },
-                ],
-            },
-        ];
-        let mut stream = prepared
-            .local
-            .create_chat_stream(&messages, &[])
+        let messages = build_vision_messages(prepared.system, prepared.user, data_uri);
+        drain_vision_summary(prepared.local.as_ref(), &messages, &prepared.cancel)
             .await
             .map_err(|e| PublicApiError::Internal {
-                message: e.to_string(),
-            })?;
-        let mut summary = String::new();
-        loop {
-            tokio::select! {
-                () = prepared.cancel.cancelled() => {
-                    // Dropping the stream aborts the reader task and sends a
-                    // best-effort `CancelStream` so the plugin stops
-                    // generating the abandoned request.
-                    drop(stream);
-                    return Err(PublicApiError::Internal {
-                        message: "vision summarization cancelled".to_string(),
-                    });
-                }
-                chunk = stream.next() => match chunk {
-                    Some(Ok(chunk)) => {
-                        if let Some(delta) = chunk.text_delta {
-                            summary.push_str(&delta);
-                        }
-                    }
-                    Some(Err(e)) => {
-                        return Err(PublicApiError::Internal {
-                            message: e.to_string(),
-                        });
-                    }
-                    None => break,
+                message: if matches!(e, ene_ai::error::LlmProviderError::Cancelled) {
+                    "vision summarization cancelled".to_string()
+                } else {
+                    e.to_string()
                 },
-            }
-        }
-        Ok(summary)
+            })
     }
+}
+
+/// Builds the chat messages for a screen summary: the rendered system
+/// prompt, then a user turn carrying the rendered text prompt and the
+/// encoded frame.
+fn build_vision_messages(system: String, user: String, data_uri: String) -> Vec<LlmMessage> {
+    vec![
+        LlmMessage::System { content: system },
+        LlmMessage::User {
+            parts: vec![
+                UserMessagePart::Text { text: user },
+                UserMessagePart::Image {
+                    base64_image_data: data_uri,
+                },
+            ],
+        },
+    ]
+}
+
+/// Streams a screen-summary completion from `provider`, collecting text
+/// deltas until the stream ends.
+///
+/// `cancel` aborts the inference: the stream is dropped (which makes the IPC
+/// layer send a best-effort `CancelStream`) and the call fails with
+/// [`ene_ai::error::LlmProviderError::Cancelled`].
+async fn drain_vision_summary(
+    provider: &dyn LlmProvider,
+    messages: &[LlmMessage],
+    cancel: &CancellationToken,
+) -> Result<String, ene_ai::error::LlmProviderError> {
+    let mut stream = provider.create_chat_stream(messages, &[]).await?;
+    let mut summary = String::new();
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => {
+                // Dropping the stream aborts the reader task and sends a
+                // best-effort `CancelStream` so the plugin stops generating
+                // the abandoned request.
+                drop(stream);
+                return Err(ene_ai::error::LlmProviderError::Cancelled);
+            }
+            chunk = stream.next() => match chunk {
+                Some(Ok(chunk)) => {
+                    if let Some(delta) = chunk.text_delta {
+                        summary.push_str(&delta);
+                    }
+                }
+                Some(Err(e)) => return Err(e),
+                None => break,
+            },
+        }
+    }
+    Ok(summary)
 }
 
 /// Validates a screen-capture RGB8 buffer's dimensions and length before it
@@ -221,4 +228,242 @@ fn validate_rgb(width: u32, height: u32, rgb: &[u8]) -> Result<(), PublicApiErro
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use ene_ai::error::LlmProviderError;
+    use ene_ai::message::{LlmCompletion, LlmResponseChunk};
+    use ene_ai::traits::LlmProvider;
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
+    use tokio_stream::Stream;
+
+    /// A stub provider whose streams emit a scripted chunk sequence and
+    /// record the messages they were created with.
+    struct StubVisionProvider {
+        chunks: std::sync::Mutex<VecDeque<Result<LlmResponseChunk, LlmProviderError>>>,
+        seen_messages: std::sync::Mutex<Vec<LlmMessage>>,
+        streams_dropped: Arc<AtomicUsize>,
+        /// When true, streams never terminate (cancel test).
+        never_ends: bool,
+    }
+
+    impl StubVisionProvider {
+        fn new(chunks: Vec<Result<LlmResponseChunk, LlmProviderError>>) -> Self {
+            Self {
+                chunks: std::sync::Mutex::new(VecDeque::from(chunks)),
+                seen_messages: std::sync::Mutex::new(Vec::new()),
+                streams_dropped: Arc::new(AtomicUsize::new(0)),
+                never_ends: false,
+            }
+        }
+
+        fn never_ending() -> Self {
+            Self {
+                chunks: std::sync::Mutex::new(VecDeque::new()),
+                seen_messages: std::sync::Mutex::new(Vec::new()),
+                streams_dropped: Arc::new(AtomicUsize::new(0)),
+                never_ends: true,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for StubVisionProvider {
+        fn name(&self) -> &'static str {
+            "vision-stub"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            messages: &[LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+            LlmProviderError,
+        > {
+            self.seen_messages
+                .lock()
+                .expect("test mutex not poisoned")
+                .extend_from_slice(messages);
+            if self.never_ends {
+                return Ok(Box::pin(HangingStream {
+                    dropped: Arc::clone(&self.streams_dropped),
+                }));
+            }
+            let chunks = std::mem::take(&mut *self.chunks.lock().expect("test mutex not poisoned"));
+            Ok(Box::pin(ChunkStream {
+                chunks,
+                dropped: Arc::clone(&self.streams_dropped),
+            }))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<LlmCompletion, LlmProviderError> {
+            Ok(LlmCompletion::text_only("stub".to_string()))
+        }
+    }
+
+    /// Emits the scripted chunks, then ends. Counts drops so the cancel test
+    /// can assert the stream was actually dropped.
+    struct ChunkStream {
+        chunks: VecDeque<Result<LlmResponseChunk, LlmProviderError>>,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Stream for ChunkStream {
+        type Item = Result<LlmResponseChunk, LlmProviderError>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.chunks.pop_front())
+        }
+    }
+
+    impl Drop for ChunkStream {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Never terminates, so only cancellation ends the drain.
+    struct HangingStream {
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Stream for HangingStream {
+        type Item = Result<LlmResponseChunk, LlmProviderError>;
+
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for HangingStream {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn delta(text: &str) -> LlmResponseChunk {
+        LlmResponseChunk {
+            text_delta: Some(text.to_string()),
+            tool_calls_delta: None,
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn build_vision_messages_has_system_and_image_user() {
+        let messages = build_vision_messages(
+            "sys".to_string(),
+            "user".to_string(),
+            "data:image/jpeg".into(),
+        );
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0],
+            LlmMessage::System {
+                content: "sys".to_string()
+            }
+        );
+        assert_eq!(
+            messages[1],
+            LlmMessage::User {
+                parts: vec![
+                    UserMessagePart::Text {
+                        text: "user".to_string()
+                    },
+                    UserMessagePart::Image {
+                        base64_image_data: "data:image/jpeg".to_string()
+                    },
+                ],
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_vision_summary_accumulates_text_deltas() {
+        let provider = StubVisionProvider::new(vec![Ok(delta("Hello")), Ok(delta(" world"))]);
+        let messages = build_vision_messages(String::new(), String::new(), String::new());
+        let summary = drain_vision_summary(&provider, &messages, &CancellationToken::new())
+            .await
+            .expect("summary drains");
+        assert_eq!(summary, "Hello world");
+        // The stub received exactly the two vision messages.
+        let seen = provider
+            .seen_messages
+            .lock()
+            .expect("test mutex not poisoned");
+        assert_eq!(seen.len(), 2);
+        assert!(matches!(seen[1], LlmMessage::User { .. }));
+    }
+
+    #[tokio::test]
+    async fn drain_vision_summary_maps_stream_error() {
+        let provider = StubVisionProvider::new(vec![
+            Ok(delta("partial")),
+            Err(LlmProviderError::Provider("boom".to_string())),
+        ]);
+        let messages = build_vision_messages(String::new(), String::new(), String::new());
+        let err = drain_vision_summary(&provider, &messages, &CancellationToken::new())
+            .await
+            .expect_err("stream error surfaces");
+        assert!(matches!(err, LlmProviderError::Provider(message) if message == "boom"));
+    }
+
+    #[tokio::test]
+    async fn drain_vision_summary_cancel_drops_the_stream() {
+        let provider = StubVisionProvider::never_ending();
+        let messages = build_vision_messages(String::new(), String::new(), String::new());
+        let cancel = CancellationToken::new();
+        let cancel_handle = cancel.clone();
+        let streams_dropped = Arc::clone(&provider.streams_dropped);
+        let task = tokio::spawn(async move {
+            drain_vision_summary(&provider, &messages, &cancel_handle).await
+        });
+        // Let the drain establish the stream, then cancel it.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        cancel.cancel();
+        let err = task
+            .await
+            .expect("drain task completes")
+            .expect_err("cancel must fail the drain");
+        assert!(matches!(err, LlmProviderError::Cancelled));
+        assert_eq!(
+            streams_dropped.load(Ordering::SeqCst),
+            1,
+            "cancelling must drop the stream so CancelStream is sent"
+        );
+    }
+
+    #[test]
+    fn validate_rgb_accepts_exact_buffer() {
+        assert!(validate_rgb(2, 2, &[0_u8; 12]).is_ok());
+    }
+
+    #[test]
+    fn validate_rgb_rejects_length_mismatch_and_oversize() {
+        assert!(matches!(
+            validate_rgb(2, 2, &[0_u8; 11]),
+            Err(PublicApiError::Invalid { .. })
+        ));
+        assert!(matches!(
+            validate_rgb(MAX_PIXELS as u32 + 1, 1, &[0_u8; 3]),
+            Err(PublicApiError::Invalid { .. })
+        ));
+    }
 }

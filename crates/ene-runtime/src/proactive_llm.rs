@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 use ene_ai::config::AiConfig;
 use ene_ai::error::LlmProviderError;
-use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk};
+use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk, UserMessagePart};
 use ene_ai::traits::{LlmProvider, LlmProviderRegistry};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -182,8 +182,13 @@ fn disabled_handles() -> ProactiveLlmHandles {
 /// Issues one trivial completion so the plugin loads the local model
 /// (lazily, on first request) inside the background init task.
 async fn warm_up_local_provider(provider: &dyn LlmProvider) -> Result<(), LlmProviderError> {
-    let messages = [LlmMessage::System {
-        content: "ping".to_string(),
+    // A minimal user turn: chat templates that render only system content
+    // into an empty user turn would fail the load ("prompt tokenized to
+    // empty sequence") and permanently fail closed to `Disabled`.
+    let messages = [LlmMessage::User {
+        parts: vec![UserMessagePart::Text {
+            text: "ping".to_string(),
+        }],
     }];
     match tokio::time::timeout(
         LOCAL_WARMUP_TIMEOUT,
