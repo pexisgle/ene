@@ -7,7 +7,11 @@
 //! variants carrying the active `TurnId`, which serializes them with turn
 //! execution and lets the actor emit the
 //! [`LifecycleEvent::CandidateChanged`](crate::handle::event::LifecycleEvent::CandidateChanged)
-//! audit event on the lifecycle bus.
+//! audit event on the lifecycle bus. The actor arms are the single mutation
+//! surface for the queue, which is also where the L1 recall cache must
+//! invalidate on approve / reject / edit (approve persists a typed memory,
+//! reject removes a pending row, and edits change the title/content that
+//! feed lexical pending recall).
 
 use crate::handle::EneCommand;
 use crate::public_api::PublicApiError;
@@ -159,9 +163,12 @@ impl MemoryCandidateHandle {
                 .list_pending_candidates(&character_id, Some(PendingCandidateStatus::Rejected))
                 .await?,
         );
+        // Resolved history reads most naturally in resolution order; rows
+        // written before `resolved_at` existed fall back to creation time.
         rows.sort_by(|a, b| {
-            b.created_at
-                .cmp(&a.created_at)
+            b.resolved_at
+                .unwrap_or(b.created_at)
+                .cmp(&a.resolved_at.unwrap_or(a.created_at))
                 .then_with(|| b.id.cmp(&a.id))
         });
         rows.truncate(limit);

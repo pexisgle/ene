@@ -61,7 +61,8 @@ The queue is a full workflow, not just a list:
   and the desktop Memory Journal's Pending tab show source, reason, confidence,
   and conflict target.
 - **Approve / reject** — approving persists the candidate as a typed memory
-  (propagating `existing_memory_id` as `supersedes_id`); rejecting discards it.
+  (propagating `existing_memory_id` as `supersedes_id` and deactivating the
+  old memory, mirroring the auto-save supersede path); rejecting discards it.
 - **Edit / edit-and-approve** — the user-editable fields (title, content,
   kind, confidence) can be corrected before saving. Edits are validated
   before any write and applied with a conditional `WHERE status = 'pending'`

@@ -530,6 +530,7 @@ mod tests {
                 existing_memory_id: None,
                 source_quote: "I like matcha".into(),
                 source_turn: None,
+                approval_parked: false,
                 status: ene_core::PendingCandidateStatus::Pending,
                 created_at: now,
                 resolved_at: None,
@@ -554,6 +555,7 @@ mod tests {
                 existing_memory_id: None,
                 source_quote: "physics".into(),
                 source_turn: None,
+                approval_parked: false,
                 status: ene_core::PendingCandidateStatus::Pending,
                 created_at: now,
                 resolved_at: None,
@@ -625,6 +627,7 @@ mod tests {
                     existing_memory_id: None,
                     source_quote: "topic".into(),
                     source_turn: None,
+                    approval_parked: false,
                     status: ene_core::PendingCandidateStatus::Pending,
                     created_at: now,
                     resolved_at: None,
@@ -686,6 +689,7 @@ mod tests {
                 existing_memory_id: None,
                 source_quote: "I like matcha".into(),
                 source_turn: None,
+                approval_parked: true,
                 status: ene_core::PendingCandidateStatus::Pending,
                 created_at: now,
                 resolved_at: None,
@@ -725,6 +729,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_parked_candidates_stay_excluded_after_mode_toggle_off() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        // Parked while approval mode was on; the mode is now off.
+        store
+            .insert_pending_candidate(ene_core::PendingCandidate {
+                id: 0,
+                character_id: "Ene".into(),
+                user_id: "User".into(),
+                title: "favorite drink".into(),
+                content: "the user's favorite drink is matcha".into(),
+                kind: MemoryKind::Preference,
+                confidence: 0.9,
+                reason_detail: "Approval mode enabled".into(),
+                existing_memory_title: None,
+                existing_memory_id: None,
+                source_quote: "I like matcha".into(),
+                source_turn: None,
+                approval_parked: true,
+                status: ene_core::PendingCandidateStatus::Pending,
+                created_at: now,
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "What does the user like to drink?",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            affect: None,
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
+        assert!(
+            recalled.iter().all(|m| {
+                !m.sources
+                    .contains(&ene_core::MemoryCandidateSource::Pending)
+            }),
+            "approval-parked candidates must not re-enter recall when the mode is toggled off"
+        );
+    }
+
+    #[tokio::test]
     async fn pending_candidate_visibility_is_applied_before_the_cap() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let now = Utc::now();
@@ -748,6 +809,7 @@ mod tests {
                 existing_memory_id: None,
                 source_quote: "topic".into(),
                 source_turn: None,
+                approval_parked: false,
                 status: ene_core::PendingCandidateStatus::Pending,
                 created_at: now - chrono::Duration::minutes(2),
                 resolved_at: None,
@@ -769,6 +831,7 @@ mod tests {
                     existing_memory_id: None,
                     source_quote: "topic".into(),
                     source_turn: None,
+                    approval_parked: false,
                     status: ene_core::PendingCandidateStatus::Pending,
                     created_at: now,
                     resolved_at: None,

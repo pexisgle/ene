@@ -34,7 +34,7 @@ greeting-choose = 挨拶を選択 (Enter で確定)
 greeting-none = (なし)
 
 ## /memory approval コマンド
-memory-approval-usage = /memory approval <list|inspect <id>|approve <id>|edit <id> --title <タイトル> --content <内容> --kind <種別> --confidence <0..1>|reject <id>|history>
+memory-approval-usage = /memory approval <list|inspect <id>|approve <id>|edit <id> --title <タイトル> --content <内容> --kind <種別> --confidence <0..1>|reject <id>|history> （スペースを含む値は --content="複数 単語" 形式を使用）
 memory-approval-list-title = 承認待ちの候補 ({ $count })
 memory-approval-history-title = 解決済み候補の履歴 ({ $count })
 memory-approval-empty = 承認待ちの候補はありません。

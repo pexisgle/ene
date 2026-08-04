@@ -645,6 +645,7 @@ impl MemoryStore {
             reason_detail: Set(candidate.reason_detail),
             source_quote: Set(candidate.source_quote),
             source_turn: Set(candidate.source_turn),
+            approval_parked: Set(candidate.approval_parked),
             existing_memory_id: Set(candidate.existing_memory_id),
             status: Set(PendingCandidateStatus::Pending.as_str().to_string()),
             created_at: Set(candidate.created_at),
@@ -751,8 +752,19 @@ impl MemoryStore {
     /// the same database, two concurrent approvals can no longer both pass a
     /// read-check and both insert — exactly one `UPDATE` matches, the loser
     /// sees `rows_affected == 0` and errors without inserting a duplicate
-    /// typed memory. Returns an error when the candidate is not found or has
-    /// already been resolved.
+    /// typed memory.
+    ///
+    /// A candidate carrying a supersede target deactivates the old memory
+    /// through [`Self::supersede_typed_memory`] (old row → `Superseded`),
+    /// mirroring the auto-save path so approving cannot leave both memories
+    /// recallable. The new memory's scope is derived from its kind like the
+    /// direct persist path (`UserProfile` / `Preference` → `User`,
+    /// `Relationship` / `Reflection` → `Shared`, otherwise `Character`).
+    ///
+    /// If the typed-memory write fails, the claim is rolled back (status and
+    /// `resolved_at` restored) so the candidate is not stranded as approved
+    /// without a memory. Returns an error when the candidate is not found or
+    /// has already been resolved.
     pub async fn approve_pending_candidate(&self, id: i64) -> Result<i64, EneMemoryError> {
         let claimed = self
             .claim_pending_candidate(id, PendingCandidateStatus::Approved)
@@ -765,10 +777,25 @@ impl MemoryStore {
 
         // Re-read the now-approved row to build the typed memory. The status
         // flip already serialized concurrent resolvers, so this read is stable.
-        let candidate = self.load_pending_candidate(id).await?;
+        let candidate = match self.load_pending_candidate(id).await {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.restore_pending_candidate(id).await;
+                return Err(error);
+            }
+        };
+        let scope = match candidate.kind {
+            crate::MemoryKind::UserProfile | crate::MemoryKind::Preference => {
+                crate::MemoryScope::User
+            }
+            crate::MemoryKind::Relationship | crate::MemoryKind::Reflection => {
+                crate::MemoryScope::Shared
+            }
+            _ => crate::MemoryScope::Character,
+        };
 
         let item = crate::NewMemoryItem {
-            scope: crate::MemoryScope::Character,
+            scope,
             character_id: candidate.character_id.clone(),
             user_id: candidate.user_id.clone(),
             kind: candidate.kind,
@@ -788,7 +815,53 @@ impl MemoryStore {
             created_at: None,
             commitment_id: None,
         };
-        self.insert_typed_memory(&item).await
+        let result = match candidate.existing_memory_id {
+            Some(existing_id) => self.supersede_typed_memory(&item, existing_id).await,
+            None => self.insert_typed_memory(&item).await,
+        };
+        match result {
+            Ok(new_id) => Ok(new_id),
+            Err(error) => {
+                self.restore_pending_candidate(id).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Roll an approved claim back to pending after a failed typed-memory
+    /// write, so the candidate can be retried instead of stranded.
+    ///
+    /// Only the claim winner can reach this (concurrent resolvers already
+    /// lost the conditional status flip), so restoring is race-safe. Best
+    /// effort: a restore failure is logged and the original write error is
+    /// returned to the caller.
+    async fn restore_pending_candidate(&self, id: i64) {
+        use crate::entities::pending_candidates::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let res = Entity::update_many()
+            .col_expr(
+                Column::Status,
+                sea_orm::sea_query::Expr::value(
+                    PendingCandidateStatus::Pending.as_str().to_string(),
+                ),
+            )
+            .col_expr(
+                Column::ResolvedAt,
+                sea_orm::sea_query::Expr::value(None::<DateTime<Utc>>),
+            )
+            .filter(Column::Id.eq(id))
+            .filter(Column::Status.eq(PendingCandidateStatus::Approved.as_str()))
+            .exec(&self.db)
+            .await;
+        if let Err(error) = res {
+            tracing::error!(
+                component = "MemoryStore",
+                candidate_id = id,
+                error = %error,
+                "Failed to restore pending candidate after failed approval write"
+            );
+        }
     }
 
     /// Resolve (approve or reject) a pending candidate by id.

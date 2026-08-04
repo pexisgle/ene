@@ -895,6 +895,7 @@ impl MemoryArbiter {
                     existing_memory_id: *existing_memory_id,
                     source_quote: decision.candidate.source_quote.clone(),
                     source_turn: ctx.source_turn.map(str::to_string),
+                    approval_parked: ctx.options.require_approval,
                     status: PendingCandidateStatus::Pending,
                     created_at: chrono::Utc::now(),
                     resolved_at: None,
@@ -2701,6 +2702,10 @@ mod tests {
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].title, "drink");
+        assert!(
+            !pending[0].approval_parked,
+            "weak-contradiction deferrals are not approval-parked"
+        );
     }
 
     #[tokio::test]
@@ -2794,6 +2799,10 @@ mod tests {
             supersede.existing_memory_id,
             Some(existing_id),
             "the supersede target must survive deferral"
+        );
+        assert!(
+            pending.iter().all(|p| p.approval_parked),
+            "approval-mode deferrals must be marked approval-parked"
         );
         assert_eq!(
             store.count_typed_memories("ene", None).await.unwrap(),

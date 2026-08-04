@@ -2756,6 +2756,7 @@ fn sample_pending_candidate(character_id: &str, title: &str) -> PendingCandidate
         existing_memory_id: None,
         source_quote: "I like tea".to_string(),
         source_turn: None,
+        approval_parked: false,
         status: PendingCandidateStatus::Pending,
         created_at: Utc::now(),
         resolved_at: None,
@@ -2789,6 +2790,11 @@ async fn pending_candidate_insert_list_approve_persists_typed_memory() {
     assert_eq!(memory.title, "likes tea");
     assert_eq!(memory.kind, crate::MemoryKind::Preference);
     assert_eq!(memory.status, crate::MemoryStatus::Active);
+    assert_eq!(
+        memory.scope,
+        crate::MemoryScope::User,
+        "user-profile/preference memories must be User-scoped on approve"
+    );
 
     let pending = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
@@ -3121,6 +3127,7 @@ fn sample_pending_candidate_for(
         existing_memory_id,
         source_quote: "I like tea".to_string(),
         source_turn: None,
+        approval_parked: false,
         status: PendingCandidateStatus::Pending,
         created_at: Utc::now(),
         resolved_at: None,
@@ -3308,12 +3315,38 @@ async fn pending_candidate_prune_both_limits_no_double_count() {
 async fn pending_candidate_approve_propagates_existing_memory_id() {
     let store = setup_store().await;
 
+    let old_item = crate::NewMemoryItem {
+        scope: crate::MemoryScope::User,
+        character_id: "ene".to_string(),
+        user_id: "user1".to_string(),
+        kind: crate::MemoryKind::Preference,
+        title: "drink".to_string(),
+        content: "likes coffee".to_string(),
+        source: crate::MemorySource::Inferred,
+        source_ref: None,
+        confidence: crate::MemoryConfidence::new(0.7),
+        salience: crate::MemorySalience::default(),
+        affect: crate::AffectAnnotation::default(),
+        relationship_impact: 0.0,
+        valid_from: None,
+        valid_until: None,
+        status: crate::MemoryStatus::Active,
+        supersedes_id: None,
+        pinned: false,
+        created_at: None,
+        commitment_id: None,
+    };
+    let old_id = store
+        .insert_typed_memory(&old_item)
+        .await
+        .expect("insert old");
+
     let id = store
         .insert_pending_candidate(sample_pending_candidate_for(
             "ene",
             "user1",
             "supersedes old",
-            Some(42),
+            Some(old_id),
         ))
         .await
         .expect("insert");
@@ -3324,7 +3357,21 @@ async fn pending_candidate_approve_propagates_existing_memory_id() {
         .await
         .expect("get memory")
         .expect("memory exists");
-    assert_eq!(memory.supersedes_id, Some(42));
+    assert_eq!(
+        memory.supersedes_id,
+        Some(old_id),
+        "approval must propagate the supersede target"
+    );
+    let old = store
+        .get_typed_memory(old_id)
+        .await
+        .expect("get old")
+        .expect("old memory exists");
+    assert_eq!(
+        old.status,
+        crate::MemoryStatus::Superseded,
+        "approving a supersede-targeted candidate must deactivate the old memory"
+    );
 }
 
 /// Resolving a candidate across a simulated restart —

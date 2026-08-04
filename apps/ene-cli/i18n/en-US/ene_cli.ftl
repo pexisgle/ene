@@ -34,7 +34,7 @@ greeting-choose = Choose a greeting (Enter to confirm)
 greeting-none = (none)
 
 ## /memory approval command
-memory-approval-usage = /memory approval <list|inspect <id>|approve <id>|edit <id> --title <title> --content <content> --kind <kind> --confidence <0..1>|reject <id>|history>
+memory-approval-usage = /memory approval <list|inspect <id>|approve <id>|edit <id> --title <title> --content <content> --kind <kind> --confidence <0..1>|reject <id>|history> (use --content="multi word text" for spaced values)
 memory-approval-list-title = Pending candidates awaiting approval ({ $count })
 memory-approval-history-title = Resolved candidate history ({ $count })
 memory-approval-empty = No pending candidates awaiting approval.

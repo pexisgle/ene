@@ -2846,6 +2846,12 @@ impl TurnActor {
                 turn,
                 reply,
             } => {
+                // This actor arm is the single mutation surface for candidate
+                // resolutions. The L1 recall cache invalidates here once it
+                // lands: approve persists a typed memory and reject removes a
+                // pending row, both of which feed hybrid recall, so the
+                // actor-owned cache must be dropped for the active character
+                // on success.
                 let Some(store) = self.concrete_store.clone() else {
                     drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
                         message: "Memory store is not enabled".to_string(),
@@ -2870,10 +2876,15 @@ impl TurnActor {
                         })
                     }
                 };
-                drop(
-                    self.lifecycle_tx
-                        .send(LifecycleEvent::CandidateChanged { id, status, turn }),
-                );
+                // Audit events must only record committed mutations; a failed
+                // approve/reject must not emit a false resolved record.
+                if result.is_ok() {
+                    drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
+                        id,
+                        status,
+                        turn,
+                    }));
+                }
                 drop(reply.send(result));
                 true
             }
@@ -2883,6 +2894,10 @@ impl TurnActor {
                 turn,
                 reply,
             } => {
+                // Same invalidation contract as ResolveCandidate: the recall
+                // cache must be dropped for the active character on success
+                // here too — an edit changes title/content that feed lexical
+                // pending recall in auto mode.
                 let Some(store) = self.concrete_store.clone() else {
                     drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
                         message: "Memory store is not enabled".to_string(),
@@ -2894,11 +2909,13 @@ impl TurnActor {
                     .await
                     .map(|_| ())
                     .map_err(crate::public_api::PublicApiError::from);
-                drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
-                    id,
-                    status: ene_store::PendingCandidateStatus::Pending,
-                    turn,
-                }));
+                if result.is_ok() {
+                    drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
+                        id,
+                        status: ene_store::PendingCandidateStatus::Pending,
+                        turn,
+                    }));
+                }
                 drop(reply.send(result));
                 true
             }

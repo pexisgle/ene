@@ -57,7 +57,8 @@ confidence、上書き対象（`existing_memory_id`）を保持します。承�
 - **一覧・確認** — CLI の `/memory approval`（および `approval inspect <id>`）と
   デスクトップ Memory Journal の承認タブで、出典・理由・confidence・競合対象を表示します。
 - **承認・却下** — 承認すると候補が typed memory として永続化され
-  （`existing_memory_id` は `supersedes_id` として引き継がれます）、却下すると破棄されます。
+  （`existing_memory_id` は `supersedes_id` として引き継がれ、自動保存の上書き
+  パスと同様に古い記憶は無効化されます）、却下すると破棄されます。
 - **編集・編集して承認** — ユーザー編集可能な項目（タイトル・内容・種別・confidence）を
   保存前に修正できます。編集は書き込み前に検証され、
   `WHERE status = 'pending'` の条件付き更新で適用されるため、不正な編集や競合が

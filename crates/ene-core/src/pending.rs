@@ -91,6 +91,15 @@ pub struct PendingCandidate {
     /// candidates produced outside a turn (retried writes, tests) or rows
     /// persisted before this field existed.
     pub source_turn: Option<String>,
+    /// Whether the candidate was parked by approval mode
+    /// (`mind.memory_approval.require_approval`) rather than by a
+    /// weak-contradiction deferral.
+    ///
+    /// Approval-parked rows are excluded from unconfirmed recall regardless
+    /// of the current mode, so toggling approval off cannot leak candidates
+    /// that were never approved. Weak-contradiction rows keep their
+    /// `[unconfirmed]` recall behavior.
+    pub approval_parked: bool,
     /// Workflow status.
     pub status: PendingCandidateStatus,
     /// When the candidate was created.

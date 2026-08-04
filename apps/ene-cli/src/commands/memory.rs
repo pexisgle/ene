@@ -83,10 +83,13 @@ async fn handle_approval(arg: &str, ctx: &mut AppContext) -> Result<CommandOutco
 async fn approval_list(
     candidates: &ene_runtime::MemoryCandidateHandle,
 ) -> Result<CommandOutcome, CliError> {
-    let rows = candidates
-        .list_pending()
-        .await
-        .map_err(|e| CliError::ExecutionFailed(format!("List approval error: {e}")))?;
+    let rows = candidates.list_pending().await.map_err(|e| {
+        CliError::ExecutionFailed(fl!(
+            crate::i18n::loader(),
+            "memory-approval-error",
+            error = e.to_string()
+        ))
+    })?;
     if rows.is_empty() {
         println!("{}", fl!(crate::i18n::loader(), "memory-approval-empty"));
         return Ok(CommandOutcome::Continue);
@@ -211,10 +214,13 @@ async fn approval_edit(
 async fn approval_history(
     candidates: &ene_runtime::MemoryCandidateHandle,
 ) -> Result<CommandOutcome, CliError> {
-    let rows = candidates
-        .history(50)
-        .await
-        .map_err(|e| CliError::ExecutionFailed(format!("History error: {e}")))?;
+    let rows = candidates.history(50).await.map_err(|e| {
+        CliError::ExecutionFailed(fl!(
+            crate::i18n::loader(),
+            "memory-approval-error",
+            error = e.to_string()
+        ))
+    })?;
     if rows.is_empty() {
         println!(
             "{}",
@@ -252,7 +258,15 @@ fn parse_edit_flags(arg: &str) -> Result<EditFlags, CliError> {
     while let Some(token) = tokens.next() {
         let (key, value) = match token.split_once('=') {
             Some((key, value)) if key.starts_with("--") => (key, Some(value.to_string())),
-            _ if token.starts_with("--") => (token, tokens.next().map(str::to_string)),
+            _ if token.starts_with("--") => {
+                let next = tokens.next();
+                if next.is_some_and(|v| v.starts_with("--")) {
+                    return Err(CliError::UsageError {
+                        usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+                    });
+                }
+                (token, next.map(str::to_string))
+            }
             _ => {
                 return Err(CliError::UsageError {
                     usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
@@ -792,6 +806,10 @@ mod tests {
     fn parse_edit_flags_rejects_missing_and_unknown_flags() {
         assert!(parse_edit_flags("--title tea --kind preference --confidence 0.5").is_err());
         assert!(parse_edit_flags("--bogus tea").is_err());
+        assert!(
+            parse_edit_flags("--title --content x --kind preference --confidence 0.5").is_err(),
+            "a missing value must not swallow the next flag"
+        );
         assert!(
             parse_edit_flags("--confidence 1.5 --title t --content c --kind preference").is_err()
         );

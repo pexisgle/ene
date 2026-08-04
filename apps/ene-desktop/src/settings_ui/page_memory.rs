@@ -349,11 +349,13 @@ fn render_pending_approval(
                                     confidence: candidate.confidence,
                                 });
                         }
-                        if ui
-                            .button(fl!(crate::i18n::loader(), "memory-approve"))
-                            .clicked()
+                        if !editing
+                            && ui
+                                .button(fl!(crate::i18n::loader(), "memory-approve"))
+                                .clicked()
                         {
                             let result = ai.approve_candidate(candidate_id);
+                            clear_candidate_draft(world, ui_entity);
                             set_action_message(
                                 world,
                                 ui_entity,
@@ -362,11 +364,13 @@ fn render_pending_approval(
                             );
                             fetch_pending_candidates(ai, world, ui_entity);
                         }
-                        if ui
-                            .button(fl!(crate::i18n::loader(), "memory-reject"))
-                            .clicked()
+                        if !editing
+                            && ui
+                                .button(fl!(crate::i18n::loader(), "memory-reject"))
+                                .clicked()
                         {
                             let result = ai.reject_candidate(candidate_id);
+                            clear_candidate_draft(world, ui_entity);
                             set_action_message(
                                 world,
                                 ui_entity,

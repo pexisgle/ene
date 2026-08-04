@@ -65,6 +65,12 @@ pub async fn gather_pending_candidates(
             .is_none_or(|user_id| candidate.user_id == user_id || candidate.user_id.is_empty())
     });
 
+    // Approval-parked rows (`mind.memory_approval.require_approval`) are
+    // excluded regardless of the current mode: a candidate that was never
+    // approved must not surface as `[unconfirmed]` hearsay just because the
+    // switch was toggled off. Only weak-contradiction deferrals compete.
+    candidates.retain(|candidate| !candidate.approval_parked);
+
     // Newest first: the freshest unconfirmed info is the most relevant to ask
     // about, and the retention policy can hold hundreds of rows per character.
     candidates.sort_by_key(|c| std::cmp::Reverse(c.created_at));

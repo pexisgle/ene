@@ -397,19 +397,21 @@ target. The queue is surfaced in the CLI (`/memory approval`) and the desktop
 Memory Journal, where each candidate can be inspected, edited,
 edit-and-approved, approved, or rejected. Approved candidates are persisted
 as typed memories with the original conflict target propagated as
-`supersedes_id`; rejected ones are discarded. Edits are validated before any
-write and resolution is conflict-safe, so a bad edit or a raced decision
-never loses the original candidate. Approval and edit operations carry the
-active turn id and are emitted as `CandidateChanged` audit events on the
-runtime lifecycle bus.
+`supersedes_id` and the old memory deactivated (`Superseded`), mirroring the
+auto-save supersede semantics; rejected ones are discarded. Edits are
+validated before any write and resolution is conflict-safe, so a bad edit or
+a raced decision never loses the original candidate. Approval and edit
+operations carry the active turn id and are emitted as `CandidateChanged`
+audit events on the runtime lifecycle bus.
 
 In approval mode, unapproved candidates are excluded from normal recall: they
-surface only in the review queue, never in the prompt. The default
-auto-save mode is unchanged (`false`); weak-contradiction candidates are
-still deferred for confirmation and may compete in recall under
-`recall_pending_candidate_limit` as described below. Commitment candidates
-(the dedicated ledger path) and explicit user forget / dispute decisions are
-applied immediately in both modes.
+surface only in the review queue, never in the prompt. Approval-parked
+candidates stay excluded even if the mode is later turned off — only
+weak-contradiction deferrals ever compete in recall under
+`recall_pending_candidate_limit` as described below. The default auto-save
+mode is unchanged (`false`). Commitment candidates (the dedicated ledger
+path) and explicit user forget / dispute decisions are applied immediately in
+both modes.
 
 The memory arbiter decides whether an incoming candidate contradicts an existing
 memory of the same kind by comparing the *similarity of their title embeddings*
