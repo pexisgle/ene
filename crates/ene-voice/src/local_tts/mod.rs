@@ -54,13 +54,23 @@ impl LocalTtsProviderFactory {
         let model_path = download::resolve_model_path(&ai);
         let voices_path = download::resolve_voices_path(config);
         let voice_name = resolved.voice.clone().unwrap_or_default();
-        let ort_dylib_path =
-            ene_ai::plugin_config::plugin_config_blob(config, ene_ai::plugin_config::ONNX_PLUGIN)
+        // The kokoro plugin's own config is the canonical source; the `onnx`
+        // slot is the legacy shared ORT home (still used by silero-vad) and
+        // kept as a fallback so existing configs keep working.
+        let ort_dylib_path = [
+            ene_ai::plugin_config::KOKORO_PLUGIN,
+            ene_ai::plugin_config::ONNX_PLUGIN,
+        ]
+        .into_iter()
+        .find_map(|plugin| {
+            ene_ai::plugin_config::plugin_config_blob(config, plugin)
                 .as_ref()
                 .and_then(|blob| blob.get("ort_dylib_path"))
                 .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
                 .map(str::to_string)
-                .filter(|p| !p.is_empty());
+        });
         let engine = provider::open(
             &model_path,
             &voices_path,
