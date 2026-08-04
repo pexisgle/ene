@@ -55,6 +55,38 @@ fn llm_provider_kind_const() {
     assert_eq!(TestLlmProvider::LLM_PROVIDER_KIND, "test-llm");
 }
 
+#[derive(LlmPlugin)]
+#[provider(
+    kind = "capability-test",
+    provides = "llm/chat@1, embed@1, gguf-runner@1",
+    requires = "g2p/ja@^1?"
+)]
+pub struct CapabilityTestProvider;
+
+impl ConfigurablePlugin for CapabilityTestProvider {}
+
+impl LlmPlugin for CapabilityTestProvider {
+    fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+        vec![Self::llm_spec()]
+    }
+}
+
+#[test]
+fn llm_capability_declarations_match_attributes() {
+    assert_eq!(
+        CapabilityTestProvider::provides(),
+        vec![
+            CapabilityRef::parse("llm/chat@1").expect("static capability string"),
+            CapabilityRef::parse("embed@1").expect("static capability string"),
+            CapabilityRef::parse("gguf-runner@1").expect("static capability string"),
+        ]
+    );
+    assert_eq!(
+        CapabilityTestProvider::requires(),
+        vec![CapabilityRequirement::parse("g2p/ja@^1?").expect("static requirement string")]
+    );
+}
+
 // ── TtsPlugin ────────────────────────────────────────────────────────────
 
 #[derive(TtsPlugin)]
@@ -175,7 +207,8 @@ fn partial_concurrency_keeps_default_queue_depth() {
     streaming,
     voices = "combo-voice",
     formats = "wav",
-    concurrency = 2
+    concurrency = 2,
+    provides = "gguf-runner@1"
 )]
 pub struct ComboProvider;
 
@@ -218,4 +251,12 @@ fn compound_provider_kind_consts() {
     // would cause when several provider derives share one struct.
     assert_eq!(ComboProvider::LLM_PROVIDER_KIND, "combo");
     assert_eq!(ComboProvider::TTS_PROVIDER_KIND, "combo");
+
+    // Capability declarations are plugin-wide: exactly one of the compound
+    // derive's expansions emits `provides()` / `requires()`, so the method
+    // exists once and carries the shared attribute's value.
+    assert_eq!(
+        ComboProvider::provides(),
+        vec![CapabilityRef::parse("gguf-runner@1").expect("static capability string")]
+    );
 }
