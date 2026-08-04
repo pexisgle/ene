@@ -47,8 +47,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use cpal::{Sample, SampleFormat};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{Sample, SampleFormat};
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 
@@ -274,8 +274,7 @@ fn open_loopback(
     configured: Option<&str>,
 ) -> Result<(cpal::Device, cpal::StreamConfig, cpal::SampleFormat), BeatSyncError> {
     let host = cpal::default_host();
-    let device =
-        find_loopback_device(&host, configured).ok_or(BeatSyncError::NoLoopbackDevice)?;
+    let device = find_loopback_device(&host, configured).ok_or(BeatSyncError::NoLoopbackDevice)?;
     let supported = device
         .default_input_config()
         .map_err(|e| BeatSyncError::NoSupportedConfig(e.to_string()))?;
@@ -399,11 +398,8 @@ impl CaptureState {
 }
 
 /// Decode a cpal data buffer into mono `f32`, reusing the caller's scratch.
-fn decode_to_mono<T: cpal::SizedSample>(
-    data: &cpal::Data,
-    channels: usize,
-    mono: &mut Vec<f32>,
-) where
+fn decode_to_mono<T: cpal::SizedSample>(data: &cpal::Data, channels: usize, mono: &mut Vec<f32>)
+where
     f32: cpal::FromSample<T>,
 {
     mono.clear();
@@ -414,11 +410,7 @@ fn decode_to_mono<T: cpal::SizedSample>(
         mono.extend(slice.iter().map(|&s| f32::from_sample(s)));
     } else {
         mono.extend(slice.chunks(channels).map(|frame| {
-            frame
-                .iter()
-                .map(|&s| f32::from_sample(s))
-                .sum::<f32>()
-                / channels as f32
+            frame.iter().map(|&s| f32::from_sample(s)).sum::<f32>() / channels as f32
         }));
     }
 }
@@ -725,10 +717,7 @@ mod tests {
         // Device" PCM; without a monitor-named candidate there is no
         // loopback, and the mic must not be selected.
         let names = ["Default Audio Device", "HD-Audio Generic, USB Audio"];
-        assert_eq!(
-            pick_loopback_device(None, names),
-            None
-        );
+        assert_eq!(pick_loopback_device(None, names), None);
     }
 
     #[test]
@@ -736,7 +725,10 @@ mod tests {
         // On PipeWire the sink and the mic can share the "Default Audio
         // Device" description; the monitor port (also exposed through
         // pipewire-alsa) is the only unambiguous loopback candidate.
-        let names = ["Default Audio Device", "alsa_output.pci-1.analog-stereo.monitor"];
+        let names = [
+            "Default Audio Device",
+            "alsa_output.pci-1.analog-stereo.monitor",
+        ];
         assert_eq!(
             pick_loopback_device(None, names),
             Some("alsa_output.pci-1.analog-stereo.monitor".to_string())
