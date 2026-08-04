@@ -196,9 +196,17 @@ mod tests {
         let server = tokio::spawn(async move {
             drop(ene_plugin::run_plugin_server(dispatch()).await);
         });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let mut stream = IpcStream::connect(&socket_path).await.expect("connect");
+        // The server task binds asynchronously; retry the connect briefly so
+        // a slow CI runner does not flake on the first attempt.
+        let mut stream = None;
+        for _ in 0..10 {
+            if let Ok(connected) = IpcStream::connect(&socket_path).await {
+                stream = Some(connected);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let mut stream = stream.expect("connect after retries");
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::Handshake {
