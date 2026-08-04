@@ -2767,16 +2767,20 @@ impl TurnActor {
                     self.proactive.suppression(false).seconds_since_user_input;
                 let mind = self.config.get_section::<ene_mind::MindConfig>().ok();
                 self.proactive.observation = observation.clone();
-                if observation.captured_at_unix_ms != 0
-                    && let Some(mind) = &mind
-                {
-                    self.proactive.world_state.push(
-                        ene_mind::WorldStateSnapshot::from_observation(
-                            &observation,
-                            seconds_since_user_input,
-                        ),
-                        &mind.proactive.world_state,
+                if let Some(mind) = &mind {
+                    let world_observation = crate::proactive::sanitize_observation(
+                        &mind.proactive,
+                        observation.clone(),
                     );
+                    if world_observation.captured_at_unix_ms != 0 {
+                        self.proactive.world_state.push(
+                            ene_mind::WorldStateSnapshot::from_observation(
+                                &world_observation,
+                                seconds_since_user_input,
+                            ),
+                            &mind.proactive.world_state,
+                        );
+                    }
                 }
                 // When screen_summary is enabled, each observe cycle (fresh
                 // capture → vision) drives the decision LLM immediately.
@@ -5803,13 +5807,20 @@ mod tests {
     #[tokio::test]
     async fn observation_updates_feed_the_world_state_ring() {
         use crate::handle::tests::{EmptyRegistry, build_bare_actor};
+        use std::time::{SystemTime, UNIX_EPOCH};
 
         let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
         let task_caps = crate::task_config::ToolRuntimeConfig::default();
         let (mut actor, _diag_rx) = build_bare_actor(registry, &task_caps);
+        let captured_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is after the Unix epoch")
+            .as_millis()
+            .try_into()
+            .expect("current Unix timestamp fits in u64");
 
         let observation = ene_mind::ProactiveObservation {
-            captured_at_unix_ms: 7,
+            captured_at_unix_ms,
             activity: Some(ene_mind::ActivitySnapshot {
                 idle_seconds: Some(30),
                 active_window_label: "Code".into(),
@@ -5831,7 +5842,7 @@ mod tests {
             .world_state
             .latest()
             .expect("latest world-state snapshot");
-        assert_eq!(snap.captured_at_unix_ms, 7);
+        assert_eq!(snap.captured_at_unix_ms, captured_at_unix_ms);
         assert_eq!(snap.idle_seconds, Some(30));
         assert_eq!(snap.active_window_label, "Code");
         assert_eq!(snap.recent_change, "focused Code");
@@ -5843,6 +5854,35 @@ mod tests {
         );
         assert_eq!(actor.proactive.world_state.len(), 2);
 
+        // A delayed observation may still arrive after the decision payload
+        // would be rejected as stale; it must not reintroduce old activity
+        // into the world-state summary.
+        assert!(
+            actor
+                .handle_command(EneCommand::UpdateProactiveObservation {
+                    observation: ene_mind::ProactiveObservation {
+                        captured_at_unix_ms: 1,
+                        activity: Some(ene_mind::ActivitySnapshot {
+                            idle_seconds: Some(0),
+                            active_window_label: "Stale editor".into(),
+                            recent_change: "stale focus".into(),
+                        }),
+                        screen_summary: None,
+                        screen_summary_status: ene_mind::ScreenSummaryStatus::Disabled,
+                    },
+                })
+                .await
+        );
+        assert_eq!(actor.proactive.world_state.len(), 3);
+        let stale = actor
+            .proactive
+            .world_state
+            .latest()
+            .expect("latest world-state snapshot");
+        assert_eq!(stale.idle_seconds, None);
+        assert!(stale.active_window_label.is_empty());
+        assert!(stale.recent_change.is_empty());
+
         // A zero-timestamp observation (no host yet) must not pollute the
         // ring.
         assert!(
@@ -5852,7 +5892,7 @@ mod tests {
                 })
                 .await
         );
-        assert_eq!(actor.proactive.world_state.len(), 2);
+        assert_eq!(actor.proactive.world_state.len(), 3);
 
         // A session reset drops the world-state history with the rest of the
         // per-session proactive state.

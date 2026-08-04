@@ -66,9 +66,9 @@ impl WorldStateSnapshot {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdleTrend {
-    /// Latest idle is larger than the earliest.
+    /// Latest idle is larger than the previous snapshot.
     Rising,
-    /// Latest idle is smaller than the earliest.
+    /// Latest idle is smaller than the previous snapshot.
     Falling,
     /// Both values are present and equal.
     Steady,
@@ -80,7 +80,7 @@ pub enum IdleTrend {
 /// Computed world-state analysis for one decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldStateSummary {
-    /// Idle direction across the ring (see [`IdleTrend`]).
+    /// Idle direction in the latest snapshot pair (see [`IdleTrend`]).
     pub idle_trend: IdleTrend,
     /// Snapshots with a window switch inside the recent change window.
     pub window_changes: usize,
