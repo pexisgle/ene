@@ -380,12 +380,12 @@ mod tests {
 
     #[test]
     fn cron_expression_with_spaces_parses_quoted_and_unquoted() {
-        let quoted = parse("--kind cron --cron \"0 9 * * *\" --tz Asia/Tokyo");
+        let quoted = parse("--kind cron --cron \"0 9 * * *\" --tz Asia/Tokyo --prompt ping");
         assert_eq!(quoted.kind, ScheduleKind::Cron);
         assert_eq!(quoted.cron_expr.as_deref(), Some("0 9 * * *"));
         assert_eq!(quoted.timezone, "Asia/Tokyo");
 
-        let unquoted = parse("--kind cron --cron 0 9 * * * --tz UTC");
+        let unquoted = parse("--kind cron --cron 0 9 * * * --tz UTC --prompt ping");
         assert_eq!(unquoted.cron_expr.as_deref(), Some("0 9 * * *"));
     }
 
