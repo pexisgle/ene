@@ -153,6 +153,7 @@ async fn compose(
         history: &[],
         greeting_index: None,
         store,
+        workspace: None,
         query_embedding: None,
         embedder: None,
         llm_provider: None,

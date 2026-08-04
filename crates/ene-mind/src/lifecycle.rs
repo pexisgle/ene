@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ene_ai::{EmbeddingProvider, LlmMessage, LlmProvider, Role};
 use ene_config::CharacterCardV3;
-use ene_core::{ActiveCommitmentPrompt, AffectState, MemoryPort};
+use ene_core::{ActiveCommitmentPrompt, AffectState, MemoryPort, WorkspaceDocumentPort};
 
 use crate::character::StyleExample;
 use crate::config::MindConfig;
@@ -66,6 +66,9 @@ pub struct TurnContext<'a> {
     pub greeting_index: Option<u32>,
     /// Memory store (optional when memory disabled).
     pub store: Option<&'a dyn MemoryPort>,
+    /// Workspace document index (optional; only used when the RAG config
+    /// enables workspace context injection).
+    pub workspace: Option<&'a dyn WorkspaceDocumentPort>,
     /// Query embedding for recall (optional).
     pub query_embedding: Option<&'a [f32]>,
     /// Embedding provider for model name.
