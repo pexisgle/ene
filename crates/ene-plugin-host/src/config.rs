@@ -92,6 +92,17 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
         },
     );
 
+    // The OpenAI Speech API TTS provider plugin authenticates with the same
+    // OPENAI_API_KEY credential and honors the same base URL override as the
+    // openai plugin.
+    list.insert(
+        "openai-tts".to_string(),
+        PluginEntry {
+            env_passthrough: vec!["OPENAI_API_KEY".to_string(), "OPENAI_BASE_URL".to_string()],
+            ..PluginEntry::default()
+        },
+    );
+
     // The local GGUF provider plugin needs no host environment and loads no
     // model until one is configured, so the default entry is a plain enabled
     // process (equivalent to the always-built-in `ene-ai-local` crate it

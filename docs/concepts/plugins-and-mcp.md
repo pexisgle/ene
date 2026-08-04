@@ -16,6 +16,7 @@ Ene Host Application (ene-runtime)
         ├── IPC Protocol v6 (Length-prefixed frames over stdio)
         │     ├── ene-plugin-anthropic (Anthropic LLM Provider Plugin)
         │     ├── ene-plugin-openai    (OpenAI-Compatible Provider Plugin)
+        │     ├── ene-plugin-openai-tts (OpenAI Speech API TTS Provider Plugin)
         │     ├── ene-plugin-llama-cpp (Local GGUF Provider Plugin)
         │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS Provider Plugin)
         │     ├── ene-plugin-edge-tts  (Microsoft Edge Neural Voice TTS Provider Plugin)
@@ -276,9 +277,11 @@ tests against pinned GGUF fixtures.
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
+| `ene-plugin-openai-tts` | Provider | OpenAI Speech API TTS provider (tts-1 / tts-1-hd) — WAV (24 kHz PCM) audio | No |
 | `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — chat streaming, completion, and GGUF embeddings | No |
+| `ene-plugin-voicevox` | Provider | VOICEVOX / Aivis Speech TTS provider — WAV audio via the 2-step `audio_query` → `synthesis` flow | No |
 
-All fifteen plugins above are included in the default `plugins.list` and start
+All seventeen plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.
 
 ### Filesystem tool reference (`filesystem.*`)
