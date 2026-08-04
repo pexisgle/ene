@@ -56,6 +56,8 @@ pub struct TurnContext<'a> {
     pub user_name: &'a str,
     /// Session identifier for logging.
     pub session_id: &'a str,
+    /// Shared L1 recall cache for this session (None disables caching).
+    pub recall_cache: Option<&'a crate::recall::MemoryRecallCache>,
     /// Current user message.
     pub user_input: &'a str,
     /// Recent conversation history.

@@ -3,6 +3,7 @@
 use chrono::Utc;
 use ene_core::MemoryPort;
 
+use super::MemoryRecallCache;
 use super::pending::gather_pending_candidates;
 use crate::character::is_lorebook_memory_row;
 use crate::commitments::CommitmentLedger;
@@ -32,6 +33,10 @@ pub struct ExecuteRecallInput<'a> {
     pub embedding_model: &'a str,
     /// Loaded affect state (optional).
     pub affect: Option<&'a ene_core::AffectState>,
+    /// L1 recall cache; `None` falls back to L2 for every query.
+    pub cache: Option<&'a MemoryRecallCache>,
+    /// Session identifier for cache scoping.
+    pub session_id: &'a str,
 }
 
 /// Execute hybrid typed recall and return plan + recalled memories.
@@ -39,14 +44,7 @@ pub async fn execute_hybrid_recall(
     config: &MindConfig,
     input: &ExecuteRecallInput<'_>,
 ) -> Result<(crate::recall::RecallPlan, Vec<RecalledMemory>), CognitionError> {
-    let commitments = match CommitmentLedger::list_active(
-        input.store,
-        input.character_id,
-        Some(input.user_id),
-        16,
-    )
-    .await
-    {
+    let commitments = match list_active_commitments(input).await {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(
@@ -81,11 +79,15 @@ pub async fn execute_hybrid_recall(
         &config.memory,
     );
 
-    let mut gathered = input
-        .store
-        .search(&search_options)
-        .await
-        .map_err(CognitionError::MemoryPort)?;
+    let mut gathered = match input.cache {
+        Some(cache) => {
+            cache
+                .search(input.store, input.session_id, &search_options)
+                .await
+        }
+        None => input.store.search(&search_options).await,
+    }
+    .map_err(CognitionError::MemoryPort)?;
 
     // Unconfirmed candidates deferred to the user-approval queue compete
     // in the same score competition as typed memories. They carry no
@@ -93,11 +95,16 @@ pub async fn execute_hybrid_recall(
     // queue and merge the topic-related ones here. `score_and_rank` below then
     // applies the ordinary min_score floor and result limit, so a pending
     // candidate only surfaces when the conversation touches its topic.
-    // Approval mode turns this off: candidates waiting for a user decision
-    // must not leak into normal recall at all.
     let pending_limit = config.memory.recall_pending_candidate_limit;
     if pending_limit > 0 && !config.memory_approval.require_approval {
-        gather_pending_candidates(input.store, &search_options, &mut gathered, pending_limit).await;
+        gather_pending_candidates(
+            input.cache,
+            input.store,
+            &search_options,
+            &mut gathered,
+            pending_limit,
+        )
+        .await;
     }
 
     // Lorebook rows are card data with a guaranteed-injection path of their
@@ -122,6 +129,25 @@ pub async fn execute_hybrid_recall(
     Ok((plan, recalled))
 }
 
+/// Load active commitments through the L1 cache when present, else L2.
+async fn list_active_commitments(
+    input: &ExecuteRecallInput<'_>,
+) -> Result<Vec<ene_core::Commitment>, ene_core::MemoryPortError> {
+    match input.cache {
+        Some(cache) => {
+            cache
+                .list_active_commitments(input.store, input.character_id, Some(input.user_id), 16)
+                .await
+        }
+        None => {
+            input
+                .store
+                .list_active_commitments(input.character_id, Some(input.user_id), 16)
+                .await
+        }
+    }
+}
+
 /// Load reflection memories and apply their boost/penalty to scored recall
 /// candidates, closing the self-reflection feedback loop.
 ///
@@ -141,7 +167,13 @@ async fn apply_reflection_to_scored(
         return;
     }
 
-    let reflections = load_reflection_memories(input.store, input.character_id).await;
+    let reflections = match input.cache {
+        Some(cache) => cache
+            .get_reflection_memories(input.store, input.character_id)
+            .await
+            .unwrap_or_default(),
+        None => load_reflection_memories(input.store, input.character_id).await,
+    };
     if reflections.is_empty() {
         return;
     }
@@ -188,16 +220,30 @@ async fn apply_reflection_to_scored(
 /// reinforce memories that were recalled but then dropped, feeding the
 /// self-reinforcing recall loop. Call this after prompt composition with
 /// `PromptPacketMeta::injected_memory_ids`.
-pub async fn bump_injected_memory_access(store: &dyn MemoryPort, injected_ids: &[i64]) {
+pub async fn bump_injected_memory_access(
+    store: &dyn MemoryPort,
+    cache: Option<&MemoryRecallCache>,
+    injected_ids: &[i64],
+) {
+    let mut bumped = Vec::new();
     for &id in injected_ids {
-        if let Err(error) = store.bump_typed_memory_access(id).await {
-            tracing::warn!(
-                component = "RecallRunner",
-                memory_id = id,
-                error = %error,
-                "Failed to bump typed memory access after prompt injection"
-            );
+        match store.bump_typed_memory_access(id).await {
+            Ok(true) => bumped.push(id),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    component = "RecallRunner",
+                    memory_id = id,
+                    error = %error,
+                    "Failed to bump typed memory access after prompt injection"
+                );
+            }
         }
+    }
+    if let Some(cache) = cache {
+        // Single refresh after all bumps so the epoch gate covers every row
+        // in one window instead of per id.
+        cache.refresh_access(&bumped);
     }
 }
 
@@ -210,6 +256,7 @@ mod tests {
     use super::*;
     use crate::config::MindConfig;
     use ene_store::MemoryStore;
+    use ene_store::{CommitmentStatus, NewCommitment};
     use ene_store::{MemoryConfidence, MemoryKind, MemorySalience, MemorySource, MemoryStatus};
     use ene_store::{MemoryScope, NewMemoryItem};
 
@@ -259,6 +306,8 @@ mod tests {
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -270,6 +319,81 @@ mod tests {
                 .all(|m| m.item.content != "The world is always sunny."),
             "lorebook rows must not surface through recall; the injection path owns them"
         );
+    }
+
+    #[tokio::test]
+    async fn cached_recall_matches_uncached_on_real_store() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let item = NewMemoryItem {
+            scope: MemoryScope::Character,
+            character_id: "Ene".into(),
+            user_id: "User".into(),
+            kind: MemoryKind::Preference,
+            title: "coffee".into(),
+            content: "The user likes coffee with oat milk.".into(),
+            source: MemorySource::Conversation,
+            source_ref: None,
+            confidence: MemoryConfidence::new(1.0),
+            salience: MemorySalience::new(1.0),
+            affect: Default::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        let id = store.insert_typed_memory(&item).await.unwrap();
+        store
+            .upsert_memory_embedding(id, "mock", "content", &[1.0, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        store
+            .insert_commitment(&NewCommitment {
+                character_id: "Ene".into(),
+                user_id: "User".into(),
+                title: "buy coffee".into(),
+                description: "pick up beans tomorrow".into(),
+                status: CommitmentStatus::Active,
+                due_at: None,
+                due_label: None,
+            })
+            .await
+            .unwrap();
+
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+
+        let cache = MemoryRecallCache::new();
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "What does the user like to drink?",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            affect: None,
+            cache: Some(&cache),
+            session_id: "sess",
+        };
+
+        let (_, first) = execute_hybrid_recall(&config, &input).await.unwrap();
+        let (_, second) = execute_hybrid_recall(&config, &input).await.unwrap();
+
+        assert_eq!(first, second, "cached recall must equal uncached recall");
+        let stats = cache.stats();
+        assert_eq!(
+            stats.misses, 3,
+            "first run loads commitments/search/pending"
+        );
+        assert_eq!(stats.hits, 3, "repeat turn is served entirely from L1");
     }
 
     #[tokio::test]
@@ -329,6 +453,8 @@ mod tests {
             query_embedding: &embedding,
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -416,6 +542,8 @@ mod tests {
             query_embedding: &embedding,
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -495,6 +623,8 @@ mod tests {
             query_embedding: &embedding,
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -579,6 +709,8 @@ mod tests {
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -653,6 +785,8 @@ mod tests {
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -674,7 +808,6 @@ mod tests {
     #[tokio::test]
     async fn approval_mode_excludes_pending_candidates_from_recall() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let now = Utc::now();
         store
             .insert_pending_candidate(ene_core::PendingCandidate {
                 id: 0,
@@ -691,7 +824,7 @@ mod tests {
                 source_turn: None,
                 approval_parked: true,
                 status: ene_core::PendingCandidateStatus::Pending,
-                created_at: now,
+                created_at: Utc::now(),
                 resolved_at: None,
             })
             .await
@@ -714,25 +847,21 @@ mod tests {
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
-        let (_, recalled) = execute_hybrid_recall(&config, &input)
-            .await
-            .expect("recall");
-        assert!(
-            recalled.iter().all(|m| {
-                !m.sources
-                    .contains(&ene_core::MemoryCandidateSource::Pending)
-            }),
-            "unapproved candidates must never leak into recall in approval mode"
-        );
+        let (_, recalled) = execute_hybrid_recall(&config, &input).await.unwrap();
+        assert!(recalled.iter().all(|memory| {
+            !memory
+                .sources
+                .contains(&ene_core::MemoryCandidateSource::Pending)
+        }));
     }
 
     #[tokio::test]
     async fn approval_parked_candidates_stay_excluded_after_mode_toggle_off() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let now = Utc::now();
-        // Parked while approval mode was on; the mode is now off.
         store
             .insert_pending_candidate(ene_core::PendingCandidate {
                 id: 0,
@@ -742,14 +871,14 @@ mod tests {
                 content: "the user's favorite drink is matcha".into(),
                 kind: MemoryKind::Preference,
                 confidence: 0.9,
-                reason_detail: "Approval mode enabled".into(),
+                reason_detail: "approval mode enabled".into(),
                 existing_memory_title: None,
                 existing_memory_id: None,
                 source_quote: "I like matcha".into(),
                 source_turn: None,
                 approval_parked: true,
                 status: ene_core::PendingCandidateStatus::Pending,
-                created_at: now,
+                created_at: Utc::now(),
                 resolved_at: None,
             })
             .await
@@ -771,18 +900,16 @@ mod tests {
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
-        let (_, recalled) = execute_hybrid_recall(&config, &input)
-            .await
-            .expect("recall");
-        assert!(
-            recalled.iter().all(|m| {
-                !m.sources
-                    .contains(&ene_core::MemoryCandidateSource::Pending)
-            }),
-            "approval-parked candidates must not re-enter recall when the mode is toggled off"
-        );
+        let (_, recalled) = execute_hybrid_recall(&config, &input).await.unwrap();
+        assert!(recalled.iter().all(|memory| {
+            !memory
+                .sources
+                .contains(&ene_core::MemoryCandidateSource::Pending)
+        }));
     }
 
     #[tokio::test]
@@ -857,6 +984,8 @@ mod tests {
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)

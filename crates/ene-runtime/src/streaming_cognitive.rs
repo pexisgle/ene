@@ -179,6 +179,7 @@ fn build_turn_context<'a>(
     card_name: &'a str,
     user_name: &'a str,
     session_id: &'a str,
+    recall_cache: Option<&'a ene_mind::MemoryRecallCache>,
     user_input: &'a str,
     history: &'a [HistoryEntry],
     greeting_index: Option<u32>,
@@ -196,6 +197,7 @@ fn build_turn_context<'a>(
         character_id: card_name,
         user_name,
         session_id,
+        recall_cache,
         user_input,
         history,
         greeting_index,
@@ -251,6 +253,7 @@ fn spawn_interrupted_memory_work(
     mind: &MindConfig,
     provider: &Arc<dyn ene_ai::LlmProvider>,
     embedder: Option<&Arc<dyn ene_ai::EmbeddingProvider>>,
+    recall_cache: Option<Arc<ene_mind::MemoryRecallCache>>,
     memory_writer_tx: &tokio::sync::mpsc::UnboundedSender<
         tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>,
     >,
@@ -284,6 +287,7 @@ fn spawn_interrupted_memory_work(
         deferred_input,
         provider.clone(),
         embedder.cloned(),
+        recall_cache,
     );
     drop(memory_writer_tx.send(handle));
 }
@@ -423,6 +427,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let card_name = session.card_name().to_string();
     let user_name = config.user_name.clone();
     let session_id = session.memory.session_id.clone();
+    let recall_cache = session.memory.recall_cache.clone();
     let mem_store = concrete_store.clone();
 
     let history: Vec<HistoryEntry> = session.history().to_vec();
@@ -490,6 +495,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             &card_name,
             &user_name,
             session_id.as_str(),
+            recall_cache.as_deref(),
             compose_query,
             &history,
             session.active_greeting_index(),
@@ -597,6 +603,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             &card_name,
             &user_name,
             session_id.as_str(),
+            recall_cache.as_deref(),
             compose_query,
             &history,
             session.active_greeting_index(),
@@ -664,6 +671,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             &card_name,
             &user_name,
             session_id.as_str(),
+            recall_cache.as_deref(),
             compose_query,
             &history,
             session.active_greeting_index(),
@@ -783,6 +791,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         &card_name,
         &user_name,
         session_id.as_str(),
+        recall_cache.as_deref(),
         compose_query,
         &history,
         session.active_greeting_index(),
@@ -1061,6 +1070,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 &mind,
                 &provider,
                 embedder.as_ref(),
+                recall_cache.clone(),
                 &memory_writer_tx,
                 user_input.as_str(),
                 &spoken,
@@ -1127,6 +1137,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     &mind,
                     &provider,
                     embedder.as_ref(),
+                    recall_cache.clone(),
                     &memory_writer_tx,
                     user_input.as_str(),
                     &spoken,
@@ -1397,7 +1408,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             if let Some(store) = mem_store.as_deref() {
                 let finalize_result = tokio::time::timeout(
                     std::time::Duration::from_mins(1),
-                    engine.finalize_turn(store, &mind, &post),
+                    engine.finalize_turn(store, &mind, &post, recall_cache.as_deref()),
                 )
                 .await;
                 if let Err(error) = match finalize_result {
@@ -1493,6 +1504,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     deferred_input,
                     provider.clone(),
                     embedder.clone(),
+                    recall_cache.clone(),
                 );
                 drop(memory_writer_tx.send(memory_writer_handle));
             }

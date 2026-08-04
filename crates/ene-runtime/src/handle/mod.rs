@@ -631,10 +631,12 @@ impl EneHandle {
         }
 
         let mind_memory = mind.memory.clone();
+        let recall_cache = session.memory.recall_cache.clone();
         let memory = crate::diagnostics::MemoryHandle::new(
             memory_store.clone(),
             session.memory.embedding_provider.clone(),
             mind_memory,
+            recall_cache.clone(),
         );
 
         let fallback_cfg = config.get_section::<ene_ai::AiConfig>()?.fallback;

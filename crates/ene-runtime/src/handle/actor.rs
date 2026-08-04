@@ -2847,8 +2847,8 @@ impl TurnActor {
                 reply,
             } => {
                 // This actor arm is the single mutation surface for candidate
-                // resolutions. The L1 recall cache invalidates here once it
-                // lands: approve persists a typed memory and reject removes a
+                // resolutions. The L1 recall cache invalidates here: approve
+                // persists a typed memory and reject removes a
                 // pending row, both of which feed hybrid recall, so the
                 // actor-owned cache must be dropped for the active character
                 // on success.
@@ -2879,6 +2879,9 @@ impl TurnActor {
                 // Audit events must only record committed mutations; a failed
                 // approve/reject must not emit a false resolved record.
                 if result.is_ok() {
+                    if let Some(cache) = &self.session.memory.recall_cache {
+                        cache.invalidate_character(self.session.card_name());
+                    }
                     drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
                         id,
                         status,
@@ -2910,6 +2913,9 @@ impl TurnActor {
                     .map(|_| ())
                     .map_err(crate::public_api::PublicApiError::from);
                 if result.is_ok() {
+                    if let Some(cache) = &self.session.memory.recall_cache {
+                        cache.invalidate_character(self.session.card_name());
+                    }
                     drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
                         id,
                         status: ene_store::PendingCandidateStatus::Pending,
