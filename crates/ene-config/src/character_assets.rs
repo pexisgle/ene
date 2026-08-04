@@ -430,6 +430,7 @@ mod tests {
             uri: String::new(),
             name: String::new(),
             ext: String::new(),
+            extra: indexmap::IndexMap::new(),
         };
         assert_eq!(asset("x_vrm").ene_kind(), Some(EneAssetKind::Vrm));
         assert_eq!(asset("vrm").ene_kind(), Some(EneAssetKind::Vrm));

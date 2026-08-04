@@ -21,6 +21,8 @@ use ene_core::{
 };
 use ene_rag::lexical_overlap_score;
 
+use super::MemoryRecallCache;
+
 /// Load the pending queue and merge topic-related candidates into `gathered`.
 ///
 /// `limit` caps how many candidates compete (newest first); a `limit` of `0`
@@ -30,15 +32,25 @@ use ene_rag::lexical_overlap_score;
 /// candidates" with a warning, mirroring how the runner treats commitment-list
 /// failures — recall must never fail a turn because the queue was unreadable.
 pub async fn gather_pending_candidates(
+    cache: Option<&MemoryRecallCache>,
     store: &dyn MemoryPort,
     query: &Query<'_>,
     gathered: &mut Vec<GatheredCandidate>,
     limit: usize,
 ) {
-    let mut candidates = match store
-        .list_pending_candidates(query.character_id, Some(PendingCandidateStatus::Pending))
-        .await
-    {
+    let listed = match cache {
+        Some(cache) => {
+            cache
+                .list_pending_candidates(store, query.character_id)
+                .await
+        }
+        None => {
+            store
+                .list_pending_candidates(query.character_id, Some(PendingCandidateStatus::Pending))
+                .await
+        }
+    };
+    let mut candidates = match listed {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(
@@ -64,6 +76,12 @@ pub async fn gather_pending_candidates(
             .user_id
             .is_none_or(|user_id| candidate.user_id == user_id || candidate.user_id.is_empty())
     });
+
+    // Approval-parked rows (`mind.memory_approval.require_approval`) are
+    // excluded regardless of the current mode: a candidate that was never
+    // approved must not surface as `[unconfirmed]` hearsay just because the
+    // switch was toggled off. Only weak-contradiction deferrals compete.
+    candidates.retain(|candidate| !candidate.approval_parked);
 
     // Newest first: the freshest unconfirmed info is the most relevant to ask
     // about, and the retention policy can hold hundreds of rows per character.

@@ -498,12 +498,38 @@ impl AiBridge {
 
     /// Approve a pending memory candidate, persisting it as a typed memory.
     pub fn approve_candidate(&self, id: i64) -> Result<(), AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.candidates().approve(id))??)
+        Ok(self.block_on_timeout(
+            self.handle
+                .candidates()
+                .approve(id, self.handle.active_turn()),
+        )??)
     }
 
     /// Reject a pending memory candidate.
     pub fn reject_candidate(&self, id: i64) -> Result<(), AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.candidates().reject(id))??)
+        Ok(self.block_on_timeout(
+            self.handle
+                .candidates()
+                .reject(id, self.handle.active_turn()),
+        )??)
+    }
+
+    /// Edit a still-pending candidate's user-editable fields.
+    pub fn edit_candidate(
+        &self,
+        id: i64,
+        edit: ene_runtime::PendingCandidateEdit,
+    ) -> Result<(), AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.candidates().edit(
+            id,
+            edit,
+            self.handle.active_turn(),
+        ))??)
+    }
+
+    /// List approved / rejected candidates, newest first.
+    pub fn fetch_candidate_history(&self) -> Result<Vec<PendingCandidateSummary>, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.candidates().history(50))??)
     }
 
     // ── Commitment management ──
@@ -910,13 +936,18 @@ async fn pump_events(
         },
         // Lifecycle bus: turn-independent, low-frequency. Only
         // `PendingCandidateAvailable` currently drives UI state here;
-        // `StatusChanged` / `ToolBackgroundCompleted` are observed
-        // elsewhere (diagnostics / background tool UI) or not yet wired.
+        // `StatusChanged` / `ToolBackgroundCompleted` / `CandidateChanged`
+        // are observed elsewhere (diagnostics / background tool UI) or the
+        // journal refetches after its own mutations anyway.
         lifecycle_event = lifecycle_receiver.recv() => match lifecycle_event {
             Ok(LifecycleEvent::PendingCandidateAvailable { count }) => {
                 drop(event_tx.send(AppEvent::PendingCandidatesCount(count)));
             }
-            Ok(LifecycleEvent::StatusChanged { .. } | LifecycleEvent::ToolBackgroundCompleted { .. }) => {}
+            Ok(
+                LifecycleEvent::StatusChanged { .. }
+                | LifecycleEvent::ToolBackgroundCompleted { .. }
+                | LifecycleEvent::CandidateChanged { .. },
+            ) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!("[Ene] Dropped {n} lifecycle events (broadcast lag)");
             }

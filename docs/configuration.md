@@ -414,9 +414,47 @@ active-commitment count, bounding memory and embedding work if the ledger grows
 large. When a list returns exactly the limit the ledger warns that results may
 be truncated; raise `mind.memory_limits.commitment_active_match_limit` (or
 `ENE_MIND__MEMORY_LIMITS__COMMITMENT_ACTIVE_MATCH_LIMIT`) if matching misses
-active commitments. This is the **only** operator-configurable memory setting —
+active commitments. This is one of two operator-configurable memory settings;
 everything else under `mind.memory.*` stays at its code default
-(`MindMemoryConfig`).
+(`MindMemoryConfig`). The other is the approval-workflow switch below.
+
+### `mind.memory_approval.*` — pre-save candidate approval
+
+```json
+{
+  "mind": {
+    "memory_approval": {
+      "require_approval": false
+    }
+  }
+}
+```
+
+`require_approval` (default `false`, env:
+`ENE_MIND__MEMORY_APPROVAL__REQUIRE_APPROVAL`) switches typed-memory writes
+from auto-save to a review-before-save workflow. When `true`, every extracted
+candidate that would otherwise be persisted (or would supersede an existing
+memory) is parked in the `pending_candidates` queue instead, carrying its
+source turn, source quote, extraction reason, confidence, and supersede
+target. The queue is surfaced in the CLI (`/memory approval`) and the desktop
+Memory Journal, where each candidate can be inspected, edited,
+edit-and-approved, approved, or rejected. Approved candidates are persisted
+as typed memories with the original conflict target propagated as
+`supersedes_id` and the old memory deactivated (`Superseded`), mirroring the
+auto-save supersede semantics; rejected ones are discarded. Edits are
+validated before any write and resolution is conflict-safe, so a bad edit or
+a raced decision never loses the original candidate. Approval and edit
+operations carry the active turn id and are emitted as `CandidateChanged`
+audit events on the runtime lifecycle bus.
+
+In approval mode, unapproved candidates are excluded from normal recall: they
+surface only in the review queue, never in the prompt. Approval-parked
+candidates stay excluded even if the mode is later turned off — only
+weak-contradiction deferrals ever compete in recall under
+`recall_pending_candidate_limit` as described below. The default auto-save
+mode is unchanged (`false`). Commitment candidates (the dedicated ledger
+path) and explicit user forget / dispute decisions are applied immediately in
+both modes.
 
 The memory arbiter decides whether an incoming candidate contradicts an existing
 memory of the same kind by comparing the *similarity of their title embeddings*
@@ -452,6 +490,10 @@ topic comes up — surfacing candidates are marked `[unconfirmed]` in the prompt
 `recall_pending_candidate_limit` (default `3`) caps how many compete per turn;
 `0` disables the recall path without affecting the settings-screen review list.
 The cap is code-tunable in `MindMemoryConfig` and not yet exposed via settings.
+Resolved candidates (approved / rejected) stay in the queue as history until
+the retention sweep removes them (`mind.memory.pending_candidate_retention`,
+code-defaulted to 14 days / 200 rows), and the CLI `/memory approval history`
+and the desktop journal's history view list them with their resolution time.
 
 ### `plugins.*` — IPC Plugins & MCP Server Connections
 
@@ -659,7 +701,8 @@ plugin-owned:
             "url": "https://example.com/gemma-4-e4b.gguf",
             "quantization": "Q4_0",
             "model_path": "",
-            "gpu_layers": "33"
+            "gpu_layers": "33",
+            "context_size": 16384
           }
         }
       }
@@ -671,11 +714,23 @@ plugin-owned:
 The local GGUF provider plugin (`ene-plugin-llama-cpp`) consumes one profile
 per model: `url` (GGUF download URL), `quantization` (label, e.g. `"F16"` /
 `"Q4_0"`), `model_path` (local path override that skips download when
-non-empty), and `gpu_layers` (`"auto"` or an integer string). Profile
-*selection* is plugin-owned; the values are delivered via
+non-empty), `gpu_layers` (`"auto"` or an integer string), and the optional
+`context_size` (chat context window in tokens; defaults to `16384` when
+omitted). The plugin downloads `url` weights into the model cache on first
+use (GGUF magic validated) and keeps one loaded model per profile for its
+process lifetime. `context_size` and `gpu_layers` size chat loads only — the
+embedding model sizes its own context and offload plan internally, and the
+host's routing window stays in `ai.local_models.<name>.context_size`.
+Because the v2→v3 migration does not mirror `context_size` and the plugin has
+no other channel to learn the host value, a profile that omits it loads
+16,384 tokens regardless of `ai.local_models.<name>.context_size`: when you
+raise the host-side window, set the profile's `context_size` to at least that
+value, otherwise long prompts fail with a context overflow at generation
+time. Profile *selection* is plugin-owned; the values are delivered via
 `ConfigurablePlugin::set_profiles`. The v2→v3 migration mirrors existing
-`ai.local_models` entries into these profiles; the local-model keys stay in
-`ai.local_models` as routing information.
+`ai.local_models` entries into these profiles (it does not mirror
+`context_size`); the local-model keys stay in `ai.local_models` as routing
+information.
 
 #### Secret marking
 
@@ -774,6 +829,74 @@ See the [Schedules guide](guide/schedules.md) for the CLI surface.
 - `confirmation_timeout_secs` (default `300`) — how long a scheduled run
   awaiting user confirmation may wait before it is recorded `timed_out`.
   `ENE_SCHEDULER__CONFIRMATION_TIMEOUT_SECS`.
+
+### `rag.workspace` — Document/Workspace RAG Settings
+
+Indexes local documents and project folders for citation-bearing retrieval
+into conversation context. **Privacy-first defaults: the feature is disabled
+and no folder is scanned until the operator explicitly opts in.** Only the
+folders listed in `folders` are ever read, and results are restricted to those
+same folders at search time. See the
+[Workspace RAG guide](guide/workspace-rag.md) for the full privacy model.
+
+```json
+{
+  "rag": {
+    "workspace": {
+      "enabled": false,
+      "folders": [],
+      "include_extensions": [
+        "md", "markdown", "txt", "rs", "toml", "json", "yaml", "yml",
+        "py", "ts", "js", "tsx", "jsx", "html", "css", "sh", "xml", "ini",
+        "cfg", "csv"
+      ],
+      "ignore_globs": [
+        ".git/**", "node_modules/**", "target/**", "dist/**", ".venv/**",
+        "**/.env", "**/.env.*", "*.gguf", "*.safetensors", "*.ckpt",
+        "*.pth", "*.onnx", "*.bin", "*.db", "*.db-wal", "*.db-shm",
+        "assets/models/**"
+      ],
+      "max_file_bytes": 1048576,
+      "chunk_chars": 1200,
+      "chunk_overlap_chars": 200,
+      "max_chunks_per_file": 256,
+      "top_k": 8,
+      "final_n": 4,
+      "min_similarity": 0.20,
+      "sync_on_startup": false
+    }
+  }
+}
+```
+
+- `enabled` — master switch. When `false` (default), nothing is scanned,
+  searched, or injected into prompts.
+- `folders` — the **only** folders that may be scanned and searched. Paths are
+  canonicalized before scanning; directory symlinks are never followed and
+  file symlinks are indexed only when their canonical target stays inside the
+  configured folder; files whose canonical path escapes it are skipped.
+- `include_extensions` — file extensions (case-insensitive, no dot) eligible
+  for indexing.
+- `ignore_globs` — glob patterns (relative to each folder) excluded from
+  scanning. Defaults cover version-control metadata, dependency/build
+  directories, `.env`-style secrets, model weights (`.gguf`, `.safetensors`,
+  ...), and database files. `*` matches within a segment, `**` across
+  segments, `?` a single character; patterns without `/` match basenames.
+- `max_file_bytes` — files larger than this are skipped entirely (default
+  1 MiB).
+- `chunk_chars` / `chunk_overlap_chars` — target chunk size and the overlap
+  repeated at the next chunk's start (line-granular).
+- `max_chunks_per_file` — hard cap; files exceeding it are skipped rather than
+  silently truncated.
+- `top_k` / `final_n` — vector over-fetch before scoring, and the maximum
+  chunks injected into a prompt (or returned by `/workspace search`).
+- `min_similarity` — minimum hybrid score for a hit to be returned.
+- `sync_on_startup` — run a background sync when the runtime opens (still
+  requires `enabled`).
+
+All keys follow the standard `ENE_` override scheme, e.g.
+`ENE_RAG__WORKSPACE__ENABLED=true`, `ENE_RAG__WORKSPACE__FOLDERS=/path/a,/path/b`
+(JSON-encoded arrays work too).
 
 ### `desktop.*` — Desktop GUI & Graphics Parameters
 

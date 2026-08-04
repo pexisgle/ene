@@ -59,6 +59,8 @@ i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop
 i18n-embed-fl = "0.10"
 active-win-pos-rs = "0.11.0"
 crossbeam-channel = { workspace = true }
+regex = { workspace = true }
+indexmap = { workspace = true }
 # Local voice pipeline I/O (optional; enabled by the `voice` feature).
 cpal = { workspace = true, optional = true }
 rodio = { workspace = true, optional = true }

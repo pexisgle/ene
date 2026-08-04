@@ -548,6 +548,7 @@ mod tests {
             selective: None,
             secondary_keys: None,
             position: None,
+            extra: indexmap::IndexMap::new(),
         }
     }
 

@@ -231,10 +231,9 @@ with the mediation layer.
 
 The built-in provider that serves `gguf-runner@1` is `ene-plugin-llama-cpp`
 (`plugins/provider/local-llm`), which also declares `llm/chat@1` and
-`embed@1`. Its inference core is not implemented yet — the plugin currently
-declares the capabilities and returns `NotSupported` for inference actions —
-so third parties should treat the contract as published but the runtime as
-unavailable until the inference slice lands.
+`embed@1` and serves both over the provider IPC: chat streaming, JSON-schema
+completion, and GGUF embeddings, exercised by the plugin crate's CPU contract
+tests against pinned GGUF fixtures.
 
 ---
 
@@ -251,13 +250,14 @@ unavailable until the inference slice lands.
 | `ene-plugin-random` | `random.*` | Random numbers, UUID v4, list picks, and hex colors | No |
 | `ene-plugin-geo` | `geo.*` | IP-based location, current weather, solar timezone offset, sunrise/sunset | No |
 | `ene-plugin-git` | `git.*` | Read-only git inspection: status, diff, log, branch, remote, blame | No |
+| `ene-plugin-homeassistant` | `homeassistant.*` | Home Assistant smart home control: entity state reads, switch/light/plug control, climate temperature setting | No |
 | `ene-plugin-utility` | `utility.*` | Question prompts, todo list management, time/system info, countdown timers & desktop notifications (Linux, D-Bus only) | Yes (host-service `db`) |
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
-| `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — capability skeleton today, inference in a later slice | No |
+| `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — chat streaming, completion, and GGUF embeddings | No |
 
-All fourteen plugins above are included in the default `plugins.list` and start
+All fifteen plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.
 
 ### Filesystem tool reference (`filesystem.*`)

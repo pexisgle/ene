@@ -12,12 +12,13 @@ crate-type = ["lib"]
 
 [dependencies]
 async-trait = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+indexmap = { workspace = true }
 
 ene-config = { workspace = true }
 ene-core = { workspace = true }
@@ -36,6 +37,7 @@ blake3 = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+indexmap = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 ene-plugin-proto = { workspace = true }

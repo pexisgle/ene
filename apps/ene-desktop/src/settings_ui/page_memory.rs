@@ -235,6 +235,35 @@ fn render_pending_approval(
     ui.separator();
     ui.heading(fl!(crate::i18n::loader(), "memory-pending-approval"));
 
+    ui.horizontal(|ui| {
+        let mut show_history = world
+            .get::<UiStateComponent>(ui_entity)
+            .is_some_and(|s| s.0.memory_journal_show_history);
+        if ui
+            .selectable_label(
+                show_history,
+                fl!(crate::i18n::loader(), "memory-pending-history"),
+            )
+            .clicked()
+        {
+            show_history = !show_history;
+            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                state.0.memory_journal_show_history = show_history;
+            }
+            if show_history {
+                fetch_candidate_history(ai, world, ui_entity);
+            }
+        }
+    });
+
+    if world
+        .get::<UiStateComponent>(ui_entity)
+        .is_some_and(|s| s.0.memory_journal_show_history)
+    {
+        render_candidate_history(ui, ai, world, ui_entity);
+        return;
+    }
+
     let candidates = world
         .get::<UiStateComponent>(ui_entity)
         .map(|s| s.0.memory_journal_pending_candidates.clone())
@@ -300,11 +329,33 @@ fn render_pending_approval(
 
                     ui.horizontal(|ui| {
                         let candidate_id = candidate.id;
-                        if ui
-                            .button(fl!(crate::i18n::loader(), "memory-approve"))
+                        let editing = world
+                            .get::<UiStateComponent>(ui_entity)
+                            .and_then(|s| s.0.memory_journal_candidate_draft.clone())
+                            .is_some_and(|d| d.id == candidate_id);
+                        if editing {
+                            render_candidate_editor(ui, ai, world, ui_entity, candidate_id);
+                        } else if ui
+                            .button(fl!(crate::i18n::loader(), "memory-approve-edit"))
                             .clicked()
+                            && let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity)
+                        {
+                            state.0.memory_journal_candidate_draft =
+                                Some(crate::settings::MemoryCandidateDraft {
+                                    id: candidate_id,
+                                    title: candidate.title.clone(),
+                                    content: candidate.content.clone(),
+                                    kind: candidate.kind.clone(),
+                                    confidence: candidate.confidence,
+                                });
+                        }
+                        if !editing
+                            && ui
+                                .button(fl!(crate::i18n::loader(), "memory-approve"))
+                                .clicked()
                         {
                             let result = ai.approve_candidate(candidate_id);
+                            clear_candidate_draft(world, ui_entity);
                             set_action_message(
                                 world,
                                 ui_entity,
@@ -313,11 +364,13 @@ fn render_pending_approval(
                             );
                             fetch_pending_candidates(ai, world, ui_entity);
                         }
-                        if ui
-                            .button(fl!(crate::i18n::loader(), "memory-reject"))
-                            .clicked()
+                        if !editing
+                            && ui
+                                .button(fl!(crate::i18n::loader(), "memory-reject"))
+                                .clicked()
                         {
                             let result = ai.reject_candidate(candidate_id);
+                            clear_candidate_draft(world, ui_entity);
                             set_action_message(
                                 world,
                                 ui_entity,
@@ -327,6 +380,203 @@ fn render_pending_approval(
                             fetch_pending_candidates(ai, world, ui_entity);
                         }
                     });
+                });
+                ui.add_space(4.0);
+            }
+        });
+}
+
+fn render_candidate_editor(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    world: &mut World,
+    ui_entity: Entity,
+    candidate_id: i64,
+) {
+    let Some(mut draft) = world
+        .get::<UiStateComponent>(ui_entity)
+        .and_then(|s| s.0.memory_journal_candidate_draft.clone())
+    else {
+        return;
+    };
+
+    ui.separator();
+    ui.label(fl!(crate::i18n::loader(), "memory-approve-edit-title"));
+    ui.horizontal(|ui| {
+        ui.label(fl!(crate::i18n::loader(), "memory-journal-title-field"));
+        ui.text_edit_singleline(&mut draft.title);
+    });
+    ui.horizontal(|ui| {
+        ui.label(fl!(crate::i18n::loader(), "memory-journal-content"));
+        ui.text_edit_multiline(&mut draft.content);
+    });
+    ui.horizontal(|ui| {
+        ui.label(fl!(crate::i18n::loader(), "memory-journal-kind"));
+        egui::ComboBox::from_id_salt(("memory_candidate_kind", candidate_id))
+            .selected_text(draft.kind.clone())
+            .show_ui(ui, |ui| {
+                for kind in [
+                    "episodic",
+                    "semantic",
+                    "user_profile",
+                    "relationship",
+                    "affective",
+                    "commitment",
+                    "preference",
+                    "procedure",
+                    "reflection",
+                ] {
+                    ui.selectable_value(&mut draft.kind, kind.to_string(), kind);
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label(fl!(crate::i18n::loader(), "memory-journal-confidence"));
+        ui.add(egui::Slider::new(&mut draft.confidence, 0.0..=1.0).step_by(0.05));
+        ui.label(format!("{:.0}%", draft.confidence * 100.0));
+    });
+
+    ui.horizontal(|ui| {
+        if ui
+            .button(fl!(crate::i18n::loader(), "memory-approve-save-approve"))
+            .clicked()
+        {
+            let Some(kind) = parse_candidate_kind(&draft.kind) else {
+                set_invalid_kind_message(world, ui_entity, &draft.kind);
+                return;
+            };
+            let edit = ene_runtime::PendingCandidateEdit {
+                title: draft.title.clone(),
+                content: draft.content.clone(),
+                kind,
+                confidence: draft.confidence,
+            };
+            let result = ai
+                .edit_candidate(candidate_id, edit)
+                .and_then(|()| ai.approve_candidate(candidate_id));
+            set_action_message(
+                world,
+                ui_entity,
+                result.map(|()| true),
+                "memory-approve-save-approve",
+            );
+            clear_candidate_draft(world, ui_entity);
+            fetch_pending_candidates(ai, world, ui_entity);
+        }
+        if ui
+            .button(fl!(crate::i18n::loader(), "memory-approve-save"))
+            .clicked()
+        {
+            let Some(kind) = parse_candidate_kind(&draft.kind) else {
+                set_invalid_kind_message(world, ui_entity, &draft.kind);
+                return;
+            };
+            let edit = ene_runtime::PendingCandidateEdit {
+                title: draft.title.clone(),
+                content: draft.content.clone(),
+                kind,
+                confidence: draft.confidence,
+            };
+            let result = ai.edit_candidate(candidate_id, edit);
+            set_action_message(
+                world,
+                ui_entity,
+                result.map(|()| true),
+                "memory-approve-save",
+            );
+            clear_candidate_draft(world, ui_entity);
+            fetch_pending_candidates(ai, world, ui_entity);
+        }
+        if ui
+            .button(fl!(crate::i18n::loader(), "memory-approve-cancel"))
+            .clicked()
+        {
+            clear_candidate_draft(world, ui_entity);
+        }
+    });
+    ui.separator();
+}
+
+fn parse_candidate_kind(kind: &str) -> Option<ene_store::MemoryKind> {
+    match kind {
+        "episodic" => Some(ene_store::MemoryKind::Episodic),
+        "semantic" => Some(ene_store::MemoryKind::Semantic),
+        "user_profile" => Some(ene_store::MemoryKind::UserProfile),
+        "relationship" => Some(ene_store::MemoryKind::Relationship),
+        "affective" => Some(ene_store::MemoryKind::Affective),
+        "commitment" => Some(ene_store::MemoryKind::Commitment),
+        "preference" => Some(ene_store::MemoryKind::Preference),
+        "procedure" => Some(ene_store::MemoryKind::Procedure),
+        "reflection" => Some(ene_store::MemoryKind::Reflection),
+        _ => None,
+    }
+}
+
+fn set_invalid_kind_message(world: &mut World, ui_entity: Entity, kind: &str) {
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.memory_journal_message = Some(format!(
+            "{}: {kind}",
+            fl!(crate::i18n::loader(), "memory-approve-edit-invalid-kind")
+        ));
+    }
+}
+
+fn clear_candidate_draft(world: &mut World, ui_entity: Entity) {
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.memory_journal_candidate_draft = None;
+    }
+}
+
+fn render_candidate_history(
+    ui: &mut egui::Ui,
+    _ai: &Arc<AiBridge>,
+    world: &mut World,
+    ui_entity: Entity,
+) {
+    let rows = world
+        .get::<UiStateComponent>(ui_entity)
+        .map(|s| s.0.memory_journal_pending_history.clone())
+        .unwrap_or_default();
+    if rows.is_empty() {
+        ui.weak(fl!(crate::i18n::loader(), "memory-pending-history-empty"));
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .max_height(400.0)
+        .show(ui, |ui| {
+            for row in &rows {
+                ui.group(|ui| {
+                    ui.strong(&row.title);
+                    ui.label(format!(
+                        "{}: {}",
+                        fl!(crate::i18n::loader(), "memory-journal-status"),
+                        match row.status.as_str() {
+                            "approved" => {
+                                fl!(crate::i18n::loader(), "memory-approval-status-approved")
+                            }
+                            "rejected" => {
+                                fl!(crate::i18n::loader(), "memory-approval-status-rejected")
+                            }
+                            _ => fl!(crate::i18n::loader(), "memory-approval-status-pending"),
+                        }
+                    ));
+                    ui.label(format!(
+                        "{}: {}",
+                        fl!(crate::i18n::loader(), "memory-journal-created"),
+                        row.created_at
+                    ));
+                    if let Some(resolved) = &row.resolved_at {
+                        ui.label(format!(
+                            "{}: {}",
+                            fl!(crate::i18n::loader(), "memory-approval-resolved-at"),
+                            resolved
+                        ));
+                    }
+                    ui.label(format!(
+                        "{}: {}",
+                        fl!(crate::i18n::loader(), "memory-journal-reason"),
+                        row.reason_detail
+                    ));
                 });
                 ui.add_space(4.0);
             }
@@ -631,6 +881,12 @@ fn action_label_from_key(action_key: &str) -> String {
         "memory-journal-action-restore" => {
             fl!(crate::i18n::loader(), "memory-journal-action-restore")
         }
+        "memory-approve" => fl!(crate::i18n::loader(), "memory-approve"),
+        "memory-reject" => fl!(crate::i18n::loader(), "memory-reject"),
+        "memory-approve-save" => fl!(crate::i18n::loader(), "memory-approve-save"),
+        "memory-approve-save-approve" => {
+            fl!(crate::i18n::loader(), "memory-approve-save-approve")
+        }
         other => other.to_string(),
     }
 }
@@ -743,6 +999,26 @@ fn fetch_pending_candidates(ai: &Arc<AiBridge>, world: &mut World, ui_entity: En
                 state.0.memory_journal_message = Some(format!(
                     "{}: {error}",
                     fl!(crate::i18n::loader(), "memory-pending-refresh-error")
+                ));
+            }
+        }
+    }
+}
+
+fn fetch_candidate_history(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
+    match ai.fetch_candidate_history() {
+        Ok(rows) => {
+            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                state.0.memory_journal_pending_history = rows;
+                state.0.memory_journal_message =
+                    Some(fl!(crate::i18n::loader(), "memory-pending-history-ok"));
+            }
+        }
+        Err(error) => {
+            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                state.0.memory_journal_message = Some(format!(
+                    "{}: {error}",
+                    fl!(crate::i18n::loader(), "memory-pending-history-error")
                 ));
             }
         }

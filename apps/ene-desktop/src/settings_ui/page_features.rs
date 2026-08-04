@@ -13,7 +13,18 @@ use std::sync::Arc;
 
 /// Known tool binary names shown even when absent from the saved map.
 const DEFAULT_TOOL_NAMES: &[&str] = &[
-    "app", "browser", "calc", "calendar", "counter", "fs", "geo", "git", "random", "utility", "web",
+    "app",
+    "browser",
+    "calc",
+    "calendar",
+    "counter",
+    "fs",
+    "geo",
+    "git",
+    "homeassistant",
+    "random",
+    "utility",
+    "web",
 ];
 
 pub fn render(
@@ -780,6 +791,7 @@ fn tool_display_name(name: &str) -> &str {
         "random" => "Random",
         "geo" => "Geo",
         "git" => "Git",
+        "homeassistant" => "Home Assistant",
         "utility" => "Utility",
         "web" => "Web",
         other => other,
@@ -808,6 +820,7 @@ mod tests {
         assert_eq!(tool_display_name("random"), "Random");
         assert_eq!(tool_display_name("geo"), "Geo");
         assert_eq!(tool_display_name("git"), "Git");
+        assert_eq!(tool_display_name("homeassistant"), "Home Assistant");
         assert_eq!(tool_display_name("unknown"), "unknown");
     }
 }

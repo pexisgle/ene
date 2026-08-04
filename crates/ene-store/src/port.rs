@@ -17,9 +17,10 @@ use chrono::{DateTime, Utc};
 use ene_core::{
     ActiveSceneSummaryRow, AffectState, Commitment, EmbeddingStorePort, EmbeddingStorePortError,
     GatheredCandidate, MemoryItem, MemoryKind, MemoryPort, MemoryPortError, MemoryStatus,
-    NaturalDecayReport, NewCommitment, NewMemoryItem, NewMemorySpan, PendingAffectProposal,
-    PendingCandidate, PendingMemoryWrite, Query, ToolEmbeddingFieldRow, ToolFailureSignalPort,
-    ToolFailureSignalPortError,
+    NaturalDecayReport, NewCommitment, NewMemoryItem, NewMemorySpan, NewWorkspaceChunk,
+    PendingAffectProposal, PendingCandidate, PendingMemoryWrite, Query, ToolEmbeddingFieldRow,
+    ToolFailureSignalPort, ToolFailureSignalPortError, WorkspaceChunkHit, WorkspaceDocumentPort,
+    WorkspaceFileRow, WorkspaceIndexStatus, WorkspacePortError, WorkspaceSearchQuery,
 };
 
 use crate::error::EneMemoryError;
@@ -32,6 +33,12 @@ impl From<EneMemoryError> for MemoryPortError {
             EneMemoryError::InvalidTransition { from, to } => Self::InvalidTransition { from, to },
             other => Self::Backend(other.to_string()),
         }
+    }
+}
+
+impl From<EneMemoryError> for WorkspacePortError {
+    fn from(err: EneMemoryError) -> Self {
+        Self::Backend(err.to_string())
     }
 }
 
@@ -287,6 +294,51 @@ impl MemoryPort for MemoryStore {
         level: i32,
     ) -> Result<Vec<NewMemorySpan>, MemoryPortError> {
         Ok(Self::list_memory_spans_by_session_and_level(self, session_id, level).await?)
+    }
+}
+
+#[async_trait]
+impl WorkspaceDocumentPort for MemoryStore {
+    async fn list_workspace_files(&self) -> Result<Vec<WorkspaceFileRow>, WorkspacePortError> {
+        Ok(Self::list_workspace_files(self).await?)
+    }
+
+    async fn replace_workspace_file(
+        &self,
+        file: &WorkspaceFileRow,
+        chunks: &[NewWorkspaceChunk],
+    ) -> Result<(), WorkspacePortError> {
+        Ok(Self::replace_workspace_file(self, file, chunks).await?)
+    }
+
+    async fn rename_workspace_file(
+        &self,
+        old_path: &str,
+        file: &WorkspaceFileRow,
+    ) -> Result<bool, WorkspacePortError> {
+        Ok(Self::rename_workspace_file(self, old_path, file).await?)
+    }
+
+    async fn delete_workspace_files(&self, paths: &[String]) -> Result<usize, WorkspacePortError> {
+        Ok(Self::delete_workspace_files(self, paths).await?)
+    }
+
+    async fn prune_workspace_roots(
+        &self,
+        keep_roots: &[String],
+    ) -> Result<usize, WorkspacePortError> {
+        Ok(Self::prune_workspace_roots(self, keep_roots).await?)
+    }
+
+    async fn search_workspace(
+        &self,
+        query: &WorkspaceSearchQuery<'_>,
+    ) -> Result<Vec<WorkspaceChunkHit>, WorkspacePortError> {
+        Ok(Self::search_workspace(self, query).await?)
+    }
+
+    async fn workspace_index_status(&self) -> Result<WorkspaceIndexStatus, WorkspacePortError> {
+        Ok(Self::workspace_index_status(self).await?)
     }
 }
 

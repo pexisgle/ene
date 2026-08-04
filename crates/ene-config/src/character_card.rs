@@ -223,6 +223,9 @@ pub struct CharacterAsset {
     /// File extension (e.g. `"vrm"`, `"vrma"`).
     #[serde(default)]
     pub ext: String,
+    /// Catch-all for vendor asset fields this build does not model.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
@@ -248,6 +251,9 @@ pub struct Lorebook {
     /// Extension data for the lorebook.
     #[serde(default)]
     pub extensions: HashMap<String, serde_json::Value>,
+    /// Catch-all for vendor lorebook fields this build does not model.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
     /// The list of lorebook entries.
     pub entries: Vec<LorebookEntry>,
 }
@@ -297,6 +303,10 @@ pub struct LorebookEntry {
     /// Where the content is inserted (`"before_char"` or `"after_char"`).
     #[serde(default)]
     pub position: Option<String>,
+    /// Catch-all for vendor entry fields (e.g. `probability`, `uid`) this
+    /// build does not model.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 /// Structured user persona for roleplay context.
@@ -815,6 +825,9 @@ pub struct EneExtension {
     /// exist. Removed from the card after a locale is applied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locales: Option<indexmap::IndexMap<String, crate::locale::LocalizedCharacterFields>>,
+    /// Catch-all for vendor `extensions.ene` fields this build does not model.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 impl EneExtension {
@@ -830,6 +843,7 @@ impl EneExtension {
             && self.relationship_stages.is_none()
             && self.time_periods.is_none()
             && self.scene_behaviors.is_none()
+            && self.extra.is_empty()
     }
 }
 

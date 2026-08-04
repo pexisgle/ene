@@ -48,6 +48,10 @@ pub enum EneMemoryError {
         value: String,
     },
 
+    /// A pending-candidate edit was rejected before any write.
+    #[error("Invalid pending candidate edit: {0}")]
+    InvalidPendingCandidateEdit(String),
+
     /// Session export uses an unsupported `format_version`.
     #[error("Unsupported session export format version: {0}")]
     UnsupportedFormatVersion(u32),
