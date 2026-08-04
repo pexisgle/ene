@@ -19,6 +19,8 @@ use ene_config::PromptLibrary;
 use ene_core::{MemoryPort, PendingCandidate, PendingCandidateStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 use crate::config::PendingConfirmationConfig;
 use crate::recall::MemoryRecallCache;
@@ -47,14 +49,17 @@ pub struct PendingConfirmationPrompt {
 /// A candidate is due when it is still `Pending`, is not approval-parked, is
 /// visible to the session user (own rows plus character-shared `user_id = ""`
 /// rows, mirroring the typed-memory visibility rule), is at least
-/// `min_age_days` old, and carries at least `min_confidence`. At most one
+/// `min_age_days` old, carries at least `min_confidence`, and was not asked
+/// about within `reask_after_days` (per-candidate backoff so an unclear
+/// reply cannot re-arm the same question on the next tick). At most one
 /// candidate is returned — a tick asks about one thing at a time.
 #[must_use]
-pub fn select_due_pending_candidate(
+pub fn select_due_pending_candidate<S: BuildHasher>(
     candidates: &[PendingCandidate],
     user_id: &str,
     config: &PendingConfirmationConfig,
     now: DateTime<Utc>,
+    asked_at: &HashMap<i64, DateTime<Utc>, S>,
 ) -> Option<PendingConfirmationPrompt> {
     if !config.enabled {
         return None;
@@ -65,6 +70,7 @@ pub fn select_due_pending_candidate(
             && (candidate.user_id.is_empty() || candidate.user_id == user_id)
             && age_days(candidate.created_at, now) >= f64::from(config.min_age_days)
             && candidate.confidence >= config.min_confidence
+            && !asked_within_backoff(candidate.id, config, now, asked_at)
     });
     let oldest = due.min_by_key(|candidate| candidate.created_at)?;
     Some(PendingConfirmationPrompt {
@@ -81,13 +87,14 @@ pub fn select_due_pending_candidate(
 /// mirroring the recall pending gather — a proactive tick must never fail
 /// because the queue was unreadable. Returns `None` when the trigger is
 /// disabled.
-pub async fn load_due_pending_confirmation(
+pub async fn load_due_pending_confirmation<S: BuildHasher>(
     cache: Option<&MemoryRecallCache>,
     store: &dyn MemoryPort,
     character_id: &str,
     user_id: &str,
     config: &PendingConfirmationConfig,
     now: DateTime<Utc>,
+    asked_at: &HashMap<i64, DateTime<Utc>, S>,
 ) -> Option<PendingConfirmationPrompt> {
     if !config.enabled {
         return None;
@@ -112,7 +119,18 @@ pub async fn load_due_pending_confirmation(
             return None;
         }
     };
-    select_due_pending_candidate(&candidates, user_id, config, now)
+    select_due_pending_candidate(&candidates, user_id, config, now, asked_at)
+}
+
+fn asked_within_backoff<S: BuildHasher>(
+    candidate_id: i64,
+    config: &PendingConfirmationConfig,
+    now: DateTime<Utc>,
+    asked_at: &HashMap<i64, DateTime<Utc>, S>,
+) -> bool {
+    asked_at
+        .get(&candidate_id)
+        .is_some_and(|asked| age_days(*asked, now) < f64::from(config.reask_after_days))
 }
 
 /// Verdict on whether the user's reply resolves the asked candidate.
@@ -217,7 +235,12 @@ mod tests {
             enabled: true,
             min_age_days: 3,
             min_confidence: 0.7,
+            reask_after_days: 7,
         }
+    }
+
+    fn no_asks() -> HashMap<i64, DateTime<Utc>> {
+        HashMap::new()
     }
 
     fn candidate(
@@ -253,8 +276,9 @@ mod tests {
             candidate(1, 10, 0.9, false, PendingCandidateStatus::Pending),
             candidate(2, 20, 0.9, false, PendingCandidateStatus::Pending),
         ];
-        let picked = select_due_pending_candidate(&candidates, "alice", &config(), now())
-            .expect("an old confident candidate must be due");
+        let picked =
+            select_due_pending_candidate(&candidates, "alice", &config(), now(), &no_asks())
+                .expect("an old confident candidate must be due");
         assert_eq!(picked.id, 2, "the oldest candidate wins");
         assert_eq!(picked.title, "candidate 2");
         assert!((picked.age_days - 20.0).abs() < f64::EPSILON);
@@ -264,19 +288,20 @@ mod tests {
     fn too_young_or_low_confidence_candidates_are_not_due() {
         let young = candidate(1, 2, 0.9, false, PendingCandidateStatus::Pending);
         assert!(
-            select_due_pending_candidate(&[young], "alice", &config(), now()).is_none(),
+            select_due_pending_candidate(&[young], "alice", &config(), now(), &no_asks()).is_none(),
             "2 days is below the 3-day gate"
         );
 
         let weak = candidate(2, 10, 0.5, false, PendingCandidateStatus::Pending);
         assert!(
-            select_due_pending_candidate(&[weak], "alice", &config(), now()).is_none(),
+            select_due_pending_candidate(&[weak], "alice", &config(), now(), &no_asks()).is_none(),
             "0.5 confidence is below the 0.7 gate"
         );
 
         let exactly = candidate(3, 3, 0.7, false, PendingCandidateStatus::Pending);
-        let picked = select_due_pending_candidate(&[exactly], "alice", &config(), now())
-            .expect("boundary values must qualify");
+        let picked =
+            select_due_pending_candidate(&[exactly], "alice", &config(), now(), &no_asks())
+                .expect("boundary values must qualify");
         assert_eq!(picked.id, 3);
     }
 
@@ -284,13 +309,15 @@ mod tests {
     fn approval_parked_and_resolved_candidates_are_never_due() {
         let parked = candidate(1, 10, 0.9, true, PendingCandidateStatus::Pending);
         assert!(
-            select_due_pending_candidate(&[parked], "alice", &config(), now()).is_none(),
+            select_due_pending_candidate(&[parked], "alice", &config(), now(), &no_asks())
+                .is_none(),
             "approval-parked rows must never be asked about"
         );
 
         let resolved = candidate(2, 10, 0.9, false, PendingCandidateStatus::Rejected);
         assert!(
-            select_due_pending_candidate(&[resolved], "alice", &config(), now()).is_none(),
+            select_due_pending_candidate(&[resolved], "alice", &config(), now(), &no_asks())
+                .is_none(),
             "resolved rows are not part of the live queue"
         );
     }
@@ -311,6 +338,7 @@ mod tests {
             "alice",
             &config(),
             now(),
+            &no_asks(),
         )
         .expect("own and character-shared rows are visible");
         assert!(picked.id == 1 || picked.id == 3, "picked {picked:?}");
@@ -323,11 +351,63 @@ mod tests {
             ..config()
         };
         let c = candidate(1, 10, 0.9, false, PendingCandidateStatus::Pending);
-        assert!(select_due_pending_candidate(&[c], "alice", &cfg, now()).is_none());
+        assert!(select_due_pending_candidate(&[c], "alice", &cfg, now(), &no_asks()).is_none());
+    }
+
+    #[test]
+    fn recently_asked_candidates_wait_out_the_backoff_window() {
+        let c = candidate(1, 10, 0.9, false, PendingCandidateStatus::Pending);
+        let mut asked_at = HashMap::new();
+        asked_at.insert(1, now() - Duration::days(1));
+        assert!(
+            select_due_pending_candidate(
+                std::slice::from_ref(&c),
+                "alice",
+                &config(),
+                now(),
+                &asked_at,
+            )
+            .is_none(),
+            "a candidate asked 1 day ago must wait out the backoff"
+        );
+
+        asked_at.insert(1, now() - Duration::days(7));
+        let picked = select_due_pending_candidate(&[c], "alice", &config(), now(), &asked_at)
+            .expect("once the backoff window passes the candidate is due again");
+        assert_eq!(picked.id, 1);
+    }
+
+    #[test]
+    fn backoff_only_applies_to_the_asked_candidate() {
+        let candidates = vec![
+            candidate(1, 10, 0.9, false, PendingCandidateStatus::Pending),
+            candidate(2, 20, 0.9, false, PendingCandidateStatus::Pending),
+        ];
+        let mut asked_at = HashMap::new();
+        asked_at.insert(2, now() - Duration::days(1));
+        let picked =
+            select_due_pending_candidate(&candidates, "alice", &config(), now(), &asked_at)
+                .expect("a different candidate must still be due");
+        assert_eq!(picked.id, 1);
+    }
+
+    #[test]
+    fn zero_backoff_allows_immediate_reask() {
+        let cfg = PendingConfirmationConfig {
+            reask_after_days: 0,
+            ..config()
+        };
+        let c = candidate(1, 10, 0.9, false, PendingCandidateStatus::Pending);
+        let mut asked_at = HashMap::new();
+        asked_at.insert(1, now());
+        assert!(
+            select_due_pending_candidate(&[c], "alice", &cfg, now(), &asked_at).is_some(),
+            "0 disables the backoff entirely"
+        );
     }
 
     #[tokio::test]
-    async fn loader_uses_the_cache_and_degrades_on_error() {
+    async fn loader_uses_the_cache() {
         use crate::memory_writer::test_support::InMemoryMemoryPort;
 
         let store = InMemoryMemoryPort::default();
@@ -342,17 +422,31 @@ mod tests {
             .await
             .expect("insert fixture");
         let cache = MemoryRecallCache::new();
-        let picked =
-            load_due_pending_confirmation(Some(&cache), &store, "ene", "alice", &config(), now())
-                .await
-                .expect("due candidate loads");
+        let picked = load_due_pending_confirmation(
+            Some(&cache),
+            &store,
+            "ene",
+            "alice",
+            &config(),
+            now(),
+            &no_asks(),
+        )
+        .await
+        .expect("due candidate loads");
         assert_eq!(picked.id, 1);
 
         // A cache hit returns the same row without another store read.
-        let again =
-            load_due_pending_confirmation(Some(&cache), &store, "ene", "alice", &config(), now())
-                .await
-                .expect("cached due candidate loads");
+        let again = load_due_pending_confirmation(
+            Some(&cache),
+            &store,
+            "ene",
+            "alice",
+            &config(),
+            now(),
+            &no_asks(),
+        )
+        .await
+        .expect("cached due candidate loads");
         assert_eq!(again, picked);
     }
 
@@ -363,10 +457,91 @@ mod tests {
         let store = InMemoryMemoryPort::default();
         let cache = MemoryRecallCache::new();
         assert!(
-            load_due_pending_confirmation(Some(&cache), &store, "ene", "alice", &config(), now(),)
-                .await
-                .is_none(),
+            load_due_pending_confirmation(
+                Some(&cache),
+                &store,
+                "ene",
+                "alice",
+                &config(),
+                now(),
+                &no_asks(),
+            )
+            .await
+            .is_none(),
             "an empty queue must not select anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn loader_respects_the_backoff_map() {
+        use crate::memory_writer::test_support::InMemoryMemoryPort;
+
+        let store = InMemoryMemoryPort::default();
+        let id = store
+            .insert_pending_candidate(candidate(
+                1,
+                10,
+                0.9,
+                false,
+                PendingCandidateStatus::Pending,
+            ))
+            .await
+            .expect("insert fixture");
+        let cache = MemoryRecallCache::new();
+        let mut asked_at = HashMap::new();
+        asked_at.insert(id, now() - Duration::days(1));
+        assert!(
+            load_due_pending_confirmation(
+                Some(&cache),
+                &store,
+                "ene",
+                "alice",
+                &config(),
+                now(),
+                &asked_at,
+            )
+            .await
+            .is_none(),
+            "a recently asked candidate must not be loaded"
+        );
+
+        asked_at.insert(id, now() - Duration::days(7));
+        assert!(
+            load_due_pending_confirmation(
+                Some(&cache),
+                &store,
+                "ene",
+                "alice",
+                &config(),
+                now(),
+                &asked_at,
+            )
+            .await
+            .is_some(),
+            "after the backoff window the candidate is due again"
+        );
+    }
+
+    #[tokio::test]
+    async fn loader_degrades_to_none_when_the_queue_is_unreadable() {
+        use crate::memory_writer::test_support::InMemoryMemoryPort;
+
+        let store = InMemoryMemoryPort::default();
+        store.fail_pending_list(true);
+        let cache = MemoryRecallCache::new();
+        assert!(
+            load_due_pending_confirmation(
+                Some(&cache),
+                &store,
+                "ene",
+                "alice",
+                &config(),
+                now(),
+                &no_asks(),
+            )
+            .await
+            .is_none(),
+            "a store error must degrade to no candidate, not fail the tick"
         );
     }
 

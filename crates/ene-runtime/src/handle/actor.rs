@@ -774,9 +774,18 @@ impl TurnActor {
                             // delivered confirmation question when one is
                             // outstanding; classify it (fail-closed) and
                             // resolve the candidate through the approval
-                            // APIs.
+                            // APIs. Mid-stream failures and cancels still
+                            // recorded the user's message at turn start, so
+                            // they are classified too; only a provider-open
+                            // failure (no stream, no outcome) defers to the
+                            // next turn.
                             if self.active_origin == crate::types::TurnOrigin::User
-                                && matches!(outcome.terminal, TerminalReason::Done)
+                                && matches!(
+                                    outcome.terminal,
+                                    TerminalReason::Done
+                                        | TerminalReason::Failed { .. }
+                                        | TerminalReason::Cancelled
+                                )
                                 && self.proactive.asked_pending_candidate.is_some()
                             {
                                 self.spawn_pending_resolution();
@@ -1469,6 +1478,7 @@ impl TurnActor {
                         &user_name,
                         &mind.proactive.pending_confirmation,
                         (self.quiet_hours_clock)(),
+                        &self.proactive.pending_confirmation_asked_at,
                     )
                     .await
                 } else {
@@ -1814,6 +1824,9 @@ impl TurnActor {
         };
         match outcome {
             Ok(()) => {
+                self.proactive
+                    .pending_confirmation_asked_at
+                    .remove(&result.candidate_id);
                 if let Some(cache) = &self.session.memory.recall_cache {
                     cache.invalidate_character(self.session.card_name());
                 }
@@ -5783,6 +5796,10 @@ mod tests {
         assert_eq!(cached.len(), 1);
 
         let turn = TurnId::new();
+        actor.proactive.pending_confirmation_asked_at.insert(
+            candidate_id,
+            (actor.quiet_hours_clock)() - chrono::Duration::days(1),
+        );
         let result = crate::proactive::PendingResolutionResult {
             session_epoch: actor.proactive.session_epoch,
             candidate_id,
@@ -5801,6 +5818,13 @@ mod tests {
             .find(|row| row.id == candidate_id)
             .expect("fixture row present");
         assert_eq!(row.status, ene_core::PendingCandidateStatus::Approved);
+        assert!(
+            !actor
+                .proactive
+                .pending_confirmation_asked_at
+                .contains_key(&candidate_id),
+            "a resolved candidate no longer needs re-ask backoff"
+        );
         let after = cache
             .list_pending_candidates(store.as_ref(), "default")
             .await
@@ -5829,6 +5853,10 @@ mod tests {
             .await
             .expect("insert fixture");
 
+        actor.proactive.pending_confirmation_asked_at.insert(
+            candidate_id,
+            (actor.quiet_hours_clock)() - chrono::Duration::days(1),
+        );
         let result = crate::proactive::PendingResolutionResult {
             session_epoch: actor.proactive.session_epoch,
             candidate_id,
@@ -5848,6 +5876,13 @@ mod tests {
             .expect("fixture row present");
         assert_eq!(row.status, ene_core::PendingCandidateStatus::Rejected);
         assert!(
+            !actor
+                .proactive
+                .pending_confirmation_asked_at
+                .contains_key(&candidate_id),
+            "a resolved candidate no longer needs re-ask backoff"
+        );
+        assert!(
             matches!(
                 lifecycle_rx.try_recv(),
                 Ok(LifecycleEvent::CandidateChanged { id, status, .. })
@@ -5866,6 +5901,10 @@ mod tests {
             .await
             .expect("insert fixture");
 
+        actor.proactive.pending_confirmation_asked_at.insert(
+            candidate_id,
+            (actor.quiet_hours_clock)() - chrono::Duration::days(1),
+        );
         let result = crate::proactive::PendingResolutionResult {
             session_epoch: actor.proactive.session_epoch,
             candidate_id,
@@ -5884,6 +5923,13 @@ mod tests {
             .find(|row| row.id == candidate_id)
             .expect("fixture row present");
         assert_eq!(row.status, ene_core::PendingCandidateStatus::Pending);
+        assert!(
+            actor
+                .proactive
+                .pending_confirmation_asked_at
+                .contains_key(&candidate_id),
+            "an unclear verdict must keep the backoff armed"
+        );
         assert!(
             lifecycle_rx.try_recv().is_err(),
             "an unclear verdict must not emit CandidateChanged"
@@ -5963,7 +6009,7 @@ mod tests {
     #[tokio::test]
     async fn pending_selection_skips_while_a_question_is_outstanding() {
         let (mut actor, _diag_rx, _lifecycle_rx, store) = actor_with_pending_store().await;
-        store
+        let candidate_id = store
             .insert_pending_candidate(pending_candidate_row())
             .await
             .expect("insert fixture");
@@ -5988,6 +6034,29 @@ mod tests {
         assert!(
             selected.is_none(),
             "selection must skip while a confirmation question is in flight"
+        );
+
+        // The backoff survives the marker: an unclear reply consumed the
+        // marker, but the delivered question still blocks re-selection.
+        actor.proactive.asked_pending_candidate = None;
+        actor.proactive.pending_confirmation_asked_at.insert(
+            candidate_id,
+            (actor.quiet_hours_clock)() - chrono::Duration::days(1),
+        );
+        let (_, _, _, _, _, selected) = actor.proactive_context_inputs(&mind).await;
+        assert!(
+            selected.is_none(),
+            "a recently asked candidate must wait out the re-ask backoff"
+        );
+
+        actor.proactive.pending_confirmation_asked_at.insert(
+            candidate_id,
+            (actor.quiet_hours_clock)() - chrono::Duration::days(8),
+        );
+        let (_, _, _, _, _, selected) = actor.proactive_context_inputs(&mind).await;
+        assert!(
+            selected.is_some(),
+            "after the backoff window the candidate is due again"
         );
     }
 

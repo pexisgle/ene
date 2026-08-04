@@ -1353,6 +1353,11 @@ pub struct PendingConfirmationConfig {
     /// Out-of-range values are clamped on load.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub min_confidence: f32,
+    /// Minimum days between confirmation attempts of the same candidate.
+    /// `0` allows re-asking immediately after a delivered question; without
+    /// this backoff an unclear reply would re-arm the candidate on the next
+    /// eligible tick and nag the user.
+    pub reask_after_days: u32,
 }
 
 impl Default for PendingConfirmationConfig {
@@ -1361,6 +1366,7 @@ impl Default for PendingConfirmationConfig {
             enabled: false,
             min_age_days: 3,
             min_confidence: 0.7,
+            reask_after_days: 7,
         }
     }
 }
@@ -1689,6 +1695,7 @@ mod tests {
         assert!(!cfg.proactive.pending_confirmation.enabled);
         assert_eq!(cfg.proactive.pending_confirmation.min_age_days, 3);
         assert!((cfg.proactive.pending_confirmation.min_confidence - 0.7).abs() < f32::EPSILON);
+        assert_eq!(cfg.proactive.pending_confirmation.reask_after_days, 7);
     }
 
     /// Pending-confirmation policy parses from the public schema with
@@ -1700,7 +1707,8 @@ mod tests {
                 "pending_confirmation": {
                     "enabled": true,
                     "min_age_days": 7,
-                    "min_confidence": 0.8
+                    "min_confidence": 0.8,
+                    "reask_after_days": 14
                 }
             }"#,
         )
@@ -1709,15 +1717,18 @@ mod tests {
         assert!(pending.enabled);
         assert_eq!(pending.min_age_days, 7);
         assert!((pending.min_confidence - 0.8).abs() < f32::EPSILON);
+        assert_eq!(pending.reask_after_days, 14);
 
         let json = serde_json::to_value(&cfg).expect("serialize");
         assert_eq!(json["pending_confirmation"]["enabled"], true);
         assert_eq!(json["pending_confirmation"]["min_age_days"], 7);
+        assert_eq!(json["pending_confirmation"]["reask_after_days"], 14);
 
         // Old settings files without the section keep parsing.
         let old: ProactiveConfig = serde_json::from_str(r#"{"enabled": true}"#).expect("parse");
         assert!(!old.pending_confirmation.enabled);
         assert_eq!(old.pending_confirmation.min_age_days, 3);
+        assert_eq!(old.pending_confirmation.reask_after_days, 7);
     }
 
     #[test]

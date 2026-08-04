@@ -6,7 +6,7 @@ use ene_mind::{
     decide_proactive_speech, parse_resolution_json, resolution_schema_object,
 };
 use ene_store::AffectState as StoreAffectState;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -39,6 +39,10 @@ pub(crate) struct ProactiveScheduler {
     /// and whose reply is still expected. Blocks re-selection so only one
     /// confirmation is in flight; consumed when the reply is classified.
     pub(crate) asked_pending_candidate: Option<PendingConfirmationPrompt>,
+    /// When each candidate's confirmation question was last delivered, for
+    /// per-candidate re-ask backoff. Survives the asked-marker consumption
+    /// so an unclear reply cannot re-arm the same question immediately.
+    pub(crate) pending_confirmation_asked_at: HashMap<i64, chrono::DateTime<chrono::Utc>>,
     /// Bumped on session reset only, so reply classifications stay valid
     /// across user turns (which bump [`Self::epoch`]) and go stale only when
     /// the character/session actually changed.
@@ -58,6 +62,7 @@ impl Default for ProactiveScheduler {
             last_decision: None,
             quiet_hours_queue: VecDeque::new(),
             asked_pending_candidate: None,
+            pending_confirmation_asked_at: HashMap::new(),
             session_epoch: 0,
         }
     }
@@ -118,6 +123,7 @@ impl ProactiveScheduler {
         self.last_decision = None;
         self.quiet_hours_queue.clear();
         self.asked_pending_candidate = None;
+        self.pending_confirmation_asked_at.clear();
         self.session_epoch = self.session_epoch.wrapping_add(1);
     }
 
@@ -297,28 +303,41 @@ pub(crate) fn proactive_generation_hint(
 ) -> String {
     let library = ene_config::PromptLibrary::load(prompt_language);
     let mut prompts = library.proactive().clone();
-    if confirmation_enabled && prompts.confirmation_note.trim().is_empty() {
-        let fallback_language = if ene_config::resolve_language_alias(prompt_language) == "ja" {
-            "ja"
-        } else {
-            "en"
-        };
-        let fallback = ene_config::PromptLibrary::load(fallback_language)
-            .proactive()
-            .confirmation_note
-            .clone();
-        prompts.confirmation_note = if fallback.trim().is_empty() {
-            "If you decide not to speak, emit exactly <|silent|> as the first token and nothing else."
-                .to_string()
-        } else {
-            fallback
-        };
-        tracing::warn!(
-            component = "Proactive",
-            "confirmation_enabled requires a confirmation_note; using the embedded fallback"
-        );
+    if confirmation_enabled {
+        ensure_confirmation_note(&mut prompts, prompt_language);
     }
     prompts.render_generation_hint(topic_hint, confirmation_enabled)
+}
+
+/// Ensure the `<|silent|>` refusal note is non-empty for a pack that ships
+/// without one: fall back to the sibling locale, then to an embedded string,
+/// so confirmation-enabled generations never lose the refusal instruction.
+fn ensure_confirmation_note(
+    prompts: &mut ene_config::prompts::ProactivePrompts,
+    prompt_language: &str,
+) {
+    if !prompts.confirmation_note.trim().is_empty() {
+        return;
+    }
+    let fallback_language = if ene_config::resolve_language_alias(prompt_language) == "ja" {
+        "ja"
+    } else {
+        "en"
+    };
+    let fallback = ene_config::PromptLibrary::load(fallback_language)
+        .proactive()
+        .confirmation_note
+        .clone();
+    prompts.confirmation_note = if fallback.trim().is_empty() {
+        "If you decide not to speak, emit exactly <|silent|> as the first token and nothing else."
+            .to_string()
+    } else {
+        fallback
+    };
+    tracing::warn!(
+        component = "Proactive",
+        "confirmation_enabled requires a confirmation_note; using the embedded fallback"
+    );
 }
 
 /// Render the generation hint for a pending-candidate confirmation question.
@@ -330,6 +349,9 @@ pub(crate) fn proactive_pending_confirmation_hint(
 ) -> String {
     let library = ene_config::PromptLibrary::load(prompt_language);
     let mut prompts = library.proactive().clone();
+    if confirmation_enabled {
+        ensure_confirmation_note(&mut prompts, prompt_language);
+    }
     if prompts.pending_confirmation_note.trim().is_empty() {
         let fallback_language = if ene_config::resolve_language_alias(prompt_language) == "ja" {
             "ja"
@@ -351,10 +373,9 @@ pub(crate) fn proactive_pending_confirmation_hint(
             "pending_confirmation_note is empty; using the embedded fallback"
         );
     }
-    prompts.render_pending_confirmation_hint(
-        &format!("{}: {}", candidate.title, candidate.content),
-        confirmation_enabled,
-    )
+    let title = candidate.title.chars().take(160).collect::<String>();
+    let content = candidate.content.chars().take(400).collect::<String>();
+    prompts.render_pending_confirmation_hint(&format!("{title}: {content}"), confirmation_enabled)
 }
 
 /// Render the catch-up generation hint for quiet-hours-suppressed moments.
@@ -459,6 +480,9 @@ pub(crate) fn apply_proactive_completion(
         // the verdict stays `Disabled` even though the question was spoken.
         if matches!(terminal, TerminalReason::Done) && spoke_visible_text {
             scheduler.asked_pending_candidate = Some(candidate.clone());
+            scheduler
+                .pending_confirmation_asked_at
+                .insert(candidate.id, chrono::Utc::now());
         } else {
             scheduler.asked_pending_candidate = None;
         }
@@ -1081,6 +1105,10 @@ mod tests {
             Some(pending_candidate()),
             "a delivered question must block re-selection until classified"
         );
+        assert!(
+            scheduler.pending_confirmation_asked_at.contains_key(&7),
+            "delivery must arm the per-candidate re-ask backoff"
+        );
     }
 
     #[test]
@@ -1152,11 +1180,13 @@ mod tests {
     fn session_reset_clears_the_asked_marker_and_bumps_the_session_epoch() {
         let mut scheduler = ProactiveScheduler {
             asked_pending_candidate: Some(pending_candidate()),
+            pending_confirmation_asked_at: HashMap::from([(7, chrono::Utc::now())]),
             ..ProactiveScheduler::default()
         };
         let epoch = scheduler.session_epoch;
         scheduler.reset_session();
         assert!(scheduler.asked_pending_candidate.is_none());
+        assert!(scheduler.pending_confirmation_asked_at.is_empty());
         assert_eq!(scheduler.session_epoch, epoch.wrapping_add(1));
     }
 
@@ -1171,6 +1201,49 @@ mod tests {
 
         let with_note = proactive_pending_confirmation_hint(&pending_candidate(), "en", true);
         assert!(with_note.contains("<|silent|>"), "hint: {with_note}");
+    }
+
+    #[test]
+    fn pending_confirmation_hint_truncates_long_candidate_text() {
+        let candidate = PendingConfirmationPrompt {
+            id: 1,
+            title: "t".repeat(300),
+            content: "c".repeat(900),
+            age_days: 5.0,
+        };
+        let hint = proactive_pending_confirmation_hint(&candidate, "en", false);
+        assert!(hint.contains(&format!("{}: {}", "t".repeat(160), "c".repeat(400))));
+        assert!(!hint.contains(&"t".repeat(161)), "title must be truncated");
+        assert!(
+            !hint.contains(&"c".repeat(401)),
+            "content must be truncated"
+        );
+    }
+
+    #[test]
+    fn pending_hint_fills_an_empty_confirmation_note_from_the_fallback() {
+        let mut prompts = ene_config::prompts::ProactivePrompts {
+            decision_system: String::new(),
+            generation_hint_idle: String::new(),
+            generation_hint_with_topic: String::new(),
+            confirmation_note: String::new(),
+            catch_up_note: String::new(),
+            pending_confirmation_note: "ask: {candidate}".into(),
+            pending_resolution_system: String::new(),
+            screen_summary_system: String::new(),
+            screen_summary_user: String::new(),
+            screen_summary_layout_note: String::new(),
+            screen_summary_code_note: String::new(),
+            screen_summary_ocr_note: String::new(),
+        };
+        ensure_confirmation_note(&mut prompts, "en");
+        assert!(
+            prompts.confirmation_note.contains("<|silent|>"),
+            "the refusal instruction must survive an empty pack note"
+        );
+        let hint = prompts.render_pending_confirmation_hint("cats", true);
+        assert!(hint.contains("<|silent|>"));
+        assert!(hint.contains("cats"));
     }
 
     #[tokio::test]

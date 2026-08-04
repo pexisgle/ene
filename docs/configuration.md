@@ -363,7 +363,8 @@ least `min_age_days` old (default `3`), and carries at least `min_confidence`
 "pending_confirmation": {
   "enabled": false,
   "min_age_days": 3,
-  "min_confidence": 0.7
+  "min_confidence": 0.7,
+  "reask_after_days": 7
 }
 ```
 
@@ -384,6 +385,10 @@ least `min_age_days` old (default `3`), and carries at least `min_confidence`
   approval APIs, `rejected` discards it, and `unclear` or any failure leaves
   it pending for a later attempt. Resolutions invalidate the recall cache and
   emit the same `CandidateChanged` lifecycle event as the manual review queue.
+- A candidate is not selected again within `reask_after_days` (default `7`)
+  of a delivered question, so an unclear reply or a failed classification
+  cannot re-arm the same question on the next tick and nag the user. `0`
+  disables the backoff.
 - The asked marker is session-scoped and not persisted: a restart simply
   re-selects the candidate on a later tick.
 
