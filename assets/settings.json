@@ -111,6 +111,11 @@
       "git": {
         "enable": true
       },
+      "homeassistant": {
+        "base_url": "http://homeassistant.local:8123",
+        "enable": true,
+        "token": ""
+      },
       "utility": {
         "enable": true
       },
