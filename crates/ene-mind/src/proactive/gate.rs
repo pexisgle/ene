@@ -50,9 +50,6 @@ pub fn evaluate_deterministic_gates(
     if config.paused {
         return Err(GateRejectReason::ManualPause);
     }
-    if context.quiet_hours.active && config.quiet_hours.suppress.decisions {
-        return Err(GateRejectReason::QuietHours);
-    }
     if context.suppression.user_turn_busy {
         return Err(GateRejectReason::UserTurnBusy);
     }
@@ -88,6 +85,14 @@ pub fn evaluate_deterministic_gates(
         && fatigue >= config.fatigue_suppression_threshold
     {
         return Err(GateRejectReason::HighFatigue);
+    }
+
+    // Quiet hours are evaluated last: the warrant gates above decide whether
+    // an utterance opportunity exists at all, and quiet hours then decide
+    // whether it may be delivered. This ordering lets callers treat a
+    // `QuietHours` rejection as "the other gates would have passed".
+    if context.quiet_hours.active && config.quiet_hours.suppress.decisions {
+        return Err(GateRejectReason::QuietHours);
     }
 
     Ok(())
@@ -183,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn quiet_hours_suppress_decisions_before_counters() {
+    fn quiet_hours_is_reported_only_after_the_warrant_gates_pass() {
         let config = ProactiveConfig {
             enabled: true,
             ..ProactiveConfig::default()
@@ -198,10 +203,22 @@ mod tests {
             active: true,
             ..crate::proactive::QuietHoursEval::inactive()
         };
+        // A warrant gate that fails (cooldown here) reports its own reason,
+        // not quiet hours: there was no utterance opportunity to suppress.
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Err(GateRejectReason::Cooldown)
+        );
+
+        ctx.suppression.seconds_since_proactive = 1000;
         assert_eq!(
             evaluate_deterministic_gates(&config, &ctx),
             Err(GateRejectReason::QuietHours)
         );
+
+        // Outside the window the gates pass.
+        ctx.quiet_hours = crate::proactive::QuietHoursEval::inactive();
+        assert_eq!(evaluate_deterministic_gates(&config, &ctx), Ok(()));
     }
 
     #[test]

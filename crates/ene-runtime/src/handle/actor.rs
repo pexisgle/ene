@@ -43,7 +43,10 @@ use ene_mind::{
     compression_has_usable_summary,
 };
 use ene_mind::{ConversationSession, EneSessionError};
-use ene_mind::{QuietHoursPolicy, evaluate_quiet_hours};
+use ene_mind::{
+    GateRejectReason, QuietHoursPolicy, build_proactive_context, evaluate_deterministic_gates,
+    evaluate_quiet_hours,
+};
 use ene_plugin_host::{
     CompositeToolRegistry, DisabledReason, PluginHealthEvent, PluginHostError, ToolRegistry,
 };
@@ -1179,8 +1182,12 @@ impl TurnActor {
         }
 
         let quiet = evaluate_quiet_hours(&mind.proactive.quiet_hours, (self.quiet_hours_clock)());
-        if quiet.active {
-            if mind.proactive.quiet_hours.suppress.decisions {
+        if quiet.active && mind.proactive.quiet_hours.suppress.decisions {
+            // Queue only real opportunities: the warrant gates (busy, idle,
+            // cooldown, session limit, sources, fatigue) must have passed,
+            // or a whole quiet night would saturate the queue with moments
+            // the decision pipeline would have rejected anyway.
+            if self.quiet_hours_opportunity(&mind, &quiet).await {
                 self.on_quiet_hours_suppressed(&mind, &quiet);
             }
             return;
@@ -1217,6 +1224,45 @@ impl TurnActor {
         let suppression = self.proactive.suppression(user_turn_busy);
         let quiet_for_context =
             evaluate_quiet_hours(&mind.proactive.quiet_hours, (self.quiet_hours_clock)());
+        let (history, observation, affect, commitments, user_instructions) =
+            self.proactive_context_inputs(&mind).await;
+        let (tx, rx) = oneshot::channel();
+        self.proactive_decision_rx = Some(rx);
+        let config = mind.proactive.clone();
+        let prompt_language = mind.resolved_classifier_language().to_owned();
+        let handle = tokio::spawn(async move {
+            let result = crate::proactive::run_decision_task(
+                config,
+                history,
+                observation,
+                suppression,
+                quiet_for_context,
+                decision_provider,
+                epoch,
+                affect,
+                commitments,
+                user_instructions,
+                prompt_language,
+            )
+            .await;
+            drop(tx.send(result));
+        });
+        self.proactive_decision_handle = Some(handle);
+    }
+
+    /// Load the live session inputs a proactive decision needs: history,
+    /// observation, affect, active commitments, and standing rules. Shared
+    /// by the decision spawn path and the quiet-hours opportunity check.
+    async fn proactive_context_inputs(
+        &self,
+        mind: &ene_mind::MindConfig,
+    ) -> (
+        Vec<MindHistoryEntry>,
+        ene_mind::ProactiveObservation,
+        Option<ene_store::AffectState>,
+        Vec<ene_mind::ActiveCommitmentPrompt>,
+        Vec<String>,
+    ) {
         let observation = self.proactive.observation.clone();
         let history = self.session.history().to_vec();
         let card_name = self.session.card_name().to_string();
@@ -1249,28 +1295,39 @@ impl TurnActor {
         } else {
             (None, Vec::new(), Vec::new())
         };
-        let (tx, rx) = oneshot::channel();
-        self.proactive_decision_rx = Some(rx);
-        let config = mind.proactive.clone();
-        let prompt_language = mind.resolved_classifier_language().to_owned();
-        let handle = tokio::spawn(async move {
-            let result = crate::proactive::run_decision_task(
-                config,
-                history,
-                observation,
-                suppression,
-                quiet_for_context,
-                decision_provider,
-                epoch,
-                affect,
-                commitments,
-                user_instructions,
-                prompt_language,
-            )
-            .await;
-            drop(tx.send(result));
-        });
-        self.proactive_decision_handle = Some(handle);
+        (history, observation, affect, commitments, user_instructions)
+    }
+
+    /// Whether a quiet-hours-suppressed tick was a real utterance
+    /// opportunity: every deterministic warrant gate (user busy, idle,
+    /// cooldown, session limit, sources, fatigue) would have passed. Quiet
+    /// hours are evaluated last by the gate, so a `QuietHours` rejection is
+    /// exactly that signal.
+    async fn quiet_hours_opportunity(
+        &self,
+        mind: &ene_mind::MindConfig,
+        quiet: &ene_mind::QuietHoursEval,
+    ) -> bool {
+        let user_turn_busy = self.stream_handle.is_some()
+            || !self.pending_permissions.lock().await.is_empty()
+            || !self.pending_user_inputs.lock().await.is_empty();
+        let suppression = self.proactive.suppression(user_turn_busy);
+        let (history, observation, affect, commitments, user_instructions) =
+            self.proactive_context_inputs(mind).await;
+        let context = build_proactive_context(
+            &mind.proactive,
+            &history,
+            &observation,
+            affect.as_ref(),
+            &commitments,
+            &user_instructions,
+            suppression,
+            quiet.clone(),
+        );
+        matches!(
+            evaluate_deterministic_gates(&mind.proactive, &context),
+            Err(GateRejectReason::QuietHours)
+        )
     }
 
     async fn handle_proactive_decision(
@@ -1323,12 +1380,41 @@ impl TurnActor {
     /// Start the proactive generation stream for a decided (or catch-up)
     /// utterance. Owns the turn gate, screen-image stash, status
     /// announcement, and stream spawn shared by decision and catch-up paths.
-    /// Returns false when the turn gate is busy (caller keeps its state).
+    /// Returns false when the gate is busy, suppression re-engaged between
+    /// decision and generation, or the stream could not start (caller keeps
+    /// its state, e.g. queued catch-up moments).
     async fn begin_proactive_generation(
         &mut self,
         result: &crate::proactive::ProactiveDecisionResult,
         hint: String,
     ) -> bool {
+        // Re-check the deterministic suppression state at generation start: a
+        // decision that passed the gate earlier must not begin speaking once
+        // the user paused or the quiet-hours window opened in the meantime.
+        let mind = self
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .unwrap_or_default();
+        let quiet = evaluate_quiet_hours(&mind.proactive.quiet_hours, (self.quiet_hours_clock)());
+        if mind.proactive.paused {
+            tracing::info!(
+                component = "Proactive",
+                speak = false,
+                detail = "manual pause",
+                "Proactive will not speak"
+            );
+            return false;
+        }
+        if quiet.active && mind.proactive.quiet_hours.suppress.decisions {
+            tracing::info!(
+                component = "Proactive",
+                speak = false,
+                detail = "quiet hours",
+                "Proactive will not speak"
+            );
+            return false;
+        }
+
         let turn = TurnId::new();
         if !self.turn_gate.try_begin(&turn) {
             tracing::info!(
@@ -1349,16 +1435,18 @@ impl TurnActor {
             "Proactive will speak"
         );
         self.proactive.last_decision = Some(result.clone());
-        let mind = self
-            .config
-            .get_section::<ene_mind::MindConfig>()
-            .unwrap_or_default();
-        let screen_image = self
-            .config
-            .get_section::<ene_ai::AiConfig>()
-            .ok()
-            .filter(ene_ai::AiConfig::proactive_generation_supports_vision)
-            .and_then(|_| self.proactive.take_screen_image());
+        let screen_image = if result.catch_up {
+            // A catch-up utterance only knows that moments occurred, never
+            // their content; a stashed frame would contradict the note.
+            let _ = self.proactive.take_screen_image();
+            None
+        } else {
+            self.config
+                .get_section::<ene_ai::AiConfig>()
+                .ok()
+                .filter(ene_ai::AiConfig::proactive_generation_supports_vision)
+                .and_then(|_| self.proactive.take_screen_image())
+        };
         if screen_image.is_none() {
             // Drop any stashed frame when the generation model cannot use it.
             let _ = self.proactive.take_screen_image();
@@ -1368,7 +1456,6 @@ impl TurnActor {
         self.terminal_emitted = Arc::new(AtomicBool::new(false));
         self.active_turn = Some(turn.clone());
         self.active_origin = crate::types::TurnOrigin::Proactive;
-        let quiet = evaluate_quiet_hours(&mind.proactive.quiet_hours, (self.quiet_hours_clock)());
         self.quiet_hours_notifications_suppressed =
             crate::proactive::quiet_hours_suppresses_notifications(
                 &quiet,
@@ -1400,8 +1487,7 @@ impl TurnActor {
             Some(result.topic_hint.clone()),
             Some(generation_timeout),
         )
-        .await;
-        true
+        .await
     }
 
     /// Record one quiet-hours-suppressed moment: bounded queue entry for the
@@ -1413,7 +1499,6 @@ impl TurnActor {
         quiet: &ene_mind::QuietHoursEval,
     ) {
         let policy = mind.proactive.quiet_hours.policy;
-        let at_unix_ms = u64::try_from((self.quiet_hours_clock)().timestamp_millis()).unwrap_or(0);
         if policy != QuietHoursPolicy::Discard {
             let queue = &mut self.proactive.quiet_hours_queue;
             if queue.len() >= crate::proactive::QUIET_HOURS_QUEUE_CAP {
@@ -1424,8 +1509,7 @@ impl TurnActor {
                 );
             }
             queue.push_back(crate::proactive::QueuedQuietHour {
-                at_unix_ms,
-                weekday: quiet.weekday.clone(),
+                local_date: quiet.local_date.clone(),
                 local_time: quiet.local_time.clone(),
             });
         }
@@ -1534,6 +1618,21 @@ impl TurnActor {
             topic_hint: topic_hint.to_string(),
             detail: "quiet hours ended".to_string(),
             confirmation: ene_mind::ProactiveConfirmation::Disabled,
+            catch_up: true,
+        }
+    }
+
+    /// TTS provider for a proactive turn: dropped while quiet hours suppress
+    /// speech audio, so the stream displays text without speaking it.
+    fn proactive_tts_provider(
+        &self,
+        quiet: &ene_mind::QuietHoursEval,
+        suppress: ene_mind::QuietHoursSuppressConfig,
+    ) -> Option<Arc<dyn ene_ai::TtsProvider>> {
+        if crate::proactive::quiet_hours_suppresses_tts(quiet, suppress) {
+            None
+        } else {
+            self.tts_provider.clone()
         }
     }
 
@@ -2188,9 +2287,13 @@ impl TurnActor {
                 }
                 self.active_turn = None;
                 self.turn_gate.end();
-                drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
-                    status: EneStatus::Idle,
-                }));
+                if self.quiet_hours_notifications_suppressed {
+                    self.quiet_hours_notifications_suppressed = false;
+                } else {
+                    drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
+                        status: EneStatus::Idle,
+                    }));
+                }
                 true
             }
             EneCommand::Shutdown => {
@@ -2816,7 +2919,7 @@ impl TurnActor {
         proactive_screen_image: Option<String>,
         proactive_topic: Option<String>,
         generation_timeout: Option<std::time::Duration>,
-    ) {
+    ) -> bool {
         if origin != crate::types::TurnOrigin::Proactive {
             self.quiet_hours_notifications_suppressed = false;
         }
@@ -2860,7 +2963,7 @@ impl TurnActor {
                         status: EneStatus::Idle,
                     }));
                 }
-                return;
+                return false;
             }
         };
 
@@ -2906,10 +3009,8 @@ impl TurnActor {
                 .unwrap_or_default();
             let quiet =
                 evaluate_quiet_hours(&mind.proactive.quiet_hours, (self.quiet_hours_clock)());
-            if crate::proactive::quiet_hours_suppresses_tts(
-                &quiet,
-                mind.proactive.quiet_hours.suppress,
-            ) {
+            let suppress = mind.proactive.quiet_hours.suppress;
+            if crate::proactive::quiet_hours_suppresses_tts(&quiet, suppress) {
                 tracing::info!(
                     component = "Proactive",
                     event = "quiet_hours_tts_suppressed",
@@ -2917,10 +3018,8 @@ impl TurnActor {
                     local_time = %quiet.local_time,
                     "Proactive TTS suppressed by quiet hours"
                 );
-                None
-            } else {
-                self.tts_provider.clone()
             }
+            self.proactive_tts_provider(&quiet, suppress)
         } else {
             self.tts_provider.clone()
         };
@@ -3017,6 +3116,7 @@ impl TurnActor {
             drop(session_tx.send(outcome));
         });
         self.stream_handle = Some(handle);
+        true
     }
 
     async fn create_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
@@ -4849,6 +4949,17 @@ mod tests {
                 .single()
                 .expect("valid utc instant"),
         );
+        // Give the warrant gates something to pass: a session with history
+        // and an observation with activity, so the tick is a real suppressed
+        // opportunity rather than a NoSources rejection.
+        actor.session.record_user_input();
+        actor.session.add_user_message("hi");
+        actor.proactive.observation = ene_mind::ProactiveObservation {
+            captured_at_unix_ms: 1,
+            activity: Some(ene_mind::ActivitySnapshot::default()),
+            screen_summary: None,
+            screen_summary_status: ene_mind::ScreenSummaryStatus::default(),
+        };
 
         actor.maybe_spawn_proactive_decision().await;
 
@@ -4862,13 +4973,13 @@ mod tests {
                 .proactive
                 .quiet_hours_queue
                 .front()
-                .map(|e| e.weekday.as_str()),
-            Some("monday")
+                .map(|e| e.local_date.as_str()),
+            Some("2026-08-03")
         );
     }
 
     #[tokio::test]
-    async fn quiet_hours_catch_up_delivers_after_window_ends() {
+    async fn quiet_hours_catch_up_keeps_queue_when_generation_cannot_start() {
         use crate::handle::tests::{EmptyRegistry, build_bare_actor};
         use chrono::TimeZone;
 
@@ -4884,6 +4995,14 @@ mod tests {
                 .single()
                 .expect("valid utc instant"),
         );
+        actor.session.record_user_input();
+        actor.session.add_user_message("hi");
+        actor.proactive.observation = ene_mind::ProactiveObservation {
+            captured_at_unix_ms: 1,
+            activity: Some(ene_mind::ActivitySnapshot::default()),
+            screen_summary: None,
+            screen_summary_status: ene_mind::ScreenSummaryStatus::default(),
+        };
         actor.maybe_spawn_proactive_decision().await;
         assert_eq!(actor.proactive.quiet_hours_queue.len(), 1);
 
@@ -4895,9 +5014,14 @@ mod tests {
         });
         actor.maybe_spawn_proactive_decision().await;
 
+        assert_eq!(
+            actor.proactive.quiet_hours_queue.len(),
+            1,
+            "a failed generation start (no provider in the bare actor) must keep the queued moment"
+        );
         assert!(
-            actor.proactive.quiet_hours_queue.is_empty(),
-            "the queued moment must be delivered after quiet hours end"
+            actor.proactive.last_decision.is_none(),
+            "start_stream failure must clear the pending decision"
         );
     }
 
@@ -4918,6 +5042,14 @@ mod tests {
                 .single()
                 .expect("valid utc instant"),
         );
+        actor.session.record_user_input();
+        actor.session.add_user_message("hi");
+        actor.proactive.observation = ene_mind::ProactiveObservation {
+            captured_at_unix_ms: 1,
+            activity: Some(ene_mind::ActivitySnapshot::default()),
+            screen_summary: None,
+            screen_summary_status: ene_mind::ScreenSummaryStatus::default(),
+        };
         actor.maybe_spawn_proactive_decision().await;
         assert_eq!(actor.proactive.quiet_hours_queue.len(), 1);
 
@@ -4942,5 +5074,162 @@ mod tests {
 
         assert!(actor.proactive.quiet_hours_queue.is_empty());
         assert!(actor.proactive_decision_rx.is_none());
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_suppress_notifications_skips_running_and_idle() {
+        use crate::handle::tests::{EmptyRegistry, build_bare_actor};
+        use chrono::TimeZone;
+
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig::default();
+        let (mut actor, _diag_rx) = build_bare_actor(registry, &task_caps);
+        quiet_hours_actor(
+            &mut actor,
+            ene_mind::QuietHoursPolicy::Discard,
+            ene_mind::QuietHoursSuppressConfig {
+                notifications: true,
+                decisions: false,
+                tts: false,
+            },
+            chrono::Utc
+                .with_ymd_and_hms(2026, 8, 3, 22, 30, 0)
+                .single()
+                .expect("valid utc instant"),
+        );
+        let mut lifecycle_rx = actor.lifecycle_tx.subscribe();
+        let result = actor.synthetic_catch_up_result("test");
+        let started = actor
+            .begin_proactive_generation(&result, "test hint".to_string())
+            .await;
+
+        assert!(
+            !started,
+            "the bare actor cannot open a provider, so the stream must not start"
+        );
+        assert!(
+            lifecycle_rx.try_recv().is_err(),
+            "no Running or Idle announcement may be emitted while notifications are suppressed"
+        );
+        assert!(
+            !actor.quiet_hours_notifications_suppressed,
+            "the suppression flag must reset when no stream runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn proactive_generation_announces_running_and_idle_when_not_suppressed() {
+        use crate::handle::tests::{EmptyRegistry, build_bare_actor};
+        use chrono::TimeZone;
+
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig::default();
+        let (mut actor, _diag_rx) = build_bare_actor(registry, &task_caps);
+        quiet_hours_actor(
+            &mut actor,
+            ene_mind::QuietHoursPolicy::Discard,
+            ene_mind::QuietHoursSuppressConfig::default(),
+            chrono::Utc
+                .with_ymd_and_hms(2026, 8, 3, 23, 30, 0)
+                .single()
+                .expect("valid utc instant"),
+        );
+        let mut lifecycle_rx = actor.lifecycle_tx.subscribe();
+        let result = actor.synthetic_catch_up_result("test");
+        let started = actor
+            .begin_proactive_generation(&result, "test hint".to_string())
+            .await;
+
+        assert!(!started);
+        assert!(matches!(
+            lifecycle_rx.try_recv(),
+            Ok(LifecycleEvent::StatusChanged {
+                status: EneStatus::Running
+            })
+        ));
+        assert!(matches!(
+            lifecycle_rx.try_recv(),
+            Ok(LifecycleEvent::StatusChanged {
+                status: EneStatus::Idle
+            })
+        ));
+        assert!(lifecycle_rx.try_recv().is_err());
+    }
+
+    struct StubTtsProvider;
+
+    #[async_trait::async_trait]
+    impl ene_ai::TtsProvider for StubTtsProvider {
+        fn name(&self) -> &str {
+            "stub-tts"
+        }
+
+        async fn synthesize_stream(
+            &self,
+            _text: &str,
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn tokio_stream::Stream<
+                            Item = Result<ene_ai::TtsChunk, ene_ai::AudioProviderError>,
+                        > + Send,
+                >,
+            >,
+            ene_ai::AudioProviderError,
+        > {
+            Ok(Box::pin(tokio_stream::empty::<
+                Result<ene_ai::TtsChunk, ene_ai::AudioProviderError>,
+            >()))
+        }
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_suppress_tts_drops_the_provider_for_proactive_turns() {
+        use crate::handle::tests::{EmptyRegistry, build_bare_actor};
+        use chrono::TimeZone;
+
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig::default();
+        let (mut actor, _diag_rx) = build_bare_actor(registry, &task_caps);
+        quiet_hours_actor(
+            &mut actor,
+            ene_mind::QuietHoursPolicy::Discard,
+            ene_mind::QuietHoursSuppressConfig {
+                notifications: false,
+                decisions: false,
+                tts: true,
+            },
+            chrono::Utc
+                .with_ymd_and_hms(2026, 8, 3, 22, 30, 0)
+                .single()
+                .expect("valid utc instant"),
+        );
+        actor.tts_provider = Some(Arc::new(StubTtsProvider));
+
+        let mind = actor
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .expect("mind config");
+        let quiet = evaluate_quiet_hours(&mind.proactive.quiet_hours, (actor.quiet_hours_clock)());
+        assert!(
+            actor
+                .proactive_tts_provider(&quiet, mind.proactive.quiet_hours.suppress)
+                .is_none(),
+            "TTS must be dropped while quiet hours suppress speech audio"
+        );
+
+        actor.quiet_hours_clock = Arc::new(|| {
+            chrono::Utc
+                .with_ymd_and_hms(2026, 8, 3, 23, 30, 0)
+                .single()
+                .expect("valid utc instant")
+        });
+        let quiet = evaluate_quiet_hours(&mind.proactive.quiet_hours, (actor.quiet_hours_clock)());
+        assert!(
+            actor
+                .proactive_tts_provider(&quiet, mind.proactive.quiet_hours.suppress)
+                .is_some(),
+            "TTS must stay available outside the quiet-hours window"
+        );
     }
 }

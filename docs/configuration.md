@@ -291,7 +291,10 @@ disabled by default. Fragment of `mind.proactive`:
   moment after the window ends, and `summary` delivers a single aggregated
   catch-up line. Queue/summary only apply while `decisions` is suppressed.
   The catch-up queue is bounded (oldest moments drop first) and session
-  scoped.
+  scoped; a moment is recorded only when the deterministic warrant gates
+  (idle, cooldown, session limit, sources, fatigue) would have passed, and a
+  user turn clears the queue (the user is back at the desk). Catch-up items
+  carry the local date and time only — never screen data.
 - Background observation (activity, screen summaries) continues during quiet
   hours, governed by the existing privacy settings (`sources.*`); quiet
   hours only gate speech output. Suppression is recorded in structured logs

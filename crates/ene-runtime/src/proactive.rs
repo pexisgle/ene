@@ -54,10 +54,9 @@ impl Default for ProactiveScheduler {
 /// One quiet-hours-suppressed proactive moment, queued for catch-up delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QueuedQuietHour {
-    /// When the moment was suppressed (unix millis).
-    pub at_unix_ms: u64,
-    /// Local weekday at the moment (`monday`..`sunday`).
-    pub weekday: String,
+    /// Local date at the moment (`YYYY-MM-DD`); disambiguates multi-night
+    /// queues.
+    pub local_date: String,
     /// Local wall time at the moment (`HH:MM`).
     pub local_time: String,
 }
@@ -69,10 +68,19 @@ pub(crate) const QUIET_HOURS_QUEUE_CAP: usize = 32;
 pub(crate) const QUIET_HOURS_SUMMARY_MAX_ITEMS: usize = 20;
 
 impl ProactiveScheduler {
-    /// Record that a user turn began (cancels stale decisions via epoch bump).
+    /// Record that a user turn began (cancels stale decisions via epoch bump
+    /// and drops queued quiet-hours moments — the user is back at the desk).
     pub fn on_user_turn_started(&mut self) {
         self.last_user_input_at = Instant::now();
         self.epoch = self.epoch.wrapping_add(1);
+        if !self.quiet_hours_queue.is_empty() {
+            tracing::debug!(
+                component = "Proactive",
+                dropped = self.quiet_hours_queue.len(),
+                "User turn discards the pending quiet-hours catch-up queue"
+            );
+            self.quiet_hours_queue.clear();
+        }
     }
 
     pub fn on_proactive_completed(&mut self) {
@@ -163,6 +171,10 @@ pub(crate) struct ProactiveDecisionResult {
     /// Main-model confirmation state (disabled / pending at decision time;
     /// the actor resolves it once the generation stream ends).
     pub confirmation: ene_mind::ProactiveConfirmation,
+    /// True for synthetic quiet-hours catch-up results: no decision LLM ran
+    /// and no stashed screen frame may attach (the catch-up note only knows
+    /// that moments occurred, never their content).
+    pub(crate) catch_up: bool,
 }
 
 /// Drop stale activity/screen payloads so decisions do not act on old host signals.
@@ -252,6 +264,7 @@ pub(crate) async fn run_decision_task(
         topic_hint: outcome.decision.topic_hint,
         detail,
         confirmation: outcome.confirmation,
+        catch_up: false,
     }
 }
 
@@ -318,13 +331,13 @@ pub(crate) fn quiet_hours_catch_up_hint(items: &str, prompt_language: &str) -> S
     prompts.render_catch_up_hint(items)
 }
 
-/// Format queued quiet-hours moments as a compact item list
-/// (`"22:30 monday, 22:45 monday"`).
+/// Format queued quiet-hours moments as a compact, language-neutral item list
+/// (`"2026-08-03 22:30, 2026-08-03 22:45"`).
 #[must_use]
 pub(crate) fn quiet_hours_items(entries: &[QueuedQuietHour]) -> String {
     entries
         .iter()
-        .map(|entry| format!("{} {}", entry.local_time, entry.weekday))
+        .map(|entry| format!("{} {}", entry.local_date, entry.local_time))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -682,6 +695,7 @@ mod tests {
             topic_hint: String::new(),
             detail: String::new(),
             confirmation: ene_mind::ProactiveConfirmation::Pending,
+            catch_up: false,
         }
     }
 
@@ -809,8 +823,7 @@ mod tests {
         let mut scheduler = ProactiveScheduler::default();
         for i in 0..40 {
             scheduler.quiet_hours_queue.push_back(QueuedQuietHour {
-                at_unix_ms: i,
-                weekday: "monday".into(),
+                local_date: format!("2026-08-{:02}", i % 30 + 1),
                 local_time: "22:00".into(),
             });
             if scheduler.quiet_hours_queue.len() > QUIET_HOURS_QUEUE_CAP {
@@ -819,8 +832,11 @@ mod tests {
         }
         assert_eq!(scheduler.quiet_hours_queue.len(), QUIET_HOURS_QUEUE_CAP);
         assert_eq!(
-            scheduler.quiet_hours_queue.front().map(|e| e.at_unix_ms),
-            Some(40 - QUIET_HOURS_QUEUE_CAP as u64),
+            scheduler
+                .quiet_hours_queue
+                .front()
+                .map(|e| e.local_date.as_str()),
+            Some("2026-08-09"),
             "oldest entries must be dropped first"
         );
 
@@ -829,29 +845,64 @@ mod tests {
     }
 
     #[test]
+    fn user_turn_started_discards_the_quiet_hours_queue() {
+        let mut scheduler = ProactiveScheduler::default();
+        scheduler.quiet_hours_queue.push_back(QueuedQuietHour {
+            local_date: "2026-08-03".into(),
+            local_time: "22:00".into(),
+        });
+        scheduler.on_user_turn_started();
+        assert!(scheduler.quiet_hours_queue.is_empty());
+    }
+
+    #[test]
     fn quiet_hours_items_renders_compact_list() {
         let entries = vec![
             QueuedQuietHour {
-                at_unix_ms: 1,
-                weekday: "monday".into(),
+                local_date: "2026-08-03".into(),
                 local_time: "22:30".into(),
             },
             QueuedQuietHour {
-                at_unix_ms: 2,
-                weekday: "monday".into(),
+                local_date: "2026-08-04".into(),
                 local_time: "22:45".into(),
             },
         ];
-        assert_eq!(quiet_hours_items(&entries), "22:30 monday, 22:45 monday");
+        assert_eq!(
+            quiet_hours_items(&entries),
+            "2026-08-03 22:30, 2026-08-04 22:45"
+        );
     }
 
     #[test]
     fn catch_up_hint_renders_items_in_both_languages() {
-        let en = quiet_hours_catch_up_hint("22:30 monday", "en");
-        assert!(en.contains("22:30 monday"), "hint: {en}");
+        let en = quiet_hours_catch_up_hint("2026-08-03 22:30", "en");
+        assert!(en.contains("2026-08-03 22:30"), "hint: {en}");
         assert!(!en.contains("{items}"), "placeholder must be replaced");
-        let ja = quiet_hours_catch_up_hint("22:30 monday", "ja");
-        assert!(ja.contains("22:30 monday"), "hint: {ja}");
+        let ja = quiet_hours_catch_up_hint("2026-08-03 22:30", "ja");
+        assert!(ja.contains("2026-08-03 22:30"), "hint: {ja}");
         assert!(!ja.contains("{items}"), "placeholder must be replaced");
+    }
+
+    #[test]
+    fn quiet_hours_suppression_helpers_require_an_active_window() {
+        let suppress = ene_mind::QuietHoursSuppressConfig::default();
+        let inactive = QuietHoursEval::inactive();
+        assert!(!quiet_hours_suppresses_tts(&inactive, suppress));
+        assert!(!quiet_hours_suppresses_notifications(&inactive, suppress));
+
+        let active = QuietHoursEval {
+            active: true,
+            ..QuietHoursEval::inactive()
+        };
+        assert!(quiet_hours_suppresses_tts(&active, suppress));
+        assert!(quiet_hours_suppresses_notifications(&active, suppress));
+
+        let tts_only = ene_mind::QuietHoursSuppressConfig {
+            tts: true,
+            notifications: false,
+            decisions: false,
+        };
+        assert!(quiet_hours_suppresses_tts(&active, tts_only));
+        assert!(!quiet_hours_suppresses_notifications(&active, tts_only));
     }
 }
