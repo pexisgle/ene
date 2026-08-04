@@ -125,3 +125,13 @@ impl HasConfigKey for WorkspaceRagConfig {
         &["rag", "workspace"]
     }
 }
+
+const _: () = {
+    #[ctor::ctor(unsafe)]
+    fn register() {
+        ene_config::register_config_schema::<WorkspaceRagConfig>(
+            ConfigTarget::Settings,
+            Some("rag"),
+        );
+    }
+};

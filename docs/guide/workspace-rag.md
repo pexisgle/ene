@@ -13,8 +13,9 @@ privacy model has four layers:
 
 1. **Explicit folder allowlist.** Only the folders listed under
    `rag.workspace.folders` are ever read. Paths are canonicalized before
-   scanning; directory symlinks are never followed; and any file whose
-   canonical path escapes the configured folder is skipped.
+   scanning; directory symlinks are never followed; file symlinks are indexed
+   only when their canonical target stays inside the configured folder, and
+   any file whose canonical path escapes it is skipped.
 2. **Search-time enforcement.** Every search (prompt injection and
    `/workspace search`) receives the *current* configured folders as an
    allowlist. Rows from a folder you removed from the config are pruned on the

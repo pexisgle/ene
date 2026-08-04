@@ -23,7 +23,6 @@ tool = [
     "dep:ene-plugin-proto",
     "dep:async-trait",
     "dep:blake3",
-    "dep:ctor",
     "dep:parking_lot",
     "dep:serde_json",
     "dep:thiserror",
@@ -35,6 +34,7 @@ tool = [
 ene-core = { workspace = true }
 ene-config = { workspace = true }
 chrono = { workspace = true }
+ctor = { workspace = true }
 regex = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
@@ -45,7 +45,6 @@ ene-ai = { workspace = true, optional = true }
 ene-plugin-proto = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
-ctor = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }

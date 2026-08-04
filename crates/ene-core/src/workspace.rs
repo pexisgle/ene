@@ -23,6 +23,9 @@ pub struct WorkspaceFileRow {
     pub content_hash: String,
     /// Embedding model that produced this file's chunk vectors.
     pub model_name: String,
+    /// Number of chunks currently indexed for this file. `0` means the file
+    /// row exists but needs (re-)embedding.
+    pub chunk_count: u64,
 }
 
 /// A chunk to persist for one file.

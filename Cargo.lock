@@ -2488,6 +2488,7 @@ dependencies = [
  "ene-config",
  "ene-mind",
  "ene-plugin-host",
+ "ene-rag",
  "ene-runtime",
  "ene-store",
  "ene-util",

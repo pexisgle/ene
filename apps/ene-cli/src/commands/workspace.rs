@@ -176,10 +176,16 @@ impl CliCommand for WorkspaceCommand {
                         usage: "Usage: /workspace search <query>".to_string(),
                     });
                 }
+                // The configured final_n caps manual search results, matching
+                // the prompt-injection budget and the config docs.
+                let config = ene_config::get_global_config()
+                    .get_section::<ene_rag::WorkspaceRagConfig>()
+                    .unwrap_or_default();
+                let limit = config.final_n.max(1);
                 let hits = ctx
                     .handle
                     .workspace()
-                    .search(query.to_string(), 8)
+                    .search(query.to_string(), limit)
                     .await
                     .map_err(|e| CliError::ExecutionFailed(format!("Search failed: {e}")))?;
                 if hits.is_empty() {

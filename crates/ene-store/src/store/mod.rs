@@ -176,6 +176,12 @@ pub(crate) async fn ensure_vec0_index(
     }
 
     if dimension_changed {
+        // Workspace chunk vectors are dimension-bound, so the base rows are
+        // dropped too: the indexer's unchanged check requires a positive
+        // chunk count, which forces a full re-embed of workspace files after
+        // a model switch instead of leaving them invisible to vector search.
+        db.execute_unprepared("DELETE FROM workspace_document_chunks")
+            .await?;
         // The store remains usable (KNN simply returns no rows until
         // re-embedding), which is strictly better than failing startup
         // forever on a model switch.

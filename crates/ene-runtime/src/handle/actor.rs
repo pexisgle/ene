@@ -541,8 +541,27 @@ impl TurnActor {
             guard.progress = crate::workspace::WorkspaceSyncProgress::default();
             guard.last_error = None;
         }
+        // Live progress: the indexer emits snapshots on an mpsc channel; a
+        // forwarding task writes them into the shared state so
+        // `/workspace status` shows the running sync, not a frozen zeroed
+        // snapshot. The forwarder exits when the channel closes (the sync
+        // drops its sender on completion).
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(64);
+        let forward_state = Arc::clone(&state);
+        let forwarder = tokio::spawn(async move {
+            while let Some(progress) = progress_rx.recv().await {
+                forward_state.lock().progress = progress;
+            }
+        });
         let task = tokio::spawn(async move {
-            let result = indexer.sync(&config, &task_cancel, None).await;
+            let result = indexer.sync(&config, &task_cancel, Some(progress_tx)).await;
+            // Drain the progress queue before writing the terminal state so
+            // the final snapshot reflects every emitted event.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "forwarder JoinHandle failure is unactionable; the channel already closed"
+            )]
+            let _ = forwarder.await;
             let mut guard = state.lock();
             guard.in_progress = false;
             match result {

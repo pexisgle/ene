@@ -9,10 +9,11 @@
 //!
 //! Privacy invariants (mirroring the fs-sandbox canonicalization pattern):
 //! roots are canonicalized before scanning, directory symlinks are never
-//! followed, and a file whose canonical path escapes every permitted root is
-//! skipped. The delete sweep runs only after a *complete* walk (no
-//! cancellation, no unreadable directory), so rows are never removed for
-//! files that were merely not scanned.
+//! followed, and file symlinks are indexed only when their canonical target
+//! stays inside the permitted root. The delete sweep runs only after a
+//! *complete* walk (no cancellation, no unreadable directory, no per-entry
+//! scan failures), so rows are never removed for files that were merely not
+//! scanned.
 
 use ene_ai::{EmbeddingKind, EmbeddingProvider, embed_query};
 use ene_core::{
@@ -114,9 +115,6 @@ pub enum WorkspaceIndexError {
     /// The document index backend rejected an operation.
     #[error("workspace index backend error: {0}")]
     Port(String),
-    /// No embedding provider is available in this session.
-    #[error("no embedding provider is configured")]
-    NoEmbedder,
     /// No configured folder resolved to an existing directory.
     #[error("no permitted workspace folders are configured or resolvable")]
     NoRoots,
@@ -164,6 +162,28 @@ impl WorkspaceIndexer {
         progress: Option<mpsc::Sender<WorkspaceSyncProgress>>,
     ) -> Result<WorkspaceSyncReport, WorkspaceIndexError> {
         let started = std::time::Instant::now();
+        if config.folders.is_empty() {
+            // An empty allowlist permits nothing: prune every row so search
+            // and status agree with the config immediately.
+            let deleted = self
+                .store
+                .prune_workspace_roots(&[])
+                .await
+                .map_err(|e| WorkspaceIndexError::Port(e.to_string()))?;
+            return Ok(WorkspaceSyncReport {
+                roots: Vec::new(),
+                files_scanned: 0,
+                files_indexed: 0,
+                files_unchanged: 0,
+                files_skipped: 0,
+                files_deleted: u64::try_from(deleted).unwrap_or(u64::MAX),
+                files_renamed: 0,
+                chunks_embedded: 0,
+                errors: 0,
+                cancelled: false,
+                elapsed: started.elapsed(),
+            });
+        }
         let roots = canonicalize_roots(&config.folders).await;
         if roots.is_empty() {
             return Err(WorkspaceIndexError::NoRoots);
@@ -172,10 +192,7 @@ impl WorkspaceIndexer {
         let mut state = SyncState::new();
         emit_progress(
             progress.as_ref(),
-            WorkspaceSyncProgress {
-                phase: WorkspaceSyncPhase::Discovering,
-                ..state.snapshot()
-            },
+            state.snapshot(WorkspaceSyncPhase::Discovering),
         );
 
         let mut walk_complete = true;
@@ -203,10 +220,7 @@ impl WorkspaceIndexer {
 
         emit_progress(
             progress.as_ref(),
-            WorkspaceSyncProgress {
-                phase: WorkspaceSyncPhase::Embedding,
-                ..state.snapshot()
-            },
+            state.snapshot(WorkspaceSyncPhase::Embedding),
         );
 
         // Hash-preserving rename remap: a file that appeared at a new path
@@ -242,6 +256,7 @@ impl WorkspaceIndexer {
                     modified_at: file.modified_at,
                     content_hash: file.hash.clone(),
                     model_name: self.embedder.model_name().to_string(),
+                    chunk_count: 0,
                 };
                 match self.store.rename_workspace_file(old, &new_row).await {
                     Ok(true) => {
@@ -283,6 +298,7 @@ impl WorkspaceIndexer {
             if let Some(row) = existing_row
                 && row.content_hash == file.hash
                 && row.model_name == self.embedder.model_name()
+                && row.chunk_count > 0
             {
                 unchanged = unchanged.saturating_add(1);
                 state.processed_paths.insert(path.clone());
@@ -290,7 +306,10 @@ impl WorkspaceIndexer {
             }
 
             state.current_file = Some(path.clone());
-            emit_progress(progress.as_ref(), state.snapshot());
+            emit_progress(
+                progress.as_ref(),
+                state.snapshot(WorkspaceSyncPhase::Embedding),
+            );
             match self.index_file(config, file, cancel).await {
                 Ok(chunk_count) => {
                     indexed = indexed.saturating_add(1);
@@ -320,7 +339,10 @@ impl WorkspaceIndexer {
                 }
             }
             state.current_file = None;
-            emit_progress(progress.as_ref(), state.snapshot());
+            emit_progress(
+                progress.as_ref(),
+                state.snapshot(WorkspaceSyncPhase::Embedding),
+            );
         }
         state.files_indexed = state.files_indexed.saturating_add(indexed);
         state.files_unchanged = unchanged;
@@ -330,10 +352,7 @@ impl WorkspaceIndexer {
         if walk_complete && !cancelled {
             emit_progress(
                 progress.as_ref(),
-                WorkspaceSyncProgress {
-                    phase: WorkspaceSyncPhase::Pruning,
-                    ..state.snapshot()
-                },
+                state.snapshot(WorkspaceSyncPhase::Pruning),
             );
             let vanished: Vec<String> = existing
                 .iter()
@@ -341,6 +360,7 @@ impl WorkspaceIndexer {
                     roots.contains(&row.root)
                         && !current_paths.contains(row.path.as_str())
                         && !state.remapped_paths.contains(&row.path)
+                        && !state.failed_paths.contains(&row.path)
                 })
                 .map(|row| row.path.clone())
                 .collect();
@@ -385,13 +405,7 @@ impl WorkspaceIndexer {
             cancelled,
             elapsed: started.elapsed(),
         };
-        emit_progress(
-            progress.as_ref(),
-            WorkspaceSyncProgress {
-                phase: WorkspaceSyncPhase::Done,
-                ..state.snapshot()
-            },
-        );
+        emit_progress(progress.as_ref(), state.snapshot(WorkspaceSyncPhase::Done));
         tracing::info!(
             component = "WorkspaceRag",
             files_scanned = report.files_scanned,
@@ -464,9 +478,23 @@ impl WorkspaceIndexer {
         if cancel.is_cancelled() {
             return Err(IndexFileError::Cancelled);
         }
+        // Re-resolve the path immediately before reading: a concurrent swap
+        // of an intermediate directory to a symlink between the walk-time
+        // canonicalize and this read must not redirect the read outside the
+        // permitted root.
+        match tokio::fs::canonicalize(&file.path).await {
+            Ok(canonical) if canonical == Path::new(&file.path) => {}
+            Ok(_) => return Err(IndexFileError::Skipped("file changed during sync".into())),
+            Err(e) => return Err(IndexFileError::Failed(format!("canonicalize {e}"))),
+        }
         let bytes = tokio::fs::read(&file.path)
             .await
             .map_err(|e| IndexFileError::Failed(format!("read {e}")))?;
+        if bytes.len() > config.max_file_bytes {
+            return Err(IndexFileError::Skipped(
+                "file grew past max_file_bytes".into(),
+            ));
+        }
         if bytes.contains(&0) {
             return Err(IndexFileError::Skipped("binary file".into()));
         }
@@ -526,6 +554,7 @@ impl WorkspaceIndexer {
             modified_at: file.modified_at,
             content_hash: file.hash.clone(),
             model_name: self.embedder.model_name().to_string(),
+            chunk_count: u64::try_from(new_chunks.len()).unwrap_or(u64::MAX),
         };
         self.store
             .replace_workspace_file(&row, &new_chunks)
@@ -545,6 +574,7 @@ struct SyncState {
     files: HashMap<String, ScannedFile>,
     processed_paths: HashSet<String>,
     remapped_paths: HashSet<String>,
+    failed_paths: HashSet<String>,
     files_scanned: u64,
     files_indexed: u64,
     files_unchanged: u64,
@@ -562,6 +592,7 @@ impl SyncState {
             files: HashMap::new(),
             processed_paths: HashSet::new(),
             remapped_paths: HashSet::new(),
+            failed_paths: HashSet::new(),
             files_scanned: 0,
             files_indexed: 0,
             files_unchanged: 0,
@@ -574,9 +605,9 @@ impl SyncState {
         }
     }
 
-    fn snapshot(&self) -> WorkspaceSyncProgress {
+    fn snapshot(&self, phase: WorkspaceSyncPhase) -> WorkspaceSyncProgress {
         WorkspaceSyncProgress {
-            phase: WorkspaceSyncPhase::Discovering,
+            phase,
             files_scanned: self.files_scanned,
             files_indexed: self.files_indexed,
             files_skipped: self.files_skipped,
@@ -647,6 +678,11 @@ async fn walk_dir(
         let entry = match result {
             Ok(entry) => entry,
             Err(e) => {
+                // The failing entry cannot be identified, so its rows cannot
+                // be excluded from the sweep individually: disable the sweep
+                // entirely rather than deleting rows for files that may
+                // still exist.
+                *walk_complete = false;
                 state.errors = state.errors.saturating_add(1);
                 tracing::warn!(component = "WorkspaceRag", error = %e, "Workspace walk entry failed");
                 continue;
@@ -657,31 +693,46 @@ async fn walk_dir(
             continue;
         };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
+        let entry_path_str = entry_path.to_string_lossy().into_owned();
 
         let file_type = match entry.file_type().await {
             Ok(t) => t,
             Err(e) => {
+                state.failed_paths.insert(entry_path_str.clone());
                 state.errors = state.errors.saturating_add(1);
                 tracing::warn!(component = "WorkspaceRag", error = %e, "Workspace file_type failed");
                 continue;
             }
         };
 
-        if file_type.is_symlink() {
-            // Never follow directory symlinks; file symlinks are validated by
-            // canonical-path containment below.
-            match tokio::fs::metadata(entry.path()).await {
+        // `DirEntry::file_type` reports symlinks as symlinks (it does not
+        // follow them), so resolve the target once: directory symlinks are
+        // never followed; file symlinks proceed to the regular file path,
+        // where canonical-path containment decides whether they are indexed.
+        let mut followed_meta: Option<std::fs::Metadata> = None;
+        let is_dir = if file_type.is_symlink() {
+            match tokio::fs::metadata(&entry_path).await {
                 Ok(meta) if meta.is_dir() => continue,
-                Ok(_) => {}
+                Ok(meta) => {
+                    followed_meta = Some(meta);
+                    false
+                }
                 Err(e) => {
+                    state.failed_paths.insert(entry_path_str.clone());
                     state.errors = state.errors.saturating_add(1);
-                    tracing::warn!(component = "WorkspaceRag", error = %e, "Workspace symlink metadata failed");
+                    tracing::warn!(
+                        component = "WorkspaceRag",
+                        error = %e,
+                        "Workspace symlink metadata failed"
+                    );
                     continue;
                 }
             }
-        }
+        } else {
+            file_type.is_dir()
+        };
 
-        if file_type.is_dir() {
+        if is_dir {
             if is_ignored(&rel_str, config) {
                 continue;
             }
@@ -697,7 +748,7 @@ async fn walk_dir(
             .await;
             continue;
         }
-        if !file_type.is_file() {
+        if !file_type.is_file() && followed_meta.is_none() {
             continue;
         }
         if is_ignored(&rel_str, config) {
@@ -722,13 +773,19 @@ async fn walk_dir(
             continue;
         }
 
-        let meta = match tokio::fs::metadata(entry.path()).await {
-            Ok(meta) => meta,
-            Err(e) => {
-                state.errors = state.errors.saturating_add(1);
-                tracing::warn!(component = "WorkspaceRag", error = %e, "Workspace metadata failed");
-                continue;
-            }
+        let meta = match followed_meta.take() {
+            Some(meta) => meta,
+            None => match tokio::fs::metadata(entry.path()).await {
+                Ok(meta) => meta,
+                Err(e) => {
+                    state
+                        .failed_paths
+                        .insert(best_effort_canonical(&entry_path).await);
+                    state.errors = state.errors.saturating_add(1);
+                    tracing::warn!(component = "WorkspaceRag", error = %e, "Workspace metadata failed");
+                    continue;
+                }
+            },
         };
         if meta.len() > u64::try_from(config.max_file_bytes).unwrap_or(u64::MAX) {
             state.files_skipped = state.files_skipped.saturating_add(1);
@@ -738,6 +795,9 @@ async fn walk_dir(
         let canonical = match tokio::fs::canonicalize(entry.path()).await {
             Ok(c) => c,
             Err(e) => {
+                state
+                    .failed_paths
+                    .insert(best_effort_canonical(&entry_path).await);
                 state.errors = state.errors.saturating_add(1);
                 tracing::warn!(component = "WorkspaceRag", error = %e, "Workspace canonicalize failed");
                 continue;
@@ -752,6 +812,9 @@ async fn walk_dir(
         let hash = match hash_file(&canonical).await {
             Ok(hash) => hash,
             Err(e) => {
+                state
+                    .failed_paths
+                    .insert(canonical.to_string_lossy().into_owned());
                 state.errors = state.errors.saturating_add(1);
                 tracing::warn!(component = "WorkspaceRag", error = %e, "Workspace hashing failed");
                 continue;
@@ -772,8 +835,21 @@ async fn walk_dir(
         );
         state.files_scanned = state.files_scanned.saturating_add(1);
         state.current_file = Some(canonical.to_string_lossy().into_owned());
-        emit_progress(progress, state.snapshot());
+        emit_progress(progress, state.snapshot(WorkspaceSyncPhase::Discovering));
     }
+}
+
+/// Best-effort canonical path for sweep-exclusion bookkeeping when
+/// `canonicalize` itself failed: canonicalize the parent and re-attach the
+/// file name so the recorded path matches the stored index key.
+async fn best_effort_canonical(path: &Path) -> String {
+    if let Some(parent) = path.parent()
+        && let Some(name) = path.file_name()
+        && let Ok(parent) = tokio::fs::canonicalize(parent).await
+    {
+        return parent.join(name).to_string_lossy().into_owned();
+    }
+    path.to_string_lossy().into_owned()
 }
 
 fn is_ignored(rel_path: &str, config: &WorkspaceRagConfig) -> bool {
@@ -1198,6 +1274,7 @@ mod tests {
         let root = dir.path().to_string_lossy().into_owned();
         write_file(&outside.path().join("secret.md"), "outside secret\n").await;
         write_file(&dir.path().join("inside.md"), "inside\n").await;
+        write_file(&dir.path().join("real.md"), "real target\n").await;
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(outside.path(), dir.path().join("escape_dir")).unwrap();
@@ -1206,6 +1283,11 @@ mod tests {
                 dir.path().join("escape_file.md"),
             )
             .unwrap();
+            // An in-root file symlink is indexed: canonical-path containment
+            // passes, so the symlink resolution must not drop it before the
+            // check.
+            std::os::unix::fs::symlink(dir.path().join("real.md"), dir.path().join("alias.md"))
+                .unwrap();
         }
         let store = Arc::new(MemoryPort::new());
         let indexer = indexer(store.clone());
@@ -1217,9 +1299,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(report.files_indexed, 1);
-        assert_eq!(store.paths().len(), 1);
-        assert!(store.paths()[0].ends_with("inside.md"));
+        // The in-root alias resolves to real.md's canonical path, so both
+        // entries collapse into one row (canonical identity); the escaping
+        // file and directory symlinks are skipped.
+        assert_eq!(report.files_indexed, 2);
+        assert_eq!(store.paths().len(), 2);
+        assert!(store.paths().iter().any(|p| p.ends_with("inside.md")));
+        assert!(store.paths().iter().any(|p| p.ends_with("real.md")));
     }
 
     #[tokio::test]
@@ -1241,13 +1327,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_without_roots_errors() {
+    async fn empty_folders_wipe_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        write_file(&dir.path().join("a.md"), "alpha\n").await;
         let store = Arc::new(MemoryPort::new());
         let indexer = indexer(store.clone());
-        let result = indexer
+        indexer
+            .sync(
+                &test_config(vec![root.clone()]),
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.paths().len(), 1);
+
+        // An empty allowlist permits nothing: syncing prunes every row so
+        // search and status agree with the configuration immediately.
+        let report = indexer
             .sync(&test_config(vec![]), &CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(report.files_deleted, 1);
+        assert!(store.paths().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unresolvable_roots_error_without_wiping() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        write_file(&dir.path().join("a.md"), "alpha\n").await;
+        let store = Arc::new(MemoryPort::new());
+        let indexer = indexer(store.clone());
+        indexer
+            .sync(
+                &test_config(vec![root.clone()]),
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // A configured-but-missing folder is a config error, not a wipe: a
+        // typo must never delete the index.
+        let result = indexer
+            .sync(
+                &test_config(vec![
+                    dir.path()
+                        .join("does-not-exist")
+                        .to_string_lossy()
+                        .into_owned(),
+                ]),
+                &CancellationToken::new(),
+                None,
+            )
             .await;
         assert!(matches!(result, Err(WorkspaceIndexError::NoRoots)));
+        assert_eq!(store.paths().len(), 1);
     }
 
     #[tokio::test]

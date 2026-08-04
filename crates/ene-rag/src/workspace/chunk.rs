@@ -112,6 +112,41 @@ pub fn chunk_document(
             heading = h.to_string();
         }
 
+        // Over-long lines (minified JS/CSS/JSON, dumps) must not become a
+        // single oversized chunk: split them at the character budget so the
+        // per-chunk and per-file caps hold for every document shape.
+        let line_chars = line.chars().count();
+        if line_chars >= options.chunk_chars {
+            flush(
+                &mut chunks,
+                &mut pending,
+                &mut heading,
+                &mut chunk_index,
+                options.overlap_chars,
+            );
+            for segment in split_long_line(line, options.chunk_chars) {
+                if chunks.len() >= options.max_chunks_per_file {
+                    return ChunkedDocument {
+                        chunks,
+                        truncated: true,
+                    };
+                }
+                chunks.push(DocumentChunk {
+                    chunk_index,
+                    heading: heading.clone(),
+                    content: segment,
+                    start_line: line_no,
+                    end_line: line_no,
+                });
+                chunk_index = chunk_index.saturating_add(1);
+            }
+            pending_chars = pending
+                .iter()
+                .map(|(_, text)| text.chars().count().saturating_add(1))
+                .sum();
+            continue;
+        }
+
         if !line.is_empty() {
             pending.push((line_no, line.to_string()));
             pending_chars = pending_chars.saturating_add(line.chars().count().saturating_add(1));
@@ -148,20 +183,7 @@ pub fn chunk_document(
         );
     }
 
-    if chunks.is_empty() && !text.trim().is_empty() {
-        // Pathological case (e.g. a single line longer than the budget):
-        // emit one chunk holding the document so the file is not lost.
-        let lines: Vec<&str> = text.lines().collect();
-        let start_line = 1u32;
-        let end_line = u32::try_from(lines.len()).unwrap_or(u32::MAX);
-        chunks.push(DocumentChunk {
-            chunk_index: 0,
-            heading: fallback_heading.to_string(),
-            content: text.trim_end().to_string(),
-            start_line,
-            end_line,
-        });
-    } else if !chunks.is_empty() && chunks[0].heading.is_empty() {
+    if !chunks.is_empty() && chunks[0].heading.is_empty() {
         chunks[0].heading = fallback_heading.to_string();
     }
 
@@ -171,6 +193,22 @@ pub fn chunk_document(
     }
 
     ChunkedDocument { chunks, truncated }
+}
+
+/// Splits a single over-long line into character-budgeted segments.
+fn split_long_line(line: &str, max_chars: usize) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::with_capacity(max_chars);
+    for c in line.chars() {
+        if current.chars().count() >= max_chars {
+            segments.push(std::mem::take(&mut current));
+        }
+        current.push(c);
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
 }
 
 /// Returns the Markdown ATX heading text for a line, if any.
@@ -248,9 +286,20 @@ mod tests {
     fn single_long_line_is_kept_as_one_chunk() {
         let line = "x".repeat(500);
         let out = chunk_document(&line, "f.txt", &options());
-        assert_eq!(out.chunks.len(), 1);
-        assert_eq!(out.chunks[0].content, line);
+        assert_eq!(out.chunks.len(), 7); // 500 chars / 80 per chunk
+        assert!(!out.truncated);
         assert_eq!(out.chunks[0].heading, "f.txt");
+        assert!(out.chunks.iter().all(|c| c.content.chars().count() <= 80));
+    }
+
+    #[test]
+    fn over_long_lines_respect_the_chunk_cap() {
+        let line = "y".repeat(5000);
+        let mut opts = options();
+        opts.max_chunks_per_file = 3;
+        let out = chunk_document(&line, "f.txt", &opts);
+        assert!(out.truncated);
+        assert_eq!(out.chunks.len(), 3);
     }
 
     #[test]

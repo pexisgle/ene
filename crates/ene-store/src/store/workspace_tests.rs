@@ -16,6 +16,7 @@ fn file_row(root: &str, path: &str, hash: &str) -> WorkspaceFileRow {
         modified_at: Utc::now(),
         content_hash: hash.to_string(),
         model_name: "test-model".to_string(),
+        chunk_count: 0,
     }
 }
 
@@ -236,4 +237,33 @@ async fn workspace_replace_is_atomic_per_file() {
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].chunk_index, 0);
+}
+
+#[tokio::test]
+async fn workspace_dimension_change_forces_reembed() {
+    let store = setup_store().await;
+    seed(
+        &store,
+        "/roots/a",
+        "/roots/a/doc.md",
+        "stable content",
+        &[1.0, 0.0, 0.0, 0.0],
+    )
+    .await;
+    assert_eq!(
+        store.list_workspace_files().await.unwrap()[0].chunk_count,
+        1
+    );
+
+    // A dimension change rebuilds the vec0 tables empty and drops the
+    // dimension-bound base chunk rows, so the next sync re-embeds the file
+    // even though its content hash is unchanged.
+    super::ensure_vec0_index(&store.db, 8).await.unwrap();
+    let files = store.list_workspace_files().await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].chunk_count, 0);
+    assert_eq!(
+        store.workspace_index_status().await.unwrap().indexed_chunks,
+        0
+    );
 }

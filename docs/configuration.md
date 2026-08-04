@@ -775,7 +775,8 @@ same folders at search time. See the
   searched, or injected into prompts.
 - `folders` — the **only** folders that may be scanned and searched. Paths are
   canonicalized before scanning; directory symlinks are never followed and
-  files whose canonical path escapes the configured folder are skipped.
+  file symlinks are indexed only when their canonical target stays inside the
+  configured folder; files whose canonical path escapes it are skipped.
 - `include_extensions` — file extensions (case-insensitive, no dot) eligible
   for indexing.
 - `ignore_globs` — glob patterns (relative to each folder) excluded from

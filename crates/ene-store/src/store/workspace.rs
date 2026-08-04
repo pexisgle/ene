@@ -9,9 +9,20 @@ use ene_core::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult,
-    PaginatorTrait, QueryFilter, QueryOrder, Statement, TransactionTrait,
+    PaginatorTrait, QueryFilter, Statement, TransactionTrait,
 };
 use std::collections::HashMap;
+
+#[derive(Debug, FromQueryResult)]
+struct FileListRow {
+    root: String,
+    path: String,
+    size: i64,
+    modified_at: chrono::DateTime<chrono::Utc>,
+    content_hash: String,
+    model_name: String,
+    chunk_count: i64,
+}
 
 #[derive(Debug, FromQueryResult)]
 struct VecSearchRow {
@@ -41,11 +52,24 @@ impl MemoryStore {
     pub async fn list_workspace_files(
         &self,
     ) -> Result<Vec<WorkspaceFileRow>, crate::error::EneMemoryError> {
-        let rows = entities::workspace_document_files::Entity::find()
-            .order_by_asc(entities::workspace_document_files::Column::Path)
-            .all(&self.db)
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT f.root, f.path, f.size, f.modified_at, f.content_hash, \
+                        f.model_name, COUNT(c.id) AS chunk_count \
+                 FROM workspace_document_files f \
+                 LEFT JOIN workspace_document_chunks c ON c.file_id = f.id \
+                 GROUP BY f.id \
+                 ORDER BY f.path ASC"
+                    .to_string(),
+            ))
             .await?;
-        Ok(rows.into_iter().map(model_to_file_row).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| FileListRow::from_query_result(&row, "").ok())
+            .map(model_to_file_row)
+            .collect())
     }
 
     /// Atomically replace one file's chunks and vec0 entries.
@@ -385,17 +409,31 @@ impl MemoryStore {
             .iter()
             .map(|root| sea_orm::Value::from(root.clone()))
             .collect();
+        let mut match_count = String::from("(");
         for (i, token) in tokens.iter().enumerate() {
             if i > 0 {
                 sql.push_str(" OR ");
+                match_count.push_str(" + ");
             }
             let pattern = format!("%{token}%");
             sql.push_str("(c.content LIKE ? OR c.heading LIKE ? OR f.path LIKE ?)");
             values.push(sea_orm::Value::from(pattern.clone()));
             values.push(sea_orm::Value::from(pattern.clone()));
+            values.push(sea_orm::Value::from(pattern.clone()));
+            match_count.push_str(
+                "CASE WHEN c.content LIKE ? OR c.heading LIKE ? OR f.path LIKE ? THEN 1 ELSE 0 END",
+            );
+            values.push(sea_orm::Value::from(pattern.clone()));
+            values.push(sea_orm::Value::from(pattern.clone()));
             values.push(sea_orm::Value::from(pattern));
         }
-        sql.push_str(") ORDER BY c.id ASC LIMIT ?");
+        match_count.push(')');
+        // Over-fetch the chunks matching the most distinct query tokens so
+        // the post-SQL score competition sees the best lexical candidates,
+        // not the first rows by insertion order.
+        sql.push_str(") ORDER BY ");
+        sql.push_str(&match_count);
+        sql.push_str(" DESC, c.id ASC LIMIT ?");
         values.push(sea_orm::Value::from(
             u64::try_from(pool).unwrap_or(u64::MAX),
         ));
@@ -479,7 +517,7 @@ impl MemoryStore {
     }
 }
 
-fn model_to_file_row(row: entities::workspace_document_files::Model) -> WorkspaceFileRow {
+fn model_to_file_row(row: FileListRow) -> WorkspaceFileRow {
     WorkspaceFileRow {
         root: row.root,
         path: row.path,
@@ -487,6 +525,7 @@ fn model_to_file_row(row: entities::workspace_document_files::Model) -> Workspac
         modified_at: row.modified_at,
         content_hash: row.content_hash,
         model_name: row.model_name,
+        chunk_count: u64::try_from(row.chunk_count).unwrap_or(u64::MAX),
     }
 }
 
