@@ -79,6 +79,11 @@ quote = "1"
 rmcp = { version = "2", features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 syn = { version = "3", features = ["full", "extra-traits"] }
 
+# ── VCS / Git ──
+# Vendored libgit2: needs only a C compiler plus system zlib headers
+# (libz-sys); no libgit2 system package required.
+git2 = { version = "0.21", features = ["vendored-libgit2"] }
+
 # ── Data Structures ──
 crossbeam-channel = "0.5"
 dashmap = "6"

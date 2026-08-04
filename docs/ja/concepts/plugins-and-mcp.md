@@ -23,6 +23,7 @@ Ene ホストアプリケーション (ene-runtime)
         │     ├── ene-plugin-fs        (サンドボックス化ファイルシステムツール)
         │     ├── ene-plugin-random    (ランダム生成ツール)
         │     ├── ene-plugin-geo       (地理情報ツール)
+        │     ├── ene-plugin-git       (読み取り専用 Git ツール)
         │     ├── ene-plugin-utility   (TODO・質問・タイマー・通知ツール)
         │     └── ene-plugin-web       (Web 検索 & スクレイパーツール)
         │
@@ -191,12 +192,13 @@ runner API は設計上**非ストリーミング**です。トークンスト�
 | `ene-plugin-fs` | `fs.*` | サンドボックス化ファイル操作 & Undo 履歴 | はい (ホストサービス `db`) |
 | `ene-plugin-random` | `random.*` | 乱数・UUID v4・リスト選択・hex 色生成 | いいえ |
 | `ene-plugin-geo` | `geo.*` | IP ベース位置情報・現在の天気・太陽時 UTC オフセット・日の出日の入り | いいえ |
+| `ene-plugin-git` | `git.*` | 読み取り専用 Git 検査: ステータス・差分・履歴・ブランチ・リモート・責務追跡 | いいえ |
 | `ene-plugin-utility` | `utility.*` | 質問プロンプト、TODO リスト管理、日時/システム情報、カウントダウンタイマー & デスクトップ通知（Linux・D-Bus のみ） | はい (ホストサービス `db`) |
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude プロバイダプラグイン | いいえ |
 | `ene-plugin-openai` | Provider | OpenAI 互換プロバイダプラグイン（チャット・ストリーミング・埋め込み） | いいえ |
 
-上記 11 プラグインはすべてデフォルトの `plugins.list` に含まれており、
+上記 12 プラグインはすべてデフォルトの `plugins.list` に含まれており、
 新規インストール時に自動的に起動します。
 
 ### ファイルツールリファレンス (`filesystem.*`)

@@ -2788,6 +2788,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-git"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ene-plugin",
+ "ene-plugin-proto",
+ "git2",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "ene-plugin-host"
 version = "0.1.0"
 dependencies = [
@@ -3715,6 +3734,18 @@ dependencies = [
  "libc",
  "system-deps 6.2.2",
  "winapi",
+]
+
+[[package]]
+name = "git2"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddddbf932745a6be37109b6112d3ee09696106f848449069d3a57bba937ab82e"
+dependencies = [
+ "bitflags 2.13.1",
+ "libc",
+ "libgit2-sys",
+ "log",
 ]
 
 [[package]]
@@ -4921,6 +4952,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libgit2-sys"
+version = "0.18.7+1.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23c7391e4b9f4ffab1a624223cc1d7385ff9a678f490768add717de7ea2f4d89"
+dependencies = [
+ "cc",
+ "libc",
+ "libz-sys",
+ "pkg-config",
+]
+
+[[package]]
 name = "libloading"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5026,6 +5069,18 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+]
+
+[[package]]
+name = "libz-sys"
+version = "1.1.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]

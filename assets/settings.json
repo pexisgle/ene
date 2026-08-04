@@ -108,6 +108,9 @@
       "random": {
         "enable": true
       },
+      "git": {
+        "enable": true
+      },
       "utility": {
         "enable": true
       },
