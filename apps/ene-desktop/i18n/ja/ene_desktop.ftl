@@ -131,6 +131,20 @@ memory-commitment-due = 期限
 memory-commitment-due-label = 期限（ラベル）
 memory-approve = 承認
 memory-reject = 拒否
+memory-approve-edit = 編集
+memory-approve-edit-title = 候補を編集
+memory-approve-save = 保存
+memory-approve-save-approve = 保存して承認
+memory-approve-cancel = キャンセル
+memory-approve-edit-invalid-kind = 無効なメモリ種別です
+memory-pending-history = 履歴
+memory-pending-history-empty = 承認・却下された候補はまだありません。
+memory-pending-history-ok = 候補の履歴を読み込みました
+memory-pending-history-error = 候補の履歴の読み込みに失敗しました
+memory-approval-status-approved = 承認済み
+memory-approval-status-rejected = 却下済み
+memory-approval-status-pending = 保留中
+memory-approval-resolved-at = 解決日時
 memory-salience = 重要度
 
 # Character
