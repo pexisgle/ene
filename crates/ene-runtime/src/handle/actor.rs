@@ -5698,6 +5698,7 @@ mod tests {
     async fn engaged_world_state_skips_the_quiet_hours_queue() {
         use crate::handle::tests::{EmptyRegistry, build_bare_actor};
         use chrono::TimeZone;
+        use std::time::{SystemTime, UNIX_EPOCH};
 
         let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
         let task_caps = crate::task_config::ToolRuntimeConfig::default();
@@ -5722,6 +5723,12 @@ mod tests {
             .expect("set mind config on test actor");
         actor.session.record_user_input();
         actor.session.add_user_message("hi");
+        let captured_at_unix_ms: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is after the Unix epoch")
+            .as_millis()
+            .try_into()
+            .expect("current Unix timestamp fits in u64");
 
         // Three observations with a fresh window switch: the trend is
         // engaged, so the quiet-hours tick is not an utterance opportunity.
@@ -5730,7 +5737,7 @@ mod tests {
                 actor
                     .handle_command(EneCommand::UpdateProactiveObservation {
                         observation: ene_mind::ProactiveObservation {
-                            captured_at_unix_ms: i + 1,
+                            captured_at_unix_ms: captured_at_unix_ms + i,
                             activity: Some(ene_mind::ActivitySnapshot {
                                 idle_seconds: None,
                                 active_window_label: "Editor".into(),
