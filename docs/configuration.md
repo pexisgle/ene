@@ -966,6 +966,76 @@ Changing `ai.tts.provider` itself (e.g. switching from `voicevox` to
 once at bootstrap, while edits to `plugins.list.edge-tts.config` and
 `ai.tts.voice` are picked up by running sessions.
 
+#### ElevenLabs TTS provider (`plugins.list.elevenlabs.config`)
+
+The `elevenlabs` provider plugin (`plugins/provider/elevenlabs`) synthesizes
+speech through the ElevenLabs API with two transports: the REST
+`POST /text-to-speech/{voice_id}/stream` endpoint (default) and the
+bidirectional `stream-input` WebSocket for low-latency streaming
+(`mode = "ws"`). It requests raw 16-bit mono PCM (`pcm_16000` / `pcm_24000` /
+`pcm_44100`) and returns WAV, which the host-side audio pipeline decodes into
+float samples. Select it with `ai.tts.provider = "elevenlabs"`; the generic
+`ai.tts.voice` field can hold a voice ID that overrides the configured
+default per request.
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "elevenlabs",
+      "voice": "21m00Tcm4TlvDq8ikWAM"
+    }
+  },
+  "plugins": {
+    "list": {
+      "elevenlabs": {
+        "enable": true,
+        "config": {
+          "api_key": "xi-...",
+          "mode": "rest",
+          "model_id": "eleven_multilingual_v2",
+          "voice_id": "21m00Tcm4TlvDq8ikWAM",
+          "sample_rate": 24000,
+          "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
+            "use_speaker_boost": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Settings:
+
+| Key | Default | Description |
+|---|---|---|
+| `api_key` | unset | ElevenLabs API key, or a `{source: inline\|env\|auto}` descriptor. Falls back to the `ELEVENLABS_API_KEY` environment variable. Marked `x-ene-secret`, so the host masks and redacts it. |
+| `mode` | `rest` | Transport: `rest` (`POST /text-to-speech/{voice_id}/stream`, chunked audio) or `ws` (`stream-input` WebSocket, bidirectional base64 audio frames). |
+| `model_id` | `eleven_multilingual_v2` | ElevenLabs model ID (e.g. `eleven_turbo_v2_5`). |
+| `voice_id` | unset | Default voice ID; a per-request voice overrides it. Required when the request carries none. |
+| `sample_rate` | `24000` | PCM output sample rate (`16000` / `24000` / `44100`); selects the API's `pcm_{rate}` format and the WAV header rate. |
+| `voice_settings.stability` | `0.5` | Voice stability (0.0–1.0, clamped). |
+| `voice_settings.similarity_boost` | `0.75` | Voice similarity boost (0.0–1.0, clamped). |
+| `voice_settings.style` | `0.0` | Style exaggeration (0.0–1.0, clamped; only some models support it). |
+| `voice_settings.use_speaker_boost` | `true` | Whether to boost the voice's natural characteristics. |
+| `base_url` | `https://api.elevenlabs.io/v1` | API base URL override. Falls back to the `ELEVENLABS_BASE_URL` environment variable. WebSocket mode swaps the scheme (`http(s)` → `ws(s)`). |
+
+The plugin sends `xi-api-key` as a request header (never a query parameter),
+requests `pcm_{sample_rate}` from the API, and returns the audio as WAV
+(`formats = ["wav"]`). The API's other formats (`mp3_44100_128`, …) are not
+exposed. REST failures are retried up to 3 times on 429 / network errors with
+jittered backoff; WebSocket mode retries the whole request on transport
+failures and discards partial audio.
+
+Changing `ai.tts.provider` itself (e.g. switching from `edge-tts` to
+`elevenlabs`) takes effect at the next startup: the active provider is built
+once at bootstrap, while edits to `plugins.list.elevenlabs.config` and
+`ai.tts.voice` are picked up by running sessions.
+
 #### Secret marking
 
 A plugin's `config_schema()` may mark a field with `x-ene-secret: true`. The
