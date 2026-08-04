@@ -1,37 +1,30 @@
-//! Local GGUF provider plugin: capability skeleton.
+//! Local GGUF provider plugin: chat streaming, completion, and embeddings.
 //!
 //! Implements [`ConfigurablePlugin`] (mmproj / acceleration config and
-//! per-model profiles) and declares the provider capabilities the inference
-//! core serves in a later slice. The [`LlmPlugin`] and [`EmbedPlugin`] action
-//! handlers are stubs returning `NotSupported` until that core lands.
-
-use std::sync::{Mutex, PoisonError};
+//! per-model profiles), [`LlmPlugin`] (streaming and non-streaming chat on
+//! `ene-ai-local`'s [`LocalLlamaCppProvider`](ene_ai_local::LocalLlamaCppProvider),
+//! including message-based vision when an mmproj is configured), and
+//! [`EmbedPlugin`] (GGUF embeddings on
+//! [`GgufEmbeddingProvider`](ene_ai_local::GgufEmbeddingProvider)). Models
+//! load lazily per profile key and stay resident for the process lifetime.
 
 use async_trait::async_trait;
+use ene_ai::EmbeddingKind;
+use ene_ai::traits::{EmbeddingProvider, LlmProvider};
 use ene_plugin::prelude::*;
-use serde_json::{Value, json};
+use serde_json::Value;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 
-/// Error message for inference actions until the llama.cpp core lands.
-const INFERENCE_NOT_IMPLEMENTED: &str =
-    "local inference is not implemented in this slice; the llama.cpp core lands in Slice C";
-
-/// Configuration delivered by the host at handshake time
-/// (`plugins.list.llama-cpp.config`), stored per process.
-///
-/// `Mutex` (rather than `OnceLock`) so tests can reset it between cases; in
-/// production the handshake is a one-shot and reconnects resend the same
-/// blob, so last-writer-wins is equivalent.
-static PLUGIN_CONFIG: Mutex<Option<Value>> = Mutex::new(None);
-
-/// Per-profile configuration (`plugins.list.llama-cpp.profiles`), stored per
-/// process. Profile *selection* is plugin-owned and starts in Slice C.
-static PLUGIN_PROFILES: Mutex<Option<Value>> = Mutex::new(None);
+use crate::config;
+use crate::convert;
+use crate::models;
 
 /// Local GGUF inference provider plugin (llama.cpp).
 ///
 /// The static capability data (`llm_spec()` / `LLM_PROVIDER_KIND` /
 /// `provides()`) is generated from the `#[provider(...)]` attribute; the
-/// async handlers below stay hand-written stubs until Slice C.
+/// async handlers below load models lazily per profile key.
 #[derive(LlmPlugin)]
 #[provider(
     kind = "local",
@@ -49,22 +42,20 @@ impl ene_plugin::ConfigurablePlugin for LocalLlmPlugin {
     /// Receives the plugin configuration blob from the host at handshake
     /// time (`plugins.list.llama-cpp.config`).
     fn set_config(&self, config: &Value) {
-        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
+        config::set_config(config);
     }
 
     /// Receives the per-model profile map (`plugins.list.llama-cpp.profiles`).
     fn set_profiles(&self, profiles: &Value) {
-        *PLUGIN_PROFILES
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(profiles.clone());
+        config::set_profiles(profiles);
     }
 
     /// Advertises the config schema. Profile shape (`url` / `quantization` /
-    /// `model_path` / `gpu_layers` per model) is delivered via `set_profiles`
-    /// and documented in `docs/configuration.md`; the host treats profiles as
-    /// opaque.
+    /// `model_path` / `gpu_layers` / optional `context_size` per model) is
+    /// delivered via `set_profiles` and documented in `docs/configuration.md`;
+    /// the host treats profiles as opaque.
     fn config_schema(&self) -> Option<Value> {
-        Some(json!({
+        Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "mmproj_url": {
@@ -95,30 +86,62 @@ impl LlmPlugin for LocalLlmPlugin {
         &self,
         kind: &str,
         _config: Value,
-        _model: String,
+        model: String,
         _max_tokens: Option<u32>,
-        _messages: Vec<Value>,
-        _tools: Vec<Value>,
+        messages: Vec<Value>,
+        tools: Vec<Value>,
     ) -> Result<PluginStream, PluginError> {
-        if kind != Self::LLM_PROVIDER_KIND {
-            return Err(PluginError::not_supported(format!("provider kind: {kind}")));
+        ensure_kind(kind)?;
+        if !tools.is_empty() {
+            return Err(PluginError::not_supported(
+                "local models do not support tool calls",
+            ));
         }
-        Err(PluginError::not_supported(INFERENCE_NOT_IMPLEMENTED))
+        let messages = convert::to_llm_messages(&messages)?;
+        let provider = models::chat_provider(&model).await?;
+        let stream = provider
+            .create_chat_stream(&messages, &[])
+            .await
+            .map_err(|e| convert::map_llm_error(&e))?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            // The engine handle lives in the provider; keep it alive for as
+            // long as the stream runs even if the registry entry is dropped.
+            let _keep_alive = provider;
+            let mut stream = stream;
+            while let Some(item) = stream.next().await {
+                let mapped = item
+                    .map_err(|e| convert::map_llm_error(&e))
+                    .map(convert::map_stream_chunk);
+                if tx.send(mapped).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
     async fn chat_completion(
         &self,
         kind: &str,
         _config: Value,
-        _model: String,
+        model: String,
         _max_tokens: Option<u32>,
-        _messages: Vec<Value>,
-        _json_schema: Option<Value>,
+        messages: Vec<Value>,
+        json_schema: Option<Value>,
     ) -> Result<PluginCompletion, PluginError> {
-        if kind != Self::LLM_PROVIDER_KIND {
-            return Err(PluginError::not_supported(format!("provider kind: {kind}")));
-        }
-        Err(PluginError::not_supported(INFERENCE_NOT_IMPLEMENTED))
+        ensure_kind(kind)?;
+        let messages = convert::to_llm_messages(&messages)?;
+        let provider = models::chat_provider(&model).await?;
+        let completion = provider
+            .chat_completion(&messages, json_schema)
+            .await
+            .map_err(|e| convert::map_llm_error(&e))?;
+        Ok(PluginCompletion {
+            text: completion.text,
+            usage: completion.usage,
+        })
     }
 }
 
@@ -132,14 +155,51 @@ impl EmbedPlugin for LocalLlmPlugin {
         &self,
         kind: &str,
         _config: Value,
-        _model: String,
-        _dimensions: Option<u32>,
-        _items: Vec<String>,
+        model: String,
+        dimensions: Option<u32>,
+        items: Vec<String>,
     ) -> Result<Vec<Vec<f32>>, PluginError> {
-        if kind != Self::LLM_PROVIDER_KIND {
-            return Err(PluginError::not_supported(format!("provider kind: {kind}")));
+        ensure_kind(kind)?;
+        if items.is_empty() {
+            return Ok(Vec::new());
         }
-        Err(PluginError::not_supported(INFERENCE_NOT_IMPLEMENTED))
+        for text in &items {
+            if text.trim().is_empty() {
+                return Err(PluginError::provider(
+                    "cannot embed empty text; refusing to pollute the vector store",
+                ));
+            }
+        }
+        let provider = models::embed_provider(&model).await?;
+        if let Some(requested) = dimensions
+            && requested > 0
+            && usize::try_from(requested).is_ok_and(|dims| dims != provider.dimensions())
+        {
+            return Err(PluginError::provider(format!(
+                "model {model:?} produces {} dims but {requested} were requested",
+                provider.dimensions()
+            )));
+        }
+        // Embedding kinds are dropped at the IPC boundary, so every item is
+        // embedded with the document prefix; the host's configured query
+        // prefix remains the query-side knob (see the Slice C plan).
+        let batch: Vec<(&str, EmbeddingKind)> = items
+            .iter()
+            .map(|text| (text.as_str(), EmbeddingKind::Summary))
+            .collect();
+        let vectors = provider
+            .embed_batch(&batch)
+            .await
+            .map_err(|e| convert::map_embed_error(&e))?;
+        Ok(vectors)
+    }
+}
+
+fn ensure_kind(kind: &str) -> Result<(), PluginError> {
+    if kind == LocalLlmPlugin::LLM_PROVIDER_KIND {
+        Ok(())
+    } else {
+        Err(PluginError::not_supported(format!("provider kind: {kind}")))
     }
 }
 
@@ -183,7 +243,7 @@ mod tests {
 
     /// The full host round-trip: handshake (with config + profiles) →
     /// capability declarations → live `SetConfig` → `GetConfigSchema` →
-    /// inference stub error.
+    /// inference error for an unconfigured model.
     #[tokio::test]
     async fn handshake_declares_capabilities_and_round_trips_config() {
         let socket_path = test_socket_path("contract");
@@ -307,13 +367,15 @@ mod tests {
             Some(&serde_json::json!(["auto", "cpu", "vulkan", "cuda"]))
         );
 
+        // Inference for an unconfigured model fails typed (no model load, no
+        // panic) — exercises the real profile-lookup path.
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::CreateChatStream {
                 request_id: "req-chat".to_string(),
                 provider_kind: "local".to_string(),
                 provider_config: serde_json::json!({}),
-                model: "gemma-4-e4b".to_string(),
+                model: "no-such-model".to_string(),
                 max_tokens: None,
                 messages: Vec::new(),
                 tools: Vec::new(),
@@ -327,11 +389,11 @@ mod tests {
             .expect("read stream error")
             .expect("stream error frame");
         let PluginIpcResponse::StreamError { message, .. } = resp else {
-            panic!("expected StreamError for stub, got {resp:?}");
+            panic!("expected StreamError for unconfigured model, got {resp:?}");
         };
         assert!(
-            message.contains("not implemented"),
-            "stub must explain the slice boundary: {message}"
+            message.contains("profile"),
+            "unconfigured model must fail with a profile error: {message}"
         );
 
         server.abort();
