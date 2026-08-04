@@ -43,6 +43,8 @@ mod memory;
 mod pending;
 mod pending_write;
 mod port;
+mod schedule;
+mod schedule_time;
 mod span;
 
 pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
@@ -60,4 +62,9 @@ pub use port::{
     EmbeddingStorePort, EmbeddingStorePortError, MemoryPort, MemoryPortError,
     ToolEmbeddingFieldRow, ToolFailureSignalPort, ToolFailureSignalPortError,
 };
+pub use schedule::{
+    NewSchedule, Schedule, ScheduleAction, ScheduleConfirmation, ScheduleError, ScheduleKind,
+    ScheduleRun, ScheduleRunStatus,
+};
+pub use schedule_time::{first_run_at, next_occurrence_after};
 pub use span::{ActiveSceneSummaryRow, NewMemorySpan};
