@@ -16,14 +16,14 @@
 | **[アーキテクチャ](architecture.md)** | 開発者・アーキテクト | ワークスペース設計、API v1 ホスト契約、ターンパイプライン、IPC Protocol v6。 |
 | **[設定リファレンス](configuration.md)** | 運用者・開発者 | 全設定項目 (`ENE_*` 環境変数、設定ファイル、キャラクターカード)。 |
 | **[主要概念](concepts/turn-and-session.md)** | 開発者 | ターン、記憶、音声/アバター、プラグイン、MCP連携の解説。 |
-| **[クレートリファレンス](crates/runtime.md)** | 開発者 | ワークスペース内全 16 クレートの公開 API と設計。 |
+| **[クレートリファレンス](crates/runtime.md)** | 開発者 | ワークスペース内全 17 クレートの公開 API と設計。 |
 | **[アプリケーション](apps/cli.md)** | エンドユーザー | `ene-cli` および `ene-desktop` の使用方法。 |
 
 ---
 
 ## ワークスペース構成図
 
-Ene は **16 のライブラリクレート**、**6 つのプラグインバイナリ**、**2 つのホストアプリケーション** からなるモジュール式 Cargo ワークスペースです：
+Ene は **17 のライブラリクレート**、**18 のプラグインバイナリ**、**2 つのホストアプリケーション** からなるモジュール式 Cargo ワークスペースです：
 
 ```
 Ene ワークスペース
@@ -35,7 +35,9 @@ Ene ワークスペース
 │   ├── ene-mind           (認知エンジン: セッション、プロンプト、感情、プロアクティブ、記憶書込)
 │   ├── ene-store          (SQLite + SeaORM + sqlite-vec 記憶・ベクトルストア)
 │   ├── ene-config         (設定読み込み、キャラクターカード、スキーマ定義)
+│   ├── ene-core           (永続化非依存のドメイン語彙 & メモリポート)
 │   ├── ene-ai             (コア AI プロバイダトレイト、OpenAI、Anthropic アダプタ)
+│   ├── ene-infer          (ローカルモデルエンジン: ワーカースレッド、キュー、適合性試験)
 │   ├── ene-voice          (ローカル STT/TTS/VAD 音声パイプライン)
 │   ├── ene-rag            (RAG ポリシー: 記憶スコアリング/減衰、ツール選択)
 │   ├── ene-connector      (外部サービスの認証情報 & アイデンティティ権威)
@@ -49,7 +51,7 @@ Ene ワークスペース
 │   └── ene-plugin-macros  (プラグイン用 Proc-macro)
 └── プロセス外プラグイン
     ├── plugins/provider/* (プロバイダプラグイン: anthropic, edge-tts, local-llm, openai, openai-tts, voicevox)
-    └── plugins/tool/*     (ツールプラグイン: app, browser, calc, calendar, fs, geo, git, random, utility, web)
+    └── plugins/tool/*     (ツールプラグイン: app, browser, calc, calendar, counter, fs, geo, git, homeassistant, random, utility, web)
 ```
 
 ---

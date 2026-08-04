@@ -51,7 +51,9 @@ jobs:
 
   # GPU backends are compile-only in CI (no GPU hardware): the workspace no
   # longer enables llama.cpp's vulkan feature through ene-cli/ene-desktop, so
-  # this job keeps the GPU code paths compiling.
+  # this job keeps the GPU code paths compiling. The cuda feature has no
+  # compile coverage here — a CUDA toolkit is not installed on the runner —
+  # matching the pre-relocation setup where cuda was never built by CI either.
   local-llm-gpu-compile:
     name: Local LLM GPU compile (vulkan)
     runs-on: ubuntu-latest
