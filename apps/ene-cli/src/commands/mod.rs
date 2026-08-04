@@ -12,6 +12,7 @@ mod import;
 mod memory;
 mod permissions;
 mod prompt;
+mod schedule;
 mod session;
 mod store;
 mod tool;
@@ -69,6 +70,7 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &commitments::CommitmentsCommand as &dyn CliCommand,
     &session::SessionCommand as &dyn CliCommand,
     &permissions::PermissionsCommand as &dyn CliCommand,
+    &schedule::ScheduleCommand as &dyn CliCommand,
     &doctor::DoctorCommand as &dyn CliCommand,
     &greeting::GreetingCommand as &dyn CliCommand,
     &store::StoreCommand as &dyn CliCommand,

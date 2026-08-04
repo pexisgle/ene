@@ -16,6 +16,7 @@ ene-config = { workspace = true }
 ene-store = { workspace = true }
 ene-plugin-host = { workspace = true }
 ene-util = { workspace = true }
+chrono = { workspace = true }
 tokio = { workspace = true, features = ["signal", "fs"] }
 tokio-stream = { workspace = true }
 serde = { workspace = true }

@@ -396,6 +396,7 @@ runtime-error-memory = メモリストアエラー: { $detail }
 runtime-error-mind = マインドエンジンエラー: { $detail }
 runtime-error-tool = ツールエラー: { $detail }
 runtime-error-actor-busy = Ene は現在ほかのリクエストを処理中です。しばらくしてから再試行してください。
+runtime-error-store-required = スケジューラーにはメモリストアが必要です。設定で `store.enabled` を有効にしてください。
 runtime-error-ai-auth = AI プロバイダーの認証に失敗しました。API キーを確認してください。
 runtime-error-ai-rate-limit = AI プロバイダーのレート制限に達しました。しばらくしてから再試行してください。
 runtime-error-ai-network = AI プロバイダーに接続できませんでした。ネットワーク接続を確認してください。

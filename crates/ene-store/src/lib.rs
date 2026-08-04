@@ -93,6 +93,8 @@ pub mod host_service;
 pub mod migrator;
 /// `impl MemoryPort for MemoryStore`.
 pub mod port;
+/// Persistent scheduler domain model.
+pub mod schedule;
 /// Hybrid memory search scoring.
 pub mod search;
 /// Session metadata domain model.
@@ -122,14 +124,19 @@ pub use export::{
 };
 /// Forgetting lifecycle helpers.
 pub use forgetting::InvalidTransition;
+/// Persistent scheduler domain types.
+pub use schedule::{
+    NewSchedule, Schedule, ScheduleAction, ScheduleConfirmation, ScheduleError, ScheduleKind,
+    ScheduleRun, ScheduleRunStatus,
+};
 /// Document-to-document lexical similarity for recall diversification.
 pub use search::document_lexical_similarity;
 /// Session metadata types.
 pub use session::{NewSessionMeta, SessionMeta};
 /// Core memory types.
 pub use store::{
-    ActiveSceneSummaryRow, ConversationLogEntry, KeyFact, MemoryStore, NaturalDecayReport,
-    NewMemorySpan, PendingCandidate, PendingCandidateStatus,
+    ActiveSceneSummaryRow, ClaimedFire, ConversationLogEntry, FireClaimMode, KeyFact, MemoryStore,
+    NaturalDecayReport, NewMemorySpan, PendingCandidate, PendingCandidateStatus,
 };
 /// Typed memory domain types.
 pub use typed_memory::{

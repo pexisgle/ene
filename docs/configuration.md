@@ -651,6 +651,34 @@ ranking, and a tool pushed below
 stays free of a persistence dependency — see
 [Memory System §5](concepts/memory-system.md#5-tool-derived-memory-guardrails).
 
+### `scheduler.*` — Persistent Scheduler Policy
+
+Controls the persistent scheduler (`ene_runtime::scheduler::SchedulerConfig`),
+which fires one-shot, interval, cron, and startup schedules. The scheduler
+requires the memory store (`store.enabled`); without it no schedule fires.
+Schedules and run history live in the store's database and survive restarts.
+See the [Schedules guide](guide/schedules.md) for the CLI surface.
+
+```json
+{
+  "scheduler": {
+    "enabled": true,
+    "late_grace_secs": 60,
+    "confirmation_timeout_secs": 300
+  }
+}
+```
+
+- `enabled` (default `true`) — master switch; when `false` no schedule fires.
+  `ENE_SCHEDULER__ENABLED`.
+- `late_grace_secs` (default `60`) — a fire processed more than this many
+  seconds after its scheduled time (system suspend, clock jump, or the app
+  being closed) is recorded `skipped_late` and is **not** executed; the next
+  occurrence is computed from the current time. `ENE_SCHEDULER__LATE_GRACE_SECS`.
+- `confirmation_timeout_secs` (default `300`) — how long a scheduled run
+  awaiting user confirmation may wait before it is recorded `timed_out`.
+  `ENE_SCHEDULER__CONFIRMATION_TIMEOUT_SECS`.
+
 ### `desktop.*` — Desktop GUI & Graphics Parameters
 
 Controls display language, graphics render parameters, and microphone input device:

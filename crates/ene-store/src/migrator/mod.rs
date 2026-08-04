@@ -3,11 +3,13 @@
 mod conversation_logs_search_index;
 mod embeddings_cleanup;
 mod pending_candidates;
+mod scheduler;
 mod vec0_memory;
 
 use conversation_logs_search_index::ConversationLogsSearchIndexMigration;
 use embeddings_cleanup::EmbeddingsCleanupIndexMigration;
 use pending_candidates::PendingCandidatesMigration;
+use scheduler::SchedulerMigration;
 use sea_orm_migration::prelude::*;
 use vec0_memory::Vec0EmbeddingIndexMigration;
 
@@ -25,6 +27,7 @@ impl MigratorTrait for Migrator {
             Box::new(AuditLogSessionIdMigration),
             Box::new(ConversationLogsSearchIndexMigration),
             Box::new(Vec0EmbeddingIndexMigration),
+            Box::new(SchedulerMigration),
         ]
     }
 }

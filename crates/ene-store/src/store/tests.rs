@@ -9,6 +9,603 @@ async fn setup_store() -> MemoryStore {
     MemoryStore::open_in_memory(4).await.unwrap()
 }
 
+use super::schedule::FireClaimMode;
+use chrono::TimeZone;
+use ene_core::{
+    NewSchedule, ScheduleAction, ScheduleConfirmation, ScheduleKind, ScheduleRunStatus,
+};
+
+fn new_cron_schedule(name: &str, cron_expr: &str, timezone: &str) -> NewSchedule {
+    NewSchedule {
+        name: name.to_string(),
+        kind: ScheduleKind::Cron,
+        timezone: timezone.to_string(),
+        cron_expr: Some(cron_expr.to_string()),
+        interval_secs: None,
+        start_at: None,
+        action: ScheduleAction::Prompt {
+            text: "reminder".to_string(),
+            allow_tools: false,
+        },
+        confirmation: ScheduleConfirmation::None,
+        max_retries: 0,
+        retry_delay_secs: 60,
+    }
+}
+
+fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
+}
+
+#[tokio::test]
+async fn schedule_crud_roundtrip_and_validation() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+
+    let inserted = store
+        .insert_schedule(&new_cron_schedule("daily", "0 9 * * *", "Asia/Tokyo"), now)
+        .await
+        .unwrap();
+    // 09:00 JST = 00:00 UTC; strictly after 12:00 UTC on the 4th, so the
+    // first occurrence is 2026-08-05T00:00:00Z.
+    assert_eq!(inserted.next_run_at, Some(at(2026, 8, 5, 0, 0)));
+    assert_eq!(
+        store.get_schedule(inserted.id).await.unwrap().unwrap().name,
+        "daily"
+    );
+    assert_eq!(
+        store
+            .get_schedule_by_name("daily")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        inserted.id
+    );
+    assert_eq!(store.list_schedules().await.unwrap().len(), 1);
+
+    let invalid = new_cron_schedule("broken", "not a cron", "UTC");
+    assert!(matches!(
+        store.insert_schedule(&invalid, now).await,
+        Err(EneMemoryError::InvalidSchedule(..))
+    ));
+
+    assert!(
+        store
+            .set_schedule_enabled(inserted.id, false, now)
+            .await
+            .unwrap()
+    );
+    let paused = store.get_schedule(inserted.id).await.unwrap().unwrap();
+    assert!(!paused.enabled);
+
+    assert!(store.delete_schedule(inserted.id).await.unwrap());
+    assert!(!store.delete_schedule(inserted.id).await.unwrap());
+    assert!(store.get_schedule(inserted.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn claim_fire_advances_and_records_run() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let schedule = store
+        .insert_schedule(&new_cron_schedule("daily", "0 9 * * *", "UTC"), now)
+        .await
+        .unwrap();
+    let first_fire = schedule.next_run_at.unwrap();
+
+    let claimed = store
+        .claim_fire(schedule.id, first_fire, now, FireClaimMode::Execute)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.run_id, 1);
+    assert!(!claimed.is_retry);
+
+    let after = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.next_run_at,
+        Some(first_fire + chrono::Duration::days(1))
+    );
+    assert_eq!(after.run_count, 1);
+    assert_eq!(after.last_status, Some(ScheduleRunStatus::Running));
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, ScheduleRunStatus::Running);
+    assert_eq!(runs[0].scheduled_at, first_fire);
+
+    store
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Success,
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::Success);
+    assert!(runs[0].finished_at.is_some());
+    assert_eq!(
+        store
+            .get_schedule(schedule.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_status,
+        Some(ScheduleRunStatus::Success)
+    );
+}
+
+#[tokio::test]
+async fn claim_fire_is_idempotent_for_stale_disabled_or_unknown() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let schedule = store
+        .insert_schedule(&new_cron_schedule("daily", "0 9 * * *", "UTC"), now)
+        .await
+        .unwrap();
+    let fire = schedule.next_run_at.unwrap();
+
+    // Wrong scheduled_at: ignored.
+    assert!(
+        store
+            .claim_fire(
+                schedule.id,
+                fire + chrono::Duration::hours(1),
+                now,
+                FireClaimMode::Execute
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Unknown schedule: ignored.
+    assert!(
+        store
+            .claim_fire(999_999, fire, now, FireClaimMode::Execute)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Claiming twice with the same scheduled_at: the second is stale.
+    store
+        .claim_fire(schedule.id, fire, now, FireClaimMode::Execute)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .claim_fire(schedule.id, fire, now, FireClaimMode::Execute)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Disabled: ignored.
+    store
+        .set_schedule_enabled(schedule.id, false, now)
+        .await
+        .unwrap();
+    let next = store
+        .get_schedule(schedule.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .next_run_at
+        .unwrap();
+    assert!(
+        store
+            .claim_fire(schedule.id, next, now, FireClaimMode::Execute)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.list_runs(schedule.id, 10).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn skipped_fires_are_recorded_and_advance() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let schedule = store
+        .insert_schedule(&new_cron_schedule("hourly", "0 * * * *", "UTC"), now)
+        .await
+        .unwrap();
+    let fire = schedule.next_run_at.unwrap();
+    assert_eq!(fire, at(2026, 8, 4, 13, 0));
+
+    store
+        .claim_fire(schedule.id, fire, fire, FireClaimMode::SkipBusy)
+        .await
+        .unwrap()
+        .unwrap();
+    let after = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    assert_eq!(after.last_status, Some(ScheduleRunStatus::SkippedBusy));
+    // Busy-skip preserves cadence: the next occurrence is one hour later.
+    assert_eq!(after.next_run_at, Some(fire + chrono::Duration::hours(1)));
+
+    let next_fire = after.next_run_at.unwrap();
+    let late = next_fire + chrono::Duration::hours(5);
+    store
+        .claim_fire(schedule.id, next_fire, late, FireClaimMode::SkipLate)
+        .await
+        .unwrap()
+        .unwrap();
+    let after = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    // Late-skip jumps to the first occurrence after `now` (19:00), not the
+    // missed 14:00 occurrence.
+    assert_eq!(after.next_run_at, Some(at(2026, 8, 4, 20, 0)));
+    assert_eq!(after.last_status, Some(ScheduleRunStatus::SkippedLate));
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].status, ScheduleRunStatus::SkippedLate);
+    assert_eq!(runs[0].scheduled_at, next_fire);
+}
+
+#[tokio::test]
+async fn failed_run_arms_retry_and_retry_claim_consumes_it() {
+    let store = setup_store().await;
+    let anchor = at(2026, 8, 4, 0, 0);
+    let mut schedule = new_cron_schedule("retrying", "0 9 * * *", "UTC");
+    schedule.kind = ScheduleKind::Interval;
+    schedule.start_at = Some(anchor);
+    schedule.interval_secs = Some(3600);
+    schedule.cron_expr = None;
+    schedule.max_retries = 2;
+    schedule.retry_delay_secs = 30;
+    let schedule = store.insert_schedule(&schedule, anchor).await.unwrap();
+    let fire = schedule.next_run_at.unwrap();
+    assert_eq!(fire, anchor);
+
+    let claimed = store
+        .claim_fire(schedule.id, fire, fire, FireClaimMode::Execute)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Failed,
+            Some("boom".to_string()),
+            fire,
+        )
+        .await
+        .unwrap();
+    let after = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    let retry_at = fire + chrono::Duration::seconds(30);
+    assert_eq!(after.next_run_at, Some(retry_at));
+    assert_eq!(after.pending_retry_of_run_id, Some(claimed.run_id));
+    assert_eq!(after.fail_count, 1);
+    assert_eq!(after.last_status, Some(ScheduleRunStatus::Failed));
+
+    // A skipped retry is re-armed instead of consumed: the pointer stays on
+    // the original failed run and the next attempt is pushed by one delay.
+    let skipped = store
+        .claim_fire(schedule.id, retry_at, retry_at, FireClaimMode::SkipBusy)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(skipped.is_retry);
+    let after = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    let second_retry_at = retry_at + chrono::Duration::seconds(30);
+    assert_eq!(after.next_run_at, Some(second_retry_at));
+    assert_eq!(after.pending_retry_of_run_id, Some(claimed.run_id));
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].status, ScheduleRunStatus::SkippedBusy);
+
+    // Exhausting retries after a failed final attempt stops the chain.
+    let second_attempt = store
+        .claim_fire(
+            schedule.id,
+            second_retry_at,
+            second_retry_at,
+            FireClaimMode::Execute,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].retries, 1);
+    assert_eq!(runs[0].retry_of_run_id, Some(claimed.run_id));
+    store
+        .finish_run(
+            schedule.id,
+            second_attempt.run_id,
+            ScheduleRunStatus::Failed,
+            Some("still broken".to_string()),
+            second_retry_at,
+        )
+        .await
+        .unwrap();
+    let after = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    let third_retry_at = second_retry_at + chrono::Duration::seconds(30);
+    assert_eq!(after.next_run_at, Some(third_retry_at));
+    assert_eq!(after.pending_retry_of_run_id, Some(second_attempt.run_id));
+    assert_eq!(after.fail_count, 2);
+
+    // The third attempt is retries=2 == max_retries; its failure ends the
+    // chain and the regular cadence resumes at 01:00.
+    let third_attempt = store
+        .claim_fire(
+            schedule.id,
+            third_retry_at,
+            third_retry_at,
+            FireClaimMode::Execute,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .finish_run(
+            schedule.id,
+            third_attempt.run_id,
+            ScheduleRunStatus::Failed,
+            Some("still broken".to_string()),
+            third_retry_at,
+        )
+        .await
+        .unwrap();
+    let after = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    assert!(after.pending_retry_of_run_id.is_none());
+    assert_eq!(after.fail_count, 3);
+    assert_eq!(after.next_run_at, Some(at(2026, 8, 4, 1, 0)));
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].retries, 2);
+    assert_eq!(runs[0].retry_of_run_id, Some(second_attempt.run_id));
+}
+
+#[tokio::test]
+async fn finish_run_is_idempotent_and_cascade_delete_removes_history() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let schedule = store
+        .insert_schedule(&new_cron_schedule("daily", "0 9 * * *", "UTC"), now)
+        .await
+        .unwrap();
+    let fire = schedule.next_run_at.unwrap();
+    let claimed = store
+        .claim_fire(schedule.id, fire, now, FireClaimMode::Execute)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Success,
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+    // A second finish (e.g. a stale retry outcome) is a no-op.
+    store
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Failed,
+            Some("late".into()),
+            now,
+        )
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::Success);
+    assert_eq!(
+        store
+            .get_schedule(schedule.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .fail_count,
+        0
+    );
+
+    store.delete_schedule(schedule.id).await.unwrap();
+    assert!(store.list_runs(schedule.id, 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn reconcile_startup_marks_inflight_runs() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let schedule = store
+        .insert_schedule(&new_cron_schedule("daily", "0 9 * * *", "UTC"), now)
+        .await
+        .unwrap();
+    let fire = schedule.next_run_at.unwrap();
+    store
+        .claim_fire(schedule.id, fire, now, FireClaimMode::Execute)
+        .await
+        .unwrap();
+    let second = store
+        .get_schedule(schedule.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .next_run_at
+        .unwrap();
+    store
+        .claim_fire(schedule.id, second, now, FireClaimMode::AwaitConfirmation)
+        .await
+        .unwrap();
+
+    store
+        .reconcile_startup(now + chrono::Duration::minutes(1))
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::TimedOut);
+    assert_eq!(runs[1].status, ScheduleRunStatus::Interrupted);
+    let schedule = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    assert_eq!(schedule.last_status, Some(ScheduleRunStatus::Interrupted));
+}
+
+#[tokio::test]
+async fn reconcile_startup_keeps_awaiting_only_schedule_as_timed_out() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let schedule = store
+        .insert_schedule(&new_cron_schedule("gated", "0 9 * * *", "UTC"), now)
+        .await
+        .unwrap();
+    let fire = schedule.next_run_at.unwrap();
+    store
+        .claim_fire(schedule.id, fire, now, FireClaimMode::AwaitConfirmation)
+        .await
+        .unwrap();
+
+    store
+        .reconcile_startup(now + chrono::Duration::minutes(1))
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::TimedOut);
+    let schedule = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    assert_eq!(schedule.last_status, Some(ScheduleRunStatus::TimedOut));
+}
+
+#[tokio::test]
+async fn approved_run_transitions_to_running_and_rejects_stale_timeout() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let mut schedule = new_cron_schedule("gated", "0 9 * * *", "UTC");
+    schedule.confirmation = ScheduleConfirmation::Confirm;
+    let schedule = store.insert_schedule(&schedule, now).await.unwrap();
+    let fire = schedule.next_run_at.unwrap();
+    let claimed = store
+        .claim_fire(schedule.id, fire, now, FireClaimMode::AwaitConfirmation)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Approval starts execution: the row leaves `awaiting_approval`.
+    store
+        .mark_run_running(schedule.id, claimed.run_id, now)
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::Running);
+
+    // A stale confirmation timeout arriving mid-execution must be a no-op.
+    store
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::TimedOut,
+            Some("confirmation timed out".to_string()),
+            now,
+        )
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::Running);
+
+    // The real outcome still lands, and a timeout can never clobber it.
+    store
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Success,
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::Success);
+}
+
+#[tokio::test]
+async fn next_due_time_excluding_skips_queued_schedules() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let a = store
+        .insert_schedule(&new_cron_schedule("a", "30 12 * * *", "UTC"), now)
+        .await
+        .unwrap();
+    let b = store
+        .insert_schedule(&new_cron_schedule("b", "15 12 * * *", "UTC"), now)
+        .await
+        .unwrap();
+    let due = store.next_due_time_excluding(&[]).await.unwrap().unwrap();
+    assert_eq!(due, at(2026, 8, 4, 12, 15));
+    let due = store
+        .next_due_time_excluding(&[b.id])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(due, at(2026, 8, 4, 12, 30));
+    assert!(
+        store
+            .next_due_time_excluding(&[a.id, b.id])
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn awaiting_approval_fire_can_be_finished_as_denied() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let mut schedule = new_cron_schedule("gated", "0 9 * * *", "UTC");
+    schedule.confirmation = ScheduleConfirmation::Confirm;
+    let schedule = store.insert_schedule(&schedule, now).await.unwrap();
+    let fire = schedule.next_run_at.unwrap();
+    let claimed = store
+        .claim_fire(schedule.id, fire, now, FireClaimMode::AwaitConfirmation)
+        .await
+        .unwrap()
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::AwaitingApproval);
+    store
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Denied,
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::Denied);
+    assert_eq!(runs[0].finished_at, Some(now));
+    let schedule = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    assert_eq!(schedule.last_status, Some(ScheduleRunStatus::Denied));
+}
+
+#[tokio::test]
+async fn schedule_runs_are_bounded_by_limit() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let schedule = store
+        .insert_schedule(&new_cron_schedule("daily", "0 9 * * *", "UTC"), now)
+        .await
+        .unwrap();
+    let mut fire = schedule.next_run_at.unwrap();
+    for _ in 0..3 {
+        store
+            .claim_fire(schedule.id, fire, now, FireClaimMode::SkipBusy)
+            .await
+            .unwrap();
+        fire = store
+            .get_schedule(schedule.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_run_at
+            .unwrap();
+    }
+    let runs = store.list_runs(schedule.id, 2).await.unwrap();
+    assert_eq!(runs.len(), 2);
+}
+
 #[test]
 fn embedding_bytes_roundtrip() {
     let original = vec![1.0_f32, 0.5, -0.25, 0.0];

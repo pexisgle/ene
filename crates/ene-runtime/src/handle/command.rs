@@ -149,6 +149,76 @@ pub enum EneCommand {
         /// Reply channel.
         reply: oneshot::Sender<Result<String, EneRuntimeError>>,
     },
+    /// Fire a schedule occurrence (sent by the scheduler timer task).
+    ScheduleFire {
+        /// The schedule whose occurrence is due.
+        schedule_id: i64,
+        /// The occurrence time the timer read from the store; the claim only
+        /// proceeds when the store's `next_run_at` still equals this value.
+        scheduled_at: DateTime<Utc>,
+    },
+    /// A scheduled run's confirmation prompt timed out.
+    ScheduleConfirmationTimeout {
+        /// The request id from the emitted `PermissionRequired` event.
+        request_id: RequestId,
+        /// Owning schedule.
+        schedule_id: i64,
+        /// The run waiting for approval.
+        run_id: i64,
+    },
+    /// A scheduled tool action finished (sent by the spawned tool task).
+    ScheduleToolFinished {
+        /// Owning schedule.
+        schedule_id: i64,
+        /// The run that executed the action.
+        run_id: i64,
+        /// The turn the action ran under.
+        turn: TurnId,
+        /// The tool name, for the `ToolCallResult` event.
+        tool_name: String,
+        /// A permission prompt was denied (or timed out / cancelled), so the
+        /// run is terminal `denied` rather than a retryable failure.
+        denied: bool,
+        /// The tool result text, or the failure message.
+        result: Result<String, String>,
+    },
+    /// Create a schedule.
+    AddSchedule {
+        /// The new schedule definition.
+        new: ene_core::NewSchedule,
+        /// Reply with the persisted schedule.
+        reply: oneshot::Sender<Result<ene_core::Schedule, EneRuntimeError>>,
+    },
+    /// List all schedules.
+    ListSchedules {
+        /// Reply with the schedules ordered by name.
+        reply: oneshot::Sender<Result<Vec<ene_core::Schedule>, EneRuntimeError>>,
+    },
+    /// List recent run history for one schedule.
+    ListScheduleRuns {
+        /// Owning schedule.
+        schedule_id: i64,
+        /// Maximum number of rows, newest first.
+        limit: u64,
+        /// Reply with the run rows.
+        reply: oneshot::Sender<Result<Vec<ene_core::ScheduleRun>, EneRuntimeError>>,
+    },
+    /// Delete a schedule and its history.
+    DeleteSchedule {
+        /// Schedule to delete.
+        schedule_id: i64,
+        /// Reply with whether a row was removed.
+        reply: oneshot::Sender<Result<bool, EneRuntimeError>>,
+    },
+    /// Pause or resume a schedule.
+    SetScheduleEnabled {
+        /// Schedule to toggle.
+        schedule_id: i64,
+        /// Whether it may fire.
+        enabled: bool,
+        /// Reply with whether a row was updated.
+        reply: oneshot::Sender<Result<bool, EneRuntimeError>>,
+    },
     /// Cancel a deferred (background) tool task by id.
     ///
     /// Routes to the owning tool and asks it to abort the background task.

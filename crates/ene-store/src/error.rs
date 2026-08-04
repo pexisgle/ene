@@ -56,6 +56,10 @@ pub enum EneMemoryError {
     #[error("Session export serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 
+    /// A schedule definition failed validation.
+    #[error("Invalid schedule: {0}")]
+    InvalidSchedule(#[from] ene_core::ScheduleError),
+
     /// File backup / restore failed.
     #[error("Database backup error: {0}")]
     BackupError(String),

@@ -520,6 +520,35 @@ Tool RAG は各ツールを、そのフィールドごとの埋め込み類似�
 パイプラインは永続化への依存を持ちません — 詳細は
 [記憶システム §5](concepts/memory-system.md#5-ツール由来記憶のガードレール) を参照してください。
 
+### `scheduler.*` — 永続スケジューラーのポリシー
+
+単発・インターバル・cron・起動時スケジュールを実行する永続スケジューラー
+（`ene_runtime::scheduler::SchedulerConfig`）を制御します。スケジューラーは
+メモリストア（`store.enabled`）を必要とし、無効な場合はどのスケジュールも
+実行されません。スケジュール定義と実行履歴はストアのデータベースに保存され、
+再起動後も復元されます。CLI の操作は
+[スケジュールガイド](guide/schedules.md) を参照してください。
+
+```json
+{
+  "scheduler": {
+    "enabled": true,
+    "late_grace_secs": 60,
+    "confirmation_timeout_secs": 300
+  }
+}
+```
+
+- `enabled`（デフォルト `true`）— マスタースイッチ。`false` の間はどの
+  スケジュールも実行されません。`ENE_SCHEDULER__ENABLED`。
+- `late_grace_secs`（デフォルト `60`）— 予定時刻からこの秒数を超えて処理された
+  実行（システムのサスペンド、時刻のズレ、アプリの終了中など）は
+  `skipped_late` として記録され、**実行されません**。次の実行時刻は現在時刻から
+  再計算されます。`ENE_SCHEDULER__LATE_GRACE_SECS`。
+- `confirmation_timeout_secs`（デフォルト `300`）— ユーザー確認を待つスケジュール
+  実行が、`timed_out` として記録されるまでの待機時間。
+  `ENE_SCHEDULER__CONFIRMATION_TIMEOUT_SECS`。
+
 ### `desktop.*` — デスクトップ GUI およびグラフィックスパラメータ
 
 表示言語、グラフィックス描画パラメータ、およびマイク入力デバイスを制御します：

@@ -94,6 +94,8 @@ pub enum TurnOrigin {
     User,
     /// Unsolicited companion utterance (no synthetic user message in history).
     Proactive,
+    /// A turn started by a persistent schedule.
+    Scheduled,
 }
 
 /// Error returned by [`crate::EneHandle::run`].
