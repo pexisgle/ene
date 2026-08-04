@@ -13,7 +13,7 @@ const WAV_HEADER_LEN: usize = 44;
 ///
 /// `pcm.len()` must fit in `u32`; the client caps payloads at
 /// [`crate::client::MAX_PCM_BYTES`], far below that bound.
-#[must_use]
+#[must_use = "the wrapped WAV result must be handled"]
 pub fn wrap_pcm(pcm: &[u8], sample_rate: u32) -> Result<Vec<u8>, PluginError> {
     let data_len = pcm.len() as u32;
     let byte_rate = sample_rate.checked_mul(2).ok_or_else(|| {
@@ -38,6 +38,10 @@ pub fn wrap_pcm(pcm: &[u8], sample_rate: u32) -> Result<Vec<u8>, PluginError> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "unit tests use expect for concise assertions"
+)]
 mod tests {
     use super::*;
 
