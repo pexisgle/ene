@@ -2614,6 +2614,55 @@ mod tests {
         assert_eq!(runs[0].status, ene_core::ScheduleRunStatus::Denied);
     }
 
+    /// An approved confirmation moves the run out of `awaiting_approval`
+    /// before execution starts, so a stale timeout can never record it
+    /// `timed_out` mid-run.
+    #[tokio::test]
+    async fn approved_confirmation_marks_run_running() {
+        let store = Arc::new(
+            ene_store::MemoryStore::open_in_memory(4)
+                .await
+                .expect("in-memory store"),
+        );
+        let (mut actor, mut event_rx, _gate) =
+            build_bare_actor_with_store(store.clone(), Arc::new(EmptyRegistry));
+        let mut new = new_test_schedule("gated");
+        new.confirmation = ene_core::ScheduleConfirmation::Confirm;
+        let schedule = add_schedule_via_actor(&mut actor, new).await;
+        let fire = schedule.next_run_at.expect("first fire time");
+
+        assert!(
+            actor
+                .handle_command(EneCommand::ScheduleFire {
+                    schedule_id: schedule.id,
+                    scheduled_at: fire,
+                })
+                .await
+        );
+        let request_id = match event_rx.recv().await.expect("confirmation event") {
+            EneEvent::PermissionRequired {
+                origin: crate::types::TurnOrigin::Scheduled,
+                request_id,
+                ..
+            } => request_id,
+            other => panic!("expected scheduled PermissionRequired, got {other:?}"),
+        };
+        assert!(
+            actor
+                .handle_command(EneCommand::PermissionDecision {
+                    request_id,
+                    decision: PermissionDecision::AllowOnce,
+                })
+                .await
+        );
+        let runs = store.list_runs(schedule.id, 10).await.expect("list runs");
+        assert_eq!(
+            runs[0].status,
+            ene_core::ScheduleRunStatus::Running,
+            "approved run must leave awaiting_approval before executing"
+        );
+    }
+
     /// Pure test of the shared admission mechanism (`actor::admit_task`),
     /// used identically by all five of `TurnActor`'s bounded `JoinSet`s:
     /// under cap it must allow admission silently, and right at cap it must

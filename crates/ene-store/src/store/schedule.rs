@@ -357,7 +357,25 @@ impl MemoryStore {
             return Ok(());
         };
         let run_status = ScheduleRunStatus::from_db_str(&run.status);
-        if run.schedule_id != schedule_id || run_status.is_terminal() {
+        // Status-transition guard: a terminal row is immutable, and the only
+        // legal transitions are `awaiting_approval -> denied | timed_out |
+        // skipped_busy | running` and `running -> success | failed`. This
+        // keeps a stale confirmation timeout from clobbering an approved run
+        // that already started executing (`running`).
+        let transition_allowed = match run_status {
+            ScheduleRunStatus::AwaitingApproval => matches!(
+                status,
+                ScheduleRunStatus::Denied
+                    | ScheduleRunStatus::TimedOut
+                    | ScheduleRunStatus::SkippedBusy
+            ),
+            ScheduleRunStatus::Running => matches!(
+                status,
+                ScheduleRunStatus::Success | ScheduleRunStatus::Failed
+            ),
+            _ => false,
+        };
+        if run.schedule_id != schedule_id || run_status.is_terminal() || !transition_allowed {
             txn.rollback().await?;
             return Ok(());
         }
@@ -391,16 +409,66 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Transition an approved run from `awaiting_approval` to `running` when
+    /// execution actually starts.
+    ///
+    /// Without this, a stale confirmation timeout could still mark the run
+    /// `timed_out` mid-execution, and a crash mid-execution would be
+    /// reconciled as `timed_out` instead of `interrupted`.
+    pub async fn mark_run_running(
+        &self,
+        schedule_id: i64,
+        run_id: i64,
+        now: DateTime<Utc>,
+    ) -> Result<(), EneMemoryError> {
+        let txn = self.db.begin().await?;
+        let Some(run) = entities::schedule_runs::Entity::find_by_id(run_id)
+            .one(&txn)
+            .await?
+        else {
+            txn.rollback().await?;
+            return Ok(());
+        };
+        if run.schedule_id != schedule_id
+            || ScheduleRunStatus::from_db_str(&run.status) != ScheduleRunStatus::AwaitingApproval
+        {
+            txn.rollback().await?;
+            return Ok(());
+        }
+        let mut run_update: entities::schedule_runs::ActiveModel = run.into();
+        run_update.status = Set(ScheduleRunStatus::Running.as_str().to_string());
+        run_update.update(&txn).await?;
+        if let Some(schedule) = entities::schedules::Entity::find_by_id(schedule_id)
+            .one(&txn)
+            .await?
+        {
+            let mut schedule_update: entities::schedules::ActiveModel = schedule.into();
+            schedule_update.last_status =
+                Set(Some(ScheduleRunStatus::Running.as_str().to_string()));
+            schedule_update.updated_at = Set(now);
+            schedule_update.update(&txn).await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
     /// Mark runs left in flight by a crash (`running` → `interrupted`,
     /// `awaiting_approval` → `timed_out`) and sync the owning schedules'
     /// `last_status`.
     pub async fn reconcile_startup(&self, now: DateTime<Utc>) -> Result<(), EneMemoryError> {
         let txn = self.db.begin().await?;
-        let affected: Vec<i64> = entities::schedule_runs::Entity::find()
-            .filter(entities::schedule_runs::Column::Status.is_in([
-                ScheduleRunStatus::Running.as_str(),
-                ScheduleRunStatus::AwaitingApproval.as_str(),
-            ]))
+        let running_ids: Vec<i64> = entities::schedule_runs::Entity::find()
+            .filter(entities::schedule_runs::Column::Status.eq(ScheduleRunStatus::Running.as_str()))
+            .all(&txn)
+            .await?
+            .into_iter()
+            .map(|r| r.schedule_id)
+            .collect();
+        let awaiting_ids: Vec<i64> = entities::schedule_runs::Entity::find()
+            .filter(
+                entities::schedule_runs::Column::Status
+                    .eq(ScheduleRunStatus::AwaitingApproval.as_str()),
+            )
             .all(&txn)
             .await?
             .into_iter()
@@ -435,26 +503,28 @@ impl MemoryStore {
             .exec(&txn)
             .await?;
 
-        // A schedule with both states was interrupted (the running attempt is
-        // the later one), so the timed_out sync runs first.
-        if !affected.is_empty() {
-            let ids = affected.iter().copied();
+        if !awaiting_ids.is_empty() {
             entities::schedules::Entity::update_many()
                 .col_expr(
                     entities::schedules::Column::LastStatus,
                     Expr::value(ScheduleRunStatus::TimedOut.as_str()),
                 )
                 .col_expr(entities::schedules::Column::UpdatedAt, Expr::value(now))
-                .filter(entities::schedules::Column::Id.is_in(ids.clone()))
+                .filter(entities::schedules::Column::Id.is_in(awaiting_ids.iter().copied()))
                 .exec(&txn)
                 .await?;
+        }
+        // A schedule whose only in-flight run was `awaiting_approval` must
+        // keep `timed_out`, so the `interrupted` sync applies only to
+        // schedules that actually had a `running` run.
+        if !running_ids.is_empty() {
             entities::schedules::Entity::update_many()
                 .col_expr(
                     entities::schedules::Column::LastStatus,
                     Expr::value(ScheduleRunStatus::Interrupted.as_str()),
                 )
                 .col_expr(entities::schedules::Column::UpdatedAt, Expr::value(now))
-                .filter(entities::schedules::Column::Id.is_in(ids))
+                .filter(entities::schedules::Column::Id.is_in(running_ids.iter().copied()))
                 .exec(&txn)
                 .await?;
         }

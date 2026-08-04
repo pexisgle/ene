@@ -445,6 +445,81 @@ async fn reconcile_startup_marks_inflight_runs() {
 }
 
 #[tokio::test]
+async fn reconcile_startup_keeps_awaiting_only_schedule_as_timed_out() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let schedule = store
+        .insert_schedule(&new_cron_schedule("gated", "0 9 * * *", "UTC"), now)
+        .await
+        .unwrap();
+    let fire = schedule.next_run_at.unwrap();
+    store
+        .claim_fire(schedule.id, fire, now, FireClaimMode::AwaitConfirmation)
+        .await
+        .unwrap();
+
+    store
+        .reconcile_startup(now + chrono::Duration::minutes(1))
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::TimedOut);
+    let schedule = store.get_schedule(schedule.id).await.unwrap().unwrap();
+    assert_eq!(schedule.last_status, Some(ScheduleRunStatus::TimedOut));
+}
+
+#[tokio::test]
+async fn approved_run_transitions_to_running_and_rejects_stale_timeout() {
+    let store = setup_store().await;
+    let now = at(2026, 8, 4, 12, 0);
+    let mut schedule = new_cron_schedule("gated", "0 9 * * *", "UTC");
+    schedule.confirmation = ScheduleConfirmation::Confirm;
+    let schedule = store.insert_schedule(&schedule, now).await.unwrap();
+    let fire = schedule.next_run_at.unwrap();
+    let claimed = store
+        .claim_fire(schedule.id, fire, now, FireClaimMode::AwaitConfirmation)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Approval starts execution: the row leaves `awaiting_approval`.
+    store
+        .mark_run_running(schedule.id, claimed.run_id, now)
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::Running);
+
+    // A stale confirmation timeout arriving mid-execution must be a no-op.
+    store
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::TimedOut,
+            Some("confirmation timed out".to_string()),
+            now,
+        )
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::Running);
+
+    // The real outcome still lands, and a timeout can never clobber it.
+    store
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Success,
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+    let runs = store.list_runs(schedule.id, 10).await.unwrap();
+    assert_eq!(runs[0].status, ScheduleRunStatus::Success);
+}
+
+#[tokio::test]
 async fn next_due_time_excluding_skips_queued_schedules() {
     let store = setup_store().await;
     let now = at(2026, 8, 4, 12, 0);

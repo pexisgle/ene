@@ -241,6 +241,9 @@ pub(super) struct TurnActor {
 struct PendingScheduleConfirmation {
     schedule_id: i64,
     run_id: i64,
+    /// Aborted when the user answers, so the timeout task never fires a
+    /// stale `ScheduleConfirmationTimeout` for an approved/denied run.
+    timeout: CancellationToken,
 }
 
 /// The schedule run currently executing (prompt stream or tool task).
@@ -1391,6 +1394,7 @@ impl TurnActor {
         scheduled_at: chrono::DateTime<chrono::Utc>,
     ) {
         let Some(store) = self.concrete_store.clone() else {
+            self.notify_scheduler();
             return;
         };
         let cfg = self
@@ -1399,9 +1403,13 @@ impl TurnActor {
             .unwrap_or_default();
         let now = chrono::Utc::now();
         let Ok(Some(schedule)) = store.get_schedule(schedule_id).await else {
+            // Notify even on read failure: the timer's `queued` set must not
+            // keep suppressing a due fire after a transient DB error.
+            self.notify_scheduler();
             return; // deleted, or the store failed; nothing to execute
         };
         if !schedule.enabled || schedule.next_run_at.as_ref() != Some(&scheduled_at) {
+            self.notify_scheduler();
             return; // paused or a stale duplicate dispatch
         }
 
@@ -1427,6 +1435,7 @@ impl TurnActor {
                 if gate_held {
                     self.turn_gate.end();
                 }
+                self.notify_scheduler();
                 return;
             }
             Err(e) => {
@@ -1439,6 +1448,7 @@ impl TurnActor {
                     schedule_id,
                     "Failed to claim schedule fire"
                 );
+                self.notify_scheduler();
                 return;
             }
         };
@@ -1470,11 +1480,13 @@ impl TurnActor {
         let schedule_id = schedule.id;
         let schedule_name = schedule.name.clone();
         let request_id = RequestId::new(format!("schedule-{run_id}"));
+        let timeout_token = CancellationToken::new();
         self.pending_schedule_confirmations.insert(
             request_id.clone(),
             PendingScheduleConfirmation {
                 schedule_id,
                 run_id,
+                timeout: timeout_token.clone(),
             },
         );
         let description = match &schedule.action {
@@ -1497,12 +1509,16 @@ impl TurnActor {
         let cmd_tx = self.cmd_tx.clone();
         let timeout = std::time::Duration::from_secs(timeout_secs.max(1));
         self.aux_tasks.spawn(async move {
-            tokio::time::sleep(timeout).await;
-            drop(cmd_tx.send(EneCommand::ScheduleConfirmationTimeout {
-                request_id,
-                schedule_id,
-                run_id,
-            }));
+            tokio::select! {
+                () = timeout_token.cancelled() => {}
+                () = tokio::time::sleep(timeout) => {
+                    drop(cmd_tx.send(EneCommand::ScheduleConfirmationTimeout {
+                        request_id,
+                        schedule_id,
+                        run_id,
+                    }));
+                }
+            }
         });
     }
 
@@ -1536,6 +1552,24 @@ impl TurnActor {
                 None,
             )
             .await;
+            return;
+        }
+        // Move the row out of `awaiting_approval` before executing so a
+        // stale timeout can never record `timed_out` for a run that is
+        // actually running (and a crash reconciles as `interrupted`).
+        let now = chrono::Utc::now();
+        if let Err(e) = store
+            .mark_run_running(pending.schedule_id, pending.run_id, now)
+            .await
+        {
+            self.turn_gate.end();
+            tracing::error!(
+                component = "Scheduler",
+                error = %e,
+                schedule_id = pending.schedule_id,
+                run_id = pending.run_id,
+                "Failed to mark approved schedule run as running"
+            );
             return;
         }
         self.begin_scheduled_run(
@@ -1617,6 +1651,8 @@ impl TurnActor {
             schedule, run_id, ..
         } = claimed;
         let schedule_id = schedule.id;
+        let final_turn = turn.clone();
+        let final_name = name.clone();
         if !admit_task(
             &mut self.call_tool_tasks,
             self.task_caps.call_tool_cap,
@@ -1632,8 +1668,9 @@ impl TurnActor {
                 drop(cmd_tx.send(EneCommand::ScheduleToolFinished {
                     schedule_id,
                     run_id,
-                    turn,
-                    tool_name: name,
+                    turn: final_turn,
+                    tool_name: final_name,
+                    denied: false,
                     result: Err("scheduled tool execution rejected: task queue full".to_string()),
                 }));
             });
@@ -1657,88 +1694,107 @@ impl TurnActor {
         let tool_timeout = std::time::Duration::from_millis(plugin_cfg.timeout_ms);
         let args_json = arguments_json;
         self.call_tool_tasks.spawn(async move {
-            let call_ctx = ene_plugin_proto::CallContext {
-                conversation_id: session_id.clone(),
-                turn_id: turn.to_string(),
-            };
-            let dispatch = if cancel_token.is_cancelled() {
-                Err(ene_plugin_host::PluginHostError::ExecutionFailed {
-                    message: "scheduled tool run cancelled before dispatch".to_string(),
-                })
-            } else if name == "system.search_tools" {
-                let query = serde_json::from_str::<serde_json::Value>(&args_json)
-                    .ok()
-                    .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
-                    .unwrap_or_default();
-                crate::streaming::execute_system_search_tool(
-                    registry.as_ref(),
-                    tool_rag.as_deref(),
-                    &query,
-                    &card_name,
-                )
-                .await
-            } else {
-                tokio::time::timeout(
-                    tool_timeout,
-                    registry.call_tool(&name, &args_json, Some(&call_ctx)),
-                )
-                .await
-                .map_or_else(
-                    |_| Err(crate::streaming::timeout_error(&name, tool_timeout)),
-                    |r| r.map(|r| r.text_for_llm()),
-                )
-            };
-            drop(event_tx.send(EneEvent::ToolCallStart {
-                turn: turn.clone(),
-                origin: crate::types::TurnOrigin::Scheduled,
-                name: name.clone(),
-                arguments: args_json.clone(),
-            }));
-            let resolved = crate::streaming::resolve_tool_prompts(
-                &crate::streaming::ToolPromptResolution {
-                    event_tx: &event_tx,
-                    turn: &turn,
-                    origin: crate::types::TurnOrigin::Scheduled,
-                    pending_permissions: &pending_permissions,
-                    pending_user_inputs: &pending_user_inputs,
-                    permission_scopes: &permission_scopes,
-                    cancel_token: &cancel_token,
-                    permission_prompt_timeout_ms: plugin_cfg.permission_prompt_timeout_ms,
-                    user_input_prompt_timeout_ms: plugin_cfg.user_input_prompt_timeout_ms,
-                },
-                registry.as_ref(),
-                &name,
-                &args_json,
-                &call_ctx,
-                tool_timeout,
-                dispatch,
-            )
-            .await;
-            if let Some(store) = concrete_store {
-                let success = resolved.result.is_ok();
-                ene_store::MemoryStore::spawn_insert_audit_entry(
-                    &store,
-                    ene_store::NewAuditEntry {
+            // The panic guard mirrors the stream task: a panicked tool task
+            // must still report back so the actor releases the gate and
+            // records a terminal run instead of leaking both until restart.
+            let (outcome, denied) = if let Ok(result) =
+                futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async move {
+                    let call_ctx = ene_plugin_proto::CallContext {
+                        conversation_id: session_id.clone(),
                         turn_id: turn.to_string(),
-                        session_id: Some(session_id),
-                        tool_name: name.clone(),
-                        action: resolved.audit_action,
-                        target: resolved.audit_target,
-                        decision: resolved.audit_decision,
-                        success,
+                    };
+                    let dispatch = if cancel_token.is_cancelled() {
+                        Err(ene_plugin_host::PluginHostError::ExecutionFailed {
+                            message: "scheduled tool run cancelled before dispatch".to_string(),
+                        })
+                    } else if name == "system.search_tools" {
+                        let query = serde_json::from_str::<serde_json::Value>(&args_json)
+                            .ok()
+                            .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
+                            .unwrap_or_default();
+                        crate::streaming::execute_system_search_tool(
+                            registry.as_ref(),
+                            tool_rag.as_deref(),
+                            &query,
+                            &card_name,
+                        )
+                        .await
+                    } else {
+                        tokio::time::timeout(
+                            tool_timeout,
+                            registry.call_tool(&name, &args_json, Some(&call_ctx)),
+                        )
+                        .await
+                        .map_or_else(
+                            |_| Err(crate::streaming::timeout_error(&name, tool_timeout)),
+                            |r| r.map(|r| r.text_for_llm()),
+                        )
+                    };
+                    drop(event_tx.send(EneEvent::ToolCallStart {
+                        turn: turn.clone(),
+                        origin: crate::types::TurnOrigin::Scheduled,
+                        name: name.clone(),
                         arguments: args_json.clone(),
-                    },
+                    }));
+                    let resolved = crate::streaming::resolve_tool_prompts(
+                        &crate::streaming::ToolPromptResolution {
+                            event_tx: &event_tx,
+                            turn: &turn,
+                            origin: crate::types::TurnOrigin::Scheduled,
+                            pending_permissions: &pending_permissions,
+                            pending_user_inputs: &pending_user_inputs,
+                            permission_scopes: &permission_scopes,
+                            cancel_token: &cancel_token,
+                            permission_prompt_timeout_ms: plugin_cfg.permission_prompt_timeout_ms,
+                            user_input_prompt_timeout_ms: plugin_cfg.user_input_prompt_timeout_ms,
+                        },
+                        registry.as_ref(),
+                        &name,
+                        &args_json,
+                        &call_ctx,
+                        tool_timeout,
+                        dispatch,
+                    )
+                    .await;
+                    if let Some(store) = concrete_store {
+                        let success = resolved.result.is_ok();
+                        ene_store::MemoryStore::spawn_insert_audit_entry(
+                            &store,
+                            ene_store::NewAuditEntry {
+                                turn_id: turn.to_string(),
+                                session_id: Some(session_id),
+                                tool_name: name.clone(),
+                                action: resolved.audit_action,
+                                target: resolved.audit_target,
+                                decision: resolved.audit_decision,
+                                success,
+                                arguments: args_json.clone(),
+                            },
+                        );
+                    }
+                    let outcome = match resolved.result {
+                        Ok(text) => Ok(text),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    (outcome, resolved.denied)
+                }))
+                .await
+            {
+                result
+            } else {
+                tracing::error!(
+                    component = "ScheduledTool",
+                    tool = %final_name,
+                    "Scheduled tool task panicked"
                 );
-            }
-            let outcome = match resolved.result {
-                Ok(text) => Ok(text),
-                Err(e) => Err(e.to_string()),
+                (Err("scheduled tool task panicked".to_string()), false)
             };
             drop(cmd_tx.send(EneCommand::ScheduleToolFinished {
                 schedule_id,
                 run_id,
-                turn,
-                tool_name: name,
+                turn: final_turn,
+                tool_name: final_name,
+                denied,
                 result: outcome,
             }));
         });
@@ -2055,6 +2111,7 @@ impl TurnActor {
                 }
                 drop(guard);
                 if let Some(pending) = self.pending_schedule_confirmations.remove(&request_id) {
+                    pending.timeout.cancel();
                     match decision {
                         PermissionDecision::AllowOnce | PermissionDecision::AllowSession => {
                             self.begin_approved_scheduled_run(pending).await;
@@ -2287,6 +2344,7 @@ impl TurnActor {
                 run_id,
                 turn,
                 tool_name,
+                denied,
                 result,
             } => {
                 if self.active_turn.as_ref() != Some(&turn) {
@@ -2295,7 +2353,7 @@ impl TurnActor {
                 self.active_scheduled_run = None;
                 self.active_turn = None;
                 self.active_origin = crate::types::TurnOrigin::User;
-                let (status, error, terminal_reason, result_text) = match result {
+                let (mut status, mut error, terminal_reason, result_text) = match result {
                     Ok(text) => (ScheduleRunStatus::Success, None, TerminalReason::Done, text),
                     Err(message) => (
                         ScheduleRunStatus::Failed,
@@ -2306,6 +2364,13 @@ impl TurnActor {
                         format!("Error executing tool: {message}"),
                     ),
                 };
+                if denied {
+                    // A denied permission prompt is a terminal, no-retry
+                    // outcome: the user already said no once, so arming a
+                    // retry would just re-open the dialog.
+                    status = ScheduleRunStatus::Denied;
+                    error = Some("Permission denied by user".to_string());
+                }
                 drop(self.event_tx.send(EneEvent::ToolCallResult {
                     turn: turn.clone(),
                     origin: crate::types::TurnOrigin::Scheduled,

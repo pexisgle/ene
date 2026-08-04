@@ -176,6 +176,9 @@ pub enum EneCommand {
         turn: TurnId,
         /// The tool name, for the `ToolCallResult` event.
         tool_name: String,
+        /// A permission prompt was denied (or timed out / cancelled), so the
+        /// run is terminal `denied` rather than a retryable failure.
+        denied: bool,
         /// The tool result text, or the failure message.
         result: Result<String, String>,
     },

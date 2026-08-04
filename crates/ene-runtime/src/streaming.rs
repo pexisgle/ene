@@ -162,6 +162,10 @@ pub(crate) struct ToolPromptResolution<'a> {
 pub(crate) struct ResolvedToolCall {
     /// The final call result (possibly retried after approvals).
     pub result: Result<String, PluginHostError>,
+    /// The user (or a prompt timeout/cancel) denied a permission request, so
+    /// the call was never retried. Scheduled runs map this to the terminal
+    /// `denied` run status instead of a retryable failure.
+    pub denied: bool,
     /// What the consumer decided, if a permission prompt was raised.
     pub audit_decision: ene_store::AuditDecision,
     /// Permission action seen while resolving prompts (for the audit row).
@@ -190,6 +194,7 @@ pub(crate) async fn resolve_tool_prompts(
     let mut audit_decision = ene_store::AuditDecision::NotRequired;
     let mut audit_action = String::new();
     let mut audit_target = String::new();
+    let mut denied = false;
     for _ in 0..MAX_PENDING_ROUNDS {
         match &result {
             Err(PluginHostError::Protocol(ToolError::PermissionRequired {
@@ -293,6 +298,7 @@ pub(crate) async fn resolve_tool_prompts(
                     }
                     Some(PermissionDecision::Deny) | None => {
                         audit_decision = ene_store::AuditDecision::Denied;
+                        denied = true;
                         result = Err(PluginHostError::Protocol(ToolError::permission_denied(
                             "Permission denied by user".to_string(),
                         )));
@@ -351,6 +357,7 @@ pub(crate) async fn resolve_tool_prompts(
     }
     ResolvedToolCall {
         result,
+        denied,
         audit_decision,
         audit_action,
         audit_target,
