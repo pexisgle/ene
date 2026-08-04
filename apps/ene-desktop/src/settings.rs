@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ene_config::CharacterConfig;
 use ene_config::serde::{Deserialize, Serialize};
+use ene_config::{CharacterConfig, Lorebook, MotionCatalog};
 use glam::Vec3;
 use parking_lot::RwLock;
 
@@ -352,8 +352,8 @@ pub struct UiState {
     pub character_editor_loaded: bool,
     /// Whether the in-memory buffers differ from the on-disk card.
     pub character_editor_modified: bool,
-    /// Validation errors from the last `ValidateCharacterCard` action.
-    pub character_editor_validation_errors: Vec<String>,
+    /// Validation issues from the last validate/save attempt.
+    pub character_editor_validation_errors: Vec<EditorIssue>,
     /// Editable `data.name` buffer.
     pub character_editor_name: String,
     /// Editable `data.description` buffer.
@@ -372,6 +372,80 @@ pub struct UiState {
     pub character_editor_creator_notes: String,
     /// Editable `data.post_history_instructions` buffer.
     pub character_editor_post_history: String,
+    /// Editable `data.alternate_greetings` list.
+    pub character_editor_alternate_greetings: Vec<String>,
+    /// Editable `data.character_book`; `None` leaves the on-disk lorebook untouched.
+    pub character_editor_lorebook: Option<Lorebook>,
+    /// Editable `extensions.ene.motion_catalog`; `None` leaves the on-disk
+    /// catalog untouched.
+    pub character_editor_motion_catalog: Option<MotionCatalog>,
+    /// `character.{code}.json` sidecar files next to the card; the editor
+    /// edits the base card only and surfaces their presence as a notice.
+    pub character_editor_locale_diffs: Vec<String>,
+    /// A close was requested while the editor had unsaved changes; the
+    /// discard dialog must be shown before the window may hide.
+    pub character_editor_close_requested: bool,
+    /// A reload was requested while the editor had unsaved changes; the
+    /// discard dialog must be shown before the buffers are reset.
+    pub character_editor_reload_pending: bool,
+}
+
+impl UiState {
+    /// Whether the editor holds edits that would be lost on close/reload.
+    ///
+    /// Only the dirty flag matters: buffers can contain typed text even when
+    /// the card never loaded (e.g. after a parse failure), and that text must
+    /// not be dropped silently either.
+    #[must_use]
+    pub fn editor_has_unsaved_changes(&self) -> bool {
+        self.character_editor_modified
+    }
+
+    /// Drop every editor buffer and mark the page as needing a fresh load.
+    ///
+    /// Used when the selected character changes (the buffers would otherwise
+    /// describe a different card) and after the user discards unsaved edits.
+    pub fn reset_character_editor(&mut self) {
+        self.character_editor_loaded = false;
+        self.character_editor_modified = false;
+        self.character_editor_close_requested = false;
+        self.character_editor_reload_pending = false;
+        self.character_editor_validation_errors.clear();
+        self.character_editor_name.clear();
+        self.character_editor_description.clear();
+        self.character_editor_personality.clear();
+        self.character_editor_scenario.clear();
+        self.character_editor_system_prompt.clear();
+        self.character_editor_mes_example.clear();
+        self.character_editor_first_mes.clear();
+        self.character_editor_creator_notes.clear();
+        self.character_editor_post_history.clear();
+        self.character_editor_alternate_greetings.clear();
+        self.character_editor_lorebook = None;
+        self.character_editor_motion_catalog = None;
+        self.character_editor_locale_diffs.clear();
+    }
+}
+
+/// Severity of a character-editor validation finding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorSeverity {
+    /// Blocks saving until fixed.
+    Error,
+    /// Shown in the UI; saving is still allowed.
+    Warning,
+}
+
+/// A single validation finding with the card field it refers to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorIssue {
+    /// JSON-pointer-style field path (e.g. `data.assets[0].uri`), or the
+    /// card file name for read/parse failures.
+    pub location: String,
+    /// Localized human-readable description.
+    pub message: String,
+    /// Whether this finding blocks saving.
+    pub severity: EditorSeverity,
 }
 
 /// A single session message search hit shown on the sessions page.
@@ -915,6 +989,50 @@ mod tests {
             card_path: "characters/ghost/character.json".to_string(),
             default_motion: None,
         }
+    }
+
+    #[test]
+    fn editor_unsaved_changes_tracks_only_dirty_flag() {
+        let mut state = UiState::default();
+        assert!(!state.editor_has_unsaved_changes());
+        state.character_editor_modified = true;
+        assert!(
+            state.editor_has_unsaved_changes(),
+            "typed text must be protected even before a successful load"
+        );
+        state.reset_character_editor();
+        assert!(!state.editor_has_unsaved_changes());
+    }
+
+    #[test]
+    fn reset_character_editor_drops_every_buffer() {
+        let mut state = UiState {
+            character_editor_loaded: true,
+            character_editor_modified: true,
+            character_editor_close_requested: true,
+            character_editor_reload_pending: true,
+            character_editor_name: "Alicia".to_string(),
+            character_editor_alternate_greetings: vec!["hi".to_string()],
+            character_editor_validation_errors: vec![EditorIssue {
+                location: "data.name".to_string(),
+                message: "nope".to_string(),
+                severity: EditorSeverity::Error,
+            }],
+            ..UiState::default()
+        };
+
+        state.reset_character_editor();
+
+        let default = UiState::default();
+        assert_eq!(state.character_editor_name, default.character_editor_name);
+        assert!(state.character_editor_alternate_greetings.is_empty());
+        assert!(state.character_editor_lorebook.is_none());
+        assert!(state.character_editor_motion_catalog.is_none());
+        assert!(state.character_editor_validation_errors.is_empty());
+        assert!(!state.character_editor_loaded);
+        assert!(!state.character_editor_modified);
+        assert!(!state.character_editor_close_requested);
+        assert!(!state.character_editor_reload_pending);
     }
 
     #[test]

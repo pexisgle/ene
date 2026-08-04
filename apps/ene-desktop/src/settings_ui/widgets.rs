@@ -7,11 +7,16 @@ use crate::ai_bridge::AiBridge;
 use crate::character_state::{AnimationControl, EmotionCommand, EmotionQueue};
 use crate::component::ui::UiStateComponent;
 use crate::settings::{
-    CharacterSettings, GraphicsQuality, GraphicsSettings, cycle_graphics_quality,
-    graphics_quality_label,
+    CharacterSettings, EditorIssue, EditorSeverity, GraphicsQuality, GraphicsSettings, UiState,
+    cycle_graphics_quality, graphics_quality_label,
 };
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
+use ene_config::{
+    CharacterCardV3, DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH, EneAssetKind, ResolvedAssetUri,
+    resolve_asset_uri,
+};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Single action enum shared by every page widget. Hotkeys and
@@ -62,10 +67,14 @@ pub enum SettingsAction {
     /// (Character Card editor page).
     SaveCharacterCard {
         path: String,
+        assets_dir: String,
     },
     /// Validate the editor buffers without writing to disk
     /// (Character Card editor page).
-    ValidateCharacterCard,
+    ValidateCharacterCard {
+        card_path: String,
+        assets_dir: String,
+    },
 }
 
 pub fn apply_action(
@@ -86,6 +95,9 @@ pub fn apply_action(
                 -1,
             );
             push_default_expression(settings.select_character(idx), emotion_queue, now_secs);
+            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                state.0.reset_character_editor();
+            }
         }
         SettingsAction::NextCharacter => {
             let idx = cycle_index(
@@ -94,6 +106,9 @@ pub fn apply_action(
                 1,
             );
             push_default_expression(settings.select_character(idx), emotion_queue, now_secs);
+            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                state.0.reset_character_editor();
+            }
         }
         SettingsAction::PrevMotion => {
             let motion_len = settings.current_entry().map_or(0, |e| e.motion_names.len());
@@ -196,11 +211,14 @@ pub fn apply_action(
         SettingsAction::LoadCharacterCard { path } => {
             load_character_card(&path, world, ui_entity);
         }
-        SettingsAction::SaveCharacterCard { path } => {
-            save_character_card(&path, world, ui_entity);
+        SettingsAction::SaveCharacterCard { path, assets_dir } => {
+            save_character_card(&path, &assets_dir, world, ui_entity);
         }
-        SettingsAction::ValidateCharacterCard => {
-            validate_character_card(world, ui_entity);
+        SettingsAction::ValidateCharacterCard {
+            card_path,
+            assets_dir,
+        } => {
+            validate_character_card(&card_path, &assets_dir, world, ui_entity);
         }
     }
 
@@ -213,35 +231,8 @@ pub fn apply_action(
 /// `character_editor_validation_errors` and the loaded flag stays
 /// `false` so the page can retry.
 fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) => {
-            set_editor_errors(
-                world,
-                ui_entity,
-                vec![i18n_embed_fl::fl!(
-                    crate::i18n::loader(),
-                    "character-editor-read-error",
-                    error = error.to_string()
-                )],
-            );
-            return;
-        }
-    };
-    let card: ene_config::CharacterCardV3 = match serde_json::from_str(&content) {
-        Ok(card) => card,
-        Err(error) => {
-            set_editor_errors(
-                world,
-                ui_entity,
-                vec![i18n_embed_fl::fl!(
-                    crate::i18n::loader(),
-                    "character-editor-parse-error",
-                    error = error.to_string()
-                )],
-            );
-            return;
-        }
+    let Some(card) = read_editable_card(Path::new(path), world, ui_entity) else {
+        return;
     };
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
         let data = &card.data;
@@ -275,6 +266,20 @@ fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
             .0
             .character_editor_post_history
             .clone_from(&data.post_history_instructions);
+        state
+            .0
+            .character_editor_alternate_greetings
+            .clone_from(&data.alternate_greetings);
+        state
+            .0
+            .character_editor_lorebook
+            .clone_from(&data.character_book);
+        state.0.character_editor_motion_catalog = data
+            .extensions
+            .ene
+            .as_ref()
+            .and_then(|ene| ene.motion_catalog.clone());
+        state.0.character_editor_locale_diffs = sidecar_diffs(Path::new(path));
         state.0.character_editor_loaded = true;
         state.0.character_editor_modified = false;
         state.0.character_editor_validation_errors.clear();
@@ -288,100 +293,460 @@ fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
 /// unparseable existing card aborts the save with the reason surfaced
 /// through `character_editor_validation_errors` — overwriting it with a
 /// default card would destroy the original. Only a missing file (a brand-new
-/// card) starts from a default. The write itself is atomic
-/// (temp file + rename via [`ene_config::save_character_card`]), so a crash
-/// mid-write cannot leave a truncated card behind.
-fn save_character_card(path: &str, world: &mut World, ui_entity: Entity) {
+/// card) starts from a default. Validation runs before any write; `Error`
+/// findings abort the save. The pre-save card is copied to `<name>.bak` once,
+/// then the write goes through the atomic temp-file-and-rename
+/// ([`ene_config::save_character_card`]) so a crash mid-write can never leave
+/// a truncated card behind.
+fn save_character_card(path: &str, assets_dir: &str, world: &mut World, ui_entity: Entity) {
     let Some(snapshot) = world
         .get::<UiStateComponent>(ui_entity)
         .map(|s| s.0.clone())
     else {
         return;
     };
-    let mut card = match std::fs::read_to_string(path) {
-        Ok(content) => match serde_json::from_str::<ene_config::CharacterCardV3>(&content) {
-            Ok(card) => card,
-            Err(error) => {
-                set_editor_errors(
-                    world,
-                    ui_entity,
-                    vec![i18n_embed_fl::fl!(
-                        crate::i18n::loader(),
-                        "character-editor-parse-error",
-                        error = error.to_string()
-                    )],
-                );
-                return;
-            }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            ene_config::CharacterCardV3::default()
-        }
-        Err(error) => {
-            set_editor_errors(
-                world,
-                ui_entity,
-                vec![i18n_embed_fl::fl!(
-                    crate::i18n::loader(),
-                    "character-editor-read-error",
-                    error = error.to_string()
-                )],
-            );
-            return;
-        }
+    let path = Path::new(path);
+    let Some(mut card) = read_editable_card(path, world, ui_entity) else {
+        return;
     };
-    card.data.name = snapshot.character_editor_name;
-    card.data.description = snapshot.character_editor_description;
-    card.data.personality = snapshot.character_editor_personality;
-    card.data.scenario = snapshot.character_editor_scenario;
-    card.data.system_prompt = snapshot.character_editor_system_prompt;
-    card.data.mes_example = snapshot.character_editor_mes_example;
-    card.data.first_mes = snapshot.character_editor_first_mes;
-    card.data.creator_notes = snapshot.character_editor_creator_notes;
-    card.data.post_history_instructions = snapshot.character_editor_post_history;
-    if let Err(error) = ene_config::save_character_card(std::path::Path::new(path), &card) {
+    card = build_card_from_buffers(&snapshot, card);
+
+    let issues = validate_card(
+        &card,
+        path.parent().unwrap_or(Path::new(".")),
+        Path::new(assets_dir),
+    );
+    if issues
+        .iter()
+        .any(|issue| issue.severity == EditorSeverity::Error)
+    {
+        set_editor_errors(world, ui_entity, issues);
+        return;
+    }
+
+    if let Err(error) = backup_card(path) {
         set_editor_errors(
             world,
             ui_entity,
-            vec![i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "character-editor-save-error",
-                error = error.to_string()
-            )],
+            vec![EditorIssue {
+                location: card_file_label(path),
+                message: i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "character-editor-backup-error",
+                    error = error.to_string()
+                ),
+                severity: EditorSeverity::Error,
+            }],
+        );
+        return;
+    }
+    if let Err(error) = ene_config::save_character_card(path, &card) {
+        set_editor_errors(
+            world,
+            ui_entity,
+            vec![EditorIssue {
+                location: card_file_label(path),
+                message: i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "character-editor-save-error",
+                    error = error.to_string()
+                ),
+                severity: EditorSeverity::Error,
+            }],
         );
         return;
     }
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
         state.0.character_editor_modified = false;
-        state.0.character_editor_validation_errors.clear();
+        state.0.character_editor_validation_errors = issues;
     }
 }
 
 /// Validate the editor buffers without touching disk, populating
 /// `character_editor_validation_errors`.
-fn validate_character_card(world: &mut World, ui_entity: Entity) {
+fn validate_character_card(
+    card_path: &str,
+    assets_dir: &str,
+    world: &mut World,
+    ui_entity: Entity,
+) {
     let Some(snapshot) = world
         .get::<UiStateComponent>(ui_entity)
         .map(|s| s.0.clone())
     else {
         return;
     };
-    let mut errors = Vec::new();
-    if snapshot.character_editor_name.trim().is_empty() {
-        errors.push(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "character-editor-name-required"
-        ));
-    }
+    let path = Path::new(card_path);
+    let Some(card) = read_editable_card(path, world, ui_entity) else {
+        return;
+    };
+    let card = build_card_from_buffers(&snapshot, card);
+    let issues = validate_card(
+        &card,
+        path.parent().unwrap_or(Path::new(".")),
+        Path::new(assets_dir),
+    );
+    set_editor_errors(world, ui_entity, issues);
+}
+
+fn set_editor_errors(world: &mut World, ui_entity: Entity, errors: Vec<EditorIssue>) {
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
         state.0.character_editor_validation_errors = errors;
     }
 }
 
-fn set_editor_errors(world: &mut World, ui_entity: Entity, errors: Vec<String>) {
-    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        state.0.character_editor_validation_errors = errors;
+/// Reads the card at `path` for editing. A missing file starts from a
+/// default card (both load and save support creating a brand-new card);
+/// any other read or parse failure is surfaced as an issue and returns
+/// `None` so the caller aborts instead of rewriting the card.
+fn read_editable_card(
+    path: &Path,
+    world: &mut World,
+    ui_entity: Entity,
+) -> Option<CharacterCardV3> {
+    let location = card_file_label(path);
+    match std::fs::read_to_string(path) {
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(card) => Some(card),
+            Err(error) => {
+                set_editor_errors(
+                    world,
+                    ui_entity,
+                    vec![EditorIssue {
+                        location,
+                        message: i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "character-editor-parse-error",
+                            error = error.to_string()
+                        ),
+                        severity: EditorSeverity::Error,
+                    }],
+                );
+                None
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some(CharacterCardV3::default())
+        }
+        Err(error) => {
+            set_editor_errors(
+                world,
+                ui_entity,
+                vec![EditorIssue {
+                    location,
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-read-error",
+                        error = error.to_string()
+                    ),
+                    severity: EditorSeverity::Error,
+                }],
+            );
+            None
+        }
     }
+}
+
+/// Applies every editor buffer to `card`. Fields the editor does not expose
+/// (assets, expressions, unknown `data` keys) come from the on-disk card and
+/// are preserved; `None` structured buffers leave the matching card section
+/// untouched.
+fn build_card_from_buffers(snapshot: &UiState, mut card: CharacterCardV3) -> CharacterCardV3 {
+    card.data.name.clone_from(&snapshot.character_editor_name);
+    card.data
+        .description
+        .clone_from(&snapshot.character_editor_description);
+    card.data
+        .personality
+        .clone_from(&snapshot.character_editor_personality);
+    card.data
+        .scenario
+        .clone_from(&snapshot.character_editor_scenario);
+    card.data
+        .system_prompt
+        .clone_from(&snapshot.character_editor_system_prompt);
+    card.data
+        .mes_example
+        .clone_from(&snapshot.character_editor_mes_example);
+    card.data
+        .first_mes
+        .clone_from(&snapshot.character_editor_first_mes);
+    card.data
+        .creator_notes
+        .clone_from(&snapshot.character_editor_creator_notes);
+    card.data
+        .post_history_instructions
+        .clone_from(&snapshot.character_editor_post_history);
+    card.data
+        .alternate_greetings
+        .clone_from(&snapshot.character_editor_alternate_greetings);
+    if let Some(book) = &snapshot.character_editor_lorebook {
+        card.data.character_book = Some(book.clone());
+    }
+    if let Some(catalog) = &snapshot.character_editor_motion_catalog {
+        let mut ene = card.data.extensions.ene.clone().unwrap_or_default();
+        ene.motion_catalog = if catalog.motions.is_empty() && catalog.idle_lower.is_none() {
+            None
+        } else {
+            Some(catalog.clone())
+        };
+        card.data.extensions.ene = Some(ene);
+    }
+    card
+}
+
+/// Semantic + asset validation of the assembled card. Every finding carries
+/// the field path it refers to; `Error` findings block saving, `Warning`
+/// findings are informational.
+fn validate_card(card: &CharacterCardV3, card_dir: &Path, assets_dir: &Path) -> Vec<EditorIssue> {
+    let mut issues = Vec::new();
+    if card.data.name.trim().is_empty() {
+        issues.push(EditorIssue {
+            location: "data.name".to_string(),
+            message: i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-name-required"),
+            severity: EditorSeverity::Error,
+        });
+    }
+    for (index, greeting) in card.data.alternate_greetings.iter().enumerate() {
+        if greeting.trim().is_empty() {
+            let human_index = index + 1;
+            issues.push(EditorIssue {
+                location: format!("data.alternate_greetings[{index}]"),
+                message: i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "character-editor-greeting-empty",
+                    index = human_index
+                ),
+                severity: EditorSeverity::Error,
+            });
+        }
+    }
+    if let Some(book) = &card.data.character_book {
+        for (index, entry) in book.entries.iter().enumerate() {
+            let human_index = index + 1;
+            let location = format!("data.character_book.entries[{index}]");
+            let has_trigger = entry.keys.iter().any(|key| !key.trim().is_empty());
+            if !has_trigger && !entry.constant.unwrap_or(false) {
+                issues.push(EditorIssue {
+                    location: format!("{location}.keys"),
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-lorebook-keys-required",
+                        index = human_index
+                    ),
+                    severity: EditorSeverity::Error,
+                });
+            }
+            if entry.content.trim().is_empty() {
+                issues.push(EditorIssue {
+                    location: format!("{location}.content"),
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-lorebook-content-required",
+                        index = human_index
+                    ),
+                    severity: EditorSeverity::Error,
+                });
+            }
+        }
+    }
+    if let Some(catalog) = card
+        .data
+        .extensions
+        .ene
+        .as_ref()
+        .and_then(|ene| ene.motion_catalog.as_ref())
+    {
+        for (index, motion) in catalog.motions.iter().enumerate() {
+            let human_index = index + 1;
+            let location = format!("extensions.ene.motion_catalog.motions[{index}]");
+            if motion.name.trim().is_empty() {
+                issues.push(EditorIssue {
+                    location: format!("{location}.name"),
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-motion-name-required",
+                        index = human_index
+                    ),
+                    severity: EditorSeverity::Error,
+                });
+            }
+            if motion.path.trim().is_empty() {
+                issues.push(EditorIssue {
+                    location: format!("{location}.path"),
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-motion-path-required",
+                        index = human_index
+                    ),
+                    severity: EditorSeverity::Error,
+                });
+            } else if escapes_card_dir(&motion.path) {
+                issues.push(EditorIssue {
+                    location: format!("{location}.path"),
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-motion-path-unsafe",
+                        index = human_index
+                    ),
+                    severity: EditorSeverity::Error,
+                });
+            } else if !is_regular_file(&card_dir.join(&motion.path)) {
+                issues.push(EditorIssue {
+                    location: format!("{location}.path"),
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-motion-file-missing",
+                        index = human_index,
+                        path = motion.path.clone()
+                    ),
+                    severity: EditorSeverity::Warning,
+                });
+            }
+        }
+        if let Some(idle) = &catalog.idle_lower
+            && !catalog.motions.iter().any(|motion| &motion.name == idle)
+        {
+            issues.push(EditorIssue {
+                location: "extensions.ene.motion_catalog.idle_lower".to_string(),
+                message: i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "character-editor-motion-idle-unknown",
+                    name = idle
+                ),
+                severity: EditorSeverity::Warning,
+            });
+        }
+    }
+    for (index, asset) in card.data.assets.iter().enumerate() {
+        if asset.ene_kind().is_none() {
+            continue;
+        }
+        let location = format!("data.assets[{index}].uri");
+        match resolve_asset_uri(&asset.uri) {
+            Ok(ResolvedAssetUri::Embedded(path)) => {
+                if !is_regular_file(&card_dir.join(&path)) {
+                    issues.push(EditorIssue {
+                        location,
+                        message: i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "character-editor-asset-file-missing",
+                            path = path.display().to_string()
+                        ),
+                        severity: EditorSeverity::Error,
+                    });
+                }
+            }
+            Ok(ResolvedAssetUri::AppDefault) => {
+                let default = match asset.ene_kind() {
+                    Some(EneAssetKind::Vrm) => DEFAULT_VRM_PATH,
+                    _ => DEFAULT_VRMA_PATH,
+                };
+                if !is_regular_file(&assets_dir.join(default)) {
+                    issues.push(EditorIssue {
+                        location,
+                        message: i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "character-editor-asset-default-missing"
+                        ),
+                        severity: EditorSeverity::Error,
+                    });
+                }
+            }
+            Ok(ResolvedAssetUri::Remote(_)) => {
+                issues.push(EditorIssue {
+                    location,
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-asset-remote-unverified"
+                    ),
+                    severity: EditorSeverity::Warning,
+                });
+            }
+            Ok(ResolvedAssetUri::Data { .. }) => {
+                issues.push(EditorIssue {
+                    location,
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-asset-data-unverified"
+                    ),
+                    severity: EditorSeverity::Warning,
+                });
+            }
+            Err(error) => {
+                issues.push(EditorIssue {
+                    location,
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-asset-uri-invalid",
+                        error = error.to_string()
+                    ),
+                    severity: EditorSeverity::Error,
+                });
+            }
+        }
+    }
+    issues
+}
+
+/// Copies the pre-save card to `<name>.bak` once. The first backup is never
+/// overwritten, so after repeated saves it still holds the pre-edit original
+/// and a buggy rewrite stays recoverable.
+fn backup_card(path: &Path) -> Result<(), std::io::Error> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut backup_name = path.as_os_str().to_owned();
+    backup_name.push(".bak");
+    let backup = PathBuf::from(backup_name);
+    if backup.exists() {
+        return Ok(());
+    }
+    std::fs::copy(path, backup).map(|_| ())
+}
+
+/// `character.{code}.json` sidecar files next to the card. The editor edits
+/// the base card only, so these are surfaced as a notice rather than edited.
+fn sidecar_diffs(card_path: &Path) -> Vec<String> {
+    let Some(dir) = card_path.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let code = name
+                .strip_prefix("character.")
+                .and_then(|rest| rest.strip_suffix(".json"))?;
+            if code.is_empty() {
+                return None;
+            }
+            Some(name.to_string())
+        })
+        .collect()
+}
+
+/// Whether a motion path can escape the character folder: absolute paths and
+/// `..` traversal components are both rejected.
+fn escapes_card_dir(path: &str) -> bool {
+    Path::new(path).is_absolute() || path.split(['/', '\\']).any(|component| component == "..")
+}
+
+/// `true` when the path names a regular file without going through symlinks.
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+/// The card file's own name, used as the issue location for file-level errors.
+fn card_file_label(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 const fn cycle_index(index: usize, len: usize, step: isize) -> usize {
@@ -436,11 +801,29 @@ mod tests {
         (world, entity)
     }
 
-    fn editor_errors(world: &World, entity: Entity) -> Vec<String> {
+    fn editor_errors(world: &World, entity: Entity) -> Vec<EditorIssue> {
         world
             .get::<UiStateComponent>(entity)
             .map(|s| s.0.character_editor_validation_errors.clone())
             .unwrap_or_default()
+    }
+
+    fn save(world: &mut World, entity: Entity, path: &Path, assets_dir: &Path) {
+        save_character_card(
+            &path.to_string_lossy(),
+            &assets_dir.to_string_lossy(),
+            world,
+            entity,
+        );
+    }
+
+    fn validate(world: &mut World, entity: Entity, path: &Path, assets_dir: &Path) {
+        validate_character_card(
+            &path.to_string_lossy(),
+            &assets_dir.to_string_lossy(),
+            world,
+            entity,
+        );
     }
 
     fn seed_card_json() -> &'static str {
@@ -503,11 +886,13 @@ mod tests {
         std::fs::write(&path, corrupt).expect("seed corrupt card");
         let (mut world, entity) = editor_world("New Name");
 
-        save_character_card(path.to_string_lossy().as_ref(), &mut world, entity);
+        save(&mut world, entity, &path, tmp.path());
 
         let errors = editor_errors(&world, entity);
         assert!(
-            errors.iter().any(|e| e.contains("Failed to parse card")),
+            errors
+                .iter()
+                .any(|issue| issue.message.contains("Failed to parse card")),
             "parse failure must be surfaced, got {errors:?}"
         );
         assert_eq!(
@@ -525,7 +910,7 @@ mod tests {
         let path = tmp.path().join("character.json");
         let (mut world, entity) = editor_world("Brand New");
 
-        save_character_card(path.to_string_lossy().as_ref(), &mut world, entity);
+        save(&mut world, entity, &path, tmp.path());
 
         assert!(
             editor_errors(&world, entity).is_empty(),
@@ -545,11 +930,13 @@ mod tests {
         std::fs::create_dir(&dir_path).expect("create dir path (read_to_string fails on it)");
         let (mut world, entity) = editor_world("Ene");
 
-        save_character_card(dir_path.to_string_lossy().as_ref(), &mut world, entity);
+        save(&mut world, entity, &dir_path, tmp.path());
 
         let errors = editor_errors(&world, entity);
         assert!(
-            errors.iter().any(|e| e.contains("Failed to read card")),
+            errors
+                .iter()
+                .any(|issue| issue.message.contains("Failed to read card")),
             "read failure must be surfaced, got {errors:?}"
         );
     }
@@ -564,7 +951,7 @@ mod tests {
         std::fs::write(&path, seed_card_json()).expect("seed card");
         let (mut world, entity) = editor_world("Edited");
 
-        save_character_card(path.to_string_lossy().as_ref(), &mut world, entity);
+        save(&mut world, entity, &path, tmp.path());
 
         assert!(
             editor_errors(&world, entity).is_empty(),
@@ -580,6 +967,349 @@ mod tests {
             parsed.pointer("/data/vendor_field"),
             Some(&serde_json::json!("from-other-app")),
             "unknown top-level field must survive the save"
+        );
+    }
+
+    /// Validation must report the exact field path for every finding so the
+    /// UI can point the user at the broken section.
+    #[test]
+    fn validate_reports_error_locations() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "spec": "chara_card_v3",
+                "spec_version": "3.0",
+                "data": {
+                    "name": "Old",
+                    "alternate_greetings": ["fine"],
+                    "character_book": {
+                        "entries": [{
+                            "keys": ["lab"],
+                            "content": "cold",
+                            "enabled": true,
+                            "insertion_order": 0,
+                            "use_regex": false
+                        }]
+                    }
+                }
+            }"#,
+        )
+        .expect("seed card");
+        let (mut world, entity) = editor_world("");
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            state.0.character_editor_alternate_greetings = vec![String::new()];
+            let mut book = ene_config::Lorebook::default();
+            book.entries.push(ene_config::LorebookEntry {
+                keys: Vec::new(),
+                content: String::new(),
+                enabled: true,
+                insertion_order: 0,
+                use_regex: false,
+                constant: Some(false),
+                case_sensitive: None,
+                name: None,
+                priority: None,
+                id: None,
+                comment: None,
+                selective: None,
+                secondary_keys: None,
+                position: None,
+                extensions: std::collections::HashMap::new(),
+            });
+            state.0.character_editor_lorebook = Some(book);
+        }
+
+        validate(&mut world, entity, &path, tmp.path());
+
+        let locations = editor_errors(&world, entity)
+            .into_iter()
+            .map(|issue| issue.location)
+            .collect::<Vec<_>>();
+        for expected in [
+            "data.name",
+            "data.alternate_greetings[0]",
+            "data.character_book.entries[0].keys",
+            "data.character_book.entries[0].content",
+        ] {
+            assert!(
+                locations.iter().any(|location| location == expected),
+                "expected {expected:?} among {locations:?}"
+            );
+        }
+    }
+
+    /// A declared VRM whose file is missing must block the save — that is the
+    /// broken-startup-path case the editor exists to prevent.
+    #[test]
+    fn save_blocks_on_missing_declared_vrm() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "spec": "chara_card_v3",
+                "spec_version": "3.0",
+                "data": {
+                    "name": "Old",
+                    "assets": [{
+                        "type": "x_vrm",
+                        "uri": "embeded://model.vrm",
+                        "name": "Model",
+                        "ext": "vrm"
+                    }]
+                }
+            }"#,
+        )
+        .expect("seed card");
+        let before = std::fs::read_to_string(&path).expect("read original");
+        let (mut world, entity) = editor_world("Edited");
+
+        save(&mut world, entity, &path, tmp.path());
+
+        let errors = editor_errors(&world, entity);
+        assert!(
+            errors
+                .iter()
+                .any(|issue| issue.location == "data.assets[0].uri"
+                    && issue.severity == EditorSeverity::Error),
+            "missing VRM must block save, got {errors:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            before,
+            "a blocked save must leave the card untouched"
+        );
+    }
+
+    /// A remote asset URL cannot be verified locally; saving is allowed but a
+    /// warning stays visible.
+    #[test]
+    fn save_allows_remote_asset_with_warning() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "spec": "chara_card_v3",
+                "spec_version": "3.0",
+                "data": {
+                    "name": "Old",
+                    "assets": [{
+                        "type": "x_vrm",
+                        "uri": "https://example.com/model.vrm",
+                        "name": "Model",
+                        "ext": "vrm"
+                    }]
+                }
+            }"#,
+        )
+        .expect("seed card");
+        let (mut world, entity) = editor_world("Edited");
+
+        save(&mut world, entity, &path, tmp.path());
+
+        let issues = editor_errors(&world, entity);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.location == "data.assets[0].uri"
+                    && issue.severity == EditorSeverity::Warning),
+            "remote asset should surface a warning, got {issues:?}"
+        );
+        assert!(
+            !world
+                .get::<UiStateComponent>(entity)
+                .unwrap()
+                .0
+                .character_editor_modified,
+            "a successful save clears the modified flag"
+        );
+    }
+
+    /// The pre-save card is backed up once; repeated saves keep the original.
+    #[test]
+    fn save_backs_up_original_once() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        std::fs::write(&path, seed_card_json()).expect("seed card");
+        let (mut world, entity) = editor_world("Edited");
+
+        save(&mut world, entity, &path, tmp.path());
+        let backup = tmp.path().join("character.json.bak");
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("backup exists"),
+            seed_card_json(),
+            "the original card must be preserved next to the saved one"
+        );
+
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            state.0.character_editor_name = "Second Edit".to_string();
+        }
+        save(&mut world, entity, &path, tmp.path());
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("backup still exists"),
+            seed_card_json(),
+            "the first backup must never be overwritten"
+        );
+    }
+
+    /// A motion path with `..` traversal is rejected as unsafe.
+    #[test]
+    fn validate_rejects_motion_path_traversal() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        let (mut world, entity) = editor_world("Ene");
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            let mut catalog = ene_config::MotionCatalog::default();
+            catalog.motions.push(ene_config::MotionEntry {
+                name: "Sneaky".to_string(),
+                path: "../evil.vrma".to_string(),
+                layer: None,
+            });
+            state.0.character_editor_motion_catalog = Some(catalog);
+        }
+
+        validate(&mut world, entity, &path, tmp.path());
+
+        assert!(
+            editor_errors(&world, entity).iter().any(|issue| {
+                issue.location == "extensions.ene.motion_catalog.motions[0].path"
+                    && issue.severity == EditorSeverity::Error
+            }),
+            "traversal motion path must be an error"
+        );
+    }
+
+    /// Load → edit → save must round-trip lorebook entries and the motion
+    /// catalog without dropping fields the editor does not expose.
+    #[test]
+    fn save_preserves_lorebook_and_motion_catalog() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "spec": "chara_card_v3",
+                "spec_version": "3.0",
+                "data": {
+                    "name": "Old",
+                    "character_book": {
+                        "name": "World",
+                        "entries": [{
+                            "keys": ["lab"],
+                            "content": "cold",
+                            "enabled": true,
+                            "insertion_order": 0,
+                            "use_regex": false,
+                            "id": 42,
+                            "extensions": {"keep": "me"}
+                        }]
+                    },
+                    "extensions": {
+                        "ene": {
+                            "motion_catalog": {
+                                "idle_lower": "Idle",
+                                "motions": [{
+                                    "name": "Idle",
+                                    "path": "motions/idle.vrma",
+                                    "layer": "lower"
+                                }]
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("seed card");
+        std::fs::create_dir(tmp.path().join("motions")).expect("create motions dir");
+        std::fs::write(tmp.path().join("motions/idle.vrma"), "idle").expect("seed idle motion");
+        std::fs::write(tmp.path().join("motions/wave.vrma"), "wave").expect("seed wave motion");
+        let (mut world, entity) = editor_world("unused");
+
+        load_character_card(&path.to_string_lossy(), &mut world, entity);
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            state.0.character_editor_name = "Edited".to_string();
+            state.0.character_editor_lorebook.as_mut().unwrap().entries[0].content =
+                "warm".to_string();
+            state
+                .0
+                .character_editor_motion_catalog
+                .as_mut()
+                .unwrap()
+                .motions
+                .push(ene_config::MotionEntry {
+                    name: "Wave".to_string(),
+                    path: "motions/wave.vrma".to_string(),
+                    layer: None,
+                });
+        }
+
+        save(&mut world, entity, &path, tmp.path());
+
+        assert!(
+            editor_errors(&world, entity).is_empty(),
+            "save must succeed silently"
+        );
+        let on_disk = std::fs::read_to_string(&path).expect("read card");
+        let parsed: ene_config::CharacterCardV3 = serde_json::from_str(&on_disk).expect("parse");
+        let book = parsed.data.character_book.expect("lorebook kept");
+        assert_eq!(book.name.as_deref(), Some("World"));
+        let entry = &book.entries[0];
+        assert_eq!(entry.content, "warm", "edited content must be applied");
+        assert_eq!(
+            entry.id,
+            Some(serde_json::json!(42)),
+            "unexposed id must survive"
+        );
+        assert_eq!(
+            entry.extensions.get("keep"),
+            Some(&serde_json::json!("me")),
+            "unexposed entry extensions must survive"
+        );
+        let catalog = parsed
+            .data
+            .extensions
+            .ene
+            .and_then(|ene| ene.motion_catalog)
+            .expect("motion catalog kept");
+        assert_eq!(catalog.motions.len(), 2);
+        assert_eq!(
+            catalog.motions[0].layer,
+            Some(ene_config::MotionLayer::Lower),
+            "unexposed layer must survive"
+        );
+        assert_eq!(catalog.motions[1].name, "Wave");
+    }
+
+    /// The load path records locale sidecars so the page can warn that the
+    /// editor only touches the base-language card.
+    #[test]
+    fn load_records_locale_sidecars() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        std::fs::write(&path, seed_card_json()).expect("seed card");
+        std::fs::write(
+            tmp.path().join("character.ja.json"),
+            r#"{"description": "日本語の説明"}"#,
+        )
+        .expect("seed sidecar");
+        let (mut world, entity) = editor_world("unused");
+
+        load_character_card(&path.to_string_lossy(), &mut world, entity);
+
+        assert_eq!(
+            world
+                .get::<UiStateComponent>(entity)
+                .unwrap()
+                .0
+                .character_editor_locale_diffs,
+            ["character.ja.json"]
         );
     }
 

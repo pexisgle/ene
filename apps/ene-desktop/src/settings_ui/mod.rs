@@ -335,6 +335,10 @@ impl SettingsUi {
                 page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);
             }
         }
+
+        // Rendered last so it floats above every page: a close with unsaved
+        // card edits must confirm before the window may hide.
+        page_character_editor::render_discard_dialog(ui, world, ui_entity);
     }
 }
 
