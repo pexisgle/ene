@@ -137,6 +137,37 @@ safety_margin` であり、`pack_prompt` は必須セクション（プラット
 キーワード一致や無関係な指示で埋まることはありません。ラベルと既定文はアプリ言語
 （`mind.language`）に従い、定義値はカード作者の言語のままです。
 
+カーネルは `extensions.ene` の任意ロールプレイ定義も、定義がありかつ毎ターンの
+状態が一致する場合にレンダリングします:
+
+- `relationship_stages` — 現在のユーザー関係性 affinity（永続化される
+  `affect.affinity` 次元、−1.0..=1.0）を超えない閾値のうち最も高い段階から
+  `Relationship tone:`（日本語では「関係性に応じた口調」）行を生成します。
+  カードは `{ "threshold": 0.3, "label": "close friend", "tone": "speak with
+  easy warmth" }` のように段階を定義します。一致する段階がなければ行は出ません。
+- `time_periods` — ローカル時刻が定義された時間帯（`morning` 5–10 時 /
+  `afternoon` 11–16 時 / `evening` 17–20 時 / `night` 21–4 時）に該当する場合、
+  `Time-of-day behavior:`（「時間帯の行動」）行を生成します。
+- `scene_behaviors` — いずれかのキーワードがアクティブな場面テキスト
+  （ロール圧縮の場面サマリー。無ければカードの `scenario` にフォールバック）
+  に一致する場合、`Scene behavior:`（「場面の行動」）行を生成します。
+
+この3ブロックはすべて任意で毎ターン評価されます。定義がないカードは従来と
+同じカーネルをコンパイルし、条件が成立しない定義は単に行を出しません。
+
+`extensions.ene.ng_expressions` は出力契約（パッキングで常に保持される PHI
+セクション）に言語別の「使わない表現」リストとして注入され、キャラクターの
+禁止表現が毎ターン必ずモデルに届きます。リストがないカードの出力契約はホストが
+構築した内容のままです。
+
+`extensions.ene.style_examples`（ラベル付き応答例）は、定義があればフラットな
+`mes_example` のチャンク分割に代わってスタイル例の供給源になります。ラベルが
+セレクターの意図タグ（`greeting` / `comforting` / `joking` /
+`serious_explanation` / `refusal` / `tool_use`）と一致すれば既存の意図
+パイプラインで選択され、それ以外のラベルはユーザー入力への大文字小文字を
+無視した部分文字列一致で選択されます。一致がない場合はフラット例と同じく先頭の
+例にフォールバックします。
+
 ### プロンプトライブラリと言語パック
 
 ユーザー向けの LLM 指示文字列（システムフレーミング、感情ルール、要約・抽出プロンプト、分割理由など）はハードコードされていません。`ene-config` の `PromptLibrary` は、アプリ全体の `mind.language` 設定（タスク別 override: 分類器・認知出力契約は `mind.emotion.classifier_language`、要約器は `mind.context.compression_language`。空の場合は `mind.language` を継承）で選ばれた言語ごとに、`assets/lang/{lang}/prompts.json` の JSON パックからこれらを**実行時に**ロードします。これによりプロンプト文は再コンパイルなしで編集でき、言語の追加は新しい `assets/lang/{lang}/` ディレクトリを1つ追加するだけで済みます — ロード経路に Rust のコード変更は不要です。

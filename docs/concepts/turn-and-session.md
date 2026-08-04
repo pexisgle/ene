@@ -210,6 +210,38 @@ an English keyword match or unrelated instructions as its speech style; labels
 and the default follow the app language (`mind.language`), while the defined
 values keep the card author's language.
 
+The kernel also renders the optional roleplay blocks from `extensions.ene`
+when they are defined and the per-turn state matches:
+
+- `relationship_stages` — a `Relationship tone:` line from the stage with the
+  highest `threshold` not exceeding the current user-relationship affinity
+  (the persistent `affect.affinity` dimension, −1.0..=1.0). Cards define
+  stages like `{ "threshold": 0.3, "label": "close friend", "tone": "speak
+  with easy warmth" }`; no matching stage renders no line.
+- `time_periods` — a `Time-of-day behavior:` line when the local hour falls
+  in the defined period (`morning` 05–10, `afternoon` 11–16, `evening`
+  17–20, `night` 21–04).
+- `scene_behaviors` — a `Scene behavior:` line when any keyword matches the
+  active scene text (the rolling-compression scene summary, falling back to
+  the card's `scenario`).
+
+All three blocks are optional and per-turn: a card without them compiles the
+same kernel as before, and a defined block whose condition does not hold
+simply renders nothing.
+
+`extensions.ene.ng_expressions` is injected into the output contract (the
+PHI section that always survives packing) as a localized `Never say:` list,
+so the character's prohibitions reach the model on every chat turn. Cards
+without the list keep the output contract exactly as the host built it.
+
+`extensions.ene.style_examples` (labeled response examples) replace the flat
+`mes_example` chunking as the style-example source when present: a label
+equal to a selector intent tag (`greeting`, `comforting`, `joking`,
+`serious_explanation`, `refusal`, `tool_use`) selects through the intent
+pipeline, any other label is matched as a case-insensitive substring of the
+user's input, and no match falls back to the first examples — the same
+fallback the flat examples use.
+
 ### Prompt Library & Language Packs
 
 The user-facing LLM instruction strings (system framing, emotion rules,

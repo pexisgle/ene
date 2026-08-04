@@ -10,7 +10,7 @@ use ene_config::{CharacterCardV3, PromptLibrary};
 use ene_core::MemoryPort;
 use tracing::Instrument;
 
-use crate::character::{CharacterProcessor, build_lorebook_injection};
+use crate::character::{CharacterProcessor, KernelContext, build_lorebook_injection};
 use crate::commitments::CommitmentLedger;
 use crate::config::MindConfig;
 use crate::context::{
@@ -513,7 +513,23 @@ impl CognitionEngine {
             "{}:{}",
             ctx.character_id, ctx.session_id
         )));
-        let kernel = CharacterProcessor::compile_kernel(
+        // Scene text gates the kernel's scene-behavior line, so it is loaded
+        // before compilation; the active scene summary is preferred over the
+        // card's standing `scenario` as the current-situation source.
+        let scene_summary = if let Some(prefetched) = prefetch.scene_summary {
+            prefetched
+        } else if let Some(store) = ctx.store {
+            load_active_scene_summary(store, ctx.session_id)
+                .await?
+                .map(|s| s.text)
+        } else {
+            None
+        };
+        let scene_text = scene_summary.as_deref().or_else(|| {
+            let scenario = ctx.card.data.scenario.trim();
+            (!scenario.is_empty()).then_some(scenario)
+        });
+        let kernel = CharacterProcessor::compile_kernel_with_context(
             ctx.card,
             ctx.user_name,
             user_persona.as_ref(),
@@ -522,6 +538,11 @@ impl CognitionEngine {
             // Keep the identity kernel aligned with the system framing when
             // the classifier task has an explicit language override.
             ctx.config.resolved_classifier_language(),
+            KernelContext {
+                affinity: Some(affect.affinity),
+                now: Some(chrono::Local::now()),
+                scene_text,
+            },
         );
 
         let style_examples = if let Some(examples) = prefetch.style_examples {
@@ -546,16 +567,6 @@ impl CognitionEngine {
             "mood={}; valence={:.2}; arousal={:.2}",
             affect.mood_label, affect.valence, affect.arousal
         ));
-
-        let scene_summary = if let Some(prefetched) = prefetch.scene_summary {
-            prefetched
-        } else if let Some(store) = ctx.store {
-            load_active_scene_summary(store, ctx.session_id)
-                .await?
-                .map(|s| s.text)
-        } else {
-            None
-        };
 
         // `Some(None)` means the caller checked and there is no pending
         // interruption; `None` (legacy/test callers) injects nothing.
@@ -604,7 +615,11 @@ impl CognitionEngine {
             character_state_note: Some(prompts.system().affect_pre_utterance_note.clone()),
             scene_summary,
             history,
-            output_contract: ctx.post_history_block.map(str::to_string),
+            output_contract: build_output_contract(
+                ctx.card,
+                ctx.post_history_block,
+                ctx.config.resolved_classifier_language(),
+            ),
             interruption_note,
             authors_note,
             lorebook,
@@ -928,6 +943,45 @@ impl CognitionEngine {
     }
 }
 
+/// Merges the post-history PHI block with the card's NG-expression list into
+/// the output contract section.
+///
+/// Cards without `extensions.ene.ng_expressions` keep the PHI block exactly
+/// as built by the host; cards with neither get no output contract.
+fn build_output_contract(card: &CharacterCardV3, phi: Option<&str>, lang: &str) -> Option<String> {
+    let mut contract = phi.map(str::to_string);
+    if let Some(ng) = build_ng_contract(card, lang) {
+        contract = Some(match contract {
+            Some(existing) => format!("{existing}\n\n{ng}"),
+            None => ng,
+        });
+    }
+    contract
+}
+
+/// Renders `extensions.ene.ng_expressions` as a localized prohibition block.
+fn build_ng_contract(card: &CharacterCardV3, lang: &str) -> Option<String> {
+    let phrases = card
+        .data
+        .get_ene_extension()
+        .and_then(|ext| ext.ng_expressions)
+        .unwrap_or_default();
+    let phrases: Vec<&str> = phrases
+        .iter()
+        .map(String::as_str)
+        .filter(|phrase| !phrase.trim().is_empty())
+        .collect();
+    if phrases.is_empty() {
+        return None;
+    }
+    let ja = ene_config::resolve_language_alias(lang) == "ja";
+    let joined = phrases.join(if ja { "、" } else { ", " });
+    Some(if ja {
+        format!("## 使わない表現\n{joined}")
+    } else {
+        format!("## Never say\n{joined}")
+    })
+}
 fn pending_to_affect_proposal(
     pending: ene_core::PendingAffectProposal,
 ) -> crate::emotion::AffectProposal {
@@ -1041,6 +1095,45 @@ pub fn build_classifier_context(
 mod turn_id_tests {
     use super::*;
     use crate::lifecycle::HistoryEntry;
+
+    #[test]
+    fn ng_contract_appends_to_post_history_phi() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.extensions.ene = Some(ene_config::EneExtension {
+            ng_expressions: Some(vec!["死ね".into(), "バカ".into()]),
+            ..ene_config::EneExtension::default()
+        });
+
+        let contract =
+            build_output_contract(&card, Some("PHI block"), "ja").expect("contract present");
+        assert!(contract.contains("PHI block"));
+        assert!(contract.contains("## 使わない表現"));
+        assert!(contract.contains("死ね、バカ"));
+
+        let alone = build_output_contract(&card, None, "en").expect("ng alone injects");
+        assert!(alone.contains("## Never say"));
+        assert!(alone.contains("死ね, バカ"));
+    }
+
+    #[test]
+    fn ng_contract_absent_for_cards_without_ng_list() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        assert_eq!(build_output_contract(&card, None, "en"), None);
+        let phi_only = build_output_contract(&card, Some("PHI block"), "en").expect("phi kept");
+        assert_eq!(phi_only, "PHI block");
+
+        card.data.extensions.ene = Some(ene_config::EneExtension {
+            ng_expressions: Some(vec!["   ".into(), String::new()]),
+            ..ene_config::EneExtension::default()
+        });
+        assert_eq!(
+            build_output_contract(&card, None, "en"),
+            None,
+            "blank NG phrases inject nothing"
+        );
+    }
 
     #[test]
     fn count_user_turns_ignores_assistant_messages() {

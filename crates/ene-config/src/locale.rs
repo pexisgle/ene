@@ -12,7 +12,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::CharacterCardV3;
+use crate::{CharacterCardV3, TimePeriod};
 
 /// Translatable subset of a `CCv3` card, layered over `character.json`.
 ///
@@ -61,6 +61,123 @@ pub struct LocalizedCharacterFields {
     /// Lorebook entry translations, matched against the base by entry `id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_book: Option<LocalizedLorebook>,
+    /// Localized roleplay fields under `extensions.ene`.
+    ///
+    /// Like `character_book`, every entry references an existing base block
+    /// (`speech` / `ng_expressions` / `style_examples` /
+    /// `relationship_stages` / `time_periods` / `scene_behaviors`); diffs
+    /// that reference an absent block are skipped with a warning so a card
+    /// cannot gain locale-only structure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<LocalizedEneRoleplay>,
+}
+
+/// Localized roleplay fields under `extensions.ene` in a card diff.
+///
+/// Only natural-language text is replaceable: enum selects, numeric
+/// thresholds, and matching keys (`id`, `name`) stay tied to the base card.
+/// List fields are either full replacements (`ng_expressions`) or
+/// entry-matched overlays (`style_examples`, `relationship_stages`,
+/// `time_periods`, `scene_behaviors`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct LocalizedEneRoleplay {
+    /// Localized speech-style text fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<LocalizedSpeechStyle>,
+    /// Localized NG expressions (full list replacement).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ng_expressions: Option<Vec<String>>,
+    /// Localized labeled style examples, matched against the base by `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_examples: Option<Vec<LocalizedStyleExample>>,
+    /// Localized relationship-stage labels/tones, matched by `threshold`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_stages: Option<Vec<LocalizedRelationshipStage>>,
+    /// Localized time-period behaviors, matched by `period`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_periods: Option<Vec<LocalizedTimePeriodBehavior>>,
+    /// Localized scene behaviors, matched against the base by `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_behaviors: Option<Vec<LocalizedSceneBehavior>>,
+}
+
+/// Localized text fields of `extensions.ene.speech`.
+///
+/// `length` and `politeness` are enum selects, not language text, so they
+/// are intentionally absent (mirroring the non-translated relationship
+/// thresholds).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct LocalizedSpeechStyle {
+    /// Localized first-person pronoun.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_person: Option<String>,
+    /// Localized second-person address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_person: Option<String>,
+    /// Localized verbal tics (full list replacement).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbal_tics: Option<Vec<String>>,
+}
+
+/// Localized label/text of one labeled style example.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct LocalizedStyleExample {
+    /// The base example's `id`.
+    pub id: String,
+    /// Localized situation label (matched against user input).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Localized example text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// Localized label/tone of one relationship stage.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct LocalizedRelationshipStage {
+    /// The base stage's threshold (the non-translated matching key).
+    pub threshold: f32,
+    /// Localized stage name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Localized tone instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
+}
+
+/// Localized behavior of one time period.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct LocalizedTimePeriodBehavior {
+    /// The base behavior's period (the non-translated matching key).
+    pub period: TimePeriod,
+    /// Localized behavior instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<String>,
+}
+
+/// Localized keywords/behavior of one scene behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct LocalizedSceneBehavior {
+    /// The base behavior's `name` (the non-translated matching key).
+    pub name: String,
+    /// Localized scene keywords (matched against localized scene text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keywords: Option<Vec<String>>,
+    /// Localized behavior instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<String>,
 }
 
 /// Lorebook translations: only `keys` and `content` of existing entries.
@@ -131,13 +248,8 @@ pub(crate) fn merge_localized_fields(card: &mut CharacterCardV3, diff: &Localize
     if let Some(tags) = &diff.tags {
         data.tags.clone_from(tags);
     }
-    if let Some(localized_book) = &diff.character_book {
-        let Some(book) = data.character_book.as_mut() else {
-            tracing::warn!(
-                "Localized card diff has character_book entries but the base card has none; skipping them"
-            );
-            return;
-        };
+    if let (Some(localized_book), Some(book)) = (&diff.character_book, data.character_book.as_mut())
+    {
         for entry in &localized_book.entries {
             let Some(base_entry) = book
                 .entries
@@ -160,7 +272,192 @@ pub(crate) fn merge_localized_fields(card: &mut CharacterCardV3, diff: &Localize
                 base_entry.content.clone_from(content);
             }
         }
+    } else if diff.character_book.is_some() {
+        tracing::warn!(
+            "Localized card diff has character_book entries but the base card has none; skipping them"
+        );
     }
+    if let Some(localized) = &diff.extensions {
+        merge_localized_extensions(&mut data.extensions, localized);
+    }
+}
+
+/// Overlays localized roleplay fields onto `data.extensions`; `None` fields
+/// keep the base value.
+///
+/// Blocks are matched against the base like lorebook entries: a diff that
+/// references an absent block is skipped with a warning so locale diffs can
+/// never add structure the base card does not have. `speech` and
+/// `ng_expressions` do not need matching (they overlay the whole block).
+fn merge_localized_extensions(
+    extensions: &mut crate::character_card::Extensions,
+    diff: &LocalizedEneRoleplay,
+) {
+    if let Some(speech) = &diff.speech {
+        if let Some(ene) = extensions.ene.as_mut() {
+            if let Some(base_speech) = ene.speech.as_mut() {
+                if let Some(first_person) = &speech.first_person {
+                    base_speech.first_person = Some(first_person.clone());
+                }
+                if let Some(second_person) = &speech.second_person {
+                    base_speech.second_person = Some(second_person.clone());
+                }
+                if let Some(verbal_tics) = &speech.verbal_tics {
+                    base_speech.verbal_tics.clone_from(verbal_tics);
+                }
+            } else {
+                tracing::warn!(
+                    "Localized card diff has extensions.ene.speech but the base card has no speech block; skipping it"
+                );
+            }
+        } else {
+            tracing::warn!(
+                "Localized card diff has extensions.ene.speech but the base card has no ene block; skipping it"
+            );
+        }
+    }
+    if let Some(ng_expressions) = &diff.ng_expressions {
+        if let Some(ene) = extensions.ene.as_mut() {
+            ene.ng_expressions = Some(ng_expressions.clone());
+        } else {
+            tracing::warn!(
+                "Localized card diff has extensions.ene.ng_expressions but the base card has none; skipping it"
+            );
+        }
+    }
+    if let Some(examples) = &diff.style_examples {
+        if let Some(ene) = extensions.ene.as_mut() {
+            if let Some(base_examples) = ene.style_examples.as_mut() {
+                for example in examples {
+                    let Some(base_example) =
+                        base_examples.iter_mut().find(|base| base.id == example.id)
+                    else {
+                        tracing::warn!(
+                            id = %example.id,
+                            "Localized style example has no matching base id; skipping it"
+                        );
+                        continue;
+                    };
+                    if let Some(label) = &example.label {
+                        base_example.label.clone_from(label);
+                    }
+                    if let Some(text) = &example.text {
+                        base_example.text.clone_from(text);
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Localized card diff has extensions.ene.style_examples but the base card has no style examples; skipping it"
+                );
+            }
+        } else {
+            tracing::warn!(
+                "Localized card diff has extensions.ene.style_examples but the base card has none; skipping it"
+            );
+        }
+    }
+    if let Some(stages) = &diff.relationship_stages {
+        if let Some(ene) = extensions.ene.as_mut() {
+            if let Some(base_stages) = ene.relationship_stages.as_mut() {
+                for stage in stages {
+                    let Some(base_stage) = base_stages
+                        .iter_mut()
+                        .find(|base| thresholds_match(base.threshold, stage.threshold))
+                    else {
+                        tracing::warn!(
+                            threshold = stage.threshold,
+                            "Localized relationship stage has no matching base threshold; skipping it"
+                        );
+                        continue;
+                    };
+                    if let Some(label) = &stage.label {
+                        base_stage.label.clone_from(label);
+                    }
+                    if let Some(tone) = &stage.tone {
+                        base_stage.tone.clone_from(tone);
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Localized card diff has extensions.ene.relationship_stages but the base card has no relationship stages; skipping it"
+                );
+            }
+        } else {
+            tracing::warn!(
+                "Localized card diff has extensions.ene.relationship_stages but the base card has none; skipping it"
+            );
+        }
+    }
+    if let Some(periods) = &diff.time_periods {
+        if let Some(ene) = extensions.ene.as_mut() {
+            if let Some(base_periods) = ene.time_periods.as_mut() {
+                for period in periods {
+                    let Some(base_period) = base_periods
+                        .iter_mut()
+                        .find(|base| base.period == period.period)
+                    else {
+                        tracing::warn!(
+                            period = ?period.period,
+                            "Localized time period has no matching base period; skipping it"
+                        );
+                        continue;
+                    };
+                    if let Some(behavior) = &period.behavior {
+                        base_period.behavior.clone_from(behavior);
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Localized card diff has extensions.ene.time_periods but the base card has no time periods; skipping it"
+                );
+            }
+        } else {
+            tracing::warn!(
+                "Localized card diff has extensions.ene.time_periods but the base card has none; skipping it"
+            );
+        }
+    }
+    if let Some(scenes) = &diff.scene_behaviors {
+        if let Some(ene) = extensions.ene.as_mut() {
+            if let Some(base_scenes) = ene.scene_behaviors.as_mut() {
+                for scene in scenes {
+                    let Some(base_scene) =
+                        base_scenes.iter_mut().find(|base| base.name == scene.name)
+                    else {
+                        tracing::warn!(
+                            name = %scene.name,
+                            "Localized scene behavior has no matching base name; skipping it"
+                        );
+                        continue;
+                    };
+                    if let Some(keywords) = &scene.keywords {
+                        base_scene.keywords.clone_from(keywords);
+                    }
+                    if let Some(behavior) = &scene.behavior {
+                        base_scene.behavior.clone_from(behavior);
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Localized card diff has extensions.ene.scene_behaviors but the base card has no scene behaviors; skipping it"
+                );
+            }
+        } else {
+            tracing::warn!(
+                "Localized card diff has extensions.ene.scene_behaviors but the base card has none; skipping it"
+            );
+        }
+    }
+}
+
+/// Exact equality is the intended diff-matching semantic: thresholds are
+/// serialized numeric keys, and the same decimal parses to identical bits.
+#[expect(
+    clippy::float_cmp,
+    reason = "thresholds are serialized numeric diff keys; same decimal yields identical f32 bits"
+)]
+fn thresholds_match(a: f32, b: f32) -> bool {
+    a == b
 }
 
 /// Removes the embedded locale bag after merging.
@@ -393,5 +690,190 @@ mod tests {
         let ene = card.data.extensions.ene.expect("ene kept");
         assert!(ene.locales.is_none());
         assert!(ene.affect_baseline.is_some());
+    }
+
+    fn roleplay_card() -> CharacterCardV3 {
+        let mut card = base_card();
+        card.data.extensions.ene = Some(EneExtension {
+            speech: Some(crate::SpeechStyleDefinition {
+                first_person: Some("私".into()),
+                second_person: Some("きみ".into()),
+                verbal_tics: vec!["だよね".into()],
+                ..crate::SpeechStyleDefinition::default()
+            }),
+            ng_expressions: Some(vec!["死ね".into()]),
+            style_examples: Some(vec![crate::LabeledStyleExample {
+                id: "angry-1".into(),
+                intent: Some("greeting".into()),
+                label: "怒っているとき".into(),
+                text: "Base angry text".into(),
+            }]),
+            relationship_stages: Some(vec![crate::RelationshipStage {
+                threshold: 0.3,
+                label: "close friend".into(),
+                tone: "Base warm tone".into(),
+            }]),
+            time_periods: Some(vec![crate::TimePeriodBehavior {
+                period: crate::TimePeriod::Night,
+                behavior: "Base night behavior".into(),
+            }]),
+            scene_behaviors: Some(vec![crate::SceneBehavior {
+                name: "working".into(),
+                keywords: vec!["作業".into()],
+                behavior: "Base work behavior".into(),
+            }]),
+            ..EneExtension::default()
+        });
+        card
+    }
+
+    #[test]
+    fn merge_overlays_roleplay_text_fields() {
+        let mut card = roleplay_card();
+        let diff = LocalizedCharacterFields {
+            extensions: Some(LocalizedEneRoleplay {
+                speech: Some(LocalizedSpeechStyle {
+                    first_person: Some("わたし".into()),
+                    verbal_tics: Some(vec!["ですわ".into()]),
+                    ..LocalizedSpeechStyle::default()
+                }),
+                ng_expressions: Some(vec!["むり".into(), "やだ".into()]),
+                ..LocalizedEneRoleplay::default()
+            }),
+            ..LocalizedCharacterFields::default()
+        };
+
+        merge_localized_fields(&mut card, &diff);
+
+        let ene = card.data.extensions.ene.expect("ene present");
+        let speech = ene.speech.expect("speech present");
+        assert_eq!(speech.first_person.as_deref(), Some("わたし"));
+        assert_eq!(
+            speech.second_person.as_deref(),
+            Some("きみ"),
+            "absent diff field keeps the base value"
+        );
+        assert_eq!(speech.verbal_tics, ["ですわ"]);
+        assert_eq!(
+            ene.ng_expressions,
+            Some(vec!["むり".to_string(), "やだ".to_string()])
+        );
+    }
+
+    #[test]
+    fn merge_matches_roleplay_entries_by_key() {
+        let mut card = roleplay_card();
+        let diff = LocalizedCharacterFields {
+            extensions: Some(LocalizedEneRoleplay {
+                style_examples: Some(vec![LocalizedStyleExample {
+                    id: "angry-1".into(),
+                    label: Some("angry".into()),
+                    text: Some("Localized angry text".into()),
+                }]),
+                relationship_stages: Some(vec![LocalizedRelationshipStage {
+                    threshold: 0.3,
+                    label: Some("親友".into()),
+                    tone: Some("親しみのある口調".into()),
+                }]),
+                time_periods: Some(vec![LocalizedTimePeriodBehavior {
+                    period: crate::TimePeriod::Night,
+                    behavior: Some("夜は小声で".into()),
+                }]),
+                scene_behaviors: Some(vec![LocalizedSceneBehavior {
+                    name: "working".into(),
+                    keywords: Some(vec!["work".into()]),
+                    behavior: Some("Keep replies short".into()),
+                }]),
+                ..LocalizedEneRoleplay::default()
+            }),
+            ..LocalizedCharacterFields::default()
+        };
+
+        merge_localized_fields(&mut card, &diff);
+
+        let ene = card.data.extensions.ene.expect("ene present");
+        let example = &ene.style_examples.expect("examples present")[0];
+        assert_eq!(example.label, "angry");
+        assert_eq!(example.text, "Localized angry text");
+        let stage = &ene.relationship_stages.expect("stages present")[0];
+        assert!((stage.threshold - 0.3).abs() < f32::EPSILON);
+        assert_eq!(stage.label, "親友");
+        assert_eq!(stage.tone, "親しみのある口調");
+        let period = &ene.time_periods.expect("periods present")[0];
+        assert_eq!(period.period, crate::TimePeriod::Night);
+        assert_eq!(period.behavior, "夜は小声で");
+        let scene = &ene.scene_behaviors.expect("scenes present")[0];
+        assert_eq!(scene.keywords, ["work"]);
+        assert_eq!(scene.behavior, "Keep replies short");
+    }
+
+    #[test]
+    fn merge_skips_roleplay_entries_without_a_base_match() {
+        let mut card = roleplay_card();
+        let diff = LocalizedCharacterFields {
+            extensions: Some(LocalizedEneRoleplay {
+                style_examples: Some(vec![LocalizedStyleExample {
+                    id: "unknown-id".into(),
+                    label: Some("angry".into()),
+                    text: Some("must not land".into()),
+                }]),
+                relationship_stages: Some(vec![LocalizedRelationshipStage {
+                    threshold: 0.9,
+                    label: Some("best friend".into()),
+                    tone: Some("must not land".into()),
+                }]),
+                time_periods: Some(vec![LocalizedTimePeriodBehavior {
+                    period: crate::TimePeriod::Morning,
+                    behavior: Some("must not land".into()),
+                }]),
+                scene_behaviors: Some(vec![LocalizedSceneBehavior {
+                    name: "unknown-scene".into(),
+                    keywords: Some(vec!["x".into()]),
+                    behavior: Some("must not land".into()),
+                }]),
+                ..LocalizedEneRoleplay::default()
+            }),
+            ..LocalizedCharacterFields::default()
+        };
+
+        merge_localized_fields(&mut card, &diff);
+
+        let ene = card.data.extensions.ene.expect("ene present");
+        let example = &ene.style_examples.expect("examples present")[0];
+        assert_eq!(
+            example.label, "怒っているとき",
+            "unmatched diff must not land"
+        );
+        assert_eq!(example.text, "Base angry text");
+        let stage = &ene.relationship_stages.expect("stages present")[0];
+        assert_eq!(stage.label, "close friend");
+        let period = &ene.time_periods.expect("periods present")[0];
+        assert_eq!(period.behavior, "Base night behavior");
+        let scene = &ene.scene_behaviors.expect("scenes present")[0];
+        assert_eq!(scene.keywords, ["作業"]);
+        assert_eq!(scene.behavior, "Base work behavior");
+    }
+
+    #[test]
+    fn merge_skips_roleplay_diff_without_a_base_extension_block() {
+        let mut card = base_card();
+        let diff = LocalizedCharacterFields {
+            extensions: Some(LocalizedEneRoleplay {
+                speech: Some(LocalizedSpeechStyle {
+                    first_person: Some("わたし".into()),
+                    ..LocalizedSpeechStyle::default()
+                }),
+                ng_expressions: Some(vec!["むり".into()]),
+                ..LocalizedEneRoleplay::default()
+            }),
+            ..LocalizedCharacterFields::default()
+        };
+
+        merge_localized_fields(&mut card, &diff);
+
+        assert!(
+            card.data.extensions.ene.is_none(),
+            "a diff must never create an ene block"
+        );
     }
 }

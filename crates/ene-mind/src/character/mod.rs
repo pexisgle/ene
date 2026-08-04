@@ -10,7 +10,7 @@ mod style;
 mod sync;
 
 pub use authors_note::{AuthorsNote, apply_authors_note, render_authors_note};
-pub use compiler::{CharacterCompiler, identity_kernel_budget_tokens};
+pub use compiler::{CharacterCompiler, KernelContext, identity_kernel_budget_tokens};
 pub use kernel::IdentityKernel;
 pub use lorebook::{
     LOREBOOK_SOURCE_PREFIX, LorebookIndexer, build_lorebook_scan_text,
@@ -56,6 +56,8 @@ impl CharacterProcessor {
     /// derive it with [`ene_config::session_pick_seed`].
     ///
     /// `language` localises the speech-style line derived for the kernel.
+    ///
+    /// The compatibility entry point uses [`KernelContext::default`].
     pub fn compile_kernel(
         card: &CharacterCardV3,
         user_name: &str,
@@ -64,13 +66,35 @@ impl CharacterProcessor {
         available_window: usize,
         language: &str,
     ) -> IdentityKernel {
-        CharacterCompiler::compile(
+        Self::compile_kernel_with_context(
             card,
             user_name,
             user_persona,
             pick_seed,
             available_window,
             language,
+            KernelContext::default(),
+        )
+    }
+
+    /// Compile an identity kernel with per-turn roleplay context.
+    pub fn compile_kernel_with_context(
+        card: &CharacterCardV3,
+        user_name: &str,
+        user_persona: Option<&UserPersona>,
+        pick_seed: Option<u64>,
+        available_window: usize,
+        language: &str,
+        ctx: KernelContext<'_>,
+    ) -> IdentityKernel {
+        CharacterCompiler::compile_with_context(
+            card,
+            user_name,
+            user_persona,
+            pick_seed,
+            available_window,
+            language,
+            ctx,
         )
     }
 
@@ -81,13 +105,14 @@ impl CharacterProcessor {
     /// token count. The speech-style line follows the system locale.
     pub fn compile_kernel_default(card: &CharacterCardV3, user_name: &str) -> IdentityKernel {
         let window = usize::try_from(ene_ai::DEFAULT_CONTEXT_WINDOW).unwrap_or(usize::MAX);
-        Self::compile_kernel(
+        Self::compile_kernel_with_context(
             card,
             user_name,
             None,
             None,
             window,
             ene_config::system_language(),
+            KernelContext::default(),
         )
     }
 

@@ -183,7 +183,26 @@ fn ccv3_item_matches(existing: &MemoryItem, desired: &NewMemoryItem) -> bool {
 }
 
 fn style_content_hash(card: &CharacterCardV3) -> u64 {
-    let hash = blake3::hash(card.data.mes_example.as_bytes());
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(card.data.mes_example.as_bytes());
+    if let Some(examples) = card
+        .data
+        .get_ene_extension()
+        .and_then(|ext| ext.style_examples)
+    {
+        for example in examples {
+            for value in [
+                example.id.as_str(),
+                example.intent.as_deref().unwrap_or_default(),
+                example.label.as_str(),
+                example.text.as_str(),
+            ] {
+                hasher.update(value.as_bytes());
+                hasher.update(&[0]);
+            }
+        }
+    }
+    let hash = hasher.finalize();
     let bytes = hash.as_bytes();
     u64::from_le_bytes([
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],

@@ -19,8 +19,23 @@ characters/Alicia/
 | `system_prompt` / `post_history_instructions` | `extensions.ene.expressions`（VRM 重み） |
 | `creator_notes` / `nickname` / `tags` | `creation_date` / `spec` / `spec_version` |
 | `character_book` エントリの `content` / `keys` / `secondary_keys` | `insertion_order` / `priority` / `position` |
+| `extensions.ene.speech` のテキスト項目（`first_person` / `second_person` / `verbal_tics`） | `extensions.ene.speech.length` / `politeness`（列挙選択） |
+| `extensions.ene.ng_expressions`（リスト全体の置換） | `extensions.ene.relationship_stages` の閾値 |
+| `extensions.ene.style_examples` の `label` / `text`（`id` で照合） | `extensions.ene.relationship_stages` の照合キー `threshold` |
+| `extensions.ene.relationship_stages` の `label` / `tone`（`threshold` で照合） | `extensions.ene.time_periods` の照合キー `period` |
+| `extensions.ene.time_periods` の `behavior`（`period` で照合） | `extensions.ene.scene_behaviors` の照合キー `name` |
+| `extensions.ene.scene_behaviors` の `keywords` / `behavior`（`name` で照合） | |
 
 ロアブックのトリガー（`keys` と `secondary_keys`）の翻訳は**必須**です。トリガーは会話テキストに対してマッチングされ、Ene のマッチャーはプライマリ 1 つ以上かつセカンダリ 1 つ以上の一致を要求するため、翻訳されていないトリガーは基底言語以外の会話では発火しません。
+
+同じ規則が `extensions.ene` のロールプレイ定義にも適用されます。シーンの
+行動の `keywords` はローカライズ済みの場面テキストに対して、ラベル付き応答例の
+`label` はユーザー入力に対してマッチングされるため、どちらも翻訳対象です。
+照合キー（`id` / `threshold` / `period` / `name`）は差分エントリを基底
+エントリに紐付けるためだけに存在し、翻訳されません。ロアブックと同様に、
+存在しないロールプレイブロックや未知のキーを参照する差分は警告付きでスキップ
+されます。ロケール差分は既存の構造を上書きできても、新しい構造を追加することは
+できません。
 
 カードの `name` は意図的に翻訳対象外です。発見処理やフォルダー名に使うキャラクターの識別キーだからです。翻訳できるのは表示専用の `nickname` だけです。CCv3 の `creator_notes_multilingual` はレガシーカード用に引き続き対応しますが、新規カードは差分ファイルを使うべきです。
 
