@@ -308,7 +308,10 @@ mod tests {
         };
         let serialized = serde_json::to_value(query.with_overrides(&config)).expect("serializes");
         assert_eq!(serialized["outputSamplingRate"], 24_000);
-        assert_eq!(serialized["tempoDynamicsScale"], 0.8);
+        let tempo = serialized["tempoDynamicsScale"]
+            .as_f64()
+            .expect("tempo is a number");
+        assert!((tempo - 0.8).abs() < 1e-6, "tempo={tempo}");
     }
 
     #[test]
