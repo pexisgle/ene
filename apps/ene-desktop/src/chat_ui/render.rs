@@ -13,23 +13,7 @@ use crate::component::chat::ChatStateComponent;
 use super::dialogs::{render_permission_dialog, render_user_input_dialog};
 
 #[derive(Default)]
-pub struct ChatUi {
-    /// Active microphone capture handle. Lives here (not in the ECS
-    /// world) because `cpal::Stream` is `!Send + !Sync`.
-    #[cfg(feature = "voice")]
-    mic_handle: crate::audio::MicCaptureHandle,
-    /// Placeholder so the struct has a field in text-only builds too.
-    #[cfg(not(feature = "voice"))]
-    mic_handle: Option<()>,
-}
-
-impl std::fmt::Debug for ChatUi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ChatUi")
-            .field("mic_active", &self.mic_handle.is_some())
-            .finish()
-    }
-}
+pub struct ChatUi {}
 
 impl ChatUi {
     pub fn render(
@@ -38,6 +22,7 @@ impl ChatUi {
         ai: Option<&Arc<AiBridge>>,
         world: &mut World,
         chat_entity: Entity,
+        mic_handle: &mut crate::audio::MicCaptureHandle,
     ) {
         let Some(ai) = ai else {
             ui.colored_label(
@@ -166,8 +151,7 @@ impl ChatUi {
                 }
 
                 if mic_clicked
-                    && let Err(e) =
-                        crate::audio::toggle_mic_capture(world, ai, &mut self.mic_handle)
+                    && let Err(e) = crate::audio::toggle_mic_capture(world, ai, mic_handle)
                 {
                     tracing::warn!(component = "Audio", error = %e, "mic toggle failed");
                     if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {

@@ -4,6 +4,7 @@
 //! frame the `UiWindow` calls [`SettingsUi::render`] with the live
 //! `&mut CharacterSettings` and the `Arc<AiBridge>`.
 pub mod input;
+pub mod page_accessibility;
 pub mod page_ai;
 pub mod page_character;
 pub mod page_character_editor;
@@ -40,6 +41,7 @@ pub enum PageKind {
     Ai,
     Voice,
     Features,
+    Accessibility,
     Memory,
     Permissions,
     Sessions,
@@ -263,6 +265,7 @@ impl SettingsUi {
                 PageKind::Ai,
                 PageKind::Voice,
                 PageKind::Features,
+                PageKind::Accessibility,
                 PageKind::Memory,
                 PageKind::Permissions,
                 PageKind::Sessions,
@@ -283,6 +286,9 @@ impl SettingsUi {
                     PageKind::Voice => i18n_embed_fl::fl!(crate::i18n::loader(), "voice"),
                     PageKind::Features => {
                         i18n_embed_fl::fl!(crate::i18n::loader(), "features")
+                    }
+                    PageKind::Accessibility => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "accessibility")
                     }
                     PageKind::Memory => i18n_embed_fl::fl!(crate::i18n::loader(), "memory"),
                     PageKind::Permissions => {
@@ -328,6 +334,7 @@ impl SettingsUi {
             ),
             PageKind::Voice => page_voice::render(ui, settings, ai, &mut self.input, world),
             PageKind::Features => page_features::render(ui, settings, ai, world),
+            PageKind::Accessibility => page_accessibility::render(ui, settings),
             PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
             PageKind::Permissions => page_permissions::render(ui, ai, world, ui_entity),
             PageKind::Sessions => page_sessions::render(ui, ai, world, ui_entity),

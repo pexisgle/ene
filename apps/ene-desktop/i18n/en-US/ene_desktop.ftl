@@ -249,12 +249,16 @@ spotlight-placeholder = Type a command…
 spotlight-action-open-settings = Open Settings
 spotlight-action-open-chat = Open Chat
 spotlight-action-toggle-mic = Toggle Microphone
-spotlight-action-quick-chat = Quick Chat
 spotlight-action-toggle-caption = Toggle Caption Overlay
+spotlight-send-chat = Send to chat: { $text }
 
 # Floating caption overlay (#218)
 caption-title = Caption
 close = Close
+caption-pin = Pin
+caption-unpin = Unpin
+caption-empty = Waiting for speech…
+caption-cue = 🎬 { $name }
 
 # AI
 ai = AI
@@ -366,6 +370,14 @@ enable-emotion = Enable emotion processing
 enable-tools = Enable tool calling
 enable-tool-rag = Enable Tool RAG
 enable-tool = Enable tool
+
+# Accessibility
+accessibility = Accessibility
+accessibility-hint = Spotlight and caption overlay toggles. Alt+Space opens Spotlight from any application; captions show the assistant's speech as on-screen subtitles.
+accessibility-spotlight = Enable Spotlight (Alt+Space)
+accessibility-spotlight-hint = Opens the command palette globally. On Wayland the shortcut only works while Ene has focus.
+accessibility-caption = Enable floating caption overlay
+accessibility-caption-hint = Shows streamed assistant speech in a draggable, pinnable subtitle window.
 
 # Audio
 voice = Voice

@@ -38,6 +38,7 @@ mod acquire_error;
 mod ai_bridge;
 mod app;
 mod audio;
+mod caption_overlay;
 mod character;
 mod character_state;
 mod chat_state;
@@ -46,6 +47,7 @@ mod component;
 mod event;
 mod events;
 mod gpu;
+mod hotkey;
 mod i18n;
 #[cfg(target_os = "linux")]
 mod input_region_debug;

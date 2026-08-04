@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, NamedKey};
@@ -19,12 +19,16 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel}
 
 use crate::acquire_error::AcquireError;
 use crate::ai_bridge::AiBridge;
+use crate::caption_overlay::CaptionOverlayWindow;
 use crate::chat_ui::ChatEguiWindow;
 use crate::events::AppEventSender;
 use crate::gpu::{WindowSurfaceError, pick_format_and_alpha};
-use crate::settings::CharacterSettings;
+use crate::hotkey::HotkeyState;
+use crate::settings::{CharacterSettings, DesktopSection};
 use crate::settings_ui::{PageKind, SettingsUi, widgets::SettingsAction};
+use crate::spotlight::SpotlightWindow;
 use crate::state::AppState;
+use bevy_ecs::entity::Entity;
 use device_query::DeviceQuery;
 
 /// Framing margin passed to `Character::auto_fit_scale` when fitting the
@@ -45,6 +49,8 @@ pub struct Runtime {
     char_window: Option<CharacterWindow>,
     ui_window: Option<UiWindow>,
     chat_egui_window: Option<ChatEguiWindow>,
+    spotlight_window: Option<SpotlightWindow>,
+    caption_window: Option<CaptionOverlayWindow>,
     last_cursor_physical: Option<PhysicalPosition<f64>>,
     last_frame_instant: Option<Instant>,
     /// Monotonic clock origin for the emotion pipeline, shared with the TTS
@@ -59,10 +65,18 @@ pub struct Runtime {
     /// `WindowEvent::ModifiersChanged` so the Alt+Space spotlight
     /// hotkey can be detected on `Space` key presses.
     alt_held: bool,
+    /// Global Alt+Space registration; `None` on Wayland or when the
+    /// registration is taken, in which case in-window handling stays on.
+    hotkey: HotkeyState,
     /// Previous frame's `tts_playing` value, used to detect the
     /// true→false transition and reset the viseme mouth shape.
     #[cfg(feature = "voice")]
     prev_tts_playing: bool,
+    /// Single long-lived microphone capture handle shared by the chat
+    /// UI and the spotlight mic action. Lives here (not in a window)
+    /// because `cpal::Stream` is `!Send + !Sync` and dropping a window
+    /// would otherwise stop capture.
+    mic_handle: crate::audio::MicCaptureHandle,
 }
 
 impl Runtime {
@@ -93,6 +107,19 @@ impl Runtime {
             ui.0.runtime_startup_error = Some(error);
         }
 
+        let mut hotkey = HotkeyState::new();
+        if hotkey.is_registered() {
+            tracing::info!("Global Alt+Space hotkey registered");
+        }
+        // A persisted `spotlight_enabled = false` must not grab
+        // Alt+Space even briefly at startup; the per-frame reconcile
+        // would release it on the first frame anyway.
+        if !state.settings.spotlight_enabled()
+            && let Err(error) = hotkey.sync_enabled(false)
+        {
+            tracing::warn!(error = %error, "Failed to release global hotkey at startup");
+        }
+
         Self {
             state,
             event_tx,
@@ -100,14 +127,18 @@ impl Runtime {
             char_window: None,
             ui_window: None,
             chat_egui_window: None,
+            spotlight_window: None,
+            caption_window: None,
             last_cursor_physical: None,
             last_frame_instant: None,
             emotion_clock,
             device_state: device_query::DeviceState::new(),
             char_surface_fatal: false,
             alt_held: false,
+            hotkey,
             #[cfg(feature = "voice")]
             prev_tts_playing: false,
+            mic_handle: None,
         }
     }
 
@@ -256,6 +287,129 @@ impl Runtime {
         if self.state.chat_bevy_state().0.chat_window_visible {
             self.state.chat_bevy_state_mut().0.chat_window_visible = false;
             self.chat_egui_window = None;
+        }
+    }
+
+    fn toggle_spotlight(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.state.settings.spotlight_enabled() {
+            return;
+        }
+        let next = {
+            let mut ui_state = self.state.ui_bevy_state_mut();
+            ui_state.0.spotlight_visible = !ui_state.0.spotlight_visible;
+            if ui_state.0.spotlight_visible {
+                ui_state.0.spotlight_input.clear();
+                ui_state.0.spotlight_selection = 0;
+            }
+            ui_state.0.spotlight_visible
+        };
+        if !next {
+            self.spotlight_window = None;
+            return;
+        }
+        if self.spotlight_window.is_none() {
+            self.create_spotlight_window(event_loop);
+        }
+        if let Some(w) = self.spotlight_window.as_ref() {
+            w.window.request_redraw();
+        }
+    }
+
+    fn create_spotlight_window(&mut self, event_loop: &ActiveEventLoop) {
+        let mut attrs = WindowAttributes::default()
+            .with_title(i18n_embed_fl::fl!(crate::i18n::loader(), "spotlight-title"))
+            .with_inner_size(LogicalSize::new(460.0, 340.0))
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_window_level(WindowLevel::AlwaysOnTop);
+        if let Some(monitor) = event_loop.primary_monitor() {
+            let position = monitor.position();
+            let size = monitor.size();
+            let scale = monitor.scale_factor();
+            let width = (460.0 * scale) as i32;
+            attrs = attrs.with_position(PhysicalPosition::new(
+                position.x + size.width as i32 / 2 - width / 2,
+                position.y + size.height as i32 / 5,
+            ));
+        }
+        let spotlight_w = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!("Failed to create spotlight window: {e}");
+                return;
+            }
+        };
+        let size = spotlight_w.inner_size();
+        match SpotlightWindow::new(
+            spotlight_w,
+            &self.state.gpu.instance,
+            &self.state.gpu.adapter,
+            &self.state.gpu.device,
+            size,
+        ) {
+            Ok(w) => self.spotlight_window = Some(w),
+            Err(e) => tracing::error!("Failed to create SpotlightWindow: {e}"),
+        }
+    }
+
+    fn create_caption_window(&mut self, event_loop: &ActiveEventLoop) {
+        let mut attrs = WindowAttributes::default()
+            .with_title(i18n_embed_fl::fl!(crate::i18n::loader(), "caption-title"))
+            .with_inner_size(LogicalSize::new(520.0, 140.0))
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_window_level(WindowLevel::AlwaysOnTop);
+        let desktop_position = self.state.settings.config_section::<DesktopSection>();
+        let (position, pinned) = {
+            let ui_state = self.state.ui_bevy_state();
+            (
+                ui_state
+                    .0
+                    .caption_position
+                    .or(desktop_position.caption_position),
+                ui_state
+                    .0
+                    .caption_pinned
+                    .or(desktop_position.caption_pinned)
+                    .unwrap_or(true),
+            )
+        };
+        if let Some((x, y)) = position {
+            attrs = attrs.with_position(LogicalPosition::new(x, y));
+        } else if let Some(monitor) = event_loop.primary_monitor() {
+            let position = monitor.position();
+            let size = monitor.size();
+            let scale = monitor.scale_factor();
+            let width = (520.0 * scale) as i32;
+            let height = (140.0 * scale) as i32;
+            attrs = attrs.with_position(PhysicalPosition::new(
+                position.x + size.width as i32 / 2 - width / 2,
+                position.y + size.height as i32 - height - 48,
+            ));
+        }
+        if !pinned {
+            attrs = attrs.with_window_level(WindowLevel::Normal);
+        }
+        let caption_w = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!("Failed to create caption window: {e}");
+                return;
+            }
+        };
+        let size = caption_w.inner_size();
+        match CaptionOverlayWindow::new(
+            caption_w,
+            &self.state.gpu.instance,
+            &self.state.gpu.adapter,
+            &self.state.gpu.device,
+            size,
+            pinned,
+        ) {
+            Ok(w) => self.caption_window = Some(w),
+            Err(e) => tracing::error!("Failed to create CaptionOverlayWindow: {e}"),
         }
     }
 }
@@ -453,6 +607,14 @@ impl ApplicationHandler for Runtime {
             .chat_egui_window
             .as_ref()
             .is_some_and(|w| w.window.id() == window_id);
+        let is_spotlight = self
+            .spotlight_window
+            .as_ref()
+            .is_some_and(|w| w.window.id() == window_id);
+        let is_caption = self
+            .caption_window
+            .as_ref()
+            .is_some_and(|w| w.window.id() == window_id);
 
         // Track the Alt modifier across all windows so the Alt+Space
         // spotlight hotkey works no matter which window is focused.
@@ -460,16 +622,36 @@ impl ApplicationHandler for Runtime {
             self.alt_held = modifiers.state().alt_key();
         }
 
+        // In-window Alt+Space fallback when no global grab is active
+        // (Wayland, or Spotlight disabled). Works from any app window;
+        // the grab consumes the key wherever it fires, so both paths
+        // are never live at the same time.
+        if let WindowEvent::KeyboardInput { .. } = &event
+            && key_pressed(&event) == Some(NamedKey::Space)
+            && self.alt_held
+            && crate::hotkey::in_window_fallback_active(self.hotkey.is_registered())
+        {
+            self.toggle_spotlight(event_loop);
+            return;
+        }
+
         if is_ui {
             self.handle_ui_window_event(event_loop, event);
         } else if is_chat {
             self.handle_chat_window_event(event_loop, event);
+        } else if is_spotlight {
+            self.handle_spotlight_window_event(event_loop, event);
+        } else if is_caption {
+            self.handle_caption_window_event(event_loop, event);
         } else if is_char {
             self.handle_char_window_event(event_loop, event);
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.hotkey.consume_press() {
+            self.toggle_spotlight(event_loop);
+        }
         self.sync_runtime_to_bevy();
         self.state.app.update();
         self.state.pull_runtime_health_from_ui();
@@ -515,6 +697,17 @@ impl Runtime {
             pipeline.expression_hold_secs = expression_hold_secs;
         }
         self.state.settings.flush_if_dirty();
+        // Reconcile the OS grab with the persisted setting so disabling
+        // Spotlight releases Alt+Space (and enabling re-registers it).
+        if let Err(error) = self
+            .hotkey
+            .sync_enabled(self.state.settings.spotlight_enabled())
+        {
+            tracing::warn!(
+                error = %error,
+                "Failed to sync global hotkey registration"
+            );
+        }
         self.state.sync_runtime_health_to_ui();
     }
 
@@ -554,6 +747,7 @@ impl Runtime {
         if !exit {
             return false;
         }
+        self.persist_caption_settings();
         self.state.save();
         event_loop.exit();
         true
@@ -613,6 +807,8 @@ impl Runtime {
     fn render_per_frame(&mut self, event_loop: &ActiveEventLoop) {
         self.render_char_frame();
 
+        self.render_caption_frame(event_loop);
+        self.render_spotlight_frame(event_loop);
         self.render_chat_frame(event_loop);
         self.render_settings_frame(event_loop);
 
@@ -650,6 +846,7 @@ impl Runtime {
             self.state.ai.as_ref(),
             bevy_world,
             chat_entity,
+            &mut self.mic_handle,
         ) {
             Ok(()) => {}
             Err(e) => match e {
@@ -660,6 +857,105 @@ impl Runtime {
                 AcquireError::Fatal => event_loop.exit(),
             },
         }
+    }
+
+    fn render_spotlight_frame(&mut self, event_loop: &ActiveEventLoop) {
+        let visible = self.state.ui_bevy_state().0.spotlight_visible
+            && self.state.settings.spotlight_enabled();
+        if !visible {
+            self.spotlight_window = None;
+            return;
+        }
+        if self.spotlight_window.is_none() {
+            self.create_spotlight_window(event_loop);
+        }
+        let Some(w) = self.spotlight_window.as_mut() else {
+            return;
+        };
+        w.window.request_redraw();
+        let Some(ui_entity) = self.state.ui_bevy_entity() else {
+            return;
+        };
+        let chat_entity = self.state.chat_bevy_entity().unwrap_or(Entity::PLACEHOLDER);
+        let bevy_world = self.state.app.world_mut();
+        match w.render_frame(
+            &self.state.gpu.device,
+            &self.state.gpu.queue,
+            self.state.ai.as_ref(),
+            bevy_world,
+            ui_entity,
+            chat_entity,
+            &mut self.mic_handle,
+        ) {
+            Ok(()) => {}
+            Err(e) => match e {
+                AcquireError::Reconfigure => {
+                    w.reconfigure(&self.state.gpu.device, w.window.inner_size());
+                }
+                AcquireError::Timeout => {}
+                AcquireError::Fatal => event_loop.exit(),
+            },
+        }
+    }
+
+    fn render_caption_frame(&mut self, event_loop: &ActiveEventLoop) {
+        let visible =
+            self.state.ui_bevy_state().0.caption_visible && self.state.settings.caption_enabled();
+        if !visible {
+            if self.caption_window.is_some() {
+                self.persist_caption_settings();
+                self.caption_window = None;
+            }
+            return;
+        }
+        if self.caption_window.is_none() {
+            self.create_caption_window(event_loop);
+        }
+        let Some(w) = self.caption_window.as_mut() else {
+            return;
+        };
+        w.window.request_redraw();
+        let Some(ui_entity) = self.state.ui_bevy_entity() else {
+            return;
+        };
+        let bevy_world = self.state.app.world_mut();
+        match w.render_frame(
+            &self.state.gpu.device,
+            &self.state.gpu.queue,
+            bevy_world,
+            ui_entity,
+        ) {
+            Ok(()) => {}
+            Err(e) => match e {
+                AcquireError::Reconfigure => {
+                    w.reconfigure(&self.state.gpu.device, w.window.inner_size());
+                }
+                AcquireError::Timeout => {}
+                AcquireError::Fatal => event_loop.exit(),
+            },
+        }
+    }
+
+    /// Persist the caption overlay's position / pin state so the next
+    /// launch restores it. Called when the overlay hides or the app
+    /// exits; the values live in `UiState` while the window is open.
+    fn persist_caption_settings(&mut self) {
+        let (position, pinned) = {
+            let ui_state = self.state.ui_bevy_state();
+            (ui_state.0.caption_position, ui_state.0.caption_pinned)
+        };
+        if position.is_none() && pinned.is_none() {
+            return;
+        }
+        let mut desktop = self.state.settings.config_section::<DesktopSection>();
+        if position.is_some() {
+            desktop.caption_position = position;
+        }
+        if pinned.is_some() {
+            desktop.caption_pinned = pinned;
+        }
+        self.state.settings.set_config_section(&desktop);
+        self.state.settings.mark_dirty();
     }
 
     fn render_settings_frame(&mut self, event_loop: &ActiveEventLoop) {
@@ -905,24 +1201,7 @@ impl Runtime {
             }
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(named) = key_pressed(&event) {
-                    if matches!(named, NamedKey::Space) && self.alt_held {
-                        let next = {
-                            let mut ui_state = self.state.ui_bevy_state_mut();
-                            ui_state.0.spotlight_visible = !ui_state.0.spotlight_visible;
-                            if ui_state.0.spotlight_visible {
-                                ui_state.0.spotlight_input.clear();
-                                ui_state.0.spotlight_selection = 0;
-                                ui_state.0.settings_window_visible = true;
-                            }
-                            ui_state.0.spotlight_visible
-                        };
-                        if next && self.ui_window.is_none() {
-                            self.create_ui_window(event_loop);
-                        }
-                        if let Some(uw) = self.ui_window.as_ref() {
-                            uw.window.request_redraw();
-                        }
-                    } else if matches!(named, NamedKey::Space) {
+                    if matches!(named, NamedKey::Space) {
                         self.transparent = !self.transparent;
                         cw.window.set_decorations(!self.transparent);
                         cw.window.set_transparent(self.transparent);
@@ -1533,6 +1812,58 @@ impl Runtime {
         }
     }
 
+    fn handle_spotlight_window_event(&mut self, _event_loop: &ActiveEventLoop, event: WindowEvent) {
+        let Some(w) = self.spotlight_window.as_mut() else {
+            return;
+        };
+
+        if event == WindowEvent::CloseRequested {
+            self.state.ui_bevy_state_mut().0.spotlight_visible = false;
+            return;
+        }
+
+        let response = w.egui_state.on_window_event(&w.window, &event);
+        if response.repaint {
+            w.window.request_redraw();
+        }
+        if response.consumed {
+            return;
+        }
+        match event {
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                w.reconfigure(&self.state.gpu.device, w.window.inner_size());
+                w.window.request_redraw();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_caption_window_event(&mut self, _event_loop: &ActiveEventLoop, event: WindowEvent) {
+        let Some(w) = self.caption_window.as_mut() else {
+            return;
+        };
+
+        if event == WindowEvent::CloseRequested {
+            self.state.ui_bevy_state_mut().0.caption_visible = false;
+            return;
+        }
+
+        let response = w.egui_state.on_window_event(&w.window, &event);
+        if response.repaint {
+            w.window.request_redraw();
+        }
+        if response.consumed {
+            return;
+        }
+        match event {
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                w.reconfigure(&self.state.gpu.device, w.window.inner_size());
+                w.window.request_redraw();
+            }
+            _ => {}
+        }
+    }
+
     fn dispatch_settings_action(&mut self, action: crate::settings_ui::widgets::SettingsAction) {
         let Some(uw) = self.ui_window.as_mut() else {
             return;
@@ -1992,9 +2323,6 @@ impl UiWindow {
             self.settings_ui
                 .render(ui, settings, ai, world, ui_entity, now_secs);
         });
-
-        crate::spotlight::render_spotlight_overlay(&self.egui_ctx, ai, world, ui_entity);
-        crate::spotlight::render_caption_overlay(&self.egui_ctx, world, ui_entity);
 
         let full_output = self.egui_ctx.end_pass();
         let platform_output = full_output.platform_output;
