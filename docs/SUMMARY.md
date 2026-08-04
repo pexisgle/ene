@@ -25,6 +25,7 @@
 - [Character Card Lorebook](concepts/character-card-lorebook.md)
 - [Character Card Assets & Import](concepts/character-card-assets.md)
 - [Character Card Localization](concepts/character-card-locales.md)
+- [Persona Formats (W++ / AliChat / YAML)](concepts/character-card-persona-formats.md)
 - [Voice & Avatar](concepts/voice-and-avatar.md)
 - [Plugins & MCP](concepts/plugins-and-mcp.md)
 

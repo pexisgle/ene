@@ -6,6 +6,7 @@ mod kernel;
 mod lorebook;
 mod lorebook_decorators;
 mod lorebook_injection;
+mod persona;
 mod style;
 mod sync;
 
@@ -23,6 +24,7 @@ pub use lorebook_decorators::{
 pub use lorebook_injection::{
     LorebookInjection, LorebookMessage, build_lorebook_injection, is_lorebook_memory_row,
 };
+pub use persona::{PersonaFormat, PersonaFormatParser, StructuredPersona};
 pub use style::{
     STYLE_SOURCE_PREFIX, StyleExample, StyleExampleSelector, StyleIntent, infer_style_intent,
 };
