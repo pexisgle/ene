@@ -102,7 +102,7 @@ pub use handle::{
 
 // ── Read-only query / vision handles ──
 /// Pending memory-candidate approval handle and its summary DTO.
-pub use query::candidates::{MemoryCandidateHandle, PendingCandidateSummary};
+pub use query::candidates::{MemoryCandidateHandle, PendingCandidateEdit, PendingCandidateSummary};
 /// Read-only session query handle (list / export / import / search / archive).
 pub use query::sessions::SessionQueryHandle;
 /// Screen-image vision summarization handle.

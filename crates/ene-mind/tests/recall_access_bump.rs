@@ -149,6 +149,7 @@ async fn compose(
         character_id: "ene",
         user_name: "user",
         session_id: "sess",
+        recall_cache: None,
         user_input: "hi",
         history: &[],
         greeting_index: None,

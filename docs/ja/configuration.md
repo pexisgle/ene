@@ -305,8 +305,44 @@ override で、空（デフォルト）の場合は `mind.language` を継承し
 計算を抑えます。返却件数がちょうど上限と一致すると台帳は切り捨てを警告します。
 照合漏れが疑われる場合は `mind.memory_limits.commitment_active_match_limit`（または
 `ENE_MIND__MEMORY_LIMITS__COMMITMENT_ACTIVE_MATCH_LIMIT`）を引き上げてください。
-これがオペレーターが設定できる唯一のメモリ項目です。`mind.memory.*` のその他の
-挙動はコード既定値（`MindMemoryConfig`）のままです。
+これはオペレーターが設定できる 2 つのメモリ項目のうちの 1 つです。`mind.memory.*` の
+その他の挙動はコード既定値（`MindMemoryConfig`）のままです。もう 1 つは下記の
+承認ワークフロー切り替えです。
+
+### `mind.memory_approval.*` — 保存前候補承認
+
+```json
+{
+  "mind": {
+    "memory_approval": {
+      "require_approval": false
+    }
+  }
+}
+```
+
+`require_approval`（既定 `false`、環境変数:
+`ENE_MIND__MEMORY_APPROVAL__REQUIRE_APPROVAL`）は、typed memory の書き込みを
+自動保存から「保存前レビュー」ワークフローに切り替えます。`true` のとき、通常は
+永続化される（または既存記憶を上書きする）抽出候補はすべて `pending_candidates`
+キューに留め置かれ、出典ターン・出典引用・抽出理由・confidence・上書き対象を保持します。
+キューは CLI（`/memory approval`）とデスクトップの Memory Journal に表示され、
+各候補を確認・編集・編集して承認・承認・却下できます。承認された候補は typed memory
+として永続化され、元の競合対象は `supersedes_id` として引き継がれ、古い記憶は
+自動保存と同じ上書きセマンティクスで `Superseded` に移行します。却下された候補は
+破棄されます。編集は書き込み前に検証され、解決は競合安全なので、不正な編集や
+競合しても元の候補が失われることはありません。承認・編集操作は実行中のターン ID を
+保持し、ランタイムのライフサイクルバス上で `CandidateChanged` 監査イベントとして
+発行されます。
+
+承認モードでは、未承認の候補は通常の想起から除外されます。プロンプトには現れず、
+レビューキューでのみ表示されます。承認モードで保留された候補は、後でモードを
+オフにしても想起に戻りません。通常の想起に参加できるのは弱い矛盾による保留のみです。
+既定の自動保存モード（`false`）は変更されません。弱い矛盾による候補は従来どおり
+確認待ちとなり、下記の
+`recall_pending_candidate_limit` の範囲で想起に参加できます。コミットメント候補
+（専用の台帳パス）と明示的なユーザー忘却・係争（dispute）判定は、どちらのモードでも
+即時に適用されます。
 
 メモリー調停器（arbiter）は、着信した候補が同じ種別の既存記憶と矛盾するかどうかを、
 *タイトル埋め込みの類似度* で判定します (#351)。`contradiction_title_similarity_threshold`
@@ -337,6 +373,10 @@ override で、空（デフォルト）の場合は `mind.language` を継承し
 `recall_pending_candidate_limit`（デフォルト `3`）はターンごとに競争へ参加する数を上限し、
 `0` にすると設定画面のレビュー一覧に影響を与えずに想起経路を無効化できます。
 この上限は `MindMemoryConfig` でコード調整でき、設定としてはまだ公開されていません。
+承認・却下された候補は履歴としてキューに残り、保持スイープ（
+`mind.memory.pending_candidate_retention`、コード既定 14 日 / 200 件）で削除される
+まで、CLI の `/memory approval history` とデスクトップの履歴ビューから解決日時と
+ともに確認できます。
 
 ### `plugins.*` — IPC プラグインおよび MCP サーバー接続
 
@@ -476,7 +516,8 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
             "url": "https://example.com/gemma-4-e4b.gguf",
             "quantization": "Q4_0",
             "model_path": "",
-            "gpu_layers": "33"
+            "gpu_layers": "33",
+            "context_size": 16384
           }
         }
       }
@@ -489,10 +530,22 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 1 つのプロファイルを消費します：`url`（GGUF ダウンロード URL）、
 `quantization`（ラベル、例：`"F16"` / `"Q4_0"`）、`model_path`（非空の場合は
 ダウンロードをスキップするローカルパス）、`gpu_layers`（`"auto"` または整数
-文字列）。プロファイルの*選択*はプラグイン側の責務で、値は
-`ConfigurablePlugin::set_profiles` で配信されます。v2→v3 マイグレーションは
-既存の `ai.local_models` エントリをこれらのプロファイルへミラーします。
-ローカルモデルのキーはルーティング情報として `ai.local_models` に残ります。
+文字列）、および省略可能な `context_size`（チャットのコンテキスト窓（トークン
+単位）。省略時は `16384`）。プラグインは初回使用時に `url` の重みをモデル
+キャッシュへダウンロードし（GGUF マジック検証付き）、プロファイルごとに
+ロードしたモデルをプロセス生存期間中保持します。`context_size` と
+`gpu_layers` はチャットのロードのみに効きます — 埋め込みモデルは内部で
+独自にコンテキストとオフロード計画を設定し、ホスト側のルーティング窓は
+`ai.local_models.<name>.context_size` に残ります。v2→v3 マイグレーションは
+`context_size` をミラーせず、プラグインにはホスト値を知る他の経路もない
+ため、プロファイルで省略した場合はホスト側の値に関係なく 16,384 で
+ロードされます：ホスト側の窓を引き上げた場合は、プロファイルの
+`context_size` にも同じ値以上を設定してください。設定しないと長いプロンプト
+が生成時にコンテキストオーバーフローで失敗します。プロファイルの*選択*は
+プラグイン側の責務で、値は `ConfigurablePlugin::set_profiles` で配信されます。
+v2→v3 マイグレーションは既存の `ai.local_models` エントリをこれらの
+プロファイルへミラーします（`context_size` はミラーしません）。ローカル
+モデルのキーはルーティング情報として `ai.local_models` に残ります。
 
 #### シークレットのマーキング
 

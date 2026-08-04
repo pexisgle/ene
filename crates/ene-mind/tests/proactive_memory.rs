@@ -66,6 +66,7 @@ fn turn_ctx<'a>(
         character_id: "ene",
         user_name: "user",
         session_id: "sess",
+        recall_cache: None,
         user_input: "",
         history: &[],
         greeting_index: None,

@@ -231,10 +231,9 @@ with the mediation layer.
 
 The built-in provider that serves `gguf-runner@1` is `ene-plugin-llama-cpp`
 (`plugins/provider/local-llm`), which also declares `llm/chat@1` and
-`embed@1`. Its inference core is not implemented yet — the plugin currently
-declares the capabilities and returns `NotSupported` for inference actions —
-so third parties should treat the contract as published but the runtime as
-unavailable until the inference slice lands.
+`embed@1` and serves both over the provider IPC: chat streaming, JSON-schema
+completion, and GGUF embeddings, exercised by the plugin crate's CPU contract
+tests against pinned GGUF fixtures.
 
 ---
 
@@ -255,7 +254,7 @@ unavailable until the inference slice lands.
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
-| `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — capability skeleton today, inference in a later slice | No |
+| `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — chat streaming, completion, and GGUF embeddings | No |
 
 All fourteen plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.

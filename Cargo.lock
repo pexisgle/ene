@@ -2644,6 +2644,7 @@ dependencies = [
  "ene-store",
  "ene-util",
  "iana-time-zone",
+ "indexmap",
  "parking_lot",
  "regex",
  "schemars",
@@ -2899,10 +2900,15 @@ name = "ene-plugin-llama-cpp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
+ "ene-ai",
+ "ene-ai-local",
  "ene-plugin",
  "ene-plugin-proto",
+ "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
 ]

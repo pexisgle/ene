@@ -128,8 +128,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
   requirements are unmet (see `docs/concepts/plugins-and-mcp.md`). The local
   GGUF provider plugin (`plugins/provider/local-llm`, binary
   `ene-plugin-llama-cpp`) declares `llm/chat@1`, `embed@1`, and `gguf-runner@1`
-  today; its llama.cpp inference core ships in a later slice, so inference
-  actions currently return `NotSupported`.
+  and serves chat streaming, completion, and GGUF embeddings over IPC.
 - **Host-service `db` passenger**: Stateful tools open the shared host-service socket via `ene-plugin-db` and perform prefix-isolated CRUD inside the host's `memory.db`. All plugins share this single socket, so namespace isolation rests on the per-plugin auth token alone (the per-plugin socket path layer is gone).
 
 ---
