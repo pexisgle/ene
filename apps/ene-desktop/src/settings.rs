@@ -156,8 +156,8 @@ ene_config::define_config!(
         /// Whether system-audio loopback capture and beat detection run.
         #[serde(default)]
         pub enabled: bool,
-        /// Loopback device name override; `None` auto-selects the monitor
-        /// of the default output device.
+        /// Loopback device name override; `None` auto-selects an available
+        /// monitor input.
         #[serde(default)]
         pub device: Option<String>,
     }
