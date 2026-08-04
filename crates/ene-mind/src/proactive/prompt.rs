@@ -21,9 +21,18 @@ pub fn build_decision_messages(
     prompt_language: &str,
 ) -> Vec<LlmMessage> {
     let prompts = PromptLibrary::load(prompt_language);
-    let system = LlmMessage::System {
-        content: prompts.proactive().decision_system.trim().to_string(),
-    };
+    let mut system = prompts.proactive().decision_system.trim().to_string();
+    // The world-state note rides the same condition as the `world_state`
+    // context field, so the system prompt is byte-identical to the base
+    // prompt while the feature is off or below the trend minimum.
+    if context.world_state.is_some() {
+        let note = prompts.proactive().world_state_note.trim();
+        if !note.is_empty() {
+            system.push_str("\n\n");
+            system.push_str(note);
+        }
+    }
+    let system = LlmMessage::System { content: system };
     let user = LlmMessage::User {
         parts: vec![UserMessagePart::Text {
             text: format_context_block(context),
@@ -291,6 +300,43 @@ mod tests {
         assert_eq!(obj["proactive_turns_this_session"], json!(0));
         assert_eq!(obj["recent_conversation"][0]["role"], json!("user"));
         assert_eq!(obj["recent_conversation"][0]["content"], json!("hello"));
+    }
+
+    #[test]
+    fn world_state_note_appends_only_when_summary_is_present() {
+        use crate::proactive::{IdleTrend, WorldStateSummary};
+
+        let messages = build_decision_messages(&base_ctx(), "en");
+        let LlmMessage::System { content } = &messages[0] else {
+            panic!("first message must be the system prompt");
+        };
+        assert_eq!(
+            *content,
+            PromptLibrary::load("en").proactive().decision_system.trim(),
+            "the system prompt must be byte-identical while world state is absent"
+        );
+        assert!(!content.contains("world_state"));
+
+        let mut ctx = base_ctx();
+        ctx.world_state = Some(WorldStateSummary {
+            idle_trend: IdleTrend::Falling,
+            window_changes: 1,
+            engaged: false,
+            latest_window: "Code".into(),
+            snapshot_count: 3,
+        });
+        let messages = build_decision_messages(&ctx, "en");
+        let LlmMessage::System { content } = &messages[0] else {
+            panic!("first message must be the system prompt");
+        };
+        assert!(content.contains("World state observation"));
+        assert!(content.contains("idle_trend"));
+
+        let messages = build_decision_messages(&ctx, "ja");
+        let LlmMessage::System { content } = &messages[0] else {
+            panic!("first message must be the system prompt");
+        };
+        assert!(content.contains("世界状態の観測データ"));
     }
 
     #[test]

@@ -448,6 +448,10 @@ pub struct ProactivePrompts {
     /// confirmation question (verdict: approved / rejected / unclear).
     #[serde(default)]
     pub pending_resolution_system: String,
+    /// Note appended to the decision system prompt only when a world-state
+    /// summary is present; documents the `world_state` observation field.
+    #[serde(default)]
+    pub world_state_note: String,
     /// System prompt for local screen-image summarization.
     pub screen_summary_system: String,
     /// User prompt for local screen-image summarization.
@@ -485,6 +489,8 @@ struct RawProactivePrompts {
     pending_confirmation_note_path: String,
     #[serde(default = "default_proactive_pending_resolution_system_path")]
     pending_resolution_system_path: String,
+    #[serde(default = "default_proactive_world_state_note_path")]
+    world_state_note_path: String,
     #[serde(default = "default_proactive_screen_summary_system_path")]
     screen_summary_system_path: String,
     #[serde(default = "default_proactive_screen_summary_user_path")]
@@ -533,6 +539,10 @@ fn default_proactive_pending_confirmation_note_path() -> String {
 
 fn default_proactive_pending_resolution_system_path() -> String {
     "en/proactive/pending_resolution_system.md".into()
+}
+
+fn default_proactive_world_state_note_path() -> String {
+    "en/proactive/world_state_note.md".into()
 }
 
 fn default_proactive_screen_summary_system_path() -> String {
@@ -859,6 +869,13 @@ macro_rules! embedded_pack {
                     "/prompts/",
                     $lang,
                     "/proactive/pending_resolution_system.md"
+                ))
+                .to_string(),
+                world_state_note: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/world_state_note.md"
                 ))
                 .to_string(),
                 screen_summary_system: include_str!(concat!(
@@ -1252,6 +1269,10 @@ mod tests {
             !lib.proactive().pending_resolution_system.is_empty(),
             "[{source}] proactive.pending_resolution_system must be non-empty"
         );
+        assert!(
+            !lib.proactive().world_state_note.is_empty(),
+            "[{source}] proactive.world_state_note must be non-empty"
+        );
     }
 
     /// Writes the embedded pack for `lang` to `base/lang/{lang}/prompts.json`,
@@ -1260,7 +1281,8 @@ mod tests {
         let lib = PromptLibrary::built_in(lang);
         let dir = base.join("lang").join(lang);
         std::fs::create_dir_all(&dir).expect("create pack dir");
-        let json = serde_json::to_string_pretty(&lib.data).expect("serialize embedded pack");
+        let mut json = serde_json::to_string_pretty(&lib.data).expect("serialize embedded pack");
+        json.push('\n');
         std::fs::write(dir.join("prompts.json"), json).expect("write pack");
     }
 

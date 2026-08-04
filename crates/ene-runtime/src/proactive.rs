@@ -1251,6 +1251,7 @@ mod tests {
             catch_up_note: String::new(),
             pending_confirmation_note: "ask: {candidate}".into(),
             pending_resolution_system: String::new(),
+            world_state_note: String::new(),
             screen_summary_system: String::new(),
             screen_summary_user: String::new(),
             screen_summary_layout_note: String::new(),
