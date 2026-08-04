@@ -87,6 +87,8 @@ impl LlmPlugin for LocalLlmPlugin {
         kind: &str,
         _config: Value,
         model: String,
+        // The local core's generation cap is hardcoded at 320/256 tokens;
+        // honoring the wire `max_tokens` is a later-slice item.
         _max_tokens: Option<u32>,
         messages: Vec<Value>,
         tools: Vec<Value>,
@@ -127,6 +129,8 @@ impl LlmPlugin for LocalLlmPlugin {
         kind: &str,
         _config: Value,
         model: String,
+        // The local core's generation cap is hardcoded at 320/256 tokens;
+        // honoring the wire `max_tokens` is a later-slice item.
         _max_tokens: Option<u32>,
         messages: Vec<Value>,
         json_schema: Option<Value>,

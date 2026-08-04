@@ -633,13 +633,19 @@ non-empty), `gpu_layers` (`"auto"` or an integer string), and the optional
 `context_size` (chat context window in tokens; defaults to `16384` when
 omitted). The plugin downloads `url` weights into the model cache on first
 use (GGUF magic validated) and keeps one loaded model per profile for its
-process lifetime. `context_size` sizes the chat model's KV cache only — the
-embedding model sizes its own context internally, and the host's routing
-window stays in `ai.local_models.<name>.context_size`. Profile *selection* is
-plugin-owned; the values are delivered via `ConfigurablePlugin::set_profiles`.
-The v2→v3 migration mirrors existing `ai.local_models` entries into these
-profiles (it does not mirror `context_size`); the local-model keys stay in
-`ai.local_models` as routing information.
+process lifetime. `context_size` and `gpu_layers` size chat loads only — the
+embedding model sizes its own context and offload plan internally, and the
+host's routing window stays in `ai.local_models.<name>.context_size`.
+Because the v2→v3 migration does not mirror `context_size` and the plugin has
+no other channel to learn the host value, a profile that omits it loads
+16,384 tokens regardless of `ai.local_models.<name>.context_size`: when you
+raise the host-side window, set the profile's `context_size` to at least that
+value, otherwise long prompts fail with a context overflow at generation
+time. Profile *selection* is plugin-owned; the values are delivered via
+`ConfigurablePlugin::set_profiles`. The v2→v3 migration mirrors existing
+`ai.local_models` entries into these profiles (it does not mirror
+`context_size`); the local-model keys stay in `ai.local_models` as routing
+information.
 
 #### Secret marking
 

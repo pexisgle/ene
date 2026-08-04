@@ -22,11 +22,12 @@ static PLUGIN_PROFILES: Mutex<Option<Value>> = Mutex::new(None);
 
 /// Default context window for a profile that omits `context_size`.
 ///
-/// Matches `ene_ai::LocalModelDef`'s default so a profile without an explicit
-/// size cannot under-size the KV cache relative to the host's routing window
-/// (`local_advertised_window` reads `local_models.<name>.context_size`): a
-/// larger-than-advertised cache is safe, a smaller one would overflow on long
-/// prompts.
+/// Matches `ene_ai::LocalModelDef`'s default. The host's routing window
+/// (`local_advertised_window` reads `ai.local_models.<name>.context_size`) is
+/// not delivered to this plugin, and the v2→v3 migration does not mirror
+/// `context_size` into profiles, so an omitted field always loads 16,384
+/// regardless of the host value — a user who raised the host window must set
+/// the profile field to match or long prompts overflow the KV cache.
 const DEFAULT_CONTEXT_SIZE: u32 = 16_384;
 
 /// Default quantization label when a profile omits it (same as

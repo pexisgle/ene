@@ -2,9 +2,10 @@
 //!
 //! Spawns `ene-plugin-llama-cpp` and drives it over the v6 `MessagePack` wire
 //! protocol: chat streaming, JSON-schema completion, GGUF embeddings, and
-//! typed error paths. The GGUF fixtures are downloaded in-test from pinned
-//! URLs and verified by blake3; any download or verification failure skips
-//! the tests so CI stays green without network access.
+//! typed error paths. The GGUF fixtures are downloaded from pinned URLs into
+//! a blake3-keyed cache and verified; a download/transport failure skips the
+//! tests so CI stays green without network access, while a hash mismatch
+//! fails loudly because the pin itself drifted.
 #![expect(
     clippy::expect_used,
     clippy::panic,
@@ -52,34 +53,29 @@ fn plugin_binary() -> &'static str {
         .expect("cargo sets CARGO_BIN_EXE_* for integration tests")
 }
 
-/// Downloaded, hash-verified fixtures kept alive for the test duration.
+/// Hash-verified fixture paths from the blake3-keyed cache.
 struct Fixtures {
     chat: PathBuf,
     embed: PathBuf,
-    _dir: tempfile::TempDir,
 }
 
 impl Fixtures {
-    /// Downloads both fixtures; `None` skips the tests when the network or a
-    /// pinned hash is unavailable (documented skip, not a failure).
+    /// Ensures both fixtures are cached and verified; `None` skips the tests
+    /// when the network is unavailable. A pinned-hash mismatch panics — the
+    /// pin must be updated, not silently skipped.
     async fn fetch() -> Option<Self> {
-        let dir = tempfile::tempdir().expect("fixture tempdir");
-        let chat = match fetch_fixture(
-            dir.path(),
-            "stories260K.gguf",
-            CHAT_FIXTURE_URL,
-            CHAT_FIXTURE_BLAKE3,
-        )
-        .await
-        {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!("skipping local-llm inference contract tests: {e}");
-                return None;
-            }
-        };
+        let chat =
+            match fetch_fixture("stories260K.gguf", CHAT_FIXTURE_URL, CHAT_FIXTURE_BLAKE3).await {
+                Ok(path) => path,
+                Err(FixtureError::Unavailable(message)) => {
+                    eprintln!("skipping local-llm inference contract tests: {message}");
+                    return None;
+                }
+                Err(FixtureError::PinDrifted(message)) => {
+                    panic!("pinned fixture drifted; update the pin: {message}");
+                }
+            };
         let embed = match fetch_fixture(
-            dir.path(),
             "bge-small-f16.gguf",
             EMBED_FIXTURE_URL,
             EMBED_FIXTURE_BLAKE3,
@@ -87,41 +83,75 @@ impl Fixtures {
         .await
         {
             Ok(path) => path,
-            Err(e) => {
-                eprintln!("skipping local-llm inference contract tests: {e}");
+            Err(FixtureError::Unavailable(message)) => {
+                eprintln!("skipping local-llm inference contract tests: {message}");
                 return None;
             }
+            Err(FixtureError::PinDrifted(message)) => {
+                panic!("pinned fixture drifted; update the pin: {message}");
+            }
         };
-        Some(Self {
-            chat,
-            embed,
-            _dir: dir,
-        })
+        Some(Self { chat, embed })
     }
 }
 
-/// Downloads `url` into `dir`, validating GGUF magic and the pinned blake3.
+/// Why a fixture is not usable.
+enum FixtureError {
+    /// Transport-level failure (network down, CDN issue): skip the tests.
+    Unavailable(String),
+    /// The downloaded bytes differ from the pinned blake3: fail the tests.
+    PinDrifted(String),
+}
+
+/// Ensures `url` is cached under the pinned blake3, validating GGUF magic.
+///
+/// The cache lives under the user cache dir, keyed by the pinned hash so
+/// re-runs reuse a verified download instead of re-fetching the 67 MB
+/// embedding fixture (`target/tmp` is wiped by cargo between builds, so the
+/// per-target temp dir would defeat the cache).
 async fn fetch_fixture(
-    dir: &Path,
     name: &str,
     url: &str,
     expected_blake3: &str,
-) -> Result<PathBuf, String> {
-    let dest = dir.join(name);
+) -> Result<PathBuf, FixtureError> {
+    let cache = fixture_cache_dir();
+    let dest = cache.join(format!("{expected_blake3}-{name}"));
+    if fixture_hash_matches(&dest, expected_blake3).await {
+        return Ok(dest);
+    }
     ModelFetcher::new()
         .fetch(url, &dest, &GGUF_VALIDATOR)
         .await
-        .map_err(|e| format!("fixture download failed: {e}"))?;
+        .map_err(|e| FixtureError::Unavailable(format!("fixture download failed: {e}")))?;
     let bytes = tokio::fs::read(&dest)
         .await
-        .map_err(|e| format!("fixture read failed: {e}"))?;
+        .map_err(|e| FixtureError::Unavailable(format!("fixture read failed: {e}")))?;
     let digest = blake3::hash(&bytes).to_hex().to_string();
     if digest != expected_blake3 {
-        return Err(format!(
+        return Err(FixtureError::PinDrifted(format!(
             "fixture hash mismatch: expected {expected_blake3}, got {digest}"
-        ));
+        )));
     }
     Ok(dest)
+}
+
+/// Stable cache dir for verified fixtures (XDG cache, falling back to the
+/// home cache). Files are content-addressed by the pinned blake3 and
+/// re-verified on every use, so a stale or tampered entry is re-downloaded
+/// rather than trusted.
+fn fixture_cache_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("ene").join("local-llm-fixtures")
+}
+
+async fn fixture_hash_matches(path: &Path, expected_blake3: &str) -> bool {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => blake3::hash(&bytes).to_hex().to_string() == expected_blake3,
+        Err(_) => false,
+    }
 }
 
 /// Kills the spawned plugin on drop so tests never leave orphan processes.
@@ -211,11 +241,11 @@ impl PluginSession {
     }
 
     /// Drains a chat stream until `StreamEnd`, returning (text deltas seen,
-    /// usage seen, full text).
-    async fn drain_chat_stream(&mut self, request_id: &str) -> (usize, bool, String) {
+    /// full text, final chunk as (text-delta-empty, usage-present)).
+    async fn drain_chat_stream(&mut self, request_id: &str) -> (usize, String, (bool, bool)) {
         let mut deltas = 0_usize;
-        let mut usage_seen = false;
         let mut full_text = String::new();
+        let mut final_chunk = (false, false);
         loop {
             let response = self.read_response().await;
             match response {
@@ -229,7 +259,7 @@ impl PluginSession {
                         deltas += 1;
                         full_text.push_str(&text_delta);
                     }
-                    usage_seen |= usage.is_some();
+                    final_chunk = (text_delta.is_empty(), usage.is_some());
                 }
                 PluginIpcResponse::StreamEnd {
                     request_id: end_rid,
@@ -237,7 +267,7 @@ impl PluginSession {
                 other => panic!("unexpected stream response: {other:?}"),
             }
         }
-        (deltas, usage_seen, full_text)
+        (deltas, full_text, final_chunk)
     }
 }
 
@@ -287,12 +317,16 @@ async fn inference_contract_round_trip() {
     )
     .await
     .expect("write create_chat_stream");
-    let (deltas, usage_seen, full_text) = session.drain_chat_stream("req-stream").await;
+    let (deltas, full_text, final_chunk) = session.drain_chat_stream("req-stream").await;
     assert!(
         deltas >= 2,
         "expected real token-by-token streaming, got {deltas} text deltas (text: {full_text:?})"
     );
-    assert!(usage_seen, "expected usage on the final stream chunk");
+    let (final_text_empty, final_usage) = final_chunk;
+    assert!(
+        final_text_empty && final_usage,
+        "the final stream chunk must be a usage-only chunk (empty text delta, usage present)"
+    );
     assert!(
         !full_text.trim().is_empty(),
         "expected non-empty streamed text"
