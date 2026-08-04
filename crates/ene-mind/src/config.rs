@@ -1301,6 +1301,9 @@ pub struct ProactiveConfig {
     /// Quiet-hours suppression policy (see [`QuietHoursConfig`]).
     #[serde(default)]
     pub quiet_hours: QuietHoursConfig,
+    /// Proactive confirmation of old pending memory candidates.
+    #[serde(default)]
+    pub pending_confirmation: PendingConfirmationConfig,
 }
 
 impl Default for ProactiveConfig {
@@ -1324,6 +1327,46 @@ impl Default for ProactiveConfig {
             fatigue_suppression_threshold: 0.7,
             paused: false,
             quiet_hours: QuietHoursConfig::default(),
+            pending_confirmation: PendingConfirmationConfig::default(),
+        }
+    }
+}
+
+/// Proactive confirmation policy for the pending memory-candidate queue.
+///
+/// Candidates deferred by weak contradictions (`AskConfirmationLater`,
+/// `approval_parked = false`) that never surface through topic-near recall are
+/// confirmed by proactive speech once they are old and important enough.
+/// Approval-mode rows (`approval_parked = true`) are never selected: an
+/// unapproved candidate must not surface as hearsay regardless of the current
+/// mode, mirroring the recall exclusion.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct PendingConfirmationConfig {
+    /// Enable proactive confirmation of old pending candidates.
+    pub enabled: bool,
+    /// Minimum candidate age (days since creation) before it may be asked
+    /// about. `0` asks as soon as a candidate exists.
+    pub min_age_days: u32,
+    /// Minimum candidate confidence (0.0..=1.0) before it may be asked about.
+    /// Out-of-range values are clamped on load.
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub min_confidence: f32,
+    /// Minimum days between confirmation attempts of the same candidate.
+    /// `0` allows re-asking immediately after a delivered question; without
+    /// this backoff an unclear reply would re-arm the candidate on the next
+    /// eligible tick and nag the user.
+    pub reask_after_days: u32,
+}
+
+impl Default for PendingConfirmationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_age_days: 3,
+            min_confidence: 0.7,
+            reask_after_days: 7,
         }
     }
 }
@@ -1649,6 +1692,51 @@ mod tests {
         assert!(!cfg.proactive.quiet_hours.enabled);
         assert_eq!(cfg.proactive.quiet_hours.policy, QuietHoursPolicy::Discard);
         assert!(cfg.proactive.quiet_hours.suppress.decisions);
+        assert!(!cfg.proactive.pending_confirmation.enabled);
+        assert_eq!(cfg.proactive.pending_confirmation.min_age_days, 3);
+        assert!((cfg.proactive.pending_confirmation.min_confidence - 0.7).abs() < f32::EPSILON);
+        assert_eq!(cfg.proactive.pending_confirmation.reask_after_days, 7);
+    }
+
+    /// Pending-confirmation policy parses from the public schema with
+    /// `snake_case` wire names and defaults to disabled when absent.
+    #[test]
+    fn proactive_pending_confirmation_round_trips_in_public_schema() {
+        let cfg: ProactiveConfig = serde_json::from_str(
+            r#"{
+                "pending_confirmation": {
+                    "enabled": true,
+                    "min_age_days": 7,
+                    "min_confidence": 0.8,
+                    "reask_after_days": 14
+                }
+            }"#,
+        )
+        .expect("deserialize");
+        let pending = &cfg.pending_confirmation;
+        assert!(pending.enabled);
+        assert_eq!(pending.min_age_days, 7);
+        assert!((pending.min_confidence - 0.8).abs() < f32::EPSILON);
+        assert_eq!(pending.reask_after_days, 14);
+
+        let json = serde_json::to_value(&cfg).expect("serialize");
+        assert_eq!(json["pending_confirmation"]["enabled"], true);
+        assert_eq!(json["pending_confirmation"]["min_age_days"], 7);
+        assert_eq!(json["pending_confirmation"]["reask_after_days"], 14);
+
+        // Old settings files without the section keep parsing.
+        let old: ProactiveConfig = serde_json::from_str(r#"{"enabled": true}"#).expect("parse");
+        assert!(!old.pending_confirmation.enabled);
+        assert_eq!(old.pending_confirmation.min_age_days, 3);
+        assert_eq!(old.pending_confirmation.reask_after_days, 7);
+    }
+
+    #[test]
+    fn proactive_pending_confirmation_confidence_clamps() {
+        let cfg: ProactiveConfig =
+            serde_json::from_str(r#"{"pending_confirmation": {"min_confidence": 1.7}}"#)
+                .expect("deserialize");
+        assert!((cfg.pending_confirmation.min_confidence - 1.0).abs() < f32::EPSILON);
     }
 
     /// Quiet hours parse from the public schema with their `snake_case` wire
