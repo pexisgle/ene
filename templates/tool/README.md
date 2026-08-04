@@ -20,8 +20,9 @@ This creates `plugins/tool/my_tool/` with:
 - provider struct `MyToolToolProvider` with one `my_tool.echo` action.
 
 The crate-level `#[expect(clippy::unused_async, ...)]` covers sync-bodied
-`run` methods (the template action has none). Once every action awaits,
-remove the expect — an unfulfilled expectation fails the build.
+`run` methods — the template action awaits nothing, so the expectation
+is needed as shipped. Once every action awaits, remove the expect: an
+unfulfilled expectation fails the build.
 
 Then implement your actions in `src/action.rs`, wire lifecycle hooks in
 `src/provider.rs`, and register the plugin:

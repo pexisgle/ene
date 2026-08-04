@@ -15,6 +15,10 @@ if [[ ! "$NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
   echo "error: plugin name must match [a-zA-Z0-9_-]" >&2
   exit 1
 fi
+if [[ ! "$NAMESPACE" =~ ^[a-zA-Z0-9_]+$ ]]; then
+  echo "error: namespace must match [a-zA-Z0-9_]; tool names disallow '-'" >&2
+  exit 1
+fi
 
 PROVIDER="$(printf '%s' "$NAME" | sed -E 's/(^|-|_)([a-zA-Z])/\U\2/g')ToolProvider"
 TARGET="plugins/tool/$NAME"
