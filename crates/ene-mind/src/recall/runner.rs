@@ -570,6 +570,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reflection_suppresses_recall_of_avoided_strategies() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let embedding = [1.0, 0.0, 0.0, 0.0];
+
+        // A normal memory that the reflection names as a strategy to avoid.
+        let normal = NewMemoryItem {
+            scope: MemoryScope::Character,
+            character_id: "Ene".into(),
+            user_id: String::new(),
+            kind: MemoryKind::Semantic,
+            title: "long monologue".into(),
+            content: "the user dislikes long monologues".into(),
+            source: MemorySource::Conversation,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.8),
+            salience: MemorySalience::new(0.6),
+            affect: Default::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        insert_with_embedding(&store, &normal, &embedding).await;
+
+        // A reflection memory naming "long monologue" as a strategy to avoid.
+        let reflection = NewMemoryItem {
+            kind: MemoryKind::Reflection,
+            title: "Strategies to avoid".into(),
+            content: "Less effective interaction strategies: long monologue".into(),
+            source: MemorySource::Inferred,
+            ..normal.clone()
+        };
+        insert_with_embedding(&store, &reflection, &embedding).await;
+
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+        config.memory.reflection.enabled = true;
+        config.memory.reflection.success_boost = 1.5;
+        config.memory.reflection.failure_penalty = 0.5;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "long monologue",
+            recent_turns: &[],
+            query_embedding: &embedding,
+            embedding_model: "mock",
+            affect: None,
+            cache: None,
+            session_id: "sess",
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
+
+        let penalized = recalled
+            .iter()
+            .find(|m| m.item.title == "long monologue")
+            .expect("normal memory recalled");
+        assert!(
+            (penalized.score_breakdown.reflection_multiplier - 0.5).abs() < f32::EPSILON,
+            "reflection failure_penalty must be recorded in the breakdown"
+        );
+    }
+
+    #[tokio::test]
     async fn reflection_disabled_leaves_scores_untouched() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let embedding = [1.0, 0.0, 0.0, 0.0];
