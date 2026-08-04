@@ -49,7 +49,7 @@ Ene ワークスペース
 │   ├── ene-plugin-db      (プラグイン用ホストサービス `db` クライアント)
 │   └── ene-plugin-macros  (プラグイン用 Proc-macro)
 └── プロセス外プラグイン
-    ├── plugins/provider/* (プロバイダプラグイン: anthropic, edge-tts, elevenlabs, local-llm, openai, openai-tts, voicevox)
+    ├── plugins/provider/* (プロバイダプラグイン: anthropic, edge-tts, elevenlabs, kokoro, local-llm, openai, openai-tts, voicevox)
     └── plugins/tool/*     (ツールプラグイン: app, browser, calc, calendar, fs, geo, git, random, utility, web)
 ```
 

@@ -907,6 +907,82 @@ Changing `ai.tts.provider` itself (e.g. switching from `kokoro` to
 once at bootstrap, while edits to `plugins.list.voicevox.config` and
 `ai.tts.voice` are picked up by running sessions.
 
+#### Local Kokoro-TTS provider (`plugins.list.kokoro.config`)
+
+The `kokoro` provider plugin (`plugins/provider/kokoro`) runs the Kokoro-82M
+ONNX model directly in its own process — fully local, no API key, no HTTP
+engine. Select it with `ai.tts.provider = "kokoro"`; the generic
+`ai.tts.voice` field can hold a Kokoro voice name (e.g. `af_heart`,
+`jf_alpha`) that overrides the configured default per request.
+
+The ONNX model and `voices.bin` embeddings are fetched into the shared
+models cache (`ene_voice`'s download/prefetch path; the desktop Settings →
+Voice page downloads them on demand). Custom `model_path` / `voices_path`
+values override the cache locations and are prefetched to those same paths
+when missing (bootstrap resolves them from this plugin config); files
+already present are never re-downloaded.
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "kokoro",
+      "voice": "af_heart"
+    }
+  },
+  "plugins": {
+    "list": {
+      "kokoro": {
+        "enable": true,
+        "config": {
+          "model_path": "/data/kokoro.onnx",
+          "voices_path": "/data/voices.bin",
+          "voice": "af_heart",
+          "speed": 1.0,
+          "language": "en",
+          "ort_dylib_path": "/opt/onnxruntime/lib/libonnxruntime.so"
+        }
+      }
+    }
+  }
+}
+```
+
+Settings:
+
+| Key | Default | Description |
+|---|---|---|
+| `model_path` | shared models cache (`models/gguf/kokoro.onnx`) | Kokoro ONNX model file path. |
+| `voices_path` | `plugins.list.kokoro.profiles.kokoro.voices_path` → shared models cache (`models/gguf/voices.bin`) | `voices.bin` voice embeddings path. The profile slot is the migration target of the former `ai.tts.voices_path`. |
+| `voice` | `""` (first voice in `voices.bin`, `af_alloy`) | Default voice; a per-request `ai.tts.voice` overrides it. See the capability list for all 53 voice names. Alternating per-request voices reload the model on each switch. |
+| `speed` | `1.0` | Speech speed multiplier (0.5–2.0). |
+| `language` | unset (English G2P) | Grapheme-to-phoneme language: `"ja"` selects the Japanese kana rules, anything else the English rules. |
+| `ort_dylib_path` | unset (`ort` default resolution) | ONNX Runtime dynamic library path override. Fixed at process start: ONNX Runtime initializes once per process, so a change requires a restart. The in-process fallback honors this key first, then the legacy `plugins.list.onnx.config.ort_dylib_path`. |
+
+Every key can be overridden per environment variable as
+`ENE_PLUGINS__LIST__KOKORO__CONFIG__<KEY>`
+(e.g. `ENE_PLUGINS__LIST__KOKORO__CONFIG__SPEED`).
+
+The model loads lazily on the first synthesize and stays resident in the
+plugin process; changing the model or voices paths, voice, speed, or
+language reloads it (`ort_dylib_path` is fixed at process start). The plugin
+returns 24 kHz mono WAV, which the host-side audio pipeline decodes into
+float samples and slices into `TtsChunk`s for streaming playback
+(`formats = ["wav"]`).
+
+Note that `ai.tts.model_path` / `ai.tts.model` are honored only by the
+in-process fallback path (see below); the plugin path reads `model_path`
+from its own config.
+
+**In-process fallback.** If the plugin host is unavailable at startup or the
+`kokoro` plugin is disabled, the runtime's built-in `ene-voice` factory still
+serves `ai.tts.provider = "kokoro"` in-process (honoring `ai.tts.model_path`
+/ `ai.tts.model` / `ai.tts.speed` and the `profiles.kokoro.voices_path`
+slot). The fallback only applies while the plugin never registered: once the
+plugin factory registers, a later plugin failure leaves `kokoro` unavailable
+until the next restart, because the in-process factory is not re-registered
+mid-session.
+
 #### OpenAI Speech API TTS provider (`plugins.list.openai-tts.config`)
 
 The `openai-tts` provider plugin (`plugins/provider/openai-tts`) synthesizes

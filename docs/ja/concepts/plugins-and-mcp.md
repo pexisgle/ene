@@ -18,6 +18,7 @@ Ene ホストアプリケーション (ene-runtime)
         │     ├── ene-plugin-openai    (OpenAI 互換プロバイダプラグイン)
         │     ├── ene-plugin-openai-tts (OpenAI Speech API TTS プロバイダプラグイン)
         │     ├── ene-plugin-llama-cpp (ローカル GGUF プロバイダプラグイン)
+        │     ├── ene-plugin-kokoro     (Kokoro-TTS ONNX ローカル TTS プロバイダプラグイン)
         │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS プロバイダプラグイン)
         │     ├── ene-plugin-edge-tts  (Microsoft Edge Neural Voice TTS プロバイダプラグイン)
         │     ├── ene-plugin-elevenlabs (ElevenLabs TTS プロバイダプラグイン)
@@ -108,6 +109,13 @@ TTS プロバイダプラグインも同じ規律に従います: `ene-plugin-ho
 の契約を保ちます。さらに `voicevox` プラグインはマネージドモード
 （`auto_start: true`）でローカルの VOICEVOX 互換エンジンバイナリの起動と
 監視を行います。
+
+`kokoro` プラグイン（`plugins/provider/kokoro`）は、ローカルの
+Kokoro-82M ONNX モデルを自プロセス内で直接実行します（`ene-voice` の ONNX
+エンジン経由）。API キー・外部エンジン・ローカルサーバーは不要です。モデル
+は最初の利用時に遅延ロードされ、24 kHz モノラル WAV を出力します。解決済み
+設定（モデル/ボイスパス・ボイス・速度・言語）が変わるとエンジンを再構築
+します。
 
 `edge-tts` プラグイン（`plugins/provider/edge-tts`）は、同じ `TtsPlugin`
 契約を Microsoft の無料・キー不要な Edge 読み上げ WebSocket エンドポイント
@@ -244,6 +252,7 @@ fixture 使用）で検証されます。
 | `ene-plugin-edge-tts` | Provider | Microsoft Edge Neural Voice TTS プロバイダプラグイン — 無料・キー不要の WebSocket（24 kHz MP3 を WAV にデコード） | いいえ |
 | `ene-plugin-elevenlabs` | Provider | ElevenLabs TTS プロバイダプラグイン（REST + WebSocket ストリーミング）— WAV（16-bit PCM）音声 | いいえ |
 | `ene-plugin-llama-cpp` | Provider | ローカル GGUF (llama.cpp) プロバイダプラグイン — チャットストリーミング・補完・GGUF 埋め込み | いいえ |
+| `ene-plugin-kokoro` | Provider | ローカル Kokoro-82M ONNX TTS プロバイダプラグイン — プロセス内 ONNX 推論による 24 kHz WAV | いいえ |
 | `ene-plugin-voicevox` | Provider | VOICEVOX / Aivis Speech TTS プロバイダプラグイン — 2 段階 `audio_query` → `synthesis` フローによる WAV 音声 | いいえ |
 
 上記 19 プラグインはすべてデフォルトの `plugins.list` に含まれており、

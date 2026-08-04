@@ -18,6 +18,7 @@ Ene Host Application (ene-runtime)
         │     ├── ene-plugin-openai    (OpenAI-Compatible Provider Plugin)
         │     ├── ene-plugin-openai-tts (OpenAI Speech API TTS Provider Plugin)
         │     ├── ene-plugin-llama-cpp (Local GGUF Provider Plugin)
+        │     ├── ene-plugin-kokoro     (Kokoro-TTS ONNX Local TTS Provider Plugin)
         │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS Provider Plugin)
         │     ├── ene-plugin-edge-tts  (Microsoft Edge Neural Voice TTS Provider Plugin)
         │     ├── ene-plugin-elevenlabs (ElevenLabs TTS Provider Plugin)
@@ -108,6 +109,12 @@ returning a whole audio file (WAV); the host decodes it to PCM and slices it
 into `TtsChunk`s, preserving the `TtsProvider::synthesize_stream` contract.
 The `voicevox` plugin additionally spawns and supervises a local
 VOICEVOX-compatible engine binary in managed mode (`auto_start: true`).
+
+The `kokoro` plugin (`plugins/provider/kokoro`) runs the local Kokoro-82M
+ONNX model directly in its own process (via `ene-voice`'s ONNX engine) — no
+API key, engine, or local server involved. It loads the model lazily on
+first use, emits 24 kHz mono WAV, and rebuilds the engine when its resolved
+config (model/voices paths, voice, speed, language) changes.
 
 The `edge-tts` plugin (`plugins/provider/edge-tts`) implements the same
 `TtsPlugin` contract against Microsoft's free, keyless Edge Read Aloud
@@ -291,6 +298,7 @@ tests against pinned GGUF fixtures.
 | `ene-plugin-edge-tts` | Provider | Microsoft Edge Neural Voice TTS provider — free, keyless WebSocket (24 kHz MP3 decoded to WAV) | No |
 | `ene-plugin-elevenlabs` | Provider | ElevenLabs TTS provider (REST + WebSocket streaming) — WAV (16-bit PCM) audio | No |
 | `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — chat streaming, completion, and GGUF embeddings | No |
+| `ene-plugin-kokoro` | Provider | Local Kokoro-82M ONNX TTS provider — 24 kHz WAV via in-process ONNX inference | No |
 | `ene-plugin-voicevox` | Provider | VOICEVOX / Aivis Speech TTS provider — WAV audio via the 2-step `audio_query` → `synthesis` flow | No |
 
 All nineteen plugins above are included in the default `plugins.list` and start
