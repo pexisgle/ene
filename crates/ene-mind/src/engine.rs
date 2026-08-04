@@ -23,8 +23,8 @@ use crate::lifecycle::{
 };
 use crate::memory_writer::MemoryWriter;
 use crate::recall::{
-    ExecuteRecallInput, RecallPlan, RecallPlanner, RecallPlannerInput, RecallPlannerOptions,
-    RecallResultMapper, execute_hybrid_recall,
+    ExecuteRecallInput, MemoryRecallCache, RecallPlan, RecallPlanner, RecallPlannerInput,
+    RecallPlannerOptions, RecallResultMapper, WriteTrackingPort, execute_hybrid_recall,
 };
 
 /// Central cognitive engine facade.
@@ -56,7 +56,6 @@ impl Default for CognitionEngine {
         Self::new()
     }
 }
-
 /// Outcome of a deferred memory-write task.
 #[derive(Debug, Clone)]
 pub enum MemoryWriteOutcome {
@@ -111,7 +110,7 @@ impl CognitionEngine {
             )
         })?;
 
-        CharacterProcessor::sync_card_memories(
+        let (report, new_hash) = CharacterProcessor::sync_card_memories(
             store,
             embedder,
             ctx.character_id,
@@ -120,7 +119,11 @@ impl CognitionEngine {
             &ctx.config.character,
             previous_hash,
         )
-        .await
+        .await?;
+        if let Some(cache) = ctx.recall_cache {
+            cache.invalidate_character(ctx.character_id);
+        }
+        Ok((report, new_hash))
     }
 
     /// Pre-turn: load affect, plan recall, execute hybrid search.
@@ -254,6 +257,8 @@ impl CognitionEngine {
             query_embedding: embedding,
             embedding_model: embedder.model_name(),
             affect: Some(&affect),
+            cache: ctx.recall_cache,
+            session_id: ctx.session_id,
         };
 
         let (recall_plan, recalled) = execute_hybrid_recall(ctx.config, &recall_input).await?;
@@ -269,20 +274,17 @@ impl CognitionEngine {
             "Cognitive recall plan generated"
         );
 
-        let commitment_rows =
-            match CommitmentLedger::list_active(store, ctx.character_id, Some(ctx.user_name), 16)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(error) => {
-                    tracing::warn!(
-                        component = "CognitionEngine",
-                        error = %error,
-                        "Failed to list active commitments for pre-turn recall"
-                    );
-                    vec![]
-                }
-            };
+        let commitment_rows = match Self::list_active_commitments_cached(&ctx, store).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(
+                    component = "CognitionEngine",
+                    error = %error,
+                    "Failed to list active commitments for pre-turn recall"
+                );
+                vec![]
+            }
+        };
         let commitments = CommitmentLedger::active_prompt_candidates(&commitment_rows);
 
         Ok(PreTurnOutput {
@@ -335,20 +337,17 @@ impl CognitionEngine {
             .await
             .map_err(CognitionError::MemoryPort)?;
 
-        let commitment_rows =
-            match CommitmentLedger::list_active(store, ctx.character_id, Some(ctx.user_name), 16)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(error) => {
-                    tracing::warn!(
-                        component = "CognitionEngine",
-                        error = %error,
-                        "Failed to list active commitments for proactive pre-turn"
-                    );
-                    vec![]
-                }
-            };
+        let commitment_rows = match Self::list_active_commitments_cached(&ctx, store).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(
+                    component = "CognitionEngine",
+                    error = %error,
+                    "Failed to list active commitments for proactive pre-turn"
+                );
+                vec![]
+            }
+        };
         let commitments = CommitmentLedger::active_prompt_candidates(&commitment_rows);
 
         // Generation-phase recall: the decision model already gated speaking,
@@ -370,7 +369,14 @@ impl CognitionEngine {
                 &affect,
                 &commitments,
             );
-            Self::run_proactive_topic_recall(ctx.config, store, &recall_plan).await
+            Self::run_proactive_topic_recall(
+                ctx.config,
+                store,
+                ctx.recall_cache,
+                ctx.session_id,
+                &recall_plan,
+            )
+            .await
         } else {
             Vec::new()
         };
@@ -444,10 +450,16 @@ impl CognitionEngine {
     async fn run_proactive_topic_recall(
         config: &MindConfig,
         store: &dyn MemoryPort,
+        cache: Option<&MemoryRecallCache>,
+        session_id: &str,
         plan: &RecallPlan,
     ) -> Vec<crate::recall::RecalledMemory> {
         let query = RecallPlanner::to_query(plan, None, "", Utc::now(), &config.memory);
-        match store.search(&query).await {
+        let gathered = match cache {
+            Some(cache) => cache.search(store, session_id, &query).await,
+            None => store.search(&query).await,
+        };
+        match gathered {
             Ok(gathered) => {
                 let scored = ene_rag::score_and_rank(&query, gathered);
                 RecallResultMapper::map(scored)
@@ -697,7 +709,12 @@ impl CognitionEngine {
         // memory) so that being recalled-but-dropped no longer reinforces a
         // memory's score and shields it from forgetting.
         if let Some(store) = ctx.store {
-            crate::recall::bump_injected_memory_access(store, &meta.injected_memory_ids).await;
+            crate::recall::bump_injected_memory_access(
+                store,
+                ctx.recall_cache,
+                &meta.injected_memory_ids,
+            )
+            .await;
         }
         tracing::debug!(
             component = "CognitionEngine",
@@ -730,14 +747,38 @@ impl CognitionEngine {
 
     /// Synchronous post-turn finalize: persist affect state only.
     ///
+    /// Load active commitments through the turn's L1 cache when present.
+    async fn list_active_commitments_cached(
+        ctx: &TurnContext<'_>,
+        store: &dyn MemoryPort,
+    ) -> Result<Vec<ene_core::Commitment>, ene_core::MemoryPortError> {
+        match ctx.recall_cache {
+            Some(cache) => {
+                cache
+                    .list_active_commitments(store, ctx.character_id, Some(ctx.user_name), 16)
+                    .await
+            }
+            None => {
+                store
+                    .list_active_commitments(ctx.character_id, Some(ctx.user_name), 16)
+                    .await
+            }
+        }
+    }
+
+    /// Synchronous post-turn finalize: persist affect state only.
+    ///
     /// Forgetting runs on the deferred path via [`Self::spawn_deferred_memory_work`].
     pub async fn finalize_turn(
         &self,
         store: &dyn MemoryPort,
         config: &MindConfig,
         input: &PostTurnInput<'_>,
+        cache: Option<&MemoryRecallCache>,
     ) -> Result<(), CognitionError> {
-        MemoryWriter::finalize_turn(store, config, input).await
+        let tracking =
+            WriteTrackingPort::new(store, cache.map(|cache| (cache, input.character_id)));
+        MemoryWriter::finalize_turn(&tracking, config, input).await
     }
 
     /// Spawn deferred post-turn memory extraction (LLM + arbiter) and forgetting lifecycle.
@@ -750,6 +791,7 @@ impl CognitionEngine {
         input: crate::lifecycle::OwnedPostTurnInput,
         llm: std::sync::Arc<dyn ene_ai::LlmProvider>,
         embedder: Option<std::sync::Arc<dyn ene_ai::EmbeddingProvider>>,
+        cache: Option<std::sync::Arc<MemoryRecallCache>>,
     ) -> tokio::task::JoinHandle<MemoryWriteOutcome> {
         tokio::spawn(
             async move {
@@ -759,13 +801,20 @@ impl CognitionEngine {
                     user_id = %input.user_id,
                     "Post-turn memory extraction and forgetting starting"
                 );
+                let tracking = WriteTrackingPort::new(
+                    store.as_ref(),
+                    cache
+                        .as_ref()
+                        .map(|cache| (cache.as_ref(), input.character_id.as_str())),
+                );
                 // Drain due retries before writing the new turn.
                 Self::drain_pending_memory_writes(
-                    store.as_ref(),
+                    &tracking,
                     &config,
                     llm.as_ref(),
                     embedder.as_ref().map(std::convert::AsRef::as_ref),
                     3,
+                    cache.as_deref(),
                 )
                 .await;
 
@@ -776,9 +825,9 @@ impl CognitionEngine {
                 };
                 let result: Result<usize, CognitionError> = async {
                     let deferred =
-                        MemoryWriter::write_memories(store.as_ref(), &config, &borrowed, providers)
+                        MemoryWriter::write_memories(&tracking, &config, &borrowed, providers)
                             .await?;
-                    MemoryWriter::apply_forgetting(store.as_ref(), &config, &borrowed).await?;
+                    MemoryWriter::apply_forgetting(&tracking, &config, &borrowed).await?;
                     Ok(deferred)
                 }
                 .await;
@@ -850,11 +899,18 @@ impl CognitionEngine {
         llm: &dyn ene_ai::LlmProvider,
         embedder: Option<&dyn ene_ai::EmbeddingProvider>,
         limit: usize,
+        cache: Option<&MemoryRecallCache>,
     ) {
         let Ok(due) = store.take_due_pending_memory_writes(limit).await else {
             return;
         };
         for row in due {
+            // The queue is global, so a drain for one character can replay
+            // retries for another; drop every replayed character's entries
+            // before its payload writes.
+            if let Some(cache) = cache {
+                cache.invalidate_character(&row.character_id);
+            }
             let Ok(input) =
                 serde_json::from_str::<crate::lifecycle::OwnedPostTurnInput>(&row.payload_json)
             else {
@@ -1229,6 +1285,7 @@ mod turn_id_tests {
             character_id: "ene",
             user_name: "user",
             session_id: "sess",
+            recall_cache: None,
             user_input: "hi",
             history: &[],
             greeting_index: None,
@@ -1302,6 +1359,7 @@ mod turn_id_tests {
             character_id: "ene",
             user_name: "user",
             session_id: "sess",
+            recall_cache: None,
             user_input: "hi",
             history: &[],
             greeting_index: None,
@@ -1328,5 +1386,127 @@ mod turn_id_tests {
             !blob.contains("Creator Notes"),
             "no creator-notes section may exist in the composed prompt: {blob}"
         );
+    }
+}
+
+#[cfg(test)]
+mod recall_cache_tests {
+    use super::*;
+    use crate::config::ToolGroundingConfig;
+    use crate::lifecycle::{OwnedPostTurnInput, OwnedTurnInput};
+    use crate::memory_writer::candidate::ToolResultSummary;
+    use ene_core::AffectState;
+    use ene_store::MemoryStore;
+
+    /// LLM that reports an empty extraction, leaving the deterministic
+    /// tool-grounding fallback in charge of the turn.
+    struct EmptyLlm;
+
+    #[async_trait::async_trait]
+    impl ene_ai::LlmProvider for EmptyLlm {
+        fn name(&self) -> &'static str {
+            "empty-mock"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn tokio_stream::Stream<
+                            Item = Result<ene_ai::LlmResponseChunk, ene_ai::LlmProviderError>,
+                        > + Send,
+                >,
+            >,
+            ene_ai::LlmProviderError,
+        > {
+            Ok(Box::pin(tokio_stream::empty()))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<ene_ai::LlmCompletion, ene_ai::LlmProviderError> {
+            Ok(ene_ai::LlmCompletion {
+                text: r#"{"candidates": []}"#.into(),
+                usage: None,
+            })
+        }
+    }
+
+    fn deferred_input(
+        user_message: &str,
+        tool_results: Vec<ToolResultSummary>,
+    ) -> OwnedPostTurnInput {
+        OwnedPostTurnInput {
+            turn: OwnedTurnInput {
+                user_message: user_message.into(),
+                assistant_message: Some("ok".into()),
+                tool_results,
+            },
+            affect: AffectState::neutral("ene"),
+            character_id: "ene".into(),
+            user_id: "user".into(),
+            interrupted: false,
+            spoken_text: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_memory_work_invalidates_cache_only_after_actual_writes() {
+        let store = std::sync::Arc::new(MemoryStore::open_in_memory(4).await.unwrap());
+        let cache = std::sync::Arc::new(MemoryRecallCache::new());
+        cache.invalidate_character("ene");
+        let config = MindConfig {
+            language: "en".into(),
+            memory: crate::config::MindMemoryConfig {
+                tool_grounding: ToolGroundingConfig {
+                    enabled: true,
+                    persist_failure_reflection: true,
+                    ..ToolGroundingConfig::default()
+                },
+                ..crate::config::MindMemoryConfig::default()
+            },
+            ..MindConfig::default()
+        };
+        let llm = std::sync::Arc::new(EmptyLlm);
+
+        // A turn with no extractable candidates writes nothing and must keep
+        // the cache intact.
+        CognitionEngine::spawn_deferred_memory_work(
+            store.clone(),
+            config.clone(),
+            deferred_input("hello", vec![]),
+            llm.clone(),
+            None,
+            Some(cache.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cache.stats().invalidations, 1);
+
+        // A tool failure is deterministically persisted by the arbiter, which
+        // must invalidate the affected character.
+        CognitionEngine::spawn_deferred_memory_work(
+            store.clone(),
+            config,
+            deferred_input(
+                "search docs",
+                vec![ToolResultSummary {
+                    tool_name: "web".into(),
+                    success: false,
+                    summary: "error: timeout".into(),
+                }],
+            ),
+            llm,
+            None,
+            Some(cache.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cache.stats().invalidations, 2);
     }
 }

@@ -152,6 +152,9 @@ pub use proactive::{
 /// Prompt packet section types.
 #[doc(no_inline)]
 pub use prompt_packet::{PromptPacket, PromptSection, PromptSectionKind};
+/// L1 in-memory recall cache (multi-tier with `ene-store` as L2).
+#[doc(no_inline)]
+pub use recall::MemoryRecallCache;
 /// Recall planning types.
 #[doc(no_inline)]
 pub use recall::{

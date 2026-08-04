@@ -21,6 +21,8 @@ use ene_core::{
 };
 use ene_rag::lexical_overlap_score;
 
+use super::MemoryRecallCache;
+
 /// Load the pending queue and merge topic-related candidates into `gathered`.
 ///
 /// `limit` caps how many candidates compete (newest first); a `limit` of `0`
@@ -30,15 +32,25 @@ use ene_rag::lexical_overlap_score;
 /// candidates" with a warning, mirroring how the runner treats commitment-list
 /// failures — recall must never fail a turn because the queue was unreadable.
 pub async fn gather_pending_candidates(
+    cache: Option<&MemoryRecallCache>,
     store: &dyn MemoryPort,
     query: &Query<'_>,
     gathered: &mut Vec<GatheredCandidate>,
     limit: usize,
 ) {
-    let mut candidates = match store
-        .list_pending_candidates(query.character_id, Some(PendingCandidateStatus::Pending))
-        .await
-    {
+    let listed = match cache {
+        Some(cache) => {
+            cache
+                .list_pending_candidates(store, query.character_id)
+                .await
+        }
+        None => {
+            store
+                .list_pending_candidates(query.character_id, Some(PendingCandidateStatus::Pending))
+                .await
+        }
+    };
+    let mut candidates = match listed {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(
