@@ -95,7 +95,7 @@ async fn run_turn(
     } else {
         HOMEASSISTANT_TURN_OFF
     };
-    let target = format!("homeassistant:entity:{entity_id}");
+    let target = format!("homeassistant:entity:{entity_id}#");
     let description = if turn_on {
         format!("Turn on {entity_id} in Home Assistant")
     } else {
@@ -175,6 +175,66 @@ mod tests {
         assert!(
             err.to_string().contains("not configured"),
             "expected configuration error, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unapproved_turn_on_makes_no_http_request() {
+        let (addr, requests) = crate::action::mock_server::spawn("200 OK", b"[]", None).await;
+        let state = Arc::new(HomeAssistantState::new());
+        state.set_config(&serde_json::json!({
+            "base_url": format!("http://127.0.0.1:{}/", addr.port()),
+            "token": "test-token"
+        }));
+        let action = TurnOnAction {
+            state,
+            entity_id: "light.living_room".to_string(),
+        };
+        let err = action.run().await.unwrap_err();
+        assert!(matches!(err, ToolError::PermissionRequired { .. }));
+        assert!(
+            requests.lock().await.is_empty(),
+            "no HTTP request may be issued before approval"
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_turn_on_sends_bearer_header_to_exact_path() {
+        let (addr, requests) = crate::action::mock_server::spawn("200 OK", b"[]", None).await;
+        let state = Arc::new(HomeAssistantState::new());
+        state.set_config(&serde_json::json!({
+            "base_url": format!("http://127.0.0.1:{}/", addr.port()),
+            "token": "test-token"
+        }));
+        let action = TurnOnAction {
+            state: state.clone(),
+            entity_id: "light.living_room".to_string(),
+        };
+        let err = action.run().await.unwrap_err();
+        let ToolError::PermissionRequired { request_id, .. } = err else {
+            panic!("expected PermissionRequired");
+        };
+        state.gate().approve_request(&request_id);
+        let out = action.run().await.unwrap();
+        assert!(out.contains(r#""turned_on":true"#), "{out}");
+        let recorded = requests.lock().await;
+        assert_eq!(recorded.len(), 1, "exactly one request: {recorded:?}");
+        assert!(
+            recorded[0].starts_with("POST /api/services/homeassistant/turn_on HTTP/1.1"),
+            "{}",
+            recorded[0]
+        );
+        assert!(
+            recorded[0]
+                .to_lowercase()
+                .contains("authorization: bearer test-token"),
+            "{}",
+            recorded[0]
+        );
+        assert!(
+            recorded[0].contains(r#""entity_id":"light.living_room""#),
+            "{}",
+            recorded[0]
         );
     }
 

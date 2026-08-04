@@ -2871,6 +2871,7 @@ dependencies = [
  "async-trait",
  "ene-plugin",
  "ene-plugin-proto",
+ "http",
  "parking_lot",
  "reqwest",
  "schemars",

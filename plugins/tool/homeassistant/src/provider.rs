@@ -31,14 +31,10 @@ impl HomeAssistantState {
             // header to an upstream-controlled host, so redirects stay on
             // the original host.
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                let same_host = match (
+                if same_host(
                     attempt.previous().last().and_then(|url| url.host_str()),
                     attempt.url().host_str(),
                 ) {
-                    (Some(previous), Some(next)) => previous == next,
-                    _ => false,
-                };
-                if same_host {
                     attempt.follow()
                 } else {
                     attempt.stop()
@@ -75,10 +71,29 @@ impl HomeAssistantState {
     /// the delivered blob is malformed.
     pub fn set_config(&self, value: &serde_json::Value) {
         match serde_json::from_value::<HomeAssistantConfig>(value.clone()) {
-            Ok(config) => *self.config.write() = config,
+            Ok(config) => {
+                if config
+                    .base_url()
+                    .is_ok_and(|base| base.starts_with("http://"))
+                {
+                    tracing::warn!(
+                        "homeassistant base_url uses plaintext http; the access token travels \
+                         unencrypted on the network. Prefer https (e.g. a reverse proxy with TLS)."
+                    );
+                }
+                *self.config.write() = config;
+            }
             Err(e) => tracing::warn!("Ignoring malformed homeassistant config: {e}"),
         }
     }
+}
+
+/// Whether a redirect hop stays on the original host.
+///
+/// A hop without a host on either side is never followed: the plugin only
+/// trusts the host the user configured.
+fn same_host(previous: Option<&str>, next: Option<&str>) -> bool {
+    matches!((previous, next), (Some(previous), Some(next)) if previous == next)
 }
 
 impl Default for HomeAssistantState {
@@ -177,5 +192,19 @@ impl ToolProvider for HomeAssistantToolProvider {
 
     fn revoke_pattern(&self, action: &str, target_pattern: &str) {
         self.inner.revoke_pattern(action, target_pattern);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redirects_require_the_same_host() {
+        assert!(same_host(Some("ha.local"), Some("ha.local")));
+        assert!(!same_host(Some("ha.local"), Some("evil.local")));
+        assert!(!same_host(None, Some("ha.local")));
+        assert!(!same_host(Some("ha.local"), None));
+        assert!(!same_host(None, None));
     }
 }

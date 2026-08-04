@@ -55,6 +55,16 @@ impl HomeAssistantConfig {
         let parsed = url::Url::parse(raw).map_err(|e| {
             HomeAssistantError::InvalidArguments(format!("base_url is not a valid URL: {e}"))
         })?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(HomeAssistantError::InvalidArguments(
+                "base_url must use http or https".to_string(),
+            ));
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(HomeAssistantError::InvalidArguments(
+                "base_url must not contain userinfo".to_string(),
+            ));
+        }
         if parsed.query().is_some() || parsed.fragment().is_some() {
             return Err(HomeAssistantError::InvalidArguments(
                 "base_url must not contain a query string or fragment".to_string(),
@@ -92,7 +102,7 @@ pub fn config_schema() -> serde_json::Value {
         "properties": {
             "base_url": {
                 "type": "string",
-                "description": "Base URL of the Home Assistant instance, e.g. http://homeassistant.local:8123 (a reverse-proxy path prefix must end with /)"
+                "description": "Base URL of the Home Assistant instance (http or https only), e.g. http://homeassistant.local:8123 (a reverse-proxy path prefix must end with /)"
             },
             "token": {
                 "type": "string",
@@ -180,6 +190,35 @@ mod tests {
     fn base_url_rejects_unparseable_input() {
         let config = HomeAssistantConfig {
             base_url: "not a url".to_string(),
+            ..HomeAssistantConfig::default()
+        };
+        assert!(matches!(
+            config.base_url(),
+            Err(HomeAssistantError::InvalidArguments(_))
+        ));
+    }
+
+    #[test]
+    fn base_url_rejects_non_http_schemes() {
+        for raw in ["ftp://ha.local:8123", "file:///tmp/hass"] {
+            let config = HomeAssistantConfig {
+                base_url: raw.to_string(),
+                ..HomeAssistantConfig::default()
+            };
+            assert!(
+                matches!(
+                    config.base_url(),
+                    Err(HomeAssistantError::InvalidArguments(_))
+                ),
+                "scheme {raw} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn base_url_rejects_userinfo() {
+        let config = HomeAssistantConfig {
+            base_url: "http://user:pass@ha.local:8123".to_string(),
             ..HomeAssistantConfig::default()
         };
         assert!(matches!(

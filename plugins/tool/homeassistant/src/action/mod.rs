@@ -125,16 +125,23 @@ fn map_http_error(status: StatusCode, body: &str) -> ToolError {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "no details provided".to_string());
-    ToolError::execution_failed(format!("Home Assistant returned HTTP {status}: {detail}"))
+    ToolError::execution_failed(format!(
+        "Home Assistant returned HTTP {status}: {}",
+        truncate(&detail)
+    ))
 }
 
-/// Reads a response body, rejecting it when the declared or actual size
-/// exceeds [`MAX_BODY_BYTES`] or when it is not valid UTF-8. The body is
-/// consumed in chunks and the running total is checked before each chunk is
-/// buffered, so a body without a known size (e.g. chunked transfer) cannot
-/// force the whole body into memory.
+/// Reads a response body, rejecting it when the declared (`Content-Length`)
+/// or actual size exceeds [`MAX_BODY_BYTES`] or when it is not valid UTF-8.
+/// The body is consumed in chunks and the running total is checked before
+/// each chunk is buffered, so a body without a known size (e.g. chunked
+/// transfer) cannot force the whole body into memory.
 async fn read_bounded_body(response: reqwest::Response) -> Result<String, ToolError> {
-    if let Some(len) = response.content_length()
+    if let Some(len) = response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
         && let Ok(len) = usize::try_from(len)
         && len > MAX_BODY_BYTES
     {
@@ -197,6 +204,83 @@ fn truncate_attributes(value: &serde_json::Value) -> String {
     let mut truncated: String = json.chars().take(MAX_ATTRIBUTES_CHARS - 3).collect();
     truncated.push_str("...");
     truncated
+}
+
+#[cfg(test)]
+pub(crate) mod mock_server {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+
+    /// Spawns a minimal HTTP/1.1 server on 127.0.0.1 that records the
+    /// request head and body of every connection, then answers with
+    /// `status` and `body`.
+    ///
+    /// `content_length` overrides the response length header so tests can
+    /// exercise the size cap without transferring megabytes.
+    pub(crate) async fn spawn(
+        status: &'static str,
+        body: &'static [u8],
+        content_length: Option<usize>,
+    ) -> (std::net::SocketAddr, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_task = requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let requests = requests_for_task.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    let header_end = loop {
+                        let Ok(n) = socket.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break end + 4;
+                        }
+                    };
+                    let request_length = String::from_utf8_lossy(&buf[..header_end])
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':')
+                                .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < header_end + request_length {
+                        let Ok(n) = socket.read(&mut chunk).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    requests
+                        .lock()
+                        .await
+                        .push(String::from_utf8_lossy(&buf).to_string());
+                    let length = content_length.unwrap_or(body.len());
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                    );
+                    drop(socket.write_all(head.as_bytes()).await);
+                    drop(socket.write_all(body).await);
+                });
+            }
+        });
+        (addr, requests)
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +351,20 @@ mod tests {
     }
 
     #[test]
+    fn http_error_message_is_truncated() {
+        let detail = "x".repeat(500);
+        let err = map_http_error(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "code": "invalid_format", "message": detail }).to_string(),
+        );
+        assert!(err.to_string().contains("400"));
+        assert!(
+            !err.to_string().contains(&"x".repeat(400)),
+            "error must not echo an unbounded message"
+        );
+    }
+
+    #[test]
     fn truncate_caps_long_strings() {
         let long = "x".repeat(500);
         let out = truncate(&long);
@@ -299,5 +397,41 @@ mod tests {
     #[test]
     fn strip_reqwest_url_keeps_plain_messages() {
         assert_eq!(strip_reqwest_url("timeout"), "timeout");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_body_accepts_small_body() {
+        let response = test_response(&[], b"[]".to_vec());
+        assert_eq!(read_bounded_body(response).await.unwrap(), "[]");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_body_rejects_declared_oversize() {
+        let response = test_response(&[("content-length", "2000000")], b"[]".to_vec());
+        let err = read_bounded_body(response).await.unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_body_rejects_actual_overflow() {
+        // No content-length header, so the cap must catch the streamed body.
+        let response = test_response(&[], vec![0u8; MAX_BODY_BYTES + 1]);
+        let err = read_bounded_body(response).await.unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_body_rejects_invalid_utf8() {
+        let response = test_response(&[], vec![0xFF, 0xFE]);
+        let err = read_bounded_body(response).await.unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "{err}");
+    }
+
+    fn test_response(headers: &[(&str, &str)], body: Vec<u8>) -> reqwest::Response {
+        let mut builder = http::Response::builder();
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        reqwest::Response::from(builder.body(body).unwrap())
     }
 }

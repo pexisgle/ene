@@ -31,5 +31,9 @@ reqwest = { workspace = true, features = ["rustls", "json", "stream"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 reqwest = { workspace = true, features = ["native-tls", "json", "stream"] }
 
+[dev-dependencies]
+http = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util"] }
+
 [lints]
 workspace = true

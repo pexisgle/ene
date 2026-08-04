@@ -128,6 +128,23 @@ mod tests {
         assert!(out.contains("..."), "{out}");
     }
 
+    #[tokio::test]
+    async fn state_rejects_oversized_response() {
+        let (addr, _requests) =
+            crate::action::mock_server::spawn("200 OK", b"[]", Some(2_000_000)).await;
+        let state = Arc::new(HomeAssistantState::new());
+        state.set_config(&serde_json::json!({
+            "base_url": format!("http://127.0.0.1:{}/", addr.port()),
+            "token": "test-token"
+        }));
+        let action = StateAction {
+            state,
+            entity_id: "light.living_room".to_string(),
+        };
+        let err = action.run().await.unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+    }
+
     #[test]
     fn spec_has_expected_name() {
         assert_eq!(StateAction::spec().name.as_str(), "homeassistant.state");

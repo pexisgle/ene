@@ -102,7 +102,7 @@ impl SetTemperatureAction {
             format!("Set {entity_id} temperature to {temperature} in Home Assistant{mode_suffix}");
         self.state.gate().check(
             HOMEASSISTANT_SET_TEMPERATURE,
-            &format!("homeassistant:entity:{entity_id}"),
+            &format!("homeassistant:entity:{entity_id}#"),
             &description,
         )?;
 
