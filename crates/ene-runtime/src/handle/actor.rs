@@ -1811,10 +1811,23 @@ impl TurnActor {
             return;
         };
         let outcome = match status {
-            ene_store::PendingCandidateStatus::Approved => store
-                .approve_pending_candidate(result.candidate_id)
-                .await
-                .map(|_| ()),
+            ene_store::PendingCandidateStatus::Approved => {
+                let approved = store.approve_pending_candidate(result.candidate_id).await;
+                if let Ok(memory_id) = approved
+                    && let Ok(mind_cfg) = self.config.get_section::<ene_mind::MindConfig>()
+                    && mind_cfg.memory.reflection.enabled
+                    && let Ok(Some(candidate)) =
+                        store.get_pending_candidate(result.candidate_id).await
+                {
+                    ene_mind::memory_writer::reflection::record_approved_outcome(
+                        store.as_ref(),
+                        &candidate,
+                        memory_id,
+                    )
+                    .await;
+                }
+                approved.map(|_| ())
+            }
             ene_store::PendingCandidateStatus::Rejected => {
                 store
                     .resolve_pending_candidate(result.candidate_id, false)
@@ -5732,6 +5745,7 @@ mod tests {
             existing_memory_id: None,
             source_quote: "test".into(),
             source_turn: None,
+            outcome_rating: None,
             approval_parked: false,
             status: ene_core::PendingCandidateStatus::Pending,
             created_at: chrono::Utc::now() - chrono::Duration::days(5),
