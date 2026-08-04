@@ -13,6 +13,7 @@
 - [Geo Tool Guide](guide/tools/geo.md)
 - [Git Tool Guide](guide/tools/git.md)
 - [Schedules: Persistent Timed Actions](guide/schedules.md)
+- [Workspace RAG Guide](guide/workspace-rag.md)
 
 # Reference
 

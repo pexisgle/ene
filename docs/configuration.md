@@ -732,6 +732,73 @@ See the [Schedules guide](guide/schedules.md) for the CLI surface.
   awaiting user confirmation may wait before it is recorded `timed_out`.
   `ENE_SCHEDULER__CONFIRMATION_TIMEOUT_SECS`.
 
+### `rag.workspace` — Document/Workspace RAG Settings
+
+Indexes local documents and project folders for citation-bearing retrieval
+into conversation context. **Privacy-first defaults: the feature is disabled
+and no folder is scanned until the operator explicitly opts in.** Only the
+folders listed in `folders` are ever read, and results are restricted to those
+same folders at search time. See the
+[Workspace RAG guide](guide/workspace-rag.md) for the full privacy model.
+
+```json
+{
+  "rag": {
+    "workspace": {
+      "enabled": false,
+      "folders": [],
+      "include_extensions": [
+        "md", "markdown", "txt", "rs", "toml", "json", "yaml", "yml",
+        "py", "ts", "js", "tsx", "jsx", "html", "css", "sh", "xml", "ini",
+        "cfg", "csv"
+      ],
+      "ignore_globs": [
+        ".git/**", "node_modules/**", "target/**", "dist/**", ".venv/**",
+        "**/.env", "**/.env.*", "*.gguf", "*.safetensors", "*.ckpt",
+        "*.pth", "*.onnx", "*.bin", "*.db", "*.db-wal", "*.db-shm",
+        "assets/models/**"
+      ],
+      "max_file_bytes": 1048576,
+      "chunk_chars": 1200,
+      "chunk_overlap_chars": 200,
+      "max_chunks_per_file": 256,
+      "top_k": 8,
+      "final_n": 4,
+      "min_similarity": 0.20,
+      "sync_on_startup": false
+    }
+  }
+}
+```
+
+- `enabled` — master switch. When `false` (default), nothing is scanned,
+  searched, or injected into prompts.
+- `folders` — the **only** folders that may be scanned and searched. Paths are
+  canonicalized before scanning; directory symlinks are never followed and
+  files whose canonical path escapes the configured folder are skipped.
+- `include_extensions` — file extensions (case-insensitive, no dot) eligible
+  for indexing.
+- `ignore_globs` — glob patterns (relative to each folder) excluded from
+  scanning. Defaults cover version-control metadata, dependency/build
+  directories, `.env`-style secrets, model weights (`.gguf`, `.safetensors`,
+  ...), and database files. `*` matches within a segment, `**` across
+  segments, `?` a single character; patterns without `/` match basenames.
+- `max_file_bytes` — files larger than this are skipped entirely (default
+  1 MiB).
+- `chunk_chars` / `chunk_overlap_chars` — target chunk size and the overlap
+  repeated at the next chunk's start (line-granular).
+- `max_chunks_per_file` — hard cap; files exceeding it are skipped rather than
+  silently truncated.
+- `top_k` / `final_n` — vector over-fetch before scoring, and the maximum
+  chunks injected into a prompt (or returned by `/workspace search`).
+- `min_similarity` — minimum hybrid score for a hit to be returned.
+- `sync_on_startup` — run a background sync when the runtime opens (still
+  requires `enabled`).
+
+All keys follow the standard `ENE_` override scheme, e.g.
+`ENE_RAG__WORKSPACE__ENABLED=true`, `ENE_RAG__WORKSPACE__FOLDERS=/path/a,/path/b`
+(JSON-encoded arrays work too).
+
 ### `desktop.*` — Desktop GUI & Graphics Parameters
 
 Controls display language, graphics render parameters, and microphone input device:

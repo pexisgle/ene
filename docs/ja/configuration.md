@@ -576,6 +576,53 @@ Tool RAG は各ツールを、そのフィールドごとの埋め込み類似�
   実行が、`timed_out` として記録されるまでの待機時間。
   `ENE_SCHEDULER__CONFIRMATION_TIMEOUT_SECS`。
 
+### `rag.workspace` — ドキュメント／ワークスペース RAG 設定
+
+ローカルの文書やプロジェクトフォルダをインデックス化し、出典付きで会話コンテキストに取得するための機能です。**プライバシー第一の既定値: 明示的に有効化するまで、この機能は無効で何もスキャンされません。** `folders` に列挙したフォルダだけが読み取られ、検索結果も同じフォルダだけに制限されます。完全なプライバシーモデルは[ワークスペース RAG ガイド](guide/workspace-rag.md) を参照してください。
+
+```json
+{
+  "rag": {
+    "workspace": {
+      "enabled": false,
+      "folders": [],
+      "include_extensions": [
+        "md", "markdown", "txt", "rs", "toml", "json", "yaml", "yml",
+        "py", "ts", "js", "tsx", "jsx", "html", "css", "sh", "xml", "ini",
+        "cfg", "csv"
+      ],
+      "ignore_globs": [
+        ".git/**", "node_modules/**", "target/**", "dist/**", ".venv/**",
+        "**/.env", "**/.env.*", "*.gguf", "*.safetensors", "*.ckpt",
+        "*.pth", "*.onnx", "*.bin", "*.db", "*.db-wal", "*.db-shm",
+        "assets/models/**"
+      ],
+      "max_file_bytes": 1048576,
+      "chunk_chars": 1200,
+      "chunk_overlap_chars": 200,
+      "max_chunks_per_file": 256,
+      "top_k": 8,
+      "final_n": 4,
+      "min_similarity": 0.20,
+      "sync_on_startup": false
+    }
+  }
+}
+```
+
+- `enabled` — 総合スイッチ。`false`（既定）の間は、スキャン・検索・プロンプトへの注入は一切行われません。
+- `folders` — スキャンと検索が許可される**唯一の**フォルダ。スキャン前にパスを正規化し、ディレクトリシンボリックリンクは辿らず、正規化後のパスが設定フォルダの外に出るファイルはスキップします。
+- `include_extensions` — インデックス対象の拡張子（大文字小文字を無視、ドットなし）。
+- `ignore_globs` — 各フォルダ相対で除外する glob パターン。既定値はバージョン管理メタデータ、依存／ビルドディレクトリ、`.env` 系の機密ファイル、モデルデータ（`.gguf`、`.safetensors` など）、データベースファイルを対象にしています。`*` はセグメント内、`**` はセグメントをまたぐ一致、`?` は1文字に一致します。`/` を含まないパターンはファイル名のみに一致します。
+- `max_file_bytes` — このサイズを超えるファイルは丸ごとスキップ（既定 1 MiB）。
+- `chunk_chars` / `chunk_overlap_chars` — チャンクの目標サイズと、次チャンク先頭に繰り返す重複量（行単位）。
+- `max_chunks_per_file` — チャンク数の上限。超過したファイルは黙って切り詰めず、丸ごとスキップします。
+- `top_k` / `final_n` — スコアリング前のベクトル過剰取得数と、プロンプト（または `/workspace search`）に注入する最大チャンク数。
+- `min_similarity` — 結果として返すためのハイブリッドスコアの下限。
+- `sync_on_startup` — ランタイム起動時にバックグラウンド同期を実行（`enabled` が必要）。
+
+すべてのキーは標準の `ENE_` 上書き形式に対応します。例: `ENE_RAG__WORKSPACE__ENABLED=true`、`ENE_RAG__WORKSPACE__FOLDERS=/path/a,/path/b`（JSON 配列のエンコードも可）。
+
 ### `desktop.*` — デスクトップ GUI およびグラフィックスパラメータ
 
 表示言語、グラフィックス描画パラメータ、およびマイク入力デバイスを制御します：
