@@ -128,8 +128,18 @@ ene_config::define_config!(
         /// for the OS default input device.
         #[serde(default)]
         pub mic_device: Option<String>,
+        /// Enable the global Alt+Space spotlight launcher.
+        #[serde(default = "default_enabled")]
+        pub spotlight_enabled: bool,
+        /// Enable the floating caption overlay window.
+        #[serde(default = "default_enabled")]
+        pub caption_enabled: bool,
     }
 );
+
+const fn default_enabled() -> bool {
+    true
+}
 
 pub use GraphicsSection as GraphicsSettings;
 
@@ -345,9 +355,13 @@ pub struct UiState {
     // ── Floating caption overlay ──
     pub caption_visible: bool,
     pub caption_text: String,
-    /// Top-left position (logical points) of the caption window; the
-    /// overlay persists the user's drag position here.
-    pub caption_position: (f32, f32),
+    /// Top-left position (logical points) of the caption window, or
+    /// `None` until the user has moved it once.
+    pub caption_position: Option<(f32, f32)>,
+    /// Always-on-top state of the caption window; toggled by its pin
+    /// button. `None` means "pinned until the user changes it".
+    /// Ignored on Wayland, which has no window-level support.
+    pub caption_pinned: Option<bool>,
 
     // ── Character card editor ──
     /// Whether the editor has loaded the on-disk card into the buffers
@@ -797,6 +811,14 @@ impl CharacterSettings {
 
     pub fn mic_device(&self) -> Option<String> {
         self.config_section::<DesktopSection>().mic_device
+    }
+
+    pub fn spotlight_enabled(&self) -> bool {
+        self.config_section::<DesktopSection>().spotlight_enabled
+    }
+
+    pub fn caption_enabled(&self) -> bool {
+        self.config_section::<DesktopSection>().caption_enabled
     }
 
     pub fn set_graphics(&self, graphics: GraphicsSettings) {

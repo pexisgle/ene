@@ -251,10 +251,15 @@ spotlight-action-open-chat = チャットを開く
 spotlight-action-toggle-mic = マイクを切り替え
 spotlight-action-quick-chat = クイックチャット
 spotlight-action-toggle-caption = キャプションオーバーレイを切り替え
+spotlight-send-chat = チャットに送信: { $text }
 
 # Floating caption overlay (#218)
 caption-title = キャプション
 close = 閉じる
+caption-pin = ピン留め
+caption-unpin = ピン解除
+caption-empty = 発話を待っています…
+caption-cue = 🎬 { $name }
 
 # AI
 ai = AI
@@ -366,6 +371,14 @@ enable-emotion = 感情処理を有効化
 enable-tools = ツール呼び出しを有効化
 enable-tool-rag = Tool RAG を有効化
 enable-tool = ツールを有効化
+
+# Accessibility
+accessibility = アクセシビリティ
+accessibility-hint = スポットライトとキャプションオーバーレイの切り替え。Alt+Space でどのアプリからでもスポットライトを開けます。キャプションはアシスタントの発話を画面上の字幕として表示します。
+accessibility-spotlight = スポットライトを有効化 (Alt+Space)
+accessibility-spotlight-hint = コマンドパレットをグローバルに開きます。Wayland では Ene にフォーカスがあるときのみ動作します。
+accessibility-caption = フローティングキャプションオーバーレイを有効化
+accessibility-caption-hint = ストリーミング中のアシスタント発話を、ドラッグ・ピン留め可能な字幕ウィンドウに表示します。
 
 # Audio
 voice = 音声

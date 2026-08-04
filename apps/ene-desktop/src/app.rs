@@ -4,7 +4,7 @@
 //! implementations, each owning a slice of resources, components,
 //! messages, and systems. This module just glues them together and exposes
 //! a single [`build_app`] entry point used by `main.rs`.
-use bevy_app::{App, Plugin, PluginGroup, PluginGroupBuilder};
+use bevy_app::{App, Plugin, PluginGroup, PluginGroupBuilder, Update};
 
 use crate::event::chat::OpenChat;
 use crate::event::{
@@ -82,6 +82,7 @@ pub fn build_app(
     app.insert_resource(TokioHandle(tokio));
     app.insert_resource(EmotionPipelineState::default());
     app.insert_resource(MotionLayerState::default());
+    app.init_resource::<crate::caption_overlay::CaptionFeed>();
     app.insert_resource(EventChannels {
         tx: event_tx,
         rx: event_rx,
@@ -106,6 +107,7 @@ pub fn build_app(
     app.add_message::<PendingCandidatesCount>();
     app.add_message::<TickGtk>();
     app.add_message::<crate::event::lifecycle::RuntimeDisconnected>();
+    app.add_systems(Update, crate::caption_overlay::feed_caption_overlay_system);
     app
 }
 
