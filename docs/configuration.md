@@ -721,7 +721,10 @@ Version-2 files are migrated to version 3 on load: every
 existing profile value is never overwritten, and an existing empty value
 counts as absent). `ai.local_models` itself is left intact — `ene-ai` still
 routes local tasks and budgets context windows from it, and the host reads
-the declared embedding dimensions from it.
+the declared embedding dimensions from it. Version-3 files are migrated to
+version 4 on load: the same mirror runs again so installs that reached v3
+before `context_size` / `dimensions` joined the key set receive them without
+a hand edit (existing non-empty profile values are still never overwritten).
 
 #### `plugins.list.<name>.profiles.<profile>` — per-profile settings (#313)
 
@@ -778,10 +781,10 @@ delivered via `ConfigurablePlugin::set_profiles`.
 `dimensions` is required on `ai.local_models.<name>` when the model backs
 `tasks.embedding` with `provider: "local"`: the host opens the memory-store
 vector schema with this value before the plugin host starts, and the plugin
-rejects a declared value that differs from the model's real dimensionality at
-load time (e.g. `1024` for the bundled `jina-v5-small` entry). The embedding
-task's own `dimensions` field is a cloud-only knob and is ignored for local
-providers.
+rejects a declared value that differs from the model's real dimensionality
+on the first `embed_batch` request, when the model is loaded (e.g. `1024`
+for the bundled `jina-v5-small` entry). The embedding task's own
+`dimensions` field is a cloud-only knob and is ignored for local providers.
 
 #### VOICEVOX / Aivis Speech TTS provider (`plugins.list.voicevox.config`)
 
