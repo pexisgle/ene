@@ -16,6 +16,8 @@ const DEFAULT_SCALE_PERCENT: u32 = 50;
 /// rejects the frame.
 const MAX_COMPOSITE_PIXELS: u64 = 1920 * 1080;
 
+const _: () = assert!(MAX_COMPOSITE_PIXELS <= ene_runtime::vision::MAX_PIXELS);
+
 /// Width of the dark separator between overview and ROI in the composite.
 const SEPARATOR_PX: u32 = 8;
 
@@ -91,12 +93,14 @@ fn capture_xcap(
     if target.is_none()
         && let Ok(monitors) = xcap::Monitor::all()
     {
-        let primary = monitors
+        let monitor = monitors
             .iter()
             .find(|m| m.is_primary().unwrap_or(false))
-            .unwrap_or_else(|| &monitors[0]);
-        if let Ok(img) = primary.capture_image() {
-            let origin = primary.x().ok().zip(primary.y().ok());
+            .or_else(|| monitors.first());
+        if let Some(monitor) = monitor
+            && let Ok(img) = monitor.capture_image()
+        {
+            let origin = monitor.x().ok().zip(monitor.y().ok());
             target = Some((DynamicImage::ImageRgba8(img), origin));
         }
     }
@@ -162,9 +166,11 @@ async fn capture_wayland_portal(
 
     // The portal gives no geometry; only compositors whose active-window
     // position `active_win_pos_rs` can report (KWin/Hyprland) allow mapping
-    // the global cursor into the captured window. Screen captures are assumed
-    // to start at the global origin, which holds for the supported
-    // compositors; a wrong guess only misplaces the optional ROI.
+    // the global cursor into the captured window. This is best-effort: the
+    // pointer still comes from device_query over XWayland, which freezes over
+    // native Wayland surfaces, and HiDPI mixes logical geometry with physical
+    // pixels. Screen captures are assumed to start at the global origin; a
+    // wrong guess only misplaces the optional ROI.
     let origin = match target {
         ashpd::desktop::screenshot::AvailableTargets::ActiveWindow => {
             active_win_pos_rs::get_position()

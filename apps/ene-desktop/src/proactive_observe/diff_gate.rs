@@ -1,8 +1,8 @@
 //! Screen-diff gate that skips redundant vision inference when the screen
 //! content has not changed significantly.
 //!
-//! Compares 64×64 luma fingerprints of the overview (changed-cell count) and
-//! of the ROI crop (exact match). Average hashing was rejected after
+//! Compares 64×64 luma fingerprints of the overview and the ROI crop, each
+//! with a changed-cell tolerance. Average hashing was rejected after
 //! simulation showed 8×8 block means are blind to the changes that matter:
 //! a typed line and an identical 40–80px scroll both produced a Hamming
 //! distance of 0.
@@ -21,6 +21,16 @@ const CELL_DELTA: u8 = 6;
 /// full-width text line changes 61 of 4096 cells in simulation; a 48px
 /// cursor sprite at most 28, so the two are cleanly separated.
 const OVERVIEW_CHANGED_CELL_LIMIT: usize = 48;
+
+/// Maximum changed ROI cells that still count as "unchanged". The ROI sits at
+/// the pointer, which after clicking into an editor is exactly where the text
+/// caret blinks; measured through the same Lanczos3 fingerprint, carets of
+/// 1–2px × 14–20px move 4–8 of 4096 cells, so an exact match would re-run
+/// inference on roughly half of all ticks. The tolerance accepts the same
+/// small-edit staleness the overview already accepts: single-character edits
+/// (9 cells) stay cached, while word-level edits (17+ cells), typed lines, and
+/// cursor-region changes re-infer.
+const ROI_CHANGED_CELL_LIMIT: usize = 12;
 
 /// Cached screen state: fingerprints plus the summary they produced.
 struct CachedScreen {
@@ -61,16 +71,22 @@ impl ScreenDiffGate {
     /// Check whether the screen has changed significantly since the last
     /// [`Self::cache`] call. Returns `Some(cached_summary)` when the app label
     /// matches, fewer than [`OVERVIEW_CHANGED_CELL_LIMIT`] overview cells
-    /// changed, and the ROI fingerprint (when present both times) matches
-    /// exactly. A dimension or ROI-presence mismatch forces re-inference.
+    /// changed, and the ROI fingerprint (when present both times) changed in
+    /// fewer than [`ROI_CHANGED_CELL_LIMIT`] cells. A dimension or
+    /// ROI-presence mismatch forces re-inference.
     ///
     #[must_use]
     pub fn check(&self, overview: &[u8], roi: Option<&[u8]>, app_label: &str) -> Option<&str> {
         let last = self.last.as_ref()?;
-        if last.app_label != app_label || last.roi.as_deref() != roi {
+        if last.app_label != app_label || last.roi.is_some() != roi.is_some() {
             return None;
         }
         if changed_cells(&last.overview, overview) >= OVERVIEW_CHANGED_CELL_LIMIT {
+            return None;
+        }
+        if let (Some(previous), Some(current)) = (&last.roi, roi)
+            && changed_cells(previous, current) >= ROI_CHANGED_CELL_LIMIT
+        {
             return None;
         }
         Some(&last.summary)
@@ -204,6 +220,7 @@ mod tests {
         let roi = fingerprint(&img);
         gate.cache(ov, Some(roi), "code".into(), "hello".into());
 
+        // A 20x20 edit block: 19 cells at 64x64, above the ROI tolerance.
         let mut edited = img.clone();
         let pixels = edited.as_mut_rgba8().unwrap();
         for x in 200..220 {
@@ -216,6 +233,28 @@ mod tests {
             gate.check(&fingerprint(&img), Some(&edited_roi), "code")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn gate_hits_on_roi_caret_blink() {
+        let mut gate = ScreenDiffGate::new();
+        let img = code_like_image(512, 512);
+        let ov = fingerprint(&img);
+        let roi = fingerprint(&img);
+        gate.cache(ov.clone(), Some(roi.clone()), "code".into(), "hello".into());
+
+        // A 2x14 text caret appears at the pointer: 8 of 4096 cells change
+        // through the Lanczos3 fingerprint, within the ROI tolerance, so an
+        // idle editor does not re-infer every caret blink.
+        let mut blinked = img;
+        let pixels = blinked.as_mut_rgba8().unwrap();
+        for y in 300..314 {
+            for x in 256..258 {
+                pixels.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+            }
+        }
+        let blinked_roi = fingerprint(&DynamicImage::ImageRgba8(pixels.clone()));
+        assert_eq!(gate.check(&ov, Some(&blinked_roi), "code"), Some("hello"));
     }
 
     #[test]

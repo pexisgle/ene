@@ -33,7 +33,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// Maximum accepted pixel count for a screen capture (1920x1080).
-const MAX_PIXELS: u64 = 1920 * 1080;
+///
+/// Public so the desktop compositor can assert its composite budget stays at
+/// or below this limit (see `ene-desktop`'s `MAX_COMPOSITE_PIXELS` test).
+pub const MAX_PIXELS: u64 = 1920 * 1080;
 
 /// Result of a successful [`EneCommand::PrepareVisionSummary`] round trip:
 /// everything [`VisionHandle::summarize_screen_image`] needs to run the

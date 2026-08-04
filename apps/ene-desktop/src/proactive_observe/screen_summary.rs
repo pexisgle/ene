@@ -88,7 +88,7 @@ impl ScreenSummaryProvider {
                 app = %captured.app_label,
                 "Screen unchanged; reusing cached summary"
             );
-            return Some(truncate(&redact_paths(cached), max_chars));
+            return Some(truncate(cached, max_chars));
         }
 
         let text = match self.summarize_captured(&captured, &composite).await {
@@ -117,11 +117,10 @@ impl ScreenSummaryProvider {
             }
         };
 
-        let text = truncate(&redact_paths(&text), max_chars);
-        if text.trim().is_empty() {
+        let Some(text) = prepare_for_cache(&text) else {
             *self.last_failure_at.lock() = Some(Instant::now());
             return None;
-        }
+        };
 
         tracing::info!(
             component = "ProactiveObserve",
@@ -137,7 +136,7 @@ impl ScreenSummaryProvider {
             captured.app_label.clone(),
             text.clone(),
         );
-        Some(text)
+        Some(truncate(&text, max_chars))
     }
 
     async fn summarize_captured(
@@ -174,5 +173,58 @@ impl ScreenSummaryProvider {
                 },
             )
             .await
+    }
+}
+
+/// Redact and validate summary text for the diff-gate cache. Truncation is
+/// deliberately *not* applied here: the cached copy must stay complete so
+/// raising `max_screen_summary_chars` extends cache hits instead of returning
+/// the shorter text cached earlier.
+fn prepare_for_cache(text: &str) -> Option<String> {
+    let text = redact_paths(text);
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_for_cache_redacts_but_does_not_truncate() {
+        let long = format!("/home/user/secret.rs {}", "word ".repeat(100));
+        let prepared = prepare_for_cache(&long).expect("non-empty after redaction");
+        assert!(!prepared.contains("/home/user"));
+        assert_eq!(prepared.split_whitespace().count(), 100);
+        assert!(
+            prepared.chars().count() > 300,
+            "redacted text must not be truncated for the cache"
+        );
+    }
+
+    #[test]
+    fn prepare_for_cache_rejects_blank_after_redaction() {
+        assert!(prepare_for_cache("/home/user/secret.rs").is_none());
+        assert!(prepare_for_cache("   ").is_none());
+    }
+
+    #[test]
+    fn cache_hit_truncation_tracks_current_max_chars() {
+        // The diff gate stores what the provider caches; the provider caches
+        // untruncated text, so the hit path must apply the *current* limit.
+        let mut gate = crate::proactive_observe::diff_gate::ScreenDiffGate::new();
+        let fp = crate::proactive_observe::diff_gate::fingerprint(&image::DynamicImage::new_rgba8(
+            64, 64,
+        ));
+        let long = "word ".repeat(100);
+        gate.cache(fp.clone(), None, "app".into(), long.clone());
+        let cached = gate.check(&fp, None, "app").expect("cache hit");
+        assert_eq!(truncate(cached, 32).chars().count(), 32);
+        assert_eq!(truncate(cached, 64).chars().count(), 64);
+        // The cache itself is never shortened by a hit.
+        assert_eq!(cached.chars().count(), long.chars().count());
     }
 }

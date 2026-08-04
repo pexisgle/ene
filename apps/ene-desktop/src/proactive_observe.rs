@@ -12,6 +12,7 @@ mod roi;
 mod screen_summary;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ene_mind::{
@@ -203,14 +204,30 @@ fn active_window_label(level: WindowTitleLevel) -> Option<String> {
 /// cropping. `device_query` reads the pointer through X11, so a pure-Wayland
 /// session (no X display) yields `None` and the observer skips ROI cropping.
 fn current_cursor_position() -> Option<(i32, i32)> {
-    use device_query::{DeviceQuery, DeviceState};
-    #[cfg(target_os = "linux")]
-    let state = DeviceState::checked_new()?;
     #[cfg(not(target_os = "linux"))]
-    let state = DeviceState::new();
-    let mouse = state.get_mouse();
-    Some(mouse.coords)
+    {
+        use device_query::{DeviceQuery, DeviceState};
+        let state = DeviceState::new();
+        return Some(state.get_mouse().coords);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use device_query::{DeviceQuery, DeviceState};
+        // `checked_new` prints a stderr line on every failed X open, so a
+        // Wayland session without X must probe once, not once per tick.
+        if CURSOR_PROBE_FAILED.load(Ordering::Relaxed) {
+            return None;
+        }
+        let Some(state) = DeviceState::checked_new() else {
+            CURSOR_PROBE_FAILED.store(true, Ordering::Relaxed);
+            return None;
+        };
+        Some(state.get_mouse().coords)
+    }
 }
+
+/// Latched when probing the X11 pointer failed; see [`current_cursor_position`].
+static CURSOR_PROBE_FAILED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn redact_paths(input: &str) -> String {
     input

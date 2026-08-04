@@ -237,18 +237,24 @@ The pipeline runs entirely in-process on the desktop:
    around the cursor** composited beside it (separated by a dark bar). The crop
    anchor snaps to a 64px grid so small pointer moves keep the crop stable. The
    crop is only produced when both the cursor position and the captured
-   surface's global geometry are known: X11 (window/monitor via xcap) and
-   Wayland on KWin/Hyprland (via `active_win_pos_rs`). On GNOME Wayland the
-   window geometry is not exposed, so the overview is used without a crop. The
-   crop follows the **pointer**, not the text caret — tracking the caret would
-   require an accessibility API (AT-SPI) and is a follow-up.
+   surface's global geometry are known. X11 (window/monitor via xcap) is fully
+   supported. On Wayland the crop is best-effort: KWin/Hyprland expose window
+   geometry via `active_win_pos_rs`, but the pointer still comes from
+   `device_query` over XWayland — it freezes over native Wayland surfaces, so
+   the crop can lag — and on HiDPI the geometry is logical while the capture is
+   physical, shifting the crop by the scale factor. GNOME Wayland exposes no
+   geometry at all, so the overview is used without a crop. The crop follows
+   the **pointer**, not the text caret — tracking the caret would require an
+   accessibility API (AT-SPI) and is a follow-up.
 2. **Diff gate**: each tick computes 64×64 grayscale fingerprints of the
    overview and the ROI. When the active app label matches, fewer than 48
-   overview cells moved by ≥ 6/255, and the ROI fingerprint is unchanged, the
-   cached summary is reused and the local vision model is **not** invoked.
-   Re-inference is forced on window switches, scrolling, edits in the ROI, and
-   any surface resize. Hits are observable in structured logs under
-   `event="screen_diff_gate"` with `cached=true`.
+   overview cells moved by ≥ 6/255, and the ROI fingerprint moved in fewer
+   than 12 cells (a blink tolerance — the ROI sits at the pointer, exactly
+   where a text caret blinks), the cached summary is reused and the local
+   vision model is **not** invoked. Re-inference is forced on window switches,
+   scrolling, word-level edits in the ROI, and any surface resize. Hits are
+   observable in structured logs under `event="screen_diff_gate"` with
+   `cached=true`.
 3. **OCR / text hints**: the pipeline ships no OCR engine (Tesseract is not
    available in the Nix flake or the CI image, and a pure-Rust OCR would be a
    heavy new dependency). Instead, a lightweight window-title/class heuristic
