@@ -46,6 +46,7 @@ mod port;
 mod schedule;
 mod schedule_time;
 mod span;
+mod workspace;
 
 pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
@@ -70,3 +71,7 @@ pub use schedule::{
 };
 pub use schedule_time::{first_run_at, next_occurrence_after};
 pub use span::{ActiveSceneSummaryRow, NewMemorySpan};
+pub use workspace::{
+    NewWorkspaceChunk, WorkspaceChunkHit, WorkspaceDocumentPort, WorkspaceFileRow,
+    WorkspaceIndexStatus, WorkspacePortError, WorkspaceSearchQuery,
+};

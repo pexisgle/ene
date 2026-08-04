@@ -17,6 +17,7 @@ mod session;
 mod store;
 mod tool;
 mod undo;
+mod workspace;
 
 use crate::context::AppContext;
 use async_trait::async_trait;
@@ -74,6 +75,7 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &doctor::DoctorCommand as &dyn CliCommand,
     &greeting::GreetingCommand as &dyn CliCommand,
     &store::StoreCommand as &dyn CliCommand,
+    &workspace::WorkspaceCommand as &dyn CliCommand,
 ];
 
 /// Maximum time the REPL will wait for the actor to drain on shutdown.

@@ -71,6 +71,7 @@ fn turn_ctx<'a>(
         history: &[],
         greeting_index: None,
         store: Some(store),
+        workspace: None,
         query_embedding: None,
         embedder: None,
         llm_provider: None,

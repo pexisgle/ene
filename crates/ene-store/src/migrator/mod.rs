@@ -7,6 +7,7 @@ mod pending_candidates_approval_parked;
 mod pending_candidates_source_turn;
 mod scheduler;
 mod vec0_memory;
+mod workspace_documents;
 
 use conversation_logs_search_index::ConversationLogsSearchIndexMigration;
 use embeddings_cleanup::EmbeddingsCleanupIndexMigration;
@@ -16,6 +17,7 @@ use pending_candidates_source_turn::PendingCandidatesSourceTurnMigration;
 use scheduler::SchedulerMigration;
 use sea_orm_migration::prelude::*;
 use vec0_memory::Vec0EmbeddingIndexMigration;
+use workspace_documents::WorkspaceDocumentsMigration;
 
 pub struct Migrator;
 
@@ -34,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(PendingCandidatesSourceTurnMigration),
             Box::new(PendingCandidatesApprovalParkedMigration),
             Box::new(SchedulerMigration),
+            Box::new(WorkspaceDocumentsMigration),
         ]
     }
 }

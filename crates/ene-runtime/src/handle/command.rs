@@ -266,6 +266,28 @@ pub enum EneCommand {
     },
     /// Invalidate the Tool RAG index, forcing re-embedding on next query.
     InvalidateToolIndex,
+    /// Start a background workspace document index sync.
+    WorkspaceStartSync {
+        /// Reply channel. `Err(EneRuntimeError::Busy)` when a sync is
+        /// already running.
+        reply: oneshot::Sender<Result<(), EneRuntimeError>>,
+    },
+    /// Cancel the in-flight workspace sync, if any.
+    WorkspaceCancelSync,
+    /// Current workspace index + sync status.
+    WorkspaceStatus {
+        /// Reply channel carrying the status view.
+        reply: oneshot::Sender<crate::workspace::WorkspaceStatusView>,
+    },
+    /// Hybrid search over the permitted workspace folders.
+    WorkspaceSearch {
+        /// Query text.
+        query: String,
+        /// Maximum number of hits.
+        limit: usize,
+        /// Reply channel carrying the hits or an error.
+        reply: oneshot::Sender<Result<Vec<ene_core::WorkspaceChunkHit>, EneRuntimeError>>,
+    },
     /// Persist the `CCv3` character-memory content hash after startup warmup.
     SetCcv3MemoryHash {
         /// Combined lorebook + style content hash.

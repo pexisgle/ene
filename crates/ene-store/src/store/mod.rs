@@ -10,11 +10,14 @@ mod memory;
 mod schedule;
 mod session;
 mod tool;
+mod workspace;
 
 pub use schedule::{ClaimedFire, FireClaimMode};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod workspace_tests;
 
 use crate::error::EneMemoryError;
 use crate::migrator::Migrator;
@@ -93,119 +96,100 @@ pub(crate) async fn ensure_vec0_index(
     db: &DatabaseConnection,
     embedding_dim: usize,
 ) -> Result<(), EneMemoryError> {
-    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    use sea_orm::ConnectionTrait;
 
     let dim = embedding_dim;
 
-    // Check if vec_memory_embeddings exists and has the correct dimension.
     // The vec0 column definition bakes in `float[N]` at creation time, so a
     // dimension change (e.g. switching embedding models) requires a rebuild.
-    // We read the stored CREATE statement from sqlite_master and check for
-    // the expected `float[{dim}]` substring. Both shadow tables are checked:
-    // a dimension change rebuilds both, and only re-creating one of them
-    // would leave the pair inconsistent.
-    let needs_recreate = {
-        let check = |table: &str| {
-            db.query_one_raw(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
-                [table.into()],
-            ))
-        };
-        let mem_sql = match check("vec_memory_embeddings").await? {
-            Some(row) => Some(row.try_get_by_index::<String>(0).map_err(|e| {
-                EneMemoryError::MemoryStoreConnectionError(format!("read sqlite_master: {e}"))
-            })?),
-            None => None,
-        };
-        let tool_sql = match check("vec_tool_embeddings").await? {
-            Some(row) => Some(row.try_get_by_index::<String>(0).map_err(|e| {
-                EneMemoryError::MemoryStoreConnectionError(format!("read sqlite_master: {e}"))
-            })?),
-            None => None,
-        };
-        match (mem_sql, tool_sql) {
-            (Some(m), Some(t)) => {
-                !m.contains(&format!("float[{dim}]")) || !t.contains(&format!("float[{dim}]"))
-            }
-            // One or both tables missing: recreate path below creates them.
-            _ => true,
+    // Each shadow table is checked individually against the stored CREATE
+    // statement: missing tables are created and backfilled, tables with a
+    // stale dimension are dropped and recreated empty (old vectors cannot be
+    // re-inserted into the new `float[N]` definition).
+    let mut dimension_changed = false;
+
+    for (table, create_sql, backfill_sql) in [
+        (
+            "vec_memory_embeddings",
+            format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory_embeddings USING vec0( \
+                     memory_embedding_id integer primary key, \
+                     embedding float[{dim}] distance_metric=cosine, \
+                     character_id text, \
+                     model_name text, \
+                     field text \
+                 )"
+            ),
+            Some(
+                "INSERT INTO vec_memory_embeddings(memory_embedding_id, embedding, character_id, model_name, field) \
+                 SELECT me.id, me.embedding, tm.character_id, me.model_name, me.field \
+                 FROM memory_embeddings me \
+                 INNER JOIN typed_memories tm ON tm.id = me.memory_item_id",
+            ),
+        ),
+        (
+            "vec_tool_embeddings",
+            format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_tool_embeddings USING vec0( \
+                     tool_embedding_id integer primary key, \
+                     embedding float[{dim}] distance_metric=cosine, \
+                     tool_name text \
+                 )"
+            ),
+            Some(
+                "INSERT INTO vec_tool_embeddings(tool_embedding_id, embedding, tool_name) \
+                 SELECT id, embedding, tool_name FROM tool_embedding_index",
+            ),
+        ),
+        (
+            "vec_workspace_chunks",
+            format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_workspace_chunks USING vec0( \
+                     chunk_id integer primary key, \
+                     embedding float[{dim}] distance_metric=cosine, \
+                     file_id integer, \
+                     model_name text \
+                 )"
+            ),
+            Some(
+                "INSERT INTO vec_workspace_chunks(chunk_id, embedding, file_id, model_name) \
+                 SELECT c.id, c.embedding, c.file_id, f.model_name \
+                 FROM workspace_document_chunks c \
+                 INNER JOIN workspace_document_files f ON f.id = c.file_id",
+            ),
+        ),
+    ] {
+        let existing = vec0_existing_sql(db, table).await?;
+        let exists = existing.is_some();
+        let right_dim = existing.is_some_and(|sql| sql.contains(&format!("float[{dim}]")));
+        if exists && !right_dim {
+            db.execute_unprepared(&format!("DROP TABLE IF EXISTS {table}"))
+                .await?;
+            dimension_changed = true;
         }
-    };
-
-    // Whether the shadow tables existed at all before this call. A dimension
-    // change drops them, but the old-dimension vectors cannot be inserted
-    // into the recreated `float[N]` table, so the backfill below only runs
-    // when the tables are being created for the *first* time (fresh DB or
-    // upgrade path with no prior vec0 tables).
-    let existed_before = needs_recreate
-        && db
-            .query_one_raw(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                ["vec_memory_embeddings".into()],
-            ))
-            .await?
-            .is_some();
-
-    if needs_recreate {
-        db.execute_unprepared("DROP TABLE IF EXISTS vec_memory_embeddings")
-            .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS vec_tool_embeddings")
-            .await?;
+        db.execute_unprepared(&create_sql).await?;
+        // Backfill only first creation: after a dimension change the old
+        // vectors are incompatible with the recreated definition.
+        if !exists && let Some(backfill) = backfill_sql {
+            db.execute_unprepared(backfill).await?;
+        }
     }
 
-    // character_id is denormalized from typed_memories so the KNN query
-    // can scope to a single character via a vec0 metadata filter.
-    db.execute_unprepared(&format!(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory_embeddings USING vec0( \
-             memory_embedding_id integer primary key, \
-             embedding float[{dim}] distance_metric=cosine, \
-             character_id text, \
-             model_name text, \
-             field text \
-         )"
-    ))
-    .await?;
-
-    db.execute_unprepared(&format!(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_tool_embeddings USING vec0( \
-             tool_embedding_id integer primary key, \
-             embedding float[{dim}] distance_metric=cosine, \
-             tool_name text \
-         )"
-    ))
-    .await?;
-
-    // Backfill the freshly-created tables. This only happens when the
-    // shadow tables did not exist before (first creation): after a
-    // dimension change the old-dimension vectors are incompatible with the
-    // new `float[N]` definition and are left out, requiring a re-embedding
-    // pass (logged below).
-    if needs_recreate && !existed_before {
-        db.execute_unprepared(
-            "INSERT INTO vec_memory_embeddings(memory_embedding_id, embedding, character_id, model_name, field) \
-             SELECT me.id, me.embedding, tm.character_id, me.model_name, me.field \
-             FROM memory_embeddings me \
-             INNER JOIN typed_memories tm ON tm.id = me.memory_item_id",
-        )
-        .await?;
-
-        db.execute_unprepared(
-            "INSERT INTO vec_tool_embeddings(tool_embedding_id, embedding, tool_name) \
-             SELECT id, embedding, tool_name FROM tool_embedding_index",
-        )
-        .await?;
-    } else if needs_recreate {
-        // Dimension change: the old vectors cannot be re-inserted into the
-        // recreated tables. The store remains usable (KNN simply returns no
-        // rows until re-embedding), which is strictly better than failing
-        // startup forever on a model switch.
+    if dimension_changed {
+        // Workspace chunk vectors are dimension-bound, so the base rows are
+        // dropped too: the indexer's unchanged check requires a positive
+        // chunk count, which forces a full re-embed of workspace files after
+        // a model switch instead of leaving them invisible to vector search.
+        db.execute_unprepared("DELETE FROM workspace_document_chunks")
+            .await?;
+        // The store remains usable (KNN simply returns no rows until
+        // re-embedding), which is strictly better than failing startup
+        // forever on a model switch.
         tracing::warn!(
             component = "ene-store",
             new_dimension = dim,
             "Embedding dimension changed; vec0 index recreated empty, \
-             re-embedding of existing memories/tools required"
+             re-embedding of existing memories/tools/documents required"
         );
     }
 
@@ -264,6 +248,27 @@ pub(crate) async fn ensure_vec0_index(
     .await?;
 
     Ok(())
+}
+
+/// Reads the stored `CREATE` statement of a vec0 shadow table, if any.
+async fn vec0_existing_sql(
+    db: &DatabaseConnection,
+    table: &str,
+) -> Result<Option<String>, EneMemoryError> {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            [table.into()],
+        ))
+        .await?;
+    Ok(match row {
+        Some(row) => Some(row.try_get_by_index::<String>(0).map_err(|e| {
+            EneMemoryError::MemoryStoreConnectionError(format!("read sqlite_master: {e}"))
+        })?),
+        None => None,
+    })
 }
 
 pub(crate) fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {

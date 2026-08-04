@@ -65,6 +65,21 @@ memory-approval-error = 承認エラー: { $error }
 ## /card コマンド
 card-loaded = キャラクターカードを読み込みました: { $name }
 
+## /workspace コマンド
+workspace-sync-started = ワークスペースインデックスの同期を開始しました。進捗は '/workspace status'、停止は '/workspace cancel' で行えます。
+workspace-sync-busy = ワークスペースの同期はすでに実行中です。
+workspace-cancel-sent = 実行中のワークスペース同期にキャンセルを要求しました。
+workspace-status-title = ワークスペースインデックス状態:
+workspace-status-disabled = ワークスペースRAGは無効です (rag.workspace.enabled)。
+workspace-status-no-folders = フォルダが設定されていません。スキャン・検索対象はありません。
+workspace-status-folders = 許可されたフォルダ:
+workspace-status-indexed = インデックス済み: ファイル { $files }、チャンク { $chunks }
+workspace-status-progress = 同期中 ({ $phase }): スキャン { $scanned }、登録 { $indexed }、スキップ { $skipped }、チャンク { $chunks }
+workspace-status-report = 前回の同期: 登録 { $indexed }、変更なし { $unchanged }、リネーム { $renamed }、削除 { $deleted }、スキップ { $skipped }、チャンク { $chunks } ({ $elapsed }秒)
+workspace-status-last-error = 前回の同期エラー: { $error }
+workspace-search-empty = 一致するワークスペース文書は見つかりませんでした。
+workspace-search-title = 一致するワークスペース文書:
+
 init-failed = 初期化に失敗しました: { $error }
 turn-failed = エラー: { $detail }
 runtime-error-no-character-card = キャラクターカードが見つからないか読み込めませんでした。
@@ -75,6 +90,7 @@ runtime-error-config = 設定エラー: { $detail }
 runtime-error-memory = メモリストアエラー: { $detail }
 runtime-error-mind = マインドエンジンエラー: { $detail }
 runtime-error-tool = ツールエラー: { $detail }
+runtime-error-workspace = ワークスペースインデックスエラー: { $detail }
 runtime-error-actor-busy = Ene は現在ほかのリクエストを処理中です。しばらくしてから再試行してください。
 runtime-error-store-required = スケジューラーにはメモリストアが必要です。設定で `store.enabled` を有効にしてください。
 runtime-error-ai-auth = AI プロバイダーの認証に失敗しました。API キーを確認してください。

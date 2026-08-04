@@ -17,7 +17,7 @@
     clippy::indexing_slicing,
     reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
 )]
-use ene_core::ActiveCommitmentPrompt;
+use ene_core::{ActiveCommitmentPrompt, WorkspaceChunkHit};
 
 use ene_config::UserPersona;
 
@@ -103,6 +103,8 @@ pub struct PackInput {
     pub style_examples: Vec<StyleExample>,
     /// Recalled typed memories.
     pub recalled: Vec<RecalledMemory>,
+    /// Retrieved workspace document chunks with citations.
+    pub workspace_documents: Vec<WorkspaceChunkHit>,
     /// Active commitments.
     pub commitments: Vec<ActiveCommitmentPrompt>,
     /// Affect summary line.
@@ -461,6 +463,17 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
         );
     }
 
+    if !input.workspace_documents.is_empty() {
+        let item_count = input.workspace_documents.len();
+        sections.push(
+            PromptSection::new(
+                PromptSectionKind::WorkspaceContext,
+                crate::prompt_packet::render_workspace_hits(&input.workspace_documents),
+            )
+            .with_item_count(item_count),
+        );
+    }
+
     if !input.commitments.is_empty() {
         sections.push(PromptSection::new(
             PromptSectionKind::ActiveCommitments,
@@ -749,6 +762,7 @@ mod tests {
 
     fn kernel_only_input(recalled: Vec<RecalledMemory>) -> PackInput {
         PackInput {
+            workspace_documents: vec![],
             platform_contract: None,
             identity_kernel: IdentityKernel {
                 name: "Ene".into(),
@@ -899,6 +913,7 @@ mod tests {
         let mut memory = sample_memory_with_id(1, MemoryKind::Episodic, 0.9);
         memory.item.content = "notes:\n- first\n- second".into();
         let input = PackInput {
+            workspace_documents: vec![],
             style_examples: vec![StyleExample {
                 text: "example with\n\nan internal blank line".into(),
                 intent: StyleIntent::Greeting,
@@ -923,9 +938,41 @@ mod tests {
     }
 
     #[test]
+    fn workspace_context_section_renders_citations() {
+        let budget = default_test_budget();
+        let input = PackInput {
+            workspace_documents: vec![ene_core::WorkspaceChunkHit {
+                chunk_index: 0,
+                root: "/roots/a".into(),
+                path: "/roots/a/guide.md".into(),
+                heading: "Installation".into(),
+                start_line: 10,
+                end_line: 24,
+                content: "run cargo build".into(),
+                similarity: 0.8,
+            }],
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &budget);
+        let section = packed
+            .packet
+            .section(PromptSectionKind::WorkspaceContext)
+            .expect("workspace section present");
+        assert_eq!(section.item_count, 1);
+        assert!(
+            section
+                .content
+                .contains("/roots/a/guide.md:10-24 [Installation]")
+        );
+        assert!(section.content.contains("run cargo build"));
+        assert!(section.kind.heading().is_some());
+    }
+
+    #[test]
     fn dropped_style_examples_zero_item_count() {
         let budget = ContextBudget::with_capacity(10);
         let input = PackInput {
+            workspace_documents: vec![],
             style_examples: vec![StyleExample {
                 text: "style filler ".repeat(80),
                 intent: StyleIntent::Greeting,
@@ -959,6 +1006,7 @@ mod tests {
         // survivor vector consistent with the rendered content.
         let budget = ContextBudget::with_capacity(10);
         let input = PackInput {
+            workspace_documents: vec![],
             // The platform contract is required, so packing never drops it;
             // its size alone keeps the total over the tiny budget even after
             // every droppable section is shed.
@@ -1008,6 +1056,7 @@ mod tests {
             post_history_instructions: None,
         };
         let input = PackInput {
+            workspace_documents: vec![],
             platform_contract: None,
             identity_kernel: kernel,
             style_examples: vec![StyleExample {
@@ -1069,6 +1118,7 @@ mod tests {
             post_history_instructions: None,
         };
         let input = PackInput {
+            workspace_documents: vec![],
             platform_contract: None,
             identity_kernel: kernel,
             style_examples: vec![],
@@ -1123,6 +1173,7 @@ mod tests {
         // still leaves room for the required kernel + one exchange + note.
         let budget = ContextBudget::with_capacity(80);
         let input = PackInput {
+            workspace_documents: vec![],
             authors_note: Some(note),
             history: vec![
                 HistoryEntry {
@@ -1192,6 +1243,7 @@ mod tests {
             post_history_instructions: None,
         };
         let input = PackInput {
+            workspace_documents: vec![],
             platform_contract: None,
             identity_kernel: kernel,
             style_examples: vec![],
@@ -1246,6 +1298,7 @@ mod tests {
         // so it survives a window that still fits it once the note is gone.
         let budget = ContextBudget::with_capacity(20);
         let input = PackInput {
+            workspace_documents: vec![],
             affect_summary: Some("mood=calm".into()),
             style_examples: vec![StyleExample {
                 text: "style ".repeat(40),
@@ -1289,6 +1342,7 @@ mod tests {
         // smaller than the assembled prompt.
         let budget = ContextBudget::with_capacity(5);
         let input = PackInput {
+            workspace_documents: vec![],
             platform_contract: Some("platform ".repeat(100)),
             affect_summary: Some("mood ".repeat(100)),
             scene_summary: Some("scene ".repeat(100)),
@@ -1343,6 +1397,7 @@ mod tests {
         // ActiveCommitments (60) outranks StyleExamples (20).
         let budget = ContextBudget::with_capacity(30);
         let input = PackInput {
+            workspace_documents: vec![],
             commitments: vec![sample_commitment()],
             style_examples: vec![StyleExample {
                 text: "style ".repeat(60),
@@ -1397,6 +1452,7 @@ mod tests {
         let budget = ContextBudget::with_capacity(60);
         let history = exchanges(5); // 10 long messages: far over budget
         let input = PackInput {
+            workspace_documents: vec![],
             recalled: vec![sample_memory(MemoryKind::Episodic, 0.9, "important memory")],
             history: history.clone(),
             compression_pending: true,
@@ -1442,6 +1498,7 @@ mod tests {
         let budget = ContextBudget::with_capacity(15);
         let history = exchanges(1); // exactly the floor: 2 messages
         let input = PackInput {
+            workspace_documents: vec![],
             recalled: vec![sample_memory(
                 MemoryKind::Episodic,
                 0.9,
@@ -1481,6 +1538,7 @@ mod tests {
         let source = exchanges(5);
         let packed = pack_prompt(
             PackInput {
+                workspace_documents: vec![],
                 history: source.clone(),
                 compression_pending: true,
                 ..kernel_only_input(vec![])
@@ -1511,6 +1569,7 @@ mod tests {
             .expect("fixed instant")
             .with_timezone(&chrono::Utc);
         let input = PackInput {
+            workspace_documents: vec![],
             commitments: vec![
                 ActiveCommitmentPrompt {
                     id: 1,
@@ -1554,6 +1613,7 @@ mod tests {
         // so even a tiny window keeps them while droppable sections fall.
         let budget = ContextBudget::with_capacity(10);
         let input = PackInput {
+            workspace_documents: vec![],
             lorebook: LorebookInjection {
                 before_char: vec!["BEFORE_ENTRY".into()],
                 after_char: vec!["AFTER_ENTRY".into()],
@@ -1584,6 +1644,7 @@ mod tests {
     #[test]
     fn lorebook_before_char_renders_before_kernel_in_messages() {
         let input = PackInput {
+            workspace_documents: vec![],
             lorebook: LorebookInjection {
                 before_char: vec!["LOREBEFORE_MARKER".into()],
                 after_char: vec!["LOREAFTER_MARKER".into()],
@@ -1636,6 +1697,7 @@ mod tests {
             },
         ];
         let input = PackInput {
+            workspace_documents: vec![],
             history,
             lorebook: LorebookInjection {
                 before_char: vec![],
@@ -1693,6 +1755,7 @@ mod tests {
             content: "only".into(),
         }];
         let input = PackInput {
+            workspace_documents: vec![],
             history,
             lorebook: LorebookInjection {
                 before_char: vec![],
@@ -1733,6 +1796,7 @@ mod tests {
         // trimming rather than overflowing the budget.
         let budget = ContextBudget::with_capacity(20);
         let input = PackInput {
+            workspace_documents: vec![],
             history: vec![
                 HistoryEntry {
                     role: ene_ai::Role::User,

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use ene_config::{CharacterCardV3, PromptLibrary};
-use ene_core::MemoryPort;
+use ene_core::{MemoryPort, WorkspaceChunkHit, WorkspaceSearchQuery};
 use tracing::Instrument;
 
 use crate::character::{CharacterProcessor, KernelContext, build_lorebook_injection};
@@ -617,11 +617,14 @@ impl CognitionEngine {
             ctx.greeting_index,
         );
 
+        let workspace_documents = search_workspace_context(&ctx).await;
+
         let pack_input = PackInput {
             platform_contract,
             identity_kernel: kernel,
             style_examples,
             recalled,
+            workspace_documents,
             commitments,
             affect_summary,
             character_state_note: Some(prompts.system().affect_pre_utterance_note.clone()),
@@ -1015,6 +1018,63 @@ fn build_output_contract(card: &CharacterCardV3, phi: Option<&str>, lang: &str) 
     contract
 }
 
+/// Retrieves workspace document hits for prompt injection.
+///
+/// Best-effort context: a missing root, a stale index, or a store error
+/// degrades to an empty section (logged) instead of failing the turn, so a
+/// broken document index can never block a conversation.
+async fn search_workspace_context(ctx: &TurnContext<'_>) -> Vec<WorkspaceChunkHit> {
+    let (Some(port), Some(embedder), Some(embedding)) =
+        (ctx.workspace, ctx.embedder, ctx.query_embedding)
+    else {
+        return Vec::new();
+    };
+    let config = ene_config::get_global_config()
+        .get_section::<ene_rag::WorkspaceRagConfig>()
+        .unwrap_or_default();
+    if !config.enabled || config.folders.is_empty() {
+        return Vec::new();
+    }
+
+    let mut allowed_roots = Vec::with_capacity(config.folders.len());
+    for folder in &config.folders {
+        match tokio::fs::canonicalize(folder).await {
+            Ok(canonical) => allowed_roots.push(canonical.to_string_lossy().into_owned()),
+            Err(error) => {
+                tracing::warn!(
+                    component = "WorkspaceRag",
+                    folder = %folder,
+                    error = %error,
+                    "Configured workspace folder not found; skipping it for this turn"
+                );
+            }
+        }
+    }
+    if allowed_roots.is_empty() {
+        return Vec::new();
+    }
+
+    let query = WorkspaceSearchQuery {
+        query_text: ctx.user_input,
+        embedding: Some(embedding),
+        model_name: embedder.model_name(),
+        allowed_roots: &allowed_roots,
+        top_k: config.top_k,
+        min_similarity: config.min_similarity,
+    };
+    match port.search_workspace(&query).await {
+        Ok(hits) => hits.into_iter().take(config.final_n).collect(),
+        Err(error) => {
+            tracing::warn!(
+                component = "WorkspaceRag",
+                error = %error,
+                "Workspace document search failed; injecting no document context"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// Renders `extensions.ene.ng_expressions` as a localized prohibition block.
 fn build_ng_contract(card: &CharacterCardV3, lang: &str) -> Option<String> {
     let phrases = card
@@ -1290,6 +1350,7 @@ mod turn_id_tests {
             history: &[],
             greeting_index: None,
             store: None,
+            workspace: None,
             query_embedding: None,
             embedder: None,
             llm_provider: None,
@@ -1364,6 +1425,7 @@ mod turn_id_tests {
             history: &[],
             greeting_index: None,
             store: None,
+            workspace: None,
             query_embedding: None,
             embedder: None,
             llm_provider: None,

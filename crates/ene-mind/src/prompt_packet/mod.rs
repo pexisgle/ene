@@ -6,7 +6,7 @@ pub use section::{PromptSection, PromptSectionKind};
 
 use chrono::{DateTime, Utc};
 use ene_ai::{LlmMessage, UserMessagePart};
-use ene_core::{ActiveCommitmentPrompt, MemoryKind, MemorySource};
+use ene_core::{ActiveCommitmentPrompt, MemoryKind, MemorySource, WorkspaceChunkHit};
 
 use crate::lifecycle::{HistoryEntry, PromptPacketMeta};
 use crate::recall::{RecallReason, RecalledMemory};
@@ -186,6 +186,28 @@ pub fn render_commitments_block(
         .map(|line| format!("- {line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Render workspace document hits as a citation block.
+///
+/// Each hit carries its source location (`path:start-end`), the nearest
+/// heading, and the chunk text so the model can ground statements in the
+/// indexed file.
+pub fn render_workspace_hits(hits: &[WorkspaceChunkHit]) -> String {
+    hits.iter()
+        .map(|hit| {
+            let citation = if hit.heading.is_empty() {
+                format!("- {}:{}-{}", hit.path, hit.start_line, hit.end_line)
+            } else {
+                format!(
+                    "- {}:{}-{} [{}]",
+                    hit.path, hit.start_line, hit.end_line, hit.heading
+                )
+            };
+            format!("{citation}\n{}", hit.content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Human-readable deadline expression for a single commitment, or `None` when

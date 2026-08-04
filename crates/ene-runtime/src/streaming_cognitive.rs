@@ -204,6 +204,9 @@ fn build_turn_context<'a>(
         store: mem_store
             .as_ref()
             .map(|s| s.as_ref() as &dyn ene_core::MemoryPort),
+        workspace: mem_store
+            .as_ref()
+            .map(|s| s.as_ref() as &dyn ene_core::WorkspaceDocumentPort),
         query_embedding,
         embedder,
         llm_provider: Some(provider.clone()),
