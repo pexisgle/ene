@@ -205,7 +205,13 @@ impl ArbiterReason {
 #[derive(Debug, Clone)]
 pub enum ArbiterAction {
     /// Insert a new typed memory.
-    Persist(NewMemoryItem),
+    Persist {
+        /// New memory payload.
+        item: NewMemoryItem,
+        /// Outcome rating of the interaction that produced this decision
+        /// (-1.0 negative ..= 1.0 positive), derived from turn affect valence.
+        outcome_rating: Option<f32>,
+    },
     /// Do not persist or modify anything.
     Ignore,
     /// Mark an existing memory as user-deleted.
@@ -219,6 +225,9 @@ pub enum ArbiterAction {
         new_item: NewMemoryItem,
         /// ID of the memory being replaced.
         superseded_id: i64,
+        /// Outcome rating of the interaction that produced this decision
+        /// (-1.0 negative ..= 1.0 positive), derived from turn affect valence.
+        outcome_rating: Option<f32>,
     },
     /// Mark an existing memory as disputed.
     MarkDisputed {
@@ -435,7 +444,10 @@ impl MemoryArbiter {
         let new_item = candidate_to_new_item(&candidate, ctx);
         CandidateDecision {
             candidate,
-            action: ArbiterAction::Persist(new_item),
+            action: ArbiterAction::Persist {
+                item: new_item,
+                outcome_rating: Some(ctx.affect_valence),
+            },
             reason: ArbiterReason::new(
                 ArbiterReasonCode::ValidNewMemory,
                 "candidate passed validation",
@@ -618,6 +630,7 @@ impl MemoryArbiter {
                 action: ArbiterAction::Supersede {
                     new_item,
                     superseded_id: existing_id,
+                    outcome_rating: Some(ctx.affect_valence),
                 },
                 reason: ArbiterReason::new(
                     ArbiterReasonCode::ToolFailureSupersede,
@@ -753,6 +766,7 @@ impl MemoryArbiter {
                 action: ArbiterAction::Supersede {
                     new_item,
                     superseded_id: existing_id,
+                    outcome_rating: Some(ctx.affect_valence),
                 },
                 reason: ArbiterReason::new(supersede_code, detail),
             });
@@ -794,7 +808,7 @@ impl MemoryArbiter {
         // outcome accounting (AskConfirmationLater arm) stays correct.
         let decision = if ctx.options.require_approval {
             match &decision.action {
-                ArbiterAction::Persist(_) => CandidateDecision {
+                ArbiterAction::Persist { .. } => CandidateDecision {
                     candidate: decision.candidate.clone(),
                     action: ArbiterAction::AskConfirmationLater {
                         existing_memory_id: None,
@@ -824,7 +838,10 @@ impl MemoryArbiter {
             decision.clone()
         };
         match &decision.action {
-            ArbiterAction::Persist(item) => {
+            ArbiterAction::Persist {
+                item,
+                outcome_rating,
+            } => {
                 let id = store
                     .insert_typed_memory(item)
                     .await
@@ -833,12 +850,13 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: Some(id),
                     updated_existing: false,
-                    outcome_rating: Some(affect_valence),
+                    outcome_rating: *outcome_rating,
                 })
             }
             ArbiterAction::Supersede {
                 new_item,
                 superseded_id,
+                outcome_rating,
             } => {
                 let id = store
                     .supersede_typed_memory(new_item, *superseded_id)
@@ -848,7 +866,7 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: Some(id),
                     updated_existing: true,
-                    outcome_rating: Some(affect_valence),
+                    outcome_rating: *outcome_rating,
                 })
             }
             ArbiterAction::MarkUserDeleted { memory_id } => {
@@ -1511,7 +1529,7 @@ mod tests {
             MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &ctx(turn)).await;
         assert!(matches!(
             decision_action(&decisions),
-            ArbiterAction::Persist(_)
+            ArbiterAction::Persist { .. }
         ));
         assert_eq!(decisions[0].reason.code, ArbiterReasonCode::ValidNewMemory);
     }
@@ -1685,7 +1703,7 @@ mod tests {
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
         assert!(matches!(
             decision_action(&decisions),
-            ArbiterAction::Persist(_)
+            ArbiterAction::Persist { .. }
         ));
     }
 
@@ -1715,7 +1733,7 @@ mod tests {
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
         assert!(matches!(
             decision_action(&decisions),
-            ArbiterAction::Persist(_)
+            ArbiterAction::Persist { .. }
         ));
     }
 
@@ -2012,7 +2030,10 @@ mod tests {
         let decisions = vec![
             CandidateDecision {
                 candidate: candidate.clone(),
-                action: ArbiterAction::Persist(persist_item),
+                action: ArbiterAction::Persist {
+                    item: persist_item,
+                    outcome_rating: Some(0.0),
+                },
                 reason: ArbiterReason::new(ArbiterReasonCode::ValidNewMemory, "first succeeds"),
             },
             CandidateDecision {
@@ -2041,6 +2062,7 @@ mod tests {
                         commitment_id: None,
                     },
                     superseded_id: 999_999,
+                    outcome_rating: Some(0.0),
                 },
                 reason: ArbiterReason::new(
                     ArbiterReasonCode::ContradictionSupersede,
@@ -2093,7 +2115,10 @@ mod tests {
         };
         let decisions = MemoryArbiter::evaluate_all(&[first, second], &[], &ctx(turn)).await;
         assert_eq!(decisions.len(), 2);
-        assert!(matches!(&decisions[0].action, ArbiterAction::Persist(_)));
+        assert!(matches!(
+            &decisions[0].action,
+            ArbiterAction::Persist { .. }
+        ));
         assert!(matches!(decisions[1].action, ArbiterAction::Ignore));
         assert_eq!(decisions[1].reason.code, ArbiterReasonCode::BatchDuplicate);
     }
@@ -2524,7 +2549,7 @@ mod tests {
         assert!(applied[0].inserted_id.is_some());
         assert!(matches!(
             applied[0].decision.action,
-            ArbiterAction::Persist(_)
+            ArbiterAction::Persist { .. }
         ));
 
         let id = applied[0].inserted_id.unwrap();
@@ -2558,7 +2583,7 @@ mod tests {
         assert_eq!(applied.len(), 1);
         assert!(matches!(
             applied[0].decision.action,
-            ArbiterAction::Persist(_)
+            ArbiterAction::Persist { .. }
         ));
         let first_id = applied[0].inserted_id.expect("persisted id");
 
@@ -2633,6 +2658,32 @@ mod tests {
             applied[0].outcome_rating,
             Some(0.75),
             "outcome_rating must mirror the turn affect valence"
+        );
+    }
+
+    /// The rating is stamped on the action itself (not only on the applied
+    /// result), so deferred/logged decisions carry the evaluation too.
+    #[tokio::test]
+    async fn persist_action_carries_outcome_rating() {
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let arbiter_ctx = ArbiterContext {
+            affect_valence: -0.4,
+            ..ctx(turn)
+        };
+        let decisions =
+            MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &arbiter_ctx).await;
+
+        let ArbiterAction::Persist { outcome_rating, .. } = decision_action(&decisions) else {
+            panic!("expected Persist");
+        };
+        assert_eq!(
+            *outcome_rating,
+            Some(-0.4),
+            "the action must carry the turn affect valence as its outcome rating"
         );
     }
 
@@ -2979,7 +3030,7 @@ mod tests {
             tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
-        let ArbiterAction::Persist(item) = decision_action(&decisions) else {
+        let ArbiterAction::Persist { item, .. } = decision_action(&decisions) else {
             panic!("expected Persist");
         };
         assert!(item.valid_until.is_none());
@@ -2998,7 +3049,7 @@ mod tests {
         let mut candidate = sample_candidate(0.9);
         candidate.tags.push(INTERRUPTED_TAG.to_string());
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
-        let ArbiterAction::Persist(item) = decision_action(&decisions) else {
+        let ArbiterAction::Persist { item, .. } = decision_action(&decisions) else {
             panic!("expected Persist");
         };
         let expected = 0.9 - INTERRUPTED_CONFIDENCE_PENALTY;
@@ -3021,7 +3072,7 @@ mod tests {
         let mut candidate = sample_candidate(0.9);
         candidate.tags.push(INTERRUPTED_TAG.to_string());
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
-        let ArbiterAction::Persist(item) = decision_action(&decisions) else {
+        let ArbiterAction::Persist { item, .. } = decision_action(&decisions) else {
             panic!("expected Persist");
         };
         assert!(
@@ -3041,7 +3092,7 @@ mod tests {
         };
         let decisions =
             MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &ctx(turn)).await;
-        let ArbiterAction::Persist(item) = decision_action(&decisions) else {
+        let ArbiterAction::Persist { item, .. } = decision_action(&decisions) else {
             panic!("expected Persist");
         };
         assert!(
@@ -3295,7 +3346,7 @@ mod tests {
         // No false positive from the unrelated titles.
         assert!(matches!(
             decision_action(&decisions),
-            ArbiterAction::Persist(_)
+            ArbiterAction::Persist { .. }
         ));
         // 10 distinct existing titles + the candidate title, all in one call.
         assert_eq!(embedder.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -3408,7 +3459,7 @@ mod tests {
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
         assert!(matches!(
             decision_action(&decisions),
-            ArbiterAction::Persist(_)
+            ArbiterAction::Persist { .. }
         ));
         assert_eq!(decisions[0].reason.code, ArbiterReasonCode::ValidNewMemory);
     }

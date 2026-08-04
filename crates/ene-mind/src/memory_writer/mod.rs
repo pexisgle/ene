@@ -292,11 +292,13 @@ impl MemoryWriter {
                         )
                         .await?;
                     record_arbiter_outcomes(
+                        store,
                         input,
                         &applied,
                         &mut outcome_summary,
                         reflection.as_ref(),
-                    );
+                    )
+                    .await;
                 } else {
                     regular.push(candidate);
                 }
@@ -307,7 +309,14 @@ impl MemoryWriter {
                     store, &regular, &base_ctx, &sync_ctx,
                 )
                 .await?;
-                record_arbiter_outcomes(input, &applied, &mut outcome_summary, reflection.as_ref());
+                record_arbiter_outcomes(
+                    store,
+                    input,
+                    &applied,
+                    &mut outcome_summary,
+                    reflection.as_ref(),
+                )
+                .await;
             }
         }
 
@@ -492,7 +501,8 @@ struct ArbiterOutcomeSummary {
     other: usize,
 }
 
-fn record_arbiter_outcomes(
+async fn record_arbiter_outcomes(
+    store: &dyn MemoryPort,
     input: &PostTurnInput<'_>,
     applied: &[crate::memory_writer::AppliedDecision],
     summary: &mut ArbiterOutcomeSummary,
@@ -500,10 +510,18 @@ fn record_arbiter_outcomes(
 ) {
     for outcome in applied {
         if let Some(pipeline) = reflection {
-            pipeline.record_outcome(outcome);
+            pipeline
+                .record_outcome(
+                    store,
+                    input.character_id,
+                    input.user_id,
+                    input.source_turn,
+                    outcome,
+                )
+                .await;
         }
         match &outcome.decision.action {
-            crate::memory_writer::ArbiterAction::Persist(_)
+            crate::memory_writer::ArbiterAction::Persist { .. }
             | crate::memory_writer::ArbiterAction::Supersede { .. } => {
                 summary.persisted = summary.persisted.saturating_add(1);
                 tracing::debug!(
