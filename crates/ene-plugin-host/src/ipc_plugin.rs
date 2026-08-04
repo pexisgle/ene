@@ -1071,6 +1071,43 @@ impl IpcPluginConnection {
         }
     }
 
+    /// Sends a `SynthesizeSpeech` request and awaits the result.
+    ///
+    /// Returns the base64-encoded audio bytes and the audio format echoed by
+    /// the plugin. The caller decodes the payload; this layer only
+    /// correlates the response.
+    pub async fn synthesize_speech(
+        &self,
+        request_id: String,
+        provider_kind: String,
+        provider_config: serde_json::Value,
+        text: String,
+        voice: String,
+        format: String,
+    ) -> Result<(String, String), PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::SynthesizeSpeech {
+                request_id,
+                provider_kind,
+                provider_config,
+                text,
+                voice,
+                format,
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::SpeechResult {
+                audio_base64,
+                format,
+                ..
+            } => Ok((audio_base64, format)),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to SynthesizeSpeech: {other:?}"
+            ))),
+        }
+    }
+
     /// Sends a graceful `Shutdown` request (best-effort; ignores errors).
     pub async fn shutdown(&self) {
         drop(self.send_request(&PluginIpcRequest::Shutdown).await);

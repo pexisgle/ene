@@ -21,6 +21,9 @@
 //! - [`IpcLlmProviderFactory`] — implements [`ene_ai::LlmProviderFactory`]
 //!   so plugin-provided LLM providers integrate with the global
 //!   [`LlmProviderRegistry`](ene_ai::LlmProviderRegistry).
+//! - [`IpcTtsProvider`] / [`IpcTtsProviderFactory`] — the TTS counterparts,
+//!   integrating plugin-provided TTS providers with
+//!   [`AudioProviderRegistry`](ene_ai::AudioProviderRegistry).
 //!
 //! ## Relationship to other crates
 //!
@@ -29,7 +32,9 @@
 //! - [`ene-plugin`](ene_plugin) — plugin authoring facade (used by plugin
 //!   binaries, not by the host).
 //! - [`ene-ai`](ene_ai) — `LlmProvider` / `LlmProviderFactory` traits that
-//!   [`IpcLlmProvider`] / [`IpcLlmProviderFactory`] implement.
+//!   [`IpcLlmProvider`] / [`IpcLlmProviderFactory`] implement, and the
+//!   `TtsProvider` / `TtsProviderFactory` traits that [`IpcTtsProvider`] /
+//!   [`IpcTtsProviderFactory`] implement.
 #![warn(missing_docs)]
 
 /// Host-side registry of plugin capability declarations and resolution.
@@ -52,6 +57,8 @@ pub mod health;
 pub mod ipc_plugin;
 /// IPC-backed LLM provider bridging to `ene_ai::LlmProvider`.
 pub mod ipc_provider;
+/// IPC-backed TTS provider bridging to `ene_ai::TtsProvider`.
+pub mod ipc_tts;
 /// Plugin host manager: process supervision and capability routing.
 pub mod manager;
 /// MCP server configuration types.
@@ -62,6 +69,10 @@ pub mod mcp_registry;
 pub mod redact;
 /// Tool registry trait, composite registry, and deferred call types.
 pub mod tool_registry;
+/// TTS provider factory backed by a plugin IPC connection.
+pub mod tts_factory;
+/// RIFF/WAVE decoder for plugin-delivered TTS audio.
+pub mod wav;
 
 /// Capability registry and requirement gate.
 pub use capability_registry::{
@@ -88,10 +99,12 @@ pub use health::{DisabledReason, PluginHealthEvent};
 pub use ipc_plugin::{IpcPluginConnection, SetConfigOutcome};
 /// IPC-backed LLM provider.
 pub use ipc_provider::IpcLlmProvider;
+/// IPC-backed TTS provider.
+pub use ipc_tts::IpcTtsProvider;
 /// Plugin host manager.
 pub use manager::{
     EmbeddingFactoriesByPlugin, EmbeddingFactoryHandle, LlmFactoriesByPlugin, LlmFactoryHandle,
-    PluginHostManager,
+    PluginHostManager, TtsFactoriesByPlugin, TtsFactoryHandle,
 };
 /// MCP server configuration types.
 pub use mcp_config::{McpServerConfig, McpTransport};
@@ -103,3 +116,5 @@ pub use redact::{redact_config, redact_config_unschematized};
 pub use tool_registry::{
     CompositeToolRegistry, DeferredCallResult, ToolRegistry, compute_tool_version_hash,
 };
+/// TTS provider factory for plugin-provided providers.
+pub use tts_factory::IpcTtsProviderFactory;

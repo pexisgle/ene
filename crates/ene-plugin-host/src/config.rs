@@ -98,6 +98,11 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // replaces).
     list.insert("llama-cpp".to_string(), PluginEntry::default());
 
+    // The VOICEVOX-compatible TTS provider plugin talks to a local engine
+    // over plain HTTP (no credentials); it is inert until
+    // `ai.tts.provider = "voicevox"` selects it.
+    list.insert("voicevox".to_string(), PluginEntry::default());
+
     list
 }
 

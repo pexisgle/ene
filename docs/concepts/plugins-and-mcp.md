@@ -17,6 +17,7 @@ Ene Host Application (ene-runtime)
         │     ├── ene-plugin-anthropic (Anthropic LLM Provider Plugin)
         │     ├── ene-plugin-openai    (OpenAI-Compatible Provider Plugin)
         │     ├── ene-plugin-llama-cpp (Local GGUF Provider Plugin)
+        │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS Provider Plugin)
         │     ├── ene-plugin-app       (GUI Launcher Tool)
         │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
         │     ├── ene-plugin-calc      (Calculation Tool)
@@ -93,6 +94,17 @@ The field is `#[serde(default)]`, like every other field added to this wire prot
 ### Host-side enforcement
 
 `ene-plugin-host`'s `IpcLlmProvider` (`crates/ene-plugin-host/src/ipc_provider.rs`) enforces the declared hint with a `ConcurrencyLimiter`: a `tokio::sync::Semaphore` sized to `max_in_flight`, plus up to `queue_depth` callers allowed to wait for a permit. A request beyond both bounds fails fast with `LlmProviderError::Busy` rather than growing the wait queue without limit — the same fail-fast-over-queue-forever discipline `ene-infer` applies on the local-inference side, applied here at the plugin IPC boundary. The limiter is built once per (plugin, provider kind) in `IpcLlmProviderFactory` and shared across every provider instance created for that pair, since a fresh `IpcLlmProvider` is built per call. For a streaming request, the acquired permit is held for the stream's entire lifetime and releases automatically when the stream is dropped — whether it completed naturally or was cancelled mid-flight.
+
+TTS provider plugins follow the same discipline: `ene-plugin-host`'s
+`IpcTtsProvider` / `IpcTtsProviderFactory` (`ipc_tts.rs` / `tts_factory.rs`)
+implement `ene_ai::TtsProvider` / `TtsProviderFactory` so a plugin's
+`tts_providers` capability registers in the global `AudioProviderRegistry`,
+keyed by its `TtsProviderSpec.kind` (e.g. `"voicevox"`, selected with
+`ai.tts.provider`). A synthesize call is one `SynthesizeSpeech` IPC round-trip
+returning a whole audio file (WAV); the host decodes it to PCM and slices it
+into `TtsChunk`s, preserving the `TtsProvider::synthesize_stream` contract.
+The `voicevox` plugin additionally spawns and supervises a local
+VOICEVOX-compatible engine binary in managed mode (`auto_start: true`).
 
 ### Local-inference plugin authors: the same discipline, in-process
 

@@ -2893,6 +2893,7 @@ name = "ene-plugin-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.0",
  "blake3",
  "dashmap",
  "ene-ai",
