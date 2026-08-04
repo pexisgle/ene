@@ -2828,6 +2828,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-elevenlabs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.0",
+ "ene-plugin",
+ "futures",
+ "http",
+ "rand 0.10.2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ene-plugin-fs"
 version = "0.1.0"
 dependencies = [
