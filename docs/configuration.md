@@ -854,7 +854,7 @@ Settings:
 | `rate` | `+0%` | Prosody rate adjustment (e.g. `+10%`, `-10%`). |
 | `pitch` | `+0Hz` | Prosody pitch adjustment (e.g. `+5Hz`, `-5Hz`). |
 | `volume` | `+0%` | Prosody volume adjustment (e.g. `+10%`, `-10%`). |
-| `max_retries` | `3` | Reconnect attempts per text chunk, with exponential backoff (0–10). |
+| `max_retries` | `3` | Reconnect attempts for the whole synthesize request (shared across text chunks), with exponential backoff (0–10). |
 | `endpoint_url` | `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1` | WebSocket endpoint; must not carry a query string. |
 
 The connection mimics the Edge Read Aloud extension (Chrome/Edge user agent,
@@ -863,7 +863,8 @@ extension `Origin`, `Sec-MS-GEC` token) and requests
 whitespace/UTF-8/XML-entity-safe boundaries and synthesized chunk by chunk
 over the same connection; the plugin decodes the MP3 stream and returns WAV
 audio (24 kHz mono). If the connection drops, the current chunk is retried
-with exponential backoff up to `max_retries` times.
+with exponential backoff, up to `max_retries` times in total per request
+(the budget is shared across chunks).
 
 Changing `ai.tts.provider` itself (e.g. switching from `voicevox` to
 `edge-tts`) takes effect at the next startup: the active provider is built

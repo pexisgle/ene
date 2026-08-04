@@ -64,7 +64,7 @@ impl ene_plugin::ConfigurablePlugin for EdgeTtsPlugin {
                     "minimum": 0,
                     "maximum": 10,
                     "default": 3,
-                    "description": "Reconnect attempts per chunk with exponential backoff"
+                    "description": "Reconnect attempts per synthesize request (shared across chunks) with exponential backoff"
                 },
                 "endpoint_url": {
                     "type": "string",
@@ -98,7 +98,7 @@ impl TtsPlugin for EdgeTtsPlugin {
                 "edge-tts only emits wav audio; requested format: {format}"
             )));
         }
-        let config = EdgeTtsConfig::from_value(config)?.with_voice(&voice);
+        let config = EdgeTtsConfig::from_value(config)?.with_voice(&voice)?;
         let chunks = chunk_text(&escape_xml(&sanitize(&text)));
         if chunks.is_empty() {
             return Err(PluginError::provider(

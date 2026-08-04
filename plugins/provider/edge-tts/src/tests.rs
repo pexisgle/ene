@@ -23,8 +23,8 @@ use tokio_tungstenite::{WebSocketStream, accept_async};
 use crate::audio::decode_mp3;
 use crate::plugin::EdgeTtsPlugin;
 
-/// Real Edge output captured from the service (MPEG-2 Layer III, 24 kHz
-/// mono, 48 kbps); 12 frames = `13_824` samples.
+/// Real Edge output captured from the service (Layer III, 24 kHz mono,
+/// 48 kbps CBR); 9 decodable frames = `5_184` samples.
 const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/edge-tts-tone.mp3");
 
 const KIND: &str = "edge-tts";
@@ -185,22 +185,90 @@ async fn turn_end_without_audio_is_no_audio_error() {
 }
 
 #[tokio::test]
-async fn http_4xx_is_rejected_without_retry() {
+async fn http_404_is_rejected_without_retry() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("address");
     tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept");
         use tokio::io::AsyncWriteExt;
         stream
-            .write_all(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n")
+            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
             .await
             .expect("write");
     });
 
     let err = synthesize_with_endpoint(&addr, "こんにちは")
         .await
-        .expect_err("rejected");
-    assert!(err.to_string().contains("403"), "{err}");
+        .expect_err("not found");
+    assert!(err.to_string().contains("404"), "{err}");
+}
+
+#[tokio::test]
+async fn http_429_is_retried() {
+    let connections = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("address");
+    let count = Arc::clone(&connections);
+    tokio::spawn(async move {
+        for connection in 0..2 {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            count.fetch_add(1, Ordering::SeqCst);
+            if connection == 0 {
+                use tokio::io::AsyncWriteExt;
+                stream
+                    .write_all(b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n")
+                    .await
+                    .expect("write");
+                continue;
+            }
+            let ws = accept_async(stream).await.expect("handshake");
+            serve_chunks(ws, 1).await;
+        }
+    });
+
+    let wav = synthesize_with_endpoint(&addr, "こんにちは")
+        .await
+        .expect("synthesis after 429 retry");
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
+    assert_eq!(&wav[..4], b"RIFF");
+}
+
+#[tokio::test]
+async fn http_403_retries_after_clock_skew_correction() {
+    let connections = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("address");
+    let count = Arc::clone(&connections);
+    tokio::spawn(async move {
+        for connection in 0..2 {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            count.fetch_add(1, Ordering::SeqCst);
+            if connection == 0 {
+                use tokio::io::AsyncWriteExt;
+                let date = chrono::Utc::now()
+                    .format("%a, %d %b %Y %H:%M:%S GMT")
+                    .to_string();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 403 Forbidden\r\ndate: {date}\r\ncontent-length: 0\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("write");
+                continue;
+            }
+            let ws = accept_async(stream).await.expect("handshake");
+            serve_chunks(ws, 1).await;
+        }
+    });
+
+    let wav = synthesize_with_endpoint(&addr, "こんにちは")
+        .await
+        .expect("synthesis after 403 retry");
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
+    assert_eq!(&wav[..4], b"RIFF");
 }
 
 #[tokio::test]

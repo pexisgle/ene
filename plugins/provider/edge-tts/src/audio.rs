@@ -6,6 +6,9 @@ use crate::error::EdgeError;
 /// `ene-plugin-host` (`wav::MAX_WAV_BYTES`), so this plugin never emits a
 /// payload the host would reject.
 pub const MAX_WAV_BYTES: usize = 32 * 1024 * 1024;
+/// RIFF/WAVE header size; counts against [`MAX_WAV_BYTES`] so the emitted
+/// file never exceeds the host's cap.
+const WAV_HEADER_BYTES: usize = 44;
 
 /// Cap on accumulated MP3 bytes per synthesis request; the 48 kbps Edge
 /// stream produces ~6 KB/s, so this is far above any legitimate request
@@ -61,7 +64,7 @@ pub fn decode_mp3(mp3: &[u8]) -> Result<DecodedPcm, EdgeError> {
                 }
             }
         }
-        if pcm.len() * 4 > MAX_WAV_BYTES {
+        if pcm.len().saturating_mul(4).saturating_add(WAV_HEADER_BYTES) > MAX_WAV_BYTES {
             return Err(EdgeError::TooLarge { max: MAX_WAV_BYTES });
         }
     }
@@ -82,7 +85,7 @@ pub fn encode_wav(pcm: &[f32], sample_rate: u32) -> Result<Vec<u8>, EdgeError> {
         .len()
         .checked_mul(4)
         .ok_or(EdgeError::TooLarge { max: MAX_WAV_BYTES })?;
-    if data_len > MAX_WAV_BYTES {
+    if data_len.saturating_add(WAV_HEADER_BYTES) > MAX_WAV_BYTES {
         return Err(EdgeError::TooLarge { max: MAX_WAV_BYTES });
     }
     let mut wav = Vec::with_capacity(44 + data_len);
@@ -141,6 +144,16 @@ mod tests {
     #[test]
     fn rejects_pcm_over_cap() {
         let pcm = vec![0f32; MAX_WAV_BYTES / 4 + 1];
+        let err = encode_wav(&pcm, 24_000).expect_err("over cap");
+        assert!(matches!(err, EdgeError::TooLarge { .. }));
+    }
+
+    #[test]
+    fn allows_wav_up_to_the_exact_host_cap() {
+        let pcm = vec![0f32; (MAX_WAV_BYTES - WAV_HEADER_BYTES) / 4];
+        let wav = encode_wav(&pcm, 24_000).expect("at cap");
+        assert_eq!(wav.len(), MAX_WAV_BYTES);
+        let pcm = vec![0f32; (MAX_WAV_BYTES - WAV_HEADER_BYTES) / 4 + 1];
         let err = encode_wav(&pcm, 24_000).expect_err("over cap");
         assert!(matches!(err, EdgeError::TooLarge { .. }));
     }

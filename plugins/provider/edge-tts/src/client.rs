@@ -8,6 +8,7 @@
 //! arrives as binary frames (`Path: audio`, `Content-Type: audio/mpeg`)
 //! followed by a `Path:turn.end` text frame.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::{SinkExt, StreamExt};
@@ -33,7 +34,9 @@ const TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const SEC_MS_GEC_VERSION: &str = "1-143.0.3650.75";
 const USER_AGENT_VALUE: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
-const ORIGIN_VALUE: &str = "chrome-extension://jdiccldimpdaibocbdbgnbgflacejaoo";
+/// Origin of the Edge Read Aloud extension. Upstream edge-tts bumps this ID
+/// when the service starts rejecting the older fingerprint; keep in sync.
+const ORIGIN_VALUE: &str = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
 
 /// Seconds between the Unix epoch and the Windows FILETIME epoch; the
 /// `Sec-MS-GEC` token is hashed in FILETIME units.
@@ -47,9 +50,15 @@ const MESSAGE_TIMEOUT: Duration = Duration::from_mins(1);
 const BACKOFF_BASE_MS: u64 = 250;
 const BACKOFF_MAX_MS: u64 = 5_000;
 
+/// Clock skew between the service's `Date` header and this machine, applied
+/// when generating `Sec-MS-GEC` tokens. Corrected on HTTP 403, which the
+/// service sends when the token misses its 5-minute validity window.
+static CLOCK_SKEW_SECS: AtomicI64 = AtomicI64::new(0);
+
 /// Synthesizes every chunk over one connection, reconnecting from the
 /// failed chunk with exponential backoff when a retryable transport error
-/// occurs. Returns the concatenated MP3 stream.
+/// occurs. The retry budget in `config.max_retries` is shared across all
+/// chunks of the request. Returns the concatenated MP3 stream.
 ///
 /// # Errors
 ///
@@ -171,7 +180,7 @@ fn ensure_path(endpoint: &str) -> String {
 fn speech_config() -> String {
     format!(
         "X-Timestamp:{}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n\
-         {{\"context\":{{\"synthesis\":{{\"audio\":{{\"metadataoptions\":{{\"sentenceBoundaryEnabled\":\"true\",\"wordBoundaryEnabled\":\"false\"}},\"outputFormat\":\"{OUTPUT_FORMAT}\"}}}}}}}}",
+         {{\"context\":{{\"synthesis\":{{\"audio\":{{\"metadataoptions\":{{\"sentenceBoundaryEnabled\":\"true\",\"wordBoundaryEnabled\":\"false\"}},\"outputFormat\":\"{OUTPUT_FORMAT}\"}}}}}}}}\r\n",
         date_to_string()
     )
 }
@@ -281,25 +290,62 @@ where
         .map_err(|e| EdgeError::Send(e.to_string()))
 }
 
-/// Maps a handshake failure to a typed error: HTTP 4xx means the request
-/// itself was rejected (not retryable), everything else is a transport
-/// failure (retryable).
+/// Maps a handshake failure to a typed error. 408/429 (rate limiting) are
+/// transport-level failures and retryable; 403 means the `Sec-MS-GEC` token
+/// was rejected, so the clock is re-synced from the response `Date` header
+/// and the error is retryable; any other 4xx is a permanent rejection.
 fn classify_connect_error(error: &WsError) -> EdgeError {
     match error {
         WsError::Http(response) if response.status().is_client_error() => {
-            EdgeError::Rejected(response.status().as_u16())
+            match response.status().as_u16() {
+                403 => {
+                    apply_server_clock_skew(response);
+                    EdgeError::Rejected(403)
+                }
+                408 | 429 => EdgeError::Connect(format!("HTTP {}", response.status().as_u16())),
+                status => EdgeError::Rejected(status),
+            }
         }
         other => EdgeError::Connect(other.to_string()),
     }
 }
 
+/// Corrects the process clock from the response `Date` header so the next
+/// `Sec-MS-GEC` token lands in the service's 5-minute window. A missing or
+/// unparseable date leaves the existing skew untouched; the retry still
+/// regenerates the token with a fresh `ConnectionId`.
+fn apply_server_clock_skew(response: &http::Response<Option<Vec<u8>>>) {
+    let Some(date) = response
+        .headers()
+        .get(http::header::DATE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return;
+    };
+    let Some(skew) = clock_skew_secs(date, unix_now_secs()) else {
+        return;
+    };
+    CLOCK_SKEW_SECS.store(skew, Ordering::Relaxed);
+}
+
+/// Difference in seconds between the server's `Date` header and the local
+/// clock; positive when the server is ahead.
+fn clock_skew_secs(server_date: &str, client_now_secs: u64) -> Option<i64> {
+    let server = chrono::DateTime::parse_from_rfc2822(server_date)
+        .ok()?
+        .timestamp();
+    Some(server - i64::try_from(client_now_secs).ok()?)
+}
+
 /// `Sec-MS-GEC` token: uppercase SHA-256 hex of
-/// `<FILETIME ticks floored to 5 minutes><TrustedClientToken>`.
+/// `<FILETIME ticks floored to 5 minutes><TrustedClientToken>`, computed
+/// from the clock-skew-corrected time.
 fn sec_ms_gec_token() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    sec_ms_gec_token_at(unix_now_secs(), CLOCK_SKEW_SECS.load(Ordering::Relaxed))
+}
+
+fn sec_ms_gec_token_at(now_secs: u64, skew_secs: i64) -> String {
+    let now = now_secs.saturating_add_signed(skew_secs);
     let ticks = (now.saturating_add(WIN_EPOCH_SECS) / 300 * 300) * 10_000_000;
     let mut hasher = Sha256::new();
     hasher.update(ticks.to_string());
@@ -310,9 +356,19 @@ fn sec_ms_gec_token() -> String {
 /// JavaScript-style UTC date string the service expects in
 /// `X-Timestamp` headers.
 fn date_to_string() -> String {
-    chrono::Utc::now()
-        .format("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
+    date_to_string_at(chrono::Utc::now())
+}
+
+fn date_to_string_at(now: chrono::DateTime<chrono::Utc>) -> String {
+    now.format("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
         .to_string()
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 async fn backoff(attempt: u32) {
@@ -320,4 +376,99 @@ async fn backoff(attempt: u32) {
         .saturating_mul(1u64 << attempt.min(5))
         .min(BACKOFF_MAX_MS);
     tokio::time::sleep(Duration::from_millis(delay)).await;
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "unit tests use expect for concise assertions"
+)]
+mod tests {
+    use super::*;
+    use http::Response;
+
+    /// 2026-08-05 01:23:45 UTC; golden token from the upstream python
+    /// edge-tts `DRM.generate_sec_ms_gec` algorithm.
+    const PINNED_NOW_SECS: u64 = 1_785_893_025;
+
+    #[test]
+    fn sec_ms_gec_token_matches_reference_implementation() {
+        assert_eq!(
+            sec_ms_gec_token_at(PINNED_NOW_SECS, 0),
+            "F9597B1DFDCF15DAD67B92BEAE1712C857F2627C368B6BCFDD09CF2307E5E140"
+        );
+    }
+
+    #[test]
+    fn sec_ms_gec_token_shifts_with_clock_skew() {
+        // +300 s moves the token into the next 5-minute window.
+        assert_ne!(
+            sec_ms_gec_token_at(PINNED_NOW_SECS, 0),
+            sec_ms_gec_token_at(PINNED_NOW_SECS, 300)
+        );
+    }
+
+    #[test]
+    fn date_to_string_matches_javascript_style() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-05T01:23:45Z")
+            .expect("parse")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            date_to_string_at(now),
+            "Wed Aug 05 2026 01:23:45 GMT+0000 (Coordinated Universal Time)"
+        );
+    }
+
+    #[test]
+    fn clock_skew_is_positive_when_server_ahead() {
+        assert_eq!(
+            clock_skew_secs("Wed, 05 Aug 2026 01:28:45 GMT", PINNED_NOW_SECS),
+            Some(300)
+        );
+        assert_eq!(
+            clock_skew_secs("Wed, 05 Aug 2026 01:23:45 GMT", PINNED_NOW_SECS),
+            Some(0)
+        );
+        assert_eq!(clock_skew_secs("not a date", PINNED_NOW_SECS), None);
+    }
+
+    fn http_error(status: u16) -> WsError {
+        WsError::Http(Box::new(
+            Response::builder()
+                .status(status)
+                .body(None)
+                .expect("response"),
+        ))
+    }
+
+    #[test]
+    fn classifies_rate_limits_as_retryable_connect_errors() {
+        assert!(matches!(
+            classify_connect_error(&http_error(429)),
+            EdgeError::Connect(_)
+        ));
+        assert!(matches!(
+            classify_connect_error(&http_error(408)),
+            EdgeError::Connect(_)
+        ));
+    }
+
+    #[test]
+    fn classifies_other_4xx_as_permanent_rejections() {
+        assert!(matches!(
+            classify_connect_error(&http_error(404)),
+            EdgeError::Rejected(404)
+        ));
+        assert!(matches!(
+            classify_connect_error(&http_error(400)),
+            EdgeError::Rejected(400)
+        ));
+    }
+
+    #[test]
+    fn classifies_403_as_retryable() {
+        let err = classify_connect_error(&http_error(403));
+        assert!(matches!(err, EdgeError::Rejected(403)));
+        assert!(err.retryable());
+    }
 }

@@ -28,7 +28,8 @@ pub struct EdgeTtsConfig {
     pub pitch: String,
     /// Prosody volume adjustment (e.g. `+0%`, `+10%`).
     pub volume: String,
-    /// Reconnect attempts per synthesis request, with exponential backoff.
+    /// Reconnect attempts per synthesize request (shared across text
+    /// chunks), with exponential backoff.
     pub max_retries: u32,
     /// WebSocket endpoint; must not carry a query string.
     pub endpoint_url: String,
@@ -64,12 +65,22 @@ impl EdgeTtsConfig {
     }
 
     /// Applies a per-request voice override (`ai.tts.voice`).
-    #[must_use]
-    pub fn with_voice(mut self, voice: &str) -> Self {
-        if !voice.trim().is_empty() {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdgeError::Config`] when the override would break the SSML
+    /// voice attribute.
+    pub fn with_voice(mut self, voice: &str) -> Result<Self, EdgeError> {
+        let voice = voice.trim();
+        if !voice.is_empty() {
+            if !is_ssml_attribute_safe(voice) {
+                return Err(EdgeError::Config(format!(
+                    "voice must not contain SSML attribute-breaking characters, got {voice:?}"
+                )));
+            }
             self.voice = voice.to_string();
         }
-        self
+        Ok(self)
     }
 
     fn validate(&self) -> Result<(), EdgeError> {
@@ -78,6 +89,18 @@ impl EdgeTtsConfig {
         }
         if self.locale.trim().is_empty() {
             return Err(EdgeError::Config("locale must not be empty".to_string()));
+        }
+        if !is_ssml_attribute_safe(&self.voice) {
+            return Err(EdgeError::Config(format!(
+                "voice must not contain SSML attribute-breaking characters, got {:?}",
+                self.voice
+            )));
+        }
+        if !is_ssml_attribute_safe(&self.locale) {
+            return Err(EdgeError::Config(format!(
+                "locale must not contain SSML attribute-breaking characters, got {:?}",
+                self.locale
+            )));
         }
         if !is_signed_number(&self.rate, "%") {
             return Err(EdgeError::Config(format!(
@@ -110,6 +133,15 @@ impl EdgeTtsConfig {
         }
         Ok(())
     }
+}
+
+/// Voice names and locales are interpolated into single-quoted SSML
+/// attributes; characters that terminate the attribute or open markup would
+/// break the document, so they are rejected at config load.
+fn is_ssml_attribute_safe(value: &str) -> bool {
+    !value
+        .chars()
+        .any(|c| matches!(c, '\'' | '"' | '&' | '<' | '>'))
 }
 
 /// Matches the `[+-]\d+(%|Hz)` shapes the service accepts for prosody.
@@ -195,10 +227,33 @@ mod tests {
     fn voice_override_wins_when_non_empty() {
         let config = EdgeTtsConfig::default();
         assert_eq!(
-            config.clone().with_voice("en-US-GuyNeural").voice,
+            config
+                .clone()
+                .with_voice("en-US-GuyNeural")
+                .expect("safe")
+                .voice,
             "en-US-GuyNeural"
         );
-        assert_eq!(config.clone().with_voice("  ").voice, "ja-JP-NanamiNeural");
-        assert_eq!(config.with_voice("").voice, "ja-JP-NanamiNeural");
+        assert_eq!(
+            config.clone().with_voice("  ").expect("empty").voice,
+            "ja-JP-NanamiNeural"
+        );
+        assert_eq!(
+            config.with_voice("").expect("empty").voice,
+            "ja-JP-NanamiNeural"
+        );
+    }
+
+    #[test]
+    fn rejects_ssml_unsafe_voice_and_locale() {
+        let err = EdgeTtsConfig::from_value(json!({"voice": "ja-JP-O'Neural"}))
+            .expect_err("unsafe voice");
+        assert!(err.to_string().contains("voice"));
+        let err = EdgeTtsConfig::from_value(json!({"locale": "ja<JP"})).expect_err("unsafe locale");
+        assert!(err.to_string().contains("locale"));
+        let err = EdgeTtsConfig::default()
+            .with_voice("x' onmouseover='alert(1)")
+            .expect_err("unsafe override");
+        assert!(err.to_string().contains("voice"));
     }
 }

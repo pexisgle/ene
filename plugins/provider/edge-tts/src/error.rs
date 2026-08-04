@@ -12,7 +12,9 @@ pub enum EdgeError {
     /// Transport-level connection failure (DNS, TLS, TCP, HTTP 5xx/408/429).
     #[error("edge-tts connection failed: {0}")]
     Connect(String),
-    /// The service rejected the handshake or a request (HTTP 4xx).
+    /// The service rejected the handshake or a request (HTTP 4xx). `403`
+    /// signals a stale `Sec-MS-GEC` token and is retryable: the client
+    /// re-syncs its clock from the response `Date` header first.
     #[error("edge-tts service rejected the request: HTTP {0}")]
     Rejected(u16),
     /// Sending a request frame failed.
@@ -39,7 +41,10 @@ impl EdgeError {
     /// Whether retrying the whole request can plausibly succeed.
     #[must_use]
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::Connect(_) | Self::Send(_) | Self::Timeout)
+        matches!(
+            self,
+            Self::Connect(_) | Self::Send(_) | Self::Timeout | Self::Rejected(403)
+        )
     }
 }
 
