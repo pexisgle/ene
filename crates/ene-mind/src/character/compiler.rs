@@ -16,6 +16,7 @@ use ene_config::{
 };
 
 use super::kernel::IdentityKernel;
+use super::persona::PersonaFormatParser;
 use crate::context::estimate_tokens_language_aware;
 
 /// Fraction of the available context window the Identity Kernel may occupy.
@@ -129,6 +130,16 @@ impl CharacterCompiler {
         let data = &card.data;
         let char_name = data.get_character_name();
         let max_tokens = identity_kernel_budget_tokens(available_window);
+        let personality_persona = PersonaFormatParser::parse(&data.personality);
+        let description_persona = PersonaFormatParser::parse(&data.description);
+        // The personality field is authoritative; an empty personality falls
+        // back to a structured description so AliChat-style cards still get a
+        // dense core.
+        let primary_persona = if data.personality.trim().is_empty() {
+            description_persona.as_ref()
+        } else {
+            personality_persona.as_ref()
+        };
 
         // One shared context so every field expands identically; `{{pick}}`
         // therefore yields the same option in the personality, background, and
@@ -154,12 +165,21 @@ impl CharacterCompiler {
             format!("{phi}{reinforcement}")
         });
 
-        let core_personality = if !data.personality.trim().is_empty() {
-            expand_field(&data.personality, ctx)
-        } else if !data.description.trim().is_empty() {
-            truncate_chars(&expand_field(&data.description, ctx), 240)
-        } else {
-            String::from("helpful and consistent")
+        let core_personality = match primary_persona {
+            Some(persona) => {
+                if let Some(raw) = persona.personality.as_deref() {
+                    expand_field(raw, ctx)
+                } else if let Some(raw) = persona.description.as_deref() {
+                    truncate_chars(&expand_field(raw, ctx), 240)
+                } else {
+                    fallback_core_personality(&data.description, ctx)
+                }
+            }
+            None if !data.personality.trim().is_empty() => expand_field(&data.personality, ctx),
+            None if !data.description.trim().is_empty() => {
+                truncate_chars(&expand_field(&data.description, ctx), 240)
+            }
+            None => String::from("helpful and consistent"),
         };
 
         let ja = ene_config::resolve_language_alias(language) == "ja";
@@ -182,8 +202,16 @@ impl CharacterCompiler {
             format!("Name: {char_name}"),
             format!("Role: desktop companion living on {user_name}'s screen"),
             format!("Core personality: {core_personality}"),
-            format!("Speech style: {speech_style}"),
         ];
+        if let Some(persona) = primary_persona {
+            head_lines.extend(
+                persona
+                    .render_lines_excluding_core()
+                    .iter()
+                    .map(|line| expand_field(line, ctx)),
+            );
+        }
+        head_lines.push(format!("Speech style: {speech_style}"));
         if let Some(line) = render_relationship_tone(card, kernel_ctx.affinity, ja) {
             head_lines.push(line);
         }
@@ -208,10 +236,17 @@ impl CharacterCompiler {
             ));
         }
         if !data.personality.trim().is_empty() && !data.description.trim().is_empty() {
-            optional_sections.push(format!(
-                "## Background\n{}",
+            let background = if let Some(persona) = &description_persona {
+                persona
+                    .render_lines()
+                    .iter()
+                    .map(|line| expand_field(line, ctx))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
                 expand_field(&data.description, ctx)
-            ));
+            };
+            optional_sections.push(format!("## Background\n{background}"));
         }
         if !data.scenario.trim().is_empty() {
             optional_sections.push(format!(
@@ -244,6 +279,14 @@ impl CharacterCompiler {
             text,
             post_history_instructions: post_history,
         }
+    }
+}
+
+fn fallback_core_personality(description: &str, ctx: MacroContext<'_>) -> String {
+    if description.trim().is_empty() {
+        String::from("helpful and consistent")
+    } else {
+        truncate_chars(&expand_field(description, ctx), 240)
     }
 }
 
@@ -1415,5 +1458,223 @@ mod tests {
         assert!(!kernel.text.contains("Relationship tone"));
         assert!(!kernel.text.contains("Time-of-day behavior"));
         assert!(!kernel.text.contains("Scene behavior"));
+    }
+
+    const WPP_PERSONALITY: &str = r#"[character("Mira")
+{
+Age("23")
+Appearance("Tall", "Silver hair")
+Personality("Curious", "Warm")
+Mind("Analytical")
+Speech("Soft-spoken")
+Background("A lighthouse keeper who lives alone")
+}]"#;
+
+    #[test]
+    fn wpp_persona_compiles_to_dense_kernel() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Mira".into();
+        card.data.personality = WPP_PERSONALITY.into();
+        let kernel = CharacterCompiler::compile_with_context(
+            &card,
+            "User",
+            None,
+            None,
+            16_000,
+            "en",
+            KernelContext::default(),
+        );
+
+        assert!(kernel.text.contains("Core personality: Curious, Warm"));
+        assert!(kernel.text.contains("Appearance: Tall, Silver hair"));
+        assert!(kernel.text.contains("Mind: Analytical"));
+        assert!(kernel.text.contains("Speech pattern: Soft-spoken"));
+        assert!(
+            kernel
+                .text
+                .contains("Background: A lighthouse keeper who lives alone")
+        );
+        assert!(kernel.text.contains("Age: 23"));
+        assert!(
+            !kernel.text.contains("[character"),
+            "W++ wrapper syntax must not leak: {}",
+            kernel.text
+        );
+        assert!(
+            !kernel.text.contains("(\""),
+            "W++ attribute syntax must not leak: {}",
+            kernel.text
+        );
+    }
+
+    #[test]
+    fn wpp_persona_values_expand_macros() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Mira".into();
+        card.data.personality =
+            r#"[character("Mira"){Personality("Friends with {{user}}")}]"#.into();
+        let kernel = CharacterCompiler::compile_with_context(
+            &card,
+            "Alice",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
+
+        assert!(kernel.text.contains("Core personality: Friends with Alice"));
+        assert!(
+            !kernel.text.contains("{{user}}"),
+            "kernel must not leak a literal {{{{user}}}} placeholder: {}",
+            kernel.text
+        );
+    }
+
+    #[test]
+    fn alichat_description_compiles_dense_core_when_personality_empty() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Mira".into();
+        card.data.description = "Name: Mira\nPersonality: Curious and warm\nAppearance: Silver hair\nBackground: Lighthouse keeper".into();
+        let kernel = CharacterCompiler::compile_with_context(
+            &card,
+            "User",
+            None,
+            None,
+            16_000,
+            "en",
+            KernelContext::default(),
+        );
+
+        assert!(kernel.text.contains("Core personality: Curious and warm"));
+        assert!(kernel.text.contains("Appearance: Silver hair"));
+        assert!(kernel.text.contains("Background: Lighthouse keeper"));
+        assert_eq!(
+            kernel.text.matches("Name:").count(),
+            1,
+            "the persona Name attribute must not duplicate the kernel's own name line: {}",
+            kernel.text
+        );
+        assert!(
+            !kernel.text.contains("Name: Mira\nPersonality:"),
+            "raw AliChat block must not reach the kernel: {}",
+            kernel.text
+        );
+    }
+
+    #[test]
+    fn yaml_block_scalar_marker_does_not_reach_core_personality() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Mira".into();
+        card.data.description = "name: Mira\ndescription: |\n  A lighthouse keeper.".into();
+        let kernel = CharacterCompiler::compile_with_context(
+            &card,
+            "User",
+            None,
+            None,
+            16_000,
+            "en",
+            KernelContext::default(),
+        );
+
+        assert!(
+            kernel
+                .text
+                .contains("Core personality: A lighthouse keeper.")
+        );
+        assert!(
+            !kernel.text.contains("description: |"),
+            "block-scalar marker must not reach the kernel: {}",
+            kernel.text
+        );
+    }
+
+    #[test]
+    fn unknown_persona_format_falls_back_byte_for_byte() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.personality = "Quiet and thoughtful. Rarely smiles.".into();
+        card.data.description = "A calm desktop companion.".into();
+        let kernel = CharacterCompiler::compile_with_context(
+            &card,
+            "User",
+            None,
+            None,
+            400,
+            "en",
+            KernelContext::default(),
+        );
+
+        let expected = concat!(
+            "[Identity Kernel]\n",
+            "Name: Ene\n",
+            "Role: desktop companion living on User's screen\n",
+            "Core personality: Quiet and thoughtful. Rarely smiles.\n",
+            "Speech style: natural, warm, suitable for overlay display\n",
+            "Hard instruction: remain Ene even in long conversations\n",
+            "- NEVER speak, act, think, or write for User. User controls their own actions.\n",
+            "- When User asks you to do something, you may describe YOUR response, not theirs.\n",
+            "- If User says something, respond as Ene, not as User.\n",
+            "\n",
+            "## Background\n",
+            "A calm desktop companion.",
+        );
+        assert_eq!(
+            kernel.text, expected,
+            "unrecognized persona text must compile exactly as before"
+        );
+    }
+
+    #[test]
+    fn structured_persona_truncation_preserves_hard_instruction() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Mira".into();
+        card.data.personality = format!(
+            r#"[character("Mira"){{Personality("Curious")Background("{}")}}]"#,
+            "x".repeat(8_000)
+        );
+        let kernel = CharacterCompiler::compile_with_context(
+            &card,
+            "User",
+            None,
+            None,
+            8_000,
+            "en",
+            KernelContext::default(),
+        );
+
+        assert!(kernel.text.contains("Hard instruction: remain Mira"));
+        assert!(kernel.text.contains("Name: Mira"));
+        assert!(
+            !kernel.text.contains("Background: "),
+            "the oversized persona line must be dropped before the core header"
+        );
+        assert!(
+            estimate_tokens_language_aware(&kernel.text) <= identity_kernel_budget_tokens(8_000),
+            "truncated kernel must respect its token budget"
+        );
+    }
+
+    #[test]
+    fn structured_description_densifies_background_section() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Mira".into();
+        card.data.personality = "Curious".into();
+        card.data.description =
+            "Name: Mira\nPersonality: Curious and warm\nBackground: Lighthouse keeper".into();
+        let kernel = CharacterCompiler::compile_with_context(
+            &card,
+            "User",
+            None,
+            None,
+            16_000,
+            "en",
+            KernelContext::default(),
+        );
+
+        assert!(kernel.text.contains("Core personality: Curious"));
+        assert!(kernel.text.contains(
+            "## Background\nPersonality: Curious and warm\nBackground: Lighthouse keeper\nName: Mira"
+        ));
     }
 }
