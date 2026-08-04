@@ -444,6 +444,13 @@ pub struct ProactivePrompts {
     pub screen_summary_system: String,
     /// User prompt for local screen-image summarization.
     pub screen_summary_user: String,
+    /// Note appended to the vision user prompt when the frame composites a
+    /// 100%-scale cursor ROI next to the 50% overview.
+    pub screen_summary_layout_note: String,
+    /// Note appended when the active window looks like a code editor or terminal.
+    pub screen_summary_code_note: String,
+    /// Template wrapping raw OCR text from the focus region (`{ocr_text}`).
+    pub screen_summary_ocr_note: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -470,6 +477,12 @@ struct RawProactivePrompts {
     screen_summary_system_path: String,
     #[serde(default = "default_proactive_screen_summary_user_path")]
     screen_summary_user_path: String,
+    #[serde(default = "default_proactive_screen_summary_layout_note_path")]
+    screen_summary_layout_note_path: String,
+    #[serde(default = "default_proactive_screen_summary_code_note_path")]
+    screen_summary_code_note_path: String,
+    #[serde(default = "default_proactive_screen_summary_ocr_note_path")]
+    screen_summary_ocr_note_path: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -510,6 +523,18 @@ fn default_proactive_screen_summary_user_path() -> String {
     "en/proactive/screen_summary_user.md".into()
 }
 
+fn default_proactive_screen_summary_layout_note_path() -> String {
+    "en/proactive/screen_summary_layout_note.md".into()
+}
+
+fn default_proactive_screen_summary_code_note_path() -> String {
+    "en/proactive/screen_summary_code_note.md".into()
+}
+
+fn default_proactive_screen_summary_ocr_note_path() -> String {
+    "en/proactive/screen_summary_ocr_note.md".into()
+}
+
 fn default_compression_system_path() -> String {
     "en/compression/system.md".into()
 }
@@ -544,11 +569,38 @@ impl ProactivePrompts {
             .to_string()
     }
 
-    /// Renders the vision user prompt with the privacy-safe OS app label.
-    pub fn render_screen_summary_user(&self, app_label: &str) -> String {
+    /// Renders the vision user prompt with the privacy-safe OS app label and
+    /// optional context notes (composite layout, code-window heuristic, OCR text).
+    pub fn render_screen_summary_user(
+        &self,
+        app_label: &str,
+        roi_composited: bool,
+        code_window: bool,
+        ocr_hint: Option<&str>,
+    ) -> String {
+        let mut notes: Vec<String> = Vec::new();
+        if roi_composited {
+            notes.push(self.screen_summary_layout_note.trim().to_string());
+        }
+        if code_window {
+            notes.push(self.screen_summary_code_note.trim().to_string());
+        }
+        if let Some(text) = ocr_hint {
+            let ocr_note = substitute(&self.screen_summary_ocr_note, &[("ocr_text", text.trim())]);
+            notes.push(ocr_note.trim().to_string());
+        }
+        let context_notes = if notes.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n\n", notes.join("\n\n"))
+        };
         substitute(
             &self.screen_summary_user,
-            &[("app_label", app_label.trim())],
+            &[
+                ("app_label", app_label.trim()),
+                // Substituted last so OCR text inside the value is never re-expanded.
+                ("context_notes", &context_notes),
+            ],
         )
         .trim()
         .to_string()
@@ -768,6 +820,27 @@ macro_rules! embedded_pack {
                     "/proactive/screen_summary_user.md"
                 ))
                 .to_string(),
+                screen_summary_layout_note: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/screen_summary_layout_note.md"
+                ))
+                .to_string(),
+                screen_summary_code_note: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/screen_summary_code_note.md"
+                ))
+                .to_string(),
+                screen_summary_ocr_note: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/screen_summary_ocr_note.md"
+                ))
+                .to_string(),
             },
             compression: CompressionPrompts {
                 system: include_str!(concat!(
@@ -971,9 +1044,38 @@ mod tests {
     #[test]
     fn render_screen_summary_user_injects_app_label() {
         let lib = PromptLibrary::built_in_english();
-        let rendered = lib.proactive().render_screen_summary_user("org.kde.kate");
+        let rendered =
+            lib.proactive()
+                .render_screen_summary_user("org.kde.kate", false, false, None);
         assert!(rendered.contains("org.kde.kate"));
         assert!(!rendered.contains("{app_label}"));
+        assert!(!rendered.contains("{context_notes}"));
+    }
+
+    #[test]
+    fn render_screen_summary_user_appends_notes_when_requested() {
+        let lib = PromptLibrary::built_in_english();
+        let rendered =
+            lib.proactive()
+                .render_screen_summary_user("code", true, true, Some("fn main() {}"));
+        assert!(rendered.contains("100%-scale close-up"));
+        assert!(rendered.contains("code editor or terminal"));
+        assert!(rendered.contains("fn main() {}"));
+        assert!(!rendered.contains("{context_notes}"));
+        assert!(!rendered.contains("{ocr_text}"));
+    }
+
+    #[test]
+    fn render_screen_summary_user_escapes_ocr_braces() {
+        let lib = PromptLibrary::built_in_english();
+        let rendered = lib.proactive().render_screen_summary_user(
+            "code",
+            false,
+            false,
+            Some("literal {app_label} text"),
+        );
+        assert!(rendered.contains("literal {app_label} text"));
+        assert!(rendered.contains("(privacy-safe"));
     }
 
     #[test]

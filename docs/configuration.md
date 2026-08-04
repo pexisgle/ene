@@ -226,6 +226,49 @@ provider is configured, **leaves the local machine**. The levels are:
 Choose `full_title` only with a local model; with a cloud provider the raw title is sent
 off-machine.
 
+### Screen summary pipeline (ROI, diff gate, OCR)
+
+`mind.proactive.sources.screen_summary` (default `false`) opts in to a short text
+summary of the focused window (or primary display when Ene itself is focused).
+The pipeline runs entirely in-process on the desktop:
+
+1. **Capture + ROI composite**: the frame is captured at full resolution, shown
+   to the vision model as a 50%-scale overview with a 512×512 **100%-scale crop
+   around the cursor** composited beside it (separated by a dark bar). The crop
+   anchor snaps to a 64px grid so small pointer moves keep the crop stable. The
+   crop is only produced when both the cursor position and the captured
+   surface's global geometry are known. X11 (window/monitor via xcap) is fully
+   supported. On Wayland the crop is best-effort: KWin/Hyprland expose window
+   geometry via `active_win_pos_rs`, but the pointer still comes from
+   `device_query` over XWayland — it freezes over native Wayland surfaces, so
+   the crop can lag — and on HiDPI the geometry is logical while the capture is
+   physical, shifting the crop by the scale factor. GNOME Wayland exposes no
+   geometry at all, so the overview is used without a crop. The crop follows
+   the **pointer**, not the text caret — tracking the caret would require an
+   accessibility API (AT-SPI) and is a follow-up.
+2. **Diff gate**: each tick computes 64×64 grayscale fingerprints of the
+   overview and the ROI. When the active app label matches, fewer than 48
+   overview cells moved by ≥ 6/255, and the ROI fingerprint moved in fewer
+   than 12 cells (a blink tolerance — the ROI sits at the pointer, exactly
+   where a text caret blinks), the cached summary is reused and the local
+   vision model is **not** invoked. Re-inference is forced on window switches,
+   scrolling, word-level edits in the ROI, and any surface resize. Hits are
+   observable in structured logs under `event="screen_diff_gate"` with
+   `cached=true`.
+3. **OCR / text hints**: the pipeline ships no OCR engine (Tesseract is not
+   available in the Nix flake or the CI image, and a pure-Rust OCR would be a
+   heavy new dependency). Instead, a lightweight window-title/class heuristic
+   flags code editors and terminals so the model is told to prefer quoting
+   visible code/errors, and a capture-time text-hint hook exists for a future
+   local OCR backend (any extracted text would ride along to the vision prompt).
+   The 100%-scale ROI is the primary mechanism for reading fine text today.
+
+All processing is local: raw frames never leave the desktop process (they are
+dropped after summarization), no new network path is involved, and the existing
+`sources.*` privacy settings fully govern this feature. On very large displays
+(5K+), the overview is scaled to fit the vision model's pixel budget — the ROI
+keeps its 100% scale.
+
 `mind.proactive.fatigue_suppression_threshold` (0.0–1.0, default `0.7`) suppresses
 proactive decisions while the character's affect fatigue is at or above the threshold —
 a tired character does not speak unprompted. The default matches the `"tired"` mood

@@ -1152,6 +1152,7 @@ impl TurnActor {
     fn prepare_vision_summary(
         &mut self,
         app_label: String,
+        hints: crate::vision::ScreenSummaryHints,
         reply: oneshot::Sender<Result<VisionPrepared, crate::public_api::PublicApiError>>,
     ) {
         use crate::public_api::PublicApiError;
@@ -1175,7 +1176,7 @@ impl TurnActor {
 
         // Fast path: handles already loaded — complete synchronously.
         if let Some(handles) = self.proactive_llm.get() {
-            let result = finish_vision_prep(handles, &prompt_language, &app_label);
+            let result = finish_vision_prep(handles, &prompt_language, &app_label, &hints);
             if result.is_ok() {
                 // Mint a fresh cancel token for this request; a new user turn
                 // cancels and replaces `self.vision_cancel` (see `EneCommand::Run`),
@@ -1242,8 +1243,8 @@ impl TurnActor {
                     return;
                 }
                 if let Some(handles) = cell.get() {
-                    let result =
-                        finish_vision_prep(handles, &prompt_language, &app_label).map(|mut vp| {
+                    let result = finish_vision_prep(handles, &prompt_language, &app_label, &hints)
+                        .map(|mut vp| {
                             vp.cancel = cancel;
                             vp
                         });
@@ -2511,8 +2512,12 @@ impl TurnActor {
                 }
                 true
             }
-            EneCommand::PrepareVisionSummary { app_label, reply } => {
-                self.prepare_vision_summary(app_label, reply);
+            EneCommand::PrepareVisionSummary {
+                app_label,
+                hints,
+                reply,
+            } => {
+                self.prepare_vision_summary(app_label, hints, reply);
                 true
             }
             EneCommand::StashProactiveScreenImage { data_uri } => {
@@ -3843,6 +3848,7 @@ fn finish_vision_prep(
     handles: &ene_ai_local::ProactiveLlmHandles,
     prompt_language: &str,
     app_label: &str,
+    hints: &crate::vision::ScreenSummaryHints,
 ) -> Result<VisionPrepared, crate::public_api::PublicApiError> {
     use crate::public_api::PublicApiError;
 
@@ -3862,7 +3868,12 @@ fn finish_vision_prep(
 
     let prompts = ene_config::PromptLibrary::load(prompt_language);
     let system = prompts.proactive().screen_summary_system.trim().to_string();
-    let user = prompts.proactive().render_screen_summary_user(app_label);
+    let user = prompts.proactive().render_screen_summary_user(
+        app_label,
+        hints.roi_composited,
+        hints.code_window,
+        hints.ocr_text.as_deref(),
+    );
     Ok(VisionPrepared {
         local,
         system,

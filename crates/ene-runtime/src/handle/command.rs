@@ -335,6 +335,9 @@ pub enum EneCommand {
     PrepareVisionSummary {
         /// Privacy-safe OS app label (may be empty).
         app_label: String,
+        /// Non-image context hints for the summary prompt (layout, window
+        /// heuristic, OCR text). Small text only — never pixel data.
+        hints: crate::vision::ScreenSummaryHints,
         /// Reply channel.
         reply: oneshot::Sender<Result<VisionPrepared, crate::public_api::PublicApiError>>,
     },
