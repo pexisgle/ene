@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use blake3::Hash as Blake3Hash;
 use chrono::Utc;
 use ene_core::{
-    Commitment, GatheredCandidate, MemoryItem, MemoryKind, MemoryPort, MemoryPortError,
-    PendingCandidate, PendingCandidateStatus, Query,
+    Commitment, GatheredCandidate, MemoryItem, MemoryKind, MemoryOutcome, MemoryPort,
+    MemoryPortError, PendingCandidate, PendingCandidateStatus, Query,
 };
 use indexmap::IndexMap;
 use parking_lot::RwLock;
@@ -495,6 +495,24 @@ impl MemoryPort for WriteTrackingPort<'_> {
         Ok(archived)
     }
 
+    async fn record_memory_outcome(&self, outcome: &MemoryOutcome) -> Result<i64, MemoryPortError> {
+        // Outcome rows feed the self-reflection signal: any new rating must
+        // force a fresh L2 read of the affected character's cached data.
+        self.mark();
+        self.inner.record_memory_outcome(outcome).await
+    }
+
+    async fn list_memory_outcomes(
+        &self,
+        character_id: &str,
+        since: Option<chrono::DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<MemoryOutcome>, MemoryPortError> {
+        self.inner
+            .list_memory_outcomes(character_id, since, limit)
+            .await
+    }
+
     async fn search(&self, query: &Query<'_>) -> Result<Vec<GatheredCandidate>, MemoryPortError> {
         self.inner.search(query).await
     }
@@ -914,6 +932,22 @@ mod tests {
             _keep_refs: &HashSet<String>,
         ) -> Result<usize, MemoryPortError> {
             Ok(0)
+        }
+
+        async fn record_memory_outcome(
+            &self,
+            _outcome: &MemoryOutcome,
+        ) -> Result<i64, MemoryPortError> {
+            Ok(0)
+        }
+
+        async fn list_memory_outcomes(
+            &self,
+            _character_id: &str,
+            _since: Option<chrono::DateTime<Utc>>,
+            _limit: usize,
+        ) -> Result<Vec<MemoryOutcome>, MemoryPortError> {
+            Ok(vec![])
         }
 
         async fn search(
@@ -1443,6 +1477,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cache.stats().invalidations, 1);
+    }
+
+    #[tokio::test]
+    async fn write_tracking_port_invalidates_on_new_outcome_rating() {
+        let inner = CountingPort::default();
+        let cache = MemoryRecallCache::new();
+        let tracker = WriteTrackingPort::new(&inner, Some((&cache, "Ene")));
+        assert_eq!(cache.stats().invalidations, 0);
+
+        tracker
+            .record_memory_outcome(&MemoryOutcome {
+                id: None,
+                memory_id: 1,
+                memory_title: "warm greeting".into(),
+                character_id: "Ene".into(),
+                user_id: "User".into(),
+                rating: 0.8,
+                source: ene_core::OutcomeRatingSource::Affect,
+                source_ref: None,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            cache.stats().invalidations,
+            1,
+            "a new rating must invalidate the character's cached recall data"
+        );
     }
 
     #[tokio::test]
