@@ -202,13 +202,14 @@ fixture 使用）で検証されます。
 | `ene-plugin-random` | `random.*` | 乱数・UUID v4・リスト選択・hex 色生成 | いいえ |
 | `ene-plugin-geo` | `geo.*` | IP ベース位置情報・現在の天気・太陽時 UTC オフセット・日の出日の入り | いいえ |
 | `ene-plugin-git` | `git.*` | 読み取り専用 Git 検査: ステータス・差分・履歴・ブランチ・リモート・責務追跡 | いいえ |
+| `ene-plugin-homeassistant` | `homeassistant.*` | Home Assistant スマートホーム連携: エンティティ状態取得・スイッチ/照明/プラグ制御・空調温度設定 | いいえ |
 | `ene-plugin-utility` | `utility.*` | 質問プロンプト、TODO リスト管理、日時/システム情報、カウントダウンタイマー & デスクトップ通知（Linux・D-Bus のみ） | はい (ホストサービス `db`) |
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude プロバイダプラグイン | いいえ |
 | `ene-plugin-openai` | Provider | OpenAI 互換プロバイダプラグイン（チャット・ストリーミング・埋め込み） | いいえ |
 | `ene-plugin-llama-cpp` | Provider | ローカル GGUF (llama.cpp) プロバイダプラグイン — チャットストリーミング・補完・GGUF 埋め込み | いいえ |
 
-上記 14 プラグインはすべてデフォルトの `plugins.list` に含まれており、
+上記 15 プラグインはすべてデフォルトの `plugins.list` に含まれており、
 新規インストール時に自動的に起動します。
 
 ### ファイルツールリファレンス (`filesystem.*`)
