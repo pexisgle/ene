@@ -64,6 +64,20 @@ pub struct VisionHandle {
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
 }
 
+/// Non-image context for the screen-summary vision call.
+///
+/// All fields are small text / flags; raw pixels never cross the mailbox.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScreenSummaryHints {
+    /// The frame composites a 100%-scale cursor ROI next to the 50% overview.
+    pub roi_composited: bool,
+    /// The active window looks like a code editor / terminal (title heuristics).
+    pub code_window: bool,
+    /// Raw OCR text extracted from the focus region; `None` when no OCR
+    /// backend produced a hint.
+    pub ocr_text: Option<String>,
+}
+
 impl VisionHandle {
     pub(crate) fn new(cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>) -> Self {
         Self { cmd_tx }
@@ -83,12 +97,17 @@ impl VisionHandle {
         height: u32,
         rgb: Vec<u8>,
         app_label: String,
+        hints: ScreenSummaryHints,
     ) -> Result<String, PublicApiError> {
         validate_rgb(width, height, &rgb)?;
 
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
-            .send(EneCommand::PrepareVisionSummary { app_label, reply })
+            .send(EneCommand::PrepareVisionSummary {
+                app_label,
+                hints,
+                reply,
+            })
             .map_err(|_| PublicApiError::ActorDead)?;
         let prepared = rx.await.map_err(|_| PublicApiError::ActorDead)??;
 
