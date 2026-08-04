@@ -78,6 +78,8 @@ pub mod undo;
 /// Screen-image vision summarization handle, bypasses the turn-execution
 /// actor mailbox entirely.
 pub mod vision;
+/// Workspace document indexer and its operations handle.
+pub mod workspace;
 
 // ── Bootstrap helpers ──
 /// Host helpers for `ConfigStore` → card → [`EneHandle::open`].
@@ -113,6 +115,8 @@ pub use diagnostics::{DiagnosticEvent, DiagnosticEventReceiver, EneDiagnostics, 
 // ── Tools ──
 /// Tool registry operations handle (list / search / call / invalidate).
 pub use tools::ToolHandle;
+/// Workspace document index operations handle.
+pub use workspace::{WorkspaceHandle, WorkspaceIndexer, WorkspaceStatusView};
 
 // ── Public API v1 ──
 /// Public API version constant, JSON chat/lifecycle-event mirrors, session

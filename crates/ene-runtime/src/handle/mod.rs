@@ -605,6 +605,16 @@ impl EneHandle {
             Some(emb) => actor::init_tool_rag(&config, emb, memory_store.clone())?,
             None => None,
         };
+        let workspace_indexer = match (embedder.as_ref(), memory_store.clone()) {
+            (Some(emb), Some(store)) => {
+                let store_port: Arc<dyn ene_core::WorkspaceDocumentPort> = store;
+                Some(Arc::new(crate::workspace::WorkspaceIndexer::new(
+                    store_port,
+                    emb.clone(),
+                )))
+            }
+            _ => None,
+        };
         if let Some(rag) = &tool_rag {
             let specs = registry.list_tools();
             let profiles = registry.list_rag_profiles();
@@ -737,6 +747,7 @@ impl EneHandle {
             memory_store,
             registry,
             tool_rag,
+            workspace_indexer,
             health_monitor,
             tts_provider,
             plugin_tool_registries,
@@ -933,6 +944,16 @@ impl EneHandle {
     /// registry is actor-owned state; see [`crate::tools`].
     pub fn tools(&self) -> crate::tools::ToolHandle {
         self.tools.clone()
+    }
+
+    /// Workspace document index operations handle (sync / cancel / status /
+    /// search).
+    ///
+    /// Cheap to call repeatedly; the returned handle is a small `Clone`.
+    /// Routes through the actor mailbox: sync is single-flight and
+    /// cancellable there.
+    pub fn workspace(&self) -> crate::workspace::WorkspaceHandle {
+        crate::workspace::WorkspaceHandle::new(Arc::clone(&self.cmd_tx))
     }
 
     /// Hot-swap the character card (CLI `/card`).
@@ -2370,6 +2391,7 @@ mod tests {
             None,
             registry,
             None,
+            None,
             health_monitor,
             None,
             Vec::new(),
@@ -2420,6 +2442,7 @@ mod tests {
             session,
             Some(store),
             registry,
+            None,
             None,
             health_monitor,
             None,
