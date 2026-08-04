@@ -2833,9 +2833,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.0",
+ "chrono",
  "ene-plugin",
  "futures",
  "http",
+ "percent-encoding",
  "rand 0.10.2",
  "reqwest",
  "serde",
@@ -2845,6 +2847,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
 ]
 
 [[package]]

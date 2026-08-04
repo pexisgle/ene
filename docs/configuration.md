@@ -1027,9 +1027,10 @@ Settings:
 The plugin sends `xi-api-key` as a request header (never a query parameter),
 requests `pcm_{sample_rate}` from the API, and returns the audio as WAV
 (`formats = ["wav"]`). The API's other formats (`mp3_44100_128`, …) are not
-exposed. REST failures are retried up to 3 times on 429 / network errors with
-jittered backoff; WebSocket mode retries the whole request on transport
-failures and discards partial audio.
+exposed. REST failures are retried up to twice (3 attempts total) on
+transient errors (408/429/5xx, network) with jittered backoff; WebSocket mode
+retries the whole request on transport failures and rate limits (429) and
+discards partial audio.
 
 Changing `ai.tts.provider` itself (e.g. switching from `edge-tts` to
 `elevenlabs`) takes effect at the next startup: the active provider is built

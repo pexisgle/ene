@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{WebSocketStream, accept_hdr_async};
+use tokio_tungstenite::{WebSocketStream, accept_async, accept_hdr_async};
 
 use crate::client::{MAX_ERROR_BODY_BYTES, MAX_PCM_BYTES};
 use crate::config::{DEFAULT_BASE_URL, DEFAULT_MODEL, resolve_api_key, resolve_base_url};
@@ -276,6 +276,30 @@ async fn auth_errors_map_to_typed_auth_without_echoing_the_key() {
 }
 
 #[tokio::test]
+async fn error_bodies_echoing_the_key_are_masked() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockElevenLabsServer::spawn().expect("mock server");
+    mock.push(MockResponse::with_status(
+        401,
+        format!("{{\"detail\":\"invalid key {TEST_KEY}\"}}").into_bytes(),
+    ));
+
+    let err = test_plugin()
+        .synthesize(
+            KIND,
+            config_json(&mock_url(&mock)),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect_err("auth failure surfaces");
+    assert_eq!(err.provider_error_kind(), Some(ProviderErrorKind::Auth));
+    assert!(!err.to_string().contains(TEST_KEY));
+    assert!(err.to_string().contains("***"));
+}
+
+#[tokio::test]
 async fn rate_limit_maps_to_typed_rate_limit() {
     let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let mock = MockElevenLabsServer::spawn().expect("mock server");
@@ -307,10 +331,12 @@ async fn rate_limit_maps_to_typed_rate_limit() {
 async fn server_error_includes_status_and_detail_message() {
     let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let mock = MockElevenLabsServer::spawn().expect("mock server");
-    mock.push(MockResponse::with_status(
-        500,
-        b"{\"detail\":{\"status\":500,\"message\":\"upstream exploded\"}}".to_vec(),
-    ));
+    for _ in 0..3 {
+        mock.push(MockResponse::with_status(
+            500,
+            b"{\"detail\":{\"status\":500,\"message\":\"upstream exploded\"}}".to_vec(),
+        ));
+    }
 
     let err = test_plugin()
         .synthesize(
@@ -590,6 +616,83 @@ async fn rate_limit_retries_then_succeeds() {
         .expect("retry succeeds");
     assert_wav_payload(&audio, &pcm_fixture(), 24_000);
     assert_eq!(mock.requests.lock().expect("request log").len(), 2);
+}
+
+#[tokio::test]
+async fn rate_limit_http_date_retry_after_is_honored() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockElevenLabsServer::spawn().expect("mock server");
+    mock.push(
+        MockResponse::with_status(429, b"{\"detail\":\"slow down\"}".to_vec())
+            // A date in the past must retry immediately (RFC 9110 form).
+            .with_header("Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT"),
+    );
+    mock.push(MockResponse::ok(pcm_fixture()));
+
+    let audio = test_plugin()
+        .synthesize(
+            KIND,
+            config_json(&mock_url(&mock)),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("date-form retry-after tolerated");
+    assert_wav_payload(&audio, &pcm_fixture(), 24_000);
+    assert_eq!(mock.requests.lock().expect("request log").len(), 2);
+}
+
+#[tokio::test]
+async fn oversized_rate_limit_error_body_still_retries() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockElevenLabsServer::spawn().expect("mock server");
+    mock.push(
+        MockResponse::with_status(429, b"slow down".to_vec())
+            .with_declared_length(MAX_ERROR_BODY_BYTES + 1),
+    );
+    mock.push(MockResponse::ok(pcm_fixture()));
+
+    let audio = test_plugin()
+        .synthesize(
+            KIND,
+            config_json(&mock_url(&mock)),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("unreadable 429 body still retries");
+    assert_wav_payload(&audio, &pcm_fixture(), 24_000);
+    assert_eq!(mock.requests.lock().expect("request log").len(), 2);
+}
+
+#[tokio::test]
+async fn server_error_retries_then_succeeds() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockElevenLabsServer::spawn().expect("mock server");
+    mock.push(MockResponse::with_status(
+        503,
+        b"{\"detail\":\"overloaded\"}".to_vec(),
+    ));
+    mock.push(MockResponse::with_status(
+        503,
+        b"{\"detail\":\"overloaded\"}".to_vec(),
+    ));
+    mock.push(MockResponse::ok(pcm_fixture()));
+
+    let audio = test_plugin()
+        .synthesize(
+            KIND,
+            config_json(&mock_url(&mock)),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("5xx retries recover");
+    assert_wav_payload(&audio, &pcm_fixture(), 24_000);
+    assert_eq!(mock.requests.lock().expect("request log").len(), 3);
 }
 
 #[tokio::test]
@@ -960,11 +1063,9 @@ async fn ws_server_error_is_terminal_and_not_retried() {
             let (mut sink, mut stream) = ws.split();
             let _init = next_text(&mut stream).await.expect("init frame");
             let _frames = collect_text_frames(&mut stream).await;
-            sink.send(Message::text(
-                json!({ "error": { "status": 429, "message": "quota exceeded" } }).to_string(),
-            ))
-            .await
-            .expect("send error");
+            sink.send(Message::text(json!({ "error": "bad request" }).to_string()))
+                .await
+                .expect("send error");
         }
     })
     .await;
@@ -979,16 +1080,143 @@ async fn ws_server_error_is_terminal_and_not_retried() {
         )
         .await
         .expect_err("server error surfaces");
-    assert_eq!(
-        err.provider_error_kind(),
-        Some(ProviderErrorKind::RateLimit)
-    );
-    assert!(err.to_string().contains("quota exceeded"));
+    assert!(err.provider_error_kind().is_none());
+    assert!(err.to_string().contains("bad request"));
     assert!(!err.to_string().contains(TEST_KEY));
     // A terminal error must not spend the retry budget: allow a full backoff
     // window to pass and assert no second connection was made.
     tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(connections.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ws_error_frames_echoing_the_key_are_masked() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let (addr, _) = spawn_ws_server(|_, ws| async move {
+        let (mut sink, mut stream) = ws.split();
+        let _init = next_text(&mut stream).await.expect("init frame");
+        let _frames = collect_text_frames(&mut stream).await;
+        sink.send(Message::text(
+            json!({ "error": { "status": 403, "message": format!("rejected key {TEST_KEY}") } })
+                .to_string(),
+        ))
+        .await
+        .expect("send error");
+    })
+    .await;
+
+    let err = test_plugin()
+        .synthesize(
+            KIND,
+            ws_config(addr),
+            "Hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect_err("error frame surfaces");
+    assert_eq!(err.provider_error_kind(), Some(ProviderErrorKind::Auth));
+    assert!(!err.to_string().contains(TEST_KEY));
+    assert!(err.to_string().contains("***"));
+}
+
+#[tokio::test]
+async fn ws_rate_limit_frame_retries_then_succeeds() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let connections = Arc::new(AtomicUsize::new(0));
+    let task_connections = Arc::clone(&connections);
+    let pcm = pcm_fixture();
+    let expected_pcm = pcm.clone();
+    let (addr, _) = spawn_ws_server(move |index, ws| {
+        let connections = Arc::clone(&task_connections);
+        let pcm = pcm.clone();
+        async move {
+            connections.fetch_add(1, Ordering::SeqCst);
+            let (mut sink, mut stream) = ws.split();
+            let _init = next_text(&mut stream).await.expect("init frame");
+            let _frames = collect_text_frames(&mut stream).await;
+            if index < 3 {
+                sink.send(Message::text(
+                    json!({ "error": { "status": 429, "message": "quota exceeded" } }).to_string(),
+                ))
+                .await
+                .expect("send rate limit");
+            } else {
+                send_audio_and_final(&mut sink, &pcm, "isFinal").await;
+            }
+        }
+    })
+    .await;
+
+    let audio = test_plugin()
+        .synthesize(
+            KIND,
+            ws_config(addr),
+            "Hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("rate-limited ws request recovers");
+    assert_wav_payload(&audio, &expected_pcm, 24_000);
+    assert_eq!(connections.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn ws_handshake_rate_limit_retries_then_succeeds() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let pcm = pcm_fixture();
+    let expected_pcm = pcm.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("address");
+    tokio::spawn(async move {
+        let mut index = 0usize;
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            index += 1;
+            if index == 1 {
+                let mut buf = Vec::new();
+                let mut temp = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut temp).await.expect("read");
+                    if read == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&temp[..read]);
+                    if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\n\
+                            Content-Length: 0\r\nConnection: close\r\n\r\n";
+                stream.write_all(head.as_bytes()).await.expect("write");
+                stream.flush().await.expect("flush");
+            } else {
+                let pcm = pcm.clone();
+                let ws = accept_async(stream).await.expect("handshake");
+                tokio::spawn(async move {
+                    let (mut sink, mut stream) = ws.split();
+                    let _init = next_text(&mut stream).await.expect("init frame");
+                    let _frames = collect_text_frames(&mut stream).await;
+                    send_audio_and_final(&mut sink, &pcm, "isFinal").await;
+                });
+            }
+        }
+    });
+
+    let audio = test_plugin()
+        .synthesize(
+            KIND,
+            ws_config(addr),
+            "Hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("rate-limited handshake recovers");
+    assert_wav_payload(&audio, &expected_pcm, 24_000);
 }
 
 #[tokio::test]

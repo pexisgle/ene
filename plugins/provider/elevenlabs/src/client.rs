@@ -17,9 +17,9 @@ use crate::wav;
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Total timeout for a single synthesis request (covers streamed bodies).
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
-/// Retry budget for transient upstream failures (429 / network); the host
-/// TTS consumer never retries, so the plugin absorbs them like the openai
-/// plugin does.
+/// Retry budget for transient upstream failures (transient statuses /
+/// network); the host TTS consumer never retries, so the plugin absorbs
+/// them like the openai plugin does.
 pub(crate) const MAX_ATTEMPTS: u32 = 3;
 /// Base backoff for retry attempts, doubled per attempt and jittered.
 pub(crate) const BASE_DELAY: Duration = Duration::from_millis(500);
@@ -52,8 +52,9 @@ struct SpeechRequest<'a> {
 ///
 /// Returns a provider error for transport failures and non-success statuses
 /// (401/403 → `Auth`, 429 → `RateLimit`), and a typed `Truncated` error when
-/// the streamed PCM ends mid-sample. Transient failures (network, 429) are
-/// retried with jittered backoff, honoring the upstream `Retry-After`.
+/// the streamed PCM ends mid-sample. Transient failures (network, 408/429,
+/// 5xx) are retried with jittered backoff, honoring the upstream
+/// `Retry-After`.
 pub async fn synthesize_rest(
     config: &ElevenLabsConfig,
     api_key: &str,
@@ -97,12 +98,18 @@ pub async fn synthesize_rest(
                     pcm::validate_pcm(&audio)?;
                     return wav::wrap_pcm(&audio, config.sample_rate);
                 }
-                let retry_after = retry_after_secs(&response);
-                let body = read_body_bounded(response, MAX_ERROR_BODY_BYTES)
-                    .await
-                    .map_err(|e| {
-                        PluginError::provider(format!("failed to read error response: {e}"))
-                    })?;
+                let retry_after = retry_after_secs(response.headers());
+                let body = match read_body_bounded(response, MAX_ERROR_BODY_BYTES).await {
+                    Ok(body) => body,
+                    // An unreadable error body must not turn a 429 into a
+                    // terminal failure: the retry budget is what matters.
+                    Err(_) if status.as_u16() == 429 => Vec::new(),
+                    Err(e) => {
+                        return Err(PluginError::provider(format!(
+                            "failed to read error response: {e}"
+                        )));
+                    }
+                };
                 UpstreamError::Http {
                     status: status.as_u16(),
                     body,
@@ -114,14 +121,14 @@ pub async fn synthesize_rest(
 
         let next = attempt.saturating_add(1);
         if !err.is_retryable() || next >= MAX_ATTEMPTS {
-            return Err(err.into_plugin_error());
+            return Err(err.into_plugin_error(api_key));
         }
         let delay = retry_delay(err.retry_after(), attempt);
         tracing::warn!(
             component = "ene-plugin-elevenlabs",
             attempt = next,
             delay_ms = delay.as_millis() as u64,
-            error = %err.into_plugin_error(),
+            error = %err.into_plugin_error(api_key),
             "retryable upstream failure; backing off"
         );
         tokio::time::sleep(delay).await;
@@ -145,11 +152,13 @@ fn http_client() -> Result<&'static reqwest::Client, PluginError> {
 }
 
 /// Maps a non-success status to a typed provider error, with the upstream
-/// body truncated to a snippet. The API key never appears here: only the
-/// status and response body are echoed.
-pub(crate) fn map_http_error(status: StatusCode, body: &[u8]) -> PluginError {
+/// body truncated to a snippet. The snippet is scrubbed of the API key, so
+/// a misbehaving endpoint that echoes request headers back cannot leak it
+/// through errors or logs.
+pub(crate) fn map_http_error(status: StatusCode, body: &[u8], api_key: &str) -> PluginError {
     let snippet =
         parse_error_message(body).unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
+    let snippet = mask_key(&snippet, api_key);
     let snippet: String = snippet.chars().take(280).collect();
     match status.as_u16() {
         401 | 403 => PluginError::provider_typed(
@@ -162,6 +171,16 @@ pub(crate) fn map_http_error(status: StatusCode, body: &[u8]) -> PluginError {
         ),
         _ => PluginError::provider(format!("HTTP {}: {snippet}", status.as_u16())),
     }
+}
+
+/// Replaces every occurrence of `key` with `***`, so upstream text that
+/// echoes the credential cannot leak it through error messages or logs.
+#[must_use]
+pub(crate) fn mask_key(message: &str, key: &str) -> String {
+    if key.is_empty() {
+        return message.to_string();
+    }
+    message.replace(key, "***")
 }
 
 /// Extracts a readable message from an `ElevenLabs` error body. The API wraps
@@ -208,7 +227,10 @@ enum UpstreamError {
 impl UpstreamError {
     /// Whether the retry budget should spend an attempt on this error.
     fn is_retryable(&self) -> bool {
-        matches!(self, Self::Network(_) | Self::Http { status: 429, .. })
+        match self {
+            Self::Network(_) => true,
+            Self::Http { status, .. } => is_transient_status(*status),
+        }
     }
 
     /// The `Retry-After` value, when the failure carries one.
@@ -219,25 +241,44 @@ impl UpstreamError {
         }
     }
 
-    /// Maps to a typed [`PluginError`] (see [`map_http_error`]).
-    fn into_plugin_error(self) -> PluginError {
+    /// Maps to a typed [`PluginError`] (see [`map_http_error`]); the API key
+    /// is scrubbed from every message.
+    fn into_plugin_error(self, api_key: &str) -> PluginError {
         match self {
-            Self::Network(message) => PluginError::provider(message),
+            Self::Network(message) => PluginError::provider(mask_key(&message, api_key)),
             Self::Http { status, body, .. } => map_http_error(
                 StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 &body,
+                api_key,
             ),
         }
     }
 }
 
-/// Parses a `Retry-After` response header (seconds) if present and valid.
-fn retry_after_secs(response: &reqwest::Response) -> Option<u64> {
-    response
-        .headers()
+/// Whether a status code is worth spending a retry attempt on: client
+/// timeout, rate limit, and server-side failures.
+#[must_use]
+pub(crate) fn is_transient_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+}
+
+/// Parses a `Retry-After` response header, in either of the RFC 9110 forms:
+/// integer seconds or an HTTP-date.
+pub(crate) fn retry_after_secs(headers: &http::HeaderMap) -> Option<u64> {
+    let value = headers
         .get(reqwest::header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
+        .and_then(|value| value.to_str().ok())?
+        .trim();
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(secs);
+    }
+    let when = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let secs = when
+        .with_timezone(&chrono::Utc)
+        .signed_duration_since(chrono::Utc::now())
+        .num_seconds()
+        .max(0);
+    u64::try_from(secs).ok()
 }
 
 /// Sleep duration for retry `retry_index` (0-indexed): the upstream

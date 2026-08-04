@@ -70,12 +70,14 @@ crossterm = "0.29"
 
 # ── Networking ──
 http = "1"
+percent-encoding = "2"
 reqwest = { version = "0.13", default-features = false }
 scraper = "0.27"
 quick-xml = { version = "0.41", features = ["serialize"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 url = "2"
+unicode-segmentation = "1"
 
 # ── IPC / Tool System ──
 # zbus (async D-Bus) backend pinned explicitly instead of the default
