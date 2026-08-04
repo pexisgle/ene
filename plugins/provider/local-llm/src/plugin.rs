@@ -13,12 +13,23 @@ use ene_ai::EmbeddingKind;
 use ene_ai::traits::{EmbeddingProvider, LlmProvider};
 use ene_plugin::prelude::*;
 use serde_json::Value;
+use std::time::Duration;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::config;
 use crate::convert;
 use crate::models;
+
+/// Budget for a non-streaming completion.
+///
+/// Decisions are short structured-output calls. The host's own decision
+/// timeout (mind's `decision_timeout_seconds`, 15 s by default) fires before
+/// this budget and abandons the request without cancelling it, so a longer
+/// plugin-side budget would let a hung generation occupy the single local
+/// engine for minutes (silencing proactive with `Busy`). Dropping the engine
+/// call on timeout cancels the job cooperatively via `caller_gone`.
+const DECISION_COMPLETION_TIMEOUT_SECS: u64 = 20;
 
 /// Local GGUF inference provider plugin (llama.cpp).
 ///
@@ -138,10 +149,17 @@ impl LlmPlugin for LocalLlmPlugin {
         ensure_kind(kind)?;
         let messages = convert::to_llm_messages(&messages)?;
         let provider = models::chat_provider(&model).await?;
-        let completion = provider
-            .chat_completion(&messages, json_schema)
-            .await
-            .map_err(|e| convert::map_llm_error(&e))?;
+        let completion = tokio::time::timeout(
+            Duration::from_secs(DECISION_COMPLETION_TIMEOUT_SECS),
+            provider.chat_completion(&messages, json_schema),
+        )
+        .await
+        .map_err(|_| {
+            PluginError::provider(format!(
+                "local completion exceeded the {DECISION_COMPLETION_TIMEOUT_SECS}s decision budget"
+            ))
+        })?
+        .map_err(|e| convert::map_llm_error(&e))?;
         Ok(PluginCompletion {
             text: completion.text,
             usage: completion.usage,

@@ -22,6 +22,7 @@
       "jina-v5-small": {
         "acceleration": "auto",
         "context_size": 2048,
+        "dimensions": 1024,
         "gpu_layers": "auto",
         "quantization": "F16",
         "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf"

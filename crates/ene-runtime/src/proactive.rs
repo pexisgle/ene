@@ -675,6 +675,43 @@ mod tests {
         assert!(uri.len() > "data:image/jpeg;base64,".len());
     }
 
+    #[test]
+    fn rgb_to_jpeg_data_uri_round_trips_through_image_decode() {
+        use base64::Engine as _;
+        use image::GenericImageView;
+
+        let rgb = [255u8, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        let uri = rgb_to_jpeg_data_uri(2, 2, &rgb).expect("encode");
+        let payload = uri
+            .strip_prefix("data:image/jpeg;base64,")
+            .expect("jpeg data uri prefix");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .expect("base64 payload decodes");
+        let decoded = image::load_from_memory(&bytes).expect("jpeg decodes");
+        assert_eq!(decoded.dimensions(), (2, 2));
+        // JPEG is lossy; sample the dominant channels with tolerance rather
+        // than asserting exact RGB round-trip.
+        let red = decoded.get_pixel(0, 0);
+        assert!(
+            red[0] > 200 && red[1] < 60 && red[2] < 60,
+            "top-left red: {red:?}"
+        );
+        // Bottom-right pixel is yellow (255, 255, 0); quality-75 JPEG
+        // softens the channels, so use generous bounds.
+        let yellow = decoded.get_pixel(1, 1);
+        assert!(
+            yellow[0] > 150 && yellow[1] > 200 && yellow[2] < 80,
+            "bottom-right yellow: {yellow:?}"
+        );
+    }
+
+    #[test]
+    fn rgb_to_jpeg_data_uri_rejects_length_mismatch() {
+        let err = rgb_to_jpeg_data_uri(2, 2, &[0_u8; 11]).expect_err("length mismatch");
+        assert!(err.contains("rgb length mismatch"), "err: {err}");
+    }
+
     struct CaptureProvider {
         captured: std::sync::Mutex<Option<String>>,
     }

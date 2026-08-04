@@ -53,6 +53,7 @@ pub mod handle;
 #[doc(hidden)]
 pub mod message_builder;
 mod proactive;
+mod proactive_llm;
 /// Stable public API v1 facade: version, JSON event mirrors, redaction.
 pub mod public_api;
 /// Read-only session and pending-candidate query handles that bypass the

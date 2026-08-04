@@ -40,6 +40,9 @@ pub struct ResolvedLocalModel {
     pub gpu_layers: String,
     /// Context size for decision workloads.
     pub context_size: u32,
+    /// Real embedding dimensionality, when the model backs `tasks.embedding`
+    /// (see [`LocalModelDef::dimensions`]).
+    pub dimensions: Option<usize>,
 }
 
 impl ResolvedLocalModel {
@@ -60,6 +63,7 @@ impl ResolvedLocalModel {
             acceleration: llama_cpp.acceleration,
             gpu_layers: def.gpu_layers.clone(),
             context_size: def.context_size,
+            dimensions: def.dimensions,
         }
     }
 

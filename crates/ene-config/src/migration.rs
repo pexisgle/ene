@@ -50,7 +50,7 @@
 //!    from a `ctor` in the crate that owns the affected schema, or eagerly at
 //!    startup before the first [`load_config`](crate::load_config).
 //!
-//! Two real migrations ship today:
+//! Three real migrations ship today:
 //!
 //! - version 1 → 2 relocates provider-specific settings out of `ai.*` into
 //!   the `plugins.list.*` sections that now own them (see
@@ -58,7 +58,10 @@
 //! - version 2 → 3 mirrors each `ai.local_models.<name>` entry's model
 //!   path/settings into `plugins.list.llama-cpp.profiles.<name>`, the model
 //!   profiles the local GGUF provider plugin consumes (see
-//!   `migrate_v2_to_v3`).
+//!   `migrate_v2_to_v3`);
+//! - version 3 → 4 re-runs that mirror so installs that reached v3 before
+//!   `context_size` / `dimensions` became profile keys receive them too (see
+//!   `migrate_v3_to_v4`).
 //!
 //! They are registered by a `ctor` in this crate because `ene-config` owns
 //! the settings document schema, and the steps must be in place wherever a
@@ -75,7 +78,7 @@ use std::sync::OnceLock;
 /// one whose `version` exceeds it is rejected (see
 /// [`EneConfigError::ConfigVersionTooNew`]). Bump this whenever you register a
 /// new migration step.
-pub const CURRENT_CONFIG_VERSION: u32 = 3;
+pub const CURRENT_CONFIG_VERSION: u32 = 4;
 
 /// The JSON key holding the schema version in `settings.json`.
 const VERSION_KEY: &str = "version";
@@ -95,10 +98,19 @@ const KOKORO_DEFAULT_PROFILE: &str = "kokoro";
 /// `ai.local_models.<name>` keys mirrored into
 /// `plugins.list.llama-cpp.profiles.<name>` by the v2→v3 migration.
 ///
-/// `context_size` is deliberately excluded: it is routing/budget information
-/// (`ene-ai` sizes prompts and the KV cache against it), not a model
-/// path/setting the plugin consumes to locate and load weights.
-const LOCAL_MODEL_PROFILE_KEYS: [&str; 4] = ["url", "quantization", "model_path", "gpu_layers"];
+/// `context_size` and `dimensions` are mirrored too: the plugin sizes the
+/// chat KV cache from the profile's `context_size` (the host's routing window
+/// stays in `ai.local_models`), and `dimensions` documents the embedding
+/// dimensionality the host needs for the store schema. Both remain in
+/// `ai.local_models` as the routing/config source of truth.
+const LOCAL_MODEL_PROFILE_KEYS: [&str; 6] = [
+    "url",
+    "quantization",
+    "model_path",
+    "gpu_layers",
+    "context_size",
+    "dimensions",
+];
 
 /// A single migration step.
 ///
@@ -530,17 +542,16 @@ fn mirror_local_model_profile_key(
     set_plugin_profile_key(doc, LLAMA_CPP_PLUGIN, model, key, value.clone())
 }
 
-/// v2 → v3: mirrors the model path/settings of every `ai.local_models` entry
-/// into the llama-cpp plugin's `profiles.<name>` blob.
+/// Mirrors the model path/settings of every `ai.local_models` entry into the
+/// llama-cpp plugin's `profiles.<name>` blob.
 ///
 /// This is a one-way mirror, not a move: `ai.local_models` stays intact
-/// because `ene-ai` still routes tasks and budgets context windows from it
-/// until the runtime switches to the plugin. Empty-string / `null` values
-/// are not mirrored, and a non-empty existing profile value is never
-/// overwritten (an existing empty-string / `null` value counts as absent,
-/// matching the v1→v2 convention).
-/// A no-op (still `Ok`) when there are no local models.
-pub(crate) fn migrate_v2_to_v3(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+/// because `ene-ai` still routes tasks and budgets context windows from it.
+/// Empty-string / `null` values are not mirrored, and a non-empty existing
+/// profile value is never overwritten (an existing empty-string / `null`
+/// value counts as absent, matching the v1→v2 convention). A no-op (still
+/// `Ok`) when there are no local models.
+fn mirror_local_models_into_profiles(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
     let Some(models) = doc
         .pointer("/ai/local_models")
         .and_then(serde_json::Value::as_object)
@@ -561,7 +572,25 @@ pub(crate) fn migrate_v2_to_v3(doc: &mut serde_json::Value) -> Result<(), EneCon
     Ok(())
 }
 
-/// Registers the v1→v2 and v2→v3 steps at process start, wherever a
+/// v2 → v3: mirrors `ai.local_models` into the llama-cpp plugin profiles.
+pub(crate) fn migrate_v2_to_v3(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+    mirror_local_models_into_profiles(doc)
+}
+
+/// v3 → v4: re-runs the `ai.local_models` → llama-cpp profile mirror.
+///
+/// The v2→v3 step only ran for files stamped v2, so installs that migrated
+/// before `context_size` / `dimensions` joined
+/// [`LOCAL_MODEL_PROFILE_KEYS`](LOCAL_MODEL_PROFILE_KEYS) still have profiles
+/// without them; without this step their local embedding setup fails at
+/// startup with a "requires `ai.local_models`.<name>.dimensions" error until
+/// a hand edit. Same fill-only-missing-keys semantics as the v2→v3 step, so
+/// a v4 file re-run is a no-op.
+pub(crate) fn migrate_v3_to_v4(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+    mirror_local_models_into_profiles(doc)
+}
+
+/// Registers the v1→v2, v2→v3, and v3→v4 steps at process start, wherever a
 /// `settings.json` is loaded. `ene-config` owns these steps because the
 /// `version` field and the migration machinery live here, and the relocated
 /// keys are host document schema rather than the property of any single
@@ -585,6 +614,13 @@ const _: () = {
                 component = "Config",
                 error = %err,
                 "failed to register settings.json migration v2->v3"
+            );
+        }
+        if let Err(err) = register_migration(3, migrate_v3_to_v4) {
+            tracing::error!(
+                component = "Config",
+                error = %err,
+                "failed to register settings.json migration v3->v4"
             );
         }
     }
@@ -1046,7 +1082,9 @@ pub(crate) mod tests {
 
     /// A v2 document's `ai.local_models` entries are mirrored into
     /// `plugins.list.llama-cpp.profiles.<name>` without touching the originals
-    /// (routing still reads them) or `context_size` (host-side budget only).
+    /// (routing still reads them). `context_size` and `dimensions` are
+    /// mirrored too: the plugin sizes its chat KV cache from the profile's
+    /// `context_size`, and `dimensions` is the host's store-schema value.
     #[test]
     fn v2_to_v3_mirrors_local_models_into_profiles() {
         with_test_version(3, || {
@@ -1059,7 +1097,8 @@ pub(crate) mod tests {
                             "quantization": "Q4_0",
                             "model_path": "/data/gemma.gguf",
                             "gpu_layers": "33",
-                            "context_size": 16384
+                            "context_size": 8192,
+                            "dimensions": 1024
                         }
                     }
                 }
@@ -1082,6 +1121,14 @@ pub(crate) mod tests {
                 doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/gpu_layers"),
                 Some(&serde_json::json!("33"))
             );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/context_size"),
+                Some(&serde_json::json!(8192))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/dimensions"),
+                Some(&serde_json::json!(1024))
+            );
             // The source entry and the routing-only field survive untouched.
             assert_eq!(
                 doc.pointer("/ai/local_models/gemma-4-e4b/url"),
@@ -1089,12 +1136,107 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 doc.pointer("/ai/local_models/gemma-4-e4b/context_size"),
-                Some(&serde_json::json!(16384))
+                Some(&serde_json::json!(8192))
             );
-            assert!(
-                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/context_size")
-                    .is_none(),
-                "context_size is routing information and must stay in ene-ai"
+            assert_eq!(
+                doc.pointer("/ai/local_models/gemma-4-e4b/dimensions"),
+                Some(&serde_json::json!(1024))
+            );
+        });
+    }
+
+    /// A v3 document whose profiles were mirrored before `context_size` /
+    /// `dimensions` joined the key set is refilled by the v3→v4 step; the
+    /// step is a no-op when the keys are already present.
+    #[test]
+    fn v3_to_v4_refills_missing_profile_keys() {
+        with_test_version(4, || {
+            let mut doc = serde_json::json!({
+                "version": 3,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "url": "https://cdn.example/gemma-4-e4b.gguf",
+                            "gpu_layers": "33",
+                            "context_size": 8192,
+                            "dimensions": 1024
+                        }
+                    }
+                },
+                "plugins": {
+                    "list": {
+                        "llama-cpp": {
+                            "profiles": {
+                                // Mirrored by the old v2→v3 step, which only
+                                // knew the original four keys.
+                                "gemma-4-e4b": {
+                                    "url": "https://cdn.example/gemma-4-e4b.gguf",
+                                    "gpu_layers": "33"
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            migrate_v3_to_v4(&mut doc).expect("v3->v4 migration succeeds");
+
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/context_size"),
+                Some(&serde_json::json!(8192))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/dimensions"),
+                Some(&serde_json::json!(1024))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/url"),
+                Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf"))
+            );
+            // A second run must not change anything (idempotent).
+            let before = doc.clone();
+            migrate_v3_to_v4(&mut doc).expect("v3->v4 re-run succeeds");
+            assert_eq!(doc, before);
+        });
+    }
+
+    /// An existing non-empty profile value wins over the v3→v4 refill, the
+    /// same fill-only-missing-keys semantics as the v2→v3 step.
+    #[test]
+    fn v3_to_v4_preserves_existing_profile_values() {
+        with_test_version(4, || {
+            let mut doc = serde_json::json!({
+                "version": 3,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "context_size": 8192,
+                            "dimensions": 1024
+                        }
+                    }
+                },
+                "plugins": {
+                    "list": {
+                        "llama-cpp": {
+                            "profiles": {
+                                "gemma-4-e4b": {
+                                    "context_size": 16384
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            migrate_v3_to_v4(&mut doc).expect("v3->v4 migration succeeds");
+
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/context_size"),
+                Some(&serde_json::json!(16384)),
+                "existing profile context_size must not be overwritten"
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/dimensions"),
+                Some(&serde_json::json!(1024)),
+                "missing dimensions are still filled"
             );
         });
     }

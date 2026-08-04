@@ -31,7 +31,4 @@ pub use gguf::{
     prefetch_decision_gguf, prefetch_embedding_gguf, resolve_decision_gguf_path,
     resolve_embedding_gguf_path, resolve_local_gguf_path,
 };
-pub use local_llm::{
-    DecisionProviderKind, DisabledDecisionProvider, LocalGgufLoadParams, LocalLlamaCppProvider,
-    ProactiveLlmHandles, build_proactive_llm_handles,
-};
+pub use local_llm::{LocalGgufLoadParams, LocalLlamaCppProvider};

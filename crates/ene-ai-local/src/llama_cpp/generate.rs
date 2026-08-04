@@ -685,4 +685,49 @@ mod tests {
         let flat = flatten_user_parts(&parts, true);
         assert_eq!(flat.matches(marker).count(), 1, "{flat}");
     }
+
+    #[test]
+    fn decode_data_uri_to_rgb_round_trips() {
+        use base64::Engine as _;
+        use image::ImageEncoder;
+
+        let rgb = vec![255u8, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95)
+            .write_image(&rgb, 2, 2, image::ExtendedColorType::Rgb8)
+            .expect("test jpeg encode");
+        let uri = format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(jpeg)
+        );
+        let (w, h, decoded) = decode_data_uri_to_rgb(&uri).expect("decode");
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(decoded.len(), 12);
+        // JPEG is lossy; check the dominant channels with tolerance.
+        assert!(decoded[0] > 200 && decoded[1] < 60 && decoded[2] < 60);
+        // Bottom-right pixel is yellow (255, 255, 0).
+        assert!(decoded[9] > 200 && decoded[10] > 200 && decoded[11] < 60);
+    }
+
+    #[test]
+    fn decode_data_uri_to_rgb_accepts_plain_base64() {
+        use base64::Engine as _;
+        use image::ImageEncoder;
+
+        let rgb = vec![0u8, 128, 255, 0, 128, 255];
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&rgb, 1, 2, image::ExtendedColorType::Rgb8)
+            .expect("test png encode");
+        let plain = base64::engine::general_purpose::STANDARD.encode(png);
+        let (w, h, decoded) = decode_data_uri_to_rgb(&plain).expect("decode plain base64");
+        assert_eq!((w, h), (1, 2));
+        assert_eq!(decoded.len(), 6);
+    }
+
+    #[test]
+    fn decode_data_uri_to_rgb_rejects_garbage() {
+        let err = decode_data_uri_to_rgb("not-base64!").expect_err("garbage rejects");
+        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
+    }
 }

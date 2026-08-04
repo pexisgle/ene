@@ -257,7 +257,7 @@ impl ene_ai::EmbeddingProviderFactory for IpcEmbeddingProviderFactory {
                 },
             );
 
-        let dimensions = embedding.dimensions.unwrap_or(1536);
+        let dimensions = resolved_embedding_dimensions(&ai_config, embedding, &model)?;
         let query_prefix = embedding
             .query_prefix
             .clone()
@@ -276,7 +276,41 @@ impl ene_ai::EmbeddingProviderFactory for IpcEmbeddingProviderFactory {
     }
 }
 
+/// The embedding dimensionality the host reports for the configured task.
+///
+/// Local GGUF models declare their real dimensionality on the model entry
+/// (`ai.local_models.<name>.dimensions`): the store schema is opened with it
+/// before the plugin host starts, so the cloud default (1536) must never be
+/// substituted here — the plugin would reject the mismatch on the first
+/// batch.
+fn resolved_embedding_dimensions(
+    ai_config: &ene_ai::AiConfig,
+    embedding: &ene_ai::TaskRef,
+    model: &str,
+) -> Result<usize, EmbeddingError> {
+    if ene_ai::AiConfig::is_local_provider(&embedding.provider) {
+        ai_config
+            .local_models
+            .get(model)
+            .and_then(|def| def.dimensions)
+            .ok_or_else(|| {
+                EmbeddingError::Init(format!(
+                    "local embedding model {model:?} requires \
+                     ai.local_models.{model}.dimensions (the store schema \
+                     needs the real vector dimensionality before the plugin \
+                     can load the model)"
+                ))
+            })
+    } else {
+        Ok(embedding.dimensions.unwrap_or(1536))
+    }
+}
+
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "unit tests use expect for concise failure messages"
+)]
 mod tests {
     use super::*;
 
@@ -329,6 +363,71 @@ mod tests {
             "non-transport errors must be terminal, got {err:?}"
         );
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn local_task_uses_declared_model_dimensions() {
+        let mut ai = ene_ai::AiConfig::default();
+        ai.local_models.insert(
+            "jina-v5-small".to_string(),
+            ene_ai::LocalModelDef {
+                dimensions: Some(1024),
+                ..ene_ai::LocalModelDef::default()
+            },
+        );
+        let embedding = ene_ai::TaskRef {
+            provider: "local".to_string(),
+            model: Some("jina-v5-small".to_string()),
+            // The cloud knob must not leak into the local path.
+            dimensions: Some(1536),
+            ..ene_ai::TaskRef::default()
+        };
+        assert_eq!(
+            resolved_embedding_dimensions(&ai, &embedding, "jina-v5-small")
+                .expect("declared dims resolve"),
+            1024
+        );
+    }
+
+    #[test]
+    fn local_task_without_declared_dimensions_is_typed_error() {
+        let ai = ene_ai::AiConfig::default();
+        let embedding = ene_ai::TaskRef {
+            provider: "local".to_string(),
+            model: Some("jina-v5-small".to_string()),
+            ..ene_ai::TaskRef::default()
+        };
+        let err = resolved_embedding_dimensions(&ai, &embedding, "jina-v5-small")
+            .expect_err("missing dims must be a typed init error");
+        assert!(
+            matches!(err, EmbeddingError::Init(ref message) if message.contains("jina-v5-small.dimensions")),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn cloud_task_defaults_to_1536_without_override() {
+        let ai = ene_ai::AiConfig::default();
+        let embedding = ene_ai::TaskRef::default();
+        assert_eq!(
+            resolved_embedding_dimensions(&ai, &embedding, "text-embedding-3-small")
+                .expect("cloud dims resolve"),
+            1536
+        );
+    }
+
+    #[test]
+    fn cloud_task_honors_configured_dimensions() {
+        let ai = ene_ai::AiConfig::default();
+        let embedding = ene_ai::TaskRef {
+            dimensions: Some(256),
+            ..ene_ai::TaskRef::default()
+        };
+        assert_eq!(
+            resolved_embedding_dimensions(&ai, &embedding, "text-embedding-3-small")
+                .expect("cloud dims resolve"),
+            256
+        );
     }
 
     #[test]

@@ -191,7 +191,7 @@ pub(super) struct TurnActor {
     /// blocking the actor loop. The `OnceCell` guarantees at-most-once
     /// initialization; `proactive_llm_init_spawned` prevents duplicate
     /// background spawns.
-    proactive_llm: Arc<OnceCell<ene_ai_local::ProactiveLlmHandles>>,
+    proactive_llm: Arc<OnceCell<crate::proactive_llm::ProactiveLlmHandles>>,
     /// Guards against spawning multiple background init tasks for
     /// [`Self::proactive_llm`]. Set to `true` when a background load
     /// is spawned; reset to `false` if that load *fails* so a later call can
@@ -201,15 +201,6 @@ pub(super) struct TurnActor {
     /// this flag is consulted again. Shared via `Arc` so the background init
     /// task can reset it on failure.
     proactive_llm_init_spawned: Arc<AtomicBool>,
-    /// Guards against invoking [`ene_ai_local::ProactiveLlmHandles::shutdown`]
-    /// more than once. Both the `EneCommand::Shutdown` arm and the
-    /// post-loop cleanup in [`Self::run`] run on every normal teardown from
-    /// unsynchronized call sites, and `Arc<OnceCell>` cannot be consumed
-    /// through a shared reference to deduplicate them, so this flag provides
-    /// the at-most-once guarantee: a `shutdown()` with real side effects
-    /// (unloading GGUF weights, releasing GPU memory) must never be
-    /// double-invoked.
-    proactive_llm_shutdown: AtomicBool,
     /// Guards against spawning duplicate `PrepareVisionSummary` slow-path
     /// pollers. The screen-capture-driven proactive vision flow can
     /// fire `PrepareVisionSummary` several times during the multi-second GGUF
@@ -374,7 +365,6 @@ impl TurnActor {
             quiet_hours_notifications_suppressed: false,
             proactive_llm: Arc::new(OnceCell::new()),
             proactive_llm_init_spawned: Arc::new(AtomicBool::new(false)),
-            proactive_llm_shutdown: AtomicBool::new(false),
             vision_slow_path_active: Arc::new(AtomicBool::new(false)),
             active_origin: crate::types::TurnOrigin::User,
             health_monitor,
@@ -957,7 +947,6 @@ impl TurnActor {
         if let Some(handle) = self.stream_handle.take() {
             handle.abort();
         }
-        self.shutdown_proactive_llm_once().await;
         // Cooperative cancel first: aux workers watching the turn's token
         // (the TTS pipeline) exit gracefully instead of being force-aborted.
         self.cancel_token.cancel();
@@ -1149,14 +1138,12 @@ impl TurnActor {
         let init_spawned = Arc::clone(&self.proactive_llm_init_spawned);
         let config = self.config.clone();
         self.bg_command_tasks.spawn(async move {
-            match ene_ai_local::build_proactive_llm_handles(&config).await {
+            match crate::proactive_llm::build_proactive_llm_handles(&config).await {
                 Ok(handles) => {
                     tracing::info!(
                         component = "Proactive",
                         decision_backend = ?handles.decision_kind,
-                        vision = handles
-                            .local()
-                            .is_some_and(|l| l.capabilities().contains(ene_ai::Capability::Vision)),
+                        local_provider = handles.local().is_some(),
                         "Proactive decision provider ready (background)"
                     );
                     drop(cell.set(handles));
@@ -1175,22 +1162,6 @@ impl TurnActor {
                 }
             }
         });
-    }
-
-    /// Shuts down the proactive LLM handles at most once.
-    ///
-    /// Both the `EneCommand::Shutdown` arm and the post-loop cleanup in
-    /// [`Self::run`] call this on every normal teardown; the
-    /// `proactive_llm_shutdown` flag guarantees the underlying
-    /// [`ene_ai_local::ProactiveLlmHandles::shutdown`] runs only on the first
-    /// of the two, since `Arc<OnceCell>` cannot be consumed through a shared
-    /// reference.
-    async fn shutdown_proactive_llm_once(&self) {
-        if let Some(handles) = self.proactive_llm.get()
-            && !self.proactive_llm_shutdown.swap(true, Ordering::AcqRel)
-        {
-            handles.shutdown().await;
-        }
     }
 
     /// Handles [`EneCommand::PrepareVisionSummary`]: the busy-check
@@ -2734,7 +2705,6 @@ impl TurnActor {
                 self.abort_all_join_sets();
                 self.abort_proactive_decision();
                 self.abort_proactive_resolution();
-                self.shutdown_proactive_llm_once().await;
                 self.drain_pending().await;
                 // Release the single-flight gate so a `run()` that races the
                 // actor's teardown is not reported `Busy` by a gate the dying
@@ -4182,7 +4152,7 @@ impl TurnActor {
 /// from `bg_command_tasks`). The `cancel` token is set by the caller after
 /// this function returns `Ok`.
 fn finish_vision_prep(
-    handles: &ene_ai_local::ProactiveLlmHandles,
+    handles: &crate::proactive_llm::ProactiveLlmHandles,
     prompt_language: &str,
     app_label: &str,
     hints: &crate::vision::ScreenSummaryHints,
@@ -4197,11 +4167,6 @@ fn finish_vision_prep(
             ),
         });
     };
-    if !local.capabilities().contains(ene_ai::Capability::Vision) {
-        return Err(PublicApiError::Internal {
-            message: "local model has no vision mmproj loaded".to_string(),
-        });
-    }
 
     let prompts = ene_config::PromptLibrary::load(prompt_language);
     let system = prompts.proactive().screen_summary_system.trim().to_string();
@@ -5190,8 +5155,24 @@ pub(super) fn init_embedding(
         .map_err(|e| ene_ai::EmbeddingError::Init(e.to_string()))?
     {
         ResolvedEmbedding::Local(local) => {
-            let provider = ene_ai_local::create_local_provider(&local)?;
-            Ok(Arc::from(provider))
+            // Same bootstrap-ordering indirection as the cloud path: the
+            // plugin host (which registers the "local" embedding factory)
+            // starts after the embedder, because the host needs DB tokens
+            // derived from the memory store, which needs the embedder's
+            // dimensions. The proxy answers dimensions from config and only
+            // touches the registry on first use.
+            let dimensions = local.dimensions.ok_or_else(|| {
+                ene_ai::EmbeddingError::Init(format!(
+                    "local embedding model {:?} requires ai.local_models.{}.dimensions",
+                    local.name, local.name
+                ))
+            })?;
+            Ok(Arc::new(PluginEmbeddingProxy::new(
+                ene_ai::LOCAL_PROVIDER.to_string(),
+                local.name,
+                dimensions,
+                Arc::new(config.clone()),
+            )))
         }
         ResolvedEmbedding::Cloud {
             kind,

@@ -254,6 +254,16 @@ pub struct LocalModelDef {
     /// shrink its KV cache.
     #[serde(default = "default_context_size")]
     pub context_size: u32,
+    /// Real embedding vector dimensionality, in f32 components.
+    ///
+    /// Required when the model backs `tasks.embedding` with
+    /// `provider: "local"`: the host opens the memory-store vec0 schema with
+    /// this number before the plugin host starts (the plugin measures the
+    /// model's real `n_embd` only at load time, which is too late for the
+    /// store schema), and the plugin rejects a declared value that differs
+    /// from the model's real dimensionality. Ignored for chat-only models.
+    #[serde(default)]
+    pub dimensions: Option<usize>,
 }
 
 impl Default for LocalModelDef {
@@ -264,6 +274,7 @@ impl Default for LocalModelDef {
             model_path: default_string(),
             gpu_layers: default_gpu_layers(),
             context_size: default_context_size(),
+            dimensions: None,
         }
     }
 }
