@@ -26,6 +26,7 @@ pub use ene_core::{
     ActiveSceneSummaryRow, KeyFact, NaturalDecayReport, NewMemorySpan, PendingCandidate,
     PendingCandidateEdit, PendingCandidateStatus,
 };
+pub use ene_core::{MemoryOutcome, OutcomeRatingSource};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::path::Path;

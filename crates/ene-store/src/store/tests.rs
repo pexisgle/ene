@@ -1719,6 +1719,77 @@ async fn hybrid_search_exclude_kinds_drops_reflection_memories() {
 }
 
 #[tokio::test]
+async fn memory_outcome_roundtrip_orders_newest_first_and_respects_since() {
+    let store = setup_store().await;
+
+    let first = store
+        .record_memory_outcome(&crate::MemoryOutcome {
+            id: None,
+            memory_id: 11,
+            memory_title: "warm greeting".into(),
+            character_id: "Ene".into(),
+            user_id: "User".into(),
+            rating: 0.8,
+            source: crate::OutcomeRatingSource::Affect,
+            source_ref: Some("turn-1".into()),
+            created_at: Utc::now() - chrono::Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+
+    let second = store
+        .record_memory_outcome(&crate::MemoryOutcome {
+            id: None,
+            memory_id: 12,
+            memory_title: "long monologue".into(),
+            character_id: "Ene".into(),
+            user_id: "User".into(),
+            rating: -0.6,
+            source: crate::OutcomeRatingSource::UserFeedback,
+            source_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let all = store.list_memory_outcomes("Ene", None, 100).await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].id, Some(second), "newest outcome must come first");
+    assert_eq!(all[0].memory_title, "long monologue");
+    assert!((all[0].rating - (-0.6)).abs() < f32::EPSILON);
+    assert_eq!(all[0].source, crate::OutcomeRatingSource::UserFeedback);
+    assert_eq!(all[1].id, Some(first));
+    assert!((all[1].rating - 0.8).abs() < f32::EPSILON);
+    assert_eq!(all[1].source, crate::OutcomeRatingSource::Affect);
+    assert_eq!(all[1].source_ref.as_deref(), Some("turn-1"));
+
+    let since = store
+        .list_memory_outcomes(
+            "Ene",
+            Some(all[0].created_at - chrono::Duration::seconds(1)),
+            100,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        since.len(),
+        1,
+        "only the newest outcome falls in the since window"
+    );
+    assert_eq!(since[0].memory_id, 12);
+
+    let scoped = store
+        .list_memory_outcomes("Other", None, 100)
+        .await
+        .unwrap();
+    assert!(scoped.is_empty(), "outcomes are character-scoped");
+
+    let limited = store.list_memory_outcomes("Ene", None, 1).await.unwrap();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].memory_id, 12);
+}
+
+#[tokio::test]
 async fn hybrid_search_lexical_component_for_matching_query() {
     let store = setup_store().await;
     let now = Utc::now();

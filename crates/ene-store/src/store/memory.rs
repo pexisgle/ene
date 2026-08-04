@@ -132,6 +132,20 @@ fn model_to_memory_item(
     })
 }
 
+fn model_to_memory_outcome(m: entities::memory_outcomes::Model) -> crate::MemoryOutcome {
+    crate::MemoryOutcome {
+        id: Some(m.id),
+        memory_id: m.memory_id,
+        memory_title: m.memory_title,
+        character_id: m.character_id,
+        user_id: m.user_id,
+        rating: m.rating,
+        source: crate::OutcomeRatingSource::from_db_str(&m.source),
+        source_ref: m.source_ref,
+        created_at: m.created_at,
+    }
+}
+
 const fn is_supersedeable_status(status: crate::MemoryStatus) -> bool {
     matches!(
         status,
@@ -425,6 +439,56 @@ impl MemoryStore {
         };
         let res = active.insert(&self.db).await?;
         Ok(res.id)
+    }
+
+    /// Persist a memory-outcome evaluation and return its assigned ID.
+    pub async fn record_memory_outcome(
+        &self,
+        outcome: &crate::MemoryOutcome,
+    ) -> Result<i64, EneMemoryError> {
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+
+        let active = entities::memory_outcomes::ActiveModel {
+            memory_id: Set(outcome.memory_id),
+            memory_title: Set(outcome.memory_title.clone()),
+            character_id: Set(outcome.character_id.clone()),
+            user_id: Set(outcome.user_id.clone()),
+            rating: Set(outcome.rating),
+            source: Set(outcome.source.as_str().to_string()),
+            source_ref: Set(outcome.source_ref.clone()),
+            created_at: Set(outcome.created_at),
+            ..Default::default()
+        };
+        let res = active.insert(&self.db).await?;
+        Ok(res.id)
+    }
+
+    /// List outcome evaluations for a character, newest first.
+    ///
+    /// `since` bounds the window to records created after the given instant
+    /// (strictly); `None` lists every record. Results are capped at `limit`.
+    pub async fn list_memory_outcomes(
+        &self,
+        character_id: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        limit: usize,
+    ) -> Result<Vec<crate::MemoryOutcome>, EneMemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let mut query = entities::memory_outcomes::Entity::find()
+            .filter(entities::memory_outcomes::Column::CharacterId.eq(character_id));
+        if let Some(since) = since {
+            query = query.filter(entities::memory_outcomes::Column::CreatedAt.gt(since));
+        }
+        let models = query
+            .order_by_desc(entities::memory_outcomes::Column::CreatedAt)
+            .order_by_desc(entities::memory_outcomes::Column::Id)
+            .limit(limit as u64)
+            .all(&self.db)
+            .await?;
+
+        Ok(models.into_iter().map(model_to_memory_outcome).collect())
     }
 
     /// Retrieve a typed memory item by its ID.

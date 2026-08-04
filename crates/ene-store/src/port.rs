@@ -103,6 +103,22 @@ impl MemoryPort for MemoryStore {
         )
     }
 
+    async fn record_memory_outcome(
+        &self,
+        outcome: &ene_core::MemoryOutcome,
+    ) -> Result<i64, MemoryPortError> {
+        Ok(Self::record_memory_outcome(self, outcome).await?)
+    }
+
+    async fn list_memory_outcomes(
+        &self,
+        character_id: &str,
+        since: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<ene_core::MemoryOutcome>, MemoryPortError> {
+        Ok(Self::list_memory_outcomes(self, character_id, since, limit).await?)
+    }
+
     async fn search(&self, query: &Query<'_>) -> Result<Vec<GatheredCandidate>, MemoryPortError> {
         Ok(Self::search(self, query).await?)
     }
