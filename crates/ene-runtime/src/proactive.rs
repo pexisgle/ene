@@ -1,10 +1,11 @@
 use ene_ai::LlmProvider;
 use ene_mind::{
     ActiveCommitmentPrompt, ProactiveConfig, ProactiveConfirmation, ProactiveObservation,
-    ProactiveSkipReason, ProactiveSuppressionState, ScreenSummaryStatus, build_proactive_context,
-    decide_proactive_speech,
+    ProactiveSkipReason, ProactiveSuppressionState, QuietHoursEval, ScreenSummaryStatus,
+    build_proactive_context, decide_proactive_speech,
 };
 use ene_store::AffectState as StoreAffectState;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,6 +30,9 @@ pub(crate) struct ProactiveScheduler {
     /// Decision behind the proactive generation currently in flight, kept so
     /// the stream-completion path can log decision/main-model agreement.
     pub last_decision: Option<ProactiveDecisionResult>,
+    /// Suppressed quiet-hours moments awaiting catch-up delivery (times only,
+    /// never screen data). Bounded; oldest entries are dropped first.
+    pub(crate) quiet_hours_queue: VecDeque<QueuedQuietHour>,
 }
 
 impl Default for ProactiveScheduler {
@@ -42,9 +46,27 @@ impl Default for ProactiveScheduler {
             epoch: 0,
             world_state_tick: 0,
             last_decision: None,
+            quiet_hours_queue: VecDeque::new(),
         }
     }
 }
+
+/// One quiet-hours-suppressed proactive moment, queued for catch-up delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueuedQuietHour {
+    /// When the moment was suppressed (unix millis).
+    pub at_unix_ms: u64,
+    /// Local weekday at the moment (`monday`..`sunday`).
+    pub weekday: String,
+    /// Local wall time at the moment (`HH:MM`).
+    pub local_time: String,
+}
+
+/// Maximum queued quiet-hours moments kept for catch-up delivery.
+pub(crate) const QUIET_HOURS_QUEUE_CAP: usize = 32;
+
+/// Maximum suppressed moments rendered into one summary catch-up hint.
+pub(crate) const QUIET_HOURS_SUMMARY_MAX_ITEMS: usize = 20;
 
 impl ProactiveScheduler {
     /// Record that a user turn began (cancels stale decisions via epoch bump).
@@ -74,6 +96,7 @@ impl ProactiveScheduler {
         self.last_screen_image_data_uri = None;
         self.last_user_input_at = Instant::now();
         self.last_decision = None;
+        self.quiet_hours_queue.clear();
     }
 
     /// Take the stashed screen image for a generation turn (clears the stash).
@@ -182,6 +205,7 @@ pub(crate) async fn run_decision_task(
     history: Vec<ene_mind::HistoryEntry>,
     observation: ProactiveObservation,
     suppression: ProactiveSuppressionState,
+    quiet_hours: QuietHoursEval,
     provider: Option<Arc<dyn LlmProvider>>,
     epoch: u64,
     affect: Option<StoreAffectState>,
@@ -198,6 +222,7 @@ pub(crate) async fn run_decision_task(
         &commitments,
         &user_instructions,
         suppression,
+        quiet_hours,
     );
     let outcome = decide_proactive_speech(&config, &context, provider, &prompt_language).await;
     let should_generate = outcome.skip.is_none()
@@ -261,6 +286,65 @@ pub(crate) fn proactive_generation_hint(
         );
     }
     prompts.render_generation_hint(topic_hint, confirmation_enabled)
+}
+
+/// Render the catch-up generation hint for quiet-hours-suppressed moments.
+#[must_use]
+pub(crate) fn quiet_hours_catch_up_hint(items: &str, prompt_language: &str) -> String {
+    let library = ene_config::PromptLibrary::load(prompt_language);
+    let mut prompts = library.proactive().clone();
+    if prompts.catch_up_note.trim().is_empty() {
+        let fallback_language = if ene_config::resolve_language_alias(prompt_language) == "ja" {
+            "ja"
+        } else {
+            "en"
+        };
+        let fallback = ene_config::PromptLibrary::load(fallback_language)
+            .proactive()
+            .catch_up_note
+            .clone();
+        prompts.catch_up_note = if fallback.trim().is_empty() {
+            "Several moments passed while you were away. If it feels natural, \
+             acknowledge them briefly: {items}"
+                .to_string()
+        } else {
+            fallback
+        };
+        tracing::warn!(
+            component = "Proactive",
+            "catch_up_note is empty; using the embedded fallback"
+        );
+    }
+    prompts.render_catch_up_hint(items)
+}
+
+/// Format queued quiet-hours moments as a compact item list
+/// (`"22:30 monday, 22:45 monday"`).
+#[must_use]
+pub(crate) fn quiet_hours_items(entries: &[QueuedQuietHour]) -> String {
+    entries
+        .iter()
+        .map(|entry| format!("{} {}", entry.local_time, entry.weekday))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether the proactive turn's status announcement is suppressed.
+#[must_use]
+pub(crate) fn quiet_hours_suppresses_notifications(
+    quiet: &QuietHoursEval,
+    suppress: &ene_mind::QuietHoursSuppressConfig,
+) -> bool {
+    quiet.active && suppress.notifications
+}
+
+/// Whether proactive TTS audio is suppressed.
+#[must_use]
+pub(crate) fn quiet_hours_suppresses_tts(
+    quiet: &QuietHoursEval,
+    suppress: &ene_mind::QuietHoursSuppressConfig,
+) -> bool {
+    quiet.active && suppress.tts
 }
 
 /// Resolve the final confirmation verdict from the terminal reason and
@@ -465,6 +549,7 @@ mod tests {
                 proactive_turns_this_session: 0,
                 user_turn_busy: false,
             },
+            QuietHoursEval::inactive(),
             Some(provider.clone() as Arc<dyn LlmProvider>),
             0,
             None,
@@ -544,6 +629,7 @@ mod tests {
             history.clone(),
             ProactiveObservation::default(),
             suppression,
+            QuietHoursEval::inactive(),
             Some(Arc::new(FixedBodyProvider {
                 body: speak.to_string(),
             }) as Arc<dyn LlmProvider>),
@@ -567,6 +653,7 @@ mod tests {
             history,
             ProactiveObservation::default(),
             suppression,
+            QuietHoursEval::inactive(),
             Some(Arc::new(FixedBodyProvider {
                 body: speak.to_string(),
             }) as Arc<dyn LlmProvider>),
@@ -715,5 +802,56 @@ mod tests {
             log_confirmation(&decision, ene_mind::ProactiveConfirmation::Empty);
         });
         assert!(empty.contains("no speech"), "log: {empty}");
+    }
+
+    #[test]
+    fn quiet_hours_queue_is_bounded_and_reset_with_session() {
+        let mut scheduler = ProactiveScheduler::default();
+        for i in 0..40 {
+            scheduler.quiet_hours_queue.push_back(QueuedQuietHour {
+                at_unix_ms: i,
+                weekday: "monday".into(),
+                local_time: "22:00".into(),
+            });
+            if scheduler.quiet_hours_queue.len() > QUIET_HOURS_QUEUE_CAP {
+                scheduler.quiet_hours_queue.pop_front();
+            }
+        }
+        assert_eq!(scheduler.quiet_hours_queue.len(), QUIET_HOURS_QUEUE_CAP);
+        assert_eq!(
+            scheduler.quiet_hours_queue.front().map(|e| e.at_unix_ms),
+            Some(40 - QUIET_HOURS_QUEUE_CAP as u64),
+            "oldest entries must be dropped first"
+        );
+
+        scheduler.reset_session();
+        assert!(scheduler.quiet_hours_queue.is_empty());
+    }
+
+    #[test]
+    fn quiet_hours_items_renders_compact_list() {
+        let entries = vec![
+            QueuedQuietHour {
+                at_unix_ms: 1,
+                weekday: "monday".into(),
+                local_time: "22:30".into(),
+            },
+            QueuedQuietHour {
+                at_unix_ms: 2,
+                weekday: "monday".into(),
+                local_time: "22:45".into(),
+            },
+        ];
+        assert_eq!(quiet_hours_items(&entries), "22:30 monday, 22:45 monday");
+    }
+
+    #[test]
+    fn catch_up_hint_renders_items_in_both_languages() {
+        let en = quiet_hours_catch_up_hint("22:30 monday", "en");
+        assert!(en.contains("22:30 monday"), "hint: {en}");
+        assert!(!en.contains("{items}"), "placeholder must be replaced");
+        let ja = quiet_hours_catch_up_hint("22:30 monday", "ja");
+        assert!(ja.contains("22:30 monday"), "hint: {ja}");
+        assert!(!ja.contains("{items}"), "placeholder must be replaced");
     }
 }
