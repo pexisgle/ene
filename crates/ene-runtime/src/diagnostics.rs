@@ -378,12 +378,9 @@ impl MemoryHandle {
             llm,
             embedder,
             limit,
+            self.recall_cache.as_deref(),
         )
         .await;
-        // The drain replays failed write payloads, so recall rows may have
-        // changed; the operation is rare and user-invoked, so drop the cache
-        // unconditionally rather than tracking individual writes.
-        self.invalidate_recall_cache();
         Ok(())
     }
 

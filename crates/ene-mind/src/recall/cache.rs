@@ -52,6 +52,10 @@ pub struct RecallCacheStats {
 #[derive(Debug, Default)]
 pub struct MemoryRecallCache {
     inner: RwLock<Inner>,
+    /// Bumped by every invalidation and access refresh; miss-path inserts are
+    /// gated on it so a read that started before a mutation cannot land its
+    /// pre-mutation snapshot afterwards.
+    epoch: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
     invalidations: AtomicU64,
@@ -76,19 +80,18 @@ impl Inner {
     }
 }
 
-/// Scope identity for character/user-keyed sections. `user_id == ""` is the
-/// unscoped form (`user_id: None` on the store call).
+/// Scope identity for character/user-keyed sections.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ScopeKey {
     character_id: String,
-    user_id: String,
+    user_id: Option<String>,
 }
 
 impl ScopeKey {
     fn new(character_id: &str, user_id: Option<&str>) -> Self {
         Self {
             character_id: character_id.to_string(),
-            user_id: user_id.unwrap_or_default().to_string(),
+            user_id: user_id.map(ToOwned::to_owned),
         }
     }
 }
@@ -113,12 +116,13 @@ struct CachedCommitments {
 struct SearchKey {
     session_id: String,
     character_id: String,
-    user_id: String,
+    user_id: Option<String>,
     model_name: String,
     query_text: String,
     embedding_hash: Option<Blake3Hash>,
     similarity_threshold_bits: u32,
     candidate_pool_size: usize,
+    limit: usize,
     recent_fallback_limit: usize,
     exclude_kinds: Vec<MemoryKind>,
 }
@@ -128,7 +132,7 @@ impl SearchKey {
         Self {
             session_id: session_id.to_string(),
             character_id: query.character_id.to_string(),
-            user_id: query.user_id.unwrap_or_default().to_string(),
+            user_id: query.user_id.map(ToOwned::to_owned),
             model_name: query.model_name.to_string(),
             query_text: query.query_text.to_string(),
             embedding_hash: query.embedding.map(|embedding| {
@@ -140,6 +144,7 @@ impl SearchKey {
             }),
             similarity_threshold_bits: query.similarity_threshold.to_bits(),
             candidate_pool_size: query.candidate_pool_size,
+            limit: query.limit,
             recent_fallback_limit: query.recent_fallback_limit,
             exclude_kinds: query.exclude_kinds.clone(),
         }
@@ -152,6 +157,7 @@ impl MemoryRecallCache {
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(Inner::new()),
+            epoch: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             invalidations: AtomicU64::new(0),
@@ -185,6 +191,7 @@ impl MemoryRecallCache {
         inner
             .searches
             .retain(|key, _| key.character_id != character_id);
+        self.epoch.fetch_add(1, Ordering::AcqRel);
         self.invalidations.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -196,6 +203,7 @@ impl MemoryRecallCache {
         inner.pending.clear();
         inner.reflections.clear();
         inner.searches.clear();
+        self.epoch.fetch_add(1, Ordering::AcqRel);
         self.invalidations.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -212,10 +220,13 @@ impl MemoryRecallCache {
             return Ok(cached.clone());
         }
         self.count_miss("search");
+        let epoch = self.epoch.load(Ordering::Acquire);
         let gathered = store.search(query).await?;
-        let mut inner = self.inner.write();
-        inner.searches.insert(key, gathered.clone());
-        evict_fifo(&mut inner.searches, MAX_SEARCH_ENTRIES);
+        if self.epoch.load(Ordering::Acquire) == epoch {
+            let mut inner = self.inner.write();
+            inner.searches.insert(key, gathered.clone());
+            evict_fifo(&mut inner.searches, MAX_SEARCH_ENTRIES);
+        }
         Ok(gathered)
     }
 
@@ -238,18 +249,21 @@ impl MemoryRecallCache {
             return Ok(cached.commitments.iter().take(limit).cloned().collect());
         }
         self.count_miss("commitments");
+        let epoch = self.epoch.load(Ordering::Acquire);
         let commitments = store
             .list_active_commitments(character_id, user_id, limit)
             .await?;
-        let mut inner = self.inner.write();
-        inner.commitments.insert(
-            key,
-            CachedCommitments {
-                commitments: commitments.clone(),
-                limit,
-            },
-        );
-        evict_fifo(&mut inner.commitments, MAX_SCOPE_ENTRIES);
+        if self.epoch.load(Ordering::Acquire) == epoch {
+            let mut inner = self.inner.write();
+            inner.commitments.insert(
+                key,
+                CachedCommitments {
+                    commitments: commitments.clone(),
+                    limit,
+                },
+            );
+            evict_fifo(&mut inner.commitments, MAX_SCOPE_ENTRIES);
+        }
         Ok(commitments)
     }
 
@@ -265,12 +279,15 @@ impl MemoryRecallCache {
             return Ok(cached.clone());
         }
         self.count_miss("pending");
+        let epoch = self.epoch.load(Ordering::Acquire);
         let candidates = store
             .list_pending_candidates(character_id, Some(PendingCandidateStatus::Pending))
             .await?;
-        let mut inner = self.inner.write();
-        inner.pending.insert(key, candidates.clone());
-        evict_fifo(&mut inner.pending, MAX_SCOPE_ENTRIES);
+        if self.epoch.load(Ordering::Acquire) == epoch {
+            let mut inner = self.inner.write();
+            inner.pending.insert(key, candidates.clone());
+            evict_fifo(&mut inner.pending, MAX_SCOPE_ENTRIES);
+        }
         Ok(candidates)
     }
 
@@ -285,13 +302,30 @@ impl MemoryRecallCache {
             return Ok(cached.clone());
         }
         self.count_miss("reflections");
-        let items =
-            crate::memory_writer::reflection::load_reflection_memories(store, character_id).await;
-        let mut inner = self.inner.write();
-        inner
-            .reflections
-            .insert(character_id.to_string(), items.clone());
-        evict_fifo(&mut inner.reflections, MAX_SCOPE_ENTRIES);
+        let epoch = self.epoch.load(Ordering::Acquire);
+        // Loaded directly (mirroring `load_reflection_memories` semantics) so
+        // a transient store error degrades to empty without being cached as
+        // if it were the true reflection set.
+        let items: Vec<MemoryItem> = store
+            .get_typed_memories_by_character(
+                character_id,
+                Some(MemoryKind::Reflection),
+                None,
+                None,
+                50,
+                0,
+            )
+            .await?
+            .into_iter()
+            .filter(|item| item.status == ene_core::MemoryStatus::Active)
+            .collect();
+        if self.epoch.load(Ordering::Acquire) == epoch {
+            let mut inner = self.inner.write();
+            inner
+                .reflections
+                .insert(character_id.to_string(), items.clone());
+            evict_fifo(&mut inner.reflections, MAX_SCOPE_ENTRIES);
+        }
         Ok(items)
     }
 
@@ -306,6 +340,9 @@ impl MemoryRecallCache {
         if ids.is_empty() {
             return;
         }
+        // Block miss-path inserts that started before the bump from landing
+        // pre-bump snapshots after the in-place refresh.
+        self.epoch.fetch_add(1, Ordering::AcqRel);
         let now = Utc::now();
         let mut inner = self.inner.write();
         for cached in inner.searches.values_mut() {
@@ -360,23 +397,31 @@ fn evict_fifo<K, V>(entries: &mut IndexMap<K, V>, max: usize) {
 pub(crate) struct WriteTrackingPort<'a> {
     inner: &'a dyn MemoryPort,
     wrote: AtomicBool,
+    invalidate: Option<(&'a MemoryRecallCache, &'a str)>,
 }
 
 impl<'a> WriteTrackingPort<'a> {
-    pub(crate) fn new(inner: &'a dyn MemoryPort) -> Self {
+    pub(crate) fn new(
+        inner: &'a dyn MemoryPort,
+        invalidate: Option<(&'a MemoryRecallCache, &'a str)>,
+    ) -> Self {
         Self {
             inner,
             wrote: AtomicBool::new(false),
+            invalidate,
         }
     }
 
-    /// Whether any mutating call has been observed so far.
-    pub(crate) fn wrote(&self) -> bool {
-        self.wrote.load(Ordering::Relaxed)
-    }
-
     fn mark(&self) {
-        self.wrote.store(true, Ordering::Relaxed);
+        if self.wrote.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        // Invalidate at the first observed write: the pipeline keeps writing
+        // for a while, and any turn in that window must not hit pre-write
+        // cache entries while fresh L2 reads return post-write rows.
+        if let Some((cache, character_id)) = self.invalidate {
+            cache.invalidate_character(character_id);
+        }
     }
 }
 
@@ -792,9 +837,18 @@ mod tests {
         commitment_calls: AtomicUsize,
         pending_calls: AtomicUsize,
         reflection_calls: AtomicUsize,
+        gate: Mutex<Option<SearchGate>>,
     }
 
     use parking_lot::Mutex;
+
+    /// One-shot blocking hook for `search`, letting a test invalidate the
+    /// cache while an L2 read is in flight.
+    #[derive(Debug)]
+    struct SearchGate {
+        started: tokio::sync::mpsc::UnboundedSender<String>,
+        release: tokio::sync::mpsc::UnboundedReceiver<String>,
+    }
 
     impl CountingPort {
         fn with_canned(candidates: Vec<GatheredCandidate>) -> Self {
@@ -858,6 +912,11 @@ mod tests {
             _query: &Query<'_>,
         ) -> Result<Vec<GatheredCandidate>, MemoryPortError> {
             self.search_calls.fetch_add(1, AtomicOrdering::Relaxed);
+            let gate = self.gate.lock().take();
+            if let Some(mut gate) = gate {
+                drop(gate.started.send("started".to_string()));
+                drop(gate.release.recv().await);
+            }
             Ok(self.search_result.lock().clone())
         }
 
@@ -1190,9 +1249,75 @@ mod tests {
 
         cache.search(&store, &session_id, &query).await.unwrap();
         cache.search(&store, &session_id, &other).await.unwrap();
+        cache
+            .list_active_commitments(&store, "Other", Some("User"), 8)
+            .await
+            .unwrap();
+        cache
+            .list_pending_candidates(&store, "Other")
+            .await
+            .unwrap();
+        cache
+            .get_reflection_memories(&store, "Other")
+            .await
+            .unwrap();
         cache.invalidate_character("Ene");
         cache.search(&store, &session_id, &other).await.unwrap();
+        cache
+            .list_active_commitments(&store, "Other", Some("User"), 8)
+            .await
+            .unwrap();
+        cache
+            .list_pending_candidates(&store, "Other")
+            .await
+            .unwrap();
+        cache
+            .get_reflection_memories(&store, "Other")
+            .await
+            .unwrap();
 
+        assert_eq!(store.search_calls.load(AtomicOrdering::Relaxed), 2);
+        assert_eq!(store.commitment_calls.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(store.pending_calls.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(store.reflection_calls.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_read_does_not_poison_cache_after_invalidation() {
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = std::sync::Arc::new(CountingPort {
+            gate: Mutex::new(Some(SearchGate {
+                started: started_tx,
+                release: release_rx,
+            })),
+            ..CountingPort::default()
+        });
+        let cache = std::sync::Arc::new(MemoryRecallCache::new());
+        let (session_id, query) = sample_query("sess", Some(&[1.0, 0.0, 0.0]), "coffee");
+
+        let read_cache = cache.clone();
+        let read_store = store.clone();
+        let read_query = query.clone();
+        let read = tokio::spawn(async move {
+            read_cache
+                .search(read_store.as_ref(), "sess", &read_query)
+                .await
+                .unwrap();
+        });
+
+        started_rx.recv().await.unwrap();
+        cache.invalidate_all();
+        drop(release_tx.send("go".to_string()));
+        read.await.unwrap();
+
+        // The in-flight read must not have re-inserted its pre-invalidation
+        // snapshot: the next search goes to L2 again.
+        assert!(cache.inner.read().searches.is_empty());
+        cache
+            .search(store.as_ref(), &session_id, &query)
+            .await
+            .unwrap();
         assert_eq!(store.search_calls.load(AtomicOrdering::Relaxed), 2);
     }
 
@@ -1270,8 +1395,9 @@ mod tests {
     #[tokio::test]
     async fn write_tracking_port_marks_mutations_only() {
         let inner = CountingPort::default();
-        let tracker = WriteTrackingPort::new(&inner);
-        assert!(!tracker.wrote());
+        let cache = MemoryRecallCache::new();
+        let tracker = WriteTrackingPort::new(&inner, Some((&cache, "Ene")));
+        assert_eq!(cache.stats().invalidations, 0);
 
         tracker
             .search(&sample_query("s", None, "q").1)
@@ -1282,13 +1408,13 @@ mod tests {
             .await
             .unwrap();
         tracker.bump_typed_memory_access(1).await.unwrap();
-        assert!(!tracker.wrote());
+        assert_eq!(cache.stats().invalidations, 0);
 
         tracker
             .set_memory_status(1, MemoryStatus::UserDeleted)
             .await
             .unwrap();
-        assert!(tracker.wrote());
+        assert_eq!(cache.stats().invalidations, 1);
     }
 
     #[tokio::test]

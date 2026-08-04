@@ -776,14 +776,9 @@ impl CognitionEngine {
         input: &PostTurnInput<'_>,
         cache: Option<&MemoryRecallCache>,
     ) -> Result<(), CognitionError> {
-        let tracking = WriteTrackingPort::new(store);
-        let result = MemoryWriter::finalize_turn(&tracking, config, input).await;
-        if tracking.wrote()
-            && let Some(cache) = cache
-        {
-            cache.invalidate_character(input.character_id);
-        }
-        result
+        let tracking =
+            WriteTrackingPort::new(store, cache.map(|cache| (cache, input.character_id)));
+        MemoryWriter::finalize_turn(&tracking, config, input).await
     }
 
     /// Spawn deferred post-turn memory extraction (LLM + arbiter) and forgetting lifecycle.
@@ -806,7 +801,12 @@ impl CognitionEngine {
                     user_id = %input.user_id,
                     "Post-turn memory extraction and forgetting starting"
                 );
-                let tracking = WriteTrackingPort::new(store.as_ref());
+                let tracking = WriteTrackingPort::new(
+                    store.as_ref(),
+                    cache
+                        .as_ref()
+                        .map(|cache| (cache.as_ref(), input.character_id.as_str())),
+                );
                 // Drain due retries before writing the new turn.
                 Self::drain_pending_memory_writes(
                     &tracking,
@@ -814,6 +814,7 @@ impl CognitionEngine {
                     llm.as_ref(),
                     embedder.as_ref().map(std::convert::AsRef::as_ref),
                     3,
+                    cache.as_deref(),
                 )
                 .await;
 
@@ -830,11 +831,6 @@ impl CognitionEngine {
                     Ok(deferred)
                 }
                 .await;
-                if tracking.wrote()
-                    && let Some(cache) = &cache
-                {
-                    cache.invalidate_character(&input.character_id);
-                }
                 match result {
                     Ok(deferred_candidates) => {
                         tracing::info!(
@@ -903,11 +899,18 @@ impl CognitionEngine {
         llm: &dyn ene_ai::LlmProvider,
         embedder: Option<&dyn ene_ai::EmbeddingProvider>,
         limit: usize,
+        cache: Option<&MemoryRecallCache>,
     ) {
         let Ok(due) = store.take_due_pending_memory_writes(limit).await else {
             return;
         };
         for row in due {
+            // The queue is global, so a drain for one character can replay
+            // retries for another; drop every replayed character's entries
+            // before its payload writes.
+            if let Some(cache) = cache {
+                cache.invalidate_character(&row.character_id);
+            }
             let Ok(input) =
                 serde_json::from_str::<crate::lifecycle::OwnedPostTurnInput>(&row.payload_json)
             else {

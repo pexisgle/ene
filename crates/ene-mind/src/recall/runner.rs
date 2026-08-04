@@ -225,17 +225,25 @@ pub async fn bump_injected_memory_access(
     cache: Option<&MemoryRecallCache>,
     injected_ids: &[i64],
 ) {
+    let mut bumped = Vec::new();
     for &id in injected_ids {
-        if let Err(error) = store.bump_typed_memory_access(id).await {
-            tracing::warn!(
-                component = "RecallRunner",
-                memory_id = id,
-                error = %error,
-                "Failed to bump typed memory access after prompt injection"
-            );
-        } else if let Some(cache) = cache {
-            cache.refresh_access(&[id]);
+        match store.bump_typed_memory_access(id).await {
+            Ok(true) => bumped.push(id),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    component = "RecallRunner",
+                    memory_id = id,
+                    error = %error,
+                    "Failed to bump typed memory access after prompt injection"
+                );
+            }
         }
+    }
+    if let Some(cache) = cache {
+        // Single refresh after all bumps so the epoch gate covers every row
+        // in one window instead of per id.
+        cache.refresh_access(&bumped);
     }
 }
 
@@ -248,6 +256,7 @@ mod tests {
     use super::*;
     use crate::config::MindConfig;
     use ene_store::MemoryStore;
+    use ene_store::{CommitmentStatus, NewCommitment};
     use ene_store::{MemoryConfidence, MemoryKind, MemorySalience, MemorySource, MemoryStatus};
     use ene_store::{MemoryScope, NewMemoryItem};
 
@@ -310,6 +319,81 @@ mod tests {
                 .all(|m| m.item.content != "The world is always sunny."),
             "lorebook rows must not surface through recall; the injection path owns them"
         );
+    }
+
+    #[tokio::test]
+    async fn cached_recall_matches_uncached_on_real_store() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let item = NewMemoryItem {
+            scope: MemoryScope::Character,
+            character_id: "Ene".into(),
+            user_id: "User".into(),
+            kind: MemoryKind::Preference,
+            title: "coffee".into(),
+            content: "The user likes coffee with oat milk.".into(),
+            source: MemorySource::Conversation,
+            source_ref: None,
+            confidence: MemoryConfidence::new(1.0),
+            salience: MemorySalience::new(1.0),
+            affect: Default::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        let id = store.insert_typed_memory(&item).await.unwrap();
+        store
+            .upsert_memory_embedding(id, "mock", "content", &[1.0, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        store
+            .insert_commitment(&NewCommitment {
+                character_id: "Ene".into(),
+                user_id: "User".into(),
+                title: "buy coffee".into(),
+                description: "pick up beans tomorrow".into(),
+                status: CommitmentStatus::Active,
+                due_at: None,
+                due_label: None,
+            })
+            .await
+            .unwrap();
+
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+
+        let cache = MemoryRecallCache::new();
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "What does the user like to drink?",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            affect: None,
+            cache: Some(&cache),
+            session_id: "sess",
+        };
+
+        let (_, first) = execute_hybrid_recall(&config, &input).await.unwrap();
+        let (_, second) = execute_hybrid_recall(&config, &input).await.unwrap();
+
+        assert_eq!(first, second, "cached recall must equal uncached recall");
+        let stats = cache.stats();
+        assert_eq!(
+            stats.misses, 3,
+            "first run loads commitments/search/pending"
+        );
+        assert_eq!(stats.hits, 3, "repeat turn is served entirely from L1");
     }
 
     #[tokio::test]
