@@ -81,6 +81,11 @@ pub struct PendingCandidate {
     /// resolve the supersede target without re-searching. `None` when the
     /// candidate does not conflict with an existing memory.
     pub existing_memory_id: Option<i64>,
+    /// Outcome rating of the interaction that produced this candidate
+    /// (-1.0 negative ..= 1.0 positive), carried through deferral so an
+    /// approved candidate still enters the self-reflection loop.
+    #[serde(default)]
+    pub outcome_rating: Option<f32>,
     /// Source quote from the conversation that triggered this candidate.
     pub source_quote: String,
     /// Source turn that triggered this candidate, when the extraction ran

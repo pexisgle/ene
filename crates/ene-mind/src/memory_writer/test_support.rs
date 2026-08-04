@@ -21,8 +21,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ene_core::{
     ActiveSceneSummaryRow, AffectState, Commitment, GatheredCandidate, MemoryItem, MemoryKind,
-    MemoryPort, MemoryPortError, MemoryStatus, NaturalDecayReport, NewCommitment, NewMemoryItem,
-    NewMemorySpan, PendingAffectProposal, PendingCandidate, PendingMemoryWrite, Query,
+    MemoryOutcome, MemoryPort, MemoryPortError, MemoryStatus, NaturalDecayReport, NewCommitment,
+    NewMemoryItem, NewMemorySpan, PendingAffectProposal, PendingCandidate, PendingMemoryWrite,
+    Query,
 };
 use parking_lot::Mutex;
 
@@ -31,6 +32,7 @@ use parking_lot::Mutex;
 pub struct InMemoryMemoryPort {
     items: Mutex<Vec<MemoryItem>>,
     pending: Mutex<Vec<PendingCandidate>>,
+    outcomes: Mutex<Vec<MemoryOutcome>>,
     next_id: AtomicI64,
     fail_pending_list: AtomicBool,
 }
@@ -57,6 +59,11 @@ impl InMemoryMemoryPort {
     /// Snapshot of the pending user-confirmation queue.
     pub fn pending_candidates(&self) -> Vec<PendingCandidate> {
         self.pending.lock().clone()
+    }
+
+    /// Snapshot of every recorded outcome, newest first.
+    pub fn outcomes(&self) -> Vec<MemoryOutcome> {
+        self.outcomes.lock().clone()
     }
 
     /// Make `list_pending_candidates` fail, exercising loader error paths.
@@ -190,6 +197,47 @@ impl MemoryPort for InMemoryMemoryPort {
             }
         }
         Ok(archived)
+    }
+
+    async fn record_memory_outcome(&self, outcome: &MemoryOutcome) -> Result<i64, MemoryPortError> {
+        let mut outcomes = self.outcomes.lock();
+        let id = self.alloc_id();
+        let mut stored = outcome.clone();
+        stored.id = Some(id);
+        outcomes.push(stored);
+        Ok(id)
+    }
+
+    async fn list_memory_outcomes(
+        &self,
+        character_id: &str,
+        since: Option<chrono::DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<MemoryOutcome>, MemoryPortError> {
+        let mut rows: Vec<MemoryOutcome> = self
+            .outcomes
+            .lock()
+            .iter()
+            .filter(|o| o.character_id == character_id)
+            .filter(|o| since.is_none_or(|s| o.created_at > s))
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    async fn delete_memory_outcomes(
+        &self,
+        character_id: &str,
+        ids: &[i64],
+    ) -> Result<usize, MemoryPortError> {
+        let mut outcomes = self.outcomes.lock();
+        let before = outcomes.len();
+        outcomes.retain(|o| {
+            o.character_id != character_id || !o.id.is_some_and(|id| ids.contains(&id))
+        });
+        Ok(before - outcomes.len())
     }
 
     async fn search(&self, _query: &Query<'_>) -> Result<Vec<GatheredCandidate>, MemoryPortError> {
@@ -480,6 +528,7 @@ mod tests {
             reason_detail: String::new(),
             existing_memory_title: None,
             existing_memory_id: None,
+            outcome_rating: None,
             source_quote: String::new(),
             source_turn: None,
             approval_parked: false,

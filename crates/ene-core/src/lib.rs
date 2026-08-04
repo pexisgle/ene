@@ -54,8 +54,9 @@ pub use key_fact::KeyFact;
 pub use memory::{
     AffectAnnotation, ContradictionKeyMatch, ForgettingPolicy, GatheredCandidate,
     HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,
-    MemoryJournalListOptions, MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown,
-    MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query, ScoredMemory, TimeRange,
+    MemoryJournalListOptions, MemoryKind, MemoryOutcome, MemorySalience, MemoryScope,
+    MemoryScoreBreakdown, MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem,
+    OutcomeRatingSource, Query, ScoredMemory, TimeRange,
 };
 pub use pending::{
     NaturalDecayReport, PendingCandidate, PendingCandidateEdit, PendingCandidateStatus,

@@ -135,9 +135,9 @@ pub use search::document_lexical_similarity;
 pub use session::{NewSessionMeta, SessionMeta};
 /// Core memory types.
 pub use store::{
-    ActiveSceneSummaryRow, ClaimedFire, ConversationLogEntry, FireClaimMode, KeyFact, MemoryStore,
-    NaturalDecayReport, NewMemorySpan, PendingCandidate, PendingCandidateEdit,
-    PendingCandidateStatus,
+    ActiveSceneSummaryRow, ClaimedFire, ConversationLogEntry, FireClaimMode, KeyFact,
+    MemoryOutcome, MemoryStore, NaturalDecayReport, NewMemorySpan, OutcomeRatingSource,
+    PendingCandidate, PendingCandidateEdit, PendingCandidateStatus,
 };
 /// Typed memory domain types.
 pub use typed_memory::{

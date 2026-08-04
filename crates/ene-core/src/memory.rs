@@ -697,6 +697,72 @@ pub struct TimeRange {
     pub end: Option<DateTime<Utc>>,
 }
 
+/// How an interaction outcome rating was produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeRatingSource {
+    /// Derived from the turn's affect state (PAD valence).
+    Affect,
+    /// Explicit user feedback. No producer exists yet; the variant reserves
+    /// the storage contract for a future feedback command.
+    UserFeedback,
+}
+
+impl OutcomeRatingSource {
+    /// Returns the `snake_case` string representation for storage/DB use.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Affect => "affect",
+            Self::UserFeedback => "user_feedback",
+        }
+    }
+
+    /// Parse from a `snake_case` string, logging a warning on unrecognized values.
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "affect" => Self::Affect,
+            "user_feedback" => Self::UserFeedback,
+            other => {
+                tracing::error!(
+                    other,
+                    "unrecognized OutcomeRatingSource in DB, falling back to Affect"
+                );
+                Self::Affect
+            }
+        }
+    }
+}
+
+/// A durable evaluation of one interaction outcome, keyed to a typed memory.
+///
+/// Recorded for every persisted arbiter decision when the self-reflection
+/// pipeline is enabled; the reflection generator aggregates these records
+/// into `Reflection`-kind strategy memories.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryOutcome {
+    /// Primary key (`None` until persisted).
+    pub id: Option<i64>,
+    /// ID of the typed memory this outcome evaluates.
+    pub memory_id: i64,
+    /// Title of the evaluated memory.
+    ///
+    /// Denormalized so the reflection generator can embed strategy titles
+    /// without joining `typed_memories` per record.
+    pub memory_title: String,
+    /// Character the outcome belongs to.
+    pub character_id: String,
+    /// User identifier (may be empty for character-level rows).
+    pub user_id: String,
+    /// Outcome rating (-1.0 negative ..= 1.0 positive).
+    pub rating: f32,
+    /// How the rating was produced.
+    pub source: OutcomeRatingSource,
+    /// Optional reference to the source turn/session.
+    pub source_ref: Option<String>,
+    /// When the outcome was recorded.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Typed-memory search query.
 ///
 /// Callers (mind) pre-compute `embedding` when vector search is desired.

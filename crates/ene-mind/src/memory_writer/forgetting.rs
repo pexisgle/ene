@@ -191,6 +191,7 @@ mod tests {
                 reason_detail: String::new(),
                 existing_memory_title: None,
                 existing_memory_id: None,
+                outcome_rating: None,
                 source_quote: String::new(),
                 source_turn: None,
                 approval_parked: false,

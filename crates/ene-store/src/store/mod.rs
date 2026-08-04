@@ -26,6 +26,7 @@ pub use ene_core::{
     ActiveSceneSummaryRow, KeyFact, NaturalDecayReport, NewMemorySpan, PendingCandidate,
     PendingCandidateEdit, PendingCandidateStatus,
 };
+pub use ene_core::{MemoryOutcome, OutcomeRatingSource};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::path::Path;
@@ -652,6 +653,7 @@ impl MemoryStore {
             source_turn: Set(candidate.source_turn),
             approval_parked: Set(candidate.approval_parked),
             existing_memory_id: Set(candidate.existing_memory_id),
+            outcome_rating: Set(candidate.outcome_rating),
             status: Set(PendingCandidateStatus::Pending.as_str().to_string()),
             created_at: Set(candidate.created_at),
             resolved_at: Set(candidate.resolved_at),

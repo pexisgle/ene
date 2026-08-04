@@ -263,6 +263,7 @@ mod tests {
             existing_memory_id: None,
             source_quote: "test".into(),
             source_turn: None,
+            outcome_rating: None,
             approval_parked,
             status,
             created_at: now() - Duration::days(age_days),
