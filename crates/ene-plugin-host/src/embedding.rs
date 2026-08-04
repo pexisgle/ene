@@ -307,6 +307,10 @@ fn resolved_embedding_dimensions(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "unit tests use expect for concise failure messages"
+)]
 mod tests {
     use super::*;
 
