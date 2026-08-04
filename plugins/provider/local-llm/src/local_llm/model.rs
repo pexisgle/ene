@@ -11,29 +11,13 @@ use llama_cpp_4::context::params::LlamaContextParams;
 use crate::llama_cpp::{self, LlamaStreamChunk, LoadSpec, LoadedModel};
 
 /// This crate's [`ene_infer::LocalModel::Request`] for [`LlamaChatModel`]:
-/// either an ordinary chat turn (routed through
+/// an ordinary chat turn (routed through
 /// [`ene_ai::StreamingLocalLlmEngine`]'s blanket `LlmProvider` impl via
-/// `From<LlmChatRequest>`) or a raw-RGB vision summarization, submitted
-/// directly through [`ene_ai::StreamingLocalLlmEngine::handle`] — see
-/// `LocalLlamaCppProvider::summarize_rgb_with_cancel` in `super`, which does
-/// not fit `LlmChatRequest`'s message-based shape (it takes raw RGB8 pixels
-/// plus width/height, not a base64 data-URI image part).
+/// `From<LlmChatRequest>`). Vision input rides the same message shape
+/// (base64 data-URI image parts).
 pub(crate) enum LlamaCppRequest {
     /// An ordinary chat completion.
     Chat(LlmChatRequest),
-    /// A raw RGB8 screen-capture summarization.
-    Vision {
-        /// Rendered system prompt.
-        system: String,
-        /// Rendered user prompt.
-        user: String,
-        /// Image width in pixels.
-        width: u32,
-        /// Image height in pixels.
-        height: u32,
-        /// Interleaved RGB8 pixel data, `width * height * 3` bytes.
-        rgb: Vec<u8>,
-    },
 }
 
 impl From<LlmChatRequest> for LlamaCppRequest {
@@ -187,25 +171,15 @@ impl LocalModel for LlamaChatModel {
         })?;
         let loaded_ref: &LoadedModel = loaded.as_ref();
 
-        let generated = match req {
-            LlamaCppRequest::Chat(chat) => llama_cpp::generate_chat(
-                loaded_ref,
-                ctx,
-                &chat.messages,
-                chat.json_schema.as_ref(),
-                job,
-                None,
-            )?,
-            LlamaCppRequest::Vision {
-                system,
-                user,
-                width,
-                height,
-                rgb,
-            } => llama_cpp::generate_vision(
-                loaded_ref, ctx, &system, &user, width, height, &rgb, job, None,
-            )?,
-        };
+        let LlamaCppRequest::Chat(chat) = req;
+        let generated = llama_cpp::generate_chat(
+            loaded_ref,
+            ctx,
+            &chat.messages,
+            chat.json_schema.as_ref(),
+            job,
+            None,
+        )?;
         Ok(LlamaCppResponse {
             text: generated.text,
             prompt_tokens: generated.prompt_tokens,
@@ -268,37 +242,15 @@ impl StreamingLocalModel for LlamaChatModel {
         })?;
         let loaded_ref: &LoadedModel = loaded.as_ref();
 
-        match req {
-            LlamaCppRequest::Chat(chat) => {
-                llama_cpp::generate_chat(
-                    loaded_ref,
-                    ctx,
-                    &chat.messages,
-                    chat.json_schema.as_ref(),
-                    job,
-                    Some(sink),
-                )?;
-            }
-            LlamaCppRequest::Vision {
-                system,
-                user,
-                width,
-                height,
-                rgb,
-            } => {
-                llama_cpp::generate_vision(
-                    loaded_ref,
-                    ctx,
-                    &system,
-                    &user,
-                    width,
-                    height,
-                    &rgb,
-                    job,
-                    Some(sink),
-                )?;
-            }
-        }
+        let LlamaCppRequest::Chat(chat) = req;
+        llama_cpp::generate_chat(
+            loaded_ref,
+            ctx,
+            &chat.messages,
+            chat.json_schema.as_ref(),
+            job,
+            Some(sink),
+        )?;
         Ok(())
     }
 }

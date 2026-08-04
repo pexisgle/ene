@@ -92,48 +92,6 @@ pub(crate) fn generate_chat(
     generate_chat_text(loaded, ctx, messages, json_schema, job, sink)
 }
 
-/// Vision completion from raw RGB8 pixels (desktop screen summary), on the
-/// caller's cached `ctx`. `sink` is threaded through exactly like
-/// [`generate_chat`]'s.
-pub(crate) fn generate_vision(
-    loaded: &LoadedModel,
-    ctx: &mut LlamaContext<'_>,
-    system: &str,
-    user: &str,
-    width: u32,
-    height: u32,
-    rgb: &[u8],
-    job: &JobContext,
-    sink: Option<&ChunkSink<LlamaStreamChunk, LlmProviderError>>,
-) -> Result<Generated, LlmProviderError> {
-    // Fold system into a single user turn; Image part alone inserts the mtmd marker.
-    let mut text = String::new();
-    if !system.trim().is_empty() {
-        text.push_str(system.trim());
-        text.push_str("\n\n");
-    }
-    text.push_str(user);
-    let messages = [LlmMessage::User {
-        parts: vec![
-            UserMessagePart::Text { text },
-            // Placeholder so `messages_have_images` / template path stay consistent;
-            // actual bitmap is passed separately.
-            UserMessagePart::Image {
-                base64_image_data: String::new(),
-            },
-        ],
-    }];
-    generate_chat_vision_with_bitmaps(
-        loaded,
-        ctx,
-        &messages,
-        &[(width, height, rgb)],
-        None,
-        job,
-        sink,
-    )
-}
-
 fn generate_chat_text(
     loaded: &LoadedModel,
     ctx: &mut LlamaContext<'_>,

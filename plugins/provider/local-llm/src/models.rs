@@ -12,14 +12,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use ene_ai::resolve::ResolvedLocalModel;
-use ene_ai_local::gguf::{ensure_gguf_available, ensure_mmproj_available};
-use ene_ai_local::{
-    EneEmbeddingError, GgufEmbeddingProvider, LocalGgufLoadParams, LocalLlamaCppProvider,
-};
 use ene_plugin::PluginError;
 
 use crate::config::{HostConfig, Profile, current_config, profile_for};
 use crate::convert;
+use crate::embedding::{EneEmbeddingError, GgufEmbeddingProvider};
+use crate::gguf::{ensure_gguf_available, ensure_mmproj_available};
+use crate::local_llm::{LocalGgufLoadParams, LocalLlamaCppProvider};
 
 /// Chat request timeout in seconds, mapped onto `EngineConfig::job_timeout`.
 /// Generous because a local chat generation can legitimately run for minutes
@@ -165,7 +164,7 @@ async fn load_embed_model(model: String) -> Result<Arc<GgufEmbeddingProvider>, P
 
 /// Resolves the GGUF path for a profile: validates `model_path` when set,
 /// otherwise downloads `url` (magic validation + blake3 cache naming live in
-/// `ene-ai-local`'s gguf module).
+/// [`crate::gguf`]).
 async fn resolve_weights(
     model: &str,
     profile: &Profile,

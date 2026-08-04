@@ -73,7 +73,7 @@ pub(crate) fn resolve_gpu_offload(
                 })
             } else {
                 Err(LlmProviderError::LocalLlm(
-                    "Vulkan acceleration requested but ene-ai-local was built without the `vulkan` feature"
+                    "Vulkan acceleration requested but the plugin was built without the `vulkan` feature"
                         .to_string(),
                 ))
             }
@@ -86,7 +86,7 @@ pub(crate) fn resolve_gpu_offload(
                 })
             } else {
                 Err(LlmProviderError::LocalLlm(
-                    "CUDA acceleration requested but ene-ai-local was built without the `cuda` feature"
+                    "CUDA acceleration requested but the plugin was built without the `cuda` feature"
                         .to_string(),
                 ))
             }

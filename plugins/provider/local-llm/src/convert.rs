@@ -1,4 +1,4 @@
-//! Conversion between the plugin wire format and ene-ai-local's types.
+//! Conversion between the plugin wire format and the local engine types.
 
 use ene_ai::EmbeddingError;
 use ene_ai::error::LlmProviderError;
