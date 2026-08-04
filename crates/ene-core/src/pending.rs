@@ -83,6 +83,14 @@ pub struct PendingCandidate {
     pub existing_memory_id: Option<i64>,
     /// Source quote from the conversation that triggered this candidate.
     pub source_quote: String,
+    /// Source turn that triggered this candidate, when the extraction ran
+    /// inside a turn.
+    ///
+    /// The runtime's `TurnId` string is stored so the approval UI can point
+    /// back at the conversation that produced the candidate. `None` for
+    /// candidates produced outside a turn (retried writes, tests) or rows
+    /// persisted before this field existed.
+    pub source_turn: Option<String>,
     /// Workflow status.
     pub status: PendingCandidateStatus,
     /// When the candidate was created.
@@ -91,6 +99,29 @@ pub struct PendingCandidate {
     /// anchor for the age-based retention sweep. Callers inserting a new
     /// candidate set this to [`Utc::now`].
     pub created_at: DateTime<Utc>,
+    /// When the candidate was resolved (approved or rejected).
+    ///
+    /// `None` while the candidate is still pending. Persisted so history
+    /// views can show when the decision was made without an extra audit
+    /// table.
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+/// User-editable fields of a pending memory candidate.
+///
+/// The source quote, extraction reason, conflict target, and provenance are
+/// fixed at extraction time and deliberately not editable; only the content
+/// a user would want to correct before approval is exposed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingCandidateEdit {
+    /// Short title or label.
+    pub title: String,
+    /// Full candidate content.
+    pub content: String,
+    /// Memory kind.
+    pub kind: MemoryKind,
+    /// Confidence score (0.0 .. 1.0).
+    pub confidence: f32,
 }
 
 /// Result of a natural-decay batch run.
