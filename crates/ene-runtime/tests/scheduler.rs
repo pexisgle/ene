@@ -138,6 +138,14 @@ fn test_config_memory_on(db_path: Option<&str>) -> EneConfig {
         ..Default::default()
     };
     drop(config.set_section(&plugins));
+    // Keep `system.search_tools` on the fast registry-list path: the Tool
+    // RAG pipeline would try to embed through the hanging test embedder and
+    // time out on every call.
+    let rag = ene_rag::ToolRagConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    drop(config.set_section(&rag));
     let mut ai = ene_ai::AiConfig::default();
     if let Some(provider) = ai.providers.get_mut("default") {
         provider.kind = "scheduler-test-hanging".to_string();
