@@ -2730,6 +2730,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-counter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-plugin",
+ "ene-plugin-db",
+ "ene-plugin-proto",
+ "parking_lot",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ene-plugin-db"
 version = "0.1.0"
 dependencies = [

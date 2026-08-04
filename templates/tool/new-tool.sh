@@ -15,8 +15,8 @@ if [[ ! "$NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
   echo "error: plugin name must match [a-zA-Z0-9_-]" >&2
   exit 1
 fi
-if [[ ! "$NAMESPACE" =~ ^[a-zA-Z0-9_]+$ ]]; then
-  echo "error: namespace must match [a-zA-Z0-9_]; tool names disallow '-'" >&2
+if [[ ! "$NAMESPACE" =~ ^[a-zA-Z0-9_]+([.:][a-zA-Z0-9_]+)*$ ]]; then
+  echo "error: namespace must use alphanumerics/_ with '.' or ':' separators (no leading, trailing, or consecutive separators)" >&2
   exit 1
 fi
 
