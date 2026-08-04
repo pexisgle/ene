@@ -343,6 +343,7 @@ pub async fn resolve_decision_gguf_path(
         acceleration: llama_cpp.acceleration,
         gpu_layers: "auto".to_string(),
         context_size: 2048,
+        dimensions: None,
     };
     Ok(Some(ensure_gguf_available(&local).await?))
 }

@@ -22,12 +22,9 @@ static PLUGIN_PROFILES: Mutex<Option<Value>> = Mutex::new(None);
 
 /// Default context window for a profile that omits `context_size`.
 ///
-/// Matches `ene_ai::LocalModelDef`'s default. The host's routing window
-/// (`local_advertised_window` reads `ai.local_models.<name>.context_size`) is
-/// not delivered to this plugin, and the v2→v3 migration does not mirror
-/// `context_size` into profiles, so an omitted field always loads 16,384
-/// regardless of the host value — a user who raised the host window must set
-/// the profile field to match or long prompts overflow the KV cache.
+/// Matches `ene_ai::LocalModelDef`'s default. The v2→v3 migration mirrors
+/// `ai.local_models.<name>.context_size` into profiles, so an omitted field
+/// means the host value was also left at the default.
 const DEFAULT_CONTEXT_SIZE: u32 = 16_384;
 
 /// Default quantization label when a profile omits it (same as
@@ -63,8 +60,7 @@ impl HostConfig {
 }
 
 /// One model profile (`plugins.list.llama-cpp.profiles.<name>`), mirroring
-/// `ene_ai::LocalModelDef` plus the plugin-owned `context_size` knob the host
-/// does not mirror (the host keeps `context_size` as routing information).
+/// `ene_ai::LocalModelDef` (the v2→v3 migration mirrors every field).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
 pub(crate) struct Profile {
@@ -73,6 +69,7 @@ pub(crate) struct Profile {
     pub(crate) model_path: Option<String>,
     pub(crate) gpu_layers: Option<String>,
     pub(crate) context_size: Option<u32>,
+    pub(crate) dimensions: Option<usize>,
 }
 
 impl Profile {
@@ -114,6 +111,12 @@ impl Profile {
     /// context internally).
     pub(crate) fn context_size(&self) -> u32 {
         self.context_size.unwrap_or(DEFAULT_CONTEXT_SIZE)
+    }
+
+    /// Declared embedding dimensionality, if any (the model's real `n_embd`
+    /// is measured at load and compared against it host-side).
+    pub(crate) fn dimensions(&self) -> Option<usize> {
+        self.dimensions
     }
 }
 

@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         acceleration: ProactiveAcceleration::Cpu,
         gpu_layers: "auto".to_string(),
         context_size: 2048,
+        dimensions: Some(1024),
     };
 
     ensure_gguf_available(&local).await?;

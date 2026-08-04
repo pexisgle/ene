@@ -27,6 +27,7 @@ fn ensure_local_embedding_provider(ai: &mut AiConfig) {
             LocalModelDef {
                 url: "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf".to_string(),
                 quantization: "F16".to_string(),
+                dimensions: Some(1024),
                 ..LocalModelDef::default()
             },
         );

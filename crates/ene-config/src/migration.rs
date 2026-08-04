@@ -95,10 +95,19 @@ const KOKORO_DEFAULT_PROFILE: &str = "kokoro";
 /// `ai.local_models.<name>` keys mirrored into
 /// `plugins.list.llama-cpp.profiles.<name>` by the v2→v3 migration.
 ///
-/// `context_size` is deliberately excluded: it is routing/budget information
-/// (`ene-ai` sizes prompts and the KV cache against it), not a model
-/// path/setting the plugin consumes to locate and load weights.
-const LOCAL_MODEL_PROFILE_KEYS: [&str; 4] = ["url", "quantization", "model_path", "gpu_layers"];
+/// `context_size` and `dimensions` are mirrored too: the plugin sizes the
+/// chat KV cache from the profile's `context_size` (the host's routing window
+/// stays in `ai.local_models`), and `dimensions` documents the embedding
+/// dimensionality the host needs for the store schema. Both remain in
+/// `ai.local_models` as the routing/config source of truth.
+const LOCAL_MODEL_PROFILE_KEYS: [&str; 6] = [
+    "url",
+    "quantization",
+    "model_path",
+    "gpu_layers",
+    "context_size",
+    "dimensions",
+];
 
 /// A single migration step.
 ///
@@ -1046,7 +1055,9 @@ pub(crate) mod tests {
 
     /// A v2 document's `ai.local_models` entries are mirrored into
     /// `plugins.list.llama-cpp.profiles.<name>` without touching the originals
-    /// (routing still reads them) or `context_size` (host-side budget only).
+    /// (routing still reads them). `context_size` and `dimensions` are
+    /// mirrored too: the plugin sizes its chat KV cache from the profile's
+    /// `context_size`, and `dimensions` is the host's store-schema value.
     #[test]
     fn v2_to_v3_mirrors_local_models_into_profiles() {
         with_test_version(3, || {
@@ -1059,7 +1070,8 @@ pub(crate) mod tests {
                             "quantization": "Q4_0",
                             "model_path": "/data/gemma.gguf",
                             "gpu_layers": "33",
-                            "context_size": 16384
+                            "context_size": 8192,
+                            "dimensions": 1024
                         }
                     }
                 }
@@ -1082,6 +1094,14 @@ pub(crate) mod tests {
                 doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/gpu_layers"),
                 Some(&serde_json::json!("33"))
             );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/context_size"),
+                Some(&serde_json::json!(8192))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/dimensions"),
+                Some(&serde_json::json!(1024))
+            );
             // The source entry and the routing-only field survive untouched.
             assert_eq!(
                 doc.pointer("/ai/local_models/gemma-4-e4b/url"),
@@ -1089,12 +1109,11 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 doc.pointer("/ai/local_models/gemma-4-e4b/context_size"),
-                Some(&serde_json::json!(16384))
+                Some(&serde_json::json!(8192))
             );
-            assert!(
-                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/context_size")
-                    .is_none(),
-                "context_size is routing information and must stay in ene-ai"
+            assert_eq!(
+                doc.pointer("/ai/local_models/gemma-4-e4b/dimensions"),
+                Some(&serde_json::json!(1024))
             );
         });
     }

@@ -106,6 +106,7 @@ async fn resolve_weights(
         acceleration: config.acceleration()?,
         gpu_layers: profile.gpu_layers().to_string(),
         context_size: profile.context_size(),
+        dimensions: profile.dimensions(),
     };
     ensure_gguf_available(&local)
         .await
@@ -139,6 +140,7 @@ async fn resolve_mmproj(config: &HostConfig) -> Result<Option<PathBuf>, PluginEr
         acceleration: config.acceleration()?,
         gpu_layers: String::new(),
         context_size: 0,
+        dimensions: None,
     };
     ensure_mmproj_available(&local)
         .await
