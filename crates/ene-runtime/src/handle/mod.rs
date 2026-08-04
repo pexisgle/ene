@@ -60,6 +60,7 @@ use ene_config::EneConfig;
 use ene_mind::{ConversationSession, SessionId};
 use ene_plugin_host::{
     DisabledReason, EmbeddingFactoriesByPlugin, LlmFactoriesByPlugin, PluginHealthEvent,
+    TtsFactoriesByPlugin,
 };
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
@@ -560,10 +561,19 @@ impl EneHandle {
                         );
                         ene_ai::EmbeddingProviderRegistry::register(Arc::clone(factory));
                     }
+                    for (kind, factory) in host.tts_factories() {
+                        tracing::info!(
+                            component = "Bootstrap",
+                            kind = %kind,
+                            "Registered plugin-provided TTS provider factory"
+                        );
+                        ene_ai::AudioProviderRegistry::register_tts(Arc::clone(factory));
+                    }
                     tracing::info!(
                         component = "Bootstrap",
                         tool_registries = host.tool_registries().len(),
                         llm_factories = host.llm_factories().len(),
+                        tts_factories = host.tts_factories().len(),
                         "Plugin host started"
                     );
                     Some(host)
@@ -586,8 +596,10 @@ impl EneHandle {
             && let Some(mut health_rx) = host.take_health_receiver()
         {
             let diag_tx = diag_tx.clone();
+            let cmd_tx = Arc::clone(&cmd_tx);
             let llm_factories_by_plugin = host.llm_factories_by_plugin();
             let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
+            let tts_factories_by_plugin = host.tts_factories_by_plugin();
             health_bridge_handle = Some(tokio::spawn(async move {
                 while let Some(event) = health_rx.recv().await {
                     if let PluginHealthEvent::Disabled { plugin, .. } = &event {
@@ -596,6 +608,9 @@ impl EneHandle {
                             plugin,
                             &embedding_factories_by_plugin,
                         );
+                        if deregister_disabled_tts_factories(plugin, &tts_factories_by_plugin) {
+                            drop(cmd_tx.send(EneCommand::RebuildTtsProvider));
+                        }
                     }
                     emit_diag(&diag_tx, plugin_health_event_to_diag(event));
                 }
@@ -1433,6 +1448,33 @@ fn deregister_disabled_embedding_factories(
             }
         }
     }
+}
+
+/// Deregisters the TTS factories a permanently-disabled plugin provided.
+///
+/// Returns `true` when at least one factory was removed, so the health
+/// bridge can notify the actor to rebuild its live TTS provider (unlike
+/// LLM/embedding providers, the long-lived `TtsProvider` keeps a now-dead
+/// IPC connection otherwise).
+fn deregister_disabled_tts_factories(
+    plugin: &str,
+    factories_by_plugin: &TtsFactoriesByPlugin,
+) -> bool {
+    let mut removed = false;
+    if let Some(factories) = factories_by_plugin.get(plugin) {
+        for (kind, factory) in factories {
+            if ene_ai::AudioProviderRegistry::deregister_tts_if_matches(kind, factory) {
+                removed = true;
+                tracing::info!(
+                    component = "PluginHealthBridge",
+                    plugin = %plugin,
+                    kind = %kind,
+                    "Deregistered TTS provider factory for permanently disabled plugin"
+                );
+            }
+        }
+    }
+    removed
 }
 
 #[cfg(test)]

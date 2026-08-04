@@ -33,6 +33,7 @@ use crate::ipc_plugin::IpcPluginConnection;
 use crate::mcp_config::McpTransport;
 use crate::mcp_registry::{McpToolRegistry, redacted_endpoint};
 use crate::tool_registry::{DeferredCallResult, ToolRegistry};
+use crate::tts_factory::IpcTtsProviderFactory;
 use ene_connector::declaration::{CredentialDeclaration, ScopeDecision};
 use ene_connector::identity::CredentialId;
 
@@ -607,6 +608,12 @@ pub type EmbeddingFactoriesByPlugin = HashMap<String, Vec<(String, EmbeddingFact
 /// A handle to a plugin-provided embedding factory.
 pub type EmbeddingFactoryHandle = Arc<dyn ene_ai::EmbeddingProviderFactory>;
 
+/// A handle to a plugin-provided TTS factory.
+pub type TtsFactoryHandle = Arc<dyn ene_ai::TtsProviderFactory>;
+
+/// TTS provider factories grouped by the plugin that provides them.
+pub type TtsFactoriesByPlugin = HashMap<String, Vec<(String, TtsFactoryHandle)>>;
+
 /// Orchestrates the lifecycle of all plugin processes and MCP connections.
 ///
 /// Starts only plugins explicitly listed in `plugins.list` with
@@ -617,6 +624,7 @@ pub type EmbeddingFactoryHandle = Arc<dyn ene_ai::EmbeddingProviderFactory>;
 ///
 /// - `capabilities.tools` (count) → wrapped in a [`ToolRegistry`] adapter (specs fetched via `ListTools`)
 /// - `capabilities.llm_providers` → registered as [`IpcLlmProviderFactory`] entries
+/// - `capabilities.tts_providers` → registered as [`IpcTtsProviderFactory`] entries
 ///
 /// Additionally connects to any MCP servers declared in `plugins.mcp_servers`
 /// and includes their tools in [`tool_registries`](Self::tool_registries).
@@ -634,6 +642,8 @@ pub struct PluginHostManager {
     llm_factory_plugins: HashMap<String, String>,
     embedding_factories: HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
     embedding_factory_plugins: HashMap<String, String>,
+    tts_factories: HashMap<String, Arc<dyn ene_ai::TtsProviderFactory>>,
+    tts_factory_plugins: HashMap<String, String>,
     /// Credential declarations parsed from each plugin's `x-ene-credentials`
     /// schema block at startup. Populated by [`start`](Self::start) alongside
     /// connection registration; consumed by the credential service for
@@ -710,6 +720,8 @@ impl PluginHostManager {
                 llm_factory_plugins: HashMap::new(),
                 embedding_factories: HashMap::new(),
                 embedding_factory_plugins: HashMap::new(),
+                tts_factories: HashMap::new(),
+                tts_factory_plugins: HashMap::new(),
                 credential_registry: CredentialRegistry::new(),
                 capability_registry: CapabilityRegistry::new(),
                 health_tasks: Vec::new(),
@@ -730,6 +742,9 @@ impl PluginHostManager {
         let mut embedding_factories: HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>> =
             HashMap::new();
         let mut embedding_factory_plugins: HashMap<String, String> = HashMap::new();
+        let mut tts_factories: HashMap<String, Arc<dyn ene_ai::TtsProviderFactory>> =
+            HashMap::new();
+        let mut tts_factory_plugins: HashMap<String, String> = HashMap::new();
         // (plugin name, fetched schema) pairs; the schemas are registered after
         // `Self` exists so the registration step is a `&self` method that unit
         // tests can drive without a plugin process.
@@ -1015,6 +1030,29 @@ impl PluginHostManager {
                 embedding_factory_plugins.insert(kind.clone(), name.clone());
             }
 
+            for spec in &caps.tts_providers {
+                if tts_factories.contains_key(&spec.kind) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        kind = %spec.kind,
+                        "Duplicate TTS provider kind; skipping"
+                    );
+                    continue;
+                }
+                let factory = IpcTtsProviderFactory::new(
+                    spec.kind.clone(),
+                    Arc::clone(conn),
+                    name.clone(),
+                    spec.concurrency,
+                );
+                tts_factories.insert(
+                    spec.kind.clone(),
+                    Arc::new(factory) as Arc<dyn ene_ai::TtsProviderFactory>,
+                );
+                tts_factory_plugins.insert(spec.kind.clone(), name.clone());
+            }
+
             supervised.push(Arc::clone(&started_plugin.plugin));
             connections.push(Arc::clone(conn));
             names.push(name.clone());
@@ -1148,6 +1186,8 @@ impl PluginHostManager {
             llm_factory_plugins,
             embedding_factories,
             embedding_factory_plugins,
+            tts_factories,
+            tts_factory_plugins,
             credential_registry: CredentialRegistry::new(),
             capability_registry,
             health_tasks,
@@ -1185,6 +1225,27 @@ impl PluginHostManager {
         let mut grouped = EmbeddingFactoriesByPlugin::new();
         for (kind, factory) in &self.embedding_factories {
             if let Some(plugin) = self.embedding_factory_plugins.get(kind) {
+                grouped
+                    .entry(plugin.clone())
+                    .or_default()
+                    .push((kind.clone(), Arc::clone(factory)));
+            }
+        }
+        grouped
+    }
+
+    /// Returns the TTS provider factories contributed by plugins, keyed by
+    /// provider kind.
+    pub fn tts_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::TtsProviderFactory>> {
+        &self.tts_factories
+    }
+
+    /// Returns the TTS factories grouped by the plugin that provides them,
+    /// mirroring [`llm_factories_by_plugin`](Self::llm_factories_by_plugin).
+    pub fn tts_factories_by_plugin(&self) -> TtsFactoriesByPlugin {
+        let mut grouped = TtsFactoriesByPlugin::new();
+        for (kind, factory) in &self.tts_factories {
+            if let Some(plugin) = self.tts_factory_plugins.get(kind) {
                 grouped
                     .entry(plugin.clone())
                     .or_default()
@@ -1459,6 +1520,8 @@ impl PluginHostManager {
             llm_factory_plugins: HashMap::new(),
             embedding_factories: HashMap::new(),
             embedding_factory_plugins: HashMap::new(),
+            tts_factories: HashMap::new(),
+            tts_factory_plugins: HashMap::new(),
             credential_registry: CredentialRegistry::new(),
             capability_registry: CapabilityRegistry::new(),
             health_tasks: Vec::new(),
@@ -1586,6 +1649,7 @@ pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] = &[
     "openai",
     "random",
     "utility",
+    "voicevox",
     "web",
 ];
 
@@ -2022,6 +2086,7 @@ mod tests {
                 "openai",
                 "random",
                 "utility",
+                "voicevox",
                 "web"
             ]
         );

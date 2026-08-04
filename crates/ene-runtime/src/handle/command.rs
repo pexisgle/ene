@@ -361,6 +361,14 @@ pub enum EneCommand {
         /// Per-plugin tool registries for future re-merges.
         plugin_tool_registries: Vec<Arc<dyn ene_plugin_host::ToolRegistry>>,
     },
+    /// Internal: the live TTS provider may hold a dead plugin connection
+    /// and must be rebuilt from the audio registry.
+    ///
+    /// Sent by the plugin health bridges when a permanently-disabled plugin
+    /// owned the selected TTS kind, and by the host-reconfiguration task
+    /// when the tool registry failed to rebuild (the reconfiguration path
+    /// normally rebuilds TTS via [`Self::PluginHostReconfigured`]).
+    RebuildTtsProvider,
     /// Test-only: mutates `pending_permissions`, `permission_scopes`, and
     /// `undo_stack` — the three shared-state fields a panicking command can
     /// mutate — then panics, so the panic hits mid-command with in-flight

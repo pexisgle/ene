@@ -1754,6 +1754,52 @@ impl TurnActor {
         }
     }
 
+    /// Rebuilds the TTS provider after a plugin-host restart.
+    ///
+    /// The previous provider instance (built at bootstrap) holds an IPC
+    /// connection to the old host's plugin process, which `shutdown()` has
+    /// killed, so it must be replaced by a fresh instance from the registry.
+    /// Mirrors the bootstrap path's failure handling: an unbuildable
+    /// provider disables TTS with a warning rather than failing the turn.
+    fn rebuild_tts_provider(&mut self) {
+        let ai_config = match self.config.get_section::<ene_ai::AiConfig>() {
+            Ok(config) => config,
+            Err(e) => {
+                self.tts_provider = None;
+                tracing::warn!(
+                    component = "TurnActor",
+                    error = %e,
+                    "Cannot rebuild TTS provider after plugin reconfiguration: AI config error"
+                );
+                return;
+            }
+        };
+        let Some(resolved) = ai_config.resolve_tts() else {
+            self.tts_provider = None;
+            return;
+        };
+        match ene_ai::AudioProviderRegistry::create_tts_provider(&resolved.provider, &self.config) {
+            Ok(provider) => {
+                self.tts_provider = Some(Arc::from(provider));
+                tracing::info!(
+                    component = "TurnActor",
+                    provider = %resolved.provider,
+                    "Rebuilt TTS provider after plugin reconfiguration"
+                );
+            }
+            Err(e) => {
+                self.tts_provider = None;
+                tracing::warn!(
+                    component = "TurnActor",
+                    provider = %resolved.provider,
+                    error = %e,
+                    "Failed to rebuild TTS provider after plugin reconfiguration; \
+                     audio synthesis disabled"
+                );
+            }
+        }
+    }
+
     /// Reconcile scheduler state left by a crash and arm startup schedules
     /// for this process start. Runs before the command loop so the timer
     /// task (spawned afterwards) sees a consistent store.
@@ -2530,6 +2576,11 @@ impl TurnActor {
             } => {
                 self.registry = registry;
                 self.plugin_tool_registries = plugin_tool_registries;
+                self.rebuild_tts_provider();
+                true
+            }
+            EneCommand::RebuildTtsProvider => {
+                self.rebuild_tts_provider();
                 true
             }
             EneCommand::PermissionDecision {
@@ -3918,15 +3969,16 @@ async fn reconfigure_plugin_host_bg(
     type ProviderFactorySnapshots = (
         HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
         HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
+        HashMap<String, Arc<dyn ene_ai::TtsProviderFactory>>,
     );
 
     // Stop the previous host (and its health bridge) first. Keep the factory
     // handles so stale removal below cannot evict a replacement installed by
     // another runtime handle.
-    let (old_llm_factories, old_embedding_factories): ProviderFactorySnapshots = {
+    let (old_llm_factories, old_embedding_factories, old_tts_factories): ProviderFactorySnapshots = {
         let mut guard = plugin_host.lock().await;
-        let (llm_factories, embedding_factories) = guard.as_ref().map_or_else(
-            || (HashMap::new(), HashMap::new()),
+        let (llm_factories, embedding_factories, tts_factories) = guard.as_ref().map_or_else(
+            || (HashMap::new(), HashMap::new(), HashMap::new()),
             |host| {
                 let llm_factories = host
                     .llm_factories()
@@ -3938,7 +3990,12 @@ async fn reconfigure_plugin_host_bg(
                     .iter()
                     .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
                     .collect();
-                (llm_factories, embedding_factories)
+                let tts_factories = host
+                    .tts_factories()
+                    .iter()
+                    .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
+                    .collect();
+                (llm_factories, embedding_factories, tts_factories)
             },
         );
         if let Some(mut host) = guard.take() {
@@ -3950,7 +4007,7 @@ async fn reconfigure_plugin_host_bg(
         if let Some(handle) = bridge.take() {
             handle.abort();
         }
-        (llm_factories, embedding_factories)
+        (llm_factories, embedding_factories, tts_factories)
     };
 
     // Abort the previous host-service accept loop before rebinding the shared
@@ -4034,6 +4091,28 @@ async fn reconfigure_plugin_host_bg(
         }
     }
 
+    // TTS factories follow the same stale-removal / re-registration
+    // discipline, so a restarted host cannot leave the audio registry
+    // pointing at a dead plugin connection.
+    let old_tts_kinds: Vec<String> = old_tts_factories.keys().cloned().collect();
+    let stale_tts_kinds = stale_llm_factory_names(
+        &old_tts_kinds,
+        new_host
+            .as_ref()
+            .map(ene_plugin_host::PluginHostManager::tts_factories),
+    );
+    for kind in stale_tts_kinds {
+        if let Some(factory) = old_tts_factories.get(&kind)
+            && ene_ai::AudioProviderRegistry::deregister_tts_if_matches(&kind, factory)
+        {
+            tracing::info!(
+                component = "TurnActor",
+                kind = %kind,
+                "Deregistered stale plugin-provided TTS provider factory during reconfiguration"
+            );
+        }
+    }
+
     if let Some(host) = new_host.as_ref() {
         for (kind, factory) in host.llm_factories() {
             tracing::info!(
@@ -4051,6 +4130,14 @@ async fn reconfigure_plugin_host_bg(
             );
             ene_ai::EmbeddingProviderRegistry::register(Arc::clone(factory));
         }
+        for (kind, factory) in host.tts_factories() {
+            tracing::info!(
+                component = "TurnActor",
+                kind = %kind,
+                "Re-registered plugin-provided TTS provider factory after Features update"
+            );
+            ene_ai::AudioProviderRegistry::register_tts(Arc::clone(factory));
+        }
     }
 
     let mut bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -4058,8 +4145,10 @@ async fn reconfigure_plugin_host_bg(
         && let Some(mut health_rx) = host.take_health_receiver()
     {
         let diag_tx = diag_tx.clone();
+        let cmd_tx = cmd_tx.clone();
         let llm_factories_by_plugin = host.llm_factories_by_plugin();
         let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
+        let tts_factories_by_plugin = host.tts_factories_by_plugin();
         bridge_handle = Some(tokio::spawn(async move {
             while let Some(event) = health_rx.recv().await {
                 if let PluginHealthEvent::Disabled { plugin, .. } = &event {
@@ -4068,6 +4157,9 @@ async fn reconfigure_plugin_host_bg(
                         plugin,
                         &embedding_factories_by_plugin,
                     );
+                    if super::deregister_disabled_tts_factories(plugin, &tts_factories_by_plugin) {
+                        drop(cmd_tx.send(EneCommand::RebuildTtsProvider));
+                    }
                 }
                 emit_diag(&diag_tx, plugin_health_event_to_diag(event));
             }
@@ -4096,6 +4188,10 @@ async fn reconfigure_plugin_host_bg(
                 error = %e,
                 "Failed to rebuild tool registry after plugin reconfiguration"
             );
+            // The registries were already refreshed above; only the actor's
+            // live TTS provider still needs a rebuild, and without a tool
+            // registry there is no `PluginHostReconfigured` to carry it.
+            drop(cmd_tx.send(EneCommand::RebuildTtsProvider));
         }
     }
 

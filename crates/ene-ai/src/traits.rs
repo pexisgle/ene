@@ -701,6 +701,15 @@ pub enum AudioProviderError {
     /// either by an explicit cancellation or because the caller went away.
     #[error("local engine job cancelled")]
     Cancelled,
+    /// An audio payload (e.g. a plugin's synthesized WAV) exceeded the
+    /// provider's size cap and was rejected before full allocation.
+    #[error("audio payload too large: {actual} bytes exceeds the {max_bytes}-byte limit")]
+    PayloadTooLarge {
+        /// The enforced cap in bytes.
+        max_bytes: usize,
+        /// The payload size that triggered the rejection.
+        actual: usize,
+    },
 }
 
 impl AudioProviderError {
@@ -891,6 +900,35 @@ impl AudioProviderRegistry {
         Self::global().tts.lock().insert(name, factory);
     }
 
+    /// Removes a registered TTS provider factory by provider name.
+    ///
+    /// Returns `true` when a factory was actually removed, `false` when no
+    /// factory was registered under `name`. Deregistration evicts factories
+    /// whose backing plugin process has been stopped, so
+    /// [`create_tts_provider`](Self::create_tts_provider) can no longer
+    /// select a stale entry that points at a dead connection.
+    pub fn deregister_tts(name: &str) -> bool {
+        Self::global().tts.lock().remove(name).is_some()
+    }
+
+    /// Removes a TTS provider factory only when `name` still points to
+    /// `expected`.
+    ///
+    /// The identity check prevents one runtime handle from deregistering a
+    /// replacement factory installed by another handle during concurrent
+    /// host reconfiguration.
+    pub fn deregister_tts_if_matches(name: &str, expected: &Arc<dyn TtsProviderFactory>) -> bool {
+        let mut guard = Self::global().tts.lock();
+        if guard
+            .get(name)
+            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
+        {
+            guard.remove(name).is_some()
+        } else {
+            false
+        }
+    }
+
     /// Registers an STT provider factory.
     pub fn register_stt(factory: Arc<dyn SttProviderFactory>) {
         let name = factory.provider_name().to_string();
@@ -1032,6 +1070,33 @@ mod audio_tests {
             &config(),
         ));
         assert!(matches!(err, AudioProviderError::Init(_)));
+    }
+
+    #[test]
+    fn tts_deregister_makes_lookup_fail() {
+        AudioProviderRegistry::register_tts(Arc::new(DummyTtsFactory));
+        assert!(AudioProviderRegistry::deregister_tts("dummy-tts"));
+        let err = unwrap_err(AudioProviderRegistry::create_tts_provider(
+            "dummy-tts",
+            &config(),
+        ));
+        assert!(matches!(err, AudioProviderError::Provider(_)));
+        assert!(!AudioProviderRegistry::deregister_tts("dummy-tts"));
+    }
+
+    #[test]
+    fn tts_deregister_if_matches_is_identity_checked() {
+        let original: Arc<dyn TtsProviderFactory> = Arc::new(DummyTtsFactory);
+        AudioProviderRegistry::register_tts(Arc::clone(&original));
+        let replacement: Arc<dyn TtsProviderFactory> = Arc::new(DummyTtsFactory);
+        assert!(!AudioProviderRegistry::deregister_tts_if_matches(
+            "dummy-tts",
+            &replacement
+        ));
+        assert!(AudioProviderRegistry::deregister_tts_if_matches(
+            "dummy-tts",
+            &original
+        ));
     }
 
     #[test]

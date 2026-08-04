@@ -732,6 +732,84 @@ time. Profile *selection* is plugin-owned; the values are delivered via
 `context_size`); the local-model keys stay in `ai.local_models` as routing
 information.
 
+#### VOICEVOX / Aivis Speech TTS provider (`plugins.list.voicevox.config`)
+
+The `voicevox` provider plugin (`plugins/provider/voicevox`) speaks the
+VOICEVOX HTTP API, so it works with VOICEVOX Engine, Aivis Speech, and other
+compatible engines (COEIROINK, …). No API key is needed — the engine is a
+local HTTP server. Select it with `ai.tts.provider = "voicevox"`; the generic
+`ai.tts.voice` field can optionally hold a speaker/style ID that overrides
+the configured default per request.
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "voicevox",
+      "voice": "14"
+    }
+  },
+  "plugins": {
+    "list": {
+      "voicevox": {
+        "enable": true,
+        "config": {
+          "server_url": "http://127.0.0.1:50021",
+          "speaker_id": 3,
+          "speed_scale": 1.0,
+          "pitch_scale": 0.0,
+          "intonation_scale": 1.0,
+          "volume_scale": 1.0,
+          "tempo_dynamics_scale": 1.0,
+          "output_sampling_rate": 24000,
+          "auto_start": false,
+          "engine_path": "/opt/voicevox/run.exe",
+          "engine_args": ["--port", "50021"],
+          "startup_timeout_secs": 10
+        }
+      }
+    }
+  }
+}
+```
+
+Settings:
+
+| Key | Default | Description |
+|---|---|---|
+| `server_url` | `http://127.0.0.1:50021` | Engine HTTP base URL. VOICEVOX defaults to port 50021; Aivis Speech to 10101. |
+| `speaker_id` | `0` | Default speaker / style ID (64-bit integer; Aivis style IDs exceed 32 bits). |
+| `speed_scale` | `1.0` | Speech speed multiplier (engine-validated, e.g. 0.5–2.0). |
+| `pitch_scale` | `0.0` | Pitch shift (engine-validated, e.g. −0.15–0.15 for VOICEVOX). |
+| `intonation_scale` | `1.0` | Intonation strength (engine-validated, e.g. 0–2). |
+| `volume_scale` | `1.0` | Output volume (engine-validated, e.g. 0–2). |
+| `tempo_dynamics_scale` | `1.0` | Aivis Speech extension: tempo dynamics strength (0–2). Only sent when non-default, since VOICEVOX rejects unknown fields. |
+| `output_sampling_rate` | unset | Output sample rate (e.g. 24000/48000). Only sent when set; the engine default applies otherwise. |
+| `auto_start` | `false` | Managed mode: spawn the engine binary when the server is not already running. |
+| `engine_path` | unset | Engine executable path used by managed mode. |
+| `engine_args` | `[]` | Extra command-line arguments passed to the engine binary. |
+| `startup_timeout_secs` | `10` | How long managed mode waits for `GET /version` after spawning. |
+
+Every key can be overridden per environment variable as
+`ENE_PLUGINS__LIST__VOICEVOX__CONFIG__<KEY>`
+(e.g. `ENE_PLUGINS__LIST__VOICEVOX__CONFIG__SPEAKER_ID`).
+
+**External mode (default).** Start the engine yourself — launch the VOICEVOX
+app or `run.exe`, or an Aivis Speech / COEIROINK server — and point
+`server_url` at it. The plugin calls `POST /audio_query` then
+`POST /synthesis` (the standard 2-step flow) and returns WAV audio.
+
+**Managed mode (`auto_start: true`).** On first use the plugin probes
+`GET /version`; if no engine answers, it spawns `engine_path` with
+`engine_args` and polls `/version` until `startup_timeout_secs` elapses. The
+spawned engine is terminated when the plugin process shuts down. The engine
+binary must be pre-installed; the plugin never downloads it.
+
+Changing `ai.tts.provider` itself (e.g. switching from `kokoro` to
+`voicevox`) takes effect at the next startup: the active provider is built
+once at bootstrap, while edits to `plugins.list.voicevox.config` and
+`ai.tts.voice` are picked up by running sessions.
+
 #### Secret marking
 
 A plugin's `config_schema()` may mark a field with `x-ene-secret: true`. The

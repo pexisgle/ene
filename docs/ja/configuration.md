@@ -586,6 +586,84 @@ v2→v3 マイグレーションは既存の `ai.local_models` エントリを�
 プロファイルへミラーします（`context_size` はミラーしません）。ローカル
 モデルのキーはルーティング情報として `ai.local_models` に残ります。
 
+#### VOICEVOX / Aivis Speech TTS プロバイダ（`plugins.list.voicevox.config`）
+
+`voicevox` プロバイダプラグイン（`plugins/provider/voicevox`）は VOICEVOX
+HTTP API を話すため、VOICEVOX Engine・Aivis Speech・その他の互換エンジン
+（COEIROINK など）で動作します。API キーは不要です — エンジンはローカルの
+HTTP サーバーです。`ai.tts.provider = "voicevox"` で選択します。汎用の
+`ai.tts.voice` には、設定済みの既定話者をリクエスト単位で上書きする
+話者/スタイル ID（数値文字列）を任意で指定できます。
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "voicevox",
+      "voice": "14"
+    }
+  },
+  "plugins": {
+    "list": {
+      "voicevox": {
+        "enable": true,
+        "config": {
+          "server_url": "http://127.0.0.1:50021",
+          "speaker_id": 3,
+          "speed_scale": 1.0,
+          "pitch_scale": 0.0,
+          "intonation_scale": 1.0,
+          "volume_scale": 1.0,
+          "tempo_dynamics_scale": 1.0,
+          "output_sampling_rate": 24000,
+          "auto_start": false,
+          "engine_path": "/opt/voicevox/run.exe",
+          "engine_args": ["--port", "50021"],
+          "startup_timeout_secs": 10
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目：
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `server_url` | `http://127.0.0.1:50021` | エンジンの HTTP ベース URL。VOICEVOX は既定でポート 50021、Aivis Speech は 10101。 |
+| `speaker_id` | `0` | 既定の話者/スタイル ID（64 ビット整数。Aivis のスタイル ID は 32 ビットを超えます）。 |
+| `speed_scale` | `1.0` | 発話速度倍率（エンジン側で検証、例：0.5–2.0）。 |
+| `pitch_scale` | `0.0` | ピッチ（エンジン側で検証、VOICEVOX では例：−0.15–0.15）。 |
+| `intonation_scale` | `1.0` | 抑揚の強さ（エンジン側で検証、例：0–2）。 |
+| `volume_scale` | `1.0` | 出力音量（エンジン側で検証、例：0–2）。 |
+| `tempo_dynamics_scale` | `1.0` | Aivis Speech 拡張：テンポの強弱（0–2）。VOICEVOX は未知フィールドを拒否するため、既定値以外のときだけ送信されます。 |
+| `output_sampling_rate` | 未設定 | 出力サンプルレート（例：24000/48000）。設定時のみ送信され、未設定ならエンジン既定値を使います。 |
+| `auto_start` | `false` | マネージドモード：サーバーが起動していない場合にエンジンバイナリを起動します。 |
+| `engine_path` | 未設定 | マネージドモードで使うエンジン実行ファイルのパス。 |
+| `engine_args` | `[]` | エンジンバイナリへ渡す追加コマンドライン引数。 |
+| `startup_timeout_secs` | `10` | 起動後にマネージドモードが `GET /version` を待つ秒数。 |
+
+各キーは環境変数 `ENE_PLUGINS__LIST__VOICEVOX__CONFIG__<KEY>`
+（例：`ENE_PLUGINS__LIST__VOICEVOX__CONFIG__SPEAKER_ID`）でも上書きできます。
+
+**外部モード（既定）。** 自分でエンジンを起動します — VOICEVOX アプリや
+`run.exe`、Aivis Speech / COEIROINK サーバーを起動し、`server_url` に指定します。
+プラグインは標準の 2 段階フロー（`POST /audio_query` → `POST /synthesis`）を
+呼び、WAV 音声を返します。
+
+**マネージドモード（`auto_start: true`）。** 初回利用時にプラグインが
+`GET /version` をプローブします。応答するエンジンが無ければ `engine_path` を
+`engine_args` 付きで起動し、`startup_timeout_secs` 秒まで `/version` をポーリング
+します。起動したエンジンはプラグインプロセスの終了時に停止されます。エンジンの
+バイナリは事前にインストールされている必要があり、プラグインはダウンロードを
+行いません。
+
+`ai.tts.provider` 自体の変更（例：`kokoro` から `voicevox` への切替）は次回
+起動時に反映されます。アクティブなプロバイダはブートストラップ時に一度だけ
+構築されるためです。一方、`plugins.list.voicevox.config` と `ai.tts.voice` の
+編集は実行中のセッションにも反映されます。
+
 #### シークレットのマーキング
 
 プラグインの `config_schema()` は、フィールドに `x-ene-secret: true` を付与できます。ホストはこれ（および既知の名前によるフォールバック：`api_key`・`token`・`password`・`authorization` など）を使って、設定 UI でフィールドをマスクする予定であり、ホストのログ出力からは値を削除（redact）します。インラインの API キーがログストリームに現れることはありません。`settings.json` の外部（キーリング/シークレットサービス）へのシークレット保存は別途追跡されており、それまではプラグインのシークレットは `plugins.list.<name>.config` 内に置かれ、スキーマでマークされ、ホスト境界で redact されます。

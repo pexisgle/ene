@@ -17,6 +17,7 @@ Ene ホストアプリケーション (ene-runtime)
         │     ├── ene-plugin-anthropic (Anthropic LLM プロバイダプラグイン)
         │     ├── ene-plugin-openai    (OpenAI 互換プロバイダプラグイン)
         │     ├── ene-plugin-llama-cpp (ローカル GGUF プロバイダプラグイン)
+        │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS プロバイダプラグイン)
         │     ├── ene-plugin-app       (GUI 起動ツール)
         │     ├── ene-plugin-browser   (CDP ブラウザ自動化ツール)
         │     ├── ene-plugin-calc      (計算ツール)
@@ -92,6 +93,18 @@ fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
 ### ホスト側での強制
 
 `ene-plugin-host` の `IpcLlmProvider` (`crates/ene-plugin-host/src/ipc_provider.rs`) は、宣言されたヒントを `ConcurrencyLimiter` で強制します: `max_in_flight` にサイズを合わせた `tokio::sync::Semaphore` と、パーミットを待てる呼び出し元を最大 `queue_depth` 件まで許容する仕組みです。両方の上限を超えたリクエストは、待ちキューを無制限に伸ばすのではなく `LlmProviderError::Busy` で即座に失敗します——`ene-infer` がローカル推論側で適用しているのと同じ「無限にキューイングするより早く失敗させる」規律を、プラグイン IPC 境界にも適用したものです。このリミッタは (プラグイン, プロバイダ種別) のペアごとに `IpcLlmProviderFactory` の中で一度だけ構築され、そのペアに対して以降作成されるすべてのプロバイダインスタンスで共有されます。呼び出しのたびに新しい `IpcLlmProvider` が作られるためです。ストリーミングリクエストの場合、取得したパーミットはストリームの生存期間中ずっと保持され、ストリームが自然に完了したか途中でキャンセルされたかにかかわらず、ストリームが drop された時点で自動的に解放されます。
+
+TTS プロバイダプラグインも同じ規律に従います: `ene-plugin-host` の
+`IpcTtsProvider` / `IpcTtsProviderFactory` (`ipc_tts.rs` / `tts_factory.rs`) は
+`ene_ai::TtsProvider` / `TtsProviderFactory` を実装し、プラグインの
+`tts_providers` ケーパビリティを `TtsProviderSpec.kind`（例：`"voicevox"`。
+`ai.tts.provider` で選択）をキーとしてグローバルな
+`AudioProviderRegistry` に登録します。合成呼び出しは 1 回の
+`SynthesizeSpeech` IPC ラウンドトリップで音声ファイル全体（WAV）を返し、
+ホスト側で PCM にデコードして `TtsChunk` に分割し、`TtsProvider::synthesize_stream`
+の契約を保ちます。さらに `voicevox` プラグインはマネージドモード
+（`auto_start: true`）でローカルの VOICEVOX 互換エンジンバイナリの起動と
+監視を行います。
 
 ### ローカル推論プラグイン作者向け: プロセス内でも同じ規律を
 
