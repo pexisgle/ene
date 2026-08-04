@@ -58,6 +58,8 @@ pub mod public_api;
 /// Read-only session and pending-candidate query handles that bypass the
 /// turn-execution actor mailbox entirely.
 pub mod query;
+/// Persistent scheduler (timer task, policy, config).
+mod scheduler;
 /// Permission types and streaming engine internals.
 ///
 /// Not part of the stable public API v1 contract. Prefer [`EneHandle`].
@@ -143,6 +145,11 @@ pub use ene_ai::LlmProvider;
 /// Memory configuration (re-exported from `ene-store`).
 #[doc(no_inline)]
 pub use ene_store::StoreConfig;
+/// Persistent scheduler domain types.
+pub use ene_core::{
+    NewSchedule, Schedule, ScheduleAction, ScheduleConfirmation, ScheduleKind, ScheduleRun,
+    ScheduleRunStatus,
+};
 
 // ── Session / history ──
 /// Role enum for conversation history (re-exported from `ene-ai`).

@@ -122,6 +122,7 @@ impl TurnGate {
             .as_ref()
             .is_some_and(|active| active.as_str() == turn.as_str())
     }
+
 }
 
 /// RAII guard that triggers graceful shutdown when the last handle clone drops.
@@ -1153,6 +1154,77 @@ impl EneHandle {
                 decision,
             })
             .map_err(|_| PublicApiError::ActorDead)
+    }
+
+    /// Create a persistent schedule.
+    ///
+    /// Validation (kind fields, timezone, cron expression, future one-shot
+    /// `start_at`) happens before anything is persisted; the returned
+    /// schedule carries its first computed `next_run_at`.
+    pub async fn add_schedule(
+        &self,
+        new: ene_core::NewSchedule,
+    ) -> Result<ene_core::Schedule, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::AddSchedule { new, reply: tx })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
+    }
+
+    /// List all persistent schedules, ordered by name.
+    pub async fn list_schedules(&self) -> Result<Vec<ene_core::Schedule>, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ListSchedules { reply: tx })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
+    }
+
+    /// List recent run history for one schedule, newest first.
+    pub async fn list_schedule_runs(
+        &self,
+        schedule_id: i64,
+        limit: u64,
+    ) -> Result<Vec<ene_core::ScheduleRun>, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ListScheduleRuns {
+                schedule_id,
+                limit,
+                reply: tx,
+            })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
+    }
+
+    /// Delete a schedule and its run history.
+    pub async fn delete_schedule(&self, schedule_id: i64) -> Result<bool, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::DeleteSchedule {
+                schedule_id,
+                reply: tx,
+            })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
+    }
+
+    /// Pause (`false`) or resume (`true`) a schedule.
+    pub async fn set_schedule_enabled(
+        &self,
+        schedule_id: i64,
+        enabled: bool,
+    ) -> Result<bool, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::SetScheduleEnabled {
+                schedule_id,
+                enabled,
+                reply: tx,
+            })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
     /// List all session-wide permission grants.
@@ -2308,6 +2380,231 @@ mod tests {
             Arc::clone(&shared),
         );
         (actor, diag_rx, lifecycle_rx, gate, shared)
+    }
+
+    /// Like [`build_bare_actor_with_session_and_gate`] but with an injected
+    /// in-memory store and a chat-event receiver, for scheduler tests that
+    /// drive `handle_command` directly (no `run()` loop, no timer task).
+    pub(super) fn build_bare_actor_with_store(
+        store: Arc<ene_store::MemoryStore>,
+        registry: Arc<dyn ene_plugin_host::ToolRegistry>,
+    ) -> (
+        actor::TurnActor,
+        broadcast::Receiver<EneEvent>,
+        Arc<TurnGate>,
+    ) {
+        let task_caps = crate::task_config::ToolRuntimeConfig::default();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = broadcast::channel(64);
+        let (lifecycle_tx, _lifecycle_rx) = broadcast::channel(16);
+        let (audio_tx, _audio_rx) = mpsc::channel(8);
+        let (diag_tx, _diag_rx) = broadcast::channel(64);
+        let mut config = EneConfig::default();
+        config
+            .set_section(&task_caps)
+            .expect("set_section(ToolRuntimeConfig) succeeds");
+        let health_monitor =
+            ene_ai::ProviderHealthMonitor::new(std::time::Duration::from_secs(1), 8);
+        let gate = Arc::new(TurnGate::new());
+        let session = ConversationSession::new();
+        let shared = Arc::new(SharedActorState::new(&config, &session));
+        let actor = actor::TurnActor::new(
+            cmd_rx,
+            cmd_tx,
+            event_tx,
+            lifecycle_tx,
+            audio_tx,
+            diag_tx.clone(),
+            diag_tx.subscribe(),
+            Arc::clone(&gate),
+            config,
+            session,
+            Some(store),
+            registry,
+            None,
+            health_monitor,
+            None,
+            Vec::new(),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::clone(&shared),
+        );
+        (actor, event_rx, gate)
+    }
+
+    fn new_test_schedule(name: &str) -> ene_core::NewSchedule {
+        ene_core::NewSchedule {
+            name: name.to_string(),
+            kind: ene_core::ScheduleKind::Cron,
+            timezone: "UTC".to_string(),
+            cron_expr: Some("0 9 * * *".to_string()),
+            interval_secs: None,
+            start_at: None,
+            action: ene_core::ScheduleAction::Tool {
+                name: "test.tool".to_string(),
+                arguments: serde_json::Value::Null,
+            },
+            confirmation: ene_core::ScheduleConfirmation::None,
+            max_retries: 0,
+            retry_delay_secs: 60,
+        }
+    }
+
+    async fn add_schedule_via_actor(
+        actor: &mut actor::TurnActor,
+        new: ene_core::NewSchedule,
+    ) -> ene_core::Schedule {
+        let (tx, rx) = oneshot::channel();
+        assert!(
+            actor
+                .handle_command(EneCommand::AddSchedule { new, reply: tx })
+                .await
+        );
+        rx.await.expect("AddSchedule replies").expect("schedule inserted")
+    }
+
+    /// A fire whose `scheduled_at` no longer matches the store's
+    /// `next_run_at` is a stale duplicate and must not claim a second run.
+    #[tokio::test]
+    async fn stale_schedule_fire_is_ignored() {
+        let store = Arc::new(
+            ene_store::MemoryStore::open_in_memory(4)
+                .await
+                .expect("in-memory store"),
+        );
+        let (mut actor, _event_rx, _gate) =
+            build_bare_actor_with_store(store.clone(), Arc::new(EmptyRegistry));
+        let schedule = add_schedule_via_actor(&mut actor, new_test_schedule("daily")).await;
+        let fire = schedule.next_run_at.expect("first fire time");
+
+        assert!(
+            actor
+                .handle_command(EneCommand::ScheduleFire {
+                    schedule_id: schedule.id,
+                    scheduled_at: fire + chrono::Duration::hours(1),
+                })
+                .await
+        );
+        let runs = store.list_runs(schedule.id, 10).await.expect("list runs");
+        assert!(runs.is_empty(), "stale fire must not create a run row");
+    }
+
+    /// A fire processed while the single-flight gate is held is recorded
+    /// `skipped_busy` and never starts a turn.
+    #[tokio::test]
+    async fn busy_fire_is_recorded_skipped_busy() {
+        let store = Arc::new(
+            ene_store::MemoryStore::open_in_memory(4)
+                .await
+                .expect("in-memory store"),
+        );
+        let (mut actor, mut event_rx, gate) =
+            build_bare_actor_with_store(store.clone(), Arc::new(EmptyRegistry));
+        let schedule = add_schedule_via_actor(&mut actor, new_test_schedule("daily")).await;
+        let fire = schedule.next_run_at.expect("first fire time");
+
+        assert!(gate.try_begin(&TurnId::new()), "test holds the gate");
+        assert!(
+            actor
+                .handle_command(EneCommand::ScheduleFire {
+                    schedule_id: schedule.id,
+                    scheduled_at: fire,
+                })
+                .await
+        );
+        let runs = store.list_runs(schedule.id, 10).await.expect("list runs");
+        assert_eq!(runs[0].status, ene_core::ScheduleRunStatus::SkippedBusy);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a skipped fire must not emit turn events"
+        );
+    }
+
+    /// A fire beyond the late-execution grace window is recorded
+    /// `skipped_late` and jumps to the next occurrence without executing.
+    #[tokio::test]
+    async fn late_fire_is_recorded_skipped_late() {
+        use sea_orm::{ConnectionTrait, Statement};
+        let store = Arc::new(
+            ene_store::MemoryStore::open_in_memory(4)
+                .await
+                .expect("in-memory store"),
+        );
+        let (mut actor, mut event_rx, _gate) =
+            build_bare_actor_with_store(store.clone(), Arc::new(EmptyRegistry));
+        let schedule = add_schedule_via_actor(&mut actor, new_test_schedule("daily")).await;
+        let fire = schedule.next_run_at.expect("first fire time");
+        let missed = fire - chrono::Duration::hours(2);
+        store
+            .connection()
+            .execute_raw(Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Sqlite,
+                "UPDATE schedules SET next_run_at = ? WHERE id = ?",
+                [sea_orm::Value::ChronoDateTimeUtc(Some(missed)), schedule.id.into()],
+            ))
+            .await
+            .expect("backdate next_run_at");
+
+        assert!(
+            actor
+                .handle_command(EneCommand::ScheduleFire {
+                    schedule_id: schedule.id,
+                    scheduled_at: missed,
+                })
+                .await
+        );
+        let runs = store.list_runs(schedule.id, 10).await.expect("list runs");
+        assert_eq!(runs[0].status, ene_core::ScheduleRunStatus::SkippedLate);
+        assert!(event_rx.try_recv().is_err(), "late fire must not execute");
+    }
+
+    /// A denied confirmation records `denied` and never starts the action.
+    #[tokio::test]
+    async fn denied_confirmation_records_denied_run() {
+        let store = Arc::new(
+            ene_store::MemoryStore::open_in_memory(4)
+                .await
+                .expect("in-memory store"),
+        );
+        let (mut actor, mut event_rx, _gate) =
+            build_bare_actor_with_store(store.clone(), Arc::new(EmptyRegistry));
+        let mut new = new_test_schedule("gated");
+        new.confirmation = ene_core::ScheduleConfirmation::Confirm;
+        let schedule = add_schedule_via_actor(&mut actor, new).await;
+        let fire = schedule.next_run_at.expect("first fire time");
+
+        assert!(
+            actor
+                .handle_command(EneCommand::ScheduleFire {
+                    schedule_id: schedule.id,
+                    scheduled_at: fire,
+                })
+                .await
+        );
+        let request_id = match event_rx.recv().await.expect("confirmation event") {
+            EneEvent::PermissionRequired {
+                origin: crate::types::TurnOrigin::Scheduled,
+                request_id,
+                ..
+            } => request_id,
+            other => panic!("expected scheduled PermissionRequired, got {other:?}"),
+        };
+        let runs = store.list_runs(schedule.id, 10).await.expect("list runs");
+        assert_eq!(
+            runs[0].status,
+            ene_core::ScheduleRunStatus::AwaitingApproval
+        );
+        assert!(
+            actor
+                .handle_command(EneCommand::PermissionDecision {
+                    request_id,
+                    decision: PermissionDecision::Deny,
+                })
+                .await
+        );
+        let runs = store.list_runs(schedule.id, 10).await.expect("list runs");
+        assert_eq!(runs[0].status, ene_core::ScheduleRunStatus::Denied);
     }
 
     /// Pure test of the shared admission mechanism (`actor::admit_task`),

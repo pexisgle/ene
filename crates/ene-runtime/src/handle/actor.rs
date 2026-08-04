@@ -34,6 +34,7 @@ use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::{RequestId, TurnId};
 use crate::vision::VisionPrepared;
 use ene_ai::{AiTaskKind, LlmProviderRegistry, create_task_chat_provider};
+use ene_core::{ScheduleConfirmation, ScheduleRunStatus};
 use ene_config::EneConfig;
 use ene_mind::commitments::CommitmentLedger;
 use ene_mind::{CardName, SessionId};
@@ -52,7 +53,7 @@ use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 /// Global monotonic counter used to generate unique DB IPC auth tokens.
@@ -106,6 +107,15 @@ pub(super) struct TurnActor {
     vision_cancel: CancellationToken,
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
+    /// Schedule runs waiting for a user confirmation decision, keyed by the
+    /// `request_id` carried in the emitted `PermissionRequired` event.
+    pending_schedule_confirmations: HashMap<RequestId, PendingScheduleConfirmation>,
+    /// The schedule run currently executing (prompt stream or tool task).
+    active_scheduled_run: Option<ActiveScheduledRun>,
+    /// Wakes the scheduler timer task after any schedule-state mutation.
+    scheduler_notify: watch::Sender<()>,
+    /// Receiver handed to the timer task when it is spawned.
+    scheduler_notify_rx: Option<watch::Receiver<()>>,
     permission_scopes: Arc<Mutex<Vec<crate::streaming::PermissionScope>>>,
     undo_stack: Arc<Mutex<crate::undo::UndoStack>>,
     context: ene_mind::ContextManager,
@@ -227,6 +237,18 @@ pub(super) struct TurnActor {
     shared: Arc<SharedActorState>,
 }
 
+/// A schedule run waiting for a user confirmation decision.
+struct PendingScheduleConfirmation {
+    schedule_id: i64,
+    run_id: i64,
+}
+
+/// The schedule run currently executing (prompt stream or tool task).
+struct ActiveScheduledRun {
+    schedule_id: i64,
+    run_id: i64,
+}
+
 impl TurnActor {
     /// Constructs a ready `TurnActor`. Called once from [`crate::EneHandle::open`].
     #[expect(
@@ -263,6 +285,7 @@ impl TurnActor {
         let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
         let (deferred_tool_tx, deferred_tool_rx) = mpsc::unbounded_channel();
         let (aux_task_tx, aux_task_rx) = mpsc::unbounded_channel();
+        let (scheduler_notify, scheduler_notify_rx) = watch::channel(());
         let task_caps = config
             .get_section::<crate::task_config::ToolRuntimeConfig>()
             .unwrap_or_default();
@@ -288,6 +311,10 @@ impl TurnActor {
             vision_cancel: CancellationToken::new(),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
+            pending_schedule_confirmations: HashMap::new(),
+            active_scheduled_run: None,
+            scheduler_notify,
+            scheduler_notify_rx: Some(scheduler_notify_rx),
             permission_scopes: Arc::new(Mutex::new(Vec::new())),
             undo_stack: Arc::new(Mutex::new(crate::undo::UndoStack::new(64))),
             context: ene_mind::ContextManager::default(),
@@ -456,6 +483,8 @@ impl TurnActor {
     }
 
     pub(super) async fn run(mut self) {
+        self.reconcile_scheduler_startup().await;
+        self.spawn_scheduler_task();
         loop {
             // Reap completed background tasks so the JoinSets shrink again
             // once work finishes. Reaping alone only bounds steady-state
@@ -602,6 +631,34 @@ impl TurnActor {
                                 );
                                 crate::proactive::log_confirmation(&decision, confirmation);
                             }
+                            // A scheduled prompt run finished with this
+                            // outcome; record it before the run state below
+                            // is cleared.
+                            if let Some(run) = self.active_scheduled_run.take() {
+                                let (status, error) = match &outcome.terminal {
+                                    TerminalReason::Done => {
+                                        (ScheduleRunStatus::Success, None)
+                                    }
+                                    TerminalReason::Failed { message } => {
+                                        (ScheduleRunStatus::Failed, Some(message.clone()))
+                                    }
+                                    TerminalReason::Cancelled => (
+                                        ScheduleRunStatus::Failed,
+                                        Some("cancelled".to_string()),
+                                    ),
+                                    TerminalReason::Declined => (
+                                        ScheduleRunStatus::Failed,
+                                        Some("declined".to_string()),
+                                    ),
+                                };
+                                self.finish_scheduled_run(
+                                    run.schedule_id,
+                                    run.run_id,
+                                    status,
+                                    error,
+                                )
+                                .await;
+                            }
                             // Retroactive topic-boundary compression: a
                             // boundary detected on the just-completed turn
                             // compresses the span before it. Runs here (after
@@ -626,6 +683,15 @@ impl TurnActor {
                             // `terminal_emitted` first (e.g. the sender was
                             // dropped before the handler ran). Emit a fallback
                             // Terminal so consumers do not wait forever.
+                            if let Some(run) = self.active_scheduled_run.take() {
+                                self.finish_scheduled_run(
+                                    run.schedule_id,
+                                    run.run_id,
+                                    ScheduleRunStatus::Failed,
+                                    Some("stream task terminated unexpectedly".to_string()),
+                                )
+                                .await;
+                            }
                             drop(self.event_tx.send(EneEvent::Terminal {
                                 turn: self.active_turn.clone().unwrap_or_default(),
                                 origin: self.active_origin,
@@ -1254,6 +1320,453 @@ impl TurnActor {
         .await;
     }
 
+    /// Reconcile scheduler state left by a crash and arm startup schedules
+    /// for this process start. Runs before the command loop so the timer
+    /// task (spawned afterwards) sees a consistent store.
+    async fn reconcile_scheduler_startup(&mut self) {
+        let Some(store) = self.concrete_store.clone() else {
+            return;
+        };
+        let enabled = self
+            .config
+            .get_section::<crate::scheduler::SchedulerConfig>()
+            .map_or(true, |cfg| cfg.enabled);
+        if !enabled {
+            return;
+        }
+        let now = chrono::Utc::now();
+        if let Err(e) = store.reconcile_startup(now).await {
+            tracing::error!(
+                component = "Scheduler",
+                error = %e,
+                "Failed to reconcile schedule runs at startup"
+            );
+        }
+        if let Err(e) = store.arm_startup_schedules(now).await {
+            tracing::error!(
+                component = "Scheduler",
+                error = %e,
+                "Failed to arm startup schedules"
+            );
+        }
+    }
+
+    /// Spawn the scheduler timer task when the store and config allow it.
+    fn spawn_scheduler_task(&mut self) {
+        let Some(store) = self.concrete_store.clone() else {
+            return;
+        };
+        let enabled = self
+            .config
+            .get_section::<crate::scheduler::SchedulerConfig>()
+            .map_or(true, |cfg| cfg.enabled);
+        let Some(notify_rx) = self.scheduler_notify_rx.take() else {
+            return;
+        };
+        if !enabled {
+            return;
+        }
+        let cmd_tx = self.cmd_tx.clone();
+        self.aux_tasks.spawn(async move {
+            crate::scheduler::task::run(store, cmd_tx, notify_rx).await;
+        });
+    }
+
+    /// Wake the scheduler timer task so it re-derives due times.
+    fn notify_scheduler(&self) {
+        // The error value is `Copy` (it wraps `()`), so `drop()` would trip
+        // `clippy::dropping_copy_types`.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "watch send error is Copy; drop() would trip dropping_copy_types"
+        )]
+        let _ = self.scheduler_notify.send(());
+    }
+
+    /// Process one due schedule fire: apply the late-execution and busy
+    /// policies, claim the occurrence atomically, then execute or wait.
+    async fn handle_schedule_fire(&mut self, schedule_id: i64, scheduled_at: chrono::DateTime<chrono::Utc>) {
+        let Some(store) = self.concrete_store.clone() else {
+            return;
+        };
+        let cfg = self
+            .config
+            .get_section::<crate::scheduler::SchedulerConfig>()
+            .unwrap_or_default();
+        let now = chrono::Utc::now();
+        let Ok(Some(schedule)) = store.get_schedule(schedule_id).await else {
+            return; // deleted, or the store failed; nothing to execute
+        };
+        if !schedule.enabled || schedule.next_run_at.as_ref() != Some(&scheduled_at) {
+            return; // paused or a stale duplicate dispatch
+        }
+
+        let grace = chrono::Duration::from_std(std::time::Duration::from_secs(
+            cfg.late_grace_secs.max(1),
+        ))
+        .unwrap_or_default();
+        let late = now.signed_duration_since(scheduled_at) > grace;
+        let turn = TurnId::new();
+        let gate_held = self.turn_gate.try_begin(&turn);
+        let mode = if late {
+            ene_store::FireClaimMode::SkipLate
+        } else if !gate_held {
+            ene_store::FireClaimMode::SkipBusy
+        } else if schedule.confirmation == ScheduleConfirmation::Confirm {
+            ene_store::FireClaimMode::AwaitConfirmation
+        } else {
+            ene_store::FireClaimMode::Execute
+        };
+
+        let claimed = match store.claim_fire(schedule_id, scheduled_at, now, mode).await {
+            Ok(Some(claimed)) => claimed,
+            Ok(None) => {
+                if gate_held {
+                    self.turn_gate.end();
+                }
+                return;
+            }
+            Err(e) => {
+                if gate_held {
+                    self.turn_gate.end();
+                }
+                tracing::error!(
+                    component = "Scheduler",
+                    error = %e,
+                    schedule_id,
+                    "Failed to claim schedule fire"
+                );
+                return;
+            }
+        };
+
+        match mode {
+            ene_store::FireClaimMode::Execute => {
+                self.begin_scheduled_run(claimed, turn).await;
+            }
+            ene_store::FireClaimMode::AwaitConfirmation => {
+                // Never hold the single-flight gate while waiting for the
+                // user: a conversation can start during the confirmation.
+                self.turn_gate.end();
+                self.register_schedule_confirmation(claimed, cfg.confirmation_timeout_secs);
+            }
+            ene_store::FireClaimMode::SkipBusy | ene_store::FireClaimMode::SkipLate => {}
+        }
+        self.notify_scheduler();
+    }
+
+    /// Emit the confirmation prompt for a claimed run and arm its timeout.
+    fn register_schedule_confirmation(
+        &mut self,
+        claimed: ene_store::ClaimedFire,
+        timeout_secs: u64,
+    ) {
+        let ene_store::ClaimedFire { schedule, run_id, .. } = claimed;
+        let schedule_id = schedule.id;
+        let schedule_name = schedule.name.clone();
+        let request_id = RequestId::new(format!("schedule-{run_id}"));
+        self.pending_schedule_confirmations.insert(
+            request_id.clone(),
+            PendingScheduleConfirmation {
+                schedule_id,
+                run_id,
+            },
+        );
+        let description = match &schedule.action {
+            ene_core::ScheduleAction::Tool { name, .. } => format!(
+                "Schedule `{schedule_name}` wants to run the tool `{name}`"
+            ),
+            ene_core::ScheduleAction::Prompt { .. } => format!(
+                "Schedule `{schedule_name}` wants to run a scheduled action"
+            ),
+        };
+        drop(self.event_tx.send(EneEvent::PermissionRequired {
+            turn: TurnId::new(),
+            origin: crate::types::TurnOrigin::Scheduled,
+            request_id: request_id.clone(),
+            action: "schedule.run".to_string(),
+            target: schedule_name,
+            description,
+        }));
+
+        let cmd_tx = self.cmd_tx.clone();
+        let timeout = std::time::Duration::from_secs(timeout_secs.max(1));
+        self.aux_tasks.spawn(async move {
+            tokio::time::sleep(timeout).await;
+            drop(cmd_tx.send(EneCommand::ScheduleConfirmationTimeout {
+                request_id,
+                schedule_id,
+                run_id,
+            }));
+        });
+    }
+
+    /// Start a confirmed run. The claim already happened (the run row is
+    /// `awaiting_approval`), so this only acquires the gate and executes.
+    async fn begin_approved_scheduled_run(&mut self, pending: PendingScheduleConfirmation) {
+        let Some(store) = self.concrete_store.clone() else {
+            return;
+        };
+        let Ok(Some(schedule)) = store.get_schedule(pending.schedule_id).await else {
+            return; // deleted while waiting; the run row stays open until the
+            // next startup reconciliation
+        };
+        if !schedule.enabled {
+            self.finish_scheduled_run(
+                pending.schedule_id,
+                pending.run_id,
+                ScheduleRunStatus::Failed,
+                Some("schedule disabled while awaiting confirmation".to_string()),
+            )
+            .await;
+            return;
+        }
+        let turn = TurnId::new();
+        if !self.turn_gate.try_begin(&turn) {
+            // A conversation started while the confirmation was pending.
+            self.finish_scheduled_run(
+                pending.schedule_id,
+                pending.run_id,
+                ScheduleRunStatus::SkippedBusy,
+                None,
+            )
+            .await;
+            return;
+        }
+        self.begin_scheduled_run(
+            ene_store::ClaimedFire {
+                schedule,
+                run_id: pending.run_id,
+                is_retry: false,
+            },
+            turn,
+        )
+        .await;
+        self.notify_scheduler();
+    }
+
+    /// Execute a claimed schedule action under the held single-flight gate.
+    async fn begin_scheduled_run(
+        &mut self,
+        claimed: ene_store::ClaimedFire,
+        turn: TurnId,
+    ) {
+        self.active_turn = Some(turn.clone());
+        self.active_origin = crate::types::TurnOrigin::Scheduled;
+        self.cancel_token = CancellationToken::new();
+        self.terminal_emitted = Arc::new(AtomicBool::new(false));
+        self.active_scheduled_run = Some(ActiveScheduledRun {
+            schedule_id: claimed.schedule.id,
+            run_id: claimed.run_id,
+        });
+        drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
+            status: EneStatus::Running,
+        }));
+        if let ene_core::ScheduleAction::Tool { name, arguments } = &claimed.schedule.action {
+            let name = name.clone();
+            let arguments_json = arguments.to_string();
+            drop(self.event_tx.send(EneEvent::TurnStarted {
+                turn: turn.clone(),
+                origin: crate::types::TurnOrigin::Scheduled,
+            }));
+            self.spawn_scheduled_tool_task(claimed, turn, name, arguments_json);
+        } else if let ene_core::ScheduleAction::Prompt { text, allow_tools } =
+            &claimed.schedule.action
+        {
+            let text = text.clone();
+            let allow_tools = *allow_tools;
+                self.start_stream(
+                    text,
+                    turn,
+                    crate::types::TurnOrigin::Scheduled,
+                    false,
+                    allow_tools,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                // `start_stream` fails synchronously (emitting Terminal and
+                // releasing the gate) when the provider cannot open; every
+                // other terminal path is observed via `stream_session_rx`.
+                if self.terminal_emitted.load(Ordering::Acquire) {
+                    self.active_scheduled_run = None;
+                    self.finish_scheduled_run(
+                        claimed.schedule.id,
+                        claimed.run_id,
+                        ScheduleRunStatus::Failed,
+                        Some("scheduled prompt could not start".to_string()),
+                    )
+                    .await;
+                }
+            drop(claimed);
+        }
+    }
+
+    /// Spawn the execution of a scheduled tool action as a supervised task.
+    fn spawn_scheduled_tool_task(
+        &mut self,
+        claimed: ene_store::ClaimedFire,
+        turn: TurnId,
+        name: String,
+        arguments_json: String,
+    ) {
+        let ene_store::ClaimedFire { schedule, run_id, .. } = claimed;
+        let schedule_id = schedule.id;
+        if !admit_task(
+            &mut self.call_tool_tasks,
+            self.task_caps.call_tool_cap,
+            "ScheduledTool",
+            Some(name.clone()),
+            &self.diag_tx,
+        ) {
+            // The task set is at capacity: fail the run rather than queueing
+            // it (matching the direct `CallTool` admission contract). The
+            // failure arms a retry when the schedule allows one.
+            let cmd_tx = self.cmd_tx.clone();
+            self.aux_tasks.spawn(async move {
+                drop(cmd_tx.send(EneCommand::ScheduleToolFinished {
+                    schedule_id,
+                    run_id,
+                    turn,
+                    tool_name: name,
+                    result: Err("scheduled tool execution rejected: task queue full".to_string()),
+                }));
+            });
+            return;
+        }
+        let registry = self.registry.clone();
+        let tool_rag = self.tool_rag.clone();
+        let event_tx = self.event_tx.clone();
+        let pending_permissions = self.pending_permissions.clone();
+        let pending_user_inputs = self.pending_user_inputs.clone();
+        let permission_scopes = self.permission_scopes.clone();
+        let cancel_token = self.cancel_token.clone();
+        let cmd_tx = self.cmd_tx.clone();
+        let concrete_store = self.concrete_store.clone();
+        let session_id = self.session.memory.session_id.to_string();
+        let card_name = self.session.card_name().to_string();
+        let plugin_cfg = self
+            .config
+            .get_section::<ene_plugin_host::PluginConfig>()
+            .unwrap_or_default();
+        let tool_timeout = std::time::Duration::from_millis(plugin_cfg.timeout_ms);
+        let args_json = arguments_json;
+        self.call_tool_tasks.spawn(async move {
+            let call_ctx = ene_plugin_proto::CallContext {
+                conversation_id: session_id.clone(),
+                turn_id: turn.to_string(),
+            };
+            let dispatch = if cancel_token.is_cancelled() {
+                Err(ene_plugin_host::PluginHostError::ExecutionFailed {
+                    message: "scheduled tool run cancelled before dispatch".to_string(),
+                })
+            } else if name == "system.search_tools" {
+                let query = serde_json::from_str::<serde_json::Value>(&args_json)
+                    .ok()
+                    .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
+                    .unwrap_or_default();
+                crate::streaming::execute_system_search_tool(
+                    registry.as_ref(),
+                    tool_rag.as_deref(),
+                    &query,
+                    &card_name,
+                )
+                .await
+            } else {
+                tokio::time::timeout(
+                    tool_timeout,
+                    registry.call_tool(&name, &args_json, Some(&call_ctx)),
+                )
+                .await
+                .map_or_else(
+                    |_| Err(crate::streaming::timeout_error(&name, tool_timeout)),
+                    |r| r.map(|r| r.text_for_llm()),
+                )
+            };
+            drop(event_tx.send(EneEvent::ToolCallStart {
+                turn: turn.clone(),
+                origin: crate::types::TurnOrigin::Scheduled,
+                name: name.clone(),
+                arguments: args_json.clone(),
+            }));
+            let resolved = crate::streaming::resolve_tool_prompts(
+                &crate::streaming::ToolPromptResolution {
+                    event_tx: &event_tx,
+                    turn: &turn,
+                    origin: crate::types::TurnOrigin::Scheduled,
+                    pending_permissions: &pending_permissions,
+                    pending_user_inputs: &pending_user_inputs,
+                    permission_scopes: &permission_scopes,
+                    cancel_token: &cancel_token,
+                    permission_prompt_timeout_ms: plugin_cfg.permission_prompt_timeout_ms,
+                    user_input_prompt_timeout_ms: plugin_cfg.user_input_prompt_timeout_ms,
+                },
+                registry.as_ref(),
+                &name,
+                &args_json,
+                &call_ctx,
+                tool_timeout,
+                dispatch,
+            )
+            .await;
+            if let Some(store) = concrete_store {
+                let success = resolved.result.is_ok();
+                ene_store::MemoryStore::spawn_insert_audit_entry(
+                    &store,
+                    ene_store::NewAuditEntry {
+                        turn_id: turn.to_string(),
+                        session_id: Some(session_id),
+                        tool_name: name.clone(),
+                        action: resolved.audit_action,
+                        target: resolved.audit_target,
+                        decision: resolved.audit_decision,
+                        success,
+                        arguments: args_json.clone(),
+                    },
+                );
+            }
+            let outcome = match resolved.result {
+                Ok(text) => Ok(text),
+                Err(e) => Err(e.to_string()),
+            };
+            drop(cmd_tx.send(EneCommand::ScheduleToolFinished {
+                schedule_id,
+                run_id,
+                turn,
+                tool_name: name,
+                result: outcome,
+            }));
+        });
+    }
+
+    /// Record a terminal run outcome and wake the timer task.
+    async fn finish_scheduled_run(
+        &mut self,
+        schedule_id: i64,
+        run_id: i64,
+        status: ScheduleRunStatus,
+        error: Option<String>,
+    ) {
+        let Some(store) = self.concrete_store.clone() else {
+            return;
+        };
+        if let Err(e) = store
+            .finish_run(schedule_id, run_id, status, error, chrono::Utc::now())
+            .await
+        {
+            tracing::error!(
+                component = "Scheduler",
+                error = %e,
+                schedule_id,
+                run_id,
+                "Failed to record schedule run outcome"
+            );
+        }
+        self.notify_scheduler();
+    }
+
     /// `pub(super)` (rather than private) solely so `handle::tests` can drive
     /// individual commands directly — e.g. to test Stage 8 task-admission
     /// caps deterministically without racing the run loop's reap timing
@@ -1317,6 +1830,14 @@ impl TurnActor {
                     return true;
                 }
                 self.cancel_token.cancel();
+                // A scheduled tool run has no stream task: the spawned task
+                // observes the token at its next permission wait / dispatch
+                // and reports back through `ScheduleToolFinished`, which
+                // emits the terminal event, releases the gate, and records
+                // the outcome. Nothing to tear down here.
+                if self.active_scheduled_run.is_some() && self.stream_handle.is_none() {
+                    return true;
+                }
 
                 // Cooperative join: give the stream up to 250ms to notice the
                 // CancellationToken and shut down gracefully (preserving in-flight
@@ -1530,6 +2051,22 @@ impl TurnActor {
                     let _ = tx.send(decision);
                 }
                 drop(guard);
+                if let Some(pending) = self.pending_schedule_confirmations.remove(&request_id) {
+                    match decision {
+                        PermissionDecision::AllowOnce | PermissionDecision::AllowSession => {
+                            self.begin_approved_scheduled_run(pending).await;
+                        }
+                        PermissionDecision::Deny => {
+                            self.finish_scheduled_run(
+                                pending.schedule_id,
+                                pending.run_id,
+                                ScheduleRunStatus::Denied,
+                                None,
+                            )
+                            .await;
+                        }
+                    }
+                }
                 true
             }
             EneCommand::ListPermissions { reply } => {
@@ -1718,6 +2255,162 @@ impl TurnActor {
                     };
                     drop(reply.send(result));
                 });
+                true
+            }
+            EneCommand::ScheduleFire {
+                schedule_id,
+                scheduled_at,
+            } => {
+                self.handle_schedule_fire(schedule_id, scheduled_at).await;
+                true
+            }
+            EneCommand::ScheduleConfirmationTimeout {
+                request_id,
+                schedule_id,
+                run_id,
+            } => {
+                self.pending_schedule_confirmations.remove(&request_id);
+                self.finish_scheduled_run(
+                    schedule_id,
+                    run_id,
+                    ScheduleRunStatus::TimedOut,
+                    Some("confirmation timed out".to_string()),
+                )
+                .await;
+                true
+            }
+            EneCommand::ScheduleToolFinished {
+                schedule_id,
+                run_id,
+                turn,
+                tool_name,
+                result,
+            } => {
+                if self.active_turn.as_ref() != Some(&turn) {
+                    return true; // stale outcome for a turn already finished
+                }
+                self.active_scheduled_run = None;
+                self.active_turn = None;
+                self.active_origin = crate::types::TurnOrigin::User;
+                let (status, error, terminal_reason, result_text) = match result {
+                    Ok(text) => (
+                        ScheduleRunStatus::Success,
+                        None,
+                        TerminalReason::Done,
+                        text,
+                    ),
+                    Err(message) => (
+                        ScheduleRunStatus::Failed,
+                        Some(message.clone()),
+                        TerminalReason::Failed {
+                            message: message.clone(),
+                        },
+                        format!("Error executing tool: {message}"),
+                    ),
+                };
+                drop(self.event_tx.send(EneEvent::ToolCallResult {
+                    turn: turn.clone(),
+                    origin: crate::types::TurnOrigin::Scheduled,
+                    name: tool_name,
+                    result: result_text,
+                }));
+                streaming::emit_terminal(
+                    &self.event_tx,
+                    &self.terminal_emitted,
+                    &turn,
+                    crate::types::TurnOrigin::Scheduled,
+                    terminal_reason,
+                );
+                self.finish_scheduled_run(schedule_id, run_id, status, error).await;
+                self.turn_gate.end();
+                drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
+                    status: EneStatus::Idle,
+                }));
+                true
+            }
+            EneCommand::AddSchedule { new, reply } => {
+                let result = match &self.concrete_store {
+                    Some(store) => store
+                        .insert_schedule(&new, chrono::Utc::now())
+                        .await
+                        .map_err(EneRuntimeError::from),
+                    None => Err(EneRuntimeError::StoreRequired),
+                };
+                // A oneshot `Sender<Result<..>>::send` error is `Copy` (the
+                // unsent `Result`), so `drop()` would itself trip
+                // `clippy::dropping_copy_types`.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
+                let _ = reply.send(result);
+                self.notify_scheduler();
+                true
+            }
+            EneCommand::ListSchedules { reply } => {
+                let result = match &self.concrete_store {
+                    Some(store) => store.list_schedules().await.map_err(EneRuntimeError::from),
+                    None => Err(EneRuntimeError::StoreRequired),
+                };
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
+                let _ = reply.send(result);
+                true
+            }
+            EneCommand::ListScheduleRuns {
+                schedule_id,
+                limit,
+                reply,
+            } => {
+                let result = match &self.concrete_store {
+                    Some(store) => store
+                        .list_runs(schedule_id, limit)
+                        .await
+                        .map_err(EneRuntimeError::from),
+                    None => Err(EneRuntimeError::StoreRequired),
+                };
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
+                let _ = reply.send(result);
+                true
+            }
+            EneCommand::DeleteSchedule { schedule_id, reply } => {
+                let result = match &self.concrete_store {
+                    Some(store) => {
+                        store.delete_schedule(schedule_id).await.map_err(EneRuntimeError::from)
+                    }
+                    None => Err(EneRuntimeError::StoreRequired),
+                };
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
+                let _ = reply.send(result);
+                self.notify_scheduler();
+                true
+            }
+            EneCommand::SetScheduleEnabled {
+                schedule_id,
+                enabled,
+                reply,
+            } => {
+                let result = match &self.concrete_store {
+                    Some(store) => store
+                        .set_schedule_enabled(schedule_id, enabled, chrono::Utc::now())
+                        .await
+                        .map_err(EneRuntimeError::from),
+                    None => Err(EneRuntimeError::StoreRequired),
+                };
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
+                let _ = reply.send(result);
+                self.notify_scheduler();
                 true
             }
             EneCommand::CancelDeferredTool {

@@ -33,6 +33,9 @@ pub enum EneRuntimeError {
     /// Bootstrap misconfiguration or internal failure.
     #[error("Bootstrap error: {0}")]
     Bootstrap(String),
+    /// The scheduler needs the memory store, which is disabled.
+    #[error("The scheduler requires the memory store (`store.enabled`)")]
+    StoreRequired,
     /// The actor rejected admission of a new background task because its
     /// bounded `JoinSet` was already at capacity (Stage 8). Mirrors
     /// `ene_infer::EngineError::Busy` and [`ene_ai::LlmProviderError::Busy`]:

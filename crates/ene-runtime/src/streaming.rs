@@ -137,6 +137,230 @@ pub(crate) struct ToolExecutionOutput {
     pub summaries: Vec<ToolResultSummary>,
 }
 
+/// Inputs for resolving chained permission / user-input prompts on one tool
+/// call.
+///
+/// Shared by the stream finalize path ([`perform_tool_executions`]) and
+/// scheduled tool actions so both resolve interactive prompts through the
+/// exact same machinery (register-before-emit, bounded waits, retry).
+pub(crate) struct ToolPromptResolution<'a> {
+    pub event_tx: &'a broadcast::Sender<EneEvent>,
+    pub turn: &'a TurnId,
+    pub origin: TurnOrigin,
+    pub pending_permissions:
+        &'a Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
+    pub pending_user_inputs:
+        &'a Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
+    pub permission_scopes: &'a Arc<Mutex<Vec<PermissionScope>>>,
+    pub cancel_token: &'a CancellationToken,
+    pub permission_prompt_timeout_ms: u64,
+    pub user_input_prompt_timeout_ms: u64,
+}
+
+/// Outcome of a resolved tool call plus the audit trail collected while
+/// resolving interactive prompts.
+#[derive(Debug)]
+pub(crate) struct ResolvedToolCall {
+    /// The final call result (possibly retried after approvals).
+    pub result: Result<String, PluginHostError>,
+    /// What the consumer decided, if a permission prompt was raised.
+    pub audit_decision: ene_store::AuditDecision,
+    /// Permission action seen while resolving prompts (for the audit row).
+    pub audit_action: String,
+    /// Permission target seen while resolving prompts (for the audit row).
+    pub audit_target: String,
+}
+
+/// Resolves chained permission / user-input prompts for a single tool call,
+/// retrying the call after approvals.
+///
+/// A tool may chain a permission prompt followed by a user-input prompt (or
+/// vice-versa) on a single call; the loop is capped so a buggy tool that
+/// ping-pongs between the two does not lock up the turn. Denials, cancels,
+/// and timeout-of-prompt all fail closed (the call is not retried).
+pub(crate) async fn resolve_tool_prompts(
+    resolution: &ToolPromptResolution<'_>,
+    registry: &dyn ene_plugin_host::ToolRegistry,
+    name: &str,
+    args: &str,
+    call_ctx: &ene_plugin_proto::CallContext,
+    tool_timeout: std::time::Duration,
+    mut result: Result<String, PluginHostError>,
+) -> ResolvedToolCall {
+    const MAX_PENDING_ROUNDS: usize = 8;
+    let mut audit_decision = ene_store::AuditDecision::NotRequired;
+    let mut audit_action = String::new();
+    let mut audit_target = String::new();
+    for _ in 0..MAX_PENDING_ROUNDS {
+        match &result {
+            Err(PluginHostError::Protocol(ToolError::PermissionRequired {
+                request_id,
+                action,
+                target,
+                description,
+            })) => {
+                let req_id = RequestId::from(request_id.clone());
+                audit_action = action.clone();
+                audit_target = target.clone();
+
+                // Register the oneshot::Sender BEFORE emitting
+                // EneEvent::PermissionRequired. A consumer that synchronously
+                // replies to the event (e.g. an automated/headless test) can
+                // otherwise race ahead of this task, send
+                // EneCommand::PermissionDecision, and hit the lookup when the
+                // map is still empty — the decision would then be silently
+                // dropped and the caller would await forever below.
+                let (decide_tx, decide_rx) = oneshot::channel::<PermissionDecision>();
+                {
+                    let mut guard = resolution.pending_permissions.lock().await;
+                    guard.insert(req_id.clone(), decide_tx);
+                }
+
+                drop(resolution.event_tx.send(EneEvent::PermissionRequired {
+                    turn: resolution.turn.clone(),
+                    origin: resolution.origin,
+                    request_id: req_id.clone(),
+                    action: action.clone(),
+                    target: target.clone(),
+                    description: description.clone(),
+                }));
+
+                match await_permission_decision(
+                    decide_rx,
+                    resolution.cancel_token,
+                    resolution.permission_prompt_timeout_ms,
+                    &req_id,
+                )
+                .await
+                {
+                    Some(PermissionDecision::AllowOnce) => {
+                        audit_decision = ene_store::AuditDecision::AllowOnce;
+                        // Route the approval to the plugin that owns the tool
+                        // which raised the request, so an unrelated plugin
+                        // mid-long-tool-call cannot delay it.
+                        registry.approve_permission_for(name, req_id.as_str()).await;
+                        result = tokio::time::timeout(
+                            tool_timeout,
+                            registry.call_tool(name, args, Some(call_ctx)),
+                        )
+                        .await
+                        .map_or_else(
+                            |_| Err(timeout_error(name, tool_timeout)),
+                            |r| r.map(|r| r.text_for_llm()),
+                        );
+                    }
+                    Some(PermissionDecision::AllowSession) => {
+                        audit_decision = ene_store::AuditDecision::AllowSession;
+                        registry.allow_pattern(action, target).await;
+                        // Route the approval to the owning plugin; the
+                        // session-wide pattern above is still broadcast to
+                        // every plugin.
+                        registry.approve_permission_for(name, req_id.as_str()).await;
+                        {
+                            let mut guard = resolution.permission_scopes.lock().await;
+                            let next_id = guard
+                                .iter()
+                                .map(|s| s.id)
+                                .max()
+                                .unwrap_or(0)
+                                .saturating_add(1);
+                            // De-duplicate: a repeated grant for the same
+                            // action+target refreshes the existing scope
+                            // rather than stacking duplicates.
+                            if let Some(existing) = guard
+                                .iter_mut()
+                                .find(|s| s.action == *action && s.target_pattern == *target)
+                            {
+                                existing.granted_at = chrono::Utc::now();
+                            } else {
+                                guard.push(PermissionScope {
+                                    id: next_id,
+                                    action: action.clone(),
+                                    target_pattern: target.clone(),
+                                    grant_type: GrantType::Session,
+                                    granted_at: chrono::Utc::now(),
+                                });
+                            }
+                        }
+                        result = tokio::time::timeout(
+                            tool_timeout,
+                            registry.call_tool(name, args, Some(call_ctx)),
+                        )
+                        .await
+                        .map_or_else(
+                            |_| Err(timeout_error(name, tool_timeout)),
+                            |r| r.map(|r| r.text_for_llm()),
+                        );
+                    }
+                    Some(PermissionDecision::Deny) | None => {
+                        audit_decision = ene_store::AuditDecision::Denied;
+                        result = Err(PluginHostError::Protocol(ToolError::permission_denied(
+                            "Permission denied by user".to_string(),
+                        )));
+                        break;
+                    }
+                }
+            }
+            Err(PluginHostError::Protocol(ToolError::UserInputRequired {
+                request_id,
+                prompt,
+            })) => {
+                let req_id = RequestId::from(request_id.clone());
+
+                // Register the oneshot::Sender BEFORE emitting
+                // EneEvent::UserInputRequired for the same race reason as the
+                // permission branch above.
+                let (resp_tx, resp_rx) = oneshot::channel::<UserInputResponse>();
+                {
+                    let mut guard = resolution.pending_user_inputs.lock().await;
+                    guard.insert(req_id.clone(), resp_tx);
+                }
+
+                drop(resolution.event_tx.send(EneEvent::UserInputRequired {
+                    turn: resolution.turn.clone(),
+                    origin: resolution.origin,
+                    request_id: req_id.clone(),
+                    prompt: prompt.clone(),
+                }));
+
+                // Bounded, fail-safe wait, mirroring the permission branch
+                // above.
+                if let Some(answers) = await_user_input_response(
+                    resp_rx,
+                    resolution.cancel_token,
+                    resolution.user_input_prompt_timeout_ms,
+                    &req_id,
+                )
+                .await
+                {
+                    let new_args = inject_user_answers(args, &answers);
+                    result = tokio::time::timeout(
+                        tool_timeout,
+                        registry.call_tool(name, &new_args, Some(call_ctx)),
+                    )
+                    .await
+                    .map_or_else(
+                        |_| Err(timeout_error(name, tool_timeout)),
+                        |r| r.map(|r| r.text_for_llm()),
+                    );
+                } else {
+                    result = Err(PluginHostError::ExecutionFailed {
+                        message: "User cancelled the question".to_string(),
+                    });
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    ResolvedToolCall {
+        result,
+        audit_decision,
+        audit_action,
+        audit_target,
+    }
+}
+
 /// Waits for a consumer's permission decision, bounded and fail-safe.
 ///
 /// The wait resolves on the first of:
@@ -589,7 +813,7 @@ pub(crate) async fn perform_tool_executions(
         // the call now on the sequential path. `.take()` moves the result out
         // (each index is visited exactly once, and `PluginHostError` is not
         // `Clone`).
-        let mut result = if let Some(outcome) = parallel_results[idx].take() {
+        let result = if let Some(outcome) = parallel_results[idx].take() {
             outcome
         } else {
             let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
@@ -614,191 +838,30 @@ pub(crate) async fn perform_tool_executions(
             }
         };
 
-        // A tool may chain a permission prompt followed by a
-        // user-input prompt (or vice-versa) on a single call.
-        // Resolve pending requests in a loop with a hard cap
-        // so a buggy tool that ping-pongs between the two
-        // does not lock up the stream.
-        const MAX_PENDING_ROUNDS: usize = 8;
-        let mut audit_decision = ene_store::AuditDecision::NotRequired;
-        let mut audit_action = String::new();
-        let mut audit_target = String::new();
-        for _ in 0..MAX_PENDING_ROUNDS {
-            match &result {
-                Err(PluginHostError::Protocol(ToolError::PermissionRequired {
-                    request_id,
-                    action,
-                    target,
-                    description,
-                })) => {
-                    let req_id = RequestId::from(request_id.clone());
-                    audit_action = action.clone();
-                    audit_target = target.clone();
-
-                    // Register the oneshot::Sender BEFORE
-                    // emitting EneEvent::PermissionRequired. A
-                    // consumer that synchronously replies to
-                    // the event (e.g. an automated/headless
-                    // test) can otherwise race ahead of this
-                    // task, send EneCommand::PermissionDecision,
-                    // and hit the lookup in handle.rs when the
-                    // map is still empty — the decision would
-                    // then be silently dropped and the stream
-                    // would await forever below.
-                    let (decide_tx, decide_rx) = oneshot::channel::<PermissionDecision>();
-                    {
-                        let mut guard = ctx.pending_permissions.lock().await;
-                        guard.insert(req_id.clone(), decide_tx);
-                    }
-
-                    drop(ctx.event_tx.send(EneEvent::PermissionRequired {
-                        turn: ctx.turn.clone(),
-                        origin: ctx.origin,
-                        request_id: req_id.clone(),
-                        action: action.clone(),
-                        target: target.clone(),
-                        description: description.clone(),
-                    }));
-
-                    let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-                    // Bounded, fail-safe wait: a consumer that never answers
-                    // (lost event, headless consumer) can no longer hold the
-                    // turn open forever — the wait times out and is selected
-                    // against the cancel token.
-                    match await_permission_decision(
-                        decide_rx,
-                        &ctx.cancel_token,
-                        ctx.permission_prompt_timeout_ms,
-                        &req_id,
-                    )
-                    .await
-                    {
-                        Some(PermissionDecision::AllowOnce) => {
-                            audit_decision = ene_store::AuditDecision::AllowOnce;
-                            // Route the approval to the plugin that owns the
-                            // tool which raised the request, so an unrelated
-                            // plugin mid-long-tool-call cannot delay it.
-                            ctx.registry
-                                .approve_permission_for(&name, req_id.as_str())
-                                .await;
-                            result = tokio::time::timeout(
-                                tool_timeout,
-                                ctx.registry.call_tool(&name, &args, Some(&call_ctx)),
-                            )
-                            .await
-                            .map_or_else(
-                                |_| Err(timeout_error(&name, tool_timeout)),
-                                |r| r.map(|r| r.text_for_llm()),
-                            );
-                        }
-                        Some(PermissionDecision::AllowSession) => {
-                            audit_decision = ene_store::AuditDecision::AllowSession;
-                            ctx.registry.allow_pattern(action, target).await;
-                            // Route the approval to the owning plugin;
-                            // the session-wide pattern above is still broadcast
-                            // to every plugin.
-                            ctx.registry
-                                .approve_permission_for(&name, req_id.as_str())
-                                .await;
-                            {
-                                let mut guard = ctx.permission_scopes.lock().await;
-                                let next_id = guard
-                                    .iter()
-                                    .map(|s| s.id)
-                                    .max()
-                                    .unwrap_or(0)
-                                    .saturating_add(1);
-                                // De-duplicate: a repeated grant for the same
-                                // action+target refreshes the existing scope
-                                // rather than stacking duplicates.
-                                if let Some(existing) = guard
-                                    .iter_mut()
-                                    .find(|s| s.action == *action && s.target_pattern == *target)
-                                {
-                                    existing.granted_at = chrono::Utc::now();
-                                } else {
-                                    guard.push(PermissionScope {
-                                        id: next_id,
-                                        action: action.clone(),
-                                        target_pattern: target.clone(),
-                                        grant_type: GrantType::Session,
-                                        granted_at: chrono::Utc::now(),
-                                    });
-                                }
-                            }
-                            result = tokio::time::timeout(
-                                tool_timeout,
-                                ctx.registry.call_tool(&name, &args, Some(&call_ctx)),
-                            )
-                            .await
-                            .map_or_else(
-                                |_| Err(timeout_error(&name, tool_timeout)),
-                                |r| r.map(|r| r.text_for_llm()),
-                            );
-                        }
-                        Some(PermissionDecision::Deny) | None => {
-                            audit_decision = ene_store::AuditDecision::Denied;
-                            result = Err(PluginHostError::Protocol(ToolError::permission_denied(
-                                "Permission denied by user".to_string(),
-                            )));
-                            break;
-                        }
-                    }
-                }
-                Err(PluginHostError::Protocol(ToolError::UserInputRequired {
-                    request_id,
-                    prompt,
-                })) => {
-                    let req_id = RequestId::from(request_id.clone());
-
-                    // Register the oneshot::Sender BEFORE
-                    // emitting EneEvent::UserInputRequired for
-                    // the same race reason as the permission
-                    // branch above.
-                    let (resp_tx, resp_rx) = oneshot::channel::<UserInputResponse>();
-                    {
-                        let mut guard = ctx.pending_user_inputs.lock().await;
-                        guard.insert(req_id.clone(), resp_tx);
-                    }
-
-                    drop(ctx.event_tx.send(EneEvent::UserInputRequired {
-                        turn: ctx.turn.clone(),
-                        origin: ctx.origin,
-                        request_id: req_id.clone(),
-                        prompt: prompt.clone(),
-                    }));
-
-                    // Bounded, fail-safe wait, mirroring the permission branch
-                    // above.
-                    if let Some(answers) = await_user_input_response(
-                        resp_rx,
-                        &ctx.cancel_token,
-                        ctx.user_input_prompt_timeout_ms,
-                        &req_id,
-                    )
-                    .await
-                    {
-                        let new_args = inject_user_answers(&args, &answers);
-                        let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-                        result = tokio::time::timeout(
-                            tool_timeout,
-                            ctx.registry.call_tool(&name, &new_args, Some(&call_ctx)),
-                        )
-                        .await
-                        .map_or_else(
-                            |_| Err(timeout_error(&name, tool_timeout)),
-                            |r| r.map(|r| r.text_for_llm()),
-                        );
-                    } else {
-                        result = Err(PluginHostError::ExecutionFailed {
-                            message: "User cancelled the question".to_string(),
-                        });
-                        break;
-                    }
-                }
-                _ => break,
-            }
-        }
+        let resolved = resolve_tool_prompts(
+            &ToolPromptResolution {
+                event_tx: ctx.event_tx,
+                turn: ctx.turn,
+                origin: ctx.origin,
+                pending_permissions: ctx.pending_permissions,
+                pending_user_inputs: ctx.pending_user_inputs,
+                permission_scopes: ctx.permission_scopes,
+                cancel_token: &ctx.cancel_token,
+                permission_prompt_timeout_ms: ctx.permission_prompt_timeout_ms,
+                user_input_prompt_timeout_ms: ctx.user_input_prompt_timeout_ms,
+            },
+            ctx.registry,
+            &name,
+            &args,
+            &call_ctx,
+            std::time::Duration::from_millis(ctx.timeout_ms),
+            result,
+        )
+        .await;
+        let result = resolved.result;
+        let audit_decision = resolved.audit_decision;
+        let mut audit_action = resolved.audit_action;
+        let mut audit_target = resolved.audit_target;
 
         let (result_str, success) = match result {
             Ok(res) => (res, true),
@@ -930,7 +993,7 @@ async fn dispatch_tool_call(
     }
 }
 
-fn timeout_error(name: &str, tool_timeout: std::time::Duration) -> PluginHostError {
+pub(crate) fn timeout_error(name: &str, tool_timeout: std::time::Duration) -> PluginHostError {
     PluginHostError::ExecutionFailed {
         message: format!(
             "Tool '{}' timed out after {:.2} seconds",

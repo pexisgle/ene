@@ -538,6 +538,7 @@ const fn origin_label(origin: TurnOrigin) -> &'static str {
     match origin {
         TurnOrigin::User => "user",
         TurnOrigin::Proactive => "proactive",
+        TurnOrigin::Scheduled => "scheduled",
     }
 }
 
