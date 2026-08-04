@@ -41,6 +41,12 @@ cargo doc -p ene-plugin-macros --open
 
 Start at `ene_plugin::prelude` for authoring, and the `ToolAction`/`ToolSpec` derive macros in `ene-plugin-macros`.
 
+For step-by-step authoring guidance and the full API/ABI reference, see
+[Write a Tool](../guide/tools/write-a-tool.md) and
+[Tool SDK Reference](../reference/tools/sdk.md). A complete end-to-end
+sample (DB IPC state, permission gate, IPC integration tests) ships as
+`plugins/tool/counter`.
+
 ---
 
 ## Related
