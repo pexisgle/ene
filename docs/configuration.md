@@ -805,6 +805,11 @@ app or `run.exe`, or an Aivis Speech / COEIROINK server — and point
 spawned engine is terminated when the plugin process shuts down. The engine
 binary must be pre-installed; the plugin never downloads it.
 
+Changing `ai.tts.provider` itself (e.g. switching from `kokoro` to
+`voicevox`) takes effect at the next startup: the active provider is built
+once at bootstrap, while edits to `plugins.list.voicevox.config` and
+`ai.tts.voice` are picked up by running sessions.
+
 #### Secret marking
 
 A plugin's `config_schema()` may mark a field with `x-ene-secret: true`. The
