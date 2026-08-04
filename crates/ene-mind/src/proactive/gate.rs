@@ -247,6 +247,39 @@ mod tests {
     }
 
     #[test]
+    fn activity_engaged_outranks_quiet_hours() {
+        use crate::proactive::{IdleTrend, WorldStateSummary};
+
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            world_state: crate::config::WorldStateConfig {
+                enabled: true,
+                ..crate::config::WorldStateConfig::default()
+            },
+            ..ProactiveConfig::default()
+        };
+        let mut ctx = ctx_with_world_state(WorldStateSummary {
+            idle_trend: IdleTrend::Unknown,
+            window_changes: 1,
+            engaged: true,
+            latest_window: "Editor".into(),
+            snapshot_count: 3,
+        });
+        ctx.quiet_hours = crate::proactive::QuietHoursEval {
+            active: true,
+            ..crate::proactive::QuietHoursEval::inactive()
+        };
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Err(GateRejectReason::ActivityEngaged),
+            "an engaged user is not a quiet-hours opportunity to queue"
+        );
+    }
+
+    #[test]
     fn world_state_alone_satisfies_the_source_gate() {
         use crate::proactive::{IdleTrend, WorldStateSummary};
 

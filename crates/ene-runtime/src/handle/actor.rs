@@ -2765,9 +2765,10 @@ impl TurnActor {
             EneCommand::UpdateProactiveObservation { observation } => {
                 let seconds_since_user_input =
                     self.proactive.suppression(false).seconds_since_user_input;
+                let mind = self.config.get_section::<ene_mind::MindConfig>().ok();
                 self.proactive.observation = observation.clone();
                 if observation.captured_at_unix_ms != 0
-                    && let Ok(mind) = self.config.get_section::<ene_mind::MindConfig>()
+                    && let Some(mind) = &mind
                 {
                     self.proactive.world_state.push(
                         ene_mind::WorldStateSnapshot::from_observation(
@@ -2776,11 +2777,11 @@ impl TurnActor {
                         ),
                         &mind.proactive.world_state,
                     );
-                    // When screen_summary is enabled, each observe cycle (fresh
-                    // capture → vision) drives the decision LLM immediately.
-                    if mind.proactive.enabled && mind.proactive.sources.screen_summary {
-                        self.maybe_spawn_proactive_decision().await;
-                    }
+                }
+                // When screen_summary is enabled, each observe cycle (fresh
+                // capture → vision) drives the decision LLM immediately.
+                if mind.is_some_and(|m| m.proactive.enabled && m.proactive.sources.screen_summary) {
+                    self.maybe_spawn_proactive_decision().await;
                 }
                 true
             }
@@ -5687,6 +5688,65 @@ mod tests {
             actor.proactive.last_decision.is_none(),
             "start_stream failure must clear the pending decision"
         );
+    }
+
+    #[tokio::test]
+    async fn engaged_world_state_skips_the_quiet_hours_queue() {
+        use crate::handle::tests::{EmptyRegistry, build_bare_actor};
+        use chrono::TimeZone;
+
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig::default();
+        let (mut actor, _diag_rx) = build_bare_actor(registry, &task_caps);
+        quiet_hours_actor(
+            &mut actor,
+            ene_mind::QuietHoursPolicy::Queue,
+            ene_mind::QuietHoursSuppressConfig::default(),
+            chrono::Utc
+                .with_ymd_and_hms(2026, 8, 3, 22, 30, 0)
+                .single()
+                .expect("valid utc instant"),
+        );
+        let mut mind = actor
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .expect("mind config");
+        mind.proactive.world_state.enabled = true;
+        actor
+            .config
+            .set_section(&mind)
+            .expect("set mind config on test actor");
+        actor.session.record_user_input();
+        actor.session.add_user_message("hi");
+
+        // Three observations with a fresh window switch: the trend is
+        // engaged, so the quiet-hours tick is not an utterance opportunity.
+        for i in 0..3 {
+            assert!(
+                actor
+                    .handle_command(EneCommand::UpdateProactiveObservation {
+                        observation: ene_mind::ProactiveObservation {
+                            captured_at_unix_ms: i + 1,
+                            activity: Some(ene_mind::ActivitySnapshot {
+                                idle_seconds: None,
+                                active_window_label: "Editor".into(),
+                                recent_change: "switched".into(),
+                            }),
+                            screen_summary: None,
+                            screen_summary_status: ene_mind::ScreenSummaryStatus::Disabled,
+                        },
+                    })
+                    .await
+            );
+        }
+
+        actor.maybe_spawn_proactive_decision().await;
+
+        assert!(
+            actor.proactive.quiet_hours_queue.is_empty(),
+            "an engaged user inside quiet hours must not queue a catch-up moment"
+        );
+        assert!(actor.proactive_decision_rx.is_none());
     }
 
     #[tokio::test]
