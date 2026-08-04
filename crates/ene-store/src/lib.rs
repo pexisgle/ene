@@ -95,6 +95,8 @@ pub mod migrator;
 pub mod port;
 /// Hybrid memory search scoring.
 pub mod search;
+/// Persistent scheduler domain model.
+pub mod schedule;
 /// Session metadata domain model.
 pub mod session;
 /// Core memory store (`SQLite` + sqlite-vec).
@@ -124,12 +126,17 @@ pub use export::{
 pub use forgetting::InvalidTransition;
 /// Document-to-document lexical similarity for recall diversification.
 pub use search::document_lexical_similarity;
+/// Persistent scheduler domain types.
+pub use schedule::{
+    NewSchedule, Schedule, ScheduleAction, ScheduleConfirmation, ScheduleError, ScheduleKind,
+    ScheduleRun, ScheduleRunStatus,
+};
 /// Session metadata types.
 pub use session::{NewSessionMeta, SessionMeta};
 /// Core memory types.
 pub use store::{
-    ActiveSceneSummaryRow, ConversationLogEntry, KeyFact, MemoryStore, NaturalDecayReport,
-    NewMemorySpan, PendingCandidate, PendingCandidateStatus,
+    ActiveSceneSummaryRow, ClaimedFire, ConversationLogEntry, FireClaimMode, KeyFact, MemoryStore,
+    NaturalDecayReport, NewMemorySpan, PendingCandidate, PendingCandidateStatus,
 };
 /// Typed memory domain types.
 pub use typed_memory::{

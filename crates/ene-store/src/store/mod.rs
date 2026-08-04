@@ -7,8 +7,11 @@ mod affect;
 mod audit;
 mod commitment;
 mod memory;
+mod schedule;
 mod session;
 mod tool;
+
+pub use schedule::{ClaimedFire, FireClaimMode};
 
 #[cfg(test)]
 mod tests;
