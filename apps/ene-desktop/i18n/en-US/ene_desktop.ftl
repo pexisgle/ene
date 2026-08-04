@@ -396,6 +396,7 @@ runtime-error-memory = Memory store error: { $detail }
 runtime-error-mind = Mind engine error: { $detail }
 runtime-error-tool = Tool error: { $detail }
 runtime-error-actor-busy = Ene is busy handling other requests right now. Try again in a moment.
+runtime-error-store-required = The scheduler requires the memory store. Enable `store.enabled` in your configuration.
 runtime-error-ai-auth = AI provider authentication failed. Check your API key.
 runtime-error-ai-rate-limit = AI provider rate limit exceeded. Try again later.
 runtime-error-ai-network = Could not reach the AI provider. Check your network connection.
