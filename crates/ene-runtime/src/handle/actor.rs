@@ -5160,7 +5160,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ene_ai::TtsProvider for StubTtsProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "stub-tts"
         }
 
