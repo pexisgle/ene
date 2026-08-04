@@ -1646,6 +1646,7 @@ pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] = &[
     "geo",
     "git",
     "homeassistant",
+    "kokoro",
     "llama-cpp",
     "openai",
     "openai-tts",
