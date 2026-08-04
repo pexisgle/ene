@@ -111,7 +111,7 @@ fn interval_tick_at_or_after(
     let ticks = if elapsed <= 0 {
         0
     } else {
-        elapsed.div_ceil(interval_secs)
+        elapsed / interval_secs + i64::from(elapsed % interval_secs != 0)
     };
     anchor + Duration::seconds(ticks * interval_secs)
 }
