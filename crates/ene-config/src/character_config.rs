@@ -53,6 +53,9 @@ pub struct MotionEntry {
     /// Body layer this motion targets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer: Option<MotionLayer>,
+    /// Catch-all for vendor motion fields this build does not model.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 /// Structured motion catalog for a character.
@@ -66,6 +69,9 @@ pub struct MotionCatalog {
     /// Registered motions indexed by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub motions: Vec<MotionEntry>,
+    /// Catch-all for vendor catalog fields this build does not model.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 /// Per-character visual config used by the desktop GUI.

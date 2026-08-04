@@ -37,6 +37,7 @@ blake3 = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+indexmap = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 ene-plugin-proto = { workspace = true }

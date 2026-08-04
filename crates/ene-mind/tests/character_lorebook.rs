@@ -59,6 +59,7 @@ fn lorebook_card() -> CharacterCardV3 {
                 selective: None,
                 secondary_keys: None,
                 position: None,
+                extra: indexmap::IndexMap::new(),
             },
             LorebookEntry {
                 keys: vec![],
@@ -76,6 +77,7 @@ fn lorebook_card() -> CharacterCardV3 {
                 selective: None,
                 secondary_keys: None,
                 position: None,
+                extra: indexmap::IndexMap::new(),
             },
         ],
         ..Default::default()
