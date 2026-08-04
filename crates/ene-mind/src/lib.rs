@@ -142,14 +142,15 @@ pub use output::{
 /// Proactive companion speech decision types.
 #[doc(no_inline)]
 pub use proactive::{
-    ActivitySnapshot, GateRejectReason, PendingConfirmationPrompt, PendingResolutionVerdict,
-    ProactiveConfirmation, ProactiveContext, ProactiveDecision, ProactiveDecisionOutcome,
-    ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState, ProactiveUrgency,
-    QuietHoursEval, SILENT_TOKEN, ScreenSummaryStatus, build_decision_messages,
-    build_proactive_context, build_resolution_messages, decide_proactive_speech,
-    decision_schema_object, evaluate_deterministic_gates, evaluate_quiet_hours,
-    load_due_pending_confirmation, load_proactive_memory_notes, parse_decision_json,
-    parse_resolution_json, resolution_schema_object, select_due_pending_candidate,
+    ActivitySnapshot, GateRejectReason, IdleTrend, PendingConfirmationPrompt,
+    PendingResolutionVerdict, ProactiveConfirmation, ProactiveContext, ProactiveDecision,
+    ProactiveDecisionOutcome, ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState,
+    ProactiveUrgency, QuietHoursEval, SILENT_TOKEN, ScreenSummaryStatus, WorldStateMemory,
+    WorldStateSnapshot, WorldStateSummary, build_decision_messages, build_proactive_context,
+    build_resolution_messages, decide_proactive_speech, decision_schema_object,
+    evaluate_deterministic_gates, evaluate_quiet_hours, load_due_pending_confirmation,
+    load_proactive_memory_notes, parse_decision_json, parse_resolution_json,
+    resolution_schema_object, select_due_pending_candidate,
 };
 /// Prompt packet section types.
 #[doc(no_inline)]

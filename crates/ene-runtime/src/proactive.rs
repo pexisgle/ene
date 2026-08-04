@@ -2,8 +2,9 @@ use ene_ai::LlmProvider;
 use ene_mind::{
     ActiveCommitmentPrompt, PendingConfirmationPrompt, PendingResolutionVerdict, ProactiveConfig,
     ProactiveConfirmation, ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState,
-    QuietHoursEval, ScreenSummaryStatus, build_proactive_context, build_resolution_messages,
-    decide_proactive_speech, parse_resolution_json, resolution_schema_object,
+    QuietHoursEval, ScreenSummaryStatus, WorldStateMemory, build_proactive_context,
+    build_resolution_messages, decide_proactive_speech, parse_resolution_json,
+    resolution_schema_object,
 };
 use ene_store::AffectState as StoreAffectState;
 use std::collections::{HashMap, VecDeque};
@@ -26,9 +27,8 @@ pub(crate) struct ProactiveScheduler {
     pub proactive_turns: usize,
     /// Bumped whenever a user turn starts so in-flight decisions are discarded.
     pub epoch: u64,
-    /// Tick counter for periodic world state memory writes.
-    #[expect(dead_code, reason = "planned for #209 world-state persistence")]
-    pub world_state_tick: usize,
+    /// Bounded in-memory ring of world-state snapshots (never persisted).
+    pub world_state: WorldStateMemory,
     /// Decision behind the proactive generation currently in flight, kept so
     /// the stream-completion path can log decision/main-model agreement.
     pub last_decision: Option<ProactiveDecisionResult>,
@@ -58,7 +58,7 @@ impl Default for ProactiveScheduler {
             last_proactive_at: None,
             proactive_turns: 0,
             epoch: 0,
-            world_state_tick: 0,
+            world_state: WorldStateMemory::default(),
             last_decision: None,
             quiet_hours_queue: VecDeque::new(),
             asked_pending_candidate: None,
@@ -128,6 +128,7 @@ impl ProactiveScheduler {
         self.last_decision = None;
         self.quiet_hours_queue.clear();
         self.asked_pending_candidate = None;
+        self.world_state.clear();
         // Keep delivery timestamps across session changes. A session reset
         // must not make an unclear candidate immediately eligible again.
         self.session_epoch = self.session_epoch.wrapping_add(1);
@@ -199,9 +200,6 @@ pub(crate) fn rgb_to_jpeg_data_uri(width: u32, height: u32, rgb: &[u8]) -> Resul
 #[derive(Debug, Clone)]
 pub(crate) struct ProactiveDecisionResult {
     pub epoch: u64,
-    /// Tick counter for periodic world state memory writes.
-    #[expect(dead_code, reason = "planned for #209 world-state persistence")]
-    pub world_state_tick: usize,
     pub should_generate: bool,
     /// Model `should_speak` flag (before confidence gate).
     pub should_speak: bool,
@@ -261,6 +259,7 @@ pub(crate) async fn run_decision_task(
     config: ProactiveConfig,
     history: Vec<ene_mind::HistoryEntry>,
     observation: ProactiveObservation,
+    world_state: Option<WorldStateMemory>,
     suppression: ProactiveSuppressionState,
     quiet_hours: QuietHoursEval,
     pending_confirmation: Option<PendingConfirmationPrompt>,
@@ -282,6 +281,7 @@ pub(crate) async fn run_decision_task(
         suppression,
         quiet_hours,
         pending_confirmation.clone(),
+        world_state.as_ref(),
     );
     let outcome = decide_proactive_speech(&config, &context, provider, &prompt_language).await;
     let should_generate = outcome.skip.is_none()
@@ -303,7 +303,6 @@ pub(crate) async fn run_decision_task(
     };
     ProactiveDecisionResult {
         epoch,
-        world_state_tick: 0,
         should_generate,
         should_speak: outcome.decision.should_speak,
         confidence: outcome.decision.confidence,
@@ -779,6 +778,7 @@ mod tests {
                 content: "hi".into(),
             }],
             ProactiveObservation::default(),
+            None,
             ProactiveSuppressionState {
                 seconds_since_user_input: 300,
                 seconds_since_proactive: 1000,
@@ -865,6 +865,7 @@ mod tests {
             base.clone(),
             history.clone(),
             ProactiveObservation::default(),
+            None,
             suppression,
             QuietHoursEval::inactive(),
             None,
@@ -890,6 +891,7 @@ mod tests {
             confirmed,
             history,
             ProactiveObservation::default(),
+            None,
             suppression,
             QuietHoursEval::inactive(),
             None,
@@ -913,7 +915,6 @@ mod tests {
     fn pending_decision() -> ProactiveDecisionResult {
         ProactiveDecisionResult {
             epoch: 0,
-            world_state_tick: 0,
             should_generate: true,
             should_speak: true,
             confidence: 0.8,
@@ -1287,6 +1288,7 @@ mod tests {
             catch_up_note: String::new(),
             pending_confirmation_note: "ask: {candidate}".into(),
             pending_resolution_system: String::new(),
+            world_state_note: String::new(),
             screen_summary_system: String::new(),
             screen_summary_user: String::new(),
             screen_summary_layout_note: String::new(),

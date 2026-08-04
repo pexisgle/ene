@@ -187,6 +187,9 @@ Configures context-window packing, hybrid memory recall, emotion decay, characte
       "interval_seconds": 600,
       "fatigue_suppression_threshold": 0.7,
       "confirmation_enabled": false,
+      "world_state": {
+        "enabled": false
+      },
       "sources": {
         "window_title_level": "app_only"
       }
@@ -298,6 +301,44 @@ responses (no visible text) are logged with `confirmation=empty` and excluded
 from the rate. Early cancellation applies to token-streaming providers; the
 non-streaming local adapter buffers the full completion before its first chunk,
 so a refusal there discards a completed generation rather than saving tokens.
+
+### World state memory (time-series trend)
+
+`mind.proactive.world_state` (default disabled) tracks a bounded in-memory
+time-series of structured snapshots: the focused window label, window
+switches, OS idle when the host measures it, and seconds since the last user
+message — captured once per observation interval. Snapshots are never
+persisted: they are short-lived telemetry (privacy-sensitive labels, stale
+within minutes) and the decision only needs the recent window.
+
+```json
+"world_state": {
+  "enabled": true,
+  "max_snapshots": 64,
+  "min_snapshots_for_trend": 3,
+  "engaged_idle_seconds": 60,
+  "change_window": 3
+}
+```
+
+- `enabled` (default `false`): master switch. When off, no snapshots are
+  consulted and the decision context and prompt are unchanged.
+- `max_snapshots` (default `64`): ring capacity — the newest snapshots are
+  kept, the oldest dropped.
+- `min_snapshots_for_trend` (default `3`): history needed before the trend
+  summary and its gate apply.
+- `engaged_idle_seconds` (default `60`): latest OS idle below this counts as
+  "engaged". Only used when the host measures idle; the current desktop host
+  does not.
+- `change_window` (default `3`): how many recent snapshots count toward the
+  window-switch trend.
+
+When enabled with enough history, the deterministic gate suppresses decisions
+while the user is actively working (a fresh window switch, low OS idle, or
+idle decreasing toward activity), and the decision prompt receives a
+`world_state` summary (idle trend, window-change count, engaged flag, latest
+window label, snapshot count). Window labels obey
+`sources.window_title_level`; screen summaries are never stored in the ring.
 
 ### Quiet hours and manual pause
 

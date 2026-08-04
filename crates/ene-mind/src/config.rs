@@ -1202,6 +1202,10 @@ impl Default for QuietHoursConfig {
 /// `max_turns_per_session`, `decision_timeout_seconds`, `generation_timeout_seconds`,
 /// `decision`, `allow_tools`, `max_conversation_chars`, `max_activity_chars`,
 /// `max_screen_summary_chars`, `max_memory_notes`.
+///
+/// World-state memory is a separate sub-section (`mind.proactive.world_state`)
+/// because it stays strictly additive: disabled by default, it changes no
+/// decision while off.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -1304,6 +1308,55 @@ pub struct ProactiveConfig {
     /// Proactive confirmation of old pending memory candidates.
     #[serde(default)]
     pub pending_confirmation: PendingConfirmationConfig,
+    /// Structured time-series world state memory (see [`WorldStateConfig`]).
+    #[serde(default)]
+    pub world_state: WorldStateConfig,
+}
+
+/// Structured time-series world state memory for proactive decisions.
+///
+/// When enabled, the runtime keeps a bounded in-memory ring of environment /
+/// user-activity snapshots (window focus, window switches, idle, user-input
+/// silence) and the proactive pipeline uses the derived trend in two ways:
+/// the deterministic gate suppresses decisions while the user is actively
+/// working, and a recent summary reaches the decision prompt. Snapshots are
+/// never persisted; the ring only fills while proactive observation runs.
+///
+/// Disabled by default so existing proactive behaviour is unchanged until the
+/// user opts in.
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct WorldStateConfig {
+    /// Master switch for world-state memory.
+    pub enabled: bool,
+    /// Ring capacity: the newest snapshots are kept, the oldest dropped.
+    #[serde(deserialize_with = "deserialize_positive_usize")]
+    pub max_snapshots: usize,
+    /// Minimum snapshots before the trend summary and its gate apply.
+    #[serde(deserialize_with = "deserialize_positive_usize")]
+    pub min_snapshots_for_trend: usize,
+    /// Latest idle value below this many seconds counts as "engaged" (only
+    /// when the host measures OS idle).
+    #[serde(deserialize_with = "deserialize_positive_u64")]
+    pub engaged_idle_seconds: u64,
+    /// Number of recent snapshots counted for the window-change trend.
+    #[serde(deserialize_with = "deserialize_positive_usize")]
+    pub change_window: usize,
+}
+
+impl Default for WorldStateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_snapshots: 64,
+            min_snapshots_for_trend: 3,
+            engaged_idle_seconds: 60,
+            change_window: 3,
+        }
+    }
 }
 
 impl Default for ProactiveConfig {
@@ -1328,6 +1381,7 @@ impl Default for ProactiveConfig {
             paused: false,
             quiet_hours: QuietHoursConfig::default(),
             pending_confirmation: PendingConfirmationConfig::default(),
+            world_state: WorldStateConfig::default(),
         }
     }
 }
