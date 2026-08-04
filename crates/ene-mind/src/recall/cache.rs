@@ -222,11 +222,10 @@ impl MemoryRecallCache {
         self.count_miss("search");
         let epoch = self.epoch.load(Ordering::Acquire);
         let gathered = store.search(query).await?;
-        if self.epoch.load(Ordering::Acquire) == epoch {
-            let mut inner = self.inner.write();
+        self.insert_if_current(epoch, |inner| {
             inner.searches.insert(key, gathered.clone());
             evict_fifo(&mut inner.searches, MAX_SEARCH_ENTRIES);
-        }
+        });
         Ok(gathered)
     }
 
@@ -253,8 +252,7 @@ impl MemoryRecallCache {
         let commitments = store
             .list_active_commitments(character_id, user_id, limit)
             .await?;
-        if self.epoch.load(Ordering::Acquire) == epoch {
-            let mut inner = self.inner.write();
+        self.insert_if_current(epoch, |inner| {
             inner.commitments.insert(
                 key,
                 CachedCommitments {
@@ -263,7 +261,7 @@ impl MemoryRecallCache {
                 },
             );
             evict_fifo(&mut inner.commitments, MAX_SCOPE_ENTRIES);
-        }
+        });
         Ok(commitments)
     }
 
@@ -283,11 +281,10 @@ impl MemoryRecallCache {
         let candidates = store
             .list_pending_candidates(character_id, Some(PendingCandidateStatus::Pending))
             .await?;
-        if self.epoch.load(Ordering::Acquire) == epoch {
-            let mut inner = self.inner.write();
+        self.insert_if_current(epoch, |inner| {
             inner.pending.insert(key, candidates.clone());
             evict_fifo(&mut inner.pending, MAX_SCOPE_ENTRIES);
-        }
+        });
         Ok(candidates)
     }
 
@@ -319,14 +316,26 @@ impl MemoryRecallCache {
             .into_iter()
             .filter(|item| item.status == ene_core::MemoryStatus::Active)
             .collect();
-        if self.epoch.load(Ordering::Acquire) == epoch {
-            let mut inner = self.inner.write();
+        self.insert_if_current(epoch, |inner| {
             inner
                 .reflections
                 .insert(character_id.to_string(), items.clone());
             evict_fifo(&mut inner.reflections, MAX_SCOPE_ENTRIES);
-        }
+        });
         Ok(items)
+    }
+
+    /// Insert a miss result only while the cache epoch still matches.
+    ///
+    /// The epoch check must happen after acquiring the write lock. Checking
+    /// before locking leaves a window where an invalidation can clear the
+    /// cache and release the lock before this task acquires it, allowing its
+    /// pre-invalidation result to be inserted again.
+    fn insert_if_current(&self, epoch: u64, insert: impl FnOnce(&mut Inner)) {
+        let mut inner = self.inner.write();
+        if self.epoch.load(Ordering::Acquire) == epoch {
+            insert(&mut inner);
+        }
     }
 
     /// Apply an access bump to cached candidates in place.
@@ -1319,6 +1328,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.search_calls.load(AtomicOrdering::Relaxed), 2);
+    }
+
+    #[test]
+    fn miss_insert_rechecks_epoch_after_acquiring_write_lock() {
+        let cache = MemoryRecallCache::new();
+        let epoch = cache.epoch.load(Ordering::Acquire);
+        let inserted = std::sync::atomic::AtomicBool::new(false);
+
+        // Model the invalidation completing after the miss-path's initial
+        // epoch read but before its insert lock is acquired.
+        cache.epoch.fetch_add(1, Ordering::AcqRel);
+        cache.insert_if_current(epoch, |_| {
+            inserted.store(true, AtomicOrdering::Relaxed);
+        });
+
+        assert!(!inserted.load(AtomicOrdering::Relaxed));
     }
 
     #[tokio::test]
