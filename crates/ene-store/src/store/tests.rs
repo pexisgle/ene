@@ -2755,8 +2755,10 @@ fn sample_pending_candidate(character_id: &str, title: &str) -> PendingCandidate
         existing_memory_title: None,
         existing_memory_id: None,
         source_quote: "I like tea".to_string(),
+        source_turn: None,
         status: PendingCandidateStatus::Pending,
         created_at: Utc::now(),
+        resolved_at: None,
     }
 }
 
@@ -2826,6 +2828,156 @@ async fn pending_candidate_reject_does_not_persist() {
         .await
         .expect("count");
     assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn pending_candidate_edit_validates_before_write_and_keeps_original() {
+    let store = setup_store().await;
+    let id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "original title"))
+        .await
+        .expect("insert");
+
+    let invalid = store
+        .edit_pending_candidate(
+            id,
+            crate::PendingCandidateEdit {
+                title: "  ".to_string(),
+                content: "body".to_string(),
+                kind: crate::MemoryKind::Semantic,
+                confidence: 0.8,
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            invalid,
+            Err(crate::EneMemoryError::InvalidPendingCandidateEdit(_))
+        ),
+        "empty title must be rejected with a typed error"
+    );
+    let invalid = store
+        .edit_pending_candidate(
+            id,
+            crate::PendingCandidateEdit {
+                title: "title".to_string(),
+                content: String::new(),
+                kind: crate::MemoryKind::Semantic,
+                confidence: 0.8,
+            },
+        )
+        .await;
+    assert!(matches!(
+        invalid,
+        Err(crate::EneMemoryError::InvalidPendingCandidateEdit(_))
+    ));
+    let invalid = store
+        .edit_pending_candidate(
+            id,
+            crate::PendingCandidateEdit {
+                title: "title".to_string(),
+                content: "body".to_string(),
+                kind: crate::MemoryKind::Semantic,
+                confidence: 1.5,
+            },
+        )
+        .await;
+    assert!(matches!(
+        invalid,
+        Err(crate::EneMemoryError::InvalidPendingCandidateEdit(_))
+    ));
+
+    let listed = store
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
+        .await
+        .expect("list");
+    assert_eq!(
+        listed[0].title, "original title",
+        "rejected edits must leave the stored candidate untouched"
+    );
+}
+
+#[tokio::test]
+async fn pending_candidate_edit_applies_and_resolution_stamps_resolved_at() {
+    let store = setup_store().await;
+    let id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "old title"))
+        .await
+        .expect("insert");
+
+    let edited = store
+        .edit_pending_candidate(
+            id,
+            crate::PendingCandidateEdit {
+                title: "new title".to_string(),
+                content: "new content".to_string(),
+                kind: crate::MemoryKind::Semantic,
+                confidence: 0.9,
+            },
+        )
+        .await
+        .expect("edit");
+    assert_eq!(edited.title, "new title");
+    assert_eq!(edited.content, "new content");
+    assert_eq!(edited.kind, crate::MemoryKind::Semantic);
+    assert!((edited.confidence - 0.9).abs() < f32::EPSILON);
+    assert_eq!(edited.status, PendingCandidateStatus::Pending);
+    assert!(edited.resolved_at.is_none());
+
+    store.approve_pending_candidate(id).await.expect("approve");
+    let approved = store
+        .get_pending_candidate(id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(approved.status, PendingCandidateStatus::Approved);
+    assert!(
+        approved.resolved_at.is_some(),
+        "approval must stamp resolved_at for history display"
+    );
+
+    let conflict = store
+        .edit_pending_candidate(
+            id,
+            crate::PendingCandidateEdit {
+                title: "too late".to_string(),
+                content: "body".to_string(),
+                kind: crate::MemoryKind::Semantic,
+                confidence: 0.8,
+            },
+        )
+        .await;
+    assert!(
+        conflict.is_err(),
+        "editing an already-resolved candidate must fail"
+    );
+    let after = store
+        .get_pending_candidate(id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(
+        after.title, "new title",
+        "a raced edit must not clobber the resolved row's content"
+    );
+}
+
+#[tokio::test]
+async fn pending_candidate_persists_source_turn() {
+    let store = setup_store().await;
+    let mut candidate = sample_pending_candidate("ene", "with source turn");
+    candidate.source_turn = Some("turn-42".to_string());
+    let id = store
+        .insert_pending_candidate(candidate)
+        .await
+        .expect("insert");
+
+    let row = store
+        .get_pending_candidate(id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.source_turn.as_deref(), Some("turn-42"));
 }
 
 /// Candidates persist to the `pending_candidates` table, so they
@@ -2968,8 +3120,10 @@ fn sample_pending_candidate_for(
         existing_memory_title: None,
         existing_memory_id,
         source_quote: "I like tea".to_string(),
+        source_turn: None,
         status: PendingCandidateStatus::Pending,
         created_at: Utc::now(),
+        resolved_at: None,
     }
 }
 

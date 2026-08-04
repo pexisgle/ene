@@ -21,7 +21,7 @@ use crate::migrator::Migrator;
 use chrono::{DateTime, Utc};
 pub use ene_core::{
     ActiveSceneSummaryRow, KeyFact, NaturalDecayReport, NewMemorySpan, PendingCandidate,
-    PendingCandidateStatus,
+    PendingCandidateEdit, PendingCandidateStatus,
 };
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -644,12 +644,76 @@ impl MemoryStore {
             confidence: Set(candidate.confidence),
             reason_detail: Set(candidate.reason_detail),
             source_quote: Set(candidate.source_quote),
+            source_turn: Set(candidate.source_turn),
             existing_memory_id: Set(candidate.existing_memory_id),
             status: Set(PendingCandidateStatus::Pending.as_str().to_string()),
             created_at: Set(candidate.created_at),
+            resolved_at: Set(candidate.resolved_at),
         };
         let inserted = active.insert(&self.db).await?;
         Ok(inserted.id)
+    }
+
+    /// Edit the user-editable fields of a still-pending candidate.
+    ///
+    /// Validation runs **before** any write: empty title/content and
+    /// out-of-range confidence are rejected with
+    /// [`EneMemoryError::InvalidPendingCandidateEdit`], leaving the stored row
+    /// untouched. The update itself is a conditional
+    /// `UPDATE ... WHERE id = ? AND status = 'pending'` (compare-and-swap,
+    /// like [`Self::claim_pending_candidate`]), so a concurrent approve /
+    /// reject / edit loses the race with `rows_affected == 0` instead of
+    /// mutating a resolved row — the original candidate is never lost or
+    /// clobbered. Returns the re-read row on success.
+    pub async fn edit_pending_candidate(
+        &self,
+        id: i64,
+        edit: PendingCandidateEdit,
+    ) -> Result<PendingCandidate, EneMemoryError> {
+        if edit.title.trim().is_empty() {
+            return Err(EneMemoryError::InvalidPendingCandidateEdit(
+                "title must not be empty".to_string(),
+            ));
+        }
+        if edit.content.trim().is_empty() {
+            return Err(EneMemoryError::InvalidPendingCandidateEdit(
+                "content must not be empty".to_string(),
+            ));
+        }
+        if !edit.confidence.is_finite() || !(0.0..=1.0).contains(&edit.confidence) {
+            return Err(EneMemoryError::InvalidPendingCandidateEdit(format!(
+                "confidence must be within 0.0..=1.0, got {}",
+                edit.confidence
+            )));
+        }
+
+        use crate::entities::pending_candidates::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let res = Entity::update_many()
+            .col_expr(Column::Title, sea_orm::sea_query::Expr::value(edit.title))
+            .col_expr(
+                Column::Content,
+                sea_orm::sea_query::Expr::value(edit.content),
+            )
+            .col_expr(
+                Column::Kind,
+                sea_orm::sea_query::Expr::value(edit.kind.as_str().to_string()),
+            )
+            .col_expr(
+                Column::Confidence,
+                sea_orm::sea_query::Expr::value(edit.confidence),
+            )
+            .filter(Column::Id.eq(id))
+            .filter(Column::Status.eq(PendingCandidateStatus::Pending.as_str()))
+            .exec(&self.db)
+            .await?;
+        if res.rows_affected == 0 {
+            return Err(EneMemoryError::Other(format!(
+                "pending candidate {id} not found or already resolved"
+            )));
+        }
+        self.load_pending_candidate(id).await
     }
 
     /// List pending candidates for a character, optionally filtered by status.
@@ -871,6 +935,22 @@ impl MemoryStore {
         })
     }
 
+    /// Fetch a single pending candidate by id, or `None` when absent.
+    pub async fn get_pending_candidate(
+        &self,
+        id: i64,
+    ) -> Result<Option<PendingCandidate>, EneMemoryError> {
+        use crate::entities::pending_candidates::{Entity, model_to_dto};
+        use sea_orm::EntityTrait;
+
+        let Some(model) = Entity::find_by_id(id).one(&self.db).await? else {
+            return Ok(None);
+        };
+        model_to_dto(model).map(Some).ok_or_else(|| {
+            EneMemoryError::Other(format!("pending candidate {id} has an unrecognized status"))
+        })
+    }
+
     /// Atomically claim a pending candidate by flipping its status from
     /// [`PendingCandidateStatus::Pending`] to `target`.
     ///
@@ -892,6 +972,10 @@ impl MemoryStore {
             .col_expr(
                 Column::Status,
                 sea_orm::sea_query::Expr::value(target.as_str().to_string()),
+            )
+            .col_expr(
+                Column::ResolvedAt,
+                sea_orm::sea_query::Expr::value(chrono::Utc::now()),
             )
             .filter(Column::Id.eq(id))
             .filter(Column::Status.eq(PendingCandidateStatus::Pending.as_str()))

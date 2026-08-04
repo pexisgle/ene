@@ -21,9 +21,11 @@ pub struct Model {
     pub confidence: f32,
     pub reason_detail: String,
     pub source_quote: String,
+    pub source_turn: Option<String>,
     pub existing_memory_id: Option<i64>,
     pub status: String,
     pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -64,7 +66,9 @@ pub fn model_to_dto(m: Model) -> Option<PendingCandidate> {
         existing_memory_title: None,
         existing_memory_id: m.existing_memory_id,
         source_quote: m.source_quote,
+        source_turn: m.source_turn,
         status,
         created_at: m.created_at,
+        resolved_at: m.resolved_at,
     })
 }
