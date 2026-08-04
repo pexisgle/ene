@@ -149,8 +149,7 @@ pub(crate) struct ToolPromptResolution<'a> {
     pub origin: TurnOrigin,
     pub pending_permissions:
         &'a Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
-    pub pending_user_inputs:
-        &'a Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
+    pub pending_user_inputs: &'a Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     pub permission_scopes: &'a Arc<Mutex<Vec<PermissionScope>>>,
     pub cancel_token: &'a CancellationToken,
     pub permission_prompt_timeout_ms: u64,
@@ -301,10 +300,7 @@ pub(crate) async fn resolve_tool_prompts(
                     }
                 }
             }
-            Err(PluginHostError::Protocol(ToolError::UserInputRequired {
-                request_id,
-                prompt,
-            })) => {
+            Err(PluginHostError::Protocol(ToolError::UserInputRequired { request_id, prompt })) => {
                 let req_id = RequestId::from(request_id.clone());
 
                 // Register the oneshot::Sender BEFORE emitting

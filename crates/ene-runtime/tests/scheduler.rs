@@ -44,8 +44,10 @@ impl LlmProvider for HangingLlmProvider {
         &self,
         _messages: &[LlmMessage],
         _tools: &[ene_plugin_proto::ToolSpec],
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>, LlmProviderError>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+        LlmProviderError,
+    > {
         std::future::pending().await
     }
 
@@ -166,7 +168,10 @@ fn test_config_memory_on(db_path: Option<&str>) -> EneConfig {
 
 fn one_shot_tool_schedule(confirm: bool) -> NewSchedule {
     NewSchedule {
-        name: format!("test-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()),
+        name: format!(
+            "test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ),
         kind: ScheduleKind::OneShot,
         timezone: "UTC".to_string(),
         cron_expr: None,
@@ -251,8 +256,14 @@ async fn scheduled_tool_action_runs_and_records_success() {
     let runs = wait_for_run_status(&handle, schedule.id, ScheduleRunStatus::Success).await;
     assert_eq!(runs[0].retries, 0);
     let schedules = handle.list_schedules().await.expect("list schedules");
-    let stored = schedules.iter().find(|s| s.id == schedule.id).expect("schedule kept");
-    assert!(stored.next_run_at.is_none(), "one-shot completes after its fire");
+    let stored = schedules
+        .iter()
+        .find(|s| s.id == schedule.id)
+        .expect("schedule kept");
+    assert!(
+        stored.next_run_at.is_none(),
+        "one-shot completes after its fire"
+    );
     drop(handle.shutdown(Duration::from_secs(2)).await);
 }
 
@@ -389,7 +400,10 @@ async fn schedules_and_history_restore_after_restart() {
         .await
         .expect("reopen initializes handle");
     let schedules = handle.list_schedules().await.expect("list schedules");
-    let stored = schedules.iter().find(|s| s.id == schedule.id).expect("schedule restored");
+    let stored = schedules
+        .iter()
+        .find(|s| s.id == schedule.id)
+        .expect("schedule restored");
     assert_eq!(stored.name, schedule.name);
     assert!(stored.next_run_at.is_none());
     assert_eq!(stored.run_count, 1);
@@ -399,6 +413,9 @@ async fn schedules_and_history_restore_after_restart() {
         .expect("list runs");
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, ScheduleRunStatus::Success);
-    assert_eq!(runs[0].scheduled_at, schedule.next_run_at.expect("first fire time"));
+    assert_eq!(
+        runs[0].scheduled_at,
+        schedule.next_run_at.expect("first fire time")
+    );
     drop(handle.shutdown(Duration::from_secs(2)).await);
 }

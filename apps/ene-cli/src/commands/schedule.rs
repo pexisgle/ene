@@ -2,9 +2,7 @@ use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use crate::style;
 use async_trait::async_trait;
-use ene_runtime::{
-    NewSchedule, Schedule, ScheduleAction, ScheduleConfirmation, ScheduleKind,
-};
+use ene_runtime::{NewSchedule, Schedule, ScheduleAction, ScheduleConfirmation, ScheduleKind};
 
 pub struct ScheduleCommand;
 
@@ -65,13 +63,16 @@ async fn list(ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         .await
         .map_err(|e| CliError::ActorError(e.to_string()))?;
     if schedules.is_empty() {
-        println!("No schedules. Add one with /schedule add <name> --kind <one_shot|interval|cron|startup> ...");
+        println!(
+            "No schedules. Add one with /schedule add <name> --kind <one_shot|interval|cron|startup> ..."
+        );
     } else {
         println!("{}", style::success("Schedules:"));
         for s in schedules {
-            let next = s
-                .next_run_at
-                .map_or_else(|| "—".to_string(), |t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string());
+            let next = s.next_run_at.map_or_else(
+                || "—".to_string(),
+                |t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            );
             let last = s
                 .last_status
                 .map_or_else(|| "never".to_string(), |st| st.as_str().to_string());
@@ -99,7 +100,10 @@ async fn history(ctx: &mut AppContext, name: &str) -> Result<CommandOutcome, Cli
     if runs.is_empty() {
         println!("No runs recorded for '{}'.", schedule.name);
     } else {
-        println!("{}", style::success(format!("Run history for '{}':", schedule.name)));
+        println!(
+            "{}",
+            style::success(format!("Run history for '{}':", schedule.name))
+        );
         for r in runs {
             let error = r
                 .error
@@ -132,7 +136,10 @@ async fn toggle(
             .await
             .map_err(|e| CliError::ActorError(e.to_string()))?;
         if removed {
-            println!("{}", style::success(format!("Deleted schedule '{}'.", schedule.name)));
+            println!(
+                "{}",
+                style::success(format!("Deleted schedule '{}'.", schedule.name))
+            );
         }
     } else {
         ctx.handle
@@ -140,7 +147,10 @@ async fn toggle(
             .await
             .map_err(|e| CliError::ActorError(e.to_string()))?;
         let verb = if enabled { "Resumed" } else { "Paused" };
-        println!("{}", style::success(format!("{verb} schedule '{}'.", schedule.name)));
+        println!(
+            "{}",
+            style::success(format!("{verb} schedule '{}'.", schedule.name))
+        );
     }
     Ok(CommandOutcome::Continue)
 }
@@ -188,10 +198,13 @@ async fn add(
 
     let value =
         |flag: &str, parts: &mut std::str::SplitWhitespace<'_>| -> Result<String, CliError> {
-        parts.next().map(str::to_string).ok_or_else(|| CliError::UsageError {
-            usage: format!("Missing value for {flag}"),
-        })
-    };
+            parts
+                .next()
+                .map(str::to_string)
+                .ok_or_else(|| CliError::UsageError {
+                    usage: format!("Missing value for {flag}"),
+                })
+        };
     while let Some(flag) = parts.next() {
         match flag {
             "--kind" => {
@@ -287,11 +300,10 @@ async fn add(
         })
         .await
         .map_err(|e| CliError::ActorError(e.to_string()))?;
-    let next = schedule
-        .next_run_at
-        .map_or_else(|| "as soon as the actor is idle".to_string(), |t| {
-            t.format("%Y-%m-%d %H:%M:%S UTC").to_string()
-        });
+    let next = schedule.next_run_at.map_or_else(
+        || "as soon as the actor is idle".to_string(),
+        |t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    );
     println!(
         "{}",
         style::success(format!(

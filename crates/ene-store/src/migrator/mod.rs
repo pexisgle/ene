@@ -9,8 +9,8 @@ mod vec0_memory;
 use conversation_logs_search_index::ConversationLogsSearchIndexMigration;
 use embeddings_cleanup::EmbeddingsCleanupIndexMigration;
 use pending_candidates::PendingCandidatesMigration;
-use sea_orm_migration::prelude::*;
 use scheduler::SchedulerMigration;
+use sea_orm_migration::prelude::*;
 use vec0_memory::Vec0EmbeddingIndexMigration;
 
 pub struct Migrator;

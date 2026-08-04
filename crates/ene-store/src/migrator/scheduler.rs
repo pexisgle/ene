@@ -32,9 +32,19 @@ impl MigrationTrait for SchedulerMigration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Schedules::Name).string().not_null().unique_key())
+                    .col(
+                        ColumnDef::new(Schedules::Name)
+                            .string()
+                            .not_null()
+                            .unique_key(),
+                    )
                     .col(ColumnDef::new(Schedules::Kind).string().not_null())
-                    .col(ColumnDef::new(Schedules::Enabled).boolean().not_null().default(true))
+                    .col(
+                        ColumnDef::new(Schedules::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
                     .col(ColumnDef::new(Schedules::Timezone).string().not_null())
                     .col(ColumnDef::new(Schedules::CronExpr).string())
                     .col(ColumnDef::new(Schedules::IntervalSecs).big_integer())
@@ -46,7 +56,12 @@ impl MigrationTrait for SchedulerMigration {
                             .not_null()
                             .default("none"),
                     )
-                    .col(ColumnDef::new(Schedules::MaxRetries).big_integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(Schedules::MaxRetries)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .col(
                         ColumnDef::new(Schedules::RetryDelaySecs)
                             .big_integer()
@@ -57,10 +72,28 @@ impl MigrationTrait for SchedulerMigration {
                     .col(ColumnDef::new(Schedules::PendingRetryOfRunId).big_integer())
                     .col(ColumnDef::new(Schedules::LastRunAt).timestamp_with_time_zone())
                     .col(ColumnDef::new(Schedules::LastStatus).string())
-                    .col(ColumnDef::new(Schedules::RunCount).big_integer().not_null().default(0))
-                    .col(ColumnDef::new(Schedules::FailCount).big_integer().not_null().default(0))
-                    .col(ColumnDef::new(Schedules::CreatedAt).timestamp_with_time_zone().not_null())
-                    .col(ColumnDef::new(Schedules::UpdatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(Schedules::RunCount)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Schedules::FailCount)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Schedules::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Schedules::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -77,7 +110,11 @@ impl MigrationTrait for SchedulerMigration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(ScheduleRuns::ScheduleId).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(ScheduleRuns::ScheduleId)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(ScheduleRuns::ScheduledAt)
                             .timestamp_with_time_zone()
@@ -87,9 +124,18 @@ impl MigrationTrait for SchedulerMigration {
                     .col(ColumnDef::new(ScheduleRuns::FinishedAt).timestamp_with_time_zone())
                     .col(ColumnDef::new(ScheduleRuns::Status).string().not_null())
                     .col(ColumnDef::new(ScheduleRuns::RetryOfRunId).big_integer())
-                    .col(ColumnDef::new(ScheduleRuns::Retries).big_integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(ScheduleRuns::Retries)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .col(ColumnDef::new(ScheduleRuns::Error).string())
-                    .col(ColumnDef::new(ScheduleRuns::CreatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(ScheduleRuns::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_schedule_runs_schedule_id")

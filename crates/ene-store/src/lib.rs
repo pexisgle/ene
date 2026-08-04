@@ -93,10 +93,10 @@ pub mod host_service;
 pub mod migrator;
 /// `impl MemoryPort for MemoryStore`.
 pub mod port;
-/// Hybrid memory search scoring.
-pub mod search;
 /// Persistent scheduler domain model.
 pub mod schedule;
+/// Hybrid memory search scoring.
+pub mod search;
 /// Session metadata domain model.
 pub mod session;
 /// Core memory store (`SQLite` + sqlite-vec).
@@ -124,13 +124,13 @@ pub use export::{
 };
 /// Forgetting lifecycle helpers.
 pub use forgetting::InvalidTransition;
-/// Document-to-document lexical similarity for recall diversification.
-pub use search::document_lexical_similarity;
 /// Persistent scheduler domain types.
 pub use schedule::{
     NewSchedule, Schedule, ScheduleAction, ScheduleConfirmation, ScheduleError, ScheduleKind,
     ScheduleRun, ScheduleRunStatus,
 };
+/// Document-to-document lexical similarity for recall diversification.
+pub use search::document_lexical_similarity;
 /// Session metadata types.
 pub use session::{NewSessionMeta, SessionMeta};
 /// Core memory types.

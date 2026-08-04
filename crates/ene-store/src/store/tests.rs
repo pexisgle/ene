@@ -9,11 +9,11 @@ async fn setup_store() -> MemoryStore {
     MemoryStore::open_in_memory(4).await.unwrap()
 }
 
+use super::schedule::FireClaimMode;
 use chrono::TimeZone;
 use ene_core::{
     NewSchedule, ScheduleAction, ScheduleConfirmation, ScheduleKind, ScheduleRunStatus,
 };
-use super::schedule::FireClaimMode;
 
 fn new_cron_schedule(name: &str, cron_expr: &str, timezone: &str) -> NewSchedule {
     NewSchedule {
@@ -49,9 +49,17 @@ async fn schedule_crud_roundtrip_and_validation() {
     // 09:00 JST = 00:00 UTC; strictly after 12:00 UTC on the 4th, so the
     // first occurrence is 2026-08-05T00:00:00Z.
     assert_eq!(inserted.next_run_at, Some(at(2026, 8, 5, 0, 0)));
-    assert_eq!(store.get_schedule(inserted.id).await.unwrap().unwrap().name, "daily");
     assert_eq!(
-        store.get_schedule_by_name("daily").await.unwrap().unwrap().id,
+        store.get_schedule(inserted.id).await.unwrap().unwrap().name,
+        "daily"
+    );
+    assert_eq!(
+        store
+            .get_schedule_by_name("daily")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
         inserted.id
     );
     assert_eq!(store.list_schedules().await.unwrap().len(), 1);
@@ -62,10 +70,12 @@ async fn schedule_crud_roundtrip_and_validation() {
         Err(EneMemoryError::InvalidSchedule(..))
     ));
 
-    assert!(!store
-        .set_schedule_enabled(inserted.id, false, now)
-        .await
-        .unwrap());
+    assert!(
+        !store
+            .set_schedule_enabled(inserted.id, false, now)
+            .await
+            .unwrap()
+    );
     let paused = store.get_schedule(inserted.id).await.unwrap().unwrap();
     assert!(!paused.enabled);
 
@@ -93,7 +103,10 @@ async fn claim_fire_advances_and_records_run() {
     assert!(!claimed.is_retry);
 
     let after = store.get_schedule(schedule.id).await.unwrap().unwrap();
-    assert_eq!(after.next_run_at, Some(first_fire + chrono::Duration::days(1)));
+    assert_eq!(
+        after.next_run_at,
+        Some(first_fire + chrono::Duration::days(1))
+    );
     assert_eq!(after.run_count, 1);
     assert_eq!(after.last_status, Some(ScheduleRunStatus::Running));
     let runs = store.list_runs(schedule.id, 10).await.unwrap();
@@ -102,13 +115,27 @@ async fn claim_fire_advances_and_records_run() {
     assert_eq!(runs[0].scheduled_at, first_fire);
 
     store
-        .finish_run(schedule.id, claimed.run_id, ScheduleRunStatus::Success, None, now)
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Success,
+            None,
+            now,
+        )
         .await
         .unwrap();
     let runs = store.list_runs(schedule.id, 10).await.unwrap();
     assert_eq!(runs[0].status, ScheduleRunStatus::Success);
     assert!(runs[0].finished_at.is_some());
-    assert_eq!(store.get_schedule(schedule.id).await.unwrap().unwrap().last_status, Some(ScheduleRunStatus::Success));
+    assert_eq!(
+        store
+            .get_schedule(schedule.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_status,
+        Some(ScheduleRunStatus::Success)
+    );
 }
 
 #[tokio::test]
@@ -122,36 +149,58 @@ async fn claim_fire_is_idempotent_for_stale_disabled_or_unknown() {
     let fire = schedule.next_run_at.unwrap();
 
     // Wrong scheduled_at: ignored.
-    assert!(store
-        .claim_fire(schedule.id, fire + chrono::Duration::hours(1), now, FireClaimMode::Execute)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .claim_fire(
+                schedule.id,
+                fire + chrono::Duration::hours(1),
+                now,
+                FireClaimMode::Execute
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
     // Unknown schedule: ignored.
-    assert!(store
-        .claim_fire(999_999, fire, now, FireClaimMode::Execute)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .claim_fire(999_999, fire, now, FireClaimMode::Execute)
+            .await
+            .unwrap()
+            .is_none()
+    );
     // Claiming twice with the same scheduled_at: the second is stale.
     store
         .claim_fire(schedule.id, fire, now, FireClaimMode::Execute)
         .await
         .unwrap()
         .unwrap();
-    assert!(store
-        .claim_fire(schedule.id, fire, now, FireClaimMode::Execute)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .claim_fire(schedule.id, fire, now, FireClaimMode::Execute)
+            .await
+            .unwrap()
+            .is_none()
+    );
     // Disabled: ignored.
-    store.set_schedule_enabled(schedule.id, false, now).await.unwrap();
-    let next = store.get_schedule(schedule.id).await.unwrap().unwrap().next_run_at.unwrap();
-    assert!(store
-        .claim_fire(schedule.id, next, now, FireClaimMode::Execute)
+    store
+        .set_schedule_enabled(schedule.id, false, now)
+        .await
+        .unwrap();
+    let next = store
+        .get_schedule(schedule.id)
         .await
         .unwrap()
-        .is_none());
+        .unwrap()
+        .next_run_at
+        .unwrap();
+    assert!(
+        store
+            .claim_fire(schedule.id, next, now, FireClaimMode::Execute)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(store.list_runs(schedule.id, 10).await.unwrap().len(), 1);
 }
 
@@ -323,17 +372,37 @@ async fn finish_run_is_idempotent_and_cascade_delete_removes_history() {
         .unwrap()
         .unwrap();
     store
-        .finish_run(schedule.id, claimed.run_id, ScheduleRunStatus::Success, None, now)
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Success,
+            None,
+            now,
+        )
         .await
         .unwrap();
     // A second finish (e.g. a stale retry outcome) is a no-op.
     store
-        .finish_run(schedule.id, claimed.run_id, ScheduleRunStatus::Failed, Some("late".into()), now)
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Failed,
+            Some("late".into()),
+            now,
+        )
         .await
         .unwrap();
     let runs = store.list_runs(schedule.id, 10).await.unwrap();
     assert_eq!(runs[0].status, ScheduleRunStatus::Success);
-    assert_eq!(store.get_schedule(schedule.id).await.unwrap().unwrap().fail_count, 0);
+    assert_eq!(
+        store
+            .get_schedule(schedule.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .fail_count,
+        0
+    );
 
     store.delete_schedule(schedule.id).await.unwrap();
     assert!(store.list_runs(schedule.id, 10).await.unwrap().is_empty());
@@ -352,13 +421,22 @@ async fn reconcile_startup_marks_inflight_runs() {
         .claim_fire(schedule.id, fire, now, FireClaimMode::Execute)
         .await
         .unwrap();
-    let second = store.get_schedule(schedule.id).await.unwrap().unwrap().next_run_at.unwrap();
+    let second = store
+        .get_schedule(schedule.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .next_run_at
+        .unwrap();
     store
         .claim_fire(schedule.id, second, now, FireClaimMode::AwaitConfirmation)
         .await
         .unwrap();
 
-    store.reconcile_startup(now + chrono::Duration::minutes(1)).await.unwrap();
+    store
+        .reconcile_startup(now + chrono::Duration::minutes(1))
+        .await
+        .unwrap();
     let runs = store.list_runs(schedule.id, 10).await.unwrap();
     assert_eq!(runs[0].status, ScheduleRunStatus::TimedOut);
     assert_eq!(runs[1].status, ScheduleRunStatus::Interrupted);
@@ -380,9 +458,19 @@ async fn next_due_time_excluding_skips_queued_schedules() {
         .unwrap();
     let due = store.next_due_time_excluding(&[]).await.unwrap().unwrap();
     assert_eq!(due, at(2026, 8, 4, 12, 15));
-    let due = store.next_due_time_excluding(&[b.id]).await.unwrap().unwrap();
+    let due = store
+        .next_due_time_excluding(&[b.id])
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(due, at(2026, 8, 4, 12, 30));
-    assert!(store.next_due_time_excluding(&[a.id, b.id]).await.unwrap().is_none());
+    assert!(
+        store
+            .next_due_time_excluding(&[a.id, b.id])
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -401,7 +489,13 @@ async fn awaiting_approval_fire_can_be_finished_as_denied() {
     let runs = store.list_runs(schedule.id, 10).await.unwrap();
     assert_eq!(runs[0].status, ScheduleRunStatus::AwaitingApproval);
     store
-        .finish_run(schedule.id, claimed.run_id, ScheduleRunStatus::Denied, None, now)
+        .finish_run(
+            schedule.id,
+            claimed.run_id,
+            ScheduleRunStatus::Denied,
+            None,
+            now,
+        )
         .await
         .unwrap();
     let runs = store.list_runs(schedule.id, 10).await.unwrap();
@@ -421,13 +515,21 @@ async fn schedule_runs_are_bounded_by_limit() {
         .unwrap();
     let mut fire = schedule.next_run_at.unwrap();
     for _ in 0..3 {
-        store.claim_fire(schedule.id, fire, now, FireClaimMode::SkipBusy).await.unwrap();
-        fire = store.get_schedule(schedule.id).await.unwrap().unwrap().next_run_at.unwrap();
+        store
+            .claim_fire(schedule.id, fire, now, FireClaimMode::SkipBusy)
+            .await
+            .unwrap();
+        fire = store
+            .get_schedule(schedule.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_run_at
+            .unwrap();
     }
     let runs = store.list_runs(schedule.id, 2).await.unwrap();
     assert_eq!(runs.len(), 2);
 }
-
 
 #[test]
 fn embedding_bytes_roundtrip() {

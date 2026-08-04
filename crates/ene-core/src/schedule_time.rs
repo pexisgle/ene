@@ -26,10 +26,7 @@ fn parse_cron(value: &str) -> Result<CronSchedule, ScheduleError> {
 }
 
 /// Validates a new schedule and computes its first `next_run_at`.
-pub fn first_run_at(
-    new: &NewSchedule,
-    now: DateTime<Utc>,
-) -> Result<DateTime<Utc>, ScheduleError> {
+pub fn first_run_at(new: &NewSchedule, now: DateTime<Utc>) -> Result<DateTime<Utc>, ScheduleError> {
     if new.name.trim().is_empty() {
         return Err(ScheduleError::EmptyName);
     }
@@ -61,10 +58,13 @@ pub fn first_run_at(
             Ok(interval_tick_at_or_after(anchor, interval, now))
         }
         ScheduleKind::Cron => {
-            let expr = new.cron_expr.as_deref().ok_or(ScheduleError::MissingField {
-                field: "cron_expr",
-                kind: "cron",
-            })?;
+            let expr = new
+                .cron_expr
+                .as_deref()
+                .ok_or(ScheduleError::MissingField {
+                    field: "cron_expr",
+                    kind: "cron",
+                })?;
             let sched = parse_cron(expr)?;
             next_cron_after(&sched, tz, now).ok_or(ScheduleError::NoNextOccurrence)
         }
@@ -120,13 +120,12 @@ fn interval_tick_strictly_after(
     anchor + Duration::seconds(ticks.max(1) * interval_secs)
 }
 
-fn next_cron_after(
-    sched: &CronSchedule,
-    tz: Tz,
-    after: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+fn next_cron_after(sched: &CronSchedule, tz: Tz, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let local_after = after.with_timezone(&tz);
-    sched.after_owned(local_after).next().map(|t| t.with_timezone(&Utc))
+    sched
+        .after_owned(local_after)
+        .next()
+        .map(|t| t.with_timezone(&Utc))
 }
 
 #[cfg(test)]
@@ -160,7 +159,9 @@ mod tests {
     }
 
     fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).single().expect("valid instant")
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .expect("valid instant")
     }
 
     #[test]
@@ -300,7 +301,13 @@ mod tests {
 
     #[test]
     fn cron_seconds_field_supported() {
-        let new = new_schedule(ScheduleKind::Cron, "UTC", Some("*/30 * * * * *"), None, None);
+        let new = new_schedule(
+            ScheduleKind::Cron,
+            "UTC",
+            Some("*/30 * * * * *"),
+            None,
+            None,
+        );
         let now = at(2026, 8, 4, 12, 0);
         assert_eq!(
             first_run_at(&new, now).expect("valid"),
@@ -319,7 +326,13 @@ mod tests {
 
     #[test]
     fn invalid_timezone_rejected() {
-        let new = new_schedule(ScheduleKind::Cron, "Mars/Olympus", Some("0 9 * * *"), None, None);
+        let new = new_schedule(
+            ScheduleKind::Cron,
+            "Mars/Olympus",
+            Some("0 9 * * *"),
+            None,
+            None,
+        );
         assert!(matches!(
             first_run_at(&new, at(2026, 8, 4, 12, 0)),
             Err(ScheduleError::InvalidTimezone { .. })
@@ -328,7 +341,13 @@ mod tests {
 
     #[test]
     fn cron_asia_tokyo_is_utc_minus_nine() {
-        let new = new_schedule(ScheduleKind::Cron, "Asia/Tokyo", Some("0 9 * * *"), None, None);
+        let new = new_schedule(
+            ScheduleKind::Cron,
+            "Asia/Tokyo",
+            Some("0 9 * * *"),
+            None,
+            None,
+        );
         let now = at(2026, 8, 4, 0, 0);
         // 09:00 JST = 00:00 UTC, which is strictly after `now`, so the first
         // occurrence is the next day's 09:00 JST = 2026-08-05T00:00:00Z.

@@ -59,10 +59,7 @@ fn model_to_schedule(m: entities::schedules::Model) -> Result<Schedule, EneMemor
         next_run_at: m.next_run_at,
         pending_retry_of_run_id: m.pending_retry_of_run_id,
         last_run_at: m.last_run_at,
-        last_status: m
-            .last_status
-            .as_deref()
-            .map(ScheduleRunStatus::from_db_str),
+        last_status: m.last_status.as_deref().map(ScheduleRunStatus::from_db_str),
         run_count: m.run_count,
         fail_count: m.fail_count,
         created_at: m.created_at,
@@ -122,7 +119,9 @@ impl MemoryStore {
 
     /// Fetch a schedule by id.
     pub async fn get_schedule(&self, id: i64) -> Result<Option<Schedule>, EneMemoryError> {
-        let maybe = entities::schedules::Entity::find_by_id(id).one(&self.db).await?;
+        let maybe = entities::schedules::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
         maybe.map(model_to_schedule).transpose()
     }
 
@@ -197,7 +196,8 @@ impl MemoryStore {
             .filter(entities::schedules::Column::Enabled.eq(true))
             .filter(entities::schedules::Column::NextRunAt.is_not_null());
         if !exclude.is_empty() {
-            query = query.filter(entities::schedules::Column::Id.is_not_in(exclude.iter().copied()));
+            query =
+                query.filter(entities::schedules::Column::Id.is_not_in(exclude.iter().copied()));
         }
         let maybe = query
             .order_by_asc(entities::schedules::Column::NextRunAt)
@@ -243,10 +243,9 @@ impl MemoryStore {
                     ScheduleRunStatus::Running
                 };
                 if let Some(retry_pointer) = model.pending_retry_of_run_id {
-                    let previous =
-                        entities::schedule_runs::Entity::find_by_id(retry_pointer)
-                            .one(&txn)
-                            .await?;
+                    let previous = entities::schedule_runs::Entity::find_by_id(retry_pointer)
+                        .one(&txn)
+                        .await?;
                     let retries = previous.map_or(0, |p| p.retries + 1);
                     (
                         status,
@@ -293,7 +292,11 @@ impl MemoryStore {
             }
         };
 
-        let terminal_now = if status.is_terminal() { Some(now) } else { None };
+        let terminal_now = if status.is_terminal() {
+            Some(now)
+        } else {
+            None
+        };
         let run = entities::schedule_runs::ActiveModel {
             schedule_id: Set(model.id),
             scheduled_at: Set(scheduled_at),
@@ -374,12 +377,11 @@ impl MemoryStore {
             schedule_update.updated_at = Set(now);
             if status == ScheduleRunStatus::Failed {
                 schedule_update.fail_count = Set(schedule.fail_count + 1);
-                if run.retries < schedule.max_retries
-                    && schedule.pending_retry_of_run_id.is_none()
+                if run.retries < schedule.max_retries && schedule.pending_retry_of_run_id.is_none()
                 {
-                    schedule_update.next_run_at = Set(Some(now + Duration::seconds(
-                        schedule.retry_delay_secs.max(1),
-                    )));
+                    schedule_update.next_run_at = Set(Some(
+                        now + Duration::seconds(schedule.retry_delay_secs.max(1)),
+                    ));
                     schedule_update.pending_retry_of_run_id = Set(Some(run_id));
                 }
             }
@@ -395,10 +397,10 @@ impl MemoryStore {
     pub async fn reconcile_startup(&self, now: DateTime<Utc>) -> Result<(), EneMemoryError> {
         let txn = self.db.begin().await?;
         let affected: Vec<i64> = entities::schedule_runs::Entity::find()
-            .filter(
-                entities::schedule_runs::Column::Status
-                    .is_in([ScheduleRunStatus::Running.as_str(), ScheduleRunStatus::AwaitingApproval.as_str()]),
-            )
+            .filter(entities::schedule_runs::Column::Status.is_in([
+                ScheduleRunStatus::Running.as_str(),
+                ScheduleRunStatus::AwaitingApproval.as_str(),
+            ]))
             .all(&txn)
             .await?
             .into_iter()
@@ -410,11 +412,11 @@ impl MemoryStore {
                 entities::schedule_runs::Column::Status,
                 Expr::value(ScheduleRunStatus::Interrupted.as_str()),
             )
-            .col_expr(entities::schedule_runs::Column::FinishedAt, Expr::value(now))
-            .filter(
-                entities::schedule_runs::Column::Status
-                    .eq(ScheduleRunStatus::Running.as_str()),
+            .col_expr(
+                entities::schedule_runs::Column::FinishedAt,
+                Expr::value(now),
             )
+            .filter(entities::schedule_runs::Column::Status.eq(ScheduleRunStatus::Running.as_str()))
             .exec(&txn)
             .await?;
         entities::schedule_runs::Entity::update_many()
@@ -422,7 +424,10 @@ impl MemoryStore {
                 entities::schedule_runs::Column::Status,
                 Expr::value(ScheduleRunStatus::TimedOut.as_str()),
             )
-            .col_expr(entities::schedule_runs::Column::FinishedAt, Expr::value(now))
+            .col_expr(
+                entities::schedule_runs::Column::FinishedAt,
+                Expr::value(now),
+            )
             .filter(
                 entities::schedule_runs::Column::Status
                     .eq(ScheduleRunStatus::AwaitingApproval.as_str()),

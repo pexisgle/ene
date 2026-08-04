@@ -142,14 +142,14 @@ pub use ene_ai::LlmMessage;
 pub use ene_ai::LlmProvider;
 
 // ── Memory types ──
-/// Memory configuration (re-exported from `ene-store`).
-#[doc(no_inline)]
-pub use ene_store::StoreConfig;
 /// Persistent scheduler domain types.
 pub use ene_core::{
     NewSchedule, Schedule, ScheduleAction, ScheduleConfirmation, ScheduleKind, ScheduleRun,
     ScheduleRunStatus,
 };
+/// Memory configuration (re-exported from `ene-store`).
+#[doc(no_inline)]
+pub use ene_store::StoreConfig;
 
 // ── Session / history ──
 /// Role enum for conversation history (re-exported from `ene-ai`).

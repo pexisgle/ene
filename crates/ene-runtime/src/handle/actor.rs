@@ -34,8 +34,8 @@ use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::{RequestId, TurnId};
 use crate::vision::VisionPrepared;
 use ene_ai::{AiTaskKind, LlmProviderRegistry, create_task_chat_provider};
-use ene_core::{ScheduleConfirmation, ScheduleRunStatus};
 use ene_config::EneConfig;
+use ene_core::{ScheduleConfirmation, ScheduleRunStatus};
 use ene_mind::commitments::CommitmentLedger;
 use ene_mind::{CardName, SessionId};
 use ene_mind::{
@@ -1385,7 +1385,11 @@ impl TurnActor {
 
     /// Process one due schedule fire: apply the late-execution and busy
     /// policies, claim the occurrence atomically, then execute or wait.
-    async fn handle_schedule_fire(&mut self, schedule_id: i64, scheduled_at: chrono::DateTime<chrono::Utc>) {
+    async fn handle_schedule_fire(
+        &mut self,
+        schedule_id: i64,
+        scheduled_at: chrono::DateTime<chrono::Utc>,
+    ) {
         let Some(store) = self.concrete_store.clone() else {
             return;
         };
@@ -1401,10 +1405,9 @@ impl TurnActor {
             return; // paused or a stale duplicate dispatch
         }
 
-        let grace = chrono::Duration::from_std(std::time::Duration::from_secs(
-            cfg.late_grace_secs.max(1),
-        ))
-        .unwrap_or_default();
+        let grace =
+            chrono::Duration::from_std(std::time::Duration::from_secs(cfg.late_grace_secs.max(1)))
+                .unwrap_or_default();
         let late = now.signed_duration_since(scheduled_at) > grace;
         let turn = TurnId::new();
         let gate_held = self.turn_gate.try_begin(&turn);
@@ -1461,7 +1464,9 @@ impl TurnActor {
         claimed: ene_store::ClaimedFire,
         timeout_secs: u64,
     ) {
-        let ene_store::ClaimedFire { schedule, run_id, .. } = claimed;
+        let ene_store::ClaimedFire {
+            schedule, run_id, ..
+        } = claimed;
         let schedule_id = schedule.id;
         let schedule_name = schedule.name.clone();
         let request_id = RequestId::new(format!("schedule-{run_id}"));
@@ -1473,12 +1478,12 @@ impl TurnActor {
             },
         );
         let description = match &schedule.action {
-            ene_core::ScheduleAction::Tool { name, .. } => format!(
-                "Schedule `{schedule_name}` wants to run the tool `{name}`"
-            ),
-            ene_core::ScheduleAction::Prompt { .. } => format!(
-                "Schedule `{schedule_name}` wants to run a scheduled action"
-            ),
+            ene_core::ScheduleAction::Tool { name, .. } => {
+                format!("Schedule `{schedule_name}` wants to run the tool `{name}`")
+            }
+            ene_core::ScheduleAction::Prompt { .. } => {
+                format!("Schedule `{schedule_name}` wants to run a scheduled action")
+            }
         };
         drop(self.event_tx.send(EneEvent::PermissionRequired {
             turn: TurnId::new(),
@@ -1546,11 +1551,7 @@ impl TurnActor {
     }
 
     /// Execute a claimed schedule action under the held single-flight gate.
-    async fn begin_scheduled_run(
-        &mut self,
-        claimed: ene_store::ClaimedFire,
-        turn: TurnId,
-    ) {
+    async fn begin_scheduled_run(&mut self, claimed: ene_store::ClaimedFire, turn: TurnId) {
         self.active_turn = Some(turn.clone());
         self.active_origin = crate::types::TurnOrigin::Scheduled;
         self.cancel_token = CancellationToken::new();
@@ -1575,31 +1576,31 @@ impl TurnActor {
         {
             let text = text.clone();
             let allow_tools = *allow_tools;
-                self.start_stream(
-                    text,
-                    turn,
-                    crate::types::TurnOrigin::Scheduled,
-                    false,
-                    allow_tools,
-                    None,
-                    None,
-                    None,
-                    None,
+            self.start_stream(
+                text,
+                turn,
+                crate::types::TurnOrigin::Scheduled,
+                false,
+                allow_tools,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+            // `start_stream` fails synchronously (emitting Terminal and
+            // releasing the gate) when the provider cannot open; every
+            // other terminal path is observed via `stream_session_rx`.
+            if self.terminal_emitted.load(Ordering::Acquire) {
+                self.active_scheduled_run = None;
+                self.finish_scheduled_run(
+                    claimed.schedule.id,
+                    claimed.run_id,
+                    ScheduleRunStatus::Failed,
+                    Some("scheduled prompt could not start".to_string()),
                 )
                 .await;
-                // `start_stream` fails synchronously (emitting Terminal and
-                // releasing the gate) when the provider cannot open; every
-                // other terminal path is observed via `stream_session_rx`.
-                if self.terminal_emitted.load(Ordering::Acquire) {
-                    self.active_scheduled_run = None;
-                    self.finish_scheduled_run(
-                        claimed.schedule.id,
-                        claimed.run_id,
-                        ScheduleRunStatus::Failed,
-                        Some("scheduled prompt could not start".to_string()),
-                    )
-                    .await;
-                }
+            }
             drop(claimed);
         }
     }
@@ -1612,7 +1613,9 @@ impl TurnActor {
         name: String,
         arguments_json: String,
     ) {
-        let ene_store::ClaimedFire { schedule, run_id, .. } = claimed;
+        let ene_store::ClaimedFire {
+            schedule, run_id, ..
+        } = claimed;
         let schedule_id = schedule.id;
         if !admit_task(
             &mut self.call_tool_tasks,
@@ -2293,12 +2296,7 @@ impl TurnActor {
                 self.active_turn = None;
                 self.active_origin = crate::types::TurnOrigin::User;
                 let (status, error, terminal_reason, result_text) = match result {
-                    Ok(text) => (
-                        ScheduleRunStatus::Success,
-                        None,
-                        TerminalReason::Done,
-                        text,
-                    ),
+                    Ok(text) => (ScheduleRunStatus::Success, None, TerminalReason::Done, text),
                     Err(message) => (
                         ScheduleRunStatus::Failed,
                         Some(message.clone()),
@@ -2321,7 +2319,8 @@ impl TurnActor {
                     crate::types::TurnOrigin::Scheduled,
                     terminal_reason,
                 );
-                self.finish_scheduled_run(schedule_id, run_id, status, error).await;
+                self.finish_scheduled_run(schedule_id, run_id, status, error)
+                    .await;
                 self.turn_gate.end();
                 drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Idle,
@@ -2380,9 +2379,10 @@ impl TurnActor {
             }
             EneCommand::DeleteSchedule { schedule_id, reply } => {
                 let result = match &self.concrete_store {
-                    Some(store) => {
-                        store.delete_schedule(schedule_id).await.map_err(EneRuntimeError::from)
-                    }
+                    Some(store) => store
+                        .delete_schedule(schedule_id)
+                        .await
+                        .map_err(EneRuntimeError::from),
                     None => Err(EneRuntimeError::StoreRequired),
                 };
                 #[expect(

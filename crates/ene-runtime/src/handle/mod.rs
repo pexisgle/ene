@@ -122,7 +122,6 @@ impl TurnGate {
             .as_ref()
             .is_some_and(|active| active.as_str() == turn.as_str())
     }
-
 }
 
 /// RAII guard that triggers graceful shutdown when the last handle clone drops.
@@ -2461,7 +2460,9 @@ mod tests {
                 .handle_command(EneCommand::AddSchedule { new, reply: tx })
                 .await
         );
-        rx.await.expect("AddSchedule replies").expect("schedule inserted")
+        rx.await
+            .expect("AddSchedule replies")
+            .expect("schedule inserted")
     }
 
     /// A fire whose `scheduled_at` no longer matches the store's
@@ -2541,7 +2542,10 @@ mod tests {
             .execute_raw(Statement::from_sql_and_values(
                 sea_orm::DatabaseBackend::Sqlite,
                 "UPDATE schedules SET next_run_at = ? WHERE id = ?",
-                [sea_orm::Value::ChronoDateTimeUtc(Some(missed)), schedule.id.into()],
+                [
+                    sea_orm::Value::ChronoDateTimeUtc(Some(missed)),
+                    schedule.id.into(),
+                ],
             ))
             .await
             .expect("backdate next_run_at");
