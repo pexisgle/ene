@@ -21,6 +21,10 @@
 //!
 //! `EmbedPlugin` is deliberately out of scope: it has no static capability
 //! declaration to generate (`embed_batch` is the entire trait).
+//!
+//! `#[provider(provides = "...", requires = "...")]` declares plugin-wide
+//! capabilities; the derive emits the `provides()` / `requires()` methods
+//! from the `LlmPlugin` expansion only (see `expand_plugin_derive`).
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -150,27 +154,6 @@ impl ProviderAttrs {
     }
 }
 
-/// Whether the input carries a `#[derive(LlmPlugin)]` entry.
-///
-/// Capability declaration methods (`provides()` / `requires()`) are
-/// plugin-wide and generated once per struct. A compound provider derives
-/// both `LlmPlugin` and another provider trait, so the other trait's
-/// expansion must defer to the `LlmPlugin` one instead of emitting a second,
-/// colliding definition.
-fn derives_llm_plugin(ast: &DeriveInput) -> bool {
-    ast.attrs.iter().any(|attr| {
-        if !attr.path().is_ident("derive") {
-            return false;
-        }
-        attr.parse_args_with(|input: syn::parse::ParseStream<'_>| {
-            let paths =
-                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated(input)?;
-            Ok(paths.iter().any(|path| path.is_ident("LlmPlugin")))
-        })
-        .unwrap_or(false)
-    })
-}
-
 fn split_list(s: &str) -> Vec<String> {
     s.split(',')
         .map(str::trim)
@@ -288,9 +271,13 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
          `Self::{const_name}`."
     );
 
-    // Capability declarations are plugin-wide; emit them from exactly one of
-    // a compound provider's expansions (see `derives_llm_plugin`).
-    let generate_capability_methods = matches!(kind, ProviderKind::Llm) || !derives_llm_plugin(ast);
+    // Capability declarations are plugin-wide, so they are emitted from the
+    // `derive(LlmPlugin)` expansion only. A compound provider
+    // (`derive(LlmPlugin, TtsPlugin)`) shares one `#[provider]` attribute:
+    // rustc hands each derive its own reduced copy of `#[derive(...)]`, so a
+    // Tts/Stt expansion cannot tell whether `LlmPlugin` is also derived and
+    // must not emit a second, colliding definition.
+    let generate_capability_methods = matches!(kind, ProviderKind::Llm);
     let capability_methods = if generate_capability_methods {
         let provides = attrs.provides.iter().map(String::as_str);
         let requires = attrs.requires.iter().map(String::as_str);

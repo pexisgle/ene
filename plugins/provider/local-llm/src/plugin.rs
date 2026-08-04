@@ -145,10 +145,9 @@ impl EmbedPlugin for LocalLlmPlugin {
 
 #[cfg(test)]
 #[expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    reason = "contract tests use unwrap/expect/panic for assertions"
+    reason = "contract tests use expect/panic for assertions"
 )]
 mod tests {
     use std::path::PathBuf;
@@ -158,7 +157,6 @@ mod tests {
     use ene_plugin_proto::{
         CapabilityRef, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION, PluginIpcRequest, PluginIpcResponse,
         VersionRange, WireFormat, cleanup_path, read_plugin_response, write_plugin_request,
-        write_plugin_response,
     };
 
     /// Counter for unique socket paths across parallel test runs.
@@ -196,7 +194,7 @@ mod tests {
             std::env::set_var("ENE_PLUGIN_SOCKET", &socket_path);
         }
         let server = tokio::spawn(async move {
-            let _ = ene_plugin::run_plugin_server(dispatch()).await;
+            drop(ene_plugin::run_plugin_server(dispatch()).await);
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 

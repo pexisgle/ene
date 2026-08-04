@@ -155,10 +155,11 @@ pub mod prelude {
 
         #[doc(no_inline)]
         pub use crate::{
-            ConcurrencyHint, ConfigurablePlugin, EmbedPlugin, LlmPlugin, LlmProviderSpec,
-            PluginCompletion, PluginDispatch, PluginError, PluginStream, PluginStreamChunk,
-            ProviderErrorKind, SttPlugin, SttProviderSpec, TokenUsage, ToolPlugin,
-            ToolPluginCapabilities, TtsPlugin, TtsProviderSpec, run_plugin_server,
+            CapabilityRef, CapabilityRequirement, ConcurrencyHint, ConfigurablePlugin, EmbedPlugin,
+            LlmPlugin, LlmProviderSpec, PluginCompletion, PluginDispatch, PluginError,
+            PluginStream, PluginStreamChunk, ProviderErrorKind, SttPlugin, SttProviderSpec,
+            TokenUsage, ToolPlugin, ToolPluginCapabilities, TtsPlugin, TtsProviderSpec,
+            run_plugin_server,
         };
     }
 
