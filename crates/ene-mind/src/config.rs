@@ -968,7 +968,7 @@ impl Default for ProactiveDecisionConfig {
 /// Weekday names are stable English contract keys (`monday`..`sunday`), not
 /// display strings; the settings UI localizes them.
 #[derive(
-    Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+    Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
 )]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -987,20 +987,6 @@ pub struct QuietHoursDaysConfig {
     pub saturday: bool,
     /// Sunday.
     pub sunday: bool,
-}
-
-impl Default for QuietHoursDaysConfig {
-    fn default() -> Self {
-        Self {
-            monday: false,
-            tuesday: false,
-            wednesday: false,
-            thursday: false,
-            friday: false,
-            saturday: false,
-            sunday: false,
-        }
-    }
 }
 
 impl QuietHoursDaysConfig {
@@ -1091,12 +1077,21 @@ impl Default for QuietHoursSuppressConfig {
 
 /// What happens to speech suppressed by quiet hours.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case")]
 #[schemars(crate = "::ene_config::schemars")]
 pub enum QuietHoursPolicy {
     /// Log the suppression and drop the opportunity.
+    #[default]
     Discard,
     /// Keep a bounded in-memory queue; when quiet hours end, deliver one
     /// catch-up utterance per queued moment (paced one per tick).
@@ -1112,12 +1107,6 @@ impl std::fmt::Display for QuietHoursPolicy {
             Self::Queue => write!(f, "queue"),
             Self::Summary => write!(f, "summary"),
         }
-    }
-}
-
-impl Default for QuietHoursPolicy {
-    fn default() -> Self {
-        Self::Discard
     }
 }
 

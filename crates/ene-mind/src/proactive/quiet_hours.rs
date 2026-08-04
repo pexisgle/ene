@@ -71,16 +71,18 @@ pub fn evaluate_quiet_hours(config: &QuietHoursConfig, now: DateTime<Utc>) -> Qu
     };
     let weekday = local.weekday();
     let local_minutes = local.hour() * 60 + local.minute();
-    let in_window = if minutes == end_minutes {
-        false
-    } else if minutes < end_minutes {
-        (minutes..end_minutes).contains(&local_minutes) && config.days.contains(weekday)
-    } else {
+    let in_window = match minutes.cmp(&end_minutes) {
+        std::cmp::Ordering::Equal => false,
+        std::cmp::Ordering::Less => {
+            (minutes..end_minutes).contains(&local_minutes) && config.days.contains(weekday)
+        }
         // Overnight: at/after start belongs to today's window (start day
         // enabled); before end belongs to the window that started yesterday
         // (the previous day's weekday must be enabled).
-        (local_minutes >= minutes && config.days.contains(weekday))
-            || (local_minutes < end_minutes && config.days.contains(weekday.pred()))
+        std::cmp::Ordering::Greater => {
+            (local_minutes >= minutes && config.days.contains(weekday))
+                || (local_minutes < end_minutes && config.days.contains(weekday.pred()))
+        }
     };
     quiet_eval(&timezone, local, in_window)
 }
@@ -139,7 +141,7 @@ fn weekday_name(weekday: Weekday) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{QuietHoursDaysConfig, QuietHoursSuppressConfig};
+    use crate::config::{QuietHoursDaysConfig, QuietHoursSuppressConfig, QuietHoursTimeConfig};
     use chrono::TimeZone;
 
     fn config() -> QuietHoursConfig {
