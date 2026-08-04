@@ -27,14 +27,10 @@ impl HomeAssistantState {
             .timeout(std::time::Duration::from_secs(10))
             .user_agent("EneHomeAssistant/0.1")
             // The tools only talk to the user-configured Home Assistant
-            // host; a cross-host redirect would forward the Authorization
-            // header to an upstream-controlled host, so redirects stay on
-            // the original host.
+            // origin; a redirect to another scheme, port, or host could
+            // forward request data to an upstream-controlled service.
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if same_host(
-                    attempt.previous().last().and_then(|url| url.host_str()),
-                    attempt.url().host_str(),
-                ) {
+                if same_origin(attempt.previous().last(), attempt.url()) {
                     attempt.follow()
                 } else {
                     attempt.stop()
@@ -88,12 +84,17 @@ impl HomeAssistantState {
     }
 }
 
-/// Whether a redirect hop stays on the original host.
+/// Whether a redirect hop stays on the original URL origin.
 ///
 /// A hop without a host on either side is never followed: the plugin only
 /// trusts the host the user configured.
-fn same_host(previous: Option<&str>, next: Option<&str>) -> bool {
-    matches!((previous, next), (Some(previous), Some(next)) if previous == next)
+fn same_origin(previous: Option<&url::Url>, next: &url::Url) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    previous.scheme() == next.scheme()
+        && previous.host_str() == next.host_str()
+        && previous.port_or_known_default() == next.port_or_known_default()
 }
 
 impl Default for HomeAssistantState {
@@ -200,11 +201,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redirects_require_the_same_host() {
-        assert!(same_host(Some("ha.local"), Some("ha.local")));
-        assert!(!same_host(Some("ha.local"), Some("evil.local")));
-        assert!(!same_host(None, Some("ha.local")));
-        assert!(!same_host(Some("ha.local"), None));
-        assert!(!same_host(None, None));
+    fn redirects_require_the_same_origin() {
+        let origin = url::Url::parse("https://ha.local:8123/api/").unwrap();
+        assert!(same_origin(
+            Some(&origin),
+            &url::Url::parse("https://ha.local:8123/api/states").unwrap()
+        ));
+        assert!(!same_origin(
+            Some(&origin),
+            &url::Url::parse("https://ha.local:8124/api/states").unwrap()
+        ));
+        assert!(!same_origin(
+            Some(&origin),
+            &url::Url::parse("http://ha.local:8123/api/states").unwrap()
+        ));
+        assert!(!same_origin(
+            Some(&origin),
+            &url::Url::parse("https://evil.local:8123/api/states").unwrap()
+        ));
+        assert!(!same_origin(None, &origin));
     }
 }

@@ -6,7 +6,7 @@ const DEFAULT_BASE_URL: &str = "http://homeassistant.local:8123";
 
 /// Plugin configuration delivered by the host from
 /// `plugins.list.homeassistant.config`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct HomeAssistantConfig {
     /// Base URL of the Home Assistant instance, e.g.
@@ -22,6 +22,15 @@ pub struct HomeAssistantConfig {
 
 fn default_base_url() -> String {
     DEFAULT_BASE_URL.to_string()
+}
+
+impl Default for HomeAssistantConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_base_url(),
+            token: String::new(),
+        }
+    }
 }
 
 impl HomeAssistantConfig {
