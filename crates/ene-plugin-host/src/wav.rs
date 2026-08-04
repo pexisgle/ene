@@ -10,9 +10,13 @@
 use ene_ai::AudioProviderError;
 
 /// Cap on the WAV byte size `decode_wav` accepts. 24 kHz s16 mono audio is
-/// ~2.9 MB per minute, so 64 MiB covers very long utterances while bounding
+/// ~2.9 MB per minute, so 32 MiB covers very long utterances while bounding
 /// the allocation a misbehaving plugin (or engine) can force on the host.
-pub const MAX_WAV_BYTES: usize = 64 * 1024 * 1024;
+///
+/// The bound must also fit the IPC frame cap after base64 expansion
+/// (`MAX_WAV_BYTES * 4/3 < 64 MiB`); the base64 pre-check in the host adapter
+/// is only reachable for payloads that fit on the wire.
+pub const MAX_WAV_BYTES: usize = 32 * 1024 * 1024;
 
 /// Decoded PCM audio.
 #[derive(Debug, Clone, PartialEq)]

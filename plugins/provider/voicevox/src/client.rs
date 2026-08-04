@@ -42,9 +42,12 @@ const SYNTHESIS_TIMEOUT: Duration = Duration::from_mins(1);
 /// Per-probe timeout for `GET /version` health checks.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 /// Cap on any engine response body. 24 kHz s16 mono audio is ~2.9 MB per
-/// minute, so 64 MiB covers very long utterances while bounding the memory
+/// minute, so 32 MiB covers very long utterances while bounding the memory
 /// a misbehaving engine can make the plugin allocate.
-const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+///
+/// The host rejects WAV payloads above `ene-plugin-host`'s `MAX_WAV_BYTES`
+/// (32 MiB), so a larger response would fail at the host anyway.
+const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Engine-reported synthesis parameters, round-tripped between the two API
 /// steps with the configured scale overrides applied.
