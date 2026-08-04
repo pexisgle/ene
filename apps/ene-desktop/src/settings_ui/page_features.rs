@@ -85,6 +85,22 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
     }
 
     ui.add_enabled_ui(mind.proactive.enabled, |ui| {
+        let mut paused = mind.proactive.paused;
+        if ui
+            .checkbox(
+                &mut paused,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-pause"),
+            )
+            .on_hover_text(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "proactive-pause-hint"
+            ))
+            .changed()
+        {
+            mind.proactive.paused = paused;
+            persist_mind(settings, ai, &mind);
+        }
+
         ui.horizontal(|ui| {
             ui.label(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
@@ -152,6 +168,250 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             crate::i18n::loader(),
             "proactive-fatigue-threshold-hint"
         ));
+
+        ui.separator();
+        ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours"));
+        let mut quiet_enabled = mind.proactive.quiet_hours.enabled;
+        if ui
+            .checkbox(
+                &mut quiet_enabled,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-enabled"),
+            )
+            .changed()
+        {
+            mind.proactive.quiet_hours.enabled = quiet_enabled;
+            persist_mind(settings, ai, &mind);
+        }
+
+        ui.add_enabled_ui(quiet_enabled, |ui| {
+            // Probe with `enabled` forced on so timezone validity is reported
+            // while the block is being edited, not only after it is saved.
+            let mut probe = mind.proactive.quiet_hours.clone();
+            probe.enabled = true;
+            let eval = ene_mind::evaluate_quiet_hours(&probe, chrono::Utc::now());
+
+            let status = if mind.proactive.paused {
+                Some((
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-paused-override"),
+                    egui::Color32::from_rgb(0xc0, 0x6a, 0x1b),
+                ))
+            } else if eval.active {
+                Some((
+                    format!(
+                        "{} ({})",
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-active"),
+                        eval.local_time
+                    ),
+                    egui::Color32::from_rgb(0xc0, 0x6a, 0x1b),
+                ))
+            } else {
+                None
+            };
+            if let Some((text, color)) = status {
+                ui.colored_label(color, text);
+            } else {
+                ui.weak(format!(
+                    "{} ({})",
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-inactive"),
+                    eval.local_time
+                ));
+            }
+
+            ui.horizontal(|ui| {
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "quiet-hours-timezone"
+                ));
+                let mut timezone = mind.proactive.quiet_hours.timezone.clone();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut timezone).desired_width(180.0))
+                    .changed()
+                {
+                    mind.proactive.quiet_hours.timezone = timezone.trim().to_string();
+                    persist_mind(settings, ai, &mind);
+                }
+            });
+            if !eval.timezone_valid {
+                ui.colored_label(
+                    egui::Color32::from_rgb(0xb3, 0x2d, 0x2d),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-timezone-invalid"),
+                );
+            }
+            ui.weak(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "quiet-hours-timezone-hint"
+            ));
+
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "quiet-hours-days"
+            ));
+            let mut days_changed = false;
+            ui.horizontal_wrapped(|ui| {
+                let days = &mut mind.proactive.quiet_hours.days;
+                if ui
+                    .checkbox(
+                        &mut days.monday,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-monday"),
+                    )
+                    .changed()
+                {
+                    days_changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut days.tuesday,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-tuesday"),
+                    )
+                    .changed()
+                {
+                    days_changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut days.wednesday,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-wednesday"),
+                    )
+                    .changed()
+                {
+                    days_changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut days.thursday,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-thursday"),
+                    )
+                    .changed()
+                {
+                    days_changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut days.friday,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-friday"),
+                    )
+                    .changed()
+                {
+                    days_changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut days.saturday,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-saturday"),
+                    )
+                    .changed()
+                {
+                    days_changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut days.sunday,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-sunday"),
+                    )
+                    .changed()
+                {
+                    days_changed = true;
+                }
+            });
+            if days_changed {
+                persist_mind(settings, ai, &mind);
+            }
+
+            ui.horizontal(|ui| {
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "quiet-hours-start"
+                ));
+                if render_time(ui, &mut mind.proactive.quiet_hours.start) {
+                    persist_mind(settings, ai, &mind);
+                }
+                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-end"));
+                if render_time(ui, &mut mind.proactive.quiet_hours.end) {
+                    persist_mind(settings, ai, &mind);
+                }
+            });
+
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "quiet-hours-suppress"
+            ));
+            let mut suppress_changed = false;
+            {
+                let suppress = &mut mind.proactive.quiet_hours.suppress;
+                if ui
+                    .checkbox(
+                        &mut suppress.notifications,
+                        i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "quiet-hours-suppress-notifications"
+                        ),
+                    )
+                    .changed()
+                {
+                    suppress_changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut suppress.decisions,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-suppress-decisions"),
+                    )
+                    .changed()
+                {
+                    suppress_changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut suppress.tts,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-suppress-tts"),
+                    )
+                    .changed()
+                {
+                    suppress_changed = true;
+                }
+            }
+            if suppress_changed {
+                persist_mind(settings, ai, &mind);
+            }
+
+            ui.horizontal(|ui| {
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "quiet-hours-policy"
+                ));
+                let mut selected = mind.proactive.quiet_hours.policy;
+                egui::ComboBox::from_id_salt("quiet_hours_policy")
+                    .selected_text(quiet_hours_policy_label(selected))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut selected,
+                            ene_mind::QuietHoursPolicy::Discard,
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-policy-discard"),
+                        );
+                        ui.selectable_value(
+                            &mut selected,
+                            ene_mind::QuietHoursPolicy::Queue,
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-policy-queue"),
+                        );
+                        ui.selectable_value(
+                            &mut selected,
+                            ene_mind::QuietHoursPolicy::Summary,
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-policy-summary"),
+                        );
+                    });
+                if selected != mind.proactive.quiet_hours.policy {
+                    mind.proactive.quiet_hours.policy = selected;
+                    persist_mind(settings, ai, &mind);
+                }
+            });
+            ui.weak(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "quiet-hours-policy-hint"
+            ));
+            ui.weak(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "quiet-hours-hint"
+            ));
+        });
 
         ui.label(i18n_embed_fl::fl!(
             crate::i18n::loader(),
@@ -280,6 +540,46 @@ fn window_title_level_label(level: WindowTitleLevel) -> String {
             i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-full")
         }
     }
+}
+
+fn quiet_hours_policy_label(policy: ene_mind::QuietHoursPolicy) -> String {
+    match policy {
+        ene_mind::QuietHoursPolicy::Discard => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-policy-discard")
+        }
+        ene_mind::QuietHoursPolicy::Queue => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-policy-queue")
+        }
+        ene_mind::QuietHoursPolicy::Summary => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-policy-summary")
+        }
+    }
+}
+
+/// Hour/minute drag row for a quiet-hours wall-clock time; returns true when
+/// the caller should persist the change.
+fn render_time(ui: &mut egui::Ui, time: &mut ene_mind::QuietHoursTimeConfig) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let mut hour = i32::from(time.hour);
+        if ui
+            .add(egui::DragValue::new(&mut hour).range(0..=23).prefix(" "))
+            .changed()
+        {
+            time.hour = hour.clamp(0, 23) as u8;
+            changed = true;
+        }
+        ui.label(":");
+        let mut minute = i32::from(time.minute);
+        if ui
+            .add(egui::DragValue::new(&mut minute).range(0..=59))
+            .changed()
+        {
+            time.minute = minute.clamp(0, 59) as u8;
+            changed = true;
+        }
+    });
+    changed
 }
 
 fn persist_mind(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, mind: &ene_mind::MindConfig) {
