@@ -1,6 +1,6 @@
 //! Host-delivered config and per-model profiles for the local GGUF provider.
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError, atomic::AtomicU64};
 
 use ene_ai::config::ProactiveAcceleration;
 use ene_plugin::PluginError;
@@ -19,6 +19,11 @@ static PLUGIN_CONFIG: Mutex<Option<Value>> = Mutex::new(None);
 /// process. Profile *selection* is plugin-owned: each inference request names
 /// a profile key, and the model for that key is loaded lazily on first use.
 static PLUGIN_PROFILES: Mutex<Option<Value>> = Mutex::new(None);
+
+/// Incremented whenever the host pushes config or profiles. Model loads carry
+/// the generation they started under, so a live update cannot publish a stale
+/// model into the new configuration's cache.
+static CONFIG_GENERATION: OnceLock<AtomicU64> = OnceLock::new();
 
 /// Default context window for a profile that omits `context_size`.
 ///
@@ -124,6 +129,7 @@ impl Profile {
 /// `ConfigurablePlugin::set_config`.
 pub(crate) fn set_config(config: &Value) {
     *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
+    super::models::config_changed();
 }
 
 /// Stores the profile map delivered by
@@ -132,6 +138,22 @@ pub(crate) fn set_profiles(profiles: &Value) {
     *PLUGIN_PROFILES
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some(profiles.clone());
+    super::models::config_changed();
+}
+
+/// Returns the current host-configuration generation.
+pub(crate) fn generation() -> u64 {
+    CONFIG_GENERATION
+        .get_or_init(|| AtomicU64::new(0))
+        .load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Advances the host-configuration generation while model-cache locks are
+/// held by [`super::models::config_changed`].
+pub(crate) fn advance_generation() {
+    CONFIG_GENERATION
+        .get_or_init(|| AtomicU64::new(0))
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 }
 
 /// Parses the current host config, defaulting to empty when the handshake
