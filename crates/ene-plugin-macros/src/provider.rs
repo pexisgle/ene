@@ -73,6 +73,8 @@ struct ProviderAttrs {
     max_in_flight: Option<u32>,
     queue_depth: Option<u32>,
     context_window: Option<u32>,
+    provides: Vec<String>,
+    requires: Vec<String>,
 }
 
 impl ProviderAttrs {
@@ -115,6 +117,12 @@ impl ProviderAttrs {
                     attrs.queue_depth = Some(parse_u32(&meta)?);
                 } else if meta.path.is_ident("context_window") {
                     attrs.context_window = Some(parse_u32(&meta)?);
+                } else if meta.path.is_ident("provides") {
+                    let s: syn::LitStr = meta.value()?.parse()?;
+                    attrs.provides = split_list(&s.value());
+                } else if meta.path.is_ident("requires") {
+                    let s: syn::LitStr = meta.value()?.parse()?;
+                    attrs.requires = split_list(&s.value());
                 } else {
                     let name = path_ident_str(&meta.path);
                     return Err(syn::Error::new_spanned(
@@ -140,6 +148,27 @@ impl ProviderAttrs {
         }
         Ok(attrs)
     }
+}
+
+/// Whether the input carries a `#[derive(LlmPlugin)]` entry.
+///
+/// Capability declaration methods (`provides()` / `requires()`) are
+/// plugin-wide and generated once per struct. A compound provider derives
+/// both `LlmPlugin` and another provider trait, so the other trait's
+/// expansion must defer to the `LlmPlugin` one instead of emitting a second,
+/// colliding definition.
+fn derives_llm_plugin(ast: &DeriveInput) -> bool {
+    ast.attrs.iter().any(|attr| {
+        if !attr.path().is_ident("derive") {
+            return false;
+        }
+        attr.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+            let paths =
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated(input)?;
+            Ok(paths.iter().any(|path| path.is_ident("LlmPlugin")))
+        })
+        .unwrap_or(false)
+    })
 }
 
 fn split_list(s: &str) -> Vec<String> {
@@ -259,6 +288,53 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
          `Self::{const_name}`."
     );
 
+    // Capability declarations are plugin-wide; emit them from exactly one of
+    // a compound provider's expansions (see `derives_llm_plugin`).
+    let generate_capability_methods = matches!(kind, ProviderKind::Llm) || !derives_llm_plugin(ast);
+    let capability_methods = if generate_capability_methods {
+        let provides = attrs.provides.iter().map(String::as_str);
+        let requires = attrs.requires.iter().map(String::as_str);
+        let provides_fn = if attrs.provides.is_empty() {
+            quote! {}
+        } else {
+            quote! {
+                /// Capabilities this plugin provides to other plugins,
+                /// declared by the `#[provider(provides = "...")]` attribute.
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "provider attribute capability strings are \
+                              compile-time literals; parse cannot fail"
+                )]
+                pub fn provides() -> ::std::vec::Vec<::ene_plugin::CapabilityRef> {
+                    ::std::vec![
+                        #(::ene_plugin::CapabilityRef::parse(#provides).unwrap()),*
+                    ]
+                }
+            }
+        };
+        let requires_fn = if attrs.requires.is_empty() {
+            quote! {}
+        } else {
+            quote! {
+                /// Capabilities this plugin requires from other plugins,
+                /// declared by the `#[provider(requires = "...")]` attribute.
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "provider attribute capability strings are \
+                              compile-time literals; parse cannot fail"
+                )]
+                pub fn requires() -> ::std::vec::Vec<::ene_plugin::CapabilityRequirement> {
+                    ::std::vec![
+                        #(::ene_plugin::CapabilityRequirement::parse(#requires).unwrap()),*
+                    ]
+                }
+            }
+        };
+        quote! { #provides_fn #requires_fn }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         impl #impl_generics #ident #ty_generics #where_clause {
             #[doc = #const_doc]
@@ -268,6 +344,7 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
             /// `*_capabilities()` trait method (which returns
             /// `vec![Self::#spec_method()]`).
             #spec_fn
+            #capability_methods
         }
     })
 }
