@@ -694,7 +694,10 @@ ONNX モデルを自プロセス内で直接実行します。完全ローカル
 
 ONNX モデルと `voices.bin` ボイス埋め込みは共有モデルキャッシュに取得されます
 （`ene_voice` のダウンロード/プリフェッチ経由。デスクトップの設定 → 音声画面
-からもダウンロードできます）。カスタムパスでキャッシュ位置を上書きできます。
+からもダウンロードできます）。カスタムの `model_path` / `voices_path` は
+キャッシュ位置を上書きし、ファイルが無い場合はブートストラップが同じ
+パスにプリフェッチします（このプラグイン設定から解決）。既存ファイルが
+再ダウンロードされることはありません。
 
 ```json
 {
@@ -728,30 +731,34 @@ ONNX モデルと `voices.bin` ボイス埋め込みは共有モデルキャッ�
 |---|---|---|
 | `model_path` | 共有モデルキャッシュ（`models/gguf/kokoro.onnx`） | Kokoro ONNX モデルファイルのパス。 |
 | `voices_path` | `plugins.list.kokoro.profiles.kokoro.voices_path` → 共有モデルキャッシュ（`models/gguf/voices.bin`） | `voices.bin` ボイス埋め込みのパス。プロファイルのスロットは旧 `ai.tts.voices_path` の移行先です。 |
-| `voice` | `""`（`voices.bin` の先頭ボイス `af_alloy`） | 既定ボイス。リクエスト単位の `ai.tts.voice` が優先されます。全 53 ボイス名はケーパビリティ一覧を参照。 |
+| `voice` | `""`（`voices.bin` の先頭ボイス `af_alloy`） | 既定ボイス。リクエスト単位の `ai.tts.voice` が優先されます。全 53 ボイス名はケーパビリティ一覧を参照。ボイスを切り替えるたびにモデルが再ロードされます。 |
 | `speed` | `1.0` | 発話速度倍率（0.5–2.0）。 |
 | `language` | 未設定（英語 G2P） | 書記素→音素変換の言語。`"ja"` で日本語のかなルール、それ以外は英語ルールを使用。 |
-| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き。 |
+| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き。プロセス起動時に固定されます（ONNX Runtime はプロセスごとに一度だけ初期化）。変更には再起動が必要です。プロセス内フォールバックはこのキーを優先し、次に従来の `plugins.list.onnx.config.ort_dylib_path` を参照します。 |
 
 各キーは環境変数で個別に上書きできます：
 `ENE_PLUGINS__LIST__KOKORO__CONFIG__<KEY>`
 （例：`ENE_PLUGINS__LIST__KOKORO__CONFIG__SPEED`）。
 
 モデルは最初の合成時に遅延ロードされ、プラグインプロセス内に常駐します。
-上記の設定（または `ai.tts.voice`）を変更すると再ロードされます。プラグインは
-24 kHz モノラル WAV を返し、ホスト側の音声パイプラインが float サンプルに
-デコードして `TtsChunk` に分割し、ストリーミング再生します
+モデル/ボイスのパス、ボイス、速度、言語を変更すると再ロードされます
+（`ort_dylib_path` はプロセス起動時に固定）。プラグインは 24 kHz モノラル
+WAV を返し、ホスト側の音声パイプラインが float サンプルにデコードして
+`TtsChunk` に分割し、ストリーミング再生します
 （`formats = ["wav"]`）。
 
 なお、`ai.tts.model_path` / `ai.tts.model` は後述のプロセス内フォールバック
 でのみ有効です。プラグイン経由では `model_path` を自プラグインの設定から
 読み取ります。
 
-**プロセス内フォールバック。** プラグインホストが利用できない場合や `kokoro`
-プラグインが無効な場合、ランタイム内蔵の `ene-voice` ファクトリが
+**プロセス内フォールバック。** プラグインホストが起動時に利用できない場合や
+`kokoro` プラグインが無効な場合、ランタイム内蔵の `ene-voice` ファクトリが
 `ai.tts.provider = "kokoro"` をプロセス内で引き続き提供します（`ai.tts.model_path`
 / `ai.tts.model` / `ai.tts.speed` と `profiles.kokoro.voices_path` を参照）。
-プラグインが稼働している間はプラグインのファクトリが優先されます。
+フォールバックが有効なのはプラグインが一度も登録されなかった場合のみです。
+プラグインファクトリが登録された後でプラグインが失敗すると、`kokoro` は
+次回の再起動まで利用できません（プロセス内ファクトリはセッション中に
+再登録されないため）。
 
 #### OpenAI Speech API TTS プロバイダ（`plugins.list.openai-tts.config`）
 

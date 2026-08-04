@@ -863,8 +863,10 @@ engine. Select it with `ai.tts.provider = "kokoro"`; the generic
 
 The ONNX model and `voices.bin` embeddings are fetched into the shared
 models cache (`ene_voice`'s download/prefetch path; the desktop Settings →
-Voice page downloads them on demand). Custom paths override the cache
-locations.
+Voice page downloads them on demand). Custom `model_path` / `voices_path`
+values override the cache locations and are prefetched to those same paths
+when missing (bootstrap resolves them from this plugin config); files
+already present are never re-downloaded.
 
 ```json
 {
@@ -898,30 +900,34 @@ Settings:
 |---|---|---|
 | `model_path` | shared models cache (`models/gguf/kokoro.onnx`) | Kokoro ONNX model file path. |
 | `voices_path` | `plugins.list.kokoro.profiles.kokoro.voices_path` → shared models cache (`models/gguf/voices.bin`) | `voices.bin` voice embeddings path. The profile slot is the migration target of the former `ai.tts.voices_path`. |
-| `voice` | `""` (first voice in `voices.bin`, `af_alloy`) | Default voice; a per-request `ai.tts.voice` overrides it. See the capability list for all 53 voice names. |
+| `voice` | `""` (first voice in `voices.bin`, `af_alloy`) | Default voice; a per-request `ai.tts.voice` overrides it. See the capability list for all 53 voice names. Alternating per-request voices reload the model on each switch. |
 | `speed` | `1.0` | Speech speed multiplier (0.5–2.0). |
 | `language` | unset (English G2P) | Grapheme-to-phoneme language: `"ja"` selects the Japanese kana rules, anything else the English rules. |
-| `ort_dylib_path` | unset (`ort` default resolution) | ONNX Runtime dynamic library path override. |
+| `ort_dylib_path` | unset (`ort` default resolution) | ONNX Runtime dynamic library path override. Fixed at process start: ONNX Runtime initializes once per process, so a change requires a restart. The in-process fallback honors this key first, then the legacy `plugins.list.onnx.config.ort_dylib_path`. |
 
 Every key can be overridden per environment variable as
 `ENE_PLUGINS__LIST__KOKORO__CONFIG__<KEY>`
 (e.g. `ENE_PLUGINS__LIST__KOKORO__CONFIG__SPEED`).
 
 The model loads lazily on the first synthesize and stays resident in the
-plugin process; changing a setting listed above (or `ai.tts.voice`) reloads
-it. The plugin returns 24 kHz mono WAV, which the host-side audio pipeline
-decodes into float samples and slices into `TtsChunk`s for streaming
-playback (`formats = ["wav"]`).
+plugin process; changing the model or voices paths, voice, speed, or
+language reloads it (`ort_dylib_path` is fixed at process start). The plugin
+returns 24 kHz mono WAV, which the host-side audio pipeline decodes into
+float samples and slices into `TtsChunk`s for streaming playback
+(`formats = ["wav"]`).
 
 Note that `ai.tts.model_path` / `ai.tts.model` are honored only by the
 in-process fallback path (see below); the plugin path reads `model_path`
 from its own config.
 
-**In-process fallback.** If the plugin host is unavailable or the `kokoro`
-plugin is disabled, the runtime's built-in `ene-voice` factory still serves
-`ai.tts.provider = "kokoro"` in-process (honoring `ai.tts.model_path` /
-`ai.tts.model` / `ai.tts.speed` and the `profiles.kokoro.voices_path` slot).
-When the plugin is running, its factory takes precedence.
+**In-process fallback.** If the plugin host is unavailable at startup or the
+`kokoro` plugin is disabled, the runtime's built-in `ene-voice` factory still
+serves `ai.tts.provider = "kokoro"` in-process (honoring `ai.tts.model_path`
+/ `ai.tts.model` / `ai.tts.speed` and the `profiles.kokoro.voices_path`
+slot). The fallback only applies while the plugin never registered: once the
+plugin factory registers, a later plugin failure leaves `kokoro` unavailable
+until the next restart, because the in-process factory is not re-registered
+mid-session.
 
 #### OpenAI Speech API TTS provider (`plugins.list.openai-tts.config`)
 
