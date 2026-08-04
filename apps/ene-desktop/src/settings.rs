@@ -874,10 +874,6 @@ impl CharacterSettings {
         });
     }
 
-    pub fn beat_sync_enabled(&self) -> bool {
-        self.config_section::<DesktopSection>().beat_sync.enabled
-    }
-
     pub fn beat_sync_device(&self) -> Option<String> {
         self.config_section::<DesktopSection>().beat_sync.device
     }

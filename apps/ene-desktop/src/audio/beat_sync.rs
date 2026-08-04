@@ -27,12 +27,14 @@
 //!
 //! `cpal` has no loopback API: on Linux it enumerates `ALSA` / `PipeWire`
 //! capture devices, so loopback works where a monitor source is exposed as
-//! an input device (`PipeWire` monitor ports; `PulseAudio` monitor sources
-//! visible to the ALSA plugin). Device selection prefers the monitor paired
-//! with the default output device, then any device named "monitor"; a
-//! manual override lives at `desktop.beat_sync.device`. When no monitor
-//! device exists the feature logs and stays disabled — it never falls back
-//! to the default microphone.
+//! an input device. Device selection is deliberately narrow — the default
+//! microphone is never an implicit candidate, because on ALSA and PipeWire
+//! the mic can share the default output device's name. Candidates are, in
+//! order: the `desktop.beat_sync.device` override (exact name), and any
+//! input device whose name contains "monitor" (the `PulseAudio` /
+//! `PipeWire` `<output>.monitor` convention, also exposed through
+//! `pipewire-alsa`). When no candidate exists the feature errors at start
+//! and stays disabled.
 //!
 //! Gated behind the `voice` feature; without it the desktop builds a
 //! text-only shell and this module is not compiled.
@@ -45,7 +47,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use cpal::SampleFormat;
+use cpal::{Sample, SampleFormat};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
@@ -114,17 +116,30 @@ pub enum BeatSyncError {
     /// The OS refused to spawn the capture thread.
     #[error("failed to spawn beat sync thread: {0}")]
     Spawn(String),
+    /// No loopback candidate device exists (see the module docs).
+    #[error("no loopback (monitor) audio device found")]
+    NoLoopbackDevice,
+    /// The loopback device reported no supported input configuration.
+    #[error("loopback device has no supported input configuration: {0}")]
+    NoSupportedConfig(String),
+    /// The negotiated format is not linear PCM (e.g. raw DSD).
+    #[error("unsupported loopback sample format: {0}")]
+    UnsupportedFormat(String),
 }
 
 /// Handle to the running beat-sync capture thread.
 ///
 /// The `cpal::Stream` is created and owned inside the thread (it is
 /// `!Send + !Sync`), so this handle is just a shutdown flag plus a join
-/// handle and can live in a bevy resource. Dropping the handle stops the
-/// stream and joins the thread.
+/// handle plus a liveness flag, and can live in a bevy resource. Dropping
+/// the handle stops the stream and joins the thread.
 pub struct BeatSyncHandle {
     join: Option<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
+    /// False until the capture stream is actually playing; flipped false
+    /// again if the stream dies (e.g. device unplug). `is_alive()` consults
+    /// it so a dead thread is never reported as running.
+    alive: Arc<AtomicBool>,
 }
 
 impl BeatSyncHandle {
@@ -134,6 +149,12 @@ impl BeatSyncHandle {
         if let Some(join) = self.join.take() {
             drop(join.join());
         }
+    }
+
+    /// Whether the capture stream is currently running.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
     }
 }
 
@@ -147,41 +168,49 @@ impl Drop for BeatSyncHandle {
 ///
 /// `device_name` overrides loopback device selection (the
 /// `desktop.beat_sync.device` config value); `None` selects the monitor of
-/// the default output device automatically. Every detected beat is relayed
-/// through `ai` into the runtime.
+/// the default output device automatically. The loopback device and its
+/// input configuration are resolved **synchronously**, so a missing device
+/// or unsupported format surfaces as an error here instead of a silently
+/// dead thread. Every detected beat is relayed through `ai` into the
+/// runtime.
 pub fn spawn_beat_sync(
     device_name: Option<String>,
     ai: Arc<AiBridge>,
 ) -> Result<BeatSyncHandle, BeatSyncError> {
+    let (device, config, sample_format) = open_loopback(device_name.as_deref())?;
     let shutdown = Arc::new(AtomicBool::new(false));
+    let alive = Arc::new(AtomicBool::new(false));
     let loop_shutdown = Arc::clone(&shutdown);
+    let loop_alive = Arc::clone(&alive);
     let join = std::thread::Builder::new()
         .name("ene-beat-sync".to_string())
-        .spawn(move || beat_sync_loop(device_name, ai, loop_shutdown))
+        .spawn(move || beat_sync_loop(device, config, sample_format, ai, loop_shutdown, loop_alive))
         .map_err(|e| BeatSyncError::Spawn(e.to_string()))?;
     Ok(BeatSyncHandle {
         join: Some(join),
         shutdown,
+        alive,
     })
 }
 
-fn beat_sync_loop(configured: Option<String>, ai: Arc<AiBridge>, shutdown: Arc<AtomicBool>) {
-    let Some((device, config, sample_format)) = open_loopback(configured.as_deref()) else {
-        tracing::warn!(
-            component = "BeatSync",
-            "no loopback (monitor) audio device found; beat sync disabled \
-             (set desktop.beat_sync.device to a monitor source name)"
-        );
-        return;
-    };
+fn beat_sync_loop(
+    device: cpal::Device,
+    config: cpal::StreamConfig,
+    sample_format: cpal::SampleFormat,
+    ai: Arc<AiBridge>,
+    shutdown: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+) {
     let src_rate = config.sample_rate;
     let channels = usize::from(config.channels.max(1));
     let mut state = Some(CaptureState {
         detector: BeatDetector::new(src_rate),
         ai,
         channels,
+        mono: Vec::new(),
         sample_rate: src_rate,
     });
+    let err_alive = Arc::clone(&alive);
 
     let stream = match device.build_input_stream_raw(
         config,
@@ -192,7 +221,12 @@ fn beat_sync_loop(configured: Option<String>, ai: Arc<AiBridge>, shutdown: Arc<A
             }
         },
         move |err| {
-            tracing::warn!(component = "BeatSync", error = %err, "loopback stream error");
+            tracing::warn!(
+                component = "BeatSync",
+                error = %err,
+                "loopback stream error; beat sync disabled until re-enabled"
+            );
+            err_alive.store(false, Ordering::Relaxed);
         },
         Some(Duration::from_secs(5)),
     ) {
@@ -203,6 +237,7 @@ fn beat_sync_loop(configured: Option<String>, ai: Arc<AiBridge>, shutdown: Arc<A
                 error = %e,
                 "failed to build loopback stream; beat sync disabled"
             );
+            alive.store(false, Ordering::Relaxed);
             return;
         }
     };
@@ -212,8 +247,10 @@ fn beat_sync_loop(configured: Option<String>, ai: Arc<AiBridge>, shutdown: Arc<A
             error = %e,
             "failed to start loopback stream; beat sync disabled"
         );
+        alive.store(false, Ordering::Relaxed);
         return;
     }
+    alive.store(true, Ordering::Relaxed);
 
     let device_name = device
         .description()
@@ -227,7 +264,7 @@ fn beat_sync_loop(configured: Option<String>, ai: Arc<AiBridge>, shutdown: Arc<A
         "beat sync capture started"
     );
 
-    while !shutdown.load(Ordering::Relaxed) {
+    while !shutdown.load(Ordering::Relaxed) && alive.load(Ordering::Relaxed) {
         std::thread::sleep(SHUTDOWN_POLL_INTERVAL);
     }
 }
@@ -235,30 +272,31 @@ fn beat_sync_loop(configured: Option<String>, ai: Arc<AiBridge>, shutdown: Arc<A
 /// Open the loopback capture device and its default input configuration.
 fn open_loopback(
     configured: Option<&str>,
-) -> Option<(cpal::Device, cpal::StreamConfig, cpal::SampleFormat)> {
+) -> Result<(cpal::Device, cpal::StreamConfig, cpal::SampleFormat), BeatSyncError> {
     let host = cpal::default_host();
-    let output_name = host
-        .default_output_device()
-        .and_then(|d| d.description().ok())
-        .map(|d| d.name().to_string());
-    let device = find_loopback_device(&host, configured, output_name.as_deref())?;
-    let supported = device.default_input_config().ok()?;
+    let device =
+        find_loopback_device(&host, configured).ok_or(BeatSyncError::NoLoopbackDevice)?;
+    let supported = device
+        .default_input_config()
+        .map_err(|e| BeatSyncError::NoSupportedConfig(e.to_string()))?;
     let sample_format = supported.sample_format();
+    if !is_linear_pcm(sample_format) {
+        return Err(BeatSyncError::UnsupportedFormat(format!(
+            "{sample_format:?}"
+        )));
+    }
     let config = supported.config();
-    Some((device, config, sample_format))
+    Ok((device, config, sample_format))
 }
 
-/// Pick a loopback input device by name.
+/// Pick a loopback input device.
 ///
-/// Selection order: the configured override (exact name), the monitor of
-/// the default output device (input name contains the output name, the
-/// `PulseAudio` / `PipeWire` `<output>.monitor` convention), any input whose
-/// name contains "monitor". The microphone is never chosen implicitly.
-fn find_loopback_device(
-    host: &cpal::Host,
-    configured: Option<&str>,
-    output_name: Option<&str>,
-) -> Option<cpal::Device> {
+/// Selection order: the configured override (exact name), then any input
+/// whose name contains "monitor". A bare name-contains-output match is
+/// intentionally absent — on ALSA, PulseAudio, and PipeWire the microphone
+/// can share the output device's name, so only the monitor convention can
+/// identify a loopback implicitly.
+fn find_loopback_device(host: &cpal::Host, configured: Option<&str>) -> Option<cpal::Device> {
     let inputs: Vec<(String, cpal::Device)> = host
         .input_devices()
         .ok()?
@@ -268,38 +306,48 @@ fn find_loopback_device(
                 .map(|desc| (desc.name().to_string(), d))
         })
         .collect();
-    let picked = pick_loopback_device(
-        configured,
-        output_name,
-        inputs.iter().map(|(name, _)| name.as_str()),
-    )?;
+    let picked = pick_loopback_device(configured, inputs.iter().map(|(name, _)| name.as_str()))?;
     inputs
         .into_iter()
         .find(|(name, _)| name == &picked)
         .map(|(_, device)| device)
 }
 
-/// Pure name-matching core of [`find_loopback_device`], unit-testable.
+/// Pure matching core of [`find_loopback_device`], unit-testable.
 fn pick_loopback_device<'a>(
     configured: Option<&str>,
-    output_name: Option<&str>,
     input_names: impl IntoIterator<Item = &'a str>,
 ) -> Option<String> {
-    let names: Vec<String> = input_names.into_iter().map(str::to_string).collect();
+    let names: Vec<&str> = input_names.into_iter().collect();
     if let Some(configured) = configured {
-        return names.into_iter().find(|name| name == configured);
-    }
-    if let Some(output_name) = output_name
-        && let Some(name) = names
+        return names
             .iter()
-            .find(|name| name.contains(output_name))
-            .cloned()
-    {
-        return Some(name);
+            .find(|name| **name == configured)
+            .map(|name| name.to_string());
     }
     names
         .into_iter()
         .find(|name| name.to_lowercase().contains("monitor"))
+        .map(str::to_string)
+}
+
+/// Whether `format` is linear PCM the detector can decode.
+fn is_linear_pcm(format: cpal::SampleFormat) -> bool {
+    matches!(
+        format,
+        SampleFormat::F32
+            | SampleFormat::F64
+            | SampleFormat::I8
+            | SampleFormat::I16
+            | SampleFormat::I24
+            | SampleFormat::I32
+            | SampleFormat::I64
+            | SampleFormat::U8
+            | SampleFormat::U16
+            | SampleFormat::U24
+            | SampleFormat::U32
+            | SampleFormat::U64
+    )
 }
 
 /// Per-callback capture state moved into the `cpal` data closure.
@@ -307,37 +355,31 @@ struct CaptureState {
     detector: BeatDetector,
     ai: Arc<AiBridge>,
     channels: usize,
+    /// Reused mono scratch buffer; avoids per-callback allocations.
+    mono: Vec<f32>,
     sample_rate: u32,
 }
 
 impl CaptureState {
     fn on_data(&mut self, data: &cpal::Data) {
-        let interleaved: Vec<f32> = match data.sample_format() {
-            SampleFormat::F32 => data.as_slice::<f32>().unwrap_or_default().to_vec(),
-            SampleFormat::I16 => data
-                .as_slice::<i16>()
-                .unwrap_or_default()
-                .iter()
-                .map(|&v| f32::from(v) / 32768.0)
-                .collect(),
-            SampleFormat::U16 => data
-                .as_slice::<u16>()
-                .unwrap_or_default()
-                .iter()
-                .map(|&v| (f32::from(v) - 32768.0) / 32768.0)
-                .collect(),
+        match data.sample_format() {
+            SampleFormat::F32 => self.decode::<f32>(data),
+            SampleFormat::F64 => self.decode::<f64>(data),
+            SampleFormat::I8 => self.decode::<i8>(data),
+            SampleFormat::I16 => self.decode::<i16>(data),
+            SampleFormat::I24 => self.decode::<cpal::I24>(data),
+            SampleFormat::I32 => self.decode::<i32>(data),
+            SampleFormat::I64 => self.decode::<i64>(data),
+            SampleFormat::U8 => self.decode::<u8>(data),
+            SampleFormat::U16 => self.decode::<u16>(data),
+            SampleFormat::U24 => self.decode::<cpal::U24>(data),
+            SampleFormat::U32 => self.decode::<u32>(data),
+            SampleFormat::U64 => self.decode::<u64>(data),
+            // Raw bitstream formats (DSD) and future formats; the open
+            // path already rejects them, this arm is defense in depth.
             _ => return,
-        };
-        let mono: Vec<f32> = if self.channels <= 1 {
-            interleaved
-        } else {
-            let ch = self.channels;
-            interleaved
-                .chunks(ch)
-                .map(|frame| frame.iter().sum::<f32>() / ch as f32)
-                .collect()
-        };
-        if let Some(pulse) = self.detector.process(&mono, self.sample_rate) {
+        }
+        if let Some(pulse) = self.detector.process(&self.mono, self.sample_rate) {
             tracing::debug!(
                 component = "BeatSync",
                 bpm = pulse.bpm,
@@ -346,6 +388,38 @@ impl CaptureState {
             );
             self.ai.report_beat_pulse(pulse.bpm, pulse.intensity);
         }
+    }
+
+    fn decode<T: cpal::SizedSample>(&mut self, data: &cpal::Data)
+    where
+        f32: cpal::FromSample<T>,
+    {
+        decode_to_mono::<T>(data, self.channels, &mut self.mono);
+    }
+}
+
+/// Decode a cpal data buffer into mono `f32`, reusing the caller's scratch.
+fn decode_to_mono<T: cpal::SizedSample>(
+    data: &cpal::Data,
+    channels: usize,
+    mono: &mut Vec<f32>,
+) where
+    f32: cpal::FromSample<T>,
+{
+    mono.clear();
+    let Some(slice) = data.as_slice::<T>() else {
+        return;
+    };
+    if channels <= 1 {
+        mono.extend(slice.iter().map(|&s| f32::from_sample(s)));
+    } else {
+        mono.extend(slice.chunks(channels).map(|frame| {
+            frame
+                .iter()
+                .map(|&s| f32::from_sample(s))
+                .sum::<f32>()
+                / channels as f32
+        }));
     }
 }
 
@@ -631,33 +705,80 @@ mod tests {
     fn configured_override_wins() {
         let names = ["hw:0", "alsa_output.pci-1.analog-stereo.monitor"];
         assert_eq!(
-            pick_loopback_device(Some("hw:0"), Some("alsa_output.pci-1.analog-stereo"), names),
+            pick_loopback_device(Some("hw:0"), names),
             Some("hw:0".to_string())
         );
     }
 
     #[test]
-    fn output_device_monitor_is_preferred() {
+    fn pulseaudio_monitor_name_is_picked() {
         let names = ["hw:0", "alsa_output.pci-1.analog-stereo.monitor"];
         assert_eq!(
-            pick_loopback_device(None, Some("alsa_output.pci-1.analog-stereo"), names),
+            pick_loopback_device(None, names),
             Some("alsa_output.pci-1.analog-stereo.monitor".to_string())
         );
     }
 
     #[test]
-    fn any_monitor_is_a_fallback() {
+    fn alsa_shared_default_name_never_picks_the_mic() {
+        // ALSA exposes default input and output as the same "Default Audio
+        // Device" PCM; without a monitor-named candidate there is no
+        // loopback, and the mic must not be selected.
+        let names = ["Default Audio Device", "HD-Audio Generic, USB Audio"];
         assert_eq!(
-            pick_loopback_device(None, None, ["Built-in Mic", "Monitor of Built-in Audio"]),
-            Some("Monitor of Built-in Audio".to_string())
+            pick_loopback_device(None, names),
+            None
+        );
+    }
+
+    #[test]
+    fn pipewire_monitor_port_is_picked_over_shared_names() {
+        // On PipeWire the sink and the mic can share the "Default Audio
+        // Device" description; the monitor port (also exposed through
+        // pipewire-alsa) is the only unambiguous loopback candidate.
+        let names = ["Default Audio Device", "alsa_output.pci-1.analog-stereo.monitor"];
+        assert_eq!(
+            pick_loopback_device(None, names),
+            Some("alsa_output.pci-1.analog-stereo.monitor".to_string())
         );
     }
 
     #[test]
     fn no_monitor_means_no_device() {
         assert_eq!(
-            pick_loopback_device(None, None, ["Built-in Mic", "hdmi-capture"]),
+            pick_loopback_device(None, ["Built-in Mic", "hdmi-capture"]),
             None
         );
+    }
+
+    #[test]
+    fn linear_pcm_formats_are_accepted() {
+        for format in [
+            SampleFormat::F32,
+            SampleFormat::F64,
+            SampleFormat::I8,
+            SampleFormat::I16,
+            SampleFormat::I24,
+            SampleFormat::I32,
+            SampleFormat::I64,
+            SampleFormat::U8,
+            SampleFormat::U16,
+            SampleFormat::U24,
+            SampleFormat::U32,
+            SampleFormat::U64,
+        ] {
+            assert!(is_linear_pcm(format), "{format:?} must be linear PCM");
+        }
+    }
+
+    #[test]
+    fn dsd_formats_are_rejected() {
+        for format in [
+            SampleFormat::DsdU8,
+            SampleFormat::DsdU16,
+            SampleFormat::DsdU32,
+        ] {
+            assert!(!is_linear_pcm(format), "{format:?} must be rejected");
+        }
     }
 }

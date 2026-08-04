@@ -1460,9 +1460,22 @@ impl Runtime {
         // Beat sync: drain pulses relayed through the runtime chat bus and
         // drive the avatar's procedural sway + locomotion speed sync.
         {
+            // A capture thread that died (device unplug, stream error) must
+            // not leave the avatar waiting for pulses that will never come;
+            // the toggle UI reads the same liveness flag.
+            #[cfg(feature = "voice")]
+            let beat_running = app
+                .world()
+                .get_resource::<crate::resource::beat_sync::BeatSyncRuntime>()
+                .is_some_and(|runtime| runtime.is_running());
+            #[cfg(not(feature = "voice"))]
+            let beat_running = false;
             let world = app.world_mut();
             let beat_state = world.get_resource_mut::<crate::resource::beat_sync::BeatSyncState>();
             if let Some(mut beat_state) = beat_state {
+                if beat_state.is_enabled() && !beat_running {
+                    beat_state.set_enabled(false);
+                }
                 character.set_beat_sync_enabled(beat_state.is_enabled());
                 for pulse in beat_state.drain_pulses() {
                     character.beat_pulse(pulse.bpm, pulse.intensity);

@@ -56,15 +56,15 @@ impl Default for BeatSway {
 impl BeatSway {
     /// Register a detected beat.
     ///
-    /// The phase snaps back to zero so the sway's peak lands on the beat;
-    /// the snap coincides with the intensity attack, which masks the small
-    /// rotational jump. `bpm` is clamped to a plausible tempo range and
-    /// `intensity` to `[0, 1]` so a misbehaving host cannot blow up the
-    /// amplitude.
+    /// The phase snaps to the sine peak (π/2) so the sway's maximum
+    /// rotation lands exactly on the beat; the snap coincides with the
+    /// intensity attack, which masks the small rotational jump. `bpm` is
+    /// clamped to a plausible tempo range and `intensity` to `[0, 1]` so a
+    /// misbehaving host cannot blow up the amplitude.
     pub fn on_pulse(&mut self, bpm: f32, intensity: f32) {
         self.bpm = bpm.clamp(30.0, 300.0);
         self.intensity = intensity.clamp(0.0, 1.0);
-        self.phase = 0.0;
+        self.phase = std::f32::consts::FRAC_PI_2;
         self.since_pulse = 0.0;
     }
 
@@ -155,9 +155,12 @@ mod tests {
         let mut sway = BeatSway::default();
         sway.on_pulse(120.0, 1.0);
         assert!(sway.is_active());
+        // The phase starts at the sine peak so the beat lands on the max
+        // rotation.
+        assert!((sway.phase - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
         sway.update(0.25);
-        // 0.25 s at 120 BPM = half a beat = pi radians.
-        assert!((sway.phase - std::f32::consts::PI).abs() < 1e-4);
+        // 0.25 s at 120 BPM = half a beat = pi radians past the peak.
+        assert!((sway.phase - 3.0 * std::f32::consts::FRAC_PI_2).abs() < 1e-4);
     }
 
     #[test]

@@ -162,7 +162,8 @@ degrades to disabled there.
 
 - **Procedural sway** (`ene-vrm::beat_sync::BeatSway`, no assets required):
   beat-locked rotations on hips / spine / chest / head (≤ ~4°), phase snapped
-  to each pulse with an intensity envelope that decays between beats.
+  to the sine peak on each pulse (max rotation lands on the beat) with an
+  intensity envelope that decays between beats.
 - **Locomotion speed sync**: while a beat is active, the currently-playing
   VRMA clip's `VrmaPlayer.speed` is scaled by `bpm / 120` (clamped
   0.85–1.2), so walk/dance clips follow the tempo.

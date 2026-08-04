@@ -11,6 +11,10 @@ use bevy_ecs::prelude::*;
 
 use crate::event::ai::BeatPulse;
 
+/// Maximum pending pulses kept for the render loop; at ≤4 pulses/s this
+/// covers many stalled frames before the oldest pulse is dropped.
+const PULSE_QUEUE_CAPACITY: usize = 32;
+
 /// A detected beat normalized for the avatar layer.
 #[derive(Debug, Clone, Copy)]
 pub struct BeatPulseSnapshot {
@@ -45,6 +49,9 @@ impl BeatSyncState {
     /// Queue a pulse for the render loop; ignored while disabled.
     pub fn push_pulse(&mut self, pulse: BeatPulseSnapshot) {
         if self.enabled {
+            if self.pulses.len() >= PULSE_QUEUE_CAPACITY {
+                self.pulses.pop_front();
+            }
             self.pulses.push_back(pulse);
         }
     }
@@ -82,7 +89,7 @@ impl BeatSyncRuntime {
     /// Whether a capture thread is currently running.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.0.is_some()
+        self.0.as_ref().is_some_and(|handle| handle.is_alive())
     }
 
     /// Stop capture and drop the handle.
