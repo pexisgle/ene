@@ -88,10 +88,14 @@ pub async fn ensure_engine(
         }
         Ok(Err(e)) => {
             drop(child.start_kill());
+            // Reap the failed child now; the plugin process is long-lived,
+            // so an unreaped zombie would outlive the failed startup attempt.
+            drop(child.wait().await);
             Err(e)
         }
         Err(_) => {
             drop(child.start_kill());
+            drop(child.wait().await);
             Err(PluginError::provider(format!(
                 "VOICEVOX engine did not answer GET /version within {} s",
                 config.startup_timeout_secs.max(1)

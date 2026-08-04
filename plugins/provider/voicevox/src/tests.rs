@@ -1,6 +1,7 @@
 //! Plugin tests: external-mode 2-step flow against an in-process fake
-//! engine, error paths, and managed-mode lifecycle against a real
-//! `voicevox-fake-engine` child process.
+//! engine, error paths, and managed-mode lifecycle against a real engine
+//! child process (the test harness re-executes itself, filtered to this
+//! test, and serves the mock engine under an env-var marker).
 
 #![expect(
     clippy::expect_used,
@@ -184,9 +185,10 @@ async fn managed_mode_requires_engine_path_when_server_down() {
 
 #[tokio::test]
 async fn managed_mode_spawns_engine_and_kills_it_on_drop() {
-    // Child branch: the plugin spawns this same test binary (filtered by
-    // `engine_args` below) as the managed engine; the marker env var makes
-    // it serve the mock engine instead of running assertions.
+    // Child branch: the plugin spawns this same test binary (filtered with
+    // `--exact` by `engine_args` below) as the managed engine; the marker
+    // env var makes the child serve the mock engine instead of running
+    // assertions.
     if let Some(port) = fake_engine_child_port() {
         run_fake_engine_child(port).await;
     }
@@ -211,7 +213,10 @@ async fn managed_mode_spawns_engine_and_kills_it_on_drop() {
                 "server_url": format!("http://127.0.0.1:{port}"),
                 "auto_start": true,
                 "engine_path": std::env::current_exe().expect("test binary path"),
-                "engine_args": ["managed_mode_spawns_engine_and_kills_it_on_drop"],
+                "engine_args": [
+                    "--exact",
+                    "tests::managed_mode_spawns_engine_and_kills_it_on_drop"
+                ],
                 "startup_timeout_secs": 15
             }),
             "こんにちは".to_string(),

@@ -78,9 +78,24 @@ impl VoicevoxConfig {
 
     /// Resolves the speaker for a request: a non-empty `voice` value that
     /// parses as an integer overrides the configured default speaker.
+    /// Unparseable values fall back to the configured speaker and log a
+    /// warning, so a typo (or a named voice from another provider) is not
+    /// silently swallowed.
     #[must_use]
     pub fn resolve_speaker(&self, voice: &str) -> u64 {
-        voice.parse::<u64>().unwrap_or(self.speaker_id)
+        match voice.parse::<u64>() {
+            Ok(speaker) => speaker,
+            Err(_) if voice.trim().is_empty() => self.speaker_id,
+            Err(_) => {
+                tracing::warn!(
+                    component = "VoicevoxPlugin",
+                    voice,
+                    speaker_id = self.speaker_id,
+                    "ai.tts.voice is not a numeric speaker id; using the configured speaker_id"
+                );
+                self.speaker_id
+            }
+        }
     }
 }
 

@@ -1,9 +1,9 @@
 //! Minimal VOICEVOX-compatible HTTP engine used as a test fixture.
 //!
-//! Compiled into two places: the plugin's `#[cfg(test)]` module tree (for
-//! in-process external-mode tests) and the `voicevox-fake-engine` helper
-//! binary (for managed-mode lifecycle tests). Both build this file without
-//! the test lint opt-outs, so it stays production-clean.
+//! Compiled into the plugin's `#[cfg(test)]` module tree (for in-process
+//! external-mode tests and the managed-mode child that re-executes the test
+//! harness). It is built without the test lint opt-outs, so it stays
+//! production-clean.
 
 use std::io;
 use std::sync::{Arc, Mutex};

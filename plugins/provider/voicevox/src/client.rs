@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use ene_plugin::PluginError;
+use futures::StreamExt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -40,6 +41,10 @@ fn http_client() -> Result<&'static reqwest::Client, PluginError> {
 const SYNTHESIS_TIMEOUT: Duration = Duration::from_mins(1);
 /// Per-probe timeout for `GET /version` health checks.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+/// Cap on any engine response body. 24 kHz s16 mono audio is ~2.9 MB per
+/// minute, so 64 MiB covers very long utterances while bounding the memory
+/// a misbehaving engine can make the plugin allocate.
+const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Engine-reported synthesis parameters, round-tripped between the two API
 /// steps with the configured scale overrides applied.
@@ -72,15 +77,24 @@ pub struct AudioQuery {
 impl AudioQuery {
     /// Applies the configured scale and sampling overrides to a query
     /// returned by `audio_query`.
+    ///
+    /// The four standard scales are always overridden by the config. The
+    /// Aivis extension fields are only overridden when explicitly
+    /// configured: engine-returned values survive at config defaults, so an
+    /// Aivis preset's `outputSamplingRate` / `tempoDynamicsScale` round-trip
+    /// (VOICEVOX never returns them, so it still never sees them).
     #[must_use]
     pub fn with_overrides(mut self, config: &VoicevoxConfig) -> Self {
         self.speed_scale = Some(config.speed_scale);
         self.pitch_scale = Some(config.pitch_scale);
         self.intonation_scale = Some(config.intonation_scale);
         self.volume_scale = Some(config.volume_scale);
-        self.tempo_dynamics_scale = ((config.tempo_dynamics_scale - 1.0).abs() > f32::EPSILON)
-            .then_some(config.tempo_dynamics_scale);
-        self.output_sampling_rate = config.output_sampling_rate;
+        if (config.tempo_dynamics_scale - 1.0).abs() > f32::EPSILON {
+            self.tempo_dynamics_scale = Some(config.tempo_dynamics_scale);
+        }
+        if let Some(rate) = config.output_sampling_rate {
+            self.output_sampling_rate = Some(rate);
+        }
         self
     }
 }
@@ -147,31 +161,56 @@ pub async fn synthesize(
         .send()
         .await
         .map_err(|e| PluginError::provider(format!("synthesis request failed: {e}")))?;
-    let status = synthesis_response.status();
-    let bytes = synthesis_response
-        .bytes()
-        .await
-        .map_err(|e| PluginError::provider(format!("failed to read synthesis response: {e}")))?;
+    let (status, bytes) = read_response_bounded(synthesis_response, "/synthesis").await?;
     if !status.is_success() {
         return Err(non_success(status, "/synthesis", &bytes));
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 async fn parse_json_response<T: for<'de> Deserialize<'de>>(
     response: reqwest::Response,
     endpoint: &str,
 ) -> Result<T, PluginError> {
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| PluginError::provider(format!("failed to read {endpoint} response: {e}")))?;
+    let (status, bytes) = read_response_bounded(response, endpoint).await?;
     if !status.is_success() {
         return Err(non_success(status, endpoint, &bytes));
     }
     serde_json::from_slice(&bytes)
         .map_err(|e| PluginError::provider(format!("invalid JSON from {endpoint}: {e}")))
+}
+
+/// Reads a response body into memory, rejecting payloads over
+/// [`MAX_RESPONSE_BYTES`] (checked against `Content-Length` upfront and
+/// against the accumulated stream while reading, so a lying or chunked
+/// engine cannot OOM the plugin).
+async fn read_response_bounded(
+    response: reqwest::Response,
+    endpoint: &str,
+) -> Result<(reqwest::StatusCode, Vec<u8>), PluginError> {
+    let status = response.status();
+    if let Some(length) = response.content_length()
+        && length > MAX_RESPONSE_BYTES as u64
+    {
+        return Err(PluginError::provider(format!(
+            "{endpoint} response too large: {length} bytes exceeds the \
+             {MAX_RESPONSE_BYTES}-byte limit"
+        )));
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            PluginError::provider(format!("failed to read {endpoint} response: {e}"))
+        })?;
+        body.extend_from_slice(&chunk);
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(PluginError::provider(format!(
+                "{endpoint} response exceeds the {MAX_RESPONSE_BYTES}-byte limit"
+            )));
+        }
+    }
+    Ok((status, body))
 }
 
 fn non_success(status: StatusCode, endpoint: &str, body: &[u8]) -> PluginError {
@@ -233,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn omits_aivis_extension_fields_at_defaults() {
+    fn preserves_engine_returned_aivis_extensions_at_defaults() {
         let query: AudioQuery =
             serde_json::from_str(EXAMPLE_AUDIO_QUERY).expect("example query parses");
         let config = VoicevoxConfig {
@@ -242,9 +281,31 @@ mod tests {
             ..VoicevoxConfig::default()
         };
         let serialized = serde_json::to_value(query.with_overrides(&config)).expect("serializes");
+        // The engine returned `outputSamplingRate`; with no config override
+        // it must round-trip instead of being erased.
+        assert_eq!(serialized["outputSamplingRate"], 24_000);
+        // The example engine never returns `tempoDynamicsScale` (it is a
+        // VOICEVOX-shaped response), so it stays absent.
         assert!(serialized.get("tempoDynamicsScale").is_none());
-        assert!(serialized.get("outputSamplingRate").is_none());
         assert!((serialized["speedScale"].as_f64().expect("number") - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn config_overrides_engine_returned_aivis_extensions() {
+        let query: AudioQuery = serde_json::from_value(json!({
+            "accentPhrases": [],
+            "outputSamplingRate": 48000,
+            "tempoDynamicsScale": 1.5
+        }))
+        .expect("aivis query parses");
+        let config = VoicevoxConfig {
+            tempo_dynamics_scale: 0.8,
+            output_sampling_rate: Some(24_000),
+            ..VoicevoxConfig::default()
+        };
+        let serialized = serde_json::to_value(query.with_overrides(&config)).expect("serializes");
+        assert_eq!(serialized["outputSamplingRate"], 24_000);
+        assert_eq!(serialized["tempoDynamicsScale"], 0.8);
     }
 
     #[test]
