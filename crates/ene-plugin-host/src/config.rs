@@ -103,6 +103,11 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // `ai.tts.provider = "voicevox"` selects it.
     list.insert("voicevox".to_string(), PluginEntry::default());
 
+    // The Edge-TTS provider plugin talks to Microsoft's free, keyless Edge
+    // Read Aloud WebSocket endpoint; it is inert until
+    // `ai.tts.provider = "edge-tts"` selects it.
+    list.insert("edge-tts".to_string(), PluginEntry::default());
+
     list
 }
 

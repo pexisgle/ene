@@ -853,6 +853,67 @@ Changing `ai.tts.provider` itself (e.g. switching from `kokoro` to
 once at bootstrap, while edits to `plugins.list.voicevox.config` and
 `ai.tts.voice` are picked up by running sessions.
 
+#### Microsoft Edge Neural Voice TTS provider (`plugins.list.edge-tts.config`)
+
+The `edge-tts` provider plugin (`plugins/provider/edge-tts`) talks to
+Microsoft's Edge Read Aloud WebSocket endpoint — the same free, keyless
+neural voices the browser's read-aloud feature uses. No API key and no local
+server are needed. Select it with `ai.tts.provider = "edge-tts"`; the generic
+`ai.tts.voice` field can hold an Edge voice name (short form, e.g.
+`ja-JP-NanamiNeural`) that overrides the configured default per request.
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "edge-tts",
+      "voice": "ja-JP-NanamiNeural"
+    }
+  },
+  "plugins": {
+    "list": {
+      "edge-tts": {
+        "enable": true,
+        "config": {
+          "voice": "ja-JP-NanamiNeural",
+          "locale": "ja-JP",
+          "rate": "+0%",
+          "pitch": "+0Hz",
+          "volume": "+0%",
+          "max_retries": 3
+        }
+      }
+    }
+  }
+}
+```
+
+Settings:
+
+| Key | Default | Description |
+|---|---|---|
+| `voice` | `ja-JP-NanamiNeural` | Edge voice name, short (`ja-JP-NanamiNeural`) or long form. |
+| `locale` | `ja-JP` | SSML `xml:lang` value on the `<speak>` element. |
+| `rate` | `+0%` | Prosody rate adjustment (e.g. `+10%`, `-10%`). |
+| `pitch` | `+0Hz` | Prosody pitch adjustment (e.g. `+5Hz`, `-5Hz`). |
+| `volume` | `+0%` | Prosody volume adjustment (e.g. `+10%`, `-10%`). |
+| `max_retries` | `3` | Reconnect attempts for the whole synthesize request (shared across text chunks), with exponential backoff (0–10). |
+| `endpoint_url` | `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1` | WebSocket endpoint; must not carry a query string. |
+
+The connection mimics the Edge Read Aloud extension (Chrome/Edge user agent,
+extension `Origin`, `Sec-MS-GEC` token) and requests
+`audio-24khz-48kbitrate-mono-mp3`. Text longer than 4096 bytes is split at
+whitespace/UTF-8/XML-entity-safe boundaries and synthesized chunk by chunk
+over the same connection; the plugin decodes the MP3 stream and returns WAV
+audio (24 kHz mono). If the connection drops, the current chunk is retried
+with exponential backoff, up to `max_retries` times in total per request
+(the budget is shared across chunks).
+
+Changing `ai.tts.provider` itself (e.g. switching from `voicevox` to
+`edge-tts`) takes effect at the next startup: the active provider is built
+once at bootstrap, while edits to `plugins.list.edge-tts.config` and
+`ai.tts.voice` are picked up by running sessions.
+
 #### Secret marking
 
 A plugin's `config_schema()` may mark a field with `x-ene-secret: true`. The
