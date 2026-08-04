@@ -251,13 +251,14 @@ unavailable until the inference slice lands.
 | `ene-plugin-random` | `random.*` | Random numbers, UUID v4, list picks, and hex colors | No |
 | `ene-plugin-geo` | `geo.*` | IP-based location, current weather, solar timezone offset, sunrise/sunset | No |
 | `ene-plugin-git` | `git.*` | Read-only git inspection: status, diff, log, branch, remote, blame | No |
+| `ene-plugin-homeassistant` | `homeassistant.*` | Home Assistant smart home control: entity state reads, switch/light/plug control, climate temperature setting | No |
 | `ene-plugin-utility` | `utility.*` | Question prompts, todo list management, time/system info, countdown timers & desktop notifications (Linux, D-Bus only) | Yes (host-service `db`) |
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
 | `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — capability skeleton today, inference in a later slice | No |
 
-All fourteen plugins above are included in the default `plugins.list` and start
+All fifteen plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.
 
 ### Filesystem tool reference (`filesystem.*`)
