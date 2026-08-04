@@ -30,6 +30,9 @@ pub struct WorldStateSnapshot {
     /// Non-empty when the focused window changed since the previous snapshot.
     pub recent_change: String,
     /// Seconds since the last user message in the session at capture time.
+    ///
+    /// Part of the temporal context; not consumed by the current trend
+    /// summary.
     pub seconds_since_user_input: u64,
 }
 
@@ -57,8 +60,9 @@ impl WorldStateSnapshot {
     }
 }
 
-/// Direction of the idle trend across the ring, computed from the latest vs.
-/// the earliest snapshot when both carry a measured idle value.
+/// Direction of the idle trend across the ring, computed from the most recent
+/// segment (latest vs. previous snapshot) when both carry a measured idle
+/// value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdleTrend {
@@ -142,10 +146,10 @@ impl WorldStateMemory {
             return None;
         }
         let latest = self.snapshots.back()?;
-        let earliest = self.snapshots.front()?;
-        let idle_trend = match (earliest.idle_seconds, latest.idle_seconds) {
-            (Some(earliest), Some(latest)) if latest > earliest => IdleTrend::Rising,
-            (Some(earliest), Some(latest)) if latest < earliest => IdleTrend::Falling,
+        let previous = self.snapshots.iter().rev().nth(1).unwrap_or(latest);
+        let idle_trend = match (previous.idle_seconds, latest.idle_seconds) {
+            (Some(previous), Some(latest)) if latest > previous => IdleTrend::Rising,
+            (Some(previous), Some(latest)) if latest < previous => IdleTrend::Falling,
             (Some(_), Some(_)) => IdleTrend::Steady,
             _ => IdleTrend::Unknown,
         };
@@ -229,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_trend_uses_latest_vs_earliest() {
+    fn idle_trend_uses_the_latest_segment() {
         let mut ring = WorldStateMemory::default();
         for (i, idle) in [Some(10u64), Some(20), Some(30)].into_iter().enumerate() {
             ring.push(snapshot(i as u64 + 1, idle, ""), &config());
@@ -259,6 +263,21 @@ mod tests {
     }
 
     #[test]
+    fn non_monotonic_idle_series_follows_the_latest_segment() {
+        let mut ring = WorldStateMemory::default();
+        // The overall series rises (60 → 120 → 90) but the most recent
+        // segment falls: the user is returning toward activity, so the trend
+        // must report Falling rather than Rising.
+        for (i, idle) in [Some(60u64), Some(120), Some(90)].into_iter().enumerate() {
+            ring.push(snapshot(i as u64 + 1, idle, ""), &config());
+        }
+        assert_eq!(
+            ring.summary(&config()).expect("summary").idle_trend,
+            IdleTrend::Falling
+        );
+    }
+
+    #[test]
     fn idle_trend_is_unknown_without_measured_idle() {
         let mut ring = WorldStateMemory::default();
         for i in 0..3 {
@@ -269,8 +288,8 @@ mod tests {
             IdleTrend::Unknown
         );
 
-        // Only the endpoints matter: a host that measures idle intermittently
-        // must not lose the trend because a middle snapshot has no value.
+        // The latest segment carries a missing value, so the direction is
+        // unknown regardless of older measurements.
         let mixed = WorldStateMemory {
             snapshots: VecDeque::from([
                 snapshot(1, Some(10), ""),
@@ -280,7 +299,7 @@ mod tests {
         };
         assert_eq!(
             mixed.summary(&config()).expect("summary").idle_trend,
-            IdleTrend::Rising
+            IdleTrend::Unknown
         );
     }
 
