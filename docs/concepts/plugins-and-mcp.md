@@ -255,7 +255,7 @@ unavailable until the inference slice lands.
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
-| `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — capability skeleton today, inference in a later slice | No |
+| `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — chat streaming, completion, and GGUF embeddings | No |
 
 All fourteen plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.

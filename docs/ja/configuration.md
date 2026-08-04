@@ -476,7 +476,8 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
             "url": "https://example.com/gemma-4-e4b.gguf",
             "quantization": "Q4_0",
             "model_path": "",
-            "gpu_layers": "33"
+            "gpu_layers": "33",
+            "context_size": 16384
           }
         }
       }
@@ -489,10 +490,17 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 1 つのプロファイルを消費します：`url`（GGUF ダウンロード URL）、
 `quantization`（ラベル、例：`"F16"` / `"Q4_0"`）、`model_path`（非空の場合は
 ダウンロードをスキップするローカルパス）、`gpu_layers`（`"auto"` または整数
-文字列）。プロファイルの*選択*はプラグイン側の責務で、値は
+文字列）、および省略可能な `context_size`（チャットのコンテキスト窓（トークン
+単位）。省略時は `16384`）。プラグインは初回使用時に `url` の重みをモデル
+キャッシュへダウンロードし（GGUF マジック検証付き）、プロファイルごとに
+ロードしたモデルをプロセス生存期間中保持します。`context_size` はチャット
+モデルの KV キャッシュ寸法のみを決めます — 埋め込みモデルは内部で独自に
+コンテキストを設定し、ホスト側のルーティング窓は `ai.local_models.<name>.context_size`
+に残ります。プロファイルの*選択*はプラグイン側の責務で、値は
 `ConfigurablePlugin::set_profiles` で配信されます。v2→v3 マイグレーションは
-既存の `ai.local_models` エントリをこれらのプロファイルへミラーします。
-ローカルモデルのキーはルーティング情報として `ai.local_models` に残ります。
+既存の `ai.local_models` エントリをこれらのプロファイルへミラーします
+（`context_size` はミラーしません）。ローカルモデルのキーはルーティング情報
+として `ai.local_models` に残ります。
 
 #### シークレットのマーキング
 
