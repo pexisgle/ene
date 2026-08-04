@@ -9,6 +9,11 @@ restart.
 > The scheduler requires the memory store (`store.enabled = true`). Without
 > it, no schedule fires and `/schedule` reports that the store is required.
 
+Schedules are managed by a single app instance: do not run two Ene processes
+against the same `memory.db` while schedules are enabled. A second instance's
+startup reconciliation would mark the first instance's in-flight runs
+`interrupted`, and the two timers would contend for the same occurrences.
+
 ## Managing schedules in the CLI
 
 All schedule management happens through the `/schedule` REPL command:
