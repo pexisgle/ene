@@ -249,7 +249,6 @@ spotlight-placeholder = コマンドを入力…
 spotlight-action-open-settings = 設定を開く
 spotlight-action-open-chat = チャットを開く
 spotlight-action-toggle-mic = マイクを切り替え
-spotlight-action-quick-chat = クイックチャット
 spotlight-action-toggle-caption = キャプションオーバーレイを切り替え
 spotlight-send-chat = チャットに送信: { $text }
 

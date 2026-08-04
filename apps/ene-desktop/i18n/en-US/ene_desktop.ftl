@@ -249,7 +249,6 @@ spotlight-placeholder = Type a command…
 spotlight-action-open-settings = Open Settings
 spotlight-action-open-chat = Open Chat
 spotlight-action-toggle-mic = Toggle Microphone
-spotlight-action-quick-chat = Quick Chat
 spotlight-action-toggle-caption = Toggle Caption Overlay
 spotlight-send-chat = Send to chat: { $text }
 

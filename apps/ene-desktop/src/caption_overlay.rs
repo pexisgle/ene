@@ -50,6 +50,7 @@ pub fn feed_caption_overlay_system(
     for delta in text_delta.read() {
         if feed.finished {
             ui.0.caption_text.clear();
+            feed.emote = None;
             feed.finished = false;
         }
         ui.0.caption_text.push_str(&delta.0);
@@ -76,6 +77,9 @@ pub struct CaptionOverlayWindow {
     revealed: f32,
     /// Always-on-top window level; toggled by the pin button.
     pinned: bool,
+    /// First rendered frame after creation: reveal the buffer already
+    /// present instead of replaying it from zero on reopen.
+    first_frame: bool,
     last_frame: Option<Instant>,
 }
 
@@ -130,6 +134,7 @@ impl CaptionOverlayWindow {
             textures_to_free: VecDeque::from(vec![Vec::new(); 3]),
             revealed: 0.0,
             pinned,
+            first_frame: true,
             last_frame: None,
         })
     }
@@ -185,7 +190,10 @@ impl CaptionOverlayWindow {
             .map(|last| now.duration_since(last).as_secs_f32())
             .unwrap_or_default();
         let len = text.chars().count() as f32;
-        if finished {
+        if self.first_frame {
+            self.revealed = len;
+            self.first_frame = false;
+        } else if finished {
             self.revealed = len;
         } else {
             self.revealed = (self.revealed + dt * CAPTION_CHARS_PER_SECOND).min(len);
@@ -257,12 +265,12 @@ impl CaptionOverlayWindow {
                 if revealed_text.is_empty() {
                     ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "caption-empty"));
                 } else {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("{revealed_text}▌")).size(18.0),
-                        )
-                        .wrap(),
-                    );
+                    let display = if finished {
+                        revealed_text
+                    } else {
+                        format!("{revealed_text}▌")
+                    };
+                    ui.add(egui::Label::new(egui::RichText::new(display).size(18.0)).wrap());
                 }
 
                 if let Some(emote) = emote
@@ -432,5 +440,23 @@ mod tests {
             world.resource::<CaptionFeed>().emote.as_deref(),
             Some("happy")
         );
+    }
+
+    #[test]
+    fn new_turn_clears_the_previous_cue() {
+        let mut world = build_world();
+        spawn_ui(&mut world);
+        world.write_message(EmoteToken("happy".to_string()));
+        world.write_message(AiTextDelta("one".to_string()));
+        world.write_message(AiStreamFinished);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(feed_caption_overlay_system);
+        schedule.run(&mut world);
+
+        world.write_message(AiTextDelta("two".to_string()));
+        schedule.run(&mut world);
+
+        assert_eq!(world.resource::<CaptionFeed>().emote, None);
     }
 }

@@ -246,6 +246,9 @@ impl VisemeState {
 /// (see [`ChatUi`](crate::chat_ui::render::ChatUi)).
 #[cfg(feature = "voice")]
 pub type MicCaptureHandle = Option<capture::MicHandle>;
+/// Text-only placeholder so UIs can hold the handle type uniformly.
+#[cfg(not(feature = "voice"))]
+pub type MicCaptureHandle = Option<()>;
 
 /// Toggle microphone capture on or off.
 ///

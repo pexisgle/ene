@@ -102,6 +102,7 @@ impl ChatEguiWindow {
         ai: Option<&Arc<AiBridge>>,
         world: &mut World,
         chat_entity: Entity,
+        mic_handle: &mut crate::audio::MicCaptureHandle,
     ) -> Result<(), AcquireError> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -132,7 +133,7 @@ impl ChatEguiWindow {
 
         egui::CentralPanel::default().show(&mut panel_ui, |ui| {
             crate::settings_ui::apply_egui_visuals(ui.ctx());
-            self.chat_ui.render(ui, ai, world, chat_entity);
+            self.chat_ui.render(ui, ai, world, chat_entity, mic_handle);
         });
 
         let full_output = self.egui_ctx.end_pass();

@@ -33,7 +33,7 @@ Press `Alt+Space` (`Option+Space` on macOS-style layouts) from any application t
 - **Toggle Caption Overlay** — shows/hides the floating caption window.
 - **Free text** — when no command matches, pressing Enter sends the text to Ene through the same path as the chat input.
 
-The palette is controlled from **Settings → Accessibility**: `Enable Spotlight (Alt+Space)` turns the global shortcut on/off, and `Enable floating caption overlay` controls the caption window.
+The palette is controlled from **Settings → Accessibility**: `Enable Spotlight (Alt+Space)` registers/unregisters the global shortcut (while it is off, Alt+Space passes through to the OS again), and `Enable floating caption overlay` controls whether the caption window can be shown.
 
 ### Platform limits
 
@@ -44,7 +44,7 @@ The palette is controlled from **Settings → Accessibility**: `Enable Spotlight
 
 ## Floating Caption Overlay
 
-The floating caption overlay is a separate, translucent subtitle window that renders the assistant's streamed speech in real time with a typewriter effect. Open it from Spotlight (`Toggle Caption Overlay`) or from Settings → Accessibility.
+The floating caption overlay is a separate, translucent subtitle window that renders the assistant's streamed speech in real time with a typewriter effect. Open it from Spotlight (`Toggle Caption Overlay`); Settings → Accessibility only enables the capability. Its position and pin state are remembered across restarts.
 
 - **Drag** — grab the title bar to move it anywhere on screen; the position is remembered.
 - **Pin / Unpin** — keeps the window above other applications (unavailable on Wayland, which has no window-level support).

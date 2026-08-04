@@ -24,7 +24,7 @@ use crate::chat_ui::ChatEguiWindow;
 use crate::events::AppEventSender;
 use crate::gpu::{WindowSurfaceError, pick_format_and_alpha};
 use crate::hotkey::HotkeyState;
-use crate::settings::CharacterSettings;
+use crate::settings::{CharacterSettings, DesktopSection};
 use crate::settings_ui::{PageKind, SettingsUi, widgets::SettingsAction};
 use crate::spotlight::SpotlightWindow;
 use crate::state::AppState;
@@ -67,11 +67,16 @@ pub struct Runtime {
     alt_held: bool,
     /// Global Alt+Space registration; `None` on Wayland or when the
     /// registration is taken, in which case in-window handling stays on.
-    hotkey: Option<HotkeyState>,
+    hotkey: HotkeyState,
     /// Previous frame's `tts_playing` value, used to detect the
     /// true→false transition and reset the viseme mouth shape.
     #[cfg(feature = "voice")]
     prev_tts_playing: bool,
+    /// Single long-lived microphone capture handle shared by the chat
+    /// UI and the spotlight mic action. Lives here (not in a window)
+    /// because `cpal::Stream` is `!Send + !Sync` and dropping a window
+    /// would otherwise stop capture.
+    mic_handle: crate::audio::MicCaptureHandle,
 }
 
 impl Runtime {
@@ -102,9 +107,17 @@ impl Runtime {
             ui.0.runtime_startup_error = Some(error);
         }
 
-        let hotkey = HotkeyState::try_new();
-        if hotkey.is_some() {
+        let mut hotkey = HotkeyState::new();
+        if hotkey.is_registered() {
             tracing::info!("Global Alt+Space hotkey registered");
+        }
+        // A persisted `spotlight_enabled = false` must not grab
+        // Alt+Space even briefly at startup; the per-frame reconcile
+        // would release it on the first frame anyway.
+        if !state.settings.spotlight_enabled()
+            && let Err(error) = hotkey.sync_enabled(false)
+        {
+            tracing::warn!(error = %error, "Failed to release global hotkey at startup");
         }
 
         Self {
@@ -125,6 +138,7 @@ impl Runtime {
             hotkey,
             #[cfg(feature = "voice")]
             prev_tts_playing: false,
+            mic_handle: None,
         }
     }
 
@@ -347,11 +361,19 @@ impl Runtime {
             .with_decorations(false)
             .with_transparent(true)
             .with_window_level(WindowLevel::AlwaysOnTop);
+        let desktop_position = self.state.settings.config_section::<DesktopSection>();
         let (position, pinned) = {
             let ui_state = self.state.ui_bevy_state();
             (
-                ui_state.0.caption_position,
-                ui_state.0.caption_pinned.unwrap_or(true),
+                ui_state
+                    .0
+                    .caption_position
+                    .or(desktop_position.caption_position),
+                ui_state
+                    .0
+                    .caption_pinned
+                    .or(desktop_position.caption_pinned)
+                    .unwrap_or(true),
             )
         };
         if let Some((x, y)) = position {
@@ -600,6 +622,19 @@ impl ApplicationHandler for Runtime {
             self.alt_held = modifiers.state().alt_key();
         }
 
+        // In-window Alt+Space fallback when no global grab is active
+        // (Wayland, or Spotlight disabled). Works from any app window;
+        // the grab consumes the key wherever it fires, so both paths
+        // are never live at the same time.
+        if let WindowEvent::KeyboardInput { .. } = &event
+            && key_pressed(&event) == Some(NamedKey::Space)
+            && self.alt_held
+            && crate::hotkey::in_window_fallback_active(self.hotkey.is_registered())
+        {
+            self.toggle_spotlight(event_loop);
+            return;
+        }
+
         if is_ui {
             self.handle_ui_window_event(event_loop, event);
         } else if is_chat {
@@ -614,7 +649,7 @@ impl ApplicationHandler for Runtime {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.hotkey.as_ref().is_some_and(HotkeyState::consume_press) {
+        if self.hotkey.consume_press() {
             self.toggle_spotlight(event_loop);
         }
         self.sync_runtime_to_bevy();
@@ -662,6 +697,17 @@ impl Runtime {
             pipeline.expression_hold_secs = expression_hold_secs;
         }
         self.state.settings.flush_if_dirty();
+        // Reconcile the OS grab with the persisted setting so disabling
+        // Spotlight releases Alt+Space (and enabling re-registers it).
+        if let Err(error) = self
+            .hotkey
+            .sync_enabled(self.state.settings.spotlight_enabled())
+        {
+            tracing::warn!(
+                error = %error,
+                "Failed to sync global hotkey registration"
+            );
+        }
         self.state.sync_runtime_health_to_ui();
     }
 
@@ -701,6 +747,7 @@ impl Runtime {
         if !exit {
             return false;
         }
+        self.persist_caption_settings();
         self.state.save();
         event_loop.exit();
         true
@@ -799,6 +846,7 @@ impl Runtime {
             self.state.ai.as_ref(),
             bevy_world,
             chat_entity,
+            &mut self.mic_handle,
         ) {
             Ok(()) => {}
             Err(e) => match e {
@@ -837,6 +885,7 @@ impl Runtime {
             bevy_world,
             ui_entity,
             chat_entity,
+            &mut self.mic_handle,
         ) {
             Ok(()) => {}
             Err(e) => match e {
@@ -853,7 +902,10 @@ impl Runtime {
         let visible =
             self.state.ui_bevy_state().0.caption_visible && self.state.settings.caption_enabled();
         if !visible {
-            self.caption_window = None;
+            if self.caption_window.is_some() {
+                self.persist_caption_settings();
+                self.caption_window = None;
+            }
             return;
         }
         if self.caption_window.is_none() {
@@ -882,6 +934,28 @@ impl Runtime {
                 AcquireError::Fatal => event_loop.exit(),
             },
         }
+    }
+
+    /// Persist the caption overlay's position / pin state so the next
+    /// launch restores it. Called when the overlay hides or the app
+    /// exits; the values live in `UiState` while the window is open.
+    fn persist_caption_settings(&mut self) {
+        let (position, pinned) = {
+            let ui_state = self.state.ui_bevy_state();
+            (ui_state.0.caption_position, ui_state.0.caption_pinned)
+        };
+        if position.is_none() && pinned.is_none() {
+            return;
+        }
+        let mut desktop = self.state.settings.config_section::<DesktopSection>();
+        if position.is_some() {
+            desktop.caption_position = position;
+        }
+        if pinned.is_some() {
+            desktop.caption_pinned = pinned;
+        }
+        self.state.settings.set_config_section(&desktop);
+        self.state.settings.mark_dirty();
     }
 
     fn render_settings_frame(&mut self, event_loop: &ActiveEventLoop) {
@@ -1127,12 +1201,7 @@ impl Runtime {
             }
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(named) = key_pressed(&event) {
-                    // In-window fallback for platforms without a global
-                    // hotkey backend (Wayland); the global grab already
-                    // consumes Alt+Space elsewhere.
-                    if matches!(named, NamedKey::Space) && self.alt_held && self.hotkey.is_none() {
-                        self.toggle_spotlight(event_loop);
-                    } else if matches!(named, NamedKey::Space) {
+                    if matches!(named, NamedKey::Space) {
                         self.transparent = !self.transparent;
                         cw.window.set_decorations(!self.transparent);
                         cw.window.set_transparent(self.transparent);

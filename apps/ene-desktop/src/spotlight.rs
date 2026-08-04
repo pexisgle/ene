@@ -89,13 +89,6 @@ pub struct SpotlightWindow {
     textures_to_free: VecDeque<Vec<egui::TextureId>>,
     /// Focus the search field on the first rendered frame after open.
     needs_focus: bool,
-    /// Active microphone capture handle. Lives here (not in the ECS
-    /// world) because `cpal::Stream` is `!Send + !Sync`.
-    #[cfg(feature = "voice")]
-    mic_handle: crate::audio::MicCaptureHandle,
-    /// Placeholder so the struct has a field in text-only builds too.
-    #[cfg(not(feature = "voice"))]
-    mic_handle: Option<()>,
 }
 
 impl SpotlightWindow {
@@ -147,7 +140,6 @@ impl SpotlightWindow {
             egui_renderer,
             textures_to_free: VecDeque::from(vec![Vec::new(); 3]),
             needs_focus: true,
-            mic_handle: None,
         })
     }
 
@@ -168,6 +160,7 @@ impl SpotlightWindow {
         world: &mut World,
         ui_entity: Entity,
         chat_entity: Entity,
+        mic_handle: &mut crate::audio::MicCaptureHandle,
     ) -> Result<(), AcquireError> {
         let surface_frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -272,6 +265,7 @@ impl SpotlightWindow {
                     sel = (sel + 1).min(matches.len().saturating_sub(1));
                 }
                 let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let processing = ai.is_some_and(|ai| ai.is_processing());
 
                 egui::ScrollArea::vertical()
                     .max_height(240.0)
@@ -296,15 +290,24 @@ impl SpotlightWindow {
                         "spotlight-send-chat",
                         text = search.trim()
                     );
-                    if ui.selectable_label(is_selected, label).clicked() {
+                    let mut send_clicked = false;
+                    ui.add_enabled_ui(!processing, |ui| {
+                        if ui.selectable_label(is_selected, label).clicked() {
+                            send_clicked = true;
+                        }
+                    });
+                    if send_clicked {
                         send_text = Some(search.trim().to_string());
+                    }
+                    if processing {
+                        ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "waiting-for-ai"));
                     }
                 }
 
                 if enter_pressed {
                     if let Some(matched) = matches.get(sel) {
                         action = Some((*matched).clone());
-                    } else if !search.trim().is_empty() {
+                    } else if !search.trim().is_empty() && !processing {
                         send_text = Some(search.trim().to_string());
                     }
                 }
@@ -391,10 +394,10 @@ impl SpotlightWindow {
         }
 
         if let Some(action) = action {
-            self.execute_action(&action, ai, world, ui_entity);
+            Self::execute_action(&action, ai, world, ui_entity, mic_handle);
         }
         if let Some(text) = send_text {
-            self.send_chat(ai, world, chat_entity, &text);
+            Self::send_chat(ai, world, chat_entity, &text);
         }
 
         Ok(())
@@ -402,11 +405,11 @@ impl SpotlightWindow {
 
     /// Dispatch a selected spotlight action via ECS messages / state.
     fn execute_action(
-        &mut self,
         action: &SpotlightAction,
         ai: Option<&Arc<AiBridge>>,
         world: &mut World,
         ui_entity: Entity,
+        mic_handle: &mut crate::audio::MicCaptureHandle,
     ) {
         match action {
             SpotlightAction::OpenSettings { page, .. } => {
@@ -422,9 +425,7 @@ impl SpotlightWindow {
                 let Some(ai) = ai else {
                     return;
                 };
-                if let Err(error) =
-                    crate::audio::toggle_mic_capture(world, ai, &mut self.mic_handle)
-                {
+                if let Err(error) = crate::audio::toggle_mic_capture(world, ai, mic_handle) {
                     tracing::warn!(error = %error, "Spotlight microphone toggle failed");
                 }
             }
@@ -437,16 +438,13 @@ impl SpotlightWindow {
     }
 
     /// Send free text through the same path as the chat input.
-    fn send_chat(
-        &self,
-        ai: Option<&Arc<AiBridge>>,
-        world: &mut World,
-        chat_entity: Entity,
-        text: &str,
-    ) {
+    fn send_chat(ai: Option<&Arc<AiBridge>>, world: &mut World, chat_entity: Entity, text: &str) {
         let Some(ai) = ai else {
             return;
         };
+        if ai.is_processing() {
+            return;
+        }
         let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) else {
             return;
         };

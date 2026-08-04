@@ -134,6 +134,15 @@ ene_config::define_config!(
         /// Enable the floating caption overlay window.
         #[serde(default = "default_enabled")]
         pub caption_enabled: bool,
+        /// Last caption overlay top-left position (logical points),
+        /// restored on the next launch. `None` until the user moves
+        /// the overlay once.
+        #[serde(default)]
+        pub caption_position: Option<(f32, f32)>,
+        /// Caption overlay pin state, restored on the next launch.
+        /// `None` means "pinned until the user changes it".
+        #[serde(default)]
+        pub caption_pinned: Option<bool>,
     }
 );
 
