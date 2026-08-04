@@ -130,6 +130,18 @@ pub enum EneEvent {
         /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
     },
+    /// A detected beat pulse from system audio (Beat Sync).
+    ///
+    /// Turn-independent: emitted by hosts that capture the system audio
+    /// loopback (e.g. `ene-desktop`), relayed to every chat-bus subscriber.
+    /// The producer normalizes the payload — `bpm` is clamped to a plausible
+    /// tempo range and `intensity` to `[0, 1]` — the actor relays it verbatim.
+    BeatPulse {
+        /// Estimated tempo in beats per minute.
+        bpm: f32,
+        /// Normalized onset strength of the beat in `[0, 1]`.
+        intensity: f32,
+    },
 }
 
 /// A chunk of synthesized PCM audio from the TTS pipeline.

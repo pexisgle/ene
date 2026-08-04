@@ -315,6 +315,16 @@ pub enum EneCommand {
         /// Normalized observation from desktop (no raw screenshots).
         observation: ene_mind::ProactiveObservation,
     },
+    /// Relay a detected system-audio beat pulse to chat-bus subscribers.
+    ///
+    /// The producer (desktop beat sync) normalizes `bpm` and `intensity`;
+    /// the actor broadcasts [`super::event::EneEvent::BeatPulse`] verbatim.
+    BeatPulse {
+        /// Estimated tempo in beats per minute.
+        bpm: f32,
+        /// Normalized onset strength in `[0, 1]`.
+        intensity: f32,
+    },
     /// Hot-update proactive policy. Provider routing comes from [`AiConfig`].
     UpdateProactiveSettings {
         /// Mind proactive policy.
