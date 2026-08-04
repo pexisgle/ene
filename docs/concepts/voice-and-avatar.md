@@ -99,3 +99,82 @@ through `EneEvent::Performance`.
 turn-end behavior — accumulated by the runtime and resolved into a single
 `EneEvent::Performance` by the expression arbiter. The TTS-on / TTS-off
 behaviors differ by design.
+
+---
+
+## 3. Beat Sync: system-audio rhythm & spectrum avatar motion
+
+Beat Sync makes the avatar react to the music or video currently playing on
+the system: the desktop captures the audio **output** loopback, detects the
+beat in real time, and sways the avatar's body on the rhythm.
+
+### Signal flow
+
+```text
+System audio output (monitor loopback)
+  │
+  ├─> 1. Loopback capture (cpal, `desktop.beat_sync` enabled)
+  ├─> 2. FFT + low-frequency energy onset detection (rustfft)
+  ├─> 3. { bpm, intensity } pulse → ene-runtime chat bus
+  │      (EneEvent::BeatPulse, via EneHandle::report_beat_pulse)
+  └─> 4. ene-vrm BeatSway: procedural body sway + VRMA speed sync
+```
+
+### Detection algorithm
+
+Energy-based onset detection on the low-frequency ("kick") band:
+
+1. The capture stream is low-pass filtered at ~250 Hz (2nd-order Butterworth)
+   so out-of-band content cannot leak into the analysis band.
+2. Every ~21 ms a Blackman-Harris-windowed 4096-point FFT is computed; the
+   mean magnitude over the ≈20–150 Hz band (DC excluded) is the frame energy.
+3. An onset fires when the energy exceeds a slow exponential average by a
+   fixed margin, the kick band holds at least 40% of the sub-500 Hz energy
+   (suppresses hi-hats and transients), a ~250 ms refractory period has
+   elapsed, and an absolute floor is cleared (silence never triggers).
+4. Onset intensity is the normalized energy overshoot `1 - avg/energy`
+   (clamped to `[0, 1]`); BPM is `60 / median(inter-onset interval)` over the
+   recent intervals, clamped to 60–180.
+
+This energy-onset approach was chosen over autocorrelation or comb-filter
+tempo trackers for robustness and simplicity at this scope; it tracks
+kick-driven music well and degrades to no onsets (stillness) on speech or
+quiet audio.
+
+### Platform support
+
+`cpal` has no loopback API: on Linux it enumerates `ALSA`/`PipeWire` capture
+devices, so loopback works where a monitor source is exposed as an input
+device (`PipeWire` monitor ports; `PulseAudio` monitor sources visible to
+`pipewire-alsa`). Device selection order:
+
+1. `desktop.beat_sync.device` — explicit device name override.
+2. The input device whose name contains the default **output** device name
+   (the `<output>.monitor` convention).
+3. Any input device whose name contains "monitor".
+
+When no monitor device exists the feature logs a warning and stays disabled —
+it never falls back to the default microphone. Windows is cross-compiled but
+unsupported: WASAPI has no monitor-style input enumeration, so the feature
+degrades to disabled there.
+
+### Avatar reaction
+
+- **Procedural sway** (`ene-vrm::beat_sync::BeatSway`, no assets required):
+  beat-locked rotations on hips / spine / chest / head (≤ ~4°), phase snapped
+  to each pulse with an intensity envelope that decays between beats.
+- **Locomotion speed sync**: while a beat is active, the currently-playing
+  VRMA clip's `VrmaPlayer.speed` is scaled by `bpm / 120` (clamped
+  0.85–1.2), so walk/dance clips follow the tempo.
+- Performance cues (`EneEvent::Performance`) are untouched: sway composes
+  *after* VRMA retargeting and *before* the skin palette, additively on top
+  of any motion the LLM/affect pipeline selected.
+
+### Configuration
+
+`desktop.beat_sync.enabled` (default `false` — capturing system audio by
+default would be a privacy surprise) and `desktop.beat_sync.device` (optional
+override). The Features page exposes the enabled toggle; changing it starts
+or stops the capture thread without restarting the app. Beat sync requires
+the desktop's `voice` build feature (the same cpal/ALSA toolchain as mic
+capture and TTS playback).

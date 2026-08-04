@@ -978,19 +978,36 @@ All keys follow the standard `ENE_` override scheme, e.g.
 
 ### `desktop.*` — Desktop GUI & Graphics Parameters
 
-Controls display language, graphics render parameters, and microphone input device:
+Controls display language, graphics render parameters, microphone input
+device, and Beat Sync (system-audio rhythm avatar motion):
 
 ```json
 {
   "desktop": {
     "language": "en",
     "mic_device": null,
+    "beat_sync": {
+      "enabled": false,
+      "device": null
+    },
     "graphics": {
       "vsync": true
     }
   }
 }
 ```
+
+- `desktop.beat_sync.enabled` — capture the system audio loopback and sway
+  the avatar on the detected beat. Defaults to `false` (capturing system
+  audio by default is a privacy surprise). Requires a PulseAudio / PipeWire
+  monitor device exposed as a capture device; without one the feature logs
+  and stays disabled.
+- `desktop.beat_sync.device` — optional explicit loopback device name.
+  When unset, the monitor of the default output device is auto-selected
+  (falling back to any input device named "monitor").
+
+See [Voice & Avatar](concepts/voice-and-avatar.md) for the detection
+algorithm and platform support details.
 
 ---
 
