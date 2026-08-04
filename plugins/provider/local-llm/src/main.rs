@@ -2,12 +2,15 @@
 //!
 //! Local GGUF inference provider plugin for the ene unified plugin system.
 //!
-//! This slice ships the provider skeleton only: capability declarations
-//! (`llm/chat@1`, `embed@1`, `gguf-runner@1`), the config schema
-//! (`mmproj_url` / `mmproj_path` / `acceleration`), and host delivery of
-//! config and model profiles. The llama.cpp inference core lands in a later
-//! slice; inference actions currently return `NotSupported`.
+//! Serves chat streaming, non-streaming completion, and GGUF embeddings over
+//! the plugin IPC, backed by `ene-ai-local`'s llama.cpp providers. Capability
+//! declarations (`llm/chat@1`, `embed@1`, `gguf-runner@1`) and the config
+//! schema (`mmproj_url` / `mmproj_path` / `acceleration`) are established in
+//! an earlier slice; this slice implements the inference actions.
 
+mod config;
+mod convert;
+mod models;
 mod plugin;
 
 use plugin::LocalLlmPlugin;

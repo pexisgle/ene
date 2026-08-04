@@ -616,7 +616,8 @@ plugin-owned:
             "url": "https://example.com/gemma-4-e4b.gguf",
             "quantization": "Q4_0",
             "model_path": "",
-            "gpu_layers": "33"
+            "gpu_layers": "33",
+            "context_size": 16384
           }
         }
       }
@@ -628,11 +629,23 @@ plugin-owned:
 The local GGUF provider plugin (`ene-plugin-llama-cpp`) consumes one profile
 per model: `url` (GGUF download URL), `quantization` (label, e.g. `"F16"` /
 `"Q4_0"`), `model_path` (local path override that skips download when
-non-empty), and `gpu_layers` (`"auto"` or an integer string). Profile
-*selection* is plugin-owned; the values are delivered via
+non-empty), `gpu_layers` (`"auto"` or an integer string), and the optional
+`context_size` (chat context window in tokens; defaults to `16384` when
+omitted). The plugin downloads `url` weights into the model cache on first
+use (GGUF magic validated) and keeps one loaded model per profile for its
+process lifetime. `context_size` and `gpu_layers` size chat loads only — the
+embedding model sizes its own context and offload plan internally, and the
+host's routing window stays in `ai.local_models.<name>.context_size`.
+Because the v2→v3 migration does not mirror `context_size` and the plugin has
+no other channel to learn the host value, a profile that omits it loads
+16,384 tokens regardless of `ai.local_models.<name>.context_size`: when you
+raise the host-side window, set the profile's `context_size` to at least that
+value, otherwise long prompts fail with a context overflow at generation
+time. Profile *selection* is plugin-owned; the values are delivered via
 `ConfigurablePlugin::set_profiles`. The v2→v3 migration mirrors existing
-`ai.local_models` entries into these profiles; the local-model keys stay in
-`ai.local_models` as routing information.
+`ai.local_models` entries into these profiles (it does not mirror
+`context_size`); the local-model keys stay in `ai.local_models` as routing
+information.
 
 #### Secret marking
 
