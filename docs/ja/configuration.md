@@ -684,6 +684,57 @@ HTTP サーバーです。`ai.tts.provider = "voicevox"` で選択します。�
 構築されるためです。一方、`plugins.list.voicevox.config` と `ai.tts.voice` の
 編集は実行中のセッションにも反映されます。
 
+#### OpenAI Speech API TTS プロバイダ（`plugins.list.openai-tts.config`）
+
+`openai-tts` プロバイダプラグイン（`plugins/provider/openai-tts`）は OpenAI
+Speech API（`tts-1` / `tts-1-hd`）で音声合成を行い、ストリーミングの
+raw 24 kHz 16-bit モノラル PCM（`response_format=pcm`）を返します。
+`openai` プラグインと同じ `OPENAI_API_KEY` 資格情報ファミリーを使用します。
+`ai.tts.provider = "openai_tts"` で選択します。汎用の `ai.tts.voice` には、
+設定済みの既定ボイスをリクエスト単位で上書きするボイス名を任意で指定できます。
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "openai_tts",
+      "voice": "nova"
+    }
+  },
+  "plugins": {
+    "list": {
+      "openai-tts": {
+        "enable": true,
+        "config": {
+          "api_key": "sk-...",
+          "model": "tts-1",
+          "voice": "alloy",
+          "speed": 1.0,
+          "sample_rate": 24000
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目：
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `api_key` | 未設定 | OpenAI API キー、または `{source: inline\|env\|auto}` ディスクリプタ。`OPENAI_API_KEY` 環境変数にフォールバックします。`x-ene-secret` でマークされるため、ホストがマスク・redact します。 |
+| `model` | `tts-1` | 音声合成モデル（低遅延の `tts-1` / 高音質の `tts-1-hd`）。 |
+| `voice` | `alloy` | 既定ボイス（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）。リクエスト単位のボイスで上書き可能。 |
+| `speed` | `1.0` | 発話速度倍率（0.25–4.0）。 |
+| `sample_rate` | `24000` | WAV ヘッダに書き込むサンプルレート。Speech API の `pcm` フォーマットは 24 kHz 固定のため、`base_url` が異なる出力レートの互換エンドポイントを指す場合のみ設定します。 |
+| `base_url` | `https://api.openai.com/v1` | API ベース URL の上書き（OpenAI 互換エンドポイント用）。`OPENAI_BASE_URL` 環境変数にフォールバックします。 |
+
+プラグインは Speech API に `response_format=pcm` を要求し、音声を WAV
+（`sample_rate` の 16-bit モノラル PCM）として返します。ホスト側の
+オーディオパイプラインが float サンプルへデコードして再生します
+（`formats = ["wav"]`）。Speech API が受け付ける他のフォーマット
+（`mp3`、`opus`、`flac`、`aac`）は公開しません。
+
 #### Microsoft Edge Neural Voice TTS プロバイダ（`plugins.list.edge-tts.config`）
 
 `edge-tts` プロバイダプラグイン（`plugins/provider/edge-tts`）は、Microsoft

@@ -16,6 +16,7 @@ Ene ホストアプリケーション (ene-runtime)
         ├── IPC Protocol v6 (stdio 上の長さプレフィックス付きフレーム)
         │     ├── ene-plugin-anthropic (Anthropic LLM プロバイダプラグイン)
         │     ├── ene-plugin-openai    (OpenAI 互換プロバイダプラグイン)
+        │     ├── ene-plugin-openai-tts (OpenAI Speech API TTS プロバイダプラグイン)
         │     ├── ene-plugin-llama-cpp (ローカル GGUF プロバイダプラグイン)
         │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS プロバイダプラグイン)
         │     ├── ene-plugin-edge-tts  (Microsoft Edge Neural Voice TTS プロバイダプラグイン)
@@ -229,9 +230,11 @@ fixture 使用）で検証されます。
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude プロバイダプラグイン | いいえ |
 | `ene-plugin-openai` | Provider | OpenAI 互換プロバイダプラグイン（チャット・ストリーミング・埋め込み） | いいえ |
+| `ene-plugin-openai-tts` | Provider | OpenAI Speech API TTS プロバイダプラグイン（tts-1 / tts-1-hd）— WAV（24 kHz PCM）音声 | いいえ |
 | `ene-plugin-llama-cpp` | Provider | ローカル GGUF (llama.cpp) プロバイダプラグイン — チャットストリーミング・補完・GGUF 埋め込み | いいえ |
+| `ene-plugin-voicevox` | Provider | VOICEVOX / Aivis Speech TTS プロバイダプラグイン — 2 段階 `audio_query` → `synthesis` フローによる WAV 音声 | いいえ |
 
-上記 15 プラグインはすべてデフォルトの `plugins.list` に含まれており、
+上記 17 プラグインはすべてデフォルトの `plugins.list` に含まれており、
 新規インストール時に自動的に起動します。
 
 ### ファイルツールリファレンス (`filesystem.*`)
