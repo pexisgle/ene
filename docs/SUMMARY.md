@@ -13,6 +13,7 @@
 - [Geo Tool Guide](guide/tools/geo.md)
 - [Git Tool Guide](guide/tools/git.md)
 - [Schedules: Persistent Timed Actions](guide/schedules.md)
+- [Character Card Editor Guide](guide/character-card-editor.md)
 
 # Reference
 
