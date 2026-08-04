@@ -14,6 +14,7 @@ ene-runtime = { workspace = true }
 ene-mind = { workspace = true }
 ene-config = { workspace = true }
 ene-store = { workspace = true }
+ene-rag = { workspace = true }
 ene-plugin-host = { workspace = true }
 ene-util = { workspace = true }
 chrono = { workspace = true }

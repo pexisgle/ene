@@ -136,7 +136,8 @@ pub use session::{NewSessionMeta, SessionMeta};
 /// Core memory types.
 pub use store::{
     ActiveSceneSummaryRow, ClaimedFire, ConversationLogEntry, FireClaimMode, KeyFact, MemoryStore,
-    NaturalDecayReport, NewMemorySpan, PendingCandidate, PendingCandidateStatus,
+    NaturalDecayReport, NewMemorySpan, PendingCandidate, PendingCandidateEdit,
+    PendingCandidateStatus,
 };
 /// Typed memory domain types.
 pub use typed_memory::{

@@ -87,11 +87,11 @@ pub use commitments::{CommitmentLedger, CommitmentSyncContext};
 /// Mind configuration section.
 pub use config::{
     CONFIRMATION_CONFIDENCE_OFFSET, CharacterMemoryConfig, ContextConfig, EmotionConfig,
-    MindConfig, MindMemoryConfig, MindMemoryLimitsConfig, ProactiveConfig, ProactiveDecisionConfig,
-    ProactiveIntervalIssue, ProactiveSourcesConfig, QuietHoursConfig, QuietHoursDaysConfig,
-    QuietHoursPolicy, QuietHoursSuppressConfig, QuietHoursTimeConfig, SessionConfig,
-    ToolGroundingConfig, TopicBoundaryConfig, WindowTitleLevel, validate_proactive_intervals,
-    warn_on_proactive_interval_issues,
+    MemoryApprovalConfig, MindConfig, MindMemoryConfig, MindMemoryLimitsConfig, ProactiveConfig,
+    ProactiveDecisionConfig, ProactiveIntervalIssue, ProactiveSourcesConfig, QuietHoursConfig,
+    QuietHoursDaysConfig, QuietHoursPolicy, QuietHoursSuppressConfig, QuietHoursTimeConfig,
+    SessionConfig, ToolGroundingConfig, TopicBoundaryConfig, WindowTitleLevel,
+    validate_proactive_intervals, warn_on_proactive_interval_issues,
 };
 /// Context budget and compression types.
 #[doc(no_inline)]
@@ -152,6 +152,9 @@ pub use proactive::{
 /// Prompt packet section types.
 #[doc(no_inline)]
 pub use prompt_packet::{PromptPacket, PromptSection, PromptSectionKind};
+/// L1 in-memory recall cache (multi-tier with `ene-store` as L2).
+#[doc(no_inline)]
+pub use recall::MemoryRecallCache;
 /// Recall planning types.
 #[doc(no_inline)]
 pub use recall::{

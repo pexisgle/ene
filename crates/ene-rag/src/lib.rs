@@ -70,6 +70,8 @@ pub mod scoring;
 /// Tool-selection RAG pipeline.
 #[cfg(feature = "tool")]
 pub mod tool;
+/// Document/workspace indexing policy — chunking, ignore rules, scoring.
+pub mod workspace;
 
 pub use decay::{
     ARCHIVE_THRESHOLD, DECAY_CONFIDENCE_BIAS, DECAY_CONFIDENCE_WEIGHT, DECAY_EMOTIONAL_BIAS,
@@ -87,4 +89,8 @@ pub use scoring::{
 pub use tool::{
     FieldWeights, HybridRerankProvider, ToolRag, ToolRagConfig, ToolRagError, ToolRagOptions,
     ToolRagStats, hybrid_embed, hyde_document, rerank_tool_specs,
+};
+pub use workspace::{
+    ChunkOptions, ChunkedDocument, DocumentChunk, WorkspaceRagConfig, chunk_document, glob_matches,
+    score_chunk,
 };

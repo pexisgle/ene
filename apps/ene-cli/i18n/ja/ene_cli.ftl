@@ -33,8 +33,52 @@ greeting-failed = 挨拶を設定できませんでした: { $error }
 greeting-choose = 挨拶を選択 (Enter で確定)
 greeting-none = (なし)
 
+## /memory approval コマンド
+memory-approval-usage = /memory approval <list|inspect <id>|approve <id>|edit <id> --title <タイトル> --content <内容> --kind <種別> --confidence <0..1>|reject <id>|history> （スペースを含む値は --content="複数 単語" 形式を使用）
+memory-approval-list-title = 承認待ちの候補 ({ $count })
+memory-approval-history-title = 解決済み候補の履歴 ({ $count })
+memory-approval-empty = 承認待ちの候補はありません。
+memory-approval-history-empty = 承認・却下された候補はまだありません。
+memory-approval-not-found = 候補 { $id } が見つからないか、すでに解決されています。
+memory-approval-label-id = id
+memory-approval-label-title = タイトル
+memory-approval-label-kind = 種別
+memory-approval-label-confidence = 信頼度
+memory-approval-label-reason = 理由
+memory-approval-label-source-quote = 出典
+memory-approval-label-source-turn = 出典ターン
+memory-approval-label-conflict = 競合対象
+memory-approval-label-status = 状態
+memory-approval-label-created = 作成日時
+memory-approval-label-resolved = 解決日時
+memory-approval-status-pending = 保留中
+memory-approval-status-approved = 承認済み
+memory-approval-status-rejected = 却下済み
+memory-approval-approve-ok = 候補 { $id } を承認しました。
+memory-approval-reject-ok = 候補 { $id } を却下しました。
+memory-approval-edit-ok = 候補 { $id } を編集しました。
+memory-approval-edit-missing-flag = 編集には --title・--content・--kind・--confidence がすべて必要です。
+memory-approval-edit-invalid-confidence = 信頼度は 0 から 1 の数値で指定してください。
+memory-approval-edit-invalid-kind = 不明なメモリ種別 '{ $kind }' です。有効: episodic, semantic, user_profile, relationship, affective, commitment, preference, procedure, reflection
+memory-approval-error = 承認エラー: { $error }
+
 ## /card コマンド
 card-loaded = キャラクターカードを読み込みました: { $name }
+
+## /workspace コマンド
+workspace-sync-started = ワークスペースインデックスの同期を開始しました。進捗は '/workspace status'、停止は '/workspace cancel' で行えます。
+workspace-sync-busy = ワークスペースの同期はすでに実行中です。
+workspace-cancel-sent = 実行中のワークスペース同期にキャンセルを要求しました。
+workspace-status-title = ワークスペースインデックス状態:
+workspace-status-disabled = ワークスペースRAGは無効です (rag.workspace.enabled)。
+workspace-status-no-folders = フォルダが設定されていません。スキャン・検索対象はありません。
+workspace-status-folders = 許可されたフォルダ:
+workspace-status-indexed = インデックス済み: ファイル { $files }、チャンク { $chunks }
+workspace-status-progress = 同期中 ({ $phase }): スキャン { $scanned }、登録 { $indexed }、スキップ { $skipped }、チャンク { $chunks }
+workspace-status-report = 前回の同期: 登録 { $indexed }、変更なし { $unchanged }、リネーム { $renamed }、削除 { $deleted }、スキップ { $skipped }、チャンク { $chunks } ({ $elapsed }秒)
+workspace-status-last-error = 前回の同期エラー: { $error }
+workspace-search-empty = 一致するワークスペース文書は見つかりませんでした。
+workspace-search-title = 一致するワークスペース文書:
 
 init-failed = 初期化に失敗しました: { $error }
 turn-failed = エラー: { $detail }
@@ -46,6 +90,7 @@ runtime-error-config = 設定エラー: { $detail }
 runtime-error-memory = メモリストアエラー: { $detail }
 runtime-error-mind = マインドエンジンエラー: { $detail }
 runtime-error-tool = ツールエラー: { $detail }
+runtime-error-workspace = ワークスペースインデックスエラー: { $detail }
 runtime-error-actor-busy = Ene は現在ほかのリクエストを処理中です。しばらくしてから再試行してください。
 runtime-error-store-required = スケジューラーにはメモリストアが必要です。設定で `store.enabled` を有効にしてください。
 runtime-error-ai-auth = AI プロバイダーの認証に失敗しました。API キーを確認してください。

@@ -46,6 +46,7 @@ mod port;
 mod schedule;
 mod schedule_time;
 mod span;
+mod workspace;
 
 pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
@@ -56,7 +57,9 @@ pub use memory::{
     MemoryJournalListOptions, MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown,
     MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query, ScoredMemory, TimeRange,
 };
-pub use pending::{NaturalDecayReport, PendingCandidate, PendingCandidateStatus};
+pub use pending::{
+    NaturalDecayReport, PendingCandidate, PendingCandidateEdit, PendingCandidateStatus,
+};
 pub use pending_write::{PendingMemoryWrite, PendingMemoryWriteStatus};
 pub use port::{
     EmbeddingStorePort, EmbeddingStorePortError, MemoryPort, MemoryPortError,
@@ -68,3 +71,7 @@ pub use schedule::{
 };
 pub use schedule_time::{first_run_at, next_occurrence_after};
 pub use span::{ActiveSceneSummaryRow, NewMemorySpan};
+pub use workspace::{
+    NewWorkspaceChunk, WorkspaceChunkHit, WorkspaceDocumentPort, WorkspaceFileRow,
+    WorkspaceIndexStatus, WorkspacePortError, WorkspaceSearchQuery,
+};

@@ -24,6 +24,9 @@ pub enum EneRuntimeError {
     /// Tool RAG pipeline error.
     #[error(transparent)]
     ToolRag(#[from] ene_rag::ToolRagError),
+    /// Workspace document index error.
+    #[error(transparent)]
+    Workspace(#[from] crate::workspace::WorkspaceIndexError),
     /// Task channel closed.
     #[error("Task channel closed")]
     ChannelClosed,

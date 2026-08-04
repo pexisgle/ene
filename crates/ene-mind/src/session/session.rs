@@ -72,6 +72,8 @@ pub struct MemoryContext {
     pub pending_embedding: Option<Vec<f32>>,
     /// Cached hash of the last synced `CCv3` character memory index.
     pub ccv3_memory_hash: Option<u64>,
+    /// L1 recall cache shared across turns and runtime mutation handles.
+    pub recall_cache: Option<Arc<crate::recall::MemoryRecallCache>>,
 }
 
 /// Snapshot of a turn that was interrupted mid-response (barge-in / cancel).
@@ -175,6 +177,7 @@ impl ConversationSession {
                 session_started_at: chrono::Utc::now(),
                 pending_embedding: None,
                 ccv3_memory_hash: None,
+                recall_cache: Some(Arc::new(crate::recall::MemoryRecallCache::new())),
             },
             state: SessionState {
                 last_input_embedding: None,
@@ -384,6 +387,12 @@ impl ConversationSession {
     /// Resets all session state (history, display, turn count) and returns a new session ID.
     pub fn reset_session(&mut self) -> SessionId {
         let new_id = generate_session_id();
+        // The cache is shared with runtime mutation handles, so it is cleared
+        // in place rather than replaced; the fresh session id also makes old
+        // gather keys unreachable.
+        if let Some(cache) = &self.memory.recall_cache {
+            cache.invalidate_all();
+        }
         self.history.conversation_history.clear();
         self.display.display_buffer.clear();
         self.display.token_carry.clear();

@@ -353,7 +353,9 @@ pub struct EneHandle {
     host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Read-only session query handle, bypasses the actor mailbox.
     sessions: crate::query::sessions::SessionQueryHandle,
-    /// Pending memory-candidate approval handle, bypasses the actor mailbox.
+    /// Pending memory-candidate approval handle. Reads bypass the actor
+    /// mailbox; mutations route through it (see
+    /// [`crate::query::candidates::MemoryCandidateHandle`]).
     candidates: crate::query::candidates::MemoryCandidateHandle,
     /// Screen-image vision summarization handle, bypasses the actor mailbox.
     vision: crate::vision::VisionHandle,
@@ -605,6 +607,16 @@ impl EneHandle {
             Some(emb) => actor::init_tool_rag(&config, emb, memory_store.clone())?,
             None => None,
         };
+        let workspace_indexer = match (embedder.as_ref(), memory_store.clone()) {
+            (Some(emb), Some(store)) => {
+                let store_port: Arc<dyn ene_core::WorkspaceDocumentPort> = store;
+                Some(Arc::new(crate::workspace::WorkspaceIndexer::new(
+                    store_port,
+                    emb.clone(),
+                )))
+            }
+            _ => None,
+        };
         if let Some(rag) = &tool_rag {
             let specs = registry.list_tools();
             let profiles = registry.list_rag_profiles();
@@ -629,10 +641,12 @@ impl EneHandle {
         }
 
         let mind_memory = mind.memory.clone();
+        let recall_cache = session.memory.recall_cache.clone();
         let memory = crate::diagnostics::MemoryHandle::new(
             memory_store.clone(),
             session.memory.embedding_provider.clone(),
             mind_memory,
+            recall_cache.clone(),
         );
 
         let fallback_cfg = config.get_section::<ene_ai::AiConfig>()?.fallback;
@@ -718,6 +732,7 @@ impl EneHandle {
         let sessions = crate::query::sessions::SessionQueryHandle::new(memory_store.clone());
         let candidates = crate::query::candidates::MemoryCandidateHandle::new(
             memory_store.clone(),
+            Arc::clone(&cmd_tx),
             Arc::clone(&shared.card_name),
         );
         let vision = crate::vision::VisionHandle::new(Arc::clone(&cmd_tx));
@@ -737,6 +752,7 @@ impl EneHandle {
             memory_store,
             registry,
             tool_rag,
+            workspace_indexer,
             health_monitor,
             tts_provider,
             plugin_tool_registries,
@@ -908,8 +924,11 @@ impl EneHandle {
         self.sessions.clone()
     }
 
-    /// Pending memory-candidate approval handle (list / approve / reject),
-    /// bypassing the turn-execution actor mailbox entirely.
+    /// Pending memory-candidate approval handle (list / inspect / history /
+    /// approve / edit / reject).
+    ///
+    /// Reads are mailbox-free; mutations route through the actor mailbox with
+    /// the active `TurnId` and emit `CandidateChanged` audit events.
     ///
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     pub fn candidates(&self) -> crate::query::candidates::MemoryCandidateHandle {
@@ -933,6 +952,16 @@ impl EneHandle {
     /// registry is actor-owned state; see [`crate::tools`].
     pub fn tools(&self) -> crate::tools::ToolHandle {
         self.tools.clone()
+    }
+
+    /// Workspace document index operations handle (sync / cancel / status /
+    /// search).
+    ///
+    /// Cheap to call repeatedly; the returned handle is a small `Clone`.
+    /// Routes through the actor mailbox: sync is single-flight and
+    /// cancellable there.
+    pub fn workspace(&self) -> crate::workspace::WorkspaceHandle {
+        crate::workspace::WorkspaceHandle::new(Arc::clone(&self.cmd_tx))
     }
 
     /// Hot-swap the character card (CLI `/card`).
@@ -2370,6 +2399,7 @@ mod tests {
             None,
             registry,
             None,
+            None,
             health_monitor,
             None,
             Vec::new(),
@@ -2420,6 +2450,7 @@ mod tests {
             session,
             Some(store),
             registry,
+            None,
             None,
             health_monitor,
             None,

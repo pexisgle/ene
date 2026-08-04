@@ -25,6 +25,8 @@ pub enum PromptSectionKind {
     SemanticContext,
     /// User profile, preferences, and relationship memories.
     UserProfile,
+    /// Retrieved workspace document chunks with citations.
+    WorkspaceContext,
     /// Active companion commitments.
     ActiveCommitments,
     /// Episodic and other recalled memories.
@@ -77,6 +79,7 @@ impl PromptSectionKind {
             Self::EpisodicMemories => 30,
             Self::SemanticContext => 40,
             Self::UserProfile => 50,
+            Self::WorkspaceContext => 55,
             Self::ActiveCommitments => 60,
             Self::CharacterState => 70,
             Self::SceneState => 80,
@@ -96,6 +99,7 @@ impl PromptSectionKind {
             Self::SceneState => Some("## Current Scene"),
             Self::SemanticContext => Some("## Semantic Context"),
             Self::UserProfile => Some("## User Profile"),
+            Self::WorkspaceContext => Some("## Workspace Documents"),
             Self::ActiveCommitments => Some("## Active Commitments"),
             Self::EpisodicMemories => Some("## Relevant Episodic Memories"),
             Self::StyleExamples => Some("## Style Examples"),
@@ -114,6 +118,7 @@ impl PromptSectionKind {
             Self::SceneState,
             Self::SemanticContext,
             Self::UserProfile,
+            Self::WorkspaceContext,
             Self::ActiveCommitments,
             Self::EpisodicMemories,
             Self::StyleExamples,
