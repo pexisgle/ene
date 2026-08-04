@@ -95,7 +95,7 @@ pub async fn synthesize(
                         ));
                     }
                     pcm::validate_pcm(&audio)?;
-                    return Ok(wav::wrap_pcm(&audio, config.sample_rate));
+                    return Ok(wav::wrap_pcm(&audio, config.sample_rate)?);
                 }
                 let retry_after = retry_after_secs(&response);
                 let body = read_body_bounded(response, MAX_ERROR_BODY_BYTES)

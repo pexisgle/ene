@@ -8,7 +8,8 @@ use serde_json::{Value, json};
 
 use crate::client;
 use crate::config::{
-    DEFAULT_SAMPLE_RATE, OpenAiTtsConfig, SUPPORTED_VOICES, resolve_api_key, resolve_base_url,
+    DEFAULT_SAMPLE_RATE, MAX_SAMPLE_RATE, OpenAiTtsConfig, SUPPORTED_VOICES, resolve_api_key,
+    resolve_base_url,
 };
 
 /// Character limit for the `input` field imposed by the Speech API.
@@ -97,6 +98,7 @@ impl ene_plugin::ConfigurablePlugin for OpenAiTtsPlugin {
                 "sample_rate": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": MAX_SAMPLE_RATE,
                     "default": DEFAULT_SAMPLE_RATE,
                     "description": "Output sample rate written into the WAV header (the Speech API's pcm format is fixed at 24 kHz; override for compatible endpoints)"
                 }

@@ -12,6 +12,8 @@ pub const DEFAULT_VOICE: &str = "alloy";
 pub const DEFAULT_SPEED: f32 = 1.0;
 /// Default output sample rate (the Speech API's `pcm` format is fixed).
 pub const DEFAULT_SAMPLE_RATE: u32 = 24_000;
+/// Largest sample rate whose 16-bit mono WAV byte rate fits in RIFF's u32 field.
+pub const MAX_SAMPLE_RATE: u32 = u32::MAX / 2;
 /// Default API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 /// Speed range accepted by the Speech API.
@@ -76,10 +78,10 @@ impl OpenAiTtsConfig {
                 config.speed
             )));
         }
-        if config.sample_rate == 0 {
-            return Err(PluginError::provider(
-                "invalid openai-tts provider config: sample_rate must be non-zero",
-            ));
+        if config.sample_rate == 0 || config.sample_rate > MAX_SAMPLE_RATE {
+            return Err(PluginError::provider(format!(
+                "invalid openai-tts provider config: sample_rate must be between 1 and {MAX_SAMPLE_RATE}"
+            )));
         }
         if config.model.is_empty() || !SUPPORTED_MODELS.contains(&config.model.as_str()) {
             return Err(PluginError::provider(format!(
@@ -185,7 +187,10 @@ fn resolve_key_value(value: &Value) -> Option<String> {
                         .map(str::trim)
                         .filter(|name| !name.is_empty())
                         .unwrap_or("OPENAI_API_KEY");
-                    std::env::var(var_name).ok().filter(|key| !key.is_empty())
+                    std::env::var(var_name)
+                        .ok()
+                        .map(|key| key.trim().to_string())
+                        .filter(|key| !key.is_empty())
                 }
                 // "auto" (or an unrecognized source) falls through to the
                 // caller's process-env fallback.
@@ -253,6 +258,12 @@ mod tests {
     fn rejects_zero_sample_rate() {
         let err = OpenAiTtsConfig::from_value(&json!({"sample_rate": 0}))
             .expect_err("zero sample rate rejected");
+        assert!(err.to_string().contains("sample_rate"));
+
+        let err = OpenAiTtsConfig::from_value(&json!({
+            "sample_rate": u64::from(MAX_SAMPLE_RATE) + 1
+        }))
+        .expect_err("sample rate with an overflowing byte rate rejected");
         assert!(err.to_string().contains("sample_rate"));
     }
 
