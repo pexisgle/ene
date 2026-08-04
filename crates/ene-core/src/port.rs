@@ -21,7 +21,7 @@ use thiserror::Error;
 use crate::affect::{AffectState, PendingAffectProposal};
 use crate::commitment::{Commitment, NewCommitment};
 use crate::memory::{
-    GatheredCandidate, MemoryItem, MemoryKind, MemoryStatus, NewMemoryItem, Query,
+    GatheredCandidate, MemoryItem, MemoryKind, MemoryOutcome, MemoryStatus, NewMemoryItem, Query,
 };
 use crate::pending::{NaturalDecayReport, PendingCandidate, PendingCandidateStatus};
 use crate::pending_write::PendingMemoryWrite;
@@ -105,6 +105,20 @@ pub trait MemoryPort: Send + Sync {
         prefixes: &[&str],
         keep_refs: &HashSet<String>,
     ) -> Result<usize, MemoryPortError>;
+
+    /// Persist a memory-outcome evaluation and return its assigned ID.
+    async fn record_memory_outcome(&self, outcome: &MemoryOutcome) -> Result<i64, MemoryPortError>;
+
+    /// List outcome evaluations for a character, newest first.
+    ///
+    /// `since` bounds the window to records created after the given instant
+    /// (strictly); `None` lists every record. Results are capped at `limit`.
+    async fn list_memory_outcomes(
+        &self,
+        character_id: &str,
+        since: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<MemoryOutcome>, MemoryPortError>;
 
     /// Gather typed-memory candidates with explainable hybrid scoring.
     ///
