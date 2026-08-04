@@ -435,6 +435,11 @@ pub struct ProactivePrompts {
     /// confirmation is enabled: how to decline with the `<|silent|>` token.
     #[serde(default)]
     pub confirmation_note: String,
+    /// Instruction for the catch-up generation after quiet hours end; the
+    /// `{items}` placeholder lists the suppressed moments (times only, never
+    /// screen data).
+    #[serde(default)]
+    pub catch_up_note: String,
     /// System prompt for local screen-image summarization.
     pub screen_summary_system: String,
     /// User prompt for local screen-image summarization.
@@ -459,6 +464,8 @@ struct RawProactivePrompts {
     generation_hint_with_topic_path: String,
     #[serde(default = "default_proactive_confirmation_note_path")]
     confirmation_note_path: String,
+    #[serde(default = "default_proactive_catch_up_note_path")]
+    catch_up_note_path: String,
     #[serde(default = "default_proactive_screen_summary_system_path")]
     screen_summary_system_path: String,
     #[serde(default = "default_proactive_screen_summary_user_path")]
@@ -489,6 +496,10 @@ fn default_proactive_generation_hint_with_topic_path() -> String {
 
 fn default_proactive_confirmation_note_path() -> String {
     "en/proactive/confirmation_note.md".into()
+}
+
+fn default_proactive_catch_up_note_path() -> String {
+    "en/proactive/catch_up_note.md".into()
 }
 
 fn default_proactive_screen_summary_system_path() -> String {
@@ -524,6 +535,13 @@ impl ProactivePrompts {
         } else {
             base
         }
+    }
+
+    /// Renders the quiet-hours catch-up hint with the suppressed-moment list.
+    pub fn render_catch_up_hint(&self, items: &str) -> String {
+        substitute(&self.catch_up_note, &[("items", items.trim())])
+            .trim()
+            .to_string()
     }
 
     /// Renders the vision user prompt with the privacy-safe OS app label.
@@ -727,6 +745,13 @@ macro_rules! embedded_pack {
                     "/prompts/",
                     $lang,
                     "/proactive/confirmation_note.md"
+                ))
+                .to_string(),
+                catch_up_note: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/catch_up_note.md"
                 ))
                 .to_string(),
                 screen_summary_system: include_str!(concat!(
