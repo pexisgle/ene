@@ -63,6 +63,7 @@ flowchart TD
 
   ToolHost -.spawns IPC.-> Anthropic[plugins/provider/anthropic]
   ToolHost -.spawns IPC.-> OpenAi[plugins/provider/openai]
+  ToolHost -.spawns IPC.-> LocalLlm[plugins/provider/local-llm]
   ToolHost -.spawns IPC.-> ToolApp[plugins/tool/app]
   ToolHost -.spawns IPC.-> ToolBrowser[plugins/tool/browser]
   ToolHost -.spawns IPC.-> ToolFs[plugins/tool/fs]
@@ -121,6 +122,14 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 - **Handshake Negotiation**: Version negotiation via `VersionRange { min: 5, max: 6 }` (`VersionRange::host_supported()`). The host sends supported range; plugin responds with negotiated version in `HandshakeAck`.
 - **Request Correlation**: All non-streaming and streaming IPC messages carry a mandatory `request_id` (`Uuid`).
 - **Capabilities Declaration**: `PluginCapabilities` advertises available `tools`, `llm_providers`, `stt_providers`, `tts_providers`.
+- **Capability sharing (`provides` / `requires`)**: plugins declare what they
+  offer other plugins (`provides`) and what they need (`requires`); the host
+  resolves the declarations at startup and disables plugins whose hard
+  requirements are unmet (see `docs/concepts/plugins-and-mcp.md`). The local
+  GGUF provider plugin (`plugins/provider/local-llm`, binary
+  `ene-plugin-llama-cpp`) declares `llm/chat@1`, `embed@1`, and `gguf-runner@1`
+  today; its llama.cpp inference core ships in a later slice, so inference
+  actions currently return `NotSupported`.
 - **Host-service `db` passenger**: Stateful tools open the shared host-service socket via `ene-plugin-db` and perform prefix-isolated CRUD inside the host's `memory.db`. All plugins share this single socket, so namespace isolation rests on the per-plugin auth token alone (the per-plugin socket path layer is gone).
 
 ---

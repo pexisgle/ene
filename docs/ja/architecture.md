@@ -63,6 +63,7 @@ flowchart TD
 
   ToolHost -.IPC生成.-> Anthropic[plugins/provider/anthropic]
   ToolHost -.IPC生成.-> OpenAi[plugins/provider/openai]
+  ToolHost -.IPC生成.-> LocalLlm[plugins/provider/local-llm]
   ToolHost -.IPC生成.-> ToolApp[plugins/tool/app]
   ToolHost -.IPC生成.-> ToolBrowser[plugins/tool/browser]
   ToolHost -.IPC生成.-> ToolFs[plugins/tool/fs]
@@ -121,6 +122,7 @@ flowchart TD
 - **ハンドシェイクネゴシエーション**: `VersionRange { min: 5, max: 6 }`（`VersionRange::host_supported()`）によるバージョンネゴシエーション。ホストがサポート範囲を送信し、プラグインが合意したバージョンを `HandshakeAck` で報告します。
 - **リクエスト相関**: 非ストリーミングおよびストリーミングの全 IPC メッセージは必須の `request_id` (`Uuid`) を保持します。
 - **ケーパビリティ宣言**: `PluginCapabilities` により利用可能な `tools`, `llm_providers`, `stt_providers`, `tts_providers` を宣伝します。
+- **能力共有 (`provides` / `requires`)**: プラグインは他プラグインへ提供する能力 (`provides`) と必要とする能力 (`requires`) を宣言します。ホストは起動時に宣言を解決し、ハード要求が未充足のプラグインを無効化します（`docs/concepts/plugins-and-mcp.md` 参照）。ローカル GGUF プロバイダプラグイン (`plugins/provider/local-llm`、バイナリ `ene-plugin-llama-cpp`) は現在 `llm/chat@1`・`embed@1`・`gguf-runner@1` を宣言します。llama.cpp 推論コアは後続スライスで実装されるため、推論アクションは現時点では `NotSupported` を返します。
 - **ホストサービス `db` 乗客**: 状態を保持するツールは `ene-plugin-db` を介して共有ホストサービスソケットを開き、ホストの `memory.db` 内でプレフィックス隔離された CRUD を行います。全プラグインがこの単一ソケットを共有するため、ネームスペースの隔離はプラグインごとの認証トークンのみに依存します (プラグインごとのソケットパス層は廃止されました)。
 
 ---
