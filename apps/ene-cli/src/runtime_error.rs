@@ -55,6 +55,9 @@ pub fn user_message(error: &EneRuntimeError) -> String {
         EneRuntimeError::Busy { .. } => {
             i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-actor-busy")
         }
+        EneRuntimeError::StoreRequired => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-store-required")
+        }
     }
 }
 

@@ -5,7 +5,7 @@ use crate::{
     stream,
     terminal_ui::{self, TerminalUi},
 };
-use ene_runtime::{EneEvent, EneEventReceiver, TurnId, TurnOrigin};
+use ene_runtime::{EneEvent, EneEventReceiver, PermissionDecision, RequestId, TurnId, TurnOrigin};
 use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::broadcast::error::RecvError;
@@ -55,6 +55,19 @@ enum ReplStep {
     Disconnected,
     /// A proactive (spontaneous) turn started while idle.
     Proactive(TurnId),
+    /// A scheduled turn started while idle.
+    Scheduled(TurnId),
+    /// A scheduled run wants a confirmation decision.
+    ScheduledPermission {
+        /// Request id for the decision.
+        request_id: RequestId,
+        /// Operation label from the event.
+        action: String,
+        /// Target label from the event.
+        target: String,
+        /// Human-readable description from the event.
+        description: String,
+    },
     /// The line editor produced input (or `None` on EOF).
     Input(Option<String>),
     /// A stray chat-bus event with nothing to render; loop again.
@@ -107,6 +120,23 @@ where
                     turn,
                     origin: TurnOrigin::Proactive,
                 }) => ReplStep::Proactive(turn),
+                Ok(EneEvent::TurnStarted {
+                    turn,
+                    origin: TurnOrigin::Scheduled,
+                }) => ReplStep::Scheduled(turn),
+                Ok(EneEvent::PermissionRequired {
+                    origin: TurnOrigin::Scheduled,
+                    request_id,
+                    action,
+                    target,
+                    description,
+                    ..
+                }) => ReplStep::ScheduledPermission {
+                    request_id,
+                    action,
+                    target,
+                    description,
+                },
                 // Turn-scoped events for the proactive turn arrive
                 // while `process_stream` owns `rx`; anything seen
                 // here is a stray event for a turn rendered
@@ -205,6 +235,65 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
                 // until the next input line. Skip the cancel/render dance;
                 // proactive turns are an interactive-mode feature.
             }
+            ReplStep::Scheduled(turn) => {
+                tracing::info!(%turn, "Scheduled turn started");
+                if TerminalUi::global().is_interactive() {
+                    cancel_editor(&mut editor).await;
+                    if stream_turn(&mut rx, ctx, &turn).await {
+                        return drain_and_exit(ctx, EXIT_INTERRUPTED).await;
+                    }
+                    editor = restart_editor();
+                }
+            }
+            ReplStep::ScheduledPermission {
+                request_id,
+                action,
+                target,
+                description,
+            } => {
+                tracing::info!(
+                    request_id = %request_id,
+                    action = %action,
+                    target = %target,
+                    description = %description,
+                    "Scheduled run needs confirmation"
+                );
+                if !TerminalUi::global().is_interactive() {
+                    // No one can answer a headless prompt; the run times out
+                    // via `scheduler.confirmation_timeout_secs`.
+                    continue;
+                }
+                cancel_editor(&mut editor).await;
+                println!(
+                    "{}",
+                    crate::style::warning(format!(
+                        "[Scheduled] Confirmation required: {description} (action={action}, target={target})"
+                    ))
+                );
+                let choices = vec![
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "permission-allow-once"),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "permission-allow-session"),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "permission-deny"),
+                ];
+                TerminalUi::global().pause_for_external_prompt();
+                let selection = dialoguer::Select::new()
+                    .with_prompt(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "permission-prompt"
+                    ))
+                    .items(&choices)
+                    .default(0)
+                    .interact()
+                    .unwrap_or(2);
+                TerminalUi::global().resume_after_external_prompt();
+                let decision = match selection {
+                    0 => PermissionDecision::AllowOnce,
+                    1 => PermissionDecision::AllowSession,
+                    _ => PermissionDecision::Deny,
+                };
+                drop(ctx.handle.decide_permission(request_id, decision));
+                editor = restart_editor();
+            }
             ReplStep::Input(maybe_input) => {
                 let Some(input) = maybe_input else {
                     // EOF (Ctrl-D) — treat like /quit so we still
@@ -271,6 +360,13 @@ mod tests {
         }
     }
 
+    fn scheduled_started() -> EneEvent {
+        EneEvent::TurnStarted {
+            turn: TurnId::new(),
+            origin: TurnOrigin::Scheduled,
+        }
+    }
+
     /// A completed editor is polled (`biased`) before a buffered proactive
     /// `TurnStarted`, so the submitted input wins; without the biased order
     /// the proactive arm would drop the user's message via `cancel_editor`.
@@ -312,6 +408,38 @@ mod tests {
         assert!(matches!(
             next_step(ready(Err(RecvError::Closed)), &mut editor).await,
             ReplStep::Disconnected
+        ));
+    }
+
+    /// A scheduled turn surfaces while idle like a proactive one.
+    #[tokio::test]
+    async fn scheduled_turn_surfaces_while_idle() {
+        let mut editor = Box::pin(pending::<Option<String>>());
+        assert!(matches!(
+            next_step(ready(Ok(scheduled_started())), &mut editor).await,
+            ReplStep::Scheduled(_)
+        ));
+    }
+
+    /// A scheduled confirmation surfaces the request details for the dialog.
+    #[tokio::test]
+    async fn scheduled_permission_surfaces_while_idle() {
+        let mut editor = Box::pin(pending::<Option<String>>());
+        let event = EneEvent::PermissionRequired {
+            turn: TurnId::new(),
+            origin: TurnOrigin::Scheduled,
+            request_id: RequestId::new("schedule-1"),
+            action: "schedule.run".to_string(),
+            target: "daily".to_string(),
+            description: "run the tool".to_string(),
+        };
+        assert!(matches!(
+            next_step(ready(Ok(event)), &mut editor).await,
+            ReplStep::ScheduledPermission {
+                ref request_id,
+                ref target,
+                ..
+            } if request_id.as_str() == "schedule-1" && target == "daily"
         ));
     }
 }
