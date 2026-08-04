@@ -19,7 +19,14 @@ fn parse_timezone(value: &str) -> Result<Tz, ScheduleError> {
 }
 
 fn parse_cron(value: &str) -> Result<CronSchedule, ScheduleError> {
-    CronSchedule::from_str(value).map_err(|e| ScheduleError::InvalidCron {
+    // cron 0.17 requires the seconds field; accept the common 5-field form
+    // by defaulting seconds to 0.
+    let normalized = if value.split_whitespace().count() == 5 {
+        format!("0 {value}")
+    } else {
+        value.to_string()
+    };
+    CronSchedule::from_str(&normalized).map_err(|e| ScheduleError::InvalidCron {
         value: value.to_string(),
         detail: e.to_string(),
     })
@@ -104,7 +111,7 @@ fn interval_tick_at_or_after(
     let ticks = if elapsed <= 0 {
         0
     } else {
-        elapsed.div_euclid(interval_secs)
+        elapsed.div_ceil(interval_secs)
     };
     anchor + Duration::seconds(ticks * interval_secs)
 }
