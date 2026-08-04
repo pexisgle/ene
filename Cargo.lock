@@ -2967,6 +2967,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-openai-tts"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-plugin",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ene-plugin-proto"
 version = "0.1.0"
 dependencies = [
