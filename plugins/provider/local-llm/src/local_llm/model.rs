@@ -15,16 +15,7 @@ use crate::llama_cpp::{self, LlamaStreamChunk, LoadSpec, LoadedModel};
 /// [`ene_ai::StreamingLocalLlmEngine`]'s blanket `LlmProvider` impl via
 /// `From<LlmChatRequest>`). Vision input rides the same message shape
 /// (base64 data-URI image parts).
-pub(crate) enum LlamaCppRequest {
-    /// An ordinary chat completion.
-    Chat(LlmChatRequest),
-}
-
-impl From<LlmChatRequest> for LlamaCppRequest {
-    fn from(req: LlmChatRequest) -> Self {
-        Self::Chat(req)
-    }
-}
+pub(crate) type LlamaCppRequest = LlmChatRequest;
 
 /// This crate's [`ene_infer::LocalModel::Response`] for [`LlamaChatModel`].
 pub(crate) struct LlamaCppResponse {
@@ -171,12 +162,11 @@ impl LocalModel for LlamaChatModel {
         })?;
         let loaded_ref: &LoadedModel = loaded.as_ref();
 
-        let LlamaCppRequest::Chat(chat) = req;
         let generated = llama_cpp::generate_chat(
             loaded_ref,
             ctx,
-            &chat.messages,
-            chat.json_schema.as_ref(),
+            &req.messages,
+            req.json_schema.as_ref(),
             job,
             None,
         )?;
@@ -242,12 +232,11 @@ impl StreamingLocalModel for LlamaChatModel {
         })?;
         let loaded_ref: &LoadedModel = loaded.as_ref();
 
-        let LlamaCppRequest::Chat(chat) = req;
         llama_cpp::generate_chat(
             loaded_ref,
             ctx,
-            &chat.messages,
-            chat.json_schema.as_ref(),
+            &req.messages,
+            req.json_schema.as_ref(),
             job,
             Some(sink),
         )?;
@@ -263,7 +252,7 @@ impl StreamingLocalModel for LlamaChatModel {
 /// [`ConformanceRequest`]/[`ConformanceResponse`] cannot be implemented on
 /// [`LlamaCppRequest`]/[`LlamaCppResponse`] directly — "run for
 /// approximately this long, or panic" has no meaningful encoding as a chat
-/// message list or raw RGB pixels, and this crate does not own
+/// message list, and this crate does not own
 /// `ene_ai::LlmChatRequest`/`LlmChatResponse` to add trait impls to them
 /// even if it did. [`ScriptedLlamaModel`] validates the part that *is*
 /// generic — that this engine's `EngineHandle`/`EngineConfig`/factory
