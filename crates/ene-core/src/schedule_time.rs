@@ -6,7 +6,7 @@
 //! a database.
 
 use super::{NewSchedule, Schedule, ScheduleError, ScheduleKind};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use chrono_tz::Tz;
 use cron::Schedule as CronSchedule;
 use std::str::FromStr;
@@ -123,18 +123,41 @@ fn interval_tick_strictly_after(
     after: DateTime<Utc>,
 ) -> DateTime<Utc> {
     let elapsed = (after - anchor).num_seconds();
-    let ticks = elapsed.div_euclid(interval_secs) + 1;
-    anchor + Duration::seconds(ticks.max(1) * interval_secs)
+    let ticks = if elapsed < 0 {
+        0
+    } else {
+        elapsed.div_euclid(interval_secs) + 1
+    };
+    anchor + Duration::seconds(ticks * interval_secs)
 }
 
 fn next_cron_after(sched: &CronSchedule, tz: Tz, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let local_after = after.with_timezone(&tz);
-    // cron's iterator scans from `after + 1s`, so when `after` is exactly
-    // the first instant of a fall-back fold the whole fold pair is skipped
-    // (the second instant is never yielded). Backdating the scan by one
-    // second lands it on `after` itself; the strict filter then discards
-    // that equal candidate and keeps the fold's second instant.
-    let shifted = local_after - chrono::Duration::seconds(1);
+    // cron's iterator scans from `after + 1s`, which loses occurrences in
+    // two fold situations:
+    // - `after` is exactly the first instant of a fall-back fold: the whole
+    //   ambiguous pair would be skipped (the second instant never yielded).
+    // - `after` falls anywhere inside the fold hour (e.g. schedule creation
+    //   at 01:45 on fold day): the naive scan starts past the repeated
+    //   minutes, so the second occurrence of the repeated time is skipped.
+    // When `after`'s local time is ambiguous, start the scan at the top of
+    // the repeated hour; otherwise backdate by one second so the scan lands
+    // on `after` itself. The strict filter then discards candidates at or
+    // before `after`, keeping exactly the occurrences that follow it.
+    let shifted = match local_after
+        .timezone()
+        .from_local_datetime(&local_after.naive_local())
+    {
+        chrono::offset::LocalResult::Ambiguous(_, later) => later
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|fold_start| later.timezone().from_local_datetime(&fold_start).single())
+            .map_or_else(
+                || local_after - chrono::Duration::seconds(1),
+                |fold_start| fold_start - chrono::Duration::seconds(1),
+            ),
+        _ => local_after - chrono::Duration::seconds(1),
+    };
     sched
         .after_owned(shifted)
         .find(|candidate| *candidate > local_after)
@@ -443,10 +466,70 @@ mod tests {
     }
 
     #[test]
+    fn cron_created_mid_fold_keeps_second_occurrence() {
+        // Creation at 01:45 EDT on the fall-back day (05:45Z): the 01:30 EDT
+        // occurrence already passed, so the next 01:30 is the second fold
+        // instant (01:30 EST = 06:30Z) on the same day — not the next day.
+        let new = new_schedule(
+            ScheduleKind::Cron,
+            "America/New_York",
+            Some("30 1 * * *"),
+            None,
+            None,
+        );
+        assert_eq!(
+            first_run_at(&new, at(2026, 11, 1, 5, 45)).expect("valid"),
+            at(2026, 11, 1, 6, 30)
+        );
+        // Creation just before the fold's first instant still fires on the
+        // first fold instant.
+        assert_eq!(
+            first_run_at(&new, at(2026, 11, 1, 5, 29)).expect("valid"),
+            at(2026, 11, 1, 5, 30)
+        );
+    }
+
+    #[test]
     fn startup_fires_at_creation_instant() {
         let new = new_schedule(ScheduleKind::Startup, "UTC", None, None, None);
         let now = at(2026, 8, 4, 12, 0);
         assert_eq!(first_run_at(&new, now).expect("valid"), now);
+    }
+
+    #[test]
+    fn interval_strictly_after_before_anchor_returns_anchor() {
+        let anchor = at(2026, 8, 4, 12, 0);
+        let schedule = Schedule {
+            id: 1,
+            name: "test".to_string(),
+            kind: ScheduleKind::Interval,
+            enabled: true,
+            timezone: "UTC".to_string(),
+            cron_expr: None,
+            interval_secs: Some(3600),
+            start_at: Some(anchor),
+            action: ScheduleAction::Prompt {
+                text: "hello".to_string(),
+                allow_tools: false,
+            },
+            confirmation: ScheduleConfirmation::None,
+            max_retries: 0,
+            retry_delay_secs: 60,
+            next_run_at: Some(anchor),
+            pending_retry_of_run_id: None,
+            last_run_at: None,
+            last_status: None,
+            run_count: 0,
+            fail_count: 0,
+            created_at: anchor,
+            updated_at: anchor,
+        };
+        // Strictly after a time before the anchor: the anchor itself is the
+        // first valid tick.
+        assert_eq!(
+            next_occurrence_after(&schedule, anchor - chrono::Duration::hours(1)),
+            Some(anchor)
+        );
     }
 
     #[test]
