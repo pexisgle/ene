@@ -2840,6 +2840,68 @@ impl TurnActor {
                 self.tool_rag = None;
                 true
             }
+            EneCommand::ResolveCandidate {
+                id,
+                status,
+                turn,
+                reply,
+            } => {
+                let Some(store) = self.concrete_store.clone() else {
+                    drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
+                        message: "Memory store is not enabled".to_string(),
+                    })));
+                    return true;
+                };
+                let result = match status {
+                    ene_store::PendingCandidateStatus::Approved => store
+                        .approve_pending_candidate(id)
+                        .await
+                        .map(|_| ())
+                        .map_err(crate::public_api::PublicApiError::from),
+                    ene_store::PendingCandidateStatus::Rejected => store
+                        .resolve_pending_candidate(id, false)
+                        .await
+                        .map_err(crate::public_api::PublicApiError::from),
+                    // Fail closed: a non-terminal status must never claim
+                    // a row; the handle only ever sends approved/rejected.
+                    ene_store::PendingCandidateStatus::Pending => {
+                        Err(crate::public_api::PublicApiError::Invalid {
+                            message: format!("cannot resolve pending candidate {id} to 'pending'"),
+                        })
+                    }
+                };
+                drop(
+                    self.lifecycle_tx
+                        .send(LifecycleEvent::CandidateChanged { id, status, turn }),
+                );
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::EditCandidate {
+                id,
+                edit,
+                turn,
+                reply,
+            } => {
+                let Some(store) = self.concrete_store.clone() else {
+                    drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
+                        message: "Memory store is not enabled".to_string(),
+                    })));
+                    return true;
+                };
+                let result = store
+                    .edit_pending_candidate(id, edit)
+                    .await
+                    .map(|_| ())
+                    .map_err(crate::public_api::PublicApiError::from);
+                drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
+                    id,
+                    status: ene_store::PendingCandidateStatus::Pending,
+                    turn,
+                }));
+                drop(reply.send(result));
+                true
+            }
             EneCommand::SetCcv3MemoryHash { hash, reply } => {
                 self.session.memory.ccv3_memory_hash = Some(hash);
                 // A oneshot send error is `Copy` here (it's just the unsent

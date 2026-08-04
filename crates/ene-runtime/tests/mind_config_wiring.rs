@@ -1,7 +1,8 @@
 //! Integration tests for the mind runtime configuration wiring.
 //!
-//! Public `MindConfig` exposes `emotion`, `proactive`, and `memory_limits`;
-//! `context` / `memory` / `character` remain code defaults (serde-skipped).
+//! Public `MindConfig` exposes `emotion`, `proactive`, `memory_limits`, and
+//! `memory_approval`; `context` / `memory` / `character` remain code defaults
+//! (serde-skipped).
 //!
 #![expect(
     clippy::expect_used,
@@ -11,7 +12,8 @@
 
 use ene_config::EneConfig;
 use ene_mind::{
-    ContextConfig, EmotionConfig, MindConfig, MindMemoryConfig, MindMemoryLimitsConfig,
+    ContextConfig, EmotionConfig, MemoryApprovalConfig, MindConfig, MindMemoryConfig,
+    MindMemoryLimitsConfig,
 };
 
 #[test]
@@ -38,7 +40,7 @@ fn mind_schema_appears_as_top_level_property_when_ene_mind_is_linked() {
         .get("properties")
         .and_then(|p| p.as_object())
         .expect("`mind` property should be a struct with sub-properties");
-    for sub in ["emotion", "proactive", "memory_limits"] {
+    for sub in ["emotion", "proactive", "memory_limits", "memory_approval"] {
         assert!(
             mind_properties.contains_key(sub),
             "mind.{sub} should appear in the registered schema; got keys: {:?}",
@@ -66,7 +68,12 @@ fn mind_public_subtypes_appear_in_schema_definitions() {
         .or_else(|| value.get("definitions"))
         .expect("schema must expose a definitions map");
 
-    for sub_type in ["EmotionConfig", "ProactiveConfig", "MindMemoryLimitsConfig"] {
+    for sub_type in [
+        "EmotionConfig",
+        "ProactiveConfig",
+        "MindMemoryLimitsConfig",
+        "MemoryApprovalConfig",
+    ] {
         assert!(
             defs.get(sub_type).is_some(),
             "expected `{sub_type}` to be registered as a referenced sub-type; got defs keys: {:?}",
@@ -113,12 +120,21 @@ fn mind_section_defaults_match_macro_definition() {
         MindMemoryLimitsConfig::default(),
         "mind.memory_limits should equal the code defaults"
     );
+    assert_eq!(
+        mind.memory_approval,
+        MemoryApprovalConfig::default(),
+        "mind.memory_approval should equal the code defaults"
+    );
     assert_eq!(mind.context.max_prompt_tokens, None);
     assert!(mind.emotion.enabled);
     assert!(!mind.proactive.enabled);
     assert_eq!(mind.proactive.interval_seconds, 60);
     assert_eq!(mind.proactive.min_idle_seconds, 120);
     assert_eq!(mind.proactive.cooldown_seconds, 300);
+    assert!(
+        !mind.memory_approval.require_approval,
+        "approval mode must default to off to keep the auto-save behavior"
+    );
 }
 
 #[test]
@@ -129,6 +145,7 @@ fn mind_section_round_trips_public_fields_only() {
     custom.proactive.interval_seconds = 90;
     custom.emotion.enabled = false;
     custom.memory_limits.commitment_active_match_limit = 128;
+    custom.memory_approval.require_approval = true;
     // Mutating skipped fields must not survive JSON round-trip.
     custom.context.max_prompt_tokens = Some(16_384);
     custom.memory.recall_result_limit = 999;
@@ -147,6 +164,10 @@ fn mind_section_round_trips_public_fields_only() {
     assert_eq!(
         loaded.memory_limits.commitment_active_match_limit, 128,
         "the public memory_limits field must survive the JSON round-trip"
+    );
+    assert!(
+        loaded.memory_approval.require_approval,
+        "the public memory_approval field must survive the JSON round-trip"
     );
     assert_eq!(
         loaded.memory,

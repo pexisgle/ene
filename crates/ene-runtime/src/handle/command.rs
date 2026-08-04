@@ -6,13 +6,16 @@
 //! ## Scope
 //!
 //! Read-only session/candidate queries (`ListSessions`, `ExportSession`,
-//! `ImportSession`, `SearchSessions`, `ArchiveSession`,
-//! `ListPendingCandidates`, `ApproveCandidate`, `RejectCandidate`) and the
-//! screen-image vision buffer are handled outside this actor mailbox: see
-//! [`crate::query::sessions::SessionQueryHandle`],
-//! [`crate::query::candidates::MemoryCandidateHandle`], and
-//! [`crate::vision`]. The vision path only crosses the mailbox as the
-//! payload-free [`EneCommand::PrepareVisionSummary`] /
+//! `ImportSession`, `SearchSessions`, `ArchiveSession`) and the screen-image
+//! vision buffer are handled outside this actor mailbox: see
+//! [`crate::query::sessions::SessionQueryHandle`] and [`crate::vision`].
+//! Pending-candidate **reads** (`list` / `inspect` / `history`) are likewise
+//! mailbox-free on [`crate::query::candidates::MemoryCandidateHandle`], but
+//! candidate **mutations** (`ResolveCandidate`, `EditCandidate`) cross the
+//! mailbox so they serialize with turn execution, carry the active `TurnId`,
+//! and emit `LifecycleEvent::CandidateChanged` audit events. The vision path
+//! only crosses the mailbox as the payload-free
+//! [`EneCommand::PrepareVisionSummary`] /
 //! [`EneCommand::StashProactiveScreenImage`] pair.
 
 use crate::error::EneRuntimeError;
@@ -230,6 +233,36 @@ pub enum EneCommand {
         task_id: String,
         /// Reply channel carrying whether a running task was cancelled.
         reply: oneshot::Sender<bool>,
+    },
+    /// Resolve a pending memory candidate (approve or reject).
+    ///
+    /// Executed against the memory store inside the actor so the decision is
+    /// serialized with turn execution and emitted as a
+    /// [`super::event::LifecycleEvent::CandidateChanged`] audit event.
+    ResolveCandidate {
+        /// Candidate row id.
+        id: i64,
+        /// Target workflow status (`approved` or `rejected`).
+        status: ene_store::PendingCandidateStatus,
+        /// Active turn context for the audit event (`None` outside a turn).
+        turn: Option<TurnId>,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
+    },
+    /// Edit the user-editable fields of a still-pending memory candidate.
+    ///
+    /// Executed against the memory store inside the actor so the edit is
+    /// serialized with turn execution and emitted as a
+    /// [`super::event::LifecycleEvent::CandidateChanged`] audit event.
+    EditCandidate {
+        /// Candidate row id.
+        id: i64,
+        /// New field values (validated before any write).
+        edit: ene_store::PendingCandidateEdit,
+        /// Active turn context for the audit event (`None` outside a turn).
+        turn: Option<TurnId>,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
     },
     /// Invalidate the Tool RAG index, forcing re-embedding on next query.
     InvalidateToolIndex,

@@ -189,6 +189,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         affect: &affect_before,
         character_id: "ene",
         user_id: "User",
+        source_turn: None,
         interrupted: false,
         spoken_text: None,
     };
@@ -437,6 +438,7 @@ async fn post_turn_tool_results_persist_procedure_memory() {
         affect: &affect,
         character_id: "ene",
         user_id: "User",
+        source_turn: None,
         interrupted: false,
         spoken_text: None,
     };

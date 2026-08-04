@@ -30,7 +30,8 @@
 //!
 //! [`PublicChatEvent`] mirrors only the chat bus ([`EneEvent`]). Lifecycle
 //! notifications (`StatusChanged`, `PendingCandidateAvailable`,
-//! `ToolBackgroundCompleted`) now ride a separate lifecycle bus
+//! `CandidateChanged`, `ToolBackgroundCompleted`) now ride a separate
+//! lifecycle bus
 //! ([`LifecycleEvent`]) and are mirrored by [`PublicLifecycleEvent`]
 //! instead. The audio channel ([`crate::handle::AudioChunk`]) has no
 //! `Public*` mirror: it is a heavyweight, single-consumer, in-process
@@ -228,6 +229,7 @@ impl From<ene_store::EneMemoryError> for PublicApiError {
             // Caller-supplied data was rejected.
             E::InvalidEmbedding(_)
             | E::InvalidTransition { .. }
+            | E::InvalidPendingCandidateEdit(_)
             | E::UnsupportedFormatVersion(_)
             | E::SerializationError(_) => Self::Invalid { message },
             // `Other` is a free-text catch-all inside `ene_store` itself; the
@@ -255,8 +257,9 @@ impl From<ene_store::EneMemoryError> for PublicApiError {
 /// extended with fields the host contract documents (`origin`, gates).
 /// Prefer this type over serializing [`EneEvent`] directly when exposing
 /// events outside the process. Turn-independent lifecycle notifications
-/// (`StatusChanged`, `PendingCandidateAvailable`, `ToolBackgroundCompleted`)
-/// are not part of this type — see [`PublicLifecycleEvent`].
+/// (`StatusChanged`, `PendingCandidateAvailable`, `CandidateChanged`,
+/// `ToolBackgroundCompleted`) are not part of this type — see
+/// [`PublicLifecycleEvent`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicChatEvent {
@@ -364,7 +367,7 @@ pub enum PublicChatEvent {
 /// Tagged with `type` in `snake_case`, mirroring [`PublicChatEvent`]'s
 /// conventions. Covers the turn-independent notifications kept off
 /// [`PublicChatEvent`]: `StatusChanged`, `PendingCandidateAvailable`,
-/// `ToolBackgroundCompleted`.
+/// `CandidateChanged`, `ToolBackgroundCompleted`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicLifecycleEvent {
@@ -377,6 +380,15 @@ pub enum PublicLifecycleEvent {
     PendingCandidatesAvailable {
         /// Number of pending candidates currently awaiting review.
         count: usize,
+    },
+    /// A pending memory candidate was approved, rejected, or edited.
+    CandidateChanged {
+        /// Candidate row id.
+        id: i64,
+        /// Status after the mutation (`pending` / `approved` / `rejected`).
+        status: String,
+        /// Active turn context at mutation time, when any.
+        turn: Option<String>,
     },
     /// A deferred background tool task reached a terminal state.
     ToolBackgroundCompleted {
@@ -521,6 +533,11 @@ impl PublicLifecycleEvent {
             LifecycleEvent::PendingCandidateAvailable { count } => {
                 Self::PendingCandidatesAvailable { count: *count }
             }
+            LifecycleEvent::CandidateChanged { id, status, turn } => Self::CandidateChanged {
+                id: *id,
+                status: status.as_str().to_string(),
+                turn: turn.as_ref().map(ToString::to_string),
+            },
             LifecycleEvent::ToolBackgroundCompleted {
                 tool_name,
                 task_id,
@@ -765,6 +782,24 @@ mod tests {
         let value = serde_json::to_value(&public).expect("serializable");
         assert_eq!(value["type"], "pending_candidates_available");
         assert_eq!(value["count"], 3);
+    }
+
+    #[test]
+    fn candidate_changed_maps_to_dedicated_event() {
+        let event = LifecycleEvent::CandidateChanged {
+            id: 7,
+            status: ene_store::PendingCandidateStatus::Approved,
+            turn: Some(TurnId::from("turn-1")),
+        };
+        let public = PublicLifecycleEvent::from_lifecycle_event(&event);
+        let PublicLifecycleEvent::CandidateChanged { id, status, turn } = &public else {
+            panic!("expected CandidateChanged");
+        };
+        assert_eq!(*id, 7);
+        assert_eq!(status.as_str(), "approved");
+        assert_eq!(turn.as_deref(), Some("turn-1"));
+        let value = serde_json::to_value(&public).expect("serializable");
+        assert_eq!(value["type"], "candidate_changed");
     }
 
     /// `ToolBackgroundCompleted` mirrors on the dedicated
