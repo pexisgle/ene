@@ -2086,6 +2086,7 @@ mod tests {
                 "geo",
                 "git",
                 "homeassistant",
+                "kokoro",
                 "llama-cpp",
                 "openai",
                 "openai-tts",
