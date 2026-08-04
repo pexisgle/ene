@@ -199,11 +199,14 @@ fn active_window_label(level: WindowTitleLevel) -> Option<String> {
     }
 }
 
-/// Read the current global cursor position (screen coordinates) for
-/// ROI cropping. Returns `None` when the device state cannot be
-/// queried, in which case the observer skips ROI cropping.
+/// Read the current global cursor position (screen coordinates) for ROI
+/// cropping. `device_query` reads the pointer through X11, so a pure-Wayland
+/// session (no X display) yields `None` and the observer skips ROI cropping.
 fn current_cursor_position() -> Option<(i32, i32)> {
     use device_query::{DeviceQuery, DeviceState};
+    #[cfg(target_os = "linux")]
+    let state = DeviceState::checked_new()?;
+    #[cfg(not(target_os = "linux"))]
     let state = DeviceState::new();
     let mouse = state.get_mouse();
     Some(mouse.coords)
