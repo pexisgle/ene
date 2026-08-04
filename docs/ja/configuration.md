@@ -684,6 +684,75 @@ HTTP サーバーです。`ai.tts.provider = "voicevox"` で選択します。�
 構築されるためです。一方、`plugins.list.voicevox.config` と `ai.tts.voice` の
 編集は実行中のセッションにも反映されます。
 
+#### ローカル Kokoro-TTS プロバイダ（`plugins.list.kokoro.config`）
+
+`kokoro` プロバイダプラグイン（`plugins/provider/kokoro`）は、Kokoro-82M
+ONNX モデルを自プロセス内で直接実行します。完全ローカルで、API キーも HTTP
+エンジンも不要です。`ai.tts.provider = "kokoro"` で選択します。汎用の
+`ai.tts.voice` には Kokoro ボイス名（例：`af_heart`、`jf_alpha`）を指定でき、
+設定済みの既定ボイスをリクエスト単位で上書きします。
+
+ONNX モデルと `voices.bin` ボイス埋め込みは共有モデルキャッシュに取得されます
+（`ene_voice` のダウンロード/プリフェッチ経由。デスクトップの設定 → 音声画面
+からもダウンロードできます）。カスタムパスでキャッシュ位置を上書きできます。
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "kokoro",
+      "voice": "af_heart"
+    }
+  },
+  "plugins": {
+    "list": {
+      "kokoro": {
+        "enable": true,
+        "config": {
+          "model_path": "/data/kokoro.onnx",
+          "voices_path": "/data/voices.bin",
+          "voice": "af_heart",
+          "speed": 1.0,
+          "language": "en",
+          "ort_dylib_path": "/opt/onnxruntime/lib/libonnxruntime.so"
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目:
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `model_path` | 共有モデルキャッシュ（`models/gguf/kokoro.onnx`） | Kokoro ONNX モデルファイルのパス。 |
+| `voices_path` | `plugins.list.kokoro.profiles.kokoro.voices_path` → 共有モデルキャッシュ（`models/gguf/voices.bin`） | `voices.bin` ボイス埋め込みのパス。プロファイルのスロットは旧 `ai.tts.voices_path` の移行先です。 |
+| `voice` | `""`（`voices.bin` の先頭ボイス `af_alloy`） | 既定ボイス。リクエスト単位の `ai.tts.voice` が優先されます。全 53 ボイス名はケーパビリティ一覧を参照。 |
+| `speed` | `1.0` | 発話速度倍率（0.5–2.0）。 |
+| `language` | 未設定（英語 G2P） | 書記素→音素変換の言語。`"ja"` で日本語のかなルール、それ以外は英語ルールを使用。 |
+| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き。 |
+
+各キーは環境変数で個別に上書きできます：
+`ENE_PLUGINS__LIST__KOKORO__CONFIG__<KEY>`
+（例：`ENE_PLUGINS__LIST__KOKORO__CONFIG__SPEED`）。
+
+モデルは最初の合成時に遅延ロードされ、プラグインプロセス内に常駐します。
+上記の設定（または `ai.tts.voice`）を変更すると再ロードされます。プラグインは
+24 kHz モノラル WAV を返し、ホスト側の音声パイプラインが float サンプルに
+デコードして `TtsChunk` に分割し、ストリーミング再生します
+（`formats = ["wav"]`）。
+
+なお、`ai.tts.model_path` / `ai.tts.model` は後述のプロセス内フォールバック
+でのみ有効です。プラグイン経由では `model_path` を自プラグインの設定から
+読み取ります。
+
+**プロセス内フォールバック。** プラグインホストが利用できない場合や `kokoro`
+プラグインが無効な場合、ランタイム内蔵の `ene-voice` ファクトリが
+`ai.tts.provider = "kokoro"` をプロセス内で引き続き提供します（`ai.tts.model_path`
+/ `ai.tts.model` / `ai.tts.speed` と `profiles.kokoro.voices_path` を参照）。
+プラグインが稼働している間はプラグインのファクトリが優先されます。
+
 #### OpenAI Speech API TTS プロバイダ（`plugins.list.openai-tts.config`）
 
 `openai-tts` プロバイダプラグイン（`plugins/provider/openai-tts`）は OpenAI
