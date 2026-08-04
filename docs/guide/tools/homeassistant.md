@@ -13,9 +13,16 @@ and a long-lived access token before any action works:
 
 - `base_url` — your instance URL, e.g. `http://homeassistant.local:8123`.
   A reverse-proxy path prefix is supported and must end with `/` (e.g.
-  `https://home.example.com/ha/`).
+  `https://home.example.com/ha/`). Only `http` and `https` are accepted.
 - `token` — a long-lived access token created in Home Assistant under
   **Profile → Security → Long-Lived Access Tokens**.
+
+> **Security:** over plaintext `http://` the long-lived token is sent
+> unencrypted on your network for every request, and anyone on the same
+> network segment can capture it and control your smart home. Prefer
+> `https://` (e.g. Home Assistant behind a TLS reverse proxy), or at least
+> restrict `http://` access to a trusted network. Ene logs a startup
+> warning whenever the configured base URL uses `http`.
 
 Set them in `settings.json` under `plugins.list.homeassistant.config`:
 
@@ -36,8 +43,8 @@ Set them in `settings.json` under `plugins.list.homeassistant.config`:
 ```
 
 The token field is marked `x-ene-secret` in the plugin's config schema, so
-Ene masks it in the UI and redacts it from logs. The same value can be set
-with the environment override
+Ene redacts it from host logs; settings-UI masking of secret fields is
+planned. The same value can be set with the environment override
 `ENE_PLUGINS__LIST__HOMEASSISTANT__CONFIG__TOKEN`.
 
 The plugin also declares the credential id `homeassistant` (private, kind
@@ -60,8 +67,8 @@ Reads the current state, attributes, and last-updated time of an entity:
 ```
 
 This action is read-only and runs without an approval prompt. It does reach
-your Home Assistant instance over the network, so the token stays on your
-own infrastructure.
+your Home Assistant instance over the network, so the transport security
+notes above apply to it as well.
 
 ### `homeassistant.turn_on` / `homeassistant.turn_off`
 
@@ -75,7 +82,9 @@ These actions change the physical state of a device, so they require
 explicit user approval before anything is sent to Home Assistant. The
 approval prompt shows the exact entity id and the intended action.
 Approvals last for the current turn; choosing "allow for this session"
-keeps the permission for the rest of the conversation.
+keeps the permission for the rest of the conversation. Direct tool calls
+(`ene-cli tool call`) run under a fresh synthetic turn, so they never
+inherit approvals granted during a chat.
 
 ### `homeassistant.set_temperature`
 
