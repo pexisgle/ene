@@ -71,7 +71,7 @@ async fn schedule_crud_roundtrip_and_validation() {
     ));
 
     assert!(
-        !store
+        store
             .set_schedule_enabled(inserted.id, false, now)
             .await
             .unwrap()
