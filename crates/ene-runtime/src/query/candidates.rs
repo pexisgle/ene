@@ -57,14 +57,21 @@ pub struct MemoryCandidateHandle {
     /// the character card is swapped (`SetCharacter`). Reading it here never
     /// requires a mailbox round-trip.
     card_name: Arc<parking_lot::Mutex<String>>,
+    /// Shared L1 recall cache invalidated on approval/rejection.
+    recall_cache: Option<Arc<ene_mind::MemoryRecallCache>>,
 }
 
 impl MemoryCandidateHandle {
     pub(crate) const fn new(
         store: Option<Arc<MemoryStore>>,
         card_name: Arc<parking_lot::Mutex<String>>,
+        recall_cache: Option<Arc<ene_mind::MemoryRecallCache>>,
     ) -> Self {
-        Self { store, card_name }
+        Self {
+            store,
+            card_name,
+            recall_cache,
+        }
     }
 
     fn store(&self) -> Result<&Arc<MemoryStore>, PublicApiError> {
@@ -91,7 +98,11 @@ impl MemoryCandidateHandle {
     /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`.
     pub async fn approve(&self, id: i64) -> Result<(), PublicApiError> {
-        self.store()?.approve_pending_candidate(id).await?;
+        let result = self.store()?.approve_pending_candidate(id).await;
+        if result.is_ok() {
+            self.invalidate_recall_cache();
+        }
+        result?;
         Ok(())
     }
 
@@ -100,7 +111,22 @@ impl MemoryCandidateHandle {
     /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`.
     pub async fn reject(&self, id: i64) -> Result<(), PublicApiError> {
-        self.store()?.resolve_pending_candidate(id, false).await?;
+        let result = self.store()?.resolve_pending_candidate(id, false).await;
+        if result.is_ok() {
+            self.invalidate_recall_cache();
+        }
+        result?;
         Ok(())
+    }
+
+    /// Drop cached gather data for the active character after a queue change.
+    ///
+    /// Approval persists a typed memory and rejection removes a pending row;
+    /// both feed hybrid recall, so either must evict the L1 tier. The card
+    /// name is read from the shared slot to keep this handle mailbox-free.
+    fn invalidate_recall_cache(&self) {
+        if let Some(cache) = &self.recall_cache {
+            cache.invalidate_character(&self.card_name.lock());
+        }
     }
 }

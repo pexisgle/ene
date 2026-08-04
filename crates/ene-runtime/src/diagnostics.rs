@@ -42,6 +42,8 @@ pub struct MemoryHandle {
     pub(crate) store: Option<Arc<ene_store::MemoryStore>>,
     pub(crate) embedder: Option<Arc<dyn ene_ai::EmbeddingProvider>>,
     pub(crate) mind_memory: ene_mind::MindMemoryConfig,
+    /// Shared L1 recall cache invalidated by every memory mutation here.
+    pub(crate) recall_cache: Option<Arc<ene_mind::MemoryRecallCache>>,
 }
 
 impl std::fmt::Debug for MemoryHandle {
@@ -57,11 +59,23 @@ impl MemoryHandle {
         store: Option<Arc<ene_store::MemoryStore>>,
         embedder: Option<Arc<dyn ene_ai::EmbeddingProvider>>,
         mind_memory: ene_mind::MindMemoryConfig,
+        recall_cache: Option<Arc<ene_mind::MemoryRecallCache>>,
     ) -> Self {
         Self {
             store,
             embedder,
             mind_memory,
+            recall_cache,
+        }
+    }
+
+    /// Drop the L1 cache after a mutation that only identifies the row by id.
+    ///
+    /// Coarse but rare (user-driven UI actions), so the correctness win of
+    /// never serving stale gather results outweighs the cache rebuild.
+    fn invalidate_recall_cache(&self) {
+        if let Some(cache) = &self.recall_cache {
+            cache.invalidate_all();
         }
     }
 
@@ -177,10 +191,14 @@ impl MemoryHandle {
     /// Update typed memory pinned flag.
     pub async fn pin_typed_memory(&self, id: i64, pinned: bool) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
-        store
+        let result = store
             .pin_typed_memory(id, pinned)
             .await
-            .map_err(EneRuntimeError::Memory)
+            .map_err(EneRuntimeError::Memory);
+        if result.as_ref().is_ok_and(|changed| *changed) {
+            self.invalidate_recall_cache();
+        }
+        result
     }
 
     /// Transition typed memory lifecycle status.
@@ -190,28 +208,40 @@ impl MemoryHandle {
         status: ene_store::MemoryStatus,
     ) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
-        store
+        let result = store
             .set_memory_status(id, status)
             .await
-            .map_err(EneRuntimeError::Memory)
+            .map_err(EneRuntimeError::Memory);
+        if result.as_ref().is_ok_and(|changed| *changed) {
+            self.invalidate_recall_cache();
+        }
+        result
     }
 
     /// User-driven restore to active status (journal/CLI UX).
     pub async fn user_restore_typed_memory(&self, id: i64) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
-        store
+        let result = store
             .user_restore_typed_memory(id)
             .await
-            .map_err(EneRuntimeError::Memory)
+            .map_err(EneRuntimeError::Memory);
+        if result.as_ref().is_ok_and(|changed| *changed) {
+            self.invalidate_recall_cache();
+        }
+        result
     }
 
     /// User-driven forget (`Active` → `UserDeleted`).
     pub async fn user_forget_typed_memory(&self, id: i64) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
-        store
+        let result = store
             .user_forget_typed_memory(id)
             .await
-            .map_err(EneRuntimeError::Memory)
+            .map_err(EneRuntimeError::Memory);
+        if result.as_ref().is_ok_and(|changed| *changed) {
+            self.invalidate_recall_cache();
+        }
+        result
     }
 
     /// Show current affect state for a character.
@@ -259,10 +289,14 @@ impl MemoryHandle {
     /// injection, so this direct store write cannot desync the actor.
     pub async fn complete_commitment(&self, id: i64) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
-        store
+        let result = store
             .complete_commitment(id)
             .await
-            .map_err(EneRuntimeError::Memory)
+            .map_err(EneRuntimeError::Memory);
+        if result.as_ref().is_ok_and(|changed| *changed) {
+            self.invalidate_recall_cache();
+        }
+        result
     }
 
     /// Mark a commitment as cancelled.
@@ -271,10 +305,14 @@ impl MemoryHandle {
     /// the ledger is stateless, so a direct store write is harmless.
     pub async fn cancel_commitment(&self, id: i64) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
-        store
+        let result = store
             .cancel_commitment(id)
             .await
-            .map_err(EneRuntimeError::Memory)
+            .map_err(EneRuntimeError::Memory);
+        if result.as_ref().is_ok_and(|changed| *changed) {
+            self.invalidate_recall_cache();
+        }
+        result
     }
 
     /// Count pending (retryable) and permanent failed memory writes.
@@ -342,6 +380,10 @@ impl MemoryHandle {
             limit,
         )
         .await;
+        // The drain replays failed write payloads, so recall rows may have
+        // changed; the operation is rare and user-invoked, so drop the cache
+        // unconditionally rather than tracking individual writes.
+        self.invalidate_recall_cache();
         Ok(())
     }
 
@@ -430,11 +472,12 @@ mod tests {
             Some(std::sync::Arc::new(store)),
             None,
             ene_mind::MindMemoryConfig::default(),
+            None,
         )
     }
 
     fn storeless_handle() -> MemoryHandle {
-        MemoryHandle::new(None, None, ene_mind::MindMemoryConfig::default())
+        MemoryHandle::new(None, None, ene_mind::MindMemoryConfig::default(), None)
     }
 
     /// Assert a facade call failed with the disabled-store connection error.

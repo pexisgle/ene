@@ -629,10 +629,12 @@ impl EneHandle {
         }
 
         let mind_memory = mind.memory.clone();
+        let recall_cache = session.memory.recall_cache.clone();
         let memory = crate::diagnostics::MemoryHandle::new(
             memory_store.clone(),
             session.memory.embedding_provider.clone(),
             mind_memory,
+            recall_cache.clone(),
         );
 
         let fallback_cfg = config.get_section::<ene_ai::AiConfig>()?.fallback;
@@ -719,6 +721,7 @@ impl EneHandle {
         let candidates = crate::query::candidates::MemoryCandidateHandle::new(
             memory_store.clone(),
             Arc::clone(&shared.card_name),
+            recall_cache,
         );
         let vision = crate::vision::VisionHandle::new(Arc::clone(&cmd_tx));
         let tools = crate::tools::ToolHandle::new(Arc::clone(&cmd_tx));
