@@ -48,6 +48,7 @@ base64 = { version = "0.23", default-features = false }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.6"
 cron = "0.17"
+iana-time-zone = "0.1"
 figment = { version = "0.10", features = ["json", "env"] }
 schemars = { version = "1.2", features = ["preserve_order", "indexmap2"] }
 serde = { version = "1", features = ["derive"] }

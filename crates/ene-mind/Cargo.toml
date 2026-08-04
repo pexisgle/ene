@@ -27,6 +27,7 @@ ene-rag = { workspace = true }
 
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+iana-time-zone = { workspace = true }
 
 schemars = { workspace = true }
 regex = { workspace = true }

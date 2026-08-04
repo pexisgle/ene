@@ -14,6 +14,8 @@ pub struct QuietHoursEval {
     pub active: bool,
     /// Local weekday (`monday`..`sunday`), stable English contract.
     pub weekday: String,
+    /// Local wall date (`YYYY-MM-DD`) in the configured timezone.
+    pub local_date: String,
     /// Local wall time as `HH:MM` in the configured timezone.
     pub local_time: String,
     /// Resolved timezone name (`Asia/Tokyo`, ...) or `local` for the system
@@ -91,6 +93,12 @@ fn quiet_eval(timezone: &str, local: NaiveDateTime, active: bool) -> QuietHoursE
     QuietHoursEval {
         active,
         weekday: weekday_name(local.weekday()).to_string(),
+        local_date: format!(
+            "{:04}-{:02}-{:02}",
+            local.year(),
+            local.month(),
+            local.day()
+        ),
         local_time: format!("{:02}:{:02}", local.hour(), local.minute()),
         timezone: timezone.to_string(),
         timezone_valid: true,
@@ -102,12 +110,26 @@ fn resolve_local_wall_time(
     now: DateTime<Utc>,
 ) -> Option<(NaiveDateTime, String)> {
     if config.timezone.trim().is_empty() {
-        // The system offset is sampled at the evaluation moment and applied
-        // to the caller's instant; DST changes between the two are rare and
-        // only shift the boundary by the transition duration.
-        let offset = *chrono::Local::now().offset();
+        // Resolve the system timezone once and convert the caller's instant
+        // in it, so the offset honours the injected clock instead of the
+        // wall-clock moment the evaluation happens to run at.
+        let Some(tz_name) = system_timezone_name() else {
+            tracing::warn!(
+                component = "Proactive",
+                "System timezone unavailable; quiet hours treated as inactive"
+            );
+            return None;
+        };
+        let Ok(tz) = Tz::from_str(&tz_name) else {
+            tracing::warn!(
+                component = "Proactive",
+                timezone = %tz_name,
+                "Resolved system timezone is not a known IANA zone; quiet hours treated as inactive"
+            );
+            return None;
+        };
         return Some((
-            now.with_timezone(&offset).naive_local(),
+            tz.from_utc_datetime(&now.naive_utc()).naive_local(),
             "local".to_string(),
         ));
     }
@@ -124,6 +146,13 @@ fn resolve_local_wall_time(
         tz.from_utc_datetime(&now.naive_utc()).naive_local(),
         timezone.to_string(),
     ))
+}
+
+fn system_timezone_name() -> Option<String> {
+    static SYSTEM_TIMEZONE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    SYSTEM_TIMEZONE
+        .get_or_init(|| iana_time_zone::get_timezone().ok())
+        .clone()
 }
 
 fn weekday_name(weekday: Weekday) -> &'static str {
@@ -261,6 +290,23 @@ mod tests {
         let eval = evaluate_quiet_hours(&cfg, utc(2026, 8, 3, 13, 0));
         assert!(!eval.active);
         assert!(!eval.timezone_valid);
+    }
+
+    #[test]
+    fn empty_timezone_resolves_the_system_zone_at_the_injected_instant() {
+        let Some(tz_name) = system_timezone_name() else {
+            return; // exotic environments without a resolvable system zone
+        };
+        let tz: Tz = tz_name.parse().expect("resolved zone must parse");
+        let mut cfg = config();
+        cfg.timezone.clear();
+        let now = utc(2026, 8, 3, 13, 0);
+        let eval = evaluate_quiet_hours(&cfg, now);
+        let expected = tz.from_utc_datetime(&now.naive_utc()).naive_local();
+        assert!(eval.timezone_valid);
+        assert_eq!(eval.local_date, expected.format("%Y-%m-%d").to_string());
+        assert_eq!(eval.local_time, expected.format("%H:%M").to_string());
+        assert_eq!(eval.weekday, weekday_name(expected.weekday()));
     }
 
     #[test]
