@@ -52,6 +52,7 @@
 )]
 
 pub mod animation;
+pub mod beat_sync;
 pub mod camera;
 pub mod debug_renderer;
 pub mod error;
@@ -78,6 +79,7 @@ pub use animation::{
     VrmaClip, VrmaFrame, VrmaPlayer, VrmaProperties, evaluate_clip, load_vrma, quat_to_yaw_pitch,
     retarget_hips_translation, retarget_rotation,
 };
+pub use beat_sync::BeatSway;
 pub use camera::{
     ModelUniform, OrthographicCamera, ndc_to_view_pos, ndc_to_view_pos_with_aspect, pixel_to_ndc,
     view_pos_to_world,
