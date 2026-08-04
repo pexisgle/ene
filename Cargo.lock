@@ -3017,6 +3017,7 @@ dependencies = [
  "ene-core",
  "ene-plugin-proto",
  "parking_lot",
+ "regex",
  "schemars",
  "serde",
  "serde_json",
