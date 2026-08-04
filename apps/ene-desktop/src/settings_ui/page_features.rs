@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 /// Known tool binary names shown even when absent from the saved map.
 const DEFAULT_TOOL_NAMES: &[&str] = &[
-    "app", "browser", "calc", "calendar", "fs", "geo", "git", "random", "utility", "web",
+    "app", "browser", "calc", "calendar", "counter", "fs", "geo", "git", "random", "utility", "web",
 ];
 
 pub fn render(
