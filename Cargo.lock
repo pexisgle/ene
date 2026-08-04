@@ -2944,6 +2944,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-kokoro"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-ai",
+ "ene-plugin",
+ "ene-voice",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ene-plugin-llama-cpp"
 version = "0.1.0"
 dependencies = [
