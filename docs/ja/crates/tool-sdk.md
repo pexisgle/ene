@@ -35,6 +35,12 @@ cargo doc -p ene-plugin-macros --open
 
 開発用には `ene_plugin::prelude`、`ToolAction`/`ToolSpec` derive マクロの詳細は `ene-plugin-macros` から始めてください。
 
+手順付きの作成ガイドと API/ABI の完全なリファレンスは
+[ツールの作成](../guide/tools/write-a-tool.md) と
+[ツール SDK リファレンス](../reference/tools/sdk.md) を参照してください。
+エンドツーエンドのサンプル（DB IPC 状態・権限ゲート・IPC 統合テスト）は
+`plugins/tool/counter` として同梱されています。
+
 ---
 
 ## 関連ドキュメント

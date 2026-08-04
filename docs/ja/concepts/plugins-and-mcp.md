@@ -21,6 +21,7 @@ Ene ホストアプリケーション (ene-runtime)
         │     ├── ene-plugin-browser   (CDP ブラウザ自動化ツール)
         │     ├── ene-plugin-calc      (計算ツール)
         │     ├── ene-plugin-calendar  (カレンダーツール)
+        │     ├── ene-plugin-counter   (サンプル状態付きツール)
         │     ├── ene-plugin-fs        (サンドボックス化ファイルシステムツール)
         │     ├── ene-plugin-random    (ランダム生成ツール)
         │     ├── ene-plugin-geo       (地理情報ツール)
@@ -197,6 +198,7 @@ runner API は設計上**非ストリーミング**です。トークンスト�
 | `ene-plugin-browser` | `browser.*` | ヘッドリス Chrome/CDP ブラウザ自動化 | はい (セッションストア) |
 | `ene-plugin-calc` | `calc.*` | 数式評価・単位/通貨/色変換 | いいえ |
 | `ene-plugin-calendar` | `calendar.*` | カレンダー単位のパーミッション・書き込み確認・空き時間検索付きローカルカレンダー | はい (ホストサービス `db`) |
+| `ene-plugin-counter` | `counter.*` | サンプル状態付きツール: DB バックアップのカウンターと権限ゲート付きリセット | はい (ホストサービス `db`) |
 | `ene-plugin-fs` | `fs.*` | サンドボックス化ファイル操作 & Undo 履歴 | はい (ホストサービス `db`) |
 | `ene-plugin-random` | `random.*` | 乱数・UUID v4・リスト選択・hex 色生成 | いいえ |
 | `ene-plugin-geo` | `geo.*` | IP ベース位置情報・現在の天気・太陽時 UTC オフセット・日の出日の入り | いいえ |
@@ -207,11 +209,8 @@ runner API は設計上**非ストリーミング**です。トークンスト�
 | `ene-plugin-openai` | Provider | OpenAI 互換プロバイダプラグイン（チャット・ストリーミング・埋め込み） | いいえ |
 | `ene-plugin-llama-cpp` | Provider | ローカル GGUF (llama.cpp) プロバイダプラグイン — 現在は能力骨格のみ、推論は後続スライス | いいえ |
 
-上記 13 プラグインはすべてデフォルトの `plugins.list` に含まれており、
-バイナリが存在すれば自動的に起動します。リリースパッケージは現在
-ツールプラグインのバイナリのみを同梱します。プロバイダバイナリ
-（`ene-plugin-anthropic`・`ene-plugin-openai`・`ene-plugin-llama-cpp`）は
-ソースからビルドしてホストバイナリの隣へ配置する必要があります。
+上記 14 プラグインはすべてデフォルトの `plugins.list` に含まれており、
+新規インストール時に自動的に起動します。
 
 ### ファイルツールリファレンス (`filesystem.*`)
 
@@ -248,7 +247,7 @@ runner API は設計上**非ストリーミング**です。トークンスト�
 ## 6. ツール DB スキーマの宣言と進化
 
 ステートフルなツールプラグイン (`ene-plugin-fs`、`ene-plugin-utility`、
-`ene-plugin-calendar`) は、共有**ホストサービス**ソケット
+`ene-plugin-calendar`、`ene-plugin-counter`) は、共有**ホストサービス**ソケット
 (`ene-host-service.sock` / named pipe) を
 介してデータをホストの `memory.db` に永続化します。最初のフレームで
 事前共有トークン付きの乗客サービスを開き、現状実装されているのは `db`
@@ -365,8 +364,7 @@ runner API は設計上**非ストリーミング**です。トークンスト�
     "list": {
       "fs": { "enable": true },
       "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] },
-      "openai": { "enable": true, "env_passthrough": ["OPENAI_API_KEY"] },
-      "llama-cpp": { "enable": true }
+      "openai": { "enable": true, "env_passthrough": ["OPENAI_API_KEY"] }
     }
   }
 }

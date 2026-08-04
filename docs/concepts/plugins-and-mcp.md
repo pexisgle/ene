@@ -21,6 +21,7 @@ Ene Host Application (ene-runtime)
         │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
         │     ├── ene-plugin-calc      (Calculation Tool)
         │     ├── ene-plugin-calendar  (Calendar Tool)
+        │     ├── ene-plugin-counter   (Sample Stateful Tool)
         │     ├── ene-plugin-fs        (Sandboxed Filesystem Tool)
         │     ├── ene-plugin-random    (Random Generation Tool)
         │     ├── ene-plugin-geo       (Geographic Information Tool)
@@ -245,6 +246,7 @@ unavailable until the inference slice lands.
 | `ene-plugin-browser` | `browser.*` | Headless Chrome/CDP web browser automation | Yes (Session store) |
 | `ene-plugin-calc` | `calc.*` | Math expression evaluation, unit/currency/color conversion | No |
 | `ene-plugin-calendar` | `calendar.*` | Local calendar with per-calendar permissions, write confirmation, free-slot search | Yes (host-service `db`) |
+| `ene-plugin-counter` | `counter.*` | Sample stateful tool: DB-backed counter with permission-gated reset | Yes (host-service `db`) |
 | `ene-plugin-fs` | `fs.*` | Sandboxed filesystem operations with undo ledger | Yes (host-service `db`) |
 | `ene-plugin-random` | `random.*` | Random numbers, UUID v4, list picks, and hex colors | No |
 | `ene-plugin-geo` | `geo.*` | IP-based location, current weather, solar timezone offset, sunrise/sunset | No |
@@ -255,12 +257,8 @@ unavailable until the inference slice lands.
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
 | `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — capability skeleton today, inference in a later slice | No |
 
-All thirteen plugins above are included in the default `plugins.list` and
-start automatically when their binaries are present. Release packages
-currently ship the tool-plugin binaries only; the provider binaries
-(`ene-plugin-anthropic`, `ene-plugin-openai`, `ene-plugin-llama-cpp`) are
-built from source and must be installed next to the host binary for those
-entries to start.
+All fourteen plugins above are included in the default `plugins.list` and start
+automatically on fresh installs.
 
 ### Filesystem tool reference (`filesystem.*`)
 
@@ -298,7 +296,8 @@ touching the filesystem.
 ## 6. Tool Database Schema Declaration & Evolution
 
 Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`,
-`ene-plugin-calendar`) persist their data into the host's `memory.db`
+`ene-plugin-calendar`, `ene-plugin-counter`) persist their data into the
+host's `memory.db`
 through the shared **host-service** socket
 (`ene-host-service.sock` / named pipe). The first framed message opens a
 passenger service with a pre-shared token; today only `db` is implemented
@@ -416,8 +415,7 @@ auto-execute" attack vector.
     "list": {
       "fs": { "enable": true },
       "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] },
-      "openai": { "enable": true, "env_passthrough": ["OPENAI_API_KEY"] },
-      "llama-cpp": { "enable": true }
+      "openai": { "enable": true, "env_passthrough": ["OPENAI_API_KEY"] }
     }
   }
 }

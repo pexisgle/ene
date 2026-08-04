@@ -7,10 +7,15 @@
 
 # ガイド
 
+- [ツールの作成ガイド](guide/tools/write-a-tool.md)
 - [MCP サーバー設定ガイド](guide/tools/mcp-servers.md)
 - [ランダム生成ツールガイド](guide/tools/random.md)
 - [地理情報ツールガイド](guide/tools/geo.md)
 - [Git ツールガイド](guide/tools/git.md)
+
+# リファレンス
+
+- [ツール SDK リファレンス](reference/tools/sdk.md)
 
 # コア概念
 
