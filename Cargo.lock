@@ -2603,6 +2603,7 @@ dependencies = [
  "regex",
  "rodio",
  "rust-embed",
+ "rustfft",
  "serde",
  "serde_json",
  "tempfile",

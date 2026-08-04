@@ -1457,6 +1457,19 @@ impl Runtime {
             }
         }
 
+        // Beat sync: drain pulses relayed through the runtime chat bus and
+        // drive the avatar's procedural sway + locomotion speed sync.
+        {
+            let world = app.world_mut();
+            let beat_state = world.get_resource_mut::<crate::resource::beat_sync::BeatSyncState>();
+            if let Some(mut beat_state) = beat_state {
+                character.set_beat_sync_enabled(beat_state.is_enabled());
+                for pulse in beat_state.drain_pulses() {
+                    character.beat_pulse(pulse.bpm, pulse.intensity);
+                }
+            }
+        }
+
         character.set_motion_player_playing(motion_playing);
 
         if let Some(palette) = character.update_motion(dt_secs) {

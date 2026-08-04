@@ -269,6 +269,7 @@ fn emote_token_emits_message_via_pump() {
     world.init_resource::<Messages<MotionCommand>>();
     world.init_resource::<Messages<ExpressionCommand>>();
     world.init_resource::<Messages<CancelCommand>>();
+    world.init_resource::<Messages<crate::event::ai::BeatPulse>>();
     world.init_resource::<Messages<OpenSettings>>();
     world.init_resource::<Messages<OpenChat>>();
     world.init_resource::<Messages<PendingCandidatesCount>>();

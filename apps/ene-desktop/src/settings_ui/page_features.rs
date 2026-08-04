@@ -740,6 +740,30 @@ fn render_audio(
         ));
         ui.weak(provider_display(&ai_cfg.tts.provider));
     });
+    #[cfg(feature = "voice")]
+    {
+        let mut enabled = settings.beat_sync_enabled();
+        if ui
+            .checkbox(
+                &mut enabled,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "beat-sync-enabled"),
+            )
+            .on_hover_text(i18n_embed_fl::fl!(crate::i18n::loader(), "beat-sync-hint"))
+            .changed()
+        {
+            settings.set_beat_sync_enabled(enabled);
+            settings.mark_dirty();
+            if let Err(e) =
+                crate::audio::set_beat_sync_enabled(world, ai, enabled, settings.beat_sync_device())
+            {
+                tracing::warn!(
+                    component = "BeatSync",
+                    error = %e,
+                    "beat sync toggle failed"
+                );
+            }
+        }
+    }
     ui.weak(i18n_embed_fl::fl!(
         crate::i18n::loader(),
         "audio-open-voice-settings"

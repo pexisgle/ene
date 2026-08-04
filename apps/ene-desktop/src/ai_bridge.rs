@@ -189,6 +189,18 @@ impl AiBridge {
         }
     }
 
+    /// Report a detected system-audio beat pulse to the runtime for
+    /// broadcast on the chat bus. Called from the beat-sync capture thread.
+    pub fn report_beat_pulse(&self, bpm: f32, intensity: f32) {
+        if let Err(e) = self.handle.report_beat_pulse(bpm, intensity) {
+            tracing::warn!(
+                component = "BeatSync",
+                error = %e,
+                "failed to report beat pulse"
+            );
+        }
+    }
+
     /// Returns `true` while a request is in flight (i.e.
     /// between the `Run` send and the matching `Done` /
     /// `Failed`). The AI page's chat input and Send button
@@ -804,6 +816,10 @@ async fn pump_events(
                     *guard = Some(turn);
                 }
                 processing.store(true, Ordering::Relaxed);
+            }
+            Ok(EneEvent::BeatPulse { bpm, intensity }) => {
+                // Turn-independent: no `turn_matches` gate.
+                drop(event_tx.send(AppEvent::BeatPulse { bpm, intensity }));
             }
             Ok(EneEvent::Terminal {
                 turn,

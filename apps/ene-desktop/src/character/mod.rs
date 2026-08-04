@@ -11,12 +11,13 @@ use std::path::PathBuf;
 
 use crate::settings::AntialiasingMode;
 use ene_vrm::{
+    BeatSway, SpringBoneProperties, SpringBoneSimulator, VrmaAsset, VrmaPlayer,
+    post_process::PostProcessor,
+};
+use ene_vrm::{
     ExpressionName, HumanoidBoneEntry, LookAtBoneOutput, LookAtEvaluator, LookAtOutput,
     LookAtProperties, ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, evaluate_clip,
     load_vrm, load_vrma,
-};
-use ene_vrm::{
-    SpringBoneProperties, SpringBoneSimulator, VrmaAsset, VrmaPlayer, post_process::PostProcessor,
 };
 use glam::{Mat4, Quat, Vec3};
 
@@ -48,6 +49,7 @@ pub struct CharacterRenderer {
     vrma: Option<VrmaAsset>,
     vrma_player: VrmaPlayer,
     vrma_path: Option<PathBuf>,
+    beat_sway: BeatSway,
     assets_dir: Option<PathBuf>,
     active_bone_nodes: Vec<usize>,
     /// Spring-bone simulator. `None` for models without `VRMC_springBone`.
@@ -85,6 +87,7 @@ impl CharacterRenderer {
             vrma: None,
             vrma_player: VrmaPlayer::default(),
             vrma_path: None,
+            beat_sway: BeatSway::default(),
             assets_dir: Some(assets_dir.to_path_buf()),
             active_bone_nodes: Vec::new(),
         }
@@ -199,6 +202,24 @@ impl CharacterRenderer {
         self.vrma_player.playing = playing;
     }
 
+    /// Register a detected beat (Beat Sync): snaps the procedural sway to
+    /// the beat and syncs the active VRMA clip's playback speed to the
+    /// tempo.
+    pub fn beat_pulse(&mut self, bpm: f32, intensity: f32) {
+        self.beat_sway.on_pulse(bpm, intensity);
+        self.vrma_player.speed = self.beat_sway.locomotion_speed_multiplier();
+    }
+
+    /// Enable or disable beat-synced motion; disabling resets the sway and
+    /// restores normal clip playback speed.
+    pub fn set_beat_sync_enabled(&mut self, enabled: bool) {
+        if enabled {
+            return;
+        }
+        self.beat_sway = BeatSway::default();
+        self.vrma_player.speed = 1.0;
+    }
+
     /// Load a `.vrma` from disk and store the asset. Safe to call
     /// before the model is loaded. Errors are logged and the
     /// previous motion is kept.
@@ -234,6 +255,7 @@ impl CharacterRenderer {
     /// [`VrmRenderer::update_skin_palette`]; `None` when there is no
     /// motion, no model, or the player is paused.
     pub fn update_motion(&mut self, dt_secs: f32) -> Option<Vec<glam::Mat4>> {
+        self.beat_sway.update(dt_secs);
         let mut frame = if self.vrma_player.playing {
             if let Some(asset) = &self.vrma
                 && let Some(clip) = asset.clips.first()
@@ -290,6 +312,8 @@ impl CharacterRenderer {
             }
             frame.bone_rotations = retargeted;
         }
+
+        self.beat_sway.apply_to(&mut frame);
 
         let model = self.model.as_mut()?;
 
