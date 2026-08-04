@@ -14,6 +14,7 @@
 - [Git Tool Guide](guide/tools/git.md)
 - [Schedules: Persistent Timed Actions](guide/schedules.md)
 - [Character Card Editor Guide](guide/character-card-editor.md)
+- [Workspace RAG Guide](guide/workspace-rag.md)
 
 # Reference
 

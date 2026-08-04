@@ -16,7 +16,7 @@ ene-ai = { workspace = true }
 ene-ai-local = { workspace = true }
 ene-voice = { workspace = true }
 futures = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
 tokio-stream = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

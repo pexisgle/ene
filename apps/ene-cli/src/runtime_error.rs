@@ -47,6 +47,11 @@ pub fn user_message(error: &EneRuntimeError) -> String {
             "runtime-error-tool",
             detail = err.to_string()
         ),
+        EneRuntimeError::Workspace(err) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-workspace",
+            detail = err.to_string()
+        ),
         EneRuntimeError::Ai(err) => user_message_from_ai(err),
         // The actor rejected a background task (direct tool call / search)
         // because its bounded queue was already full (Stage 8) — the

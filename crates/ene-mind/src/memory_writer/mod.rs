@@ -223,7 +223,8 @@ impl MemoryWriter {
             }
         }
 
-        let options = ArbiterOptions::from_config(&config.memory);
+        let options =
+            ArbiterOptions::from_config(&config.memory, config.memory_approval.require_approval);
         let sync_ctx = CommitmentSyncContext {
             character_id: input.character_id,
             user_id: input.user_id,
@@ -264,6 +265,7 @@ impl MemoryWriter {
                 character_id: input.character_id,
                 user_id: input.user_id,
                 source_ref: None,
+                source_turn: input.source_turn,
                 provenance,
                 options: options.clone(),
                 semantic_matches,
@@ -671,6 +673,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };
@@ -698,6 +701,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };
@@ -741,6 +745,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };
@@ -788,6 +793,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };
@@ -830,6 +836,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };
@@ -884,6 +891,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };
@@ -931,6 +939,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };
@@ -972,6 +981,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };
@@ -1032,6 +1042,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };
@@ -1097,6 +1108,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };
@@ -1182,6 +1194,7 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         };

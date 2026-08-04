@@ -669,6 +669,7 @@ mod tests {
             character_id: "ene",
             user_id: "user1",
             source_ref: Some("session-1"),
+            source_turn: None,
             provenance: CandidateProvenance::Deterministic,
             options: ArbiterOptions {
                 min_confidence: 0.4,

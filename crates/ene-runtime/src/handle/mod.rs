@@ -353,7 +353,9 @@ pub struct EneHandle {
     host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Read-only session query handle, bypasses the actor mailbox.
     sessions: crate::query::sessions::SessionQueryHandle,
-    /// Pending memory-candidate approval handle, bypasses the actor mailbox.
+    /// Pending memory-candidate approval handle. Reads bypass the actor
+    /// mailbox; mutations route through it (see
+    /// [`crate::query::candidates::MemoryCandidateHandle`]).
     candidates: crate::query::candidates::MemoryCandidateHandle,
     /// Screen-image vision summarization handle, bypasses the actor mailbox.
     vision: crate::vision::VisionHandle,
@@ -605,6 +607,16 @@ impl EneHandle {
             Some(emb) => actor::init_tool_rag(&config, emb, memory_store.clone())?,
             None => None,
         };
+        let workspace_indexer = match (embedder.as_ref(), memory_store.clone()) {
+            (Some(emb), Some(store)) => {
+                let store_port: Arc<dyn ene_core::WorkspaceDocumentPort> = store;
+                Some(Arc::new(crate::workspace::WorkspaceIndexer::new(
+                    store_port,
+                    emb.clone(),
+                )))
+            }
+            _ => None,
+        };
         if let Some(rag) = &tool_rag {
             let specs = registry.list_tools();
             let profiles = registry.list_rag_profiles();
@@ -629,10 +641,12 @@ impl EneHandle {
         }
 
         let mind_memory = mind.memory.clone();
+        let recall_cache = session.memory.recall_cache.clone();
         let memory = crate::diagnostics::MemoryHandle::new(
             memory_store.clone(),
             session.memory.embedding_provider.clone(),
             mind_memory,
+            recall_cache.clone(),
         );
 
         let fallback_cfg = config.get_section::<ene_ai::AiConfig>()?.fallback;
@@ -718,6 +732,7 @@ impl EneHandle {
         let sessions = crate::query::sessions::SessionQueryHandle::new(memory_store.clone());
         let candidates = crate::query::candidates::MemoryCandidateHandle::new(
             memory_store.clone(),
+            Arc::clone(&cmd_tx),
             Arc::clone(&shared.card_name),
         );
         let vision = crate::vision::VisionHandle::new(Arc::clone(&cmd_tx));
@@ -737,6 +752,7 @@ impl EneHandle {
             memory_store,
             registry,
             tool_rag,
+            workspace_indexer,
             health_monitor,
             tts_provider,
             plugin_tool_registries,
@@ -908,8 +924,11 @@ impl EneHandle {
         self.sessions.clone()
     }
 
-    /// Pending memory-candidate approval handle (list / approve / reject),
-    /// bypassing the turn-execution actor mailbox entirely.
+    /// Pending memory-candidate approval handle (list / inspect / history /
+    /// approve / edit / reject).
+    ///
+    /// Reads are mailbox-free; mutations route through the actor mailbox with
+    /// the active `TurnId` and emit `CandidateChanged` audit events.
     ///
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     pub fn candidates(&self) -> crate::query::candidates::MemoryCandidateHandle {
@@ -933,6 +952,16 @@ impl EneHandle {
     /// registry is actor-owned state; see [`crate::tools`].
     pub fn tools(&self) -> crate::tools::ToolHandle {
         self.tools.clone()
+    }
+
+    /// Workspace document index operations handle (sync / cancel / status /
+    /// search).
+    ///
+    /// Cheap to call repeatedly; the returned handle is a small `Clone`.
+    /// Routes through the actor mailbox: sync is single-flight and
+    /// cancellable there.
+    pub fn workspace(&self) -> crate::workspace::WorkspaceHandle {
+        crate::workspace::WorkspaceHandle::new(Arc::clone(&self.cmd_tx))
     }
 
     /// Hot-swap the character card (CLI `/card`).
@@ -2370,6 +2399,7 @@ mod tests {
             None,
             registry,
             None,
+            None,
             health_monitor,
             None,
             Vec::new(),
@@ -2420,6 +2450,7 @@ mod tests {
             session,
             Some(store),
             registry,
+            None,
             None,
             health_monitor,
             None,
@@ -3100,6 +3131,89 @@ mod tests {
         assert_eq!(
             res1.expect("first call must be admitted and succeed"),
             "done"
+        );
+    }
+
+    /// Records the per-call context of every `call_tool` invocation so
+    /// tests can pin the host's scoping contract.
+    struct RecordingContextRegistry {
+        contexts: Arc<std::sync::Mutex<Vec<Option<ene_plugin_proto::CallContext>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ene_plugin_host::ToolRegistry for RecordingContextRegistry {
+        fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
+            Vec::new()
+        }
+
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _arguments: &str,
+            context: Option<&ene_plugin_proto::CallContext>,
+        ) -> Result<ene_plugin_proto::ToolResult, ene_plugin_host::PluginHostError> {
+            self.contexts.lock().unwrap().push(context.cloned());
+            Ok(ene_plugin_proto::ToolResult::text("done"))
+        }
+    }
+
+    /// Direct `CallTool` commands (turn: `None`, e.g. `ene-cli tool call`)
+    /// must still receive a per-call context: a unique synthetic turn keeps
+    /// plugin approval scopes from leaking between calls.
+    #[tokio::test]
+    async fn direct_call_tool_always_receives_a_fresh_synthetic_context() {
+        let contexts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(RecordingContextRegistry {
+            contexts: contexts.clone(),
+        });
+        let task_caps = crate::task_config::ToolRuntimeConfig {
+            call_tool_cap: 4,
+            ..Default::default()
+        };
+        let (mut actor, _diag_rx) = build_bare_actor(registry, &task_caps);
+
+        let explicit_turn = crate::types::TurnId::new();
+        for turn in [None, Some(explicit_turn.clone()), None] {
+            let (tx, rx) = oneshot::channel();
+            assert!(
+                actor
+                    .handle_command(EneCommand::CallTool {
+                        name: "anything".into(),
+                        arguments: "{}".into(),
+                        turn,
+                        reply: tx,
+                    })
+                    .await
+            );
+            rx.await
+                .expect("reply channel not dropped")
+                .expect("direct call must succeed");
+        }
+
+        let recorded = contexts.lock().unwrap();
+        assert_eq!(recorded.len(), 3);
+        let first = recorded[0]
+            .as_ref()
+            .expect("direct call must receive a context");
+        let second = recorded[1]
+            .as_ref()
+            .expect("turned call must receive a context");
+        let third = recorded[2]
+            .as_ref()
+            .expect("direct call must receive a context");
+        assert!(
+            first.turn_id.starts_with("direct:"),
+            "synthetic turn id expected, got {}",
+            first.turn_id
+        );
+        assert_ne!(
+            first.turn_id, third.turn_id,
+            "each direct call must get a fresh scope"
+        );
+        assert_eq!(second.turn_id, explicit_turn.to_string());
+        assert_eq!(
+            first.conversation_id, third.conversation_id,
+            "direct calls stay in the session conversation"
         );
     }
 

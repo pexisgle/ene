@@ -2488,6 +2488,7 @@ dependencies = [
  "ene-config",
  "ene-mind",
  "ene-plugin-host",
+ "ene-rag",
  "ene-runtime",
  "ene-store",
  "ene-util",
@@ -2868,6 +2869,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-homeassistant"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-plugin",
+ "ene-plugin-proto",
+ "http",
+ "parking_lot",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "ene-plugin-host"
 version = "0.1.0"
 dependencies = [
@@ -2901,10 +2922,15 @@ name = "ene-plugin-llama-cpp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
+ "ene-ai",
+ "ene-ai-local",
  "ene-plugin",
  "ene-plugin-proto",
+ "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3020,6 +3046,7 @@ dependencies = [
  "ene-core",
  "ene-plugin-proto",
  "parking_lot",
+ "regex",
  "schemars",
  "serde",
  "serde_json",

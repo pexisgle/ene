@@ -95,6 +95,10 @@ pub(super) struct TurnActor {
     concrete_store: Option<Arc<ene_store::MemoryStore>>,
     registry: Arc<dyn ToolRegistry>,
     tool_rag: Option<Arc<ToolRag>>,
+    workspace_indexer: Option<Arc<crate::workspace::WorkspaceIndexer>>,
+    workspace_state: Arc<parking_lot::Mutex<crate::workspace::WorkspaceActorState>>,
+    workspace_sync_task: Option<tokio::task::JoinHandle<()>>,
+    workspace_cancel: Option<CancellationToken>,
     cancel_token: CancellationToken,
     stream_handle: Option<tokio::task::JoinHandle<()>>,
     stream_session_rx: Option<oneshot::Receiver<streaming::StreamOutcome>>,
@@ -289,6 +293,7 @@ impl TurnActor {
         concrete_store: Option<Arc<ene_store::MemoryStore>>,
         registry: Arc<dyn ToolRegistry>,
         tool_rag: Option<Arc<ToolRag>>,
+        workspace_indexer: Option<Arc<crate::workspace::WorkspaceIndexer>>,
         health_monitor: ene_ai::ProviderHealthMonitor,
         tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
         plugin_tool_registries: Vec<Arc<dyn ToolRegistry>>,
@@ -319,6 +324,12 @@ impl TurnActor {
             concrete_store,
             registry,
             tool_rag,
+            workspace_indexer,
+            workspace_state: Arc::new(parking_lot::Mutex::new(
+                crate::workspace::WorkspaceActorState::default(),
+            )),
+            workspace_sync_task: None,
+            workspace_cancel: None,
             cancel_token: CancellationToken::new(),
             stream_handle: None,
             stream_session_rx: None,
@@ -500,9 +511,109 @@ impl TurnActor {
         self.drain_memory_writers();
     }
 
+    /// Starts the background workspace index sync (single-flight).
+    ///
+    /// The sync task updates [`Self::workspace_state`] as it progresses and
+    /// stores its report on completion; cancellation is signalled through
+    /// [`Self::workspace_cancel`].
+    fn spawn_workspace_sync(&mut self) -> Result<(), EneRuntimeError> {
+        let Some(indexer) = self.workspace_indexer.clone() else {
+            return Err(EneRuntimeError::MindPrerequisite(
+                "workspace indexer unavailable",
+            ));
+        };
+        if self.workspace_sync_task.is_some() {
+            return Err(EneRuntimeError::Busy { queue_depth: 1 });
+        }
+        let config = self
+            .config
+            .get_section::<ene_rag::WorkspaceRagConfig>()
+            .unwrap_or_default();
+        if !config.enabled {
+            return Err(crate::workspace::WorkspaceIndexError::Disabled.into());
+        }
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let state = Arc::clone(&self.workspace_state);
+        {
+            let mut guard = state.lock();
+            guard.in_progress = true;
+            guard.progress = crate::workspace::WorkspaceSyncProgress::default();
+            guard.last_error = None;
+        }
+        // Live progress: the indexer emits snapshots on an mpsc channel; a
+        // forwarding task writes them into the shared state so
+        // `/workspace status` shows the running sync, not a frozen zeroed
+        // snapshot. The forwarder exits when the channel closes (the sync
+        // drops its sender on completion).
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(64);
+        let forward_state = Arc::clone(&state);
+        let forwarder = tokio::spawn(async move {
+            while let Some(progress) = progress_rx.recv().await {
+                forward_state.lock().progress = progress;
+            }
+        });
+        let task = tokio::spawn(async move {
+            let result = indexer.sync(&config, &task_cancel, Some(progress_tx)).await;
+            // Drain the progress queue before writing the terminal state so
+            // the final snapshot reflects every emitted event.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "forwarder JoinHandle failure is unactionable; the channel already closed"
+            )]
+            let _ = forwarder.await;
+            let mut guard = state.lock();
+            guard.in_progress = false;
+            match result {
+                Ok(report) => {
+                    guard.progress = crate::workspace::WorkspaceSyncProgress {
+                        phase: crate::workspace::WorkspaceSyncPhase::Done,
+                        ..guard.progress.clone()
+                    };
+                    guard.last_report = Some(report);
+                }
+                Err(e) => {
+                    guard.last_error = Some(e.to_string());
+                    tracing::warn!(
+                        component = "WorkspaceRag",
+                        error = %e,
+                        "Workspace index sync failed"
+                    );
+                }
+            }
+        });
+        self.workspace_sync_task = Some(task);
+        self.workspace_cancel = Some(cancel);
+        Ok(())
+    }
+
     pub(super) async fn run(mut self) {
         self.reconcile_scheduler_startup().await;
         self.spawn_scheduler_task();
+        // Privacy-first startup sync: only when the operator explicitly
+        // enabled the feature and asked for a startup pass.
+        let startup_sync = self
+            .config
+            .get_section::<ene_rag::WorkspaceRagConfig>()
+            .unwrap_or_default()
+            .sync_on_startup;
+        if startup_sync {
+            match self.spawn_workspace_sync() {
+                Ok(()) => {
+                    tracing::info!(
+                        component = "WorkspaceRag",
+                        "Workspace index startup sync started"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        component = "WorkspaceRag",
+                        error = %e,
+                        "Workspace index startup sync skipped"
+                    );
+                }
+            }
+        }
         loop {
             // Reap completed background tasks so the JoinSets shrink again
             // once work finishes. Reaping alone only bounds steady-state
@@ -553,6 +664,12 @@ impl TurnActor {
                 "Auxiliary stream task panicked",
                 &self.diag_tx,
             );
+            if let Some(handle) = self.workspace_sync_task.as_ref()
+                && handle.is_finished()
+            {
+                self.workspace_sync_task = None;
+                self.workspace_cancel = None;
+            }
 
             self.admit_aux_handles();
 
@@ -2606,10 +2723,17 @@ impl TurnActor {
                 let session_id = self.session.memory.session_id.to_string();
                 let card_name = self.session.card_name().to_string();
                 self.call_tool_tasks.spawn(async move {
-                    let context = turn.as_ref().map(|turn| ene_plugin_proto::CallContext {
+                    // Direct calls (`PublicApi::call_tool`) carry no turn;
+                    // a unique synthetic turn keeps the per-turn approval
+                    // expiry in plugins running uniformly, so a direct call
+                    // can never inherit an approval granted in a chat turn.
+                    let context = ene_plugin_proto::CallContext {
                         conversation_id: session_id,
-                        turn_id: turn.to_string(),
-                    });
+                        turn_id: turn.map_or_else(
+                            || format!("direct:{}", uuid::Uuid::new_v4()),
+                            |turn| turn.to_string(),
+                        ),
+                    };
                     let result: Result<String, EneRuntimeError> = if name == "system.search_tools" {
                         let query = serde_json::from_str::<serde_json::Value>(&arguments)
                             .ok()
@@ -2625,7 +2749,7 @@ impl TurnActor {
                         .map_err(EneRuntimeError::from)
                     } else {
                         registry
-                            .call_tool(&name, &arguments, context.as_ref())
+                            .call_tool(&name, &arguments, Some(&context))
                             .await
                             .map(|r| r.text_for_llm())
                             .map_err(EneRuntimeError::from)
@@ -2838,6 +2962,142 @@ impl TurnActor {
             }
             EneCommand::InvalidateToolIndex => {
                 self.tool_rag = None;
+                true
+            }
+            EneCommand::WorkspaceStartSync { reply } => {
+                let result = self.spawn_workspace_sync();
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::WorkspaceCancelSync => {
+                if let Some(token) = &self.workspace_cancel {
+                    token.cancel();
+                }
+                true
+            }
+            EneCommand::WorkspaceStatus { reply } => {
+                let config = self
+                    .config
+                    .get_section::<ene_rag::WorkspaceRagConfig>()
+                    .unwrap_or_default();
+                let state = self.workspace_state.lock().clone();
+                let mut view = crate::workspace::WorkspaceStatusView {
+                    enabled: config.enabled,
+                    folders: config.folders.clone(),
+                    indexed_files: 0,
+                    indexed_chunks: 0,
+                    in_progress: state.in_progress,
+                    progress: state.progress.clone(),
+                    last_report: state.last_report.clone(),
+                    last_error: state.last_error.clone(),
+                };
+                if let Some(indexer) = &self.workspace_indexer
+                    && let Ok(status) = indexer.index_status().await
+                {
+                    view.indexed_files = status.indexed_files;
+                    view.indexed_chunks = status.indexed_chunks;
+                }
+                drop(reply.send(view));
+                true
+            }
+            EneCommand::WorkspaceSearch {
+                query,
+                limit,
+                reply,
+            } => {
+                let config = self
+                    .config
+                    .get_section::<ene_rag::WorkspaceRagConfig>()
+                    .unwrap_or_default();
+                let result = if config.enabled {
+                    match self.workspace_indexer.clone() {
+                        Some(indexer) => indexer
+                            .search(&config, &query, limit)
+                            .await
+                            .map_err(EneRuntimeError::from),
+                        None => Err(EneRuntimeError::MindPrerequisite(
+                            "workspace indexer unavailable",
+                        )),
+                    }
+                } else {
+                    Err(crate::workspace::WorkspaceIndexError::Disabled.into())
+                };
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::ResolveCandidate {
+                id,
+                status,
+                turn,
+                reply,
+            } => {
+                // Candidate mutations are serialized by the actor. The
+                // shared recall cache is invalidated only after a successful
+                // approve or reject so a stale pending or typed-memory entry
+                // cannot survive the mutation.
+                let Some(store) = self.concrete_store.clone() else {
+                    drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
+                        message: "Memory store is not enabled".to_string(),
+                    })));
+                    return true;
+                };
+                let result = match status {
+                    ene_store::PendingCandidateStatus::Approved => store
+                        .approve_pending_candidate(id)
+                        .await
+                        .map(|_| ())
+                        .map_err(crate::public_api::PublicApiError::from),
+                    ene_store::PendingCandidateStatus::Rejected => store
+                        .resolve_pending_candidate(id, false)
+                        .await
+                        .map_err(crate::public_api::PublicApiError::from),
+                    ene_store::PendingCandidateStatus::Pending => {
+                        Err(crate::public_api::PublicApiError::Invalid {
+                            message: format!("cannot resolve pending candidate {id} to 'pending'"),
+                        })
+                    }
+                };
+                if result.is_ok() {
+                    if let Some(cache) = &self.session.memory.recall_cache {
+                        cache.invalidate_character(self.session.card_name());
+                    }
+                    drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
+                        id,
+                        status,
+                        turn,
+                    }));
+                }
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::EditCandidate {
+                id,
+                edit,
+                turn,
+                reply,
+            } => {
+                let Some(store) = self.concrete_store.clone() else {
+                    drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
+                        message: "Memory store is not enabled".to_string(),
+                    })));
+                    return true;
+                };
+                let result = store
+                    .edit_pending_candidate(id, edit)
+                    .await
+                    .map(|_| ())
+                    .map_err(crate::public_api::PublicApiError::from);
+                if result.is_ok() {
+                    if let Some(cache) = &self.session.memory.recall_cache {
+                        cache.invalidate_character(self.session.card_name());
+                    }
+                    drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
+                        id,
+                        status: ene_store::PendingCandidateStatus::Pending,
+                        turn,
+                    }));
+                }
+                drop(reply.send(result));
                 true
             }
             EneCommand::SetCcv3MemoryHash { hash, reply } => {

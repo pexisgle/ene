@@ -285,6 +285,9 @@ pub struct UiState {
     pub memory_journal_commitments: Vec<String>,
     pub memory_journal_commitments_cache: Vec<ene_store::Commitment>,
     pub memory_journal_pending_candidates: Vec<ene_runtime::handle::PendingCandidateSummary>,
+    pub memory_journal_pending_history: Vec<ene_runtime::handle::PendingCandidateSummary>,
+    pub memory_journal_show_history: bool,
+    pub memory_journal_candidate_draft: Option<MemoryCandidateDraft>,
     pub memory_journal_affect: MemoryJournalAffect,
     pub memory_journal_message: Option<String>,
     pub memory_journal_show_deleted: bool,
@@ -499,6 +502,21 @@ pub struct PendingPermission {
 pub struct PendingUserInput {
     pub request_id: ene_runtime::RequestId,
     pub prompt: ene_plugin_proto::UserInputPrompt,
+}
+
+/// Inline edit draft for a pending memory candidate in the journal UI.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MemoryCandidateDraft {
+    /// Candidate row being edited.
+    pub id: i64,
+    /// Draft title.
+    pub title: String,
+    /// Draft content.
+    pub content: String,
+    /// Draft kind as string (validated against `MemoryKind` on save).
+    pub kind: String,
+    /// Draft confidence.
+    pub confidence: f32,
 }
 
 #[derive(Clone, Debug, Default)]

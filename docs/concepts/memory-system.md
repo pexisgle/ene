@@ -44,6 +44,41 @@ Once a contradiction is found, the arbiter compares the candidate's confidence a
 
 Deferred candidates are parked in the `pending_candidates` queue (`AskConfirmationLater`). They are listed on the desktop settings screen for manual review, and they also compete in **normal hybrid recall**: since a deferred candidate has no embedding, recall loads the live queue and lets topic-related rows (lexical overlap with the query) compete in the ordinary score competition. A surfacing candidate is rendered with an `[unconfirmed]` marker in the prompt, so the character treats it as hearsay to verify in conversation rather than asserting it as fact. `recall_pending_candidate_limit` (default `3`) caps how many compete per turn; `0` disables the recall path entirely without affecting the settings-screen review list. The cap is code-tunable in `MindMemoryConfig` and not yet exposed via settings.
 
+### Approval Mode (`mind.memory_approval.require_approval`)
+When `require_approval` is enabled, the pipeline becomes **review-before-save**:
+every candidate that would otherwise be persisted or supersede an existing
+memory is parked in the same `pending_candidates` queue instead of being
+written to typed memory. Each queued candidate carries its source turn and
+quote, extraction reason, confidence, and supersede target
+(`existing_memory_id`). Approval-mode candidates are **excluded from recall
+entirely** — they surface only in the review queue, never in the prompt — so
+unapproved information cannot leak into normal recall. The default
+auto-save mode is unchanged.
+
+The queue is a full workflow, not just a list:
+
+- **List / inspect** — the CLI `/memory approval` (and `approval inspect <id>`)
+  and the desktop Memory Journal's Pending tab show source, reason, confidence,
+  and conflict target.
+- **Approve / reject** — approving persists the candidate as a typed memory
+  (propagating `existing_memory_id` as `supersedes_id` and deactivating the
+  old memory, mirroring the auto-save supersede path); rejecting discards it.
+- **Edit / edit-and-approve** — the user-editable fields (title, content,
+  kind, confidence) can be corrected before saving. Edits are validated
+  before any write and applied with a conditional `WHERE status = 'pending'`
+  update, so an invalid edit or a raced decision never loses the original
+  candidate.
+- **History** — resolved candidates stay in the queue (bounded by
+  `pending_candidate_retention`, code-defaulted to 14 days / 200 rows) and
+  are listed by `/memory approval history` and the desktop journal's history
+  view with their resolution time.
+
+All resolution and edit operations route through the runtime actor with the
+active turn id and are emitted as `CandidateChanged` lifecycle events, so the
+decision trail is auditable from the actor's event bus. Commitment candidates
+(the dedicated ledger path) and explicit user forget / dispute decisions are
+applied immediately in both modes.
+
 ### Self-Reflection Feedback Loop
 When `mind.memory.reflection.enabled` is set, the post-turn pipeline periodically reviews persisted memory outcomes and writes `Reflection` memories summarizing successful and unsuccessful interaction strategies. These reflections **close the loop during recall**: they are loaded and applied as a scoring signal that boosts memories matching successful strategies and penalizes those matching strategies to avoid. Reflections are deliberately **excluded from the recall candidate set** (via a kind filter on the search query), so they adjust scores without ever surfacing as ordinary recall results or leaking into the LLM context. Each applied adjustment is recorded in the score breakdown's `reflection_multiplier`, keeping the explainable score consistent with its displayed total.
 

@@ -14,6 +14,7 @@
 - [Git ツールガイド](guide/tools/git.md)
 - [スケジュール：永続的な時刻指定アクション](guide/schedules.md)
 - [キャラクターカードエディターガイド](guide/character-card-editor.md)
+- [ワークスペース RAG ガイド](guide/workspace-rag.md)
 
 # リファレンス
 

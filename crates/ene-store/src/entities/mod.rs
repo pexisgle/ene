@@ -16,6 +16,8 @@ pub mod session;
 pub mod tool_embedding_index;
 pub mod tool_schemas;
 pub mod typed_memories;
+pub mod workspace_document_chunks;
+pub mod workspace_document_files;
 
 pub use affect_states::Entity as AffectStates;
 pub use audit_log::Entity as AuditLog;
@@ -33,3 +35,5 @@ pub use session::Entity as Session;
 pub use tool_embedding_index::Entity as ToolEmbeddingIndex;
 pub use tool_schemas::Entity as ToolSchemas;
 pub use typed_memories::Entity as TypedMemories;
+pub use workspace_document_chunks::Entity as WorkspaceDocumentChunks;
+pub use workspace_document_files::Entity as WorkspaceDocumentFiles;

@@ -4,6 +4,7 @@
 //! execute database searches; callers pass the resulting [`RecallPlan`] to the
 //! memory store or later recall pipeline stages.
 
+mod cache;
 mod diversify;
 mod executor;
 mod input;
@@ -16,6 +17,9 @@ mod result;
 mod runner;
 mod topic;
 
+pub(crate) use cache::WriteTrackingPort;
+/// L1 in-memory recall cache (multi-tier with `ene-store` as L2).
+pub use cache::{MemoryRecallCache, RecallCacheStats};
 /// MMR diversification after hybrid search.
 pub use diversify::{MemoryDiversifyOptions, MemoryDiversifyPipeline};
 /// Cognition-side mapper from hybrid search output to explainable recall results.

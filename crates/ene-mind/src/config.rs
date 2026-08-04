@@ -37,6 +37,9 @@ ene_config::define_config!(
         /// `mind.memory` stays code-defaulted (see `MindMemoryConfig`).
         pub memory_limits: MindMemoryLimitsConfig,
 
+        /// Memory approval-workflow policy.
+        pub memory_approval: MemoryApprovalConfig,
+
         /// Emotion and expression processing settings.
         pub emotion: EmotionConfig,
 
@@ -491,6 +494,32 @@ impl Default for MindMemoryLimitsConfig {
             commitment_active_match_limit: 4096,
         }
     }
+}
+
+/// Memory approval-workflow policy.
+///
+/// Registered as the `mind.memory_approval` settings section (env override:
+/// `ENE_MIND__MEMORY_APPROVAL__REQUIRE_APPROVAL`) so the pre-save approval
+/// switch is operator-configurable without re-exposing the deliberately
+/// code-defaulted `mind.memory` section.
+#[derive(
+    Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct MemoryApprovalConfig {
+    /// Require explicit user approval before extracted candidates are
+    /// persisted to typed memory.
+    ///
+    /// When `true`, candidates that would otherwise be persisted or
+    /// supersede an existing memory are parked in the pending-candidate
+    /// queue instead, and unapproved candidates are excluded from normal
+    /// recall (the queue is the only place they surface). `false` (the
+    /// default) keeps the current auto-save behavior; only weak
+    /// contradictions are deferred for confirmation, and unconfirmed
+    /// candidates may still compete in recall under
+    /// `MindMemoryConfig::recall_pending_candidate_limit`.
+    pub require_approval: bool,
 }
 
 /// Retention policy for the pending memory-candidate approval queue.

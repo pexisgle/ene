@@ -10,18 +10,21 @@ mod memory;
 mod schedule;
 mod session;
 mod tool;
+mod workspace;
 
 pub use schedule::{ClaimedFire, FireClaimMode};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod workspace_tests;
 
 use crate::error::EneMemoryError;
 use crate::migrator::Migrator;
 use chrono::{DateTime, Utc};
 pub use ene_core::{
     ActiveSceneSummaryRow, KeyFact, NaturalDecayReport, NewMemorySpan, PendingCandidate,
-    PendingCandidateStatus,
+    PendingCandidateEdit, PendingCandidateStatus,
 };
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -93,119 +96,100 @@ pub(crate) async fn ensure_vec0_index(
     db: &DatabaseConnection,
     embedding_dim: usize,
 ) -> Result<(), EneMemoryError> {
-    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    use sea_orm::ConnectionTrait;
 
     let dim = embedding_dim;
 
-    // Check if vec_memory_embeddings exists and has the correct dimension.
     // The vec0 column definition bakes in `float[N]` at creation time, so a
     // dimension change (e.g. switching embedding models) requires a rebuild.
-    // We read the stored CREATE statement from sqlite_master and check for
-    // the expected `float[{dim}]` substring. Both shadow tables are checked:
-    // a dimension change rebuilds both, and only re-creating one of them
-    // would leave the pair inconsistent.
-    let needs_recreate = {
-        let check = |table: &str| {
-            db.query_one_raw(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
-                [table.into()],
-            ))
-        };
-        let mem_sql = match check("vec_memory_embeddings").await? {
-            Some(row) => Some(row.try_get_by_index::<String>(0).map_err(|e| {
-                EneMemoryError::MemoryStoreConnectionError(format!("read sqlite_master: {e}"))
-            })?),
-            None => None,
-        };
-        let tool_sql = match check("vec_tool_embeddings").await? {
-            Some(row) => Some(row.try_get_by_index::<String>(0).map_err(|e| {
-                EneMemoryError::MemoryStoreConnectionError(format!("read sqlite_master: {e}"))
-            })?),
-            None => None,
-        };
-        match (mem_sql, tool_sql) {
-            (Some(m), Some(t)) => {
-                !m.contains(&format!("float[{dim}]")) || !t.contains(&format!("float[{dim}]"))
-            }
-            // One or both tables missing: recreate path below creates them.
-            _ => true,
+    // Each shadow table is checked individually against the stored CREATE
+    // statement: missing tables are created and backfilled, tables with a
+    // stale dimension are dropped and recreated empty (old vectors cannot be
+    // re-inserted into the new `float[N]` definition).
+    let mut dimension_changed = false;
+
+    for (table, create_sql, backfill_sql) in [
+        (
+            "vec_memory_embeddings",
+            format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory_embeddings USING vec0( \
+                     memory_embedding_id integer primary key, \
+                     embedding float[{dim}] distance_metric=cosine, \
+                     character_id text, \
+                     model_name text, \
+                     field text \
+                 )"
+            ),
+            Some(
+                "INSERT INTO vec_memory_embeddings(memory_embedding_id, embedding, character_id, model_name, field) \
+                 SELECT me.id, me.embedding, tm.character_id, me.model_name, me.field \
+                 FROM memory_embeddings me \
+                 INNER JOIN typed_memories tm ON tm.id = me.memory_item_id",
+            ),
+        ),
+        (
+            "vec_tool_embeddings",
+            format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_tool_embeddings USING vec0( \
+                     tool_embedding_id integer primary key, \
+                     embedding float[{dim}] distance_metric=cosine, \
+                     tool_name text \
+                 )"
+            ),
+            Some(
+                "INSERT INTO vec_tool_embeddings(tool_embedding_id, embedding, tool_name) \
+                 SELECT id, embedding, tool_name FROM tool_embedding_index",
+            ),
+        ),
+        (
+            "vec_workspace_chunks",
+            format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_workspace_chunks USING vec0( \
+                     chunk_id integer primary key, \
+                     embedding float[{dim}] distance_metric=cosine, \
+                     file_id integer, \
+                     model_name text \
+                 )"
+            ),
+            Some(
+                "INSERT INTO vec_workspace_chunks(chunk_id, embedding, file_id, model_name) \
+                 SELECT c.id, c.embedding, c.file_id, f.model_name \
+                 FROM workspace_document_chunks c \
+                 INNER JOIN workspace_document_files f ON f.id = c.file_id",
+            ),
+        ),
+    ] {
+        let existing = vec0_existing_sql(db, table).await?;
+        let exists = existing.is_some();
+        let right_dim = existing.is_some_and(|sql| sql.contains(&format!("float[{dim}]")));
+        if exists && !right_dim {
+            db.execute_unprepared(&format!("DROP TABLE IF EXISTS {table}"))
+                .await?;
+            dimension_changed = true;
         }
-    };
-
-    // Whether the shadow tables existed at all before this call. A dimension
-    // change drops them, but the old-dimension vectors cannot be inserted
-    // into the recreated `float[N]` table, so the backfill below only runs
-    // when the tables are being created for the *first* time (fresh DB or
-    // upgrade path with no prior vec0 tables).
-    let existed_before = needs_recreate
-        && db
-            .query_one_raw(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                ["vec_memory_embeddings".into()],
-            ))
-            .await?
-            .is_some();
-
-    if needs_recreate {
-        db.execute_unprepared("DROP TABLE IF EXISTS vec_memory_embeddings")
-            .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS vec_tool_embeddings")
-            .await?;
+        db.execute_unprepared(&create_sql).await?;
+        // Backfill only first creation: after a dimension change the old
+        // vectors are incompatible with the recreated definition.
+        if !exists && let Some(backfill) = backfill_sql {
+            db.execute_unprepared(backfill).await?;
+        }
     }
 
-    // character_id is denormalized from typed_memories so the KNN query
-    // can scope to a single character via a vec0 metadata filter.
-    db.execute_unprepared(&format!(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory_embeddings USING vec0( \
-             memory_embedding_id integer primary key, \
-             embedding float[{dim}] distance_metric=cosine, \
-             character_id text, \
-             model_name text, \
-             field text \
-         )"
-    ))
-    .await?;
-
-    db.execute_unprepared(&format!(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_tool_embeddings USING vec0( \
-             tool_embedding_id integer primary key, \
-             embedding float[{dim}] distance_metric=cosine, \
-             tool_name text \
-         )"
-    ))
-    .await?;
-
-    // Backfill the freshly-created tables. This only happens when the
-    // shadow tables did not exist before (first creation): after a
-    // dimension change the old-dimension vectors are incompatible with the
-    // new `float[N]` definition and are left out, requiring a re-embedding
-    // pass (logged below).
-    if needs_recreate && !existed_before {
-        db.execute_unprepared(
-            "INSERT INTO vec_memory_embeddings(memory_embedding_id, embedding, character_id, model_name, field) \
-             SELECT me.id, me.embedding, tm.character_id, me.model_name, me.field \
-             FROM memory_embeddings me \
-             INNER JOIN typed_memories tm ON tm.id = me.memory_item_id",
-        )
-        .await?;
-
-        db.execute_unprepared(
-            "INSERT INTO vec_tool_embeddings(tool_embedding_id, embedding, tool_name) \
-             SELECT id, embedding, tool_name FROM tool_embedding_index",
-        )
-        .await?;
-    } else if needs_recreate {
-        // Dimension change: the old vectors cannot be re-inserted into the
-        // recreated tables. The store remains usable (KNN simply returns no
-        // rows until re-embedding), which is strictly better than failing
-        // startup forever on a model switch.
+    if dimension_changed {
+        // Workspace chunk vectors are dimension-bound, so the base rows are
+        // dropped too: the indexer's unchanged check requires a positive
+        // chunk count, which forces a full re-embed of workspace files after
+        // a model switch instead of leaving them invisible to vector search.
+        db.execute_unprepared("DELETE FROM workspace_document_chunks")
+            .await?;
+        // The store remains usable (KNN simply returns no rows until
+        // re-embedding), which is strictly better than failing startup
+        // forever on a model switch.
         tracing::warn!(
             component = "ene-store",
             new_dimension = dim,
             "Embedding dimension changed; vec0 index recreated empty, \
-             re-embedding of existing memories/tools required"
+             re-embedding of existing memories/tools/documents required"
         );
     }
 
@@ -264,6 +248,27 @@ pub(crate) async fn ensure_vec0_index(
     .await?;
 
     Ok(())
+}
+
+/// Reads the stored `CREATE` statement of a vec0 shadow table, if any.
+async fn vec0_existing_sql(
+    db: &DatabaseConnection,
+    table: &str,
+) -> Result<Option<String>, EneMemoryError> {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            [table.into()],
+        ))
+        .await?;
+    Ok(match row {
+        Some(row) => Some(row.try_get_by_index::<String>(0).map_err(|e| {
+            EneMemoryError::MemoryStoreConnectionError(format!("read sqlite_master: {e}"))
+        })?),
+        None => None,
+    })
 }
 
 pub(crate) fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
@@ -644,12 +649,77 @@ impl MemoryStore {
             confidence: Set(candidate.confidence),
             reason_detail: Set(candidate.reason_detail),
             source_quote: Set(candidate.source_quote),
+            source_turn: Set(candidate.source_turn),
+            approval_parked: Set(candidate.approval_parked),
             existing_memory_id: Set(candidate.existing_memory_id),
             status: Set(PendingCandidateStatus::Pending.as_str().to_string()),
             created_at: Set(candidate.created_at),
+            resolved_at: Set(candidate.resolved_at),
         };
         let inserted = active.insert(&self.db).await?;
         Ok(inserted.id)
+    }
+
+    /// Edit the user-editable fields of a still-pending candidate.
+    ///
+    /// Validation runs **before** any write: empty title/content and
+    /// out-of-range confidence are rejected with
+    /// [`EneMemoryError::InvalidPendingCandidateEdit`], leaving the stored row
+    /// untouched. The update itself is a conditional
+    /// `UPDATE ... WHERE id = ? AND status = 'pending'` (compare-and-swap,
+    /// like [`Self::claim_pending_candidate`]), so a concurrent approve /
+    /// reject / edit loses the race with `rows_affected == 0` instead of
+    /// mutating a resolved row — the original candidate is never lost or
+    /// clobbered. Returns the re-read row on success.
+    pub async fn edit_pending_candidate(
+        &self,
+        id: i64,
+        edit: PendingCandidateEdit,
+    ) -> Result<PendingCandidate, EneMemoryError> {
+        if edit.title.trim().is_empty() {
+            return Err(EneMemoryError::InvalidPendingCandidateEdit(
+                "title must not be empty".to_string(),
+            ));
+        }
+        if edit.content.trim().is_empty() {
+            return Err(EneMemoryError::InvalidPendingCandidateEdit(
+                "content must not be empty".to_string(),
+            ));
+        }
+        if !edit.confidence.is_finite() || !(0.0..=1.0).contains(&edit.confidence) {
+            return Err(EneMemoryError::InvalidPendingCandidateEdit(format!(
+                "confidence must be within 0.0..=1.0, got {}",
+                edit.confidence
+            )));
+        }
+
+        use crate::entities::pending_candidates::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let res = Entity::update_many()
+            .col_expr(Column::Title, sea_orm::sea_query::Expr::value(edit.title))
+            .col_expr(
+                Column::Content,
+                sea_orm::sea_query::Expr::value(edit.content),
+            )
+            .col_expr(
+                Column::Kind,
+                sea_orm::sea_query::Expr::value(edit.kind.as_str().to_string()),
+            )
+            .col_expr(
+                Column::Confidence,
+                sea_orm::sea_query::Expr::value(edit.confidence),
+            )
+            .filter(Column::Id.eq(id))
+            .filter(Column::Status.eq(PendingCandidateStatus::Pending.as_str()))
+            .exec(&self.db)
+            .await?;
+        if res.rows_affected == 0 {
+            return Err(EneMemoryError::Other(format!(
+                "pending candidate {id} not found or already resolved"
+            )));
+        }
+        self.load_pending_candidate(id).await
     }
 
     /// List pending candidates for a character, optionally filtered by status.
@@ -687,8 +757,19 @@ impl MemoryStore {
     /// the same database, two concurrent approvals can no longer both pass a
     /// read-check and both insert — exactly one `UPDATE` matches, the loser
     /// sees `rows_affected == 0` and errors without inserting a duplicate
-    /// typed memory. Returns an error when the candidate is not found or has
-    /// already been resolved.
+    /// typed memory.
+    ///
+    /// A candidate carrying a supersede target deactivates the old memory
+    /// through [`Self::supersede_typed_memory`] (old row → `Superseded`),
+    /// mirroring the auto-save path so approving cannot leave both memories
+    /// recallable. The new memory's scope is derived from its kind like the
+    /// direct persist path (`UserProfile` / `Preference` → `User`,
+    /// `Relationship` / `Reflection` → `Shared`, otherwise `Character`).
+    ///
+    /// If the typed-memory write fails, the claim is rolled back (status and
+    /// `resolved_at` restored) so the candidate is not stranded as approved
+    /// without a memory. Returns an error when the candidate is not found or
+    /// has already been resolved.
     pub async fn approve_pending_candidate(&self, id: i64) -> Result<i64, EneMemoryError> {
         let claimed = self
             .claim_pending_candidate(id, PendingCandidateStatus::Approved)
@@ -701,10 +782,25 @@ impl MemoryStore {
 
         // Re-read the now-approved row to build the typed memory. The status
         // flip already serialized concurrent resolvers, so this read is stable.
-        let candidate = self.load_pending_candidate(id).await?;
+        let candidate = match self.load_pending_candidate(id).await {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.restore_pending_candidate(id).await;
+                return Err(error);
+            }
+        };
+        let scope = match candidate.kind {
+            crate::MemoryKind::UserProfile | crate::MemoryKind::Preference => {
+                crate::MemoryScope::User
+            }
+            crate::MemoryKind::Relationship | crate::MemoryKind::Reflection => {
+                crate::MemoryScope::Shared
+            }
+            _ => crate::MemoryScope::Character,
+        };
 
         let item = crate::NewMemoryItem {
-            scope: crate::MemoryScope::Character,
+            scope,
             character_id: candidate.character_id.clone(),
             user_id: candidate.user_id.clone(),
             kind: candidate.kind,
@@ -724,7 +820,53 @@ impl MemoryStore {
             created_at: None,
             commitment_id: None,
         };
-        self.insert_typed_memory(&item).await
+        let result = match candidate.existing_memory_id {
+            Some(existing_id) => self.supersede_typed_memory(&item, existing_id).await,
+            None => self.insert_typed_memory(&item).await,
+        };
+        match result {
+            Ok(new_id) => Ok(new_id),
+            Err(error) => {
+                self.restore_pending_candidate(id).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Roll an approved claim back to pending after a failed typed-memory
+    /// write, so the candidate can be retried instead of stranded.
+    ///
+    /// Only the claim winner can reach this (concurrent resolvers already
+    /// lost the conditional status flip), so restoring is race-safe. Best
+    /// effort: a restore failure is logged and the original write error is
+    /// returned to the caller.
+    async fn restore_pending_candidate(&self, id: i64) {
+        use crate::entities::pending_candidates::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let res = Entity::update_many()
+            .col_expr(
+                Column::Status,
+                sea_orm::sea_query::Expr::value(
+                    PendingCandidateStatus::Pending.as_str().to_string(),
+                ),
+            )
+            .col_expr(
+                Column::ResolvedAt,
+                sea_orm::sea_query::Expr::value(None::<DateTime<Utc>>),
+            )
+            .filter(Column::Id.eq(id))
+            .filter(Column::Status.eq(PendingCandidateStatus::Approved.as_str()))
+            .exec(&self.db)
+            .await;
+        if let Err(error) = res {
+            tracing::error!(
+                component = "MemoryStore",
+                candidate_id = id,
+                error = %error,
+                "Failed to restore pending candidate after failed approval write"
+            );
+        }
     }
 
     /// Resolve (approve or reject) a pending candidate by id.
@@ -871,6 +1013,22 @@ impl MemoryStore {
         })
     }
 
+    /// Fetch a single pending candidate by id, or `None` when absent.
+    pub async fn get_pending_candidate(
+        &self,
+        id: i64,
+    ) -> Result<Option<PendingCandidate>, EneMemoryError> {
+        use crate::entities::pending_candidates::{Entity, model_to_dto};
+        use sea_orm::EntityTrait;
+
+        let Some(model) = Entity::find_by_id(id).one(&self.db).await? else {
+            return Ok(None);
+        };
+        model_to_dto(model).map(Some).ok_or_else(|| {
+            EneMemoryError::Other(format!("pending candidate {id} has an unrecognized status"))
+        })
+    }
+
     /// Atomically claim a pending candidate by flipping its status from
     /// [`PendingCandidateStatus::Pending`] to `target`.
     ///
@@ -892,6 +1050,10 @@ impl MemoryStore {
             .col_expr(
                 Column::Status,
                 sea_orm::sea_query::Expr::value(target.as_str().to_string()),
+            )
+            .col_expr(
+                Column::ResolvedAt,
+                sea_orm::sea_query::Expr::value(chrono::Utc::now()),
             )
             .filter(Column::Id.eq(id))
             .filter(Column::Status.eq(PendingCandidateStatus::Pending.as_str()))

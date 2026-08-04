@@ -181,6 +181,20 @@ pub enum LifecycleEvent {
         /// Number of pending candidates.
         count: usize,
     },
+    /// A pending memory candidate was approved, rejected, or edited.
+    ///
+    /// Audit event emitted from the actor after the mutation committed;
+    /// consumers refetch the queue via
+    /// [`crate::EneHandle::candidates`] rather than trusting this snapshot.
+    CandidateChanged {
+        /// Candidate row id.
+        id: i64,
+        /// Status after the mutation (`pending` for edits, `approved` /
+        /// `rejected` for resolutions).
+        status: ene_store::PendingCandidateStatus,
+        /// Active turn context at mutation time, when any.
+        turn: Option<TurnId>,
+    },
     /// A deferred (background) tool task has reached a terminal state.
     ///
     /// Emitted asynchronously after the originating turn has completed, once
