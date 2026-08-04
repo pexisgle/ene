@@ -81,6 +81,11 @@ pub(crate) struct QueuedQuietHour {
 /// Maximum queued quiet-hours moments kept for catch-up delivery.
 pub(crate) const QUIET_HOURS_QUEUE_CAP: usize = 32;
 
+/// Bounds the in-process fallback for pending-confirmation delivery timestamps.
+/// Resolved candidates are removed normally; this cap covers rows that expire
+/// or are resolved through another API while the actor remains alive.
+const PENDING_CONFIRMATION_BACKOFF_CAP: usize = 256;
+
 /// Maximum suppressed moments rendered into one summary catch-up hint.
 pub(crate) const QUIET_HOURS_SUMMARY_MAX_ITEMS: usize = 20;
 
@@ -123,8 +128,25 @@ impl ProactiveScheduler {
         self.last_decision = None;
         self.quiet_hours_queue.clear();
         self.asked_pending_candidate = None;
-        self.pending_confirmation_asked_at.clear();
+        // Keep delivery timestamps across session changes. A session reset
+        // must not make an unclear candidate immediately eligible again.
         self.session_epoch = self.session_epoch.wrapping_add(1);
+    }
+
+    fn remember_pending_confirmation_delivery(&mut self, candidate_id: i64) {
+        if !self
+            .pending_confirmation_asked_at
+            .contains_key(&candidate_id)
+            && self.pending_confirmation_asked_at.len() >= PENDING_CONFIRMATION_BACKOFF_CAP
+            && let Some((&oldest_id, _)) = self
+                .pending_confirmation_asked_at
+                .iter()
+                .min_by_key(|(_, asked_at)| *asked_at)
+        {
+            self.pending_confirmation_asked_at.remove(&oldest_id);
+        }
+        self.pending_confirmation_asked_at
+            .insert(candidate_id, chrono::Utc::now());
     }
 
     /// Take the stashed screen image for a generation turn (clears the stash).
@@ -480,9 +502,7 @@ pub(crate) fn apply_proactive_completion(
         // the verdict stays `Disabled` even though the question was spoken.
         if matches!(terminal, TerminalReason::Done) && spoke_visible_text {
             scheduler.asked_pending_candidate = Some(candidate.clone());
-            scheduler
-                .pending_confirmation_asked_at
-                .insert(candidate.id, chrono::Utc::now());
+            scheduler.remember_pending_confirmation_delivery(candidate.id);
         } else {
             scheduler.asked_pending_candidate = None;
         }
@@ -1177,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn session_reset_clears_the_asked_marker_and_bumps_the_session_epoch() {
+    fn session_reset_clears_the_asked_marker_but_keeps_backoff() {
         let mut scheduler = ProactiveScheduler {
             asked_pending_candidate: Some(pending_candidate()),
             pending_confirmation_asked_at: HashMap::from([(7, chrono::Utc::now())]),
@@ -1186,7 +1206,7 @@ mod tests {
         let epoch = scheduler.session_epoch;
         scheduler.reset_session();
         assert!(scheduler.asked_pending_candidate.is_none());
-        assert!(scheduler.pending_confirmation_asked_at.is_empty());
+        assert!(scheduler.pending_confirmation_asked_at.contains_key(&7));
         assert_eq!(scheduler.session_epoch, epoch.wrapping_add(1));
     }
 
