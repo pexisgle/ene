@@ -122,8 +122,8 @@ available = min(model_window, context_window)
 `plugins.list.llama-cpp.profiles.<name>` ブロブへミラーされます。`local_models`
 のキー自体はルーティングおよびコンテキスト予算の情報としてここに残ります
 （`context_size` は解決時に読まれ、`dimensions` はローカル埋め込みの
-ストアスキーマ値です）。ミラーは v2→v3 設定マイグレーションによる一方向
-コピーです — プロファイルを編集しても `local_models` は書き換わりません。
+ストアスキーマ値です）。ミラーは設定マイグレーションによる一方向コピーです
+— プロファイルを編集しても `local_models` は書き換わりません。
 
 起動時、ランタイムは各生成タスク（`chat`、および設定されている場合は `proactive`）
 のウィンドウが必要量（プロンプト予算 + 応答予約 `tasks.<task>.max_tokens`）を
@@ -610,14 +610,14 @@ llama-cpp プラグインの `acceleration` 値はバイナリのビルドと一
 指定してください。`context_size` と `gpu_layers` はチャットの
 ロードのみに効きます — 埋め込みモデルは内部で独自にコンテキストとオフロード
 計画を設定し、ホスト側のルーティング窓は `ai.local_models.<name>.context_size`
-に残ります。v2→v3 マイグレーションは `context_size` をミラーするため、
-プロファイルで省略した場合はホスト側の値でロードされます（ホスト側も既定値の
-場合は 16,384）。ミラーより前の手書きプロファイルだけが乖離し得るため、その
-場合はホスト側の値以上の `context_size` を設定してください。設定しないと長い
-プロンプトが生成時にコンテキストオーバーフローで失敗します。プロファイルの
-*選択*はプラグイン側の責務で、値は `ConfigurablePlugin::set_profiles` で
-配信されます。ローカルモデルのキーはルーティング情報として
-`ai.local_models` に残ります。
+に残ります。マイグレーションは `context_size` をミラーするため、プロファイルで
+省略した場合はホスト側の値でロードされます（ホスト側も既定値の場合は 16,384）。
+ミラーは一度きりのため、その後の `ai.local_models.<name>.context_size` 編集は
+プロファイルに再同期されません — プロファイル側にもホスト側の値以上の
+`context_size` を設定してください。設定しないと長いプロンプトが生成時に
+コンテキストオーバーフローで失敗します。プロファイルの*選択*はプラグイン側の
+責務で、値は `ConfigurablePlugin::set_profiles` で配信されます。ローカルモデルの
+キーはルーティング情報として `ai.local_models` に残ります。
 
 `dimensions` は、モデルが `provider: "local"` の `tasks.embedding` を担う場合、
 `ai.local_models.<name>` に必須です：ホストはプラグインホストの起動前に

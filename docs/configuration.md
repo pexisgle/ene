@@ -120,7 +120,7 @@ the local GGUF provider plugin (`ene-plugin-llama-cpp`); the `local_models`
 keys themselves remain here as routing and context-budget information
 (`context_size` is read at resolve time, `dimensions` is the host's
 store-schema value for local embedding). The mirror is a one-way copy made by
-the v2→v3 settings migration — editing a profile does not rewrite
+the settings migration — editing a profile does not rewrite
 `local_models`.
 
 At startup the runtime validates each generative task's window (`chat`, plus
@@ -782,12 +782,13 @@ warm-up's 5-minute budget; a model that takes longer to fetch fails closed
 and `gpu_layers` size chat loads only — the embedding model sizes its own
 context and offload plan internally, and the
 host's routing window stays in `ai.local_models.<name>.context_size`. The
-v2→v3 migration mirrors `context_size`, so a profile that omits it loads the
-host-side value (16,384 when the host value is also the default); only
-manually written profiles that predate the mirror can drift — set their
-`context_size` to at least the host value to avoid a context overflow at
-generation time. Profile *selection* is plugin-owned; the values are
-delivered via `ConfigurablePlugin::set_profiles`.
+migrations mirror `context_size`, so a profile that omits it loads the
+host-side value (16,384 when the host value is also the default); the mirror
+is a one-time migration, so a *later* edit of
+`ai.local_models.<name>.context_size` does not re-sync the profile — set the
+profile's `context_size` to at least the host value to avoid a context
+overflow at generation time. Profile *selection* is plugin-owned; the values
+are delivered via `ConfigurablePlugin::set_profiles`.
 
 `dimensions` is required on `ai.local_models.<name>` when the model backs
 `tasks.embedding` with `provider: "local"`: the host opens the memory-store
