@@ -352,7 +352,7 @@ impl TurnActor {
             proactive: crate::proactive::ProactiveScheduler::default(),
             proactive_decision_rx: None,
             proactive_decision_handle: None,
-            quiet_hours_clock: Arc::new(|| chrono::Utc::now()),
+            quiet_hours_clock: Arc::new(chrono::Utc::now),
             quiet_hours_notifications_suppressed: false,
             proactive_llm: Arc::new(OnceCell::new()),
             proactive_llm_init_spawned: Arc::new(AtomicBool::new(false)),
@@ -1181,7 +1181,7 @@ impl TurnActor {
         let quiet = evaluate_quiet_hours(&mind.proactive.quiet_hours, (self.quiet_hours_clock)());
         if quiet.active {
             if mind.proactive.quiet_hours.suppress.decisions {
-                self.on_quiet_hours_suppressed(&mind, &quiet).await;
+                self.on_quiet_hours_suppressed(&mind, &quiet);
             }
             return;
         }
@@ -1372,7 +1372,7 @@ impl TurnActor {
         self.quiet_hours_notifications_suppressed =
             crate::proactive::quiet_hours_suppresses_notifications(
                 &quiet,
-                &mind.proactive.quiet_hours.suppress,
+                mind.proactive.quiet_hours.suppress,
             );
         if self.quiet_hours_notifications_suppressed {
             tracing::info!(
@@ -1407,7 +1407,7 @@ impl TurnActor {
     /// Record one quiet-hours-suppressed moment: bounded queue entry for the
     /// `queue` / `summary` policies plus the structured suppression log.
     /// The log carries decision + policy metadata only — never screen data.
-    async fn on_quiet_hours_suppressed(
+    fn on_quiet_hours_suppressed(
         &mut self,
         mind: &ene_mind::MindConfig,
         quiet: &ene_mind::QuietHoursEval,
@@ -1464,7 +1464,6 @@ impl TurnActor {
         match policy {
             QuietHoursPolicy::Discard => {
                 self.proactive.quiet_hours_queue.clear();
-                return;
             }
             QuietHoursPolicy::Queue => {
                 let Some(entry) = self.proactive.quiet_hours_queue.front().cloned() else {
@@ -2909,7 +2908,7 @@ impl TurnActor {
                 evaluate_quiet_hours(&mind.proactive.quiet_hours, (self.quiet_hours_clock)());
             if crate::proactive::quiet_hours_suppresses_tts(
                 &quiet,
-                &mind.proactive.quiet_hours.suppress,
+                mind.proactive.quiet_hours.suppress,
             ) {
                 tracing::info!(
                     component = "Proactive",

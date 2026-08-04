@@ -1622,7 +1622,7 @@ mod tests {
         assert!(cfg.proactive.quiet_hours.suppress.decisions);
     }
 
-    /// Quiet hours parse from the public schema with their snake_case wire
+    /// Quiet hours parse from the public schema with their `snake_case` wire
     /// names and default to disabled when absent (old settings files).
     #[test]
     fn proactive_quiet_hours_round_trip_in_public_schema() {

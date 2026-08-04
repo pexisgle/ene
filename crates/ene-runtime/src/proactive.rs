@@ -333,7 +333,7 @@ pub(crate) fn quiet_hours_items(entries: &[QueuedQuietHour]) -> String {
 #[must_use]
 pub(crate) fn quiet_hours_suppresses_notifications(
     quiet: &QuietHoursEval,
-    suppress: &ene_mind::QuietHoursSuppressConfig,
+    suppress: ene_mind::QuietHoursSuppressConfig,
 ) -> bool {
     quiet.active && suppress.notifications
 }
@@ -342,7 +342,7 @@ pub(crate) fn quiet_hours_suppresses_notifications(
 #[must_use]
 pub(crate) fn quiet_hours_suppresses_tts(
     quiet: &QuietHoursEval,
-    suppress: &ene_mind::QuietHoursSuppressConfig,
+    suppress: ene_mind::QuietHoursSuppressConfig,
 ) -> bool {
     quiet.active && suppress.tts
 }
