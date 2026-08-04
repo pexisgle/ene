@@ -767,8 +767,10 @@ non-empty), `gpu_layers` (`"auto"` or an integer string), and the optional
 `context_size` (chat context window in tokens; defaults to `16384` when
 omitted) plus the optional `dimensions` (declared embedding dimensionality;
 see below). The plugin downloads `url` weights into the model cache on first
-use (GGUF magic validated) and keeps one loaded model per profile for its
-process lifetime. `context_size` and `gpu_layers` size chat loads only — the
+use (GGUF magic validated) and keeps one loaded model per profile until a live
+config/profile update invalidates that cache. Existing requests retain their
+model; subsequent requests load the new settings. `context_size` and
+`gpu_layers` size chat loads only — the
 embedding model sizes its own context and offload plan internally, and the
 host's routing window stays in `ai.local_models.<name>.context_size`. The
 v2→v3 migration mirrors `context_size`, so a profile that omits it loads the
