@@ -771,9 +771,7 @@ async fn voice_settings_are_clamped_before_sending() {
             .abs()
             < 1e-6
     );
-    assert!(
-        (body["voice_settings"]["style"].as_f64().expect("number") - 1.0).abs() < 1e-6
-    );
+    assert!((body["voice_settings"]["style"].as_f64().expect("number") - 1.0).abs() < 1e-6);
     assert_eq!(body["voice_settings"]["use_speaker_boost"], false);
 }
 
