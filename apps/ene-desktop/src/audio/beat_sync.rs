@@ -28,7 +28,7 @@
 //! `cpal` has no loopback API: on Linux it enumerates `ALSA` / `PipeWire`
 //! capture devices, so loopback works where a monitor source is exposed as
 //! an input device. Device selection is deliberately narrow — the default
-//! microphone is never an implicit candidate, because on ALSA and PipeWire
+//! microphone is never an implicit candidate, because on ALSA and `PipeWire`
 //! the mic can share the default output device's name. Candidates are, in
 //! order: the `desktop.beat_sync.device` override (exact name), and any
 //! input device whose name contains "monitor" (the `PulseAudio` /
@@ -136,9 +136,9 @@ pub enum BeatSyncError {
 pub struct BeatSyncHandle {
     join: Option<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
-    /// False until the capture stream is actually playing; flipped false
-    /// again if the stream dies (e.g. device unplug). `is_alive()` consults
-    /// it so a dead thread is never reported as running.
+    /// Set optimistically before the capture thread starts, then cleared if
+    /// stream setup fails or the device dies. This avoids the render loop
+    /// disabling a just-started capture before its worker has initialized.
     alive: Arc<AtomicBool>,
 }
 
@@ -179,7 +179,7 @@ pub fn spawn_beat_sync(
 ) -> Result<BeatSyncHandle, BeatSyncError> {
     let (device, config, sample_format) = open_loopback(device_name.as_deref())?;
     let shutdown = Arc::new(AtomicBool::new(false));
-    let alive = Arc::new(AtomicBool::new(false));
+    let alive = Arc::new(AtomicBool::new(true));
     let loop_shutdown = Arc::clone(&shutdown);
     let loop_alive = Arc::clone(&alive);
     let join = std::thread::Builder::new()
@@ -292,7 +292,7 @@ fn open_loopback(
 ///
 /// Selection order: the configured override (exact name), then any input
 /// whose name contains "monitor". A bare name-contains-output match is
-/// intentionally absent — on ALSA, PulseAudio, and PipeWire the microphone
+/// intentionally absent — on ALSA, `PulseAudio`, and `PipeWire` the microphone
 /// can share the output device's name, so only the monitor convention can
 /// identify a loopback implicitly.
 fn find_loopback_device(host: &cpal::Host, configured: Option<&str>) -> Option<cpal::Device> {
@@ -322,7 +322,7 @@ fn pick_loopback_device<'a>(
         return names
             .iter()
             .find(|name| **name == configured)
-            .map(|name| name.to_string());
+            .map(ToString::to_string);
     }
     names
         .into_iter()

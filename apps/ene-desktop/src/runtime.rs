@@ -1467,7 +1467,7 @@ impl Runtime {
             let beat_running = app
                 .world()
                 .get_resource::<crate::resource::beat_sync::BeatSyncRuntime>()
-                .is_some_and(|runtime| runtime.is_running());
+                .is_some_and(crate::resource::beat_sync::BeatSyncRuntime::is_running);
             #[cfg(not(feature = "voice"))]
             let beat_running = false;
             let world = app.world_mut();

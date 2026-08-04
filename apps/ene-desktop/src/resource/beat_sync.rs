@@ -89,7 +89,9 @@ impl BeatSyncRuntime {
     /// Whether a capture thread is currently running.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.0.as_ref().is_some_and(|handle| handle.is_alive())
+        self.0
+            .as_ref()
+            .is_some_and(crate::audio::beat_sync::BeatSyncHandle::is_alive)
     }
 
     /// Stop capture and drop the handle.

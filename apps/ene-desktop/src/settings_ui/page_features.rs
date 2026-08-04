@@ -747,7 +747,7 @@ fn render_audio(
         // writes still go to the persisted config.
         let mut enabled = world
             .get_resource::<crate::resource::beat_sync::BeatSyncRuntime>()
-            .is_some_and(|runtime| runtime.is_running());
+            .is_some_and(crate::resource::beat_sync::BeatSyncRuntime::is_running);
         if ui
             .checkbox(
                 &mut enabled,
