@@ -517,6 +517,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_gate_spans_pipeline_instances() {
+        let port = InMemoryMemoryPort::new();
+        let first = SelfReflectionPipeline::new(config(2, 2));
+        first
+            .record_outcome(&port, "ene", "user1", None, &applied_with_rating("a", 0.5))
+            .await;
+        assert!(!first.should_reflect_with_store(&port, "ene").await);
+
+        let second = SelfReflectionPipeline::new(config(2, 2));
+        assert!(!second.should_reflect_with_store(&port, "ene").await);
+        second
+            .record_outcome(&port, "ene", "user1", None, &applied_with_rating("b", 0.5))
+            .await;
+        assert!(second.should_reflect_with_store(&port, "ene").await);
+    }
+
+    #[tokio::test]
     async fn record_outcome_ignores_missing_rating_or_id() {
         let port = InMemoryMemoryPort::new();
         let pipeline = SelfReflectionPipeline::new(config(1, 1));
