@@ -53,8 +53,9 @@ fix.
 
 Checks performed:
 
-- Required fields: `data.name`, non-empty greetings, lorebook trigger
-  keys/content, motion names and paths.
+- Required fields: `data.name`, non-empty alternate greetings, lorebook
+  trigger keys/content, motion names and paths. An empty first message is
+  legal CCv3, so it is flagged as a warning rather than blocking the save.
 - Motion paths must stay inside the character folder (no `..` or absolute
   paths).
 - Declared assets (`data.assets`, VRM/VRMA): the URI must be valid and
@@ -62,6 +63,8 @@ Checks performed:
   would break startup. Remote URLs and data URLs cannot be verified locally
   and produce a non-blocking warning.
 - The idle motion must reference a motion in the catalog.
+- Lorebook entries: a selective entry without secondary keys and a regex
+  trigger key that does not compile are both surfaced as warnings.
 
 ## Saving, backup, and discard protection
 
@@ -71,6 +74,6 @@ Checks performed:
 - **Atomic write**: the card is written via a temp file + rename, so a crash
   mid-save cannot leave a truncated card.
 - **Discard confirmation**: closing the settings window (window close button,
-  `Esc`, `F1`) or pressing **Reload** while there are unsaved changes asks for
-  confirmation first. Choose **Discard** to lose the edits or **Keep editing**
-  to go back.
+  `Esc`, `F1`), closing the app from the main window, switching characters,
+  or pressing **Reload** while there are unsaved changes asks for confirmation
+  first. Choose **Discard** to lose the edits or **Keep editing** to go back.

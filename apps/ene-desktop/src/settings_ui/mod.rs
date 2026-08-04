@@ -336,9 +336,17 @@ impl SettingsUi {
             }
         }
 
-        // Rendered last so it floats above every page: a close with unsaved
-        // card edits must confirm before the window may hide.
-        page_character_editor::render_discard_dialog(ui, world, ui_entity);
+        // Rendered last so it floats above every page: a close, app exit,
+        // reload, or character switch with unsaved card edits must confirm
+        // before the action proceeds.
+        page_character_editor::render_discard_dialog(
+            ui,
+            settings,
+            &mut self.emotion_queue,
+            now_secs,
+            world,
+            ui_entity,
+        );
     }
 }
 

@@ -94,6 +94,9 @@ pub fn apply_action(
                 settings.characters.len(),
                 -1,
             );
+            if defer_character_switch_if_unsaved(idx, world, ui_entity) {
+                return;
+            }
             push_default_expression(settings.select_character(idx), emotion_queue, now_secs);
             if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
                 state.0.reset_character_editor();
@@ -105,6 +108,9 @@ pub fn apply_action(
                 settings.characters.len(),
                 1,
             );
+            if defer_character_switch_if_unsaved(idx, world, ui_entity) {
+                return;
+            }
             push_default_expression(settings.select_character(idx), emotion_queue, now_secs);
             if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
                 state.0.reset_character_editor();
@@ -395,6 +401,67 @@ fn set_editor_errors(world: &mut World, ui_entity: Entity, errors: Vec<EditorIss
     }
 }
 
+/// Applies the discard dialog's "discard" choice to the editor state.
+///
+/// Returns `true` when a deferred character switch must still be applied to
+/// settings (the caller releases the world borrow first). The close and
+/// app-exit intents keep their request flags so the runtime completes them
+/// once the dirty flag is gone.
+pub(crate) fn apply_discard_decision(state: &mut UiState) -> bool {
+    if state.character_editor_pending_character.is_some() {
+        return true;
+    }
+    if state.character_editor_reload_pending {
+        state.reset_character_editor();
+        return false;
+    }
+    state.character_editor_modified = false;
+    state.character_editor_loaded = false;
+    state.character_editor_validation_errors.clear();
+    false
+}
+
+/// Records a deferred character switch when the editor holds unsaved
+/// changes. Returns `true` when the switch must wait for the discard dialog;
+/// the caller then skips `select_character`.
+pub(crate) fn defer_character_switch_if_unsaved(
+    target: usize,
+    world: &mut World,
+    ui_entity: Entity,
+) -> bool {
+    if world
+        .get::<UiStateComponent>(ui_entity)
+        .is_some_and(|s| s.0.editor_has_unsaved_changes())
+    {
+        if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+            state.0.character_editor_pending_character = Some(target);
+        }
+        return true;
+    }
+    false
+}
+
+/// Applies a character switch that the discard dialog confirmed, then drops
+/// the editor buffers so the page reloads for the newly selected character.
+pub(crate) fn confirm_pending_character_switch(
+    settings: &mut CharacterSettings,
+    emotion_queue: Option<&mut EmotionQueue>,
+    now_secs: f64,
+    world: &mut World,
+    ui_entity: Entity,
+) {
+    let Some(target) = world
+        .get::<UiStateComponent>(ui_entity)
+        .and_then(|s| s.0.character_editor_pending_character)
+    else {
+        return;
+    };
+    push_default_expression(settings.select_character(target), emotion_queue, now_secs);
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.reset_character_editor();
+    }
+}
+
 /// Reads the card at `path` for editing. A missing file starts from a
 /// default card (both load and save support creating a brand-new card);
 /// any other read or parse failure is surfaced as an issue and returns
@@ -507,6 +574,13 @@ fn validate_card(card: &CharacterCardV3, card_dir: &Path, assets_dir: &Path) -> 
             severity: EditorSeverity::Error,
         });
     }
+    if card.data.first_mes.trim().is_empty() {
+        issues.push(EditorIssue {
+            location: "data.first_mes".to_string(),
+            message: i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-first-mes-empty"),
+            severity: EditorSeverity::Warning,
+        });
+    }
     for (index, greeting) in card.data.alternate_greetings.iter().enumerate() {
         if greeting.trim().is_empty() {
             let human_index = index + 1;
@@ -546,6 +620,36 @@ fn validate_card(card: &CharacterCardV3, card_dir: &Path, assets_dir: &Path) -> 
                         index = human_index
                     ),
                     severity: EditorSeverity::Error,
+                });
+            }
+            if entry.selective == Some(true)
+                && entry.secondary_keys.as_ref().is_none_or(Vec::is_empty)
+            {
+                issues.push(EditorIssue {
+                    location: format!("{location}.secondary_keys"),
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-lorebook-selective-keys-required",
+                        index = human_index
+                    ),
+                    severity: EditorSeverity::Warning,
+                });
+            }
+            if entry.use_regex
+                && let Some(bad_key) = entry
+                    .keys
+                    .iter()
+                    .find(|key| regex::Regex::new(key).is_err())
+            {
+                issues.push(EditorIssue {
+                    location: format!("{location}.keys"),
+                    message: i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "character-editor-lorebook-regex-invalid",
+                        index = human_index,
+                        key = bad_key.clone()
+                    ),
+                    severity: EditorSeverity::Warning,
                 });
             }
         }
@@ -626,6 +730,10 @@ fn validate_card(card: &CharacterCardV3, card_dir: &Path, assets_dir: &Path) -> 
         match resolve_asset_uri(&asset.uri) {
             Ok(ResolvedAssetUri::Embedded(path)) => {
                 if !is_regular_file(&card_dir.join(&path)) {
+                    let severity = match asset.ene_kind() {
+                        Some(EneAssetKind::Vrm) => EditorSeverity::Error,
+                        _ => EditorSeverity::Warning,
+                    };
                     issues.push(EditorIssue {
                         location,
                         message: i18n_embed_fl::fl!(
@@ -633,7 +741,7 @@ fn validate_card(card: &CharacterCardV3, card_dir: &Path, assets_dir: &Path) -> 
                             "character-editor-asset-file-missing",
                             path = path.display().to_string()
                         ),
-                        severity: EditorSeverity::Error,
+                        severity,
                     });
                 }
             }
@@ -643,13 +751,17 @@ fn validate_card(card: &CharacterCardV3, card_dir: &Path, assets_dir: &Path) -> 
                     _ => DEFAULT_VRMA_PATH,
                 };
                 if !is_regular_file(&assets_dir.join(default)) {
+                    let severity = match asset.ene_kind() {
+                        Some(EneAssetKind::Vrm) => EditorSeverity::Error,
+                        _ => EditorSeverity::Warning,
+                    };
                     issues.push(EditorIssue {
                         location,
                         message: i18n_embed_fl::fl!(
                             crate::i18n::loader(),
                             "character-editor-asset-default-missing"
                         ),
-                        severity: EditorSeverity::Error,
+                        severity,
                     });
                 }
             }
@@ -789,6 +901,8 @@ fn push_default_expression(
 mod tests {
     use super::*;
     use crate::settings::UiState;
+    use crate::settings::{CharacterEntry, CharacterState};
+    use parking_lot::RwLock;
 
     fn editor_world(name: &str) -> (World, Entity) {
         let mut world = World::new();
@@ -846,6 +960,31 @@ mod tests {
                 "vendor_field": "from-other-app"
             }
         }"#
+    }
+
+    fn test_settings(names: &[&str]) -> CharacterSettings {
+        CharacterSettings {
+            assets_dir: PathBuf::from("/tmp/ene-test-assets"),
+            characters: names
+                .iter()
+                .map(|name| CharacterEntry {
+                    name: (*name).to_string(),
+                    folder: (*name).to_string(),
+                    vrm_paths: Vec::new(),
+                    motion_paths: Vec::new(),
+                    motion_names: Vec::new(),
+                    card_path: format!("characters/{name}/character.json"),
+                    default_motion: None,
+                })
+                .collect(),
+            character_state: CharacterState {
+                selected_character: 0,
+                ..Default::default()
+            },
+            store: Arc::new(RwLock::new(ene_config::ConfigStore::from_config(
+                ene_config::EneConfig::default(),
+            ))),
+        }
     }
 
     #[test]
@@ -912,9 +1051,12 @@ mod tests {
 
         save(&mut world, entity, &path, tmp.path());
 
+        let issues = editor_errors(&world, entity);
         assert!(
-            editor_errors(&world, entity).is_empty(),
-            "save must succeed silently"
+            issues
+                .iter()
+                .all(|issue| issue.severity != EditorSeverity::Error),
+            "a new default card may warn (empty greeting) but must save, got {issues:?}"
         );
         let on_disk = std::fs::read_to_string(&path).expect("read card");
         let card: ene_config::CharacterCardV3 = serde_json::from_str(&on_disk).expect("valid JSON");
@@ -950,6 +1092,10 @@ mod tests {
         let path = tmp.path().join("character.json");
         std::fs::write(&path, seed_card_json()).expect("seed card");
         let (mut world, entity) = editor_world("Edited");
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            state.0.character_editor_first_mes = "hello".to_string();
+        }
 
         save(&mut world, entity, &path, tmp.path());
 
@@ -1017,6 +1163,7 @@ mod tests {
                 selective: None,
                 secondary_keys: None,
                 position: None,
+                extra: indexmap::IndexMap::new(),
                 extensions: std::collections::HashMap::new(),
             });
             state.0.character_editor_lorebook = Some(book);
@@ -1170,6 +1317,7 @@ mod tests {
                 name: "Sneaky".to_string(),
                 path: "../evil.vrma".to_string(),
                 layer: None,
+                extra: indexmap::IndexMap::new(),
             });
             state.0.character_editor_motion_catalog = Some(catalog);
         }
@@ -1198,8 +1346,10 @@ mod tests {
                 "spec_version": "3.0",
                 "data": {
                     "name": "Old",
+                    "first_mes": "hello",
                     "character_book": {
                         "name": "World",
+                        "vendorBookKey": "keep",
                         "entries": [{
                             "keys": ["lab"],
                             "content": "cold",
@@ -1207,11 +1357,14 @@ mod tests {
                             "insertion_order": 0,
                             "use_regex": false,
                             "id": 42,
+                            "probability": 0.5,
+                            "uid": 12345,
                             "extensions": {"keep": "me"}
                         }]
                     },
                     "extensions": {
                         "ene": {
+                            "vendorEneKey": "keep",
                             "motion_catalog": {
                                 "idle_lower": "Idle",
                                 "motions": [{
@@ -1247,6 +1400,7 @@ mod tests {
                     name: "Wave".to_string(),
                     path: "motions/wave.vrma".to_string(),
                     layer: None,
+                    extra: indexmap::IndexMap::new(),
                 });
         }
 
@@ -1260,6 +1414,11 @@ mod tests {
         let parsed: ene_config::CharacterCardV3 = serde_json::from_str(&on_disk).expect("parse");
         let book = parsed.data.character_book.expect("lorebook kept");
         assert_eq!(book.name.as_deref(), Some("World"));
+        assert_eq!(
+            book.extra.get("vendorBookKey"),
+            Some(&serde_json::json!("keep")),
+            "unknown lorebook-level keys must survive the save"
+        );
         let entry = &book.entries[0];
         assert_eq!(entry.content, "warm", "edited content must be applied");
         assert_eq!(
@@ -1268,16 +1427,22 @@ mod tests {
             "unexposed id must survive"
         );
         assert_eq!(
+            entry.extra.get("probability"),
+            Some(&serde_json::json!(0.5)),
+            "vendor entry keys must survive the save"
+        );
+        assert_eq!(
+            entry.extra.get("uid"),
+            Some(&serde_json::json!(12345)),
+            "vendor entry keys must survive the save"
+        );
+        assert_eq!(
             entry.extensions.get("keep"),
             Some(&serde_json::json!("me")),
             "unexposed entry extensions must survive"
         );
-        let catalog = parsed
-            .data
-            .extensions
-            .ene
-            .and_then(|ene| ene.motion_catalog)
-            .expect("motion catalog kept");
+        let ene = parsed.data.extensions.ene.expect("ene block kept");
+        let catalog = ene.motion_catalog.as_ref().expect("motion catalog kept");
         assert_eq!(catalog.motions.len(), 2);
         assert_eq!(
             catalog.motions[0].layer,
@@ -1285,6 +1450,11 @@ mod tests {
             "unexposed layer must survive"
         );
         assert_eq!(catalog.motions[1].name, "Wave");
+        assert_eq!(
+            ene.extra.get("vendorEneKey"),
+            Some(&serde_json::json!("keep")),
+            "unknown extensions.ene keys must survive the save"
+        );
     }
 
     /// The load path records locale sidecars so the page can warn that the
@@ -1333,5 +1503,382 @@ mod tests {
         assert_eq!(state.character_position, glam::Vec3::ZERO);
         assert!((state.look_at_strength - 0.42).abs() < 1e-6);
         assert!((state.model_scale - 1.75).abs() < 1e-6);
+    }
+
+    /// Unsaved edits defer the switch to the discard dialog; confirming
+    /// applies the selection and drops the buffers so the page reloads.
+    #[test]
+    fn character_switch_defers_until_discard_confirmed() {
+        let mut settings = test_settings(&["Alicia", "Blanc"]);
+        let (mut world, entity) = editor_world("Edited");
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            state.0.character_editor_loaded = true;
+            state.0.character_editor_modified = true;
+        }
+
+        assert!(
+            defer_character_switch_if_unsaved(1, &mut world, entity),
+            "unsaved edits must defer the switch"
+        );
+        assert_eq!(
+            settings.character_state.selected_character, 0,
+            "the selection must not move before confirmation"
+        );
+        {
+            let state = world.get::<UiStateComponent>(entity).unwrap();
+            assert_eq!(state.0.character_editor_pending_character, Some(1));
+            assert!(state.0.editor_dialog_pending());
+        }
+
+        confirm_pending_character_switch(&mut settings, None, 0.0, &mut world, entity);
+
+        assert_eq!(settings.character_state.selected_character, 1);
+        let state = world.get::<UiStateComponent>(entity).unwrap();
+        assert!(!state.0.character_editor_modified);
+        assert!(!state.0.character_editor_loaded);
+        assert!(state.0.character_editor_pending_character.is_none());
+    }
+
+    /// "Keep editing" cancels the deferred switch and keeps both the buffers
+    /// and the current selection.
+    #[test]
+    fn character_switch_cancel_keeps_edits_and_selection() {
+        let settings = test_settings(&["Alicia", "Blanc"]);
+        let (mut world, entity) = editor_world("Edited");
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            state.0.character_editor_loaded = true;
+            state.0.character_editor_modified = true;
+        }
+        defer_character_switch_if_unsaved(1, &mut world, entity);
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            state.0.cancel_editor_dialog();
+        }
+
+        let state = world.get::<UiStateComponent>(entity).unwrap();
+        assert!(state.0.character_editor_modified, "edits must survive");
+        assert!(!state.0.editor_dialog_pending());
+        assert_eq!(settings.character_state.selected_character, 0);
+    }
+
+    #[test]
+    fn character_switch_without_edits_switches_immediately() {
+        let settings = test_settings(&["Alicia", "Blanc"]);
+        let (mut world, entity) = editor_world("Alicia");
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            state.0.character_editor_loaded = true;
+        }
+
+        assert!(!defer_character_switch_if_unsaved(1, &mut world, entity));
+        assert_eq!(settings.character_state.selected_character, 0);
+    }
+
+    /// Discarding a close keeps `close_requested` set so the runtime can
+    /// complete the hide once the dirty flag is gone.
+    #[test]
+    fn discard_decision_close_flow_keeps_request_flags() {
+        let mut state = UiState {
+            character_editor_loaded: true,
+            character_editor_modified: true,
+            character_editor_close_requested: true,
+            ..UiState::default()
+        };
+
+        assert!(!apply_discard_decision(&mut state));
+        assert!(!state.character_editor_modified);
+        assert!(!state.character_editor_loaded);
+        assert!(state.character_editor_close_requested);
+    }
+
+    /// Discarding a reload resets the buffers so the page reloads from disk.
+    #[test]
+    fn discard_decision_reload_resets_buffers() {
+        let mut state = UiState {
+            character_editor_loaded: true,
+            character_editor_modified: true,
+            character_editor_reload_pending: true,
+            character_editor_name: "Edited".to_string(),
+            ..UiState::default()
+        };
+
+        assert!(!apply_discard_decision(&mut state));
+        assert!(!state.character_editor_modified);
+        assert!(!state.character_editor_reload_pending);
+        assert!(state.character_editor_name.is_empty());
+    }
+
+    /// A deferred character switch is reported so the caller can apply it
+    /// after releasing the world borrow.
+    #[test]
+    fn discard_decision_switch_returns_pending_target() {
+        let mut state = UiState {
+            character_editor_modified: true,
+            character_editor_pending_character: Some(2),
+            ..UiState::default()
+        };
+
+        assert!(apply_discard_decision(&mut state));
+        assert_eq!(state.character_editor_pending_character, Some(2));
+    }
+
+    /// Absolute motion paths are rejected just like `..` traversal.
+    #[test]
+    fn validate_rejects_absolute_motion_path() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        let (mut world, entity) = editor_world("Ene");
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            let mut catalog = ene_config::MotionCatalog::default();
+            catalog.motions.push(ene_config::MotionEntry {
+                name: "Absolute".to_string(),
+                path: "/etc/evil.vrma".to_string(),
+                layer: None,
+                extra: indexmap::IndexMap::new(),
+            });
+            state.0.character_editor_motion_catalog = Some(catalog);
+        }
+
+        validate(&mut world, entity, &path, tmp.path());
+
+        assert!(
+            editor_errors(&world, entity).iter().any(|issue| {
+                issue.location == "extensions.ene.motion_catalog.motions[0].path"
+                    && issue.severity == EditorSeverity::Error
+            }),
+            "absolute motion path must be an error"
+        );
+    }
+
+    /// A missing bundled default VRM blocks saving; the same default VRMA
+    /// only warns because the runtime tolerates a missing motion.
+    #[test]
+    fn validate_default_asset_missing_vrm_error_vrma_warning() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "spec": "chara_card_v3",
+                "spec_version": "3.0",
+                "data": {
+                    "name": "Ene",
+                    "first_mes": "hi",
+                    "assets": [
+                        {"type": "x_vrm", "uri": "ccdefault:", "name": "model", "ext": "vrm"},
+                        {"type": "x_vrma", "uri": "ccdefault:", "name": "motion", "ext": "vrma"}
+                    ]
+                }
+            }"#,
+        )
+        .expect("seed card");
+        let (mut world, entity) = editor_world("Ene");
+
+        validate(&mut world, entity, &path, tmp.path());
+
+        let issues = editor_errors(&world, entity);
+        assert!(
+            issues.iter().any(|issue| {
+                issue.location == "data.assets[0].uri" && issue.severity == EditorSeverity::Error
+            }),
+            "missing default VRM must be an error, got {issues:?}"
+        );
+        assert!(
+            issues.iter().any(|issue| {
+                issue.location == "data.assets[1].uri" && issue.severity == EditorSeverity::Warning
+            }),
+            "missing default VRMA must be a warning, got {issues:?}"
+        );
+    }
+
+    /// Unsupported URI schemes are errors; data URLs are unverifiable
+    /// warnings.
+    #[test]
+    fn validate_invalid_uri_error_and_data_url_warning() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "spec": "chara_card_v3",
+                "spec_version": "3.0",
+                "data": {
+                    "name": "Ene",
+                    "first_mes": "hi",
+                    "assets": [
+                        {"type": "x_vrm", "uri": "ftp://host/model.vrm", "name": "bad", "ext": "vrm"},
+                        {"type": "x_vrm", "uri": "data:application/octet-stream;base64,AAAA", "name": "embedded", "ext": "vrm"}
+                    ]
+                }
+            }"#,
+        )
+        .expect("seed card");
+        let (mut world, entity) = editor_world("Ene");
+
+        validate(&mut world, entity, &path, tmp.path());
+
+        let issues = editor_errors(&world, entity);
+        assert!(
+            issues.iter().any(|issue| {
+                issue.location == "data.assets[0].uri" && issue.severity == EditorSeverity::Error
+            }),
+            "unsupported scheme must be an error, got {issues:?}"
+        );
+        assert!(
+            issues.iter().any(|issue| {
+                issue.location == "data.assets[1].uri" && issue.severity == EditorSeverity::Warning
+            }),
+            "data URL must be an unverifiable warning, got {issues:?}"
+        );
+    }
+
+    /// A missing declared VRMA warns but does not block the save.
+    #[test]
+    fn missing_declared_vrma_warns_but_saves() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "spec": "chara_card_v3",
+                "spec_version": "3.0",
+                "data": {
+                    "name": "Old",
+                    "first_mes": "hi",
+                    "assets": [{
+                        "type": "x_vrma",
+                        "uri": "embeded://wave.vrma",
+                        "name": "Wave",
+                        "ext": "vrma"
+                    }]
+                }
+            }"#,
+        )
+        .expect("seed card");
+        let (mut world, entity) = editor_world("Edited");
+
+        save(&mut world, entity, &path, tmp.path());
+
+        let issues = editor_errors(&world, entity);
+        assert!(
+            issues.iter().any(|issue| {
+                issue.location == "data.assets[0].uri" && issue.severity == EditorSeverity::Warning
+            }),
+            "missing VRMA must warn, got {issues:?}"
+        );
+        assert!(
+            !world
+                .get::<UiStateComponent>(entity)
+                .unwrap()
+                .0
+                .character_editor_modified,
+            "a warning-only save must still write the card"
+        );
+    }
+
+    /// An empty first message is legal `CCv3`, so it warns instead of blocking.
+    #[test]
+    fn empty_first_mes_warns_but_saves() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        let (mut world, entity) = editor_world("Ene");
+
+        save(&mut world, entity, &path, tmp.path());
+
+        let issues = editor_errors(&world, entity);
+        assert!(
+            issues.iter().any(|issue| {
+                issue.location == "data.first_mes" && issue.severity == EditorSeverity::Warning
+            }),
+            "empty first message must warn, got {issues:?}"
+        );
+        assert!(path.exists(), "the save must still succeed");
+    }
+
+    /// A selective entry without secondary keys cannot actually be
+    /// selective; surface it at the entry's secondary-keys field.
+    #[test]
+    fn selective_entry_without_secondary_keys_warns() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        let (mut world, entity) = editor_world("Ene");
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            let mut book = ene_config::Lorebook::default();
+            book.entries.push(ene_config::LorebookEntry {
+                keys: vec!["lab".to_string()],
+                content: "cold".to_string(),
+                enabled: true,
+                insertion_order: 0,
+                use_regex: false,
+                constant: Some(false),
+                case_sensitive: None,
+                name: None,
+                priority: None,
+                id: None,
+                comment: None,
+                selective: Some(true),
+                secondary_keys: None,
+                position: None,
+                extensions: std::collections::HashMap::new(),
+                extra: indexmap::IndexMap::new(),
+            });
+            state.0.character_editor_lorebook = Some(book);
+        }
+
+        validate(&mut world, entity, &path, tmp.path());
+
+        assert!(
+            editor_errors(&world, entity).iter().any(|issue| {
+                issue.location == "data.character_book.entries[0].secondary_keys"
+                    && issue.severity == EditorSeverity::Warning
+            }),
+            "selective entry without secondary keys must warn"
+        );
+    }
+
+    /// A trigger key that does not compile as a regex is pointed at even
+    /// though the runtime tolerates it.
+    #[test]
+    fn invalid_regex_key_warns() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("character.json");
+        let (mut world, entity) = editor_world("Ene");
+        {
+            let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
+            let mut book = ene_config::Lorebook::default();
+            book.entries.push(ene_config::LorebookEntry {
+                keys: vec!["(".to_string()],
+                content: "cold".to_string(),
+                enabled: true,
+                insertion_order: 0,
+                use_regex: true,
+                constant: Some(false),
+                case_sensitive: None,
+                name: None,
+                priority: None,
+                id: None,
+                comment: None,
+                selective: None,
+                secondary_keys: None,
+                position: None,
+                extensions: std::collections::HashMap::new(),
+                extra: indexmap::IndexMap::new(),
+            });
+            state.0.character_editor_lorebook = Some(book);
+        }
+
+        validate(&mut world, entity, &path, tmp.path());
+
+        assert!(
+            editor_errors(&world, entity).iter().any(|issue| {
+                issue.location == "data.character_book.entries[0].keys"
+                    && issue.severity == EditorSeverity::Warning
+            }),
+            "a trigger key that fails to compile as regex must warn"
+        );
     }
 }

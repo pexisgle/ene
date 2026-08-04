@@ -388,6 +388,14 @@ pub struct UiState {
     /// A reload was requested while the editor had unsaved changes; the
     /// discard dialog must be shown before the buffers are reset.
     pub character_editor_reload_pending: bool,
+    /// A character switch was requested while the editor had unsaved
+    /// changes; the switch is applied only after the discard dialog
+    /// confirms.
+    pub character_editor_pending_character: Option<usize>,
+    /// App exit was requested (main-window close / Esc) while the editor had
+    /// unsaved changes; the exit is deferred until the discard dialog
+    /// resolves.
+    pub app_exit_requested: bool,
 }
 
 impl UiState {
@@ -410,6 +418,8 @@ impl UiState {
         self.character_editor_modified = false;
         self.character_editor_close_requested = false;
         self.character_editor_reload_pending = false;
+        self.character_editor_pending_character = None;
+        self.app_exit_requested = false;
         self.character_editor_validation_errors.clear();
         self.character_editor_name.clear();
         self.character_editor_description.clear();
@@ -424,6 +434,24 @@ impl UiState {
         self.character_editor_lorebook = None;
         self.character_editor_motion_catalog = None;
         self.character_editor_locale_diffs.clear();
+    }
+
+    /// Whether any discard dialog is currently pending.
+    #[must_use]
+    pub fn editor_dialog_pending(&self) -> bool {
+        self.character_editor_close_requested
+            || self.character_editor_reload_pending
+            || self.character_editor_pending_character.is_some()
+            || self.app_exit_requested
+    }
+
+    /// The user chose "keep editing": every pending dialog intent is
+    /// cancelled and the buffers stay untouched.
+    pub fn cancel_editor_dialog(&mut self) {
+        self.character_editor_close_requested = false;
+        self.character_editor_reload_pending = false;
+        self.character_editor_pending_character = None;
+        self.app_exit_requested = false;
     }
 }
 
@@ -1011,6 +1039,8 @@ mod tests {
             character_editor_modified: true,
             character_editor_close_requested: true,
             character_editor_reload_pending: true,
+            character_editor_pending_character: Some(1),
+            app_exit_requested: true,
             character_editor_name: "Alicia".to_string(),
             character_editor_alternate_greetings: vec!["hi".to_string()],
             character_editor_validation_errors: vec![EditorIssue {
@@ -1033,6 +1063,28 @@ mod tests {
         assert!(!state.character_editor_modified);
         assert!(!state.character_editor_close_requested);
         assert!(!state.character_editor_reload_pending);
+        assert!(state.character_editor_pending_character.is_none());
+        assert!(!state.app_exit_requested);
+    }
+
+    #[test]
+    fn editor_dialog_pending_covers_every_intent() {
+        let mut state = UiState::default();
+        assert!(!state.editor_dialog_pending());
+        state.character_editor_close_requested = true;
+        assert!(state.editor_dialog_pending());
+        state.character_editor_close_requested = false;
+        state.character_editor_reload_pending = true;
+        assert!(state.editor_dialog_pending());
+        state.character_editor_reload_pending = false;
+        state.character_editor_pending_character = Some(3);
+        assert!(state.editor_dialog_pending());
+        state.character_editor_pending_character = None;
+        state.app_exit_requested = true;
+        assert!(state.editor_dialog_pending());
+
+        state.cancel_editor_dialog();
+        assert!(!state.editor_dialog_pending());
     }
 
     #[test]

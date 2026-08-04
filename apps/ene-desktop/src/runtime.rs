@@ -180,6 +180,28 @@ impl Runtime {
         }
     }
 
+    /// User-initiated app exit (main-window close or Esc). With unsaved
+    /// character-card edits the exit is deferred to the discard dialog;
+    /// otherwise it happens immediately. Fatal-error exits keep their direct
+    /// `event_loop.exit()` paths.
+    fn request_app_exit(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.ui_bevy_state().0.editor_has_unsaved_changes() {
+            let needs_window = {
+                let mut ui_state = self.state.ui_bevy_state_mut();
+                ui_state.0.app_exit_requested = true;
+                let was_hidden = !ui_state.0.settings_window_visible;
+                ui_state.0.settings_window_visible = true;
+                was_hidden
+            };
+            if needs_window && self.ui_window.is_none() {
+                self.create_ui_window(event_loop);
+            }
+            return;
+        }
+        self.state.save();
+        event_loop.exit();
+    }
+
     fn create_chat_window(&mut self, event_loop: &ActiveEventLoop) {
         let mut chat_attrs = WindowAttributes::default()
             .with_title(i18n_embed_fl::fl!(
@@ -642,6 +664,18 @@ impl Runtime {
 
     fn render_settings_frame(&mut self, event_loop: &ActiveEventLoop) {
         // A discard decision from the editor dialog clears the unsaved flag
+        // while keeping `app_exit_requested` set; complete the exit here.
+        let exit_after_discard = {
+            let ui_state = self.state.ui_bevy_state();
+            ui_state.0.app_exit_requested && !ui_state.0.editor_has_unsaved_changes()
+        };
+        if exit_after_discard {
+            self.state.save();
+            event_loop.exit();
+            return;
+        }
+
+        // A discard decision from the editor dialog clears the unsaved flag
         // while keeping `close_requested` set; complete the close here.
         let close_after_discard = {
             let ui_state = self.state.ui_bevy_state();
@@ -744,8 +778,7 @@ impl Runtime {
         };
         match event {
             WindowEvent::CloseRequested => {
-                self.state.save();
-                event_loop.exit();
+                self.request_app_exit(event_loop);
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 let AppState {
@@ -895,8 +928,7 @@ impl Runtime {
                         cw.window.set_transparent(self.transparent);
                         cw.window.request_redraw();
                     } else if matches!(named, NamedKey::Escape) {
-                        self.state.save();
-                        event_loop.exit();
+                        self.request_app_exit(event_loop);
                     } else if matches!(named, NamedKey::F1) {
                         let visible = self.state.ui_bevy_state().0.settings_window_visible;
                         if visible {
@@ -1461,7 +1493,8 @@ impl Runtime {
                 uw.window.request_redraw();
             }
             WindowEvent::KeyboardInput { .. } => {
-                if key_pressed(&event) == Some(NamedKey::Escape) {
+                let pressed = key_pressed(&event);
+                if matches!(pressed, Some(NamedKey::Escape | NamedKey::F1)) {
                     self.hide_settings_window();
                 }
             }

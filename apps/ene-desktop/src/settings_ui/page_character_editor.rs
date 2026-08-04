@@ -294,26 +294,32 @@ pub fn render(
     });
 }
 
-/// Discard-confirmation modal shown when the settings window is closed or a
-/// reload is requested while the editor holds unsaved changes.
-pub fn render_discard_dialog(ui: &mut egui::Ui, world: &mut World, ui_entity: Entity) {
-    let pending = world.get::<UiStateComponent>(ui_entity).is_some_and(|s| {
-        s.0.character_editor_close_requested || s.0.character_editor_reload_pending
-    });
+/// Discard-confirmation modal shown when the settings window is closed, the
+/// app exits, a reload is requested, or a character switch is requested while
+/// the editor holds unsaved changes.
+pub fn render_discard_dialog(
+    ui: &mut egui::Ui,
+    settings: &mut CharacterSettings,
+    emotion_queue: &mut crate::character_state::EmotionQueue,
+    now_secs: f64,
+    world: &mut World,
+    ui_entity: Entity,
+) {
+    let pending = world
+        .get::<UiStateComponent>(ui_entity)
+        .is_some_and(|s| s.0.editor_dialog_pending());
     if !pending {
         return;
     }
 
     let mut discard = false;
     let mut keep_editing = false;
-    egui::Window::new(i18n_embed_fl::fl!(
-        crate::i18n::loader(),
-        "character-editor-discard-title"
-    ))
-    .collapsible(false)
-    .resizable(false)
-    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-    .show(ui.ctx(), |ui| {
+    egui::Modal::new(egui::Id::new("character-editor-discard-modal")).show(ui.ctx(), |ui| {
+        ui.set_min_width(280.0);
+        ui.heading(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "character-editor-discard-title"
+        ));
         ui.label(i18n_embed_fl::fl!(
             crate::i18n::loader(),
             "character-editor-discard-body"
@@ -343,19 +349,24 @@ pub fn render_discard_dialog(ui: &mut egui::Ui, world: &mut World, ui_entity: En
     if !discard && !keep_editing {
         return;
     }
+    let mut pending_switch = false;
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        if discard && state.0.character_editor_reload_pending {
-            state.0.reset_character_editor();
-        } else if discard {
-            // Keep `close_requested` set so the runtime completes the close;
-            // dropping the buffers makes the page reload from disk next open.
-            state.0.character_editor_modified = false;
-            state.0.character_editor_loaded = false;
-            state.0.character_editor_validation_errors.clear();
+        if discard {
+            // A deferred character switch still needs settings access, so the
+            // world borrow is released before it is applied below.
+            pending_switch = super::widgets::apply_discard_decision(&mut state.0);
         } else {
-            state.0.character_editor_close_requested = false;
-            state.0.character_editor_reload_pending = false;
+            state.0.cancel_editor_dialog();
         }
+    }
+    if pending_switch {
+        super::widgets::confirm_pending_character_switch(
+            settings,
+            Some(emotion_queue),
+            now_secs,
+            world,
+            ui_entity,
+        );
     }
 }
 
@@ -575,24 +586,40 @@ fn lorebook_editor(ui: &mut egui::Ui, world: &mut World, ui_entity: Entity) {
                         changed = true;
                     }
                 });
-                changed |= singleline_field(
+                let mut name = entry.name.clone().unwrap_or_default();
+                let name_changed = singleline_field(
                     ui,
                     i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-lorebook-name"),
-                    entry.name.get_or_insert_default(),
+                    &mut name,
                 );
+                if name_changed {
+                    // An emptied name goes back to `null` rather than `""` so
+                    // a no-edit save stays byte-identical.
+                    entry.name = if name.is_empty() { None } else { Some(name) };
+                    changed = true;
+                }
                 changed |= key_list_field(
                     ui,
                     i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-lorebook-keys"),
                     &mut entry.keys,
                 );
-                changed |= key_list_field(
+                let mut secondary = entry.secondary_keys.clone().unwrap_or_default();
+                let secondary_changed = key_list_field(
                     ui,
                     i18n_embed_fl::fl!(
                         crate::i18n::loader(),
                         "character-editor-lorebook-secondary-keys"
                     ),
-                    entry.secondary_keys.get_or_insert_with(Vec::new),
+                    &mut secondary,
                 );
+                if secondary_changed {
+                    entry.secondary_keys = if secondary.is_empty() {
+                        None
+                    } else {
+                        Some(secondary)
+                    };
+                    changed = true;
+                }
                 changed |= multiline_field(
                     ui,
                     i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-lorebook-content"),
@@ -707,11 +734,20 @@ fn lorebook_editor(ui: &mut egui::Ui, world: &mut World, ui_entity: Entity) {
                         changed = true;
                     }
                 });
-                changed |= singleline_field(
+                let mut comment = entry.comment.clone().unwrap_or_default();
+                let comment_changed = singleline_field(
                     ui,
                     i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-lorebook-comment"),
-                    entry.comment.get_or_insert_default(),
+                    &mut comment,
                 );
+                if comment_changed {
+                    entry.comment = if comment.is_empty() {
+                        None
+                    } else {
+                        Some(comment)
+                    };
+                    changed = true;
+                }
                 if ui.button(remove_label).clicked() {
                     remove_index = Some(index);
                 }
@@ -916,6 +952,7 @@ fn new_motion_entry() -> MotionEntry {
         name: String::new(),
         path: String::new(),
         layer: None,
+        extra: indexmap::IndexMap::new(),
     }
 }
 
@@ -938,6 +975,7 @@ fn new_lorebook_entry(insertion_order: usize) -> LorebookEntry {
         selective: None,
         secondary_keys: None,
         position: None,
+        extra: indexmap::IndexMap::new(),
     }
 }
 
