@@ -1,6 +1,7 @@
 use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
+use i18n_embed_fl::fl;
 
 pub struct MemoryCommand;
 
@@ -22,7 +23,7 @@ impl CliCommand for MemoryCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "/memory <list|inspect|search|why|pin|archive|forget|dispute|restore|status|pending|retry>"
+        "/memory <list|inspect|search|why|pin|archive|forget|dispute|restore|status|pending|retry|approval>"
     }
 
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
@@ -54,11 +55,343 @@ impl CliCommand for MemoryCommand {
             "status" => handle_status(memory, &snapshot).await,
             "pending" => handle_pending(memory, &snapshot).await,
             "retry" => handle_retry(memory, &snapshot).await,
+            "approval" => handle_approval(tail, ctx).await,
             _ => Err(CliError::UsageError {
                 usage: self.usage().to_string(),
             }),
         }
     }
+}
+
+async fn handle_approval(arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
+    let (sub, tail) = parse_subcommand_and_tail(arg);
+    let candidates = ctx.handle.candidates();
+    let turn = ctx.handle.active_turn();
+    match sub {
+        "" | "list" => approval_list(&candidates).await,
+        "inspect" => approval_inspect(tail, &candidates).await,
+        "approve" => approval_resolve(tail, true, &candidates, turn).await,
+        "reject" => approval_resolve(tail, false, &candidates, turn).await,
+        "edit" => approval_edit(tail, &candidates, turn).await,
+        "history" => approval_history(&candidates).await,
+        _ => Err(CliError::UsageError {
+            usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+        }),
+    }
+}
+
+async fn approval_list(
+    candidates: &ene_runtime::MemoryCandidateHandle,
+) -> Result<CommandOutcome, CliError> {
+    let rows = candidates
+        .list_pending()
+        .await
+        .map_err(|e| CliError::ExecutionFailed(format!("List approval error: {e}")))?;
+    if rows.is_empty() {
+        println!("{}", fl!(crate::i18n::loader(), "memory-approval-empty"));
+        return Ok(CommandOutcome::Continue);
+    }
+    println!(
+        "{}",
+        fl!(
+            crate::i18n::loader(),
+            "memory-approval-list-title",
+            count = rows.len()
+        )
+    );
+    for row in &rows {
+        print_approval_summary(row);
+    }
+    Ok(CommandOutcome::Continue)
+}
+
+async fn approval_inspect(
+    id_arg: &str,
+    candidates: &ene_runtime::MemoryCandidateHandle,
+) -> Result<CommandOutcome, CliError> {
+    let Some(id) = parse_id(id_arg) else {
+        return Err(CliError::UsageError {
+            usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+        });
+    };
+    match candidates.inspect_pending(id).await {
+        Ok(Some(row)) => {
+            print_approval_summary(&row);
+            Ok(CommandOutcome::Continue)
+        }
+        Ok(None) => Err(CliError::ExecutionFailed(fl!(
+            crate::i18n::loader(),
+            "memory-approval-not-found",
+            id = id
+        ))),
+        Err(e) => Err(CliError::ExecutionFailed(fl!(
+            crate::i18n::loader(),
+            "memory-approval-error",
+            error = e.to_string()
+        ))),
+    }
+}
+
+async fn approval_resolve(
+    id_arg: &str,
+    approved: bool,
+    candidates: &ene_runtime::MemoryCandidateHandle,
+    turn: Option<ene_runtime::TurnId>,
+) -> Result<CommandOutcome, CliError> {
+    let Some(id) = parse_id(id_arg) else {
+        return Err(CliError::UsageError {
+            usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+        });
+    };
+    let result = if approved {
+        candidates.approve(id, turn).await
+    } else {
+        candidates.reject(id, turn).await
+    };
+    match result {
+        Ok(()) => {
+            let message = if approved {
+                fl!(crate::i18n::loader(), "memory-approval-approve-ok", id = id)
+            } else {
+                fl!(crate::i18n::loader(), "memory-approval-reject-ok", id = id)
+            };
+            println!("{}", style::success(message));
+            Ok(CommandOutcome::Continue)
+        }
+        Err(e) => Err(CliError::ExecutionFailed(fl!(
+            crate::i18n::loader(),
+            "memory-approval-error",
+            error = e.to_string()
+        ))),
+    }
+}
+
+async fn approval_edit(
+    arg: &str,
+    candidates: &ene_runtime::MemoryCandidateHandle,
+    turn: Option<ene_runtime::TurnId>,
+) -> Result<CommandOutcome, CliError> {
+    let Some((id_arg, flags)) = arg.split_once(' ') else {
+        return Err(CliError::UsageError {
+            usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+        });
+    };
+    let Some(id) = parse_id(id_arg) else {
+        return Err(CliError::UsageError {
+            usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+        });
+    };
+    let parsed = parse_edit_flags(flags)?;
+    let edit = ene_store::PendingCandidateEdit {
+        title: parsed.title,
+        content: parsed.content,
+        kind: parsed.kind,
+        confidence: parsed.confidence,
+    };
+    match candidates.edit(id, edit, turn).await {
+        Ok(()) => {
+            println!(
+                "{}",
+                style::success(fl!(
+                    crate::i18n::loader(),
+                    "memory-approval-edit-ok",
+                    id = id
+                ))
+            );
+            Ok(CommandOutcome::Continue)
+        }
+        Err(e) => Err(CliError::ExecutionFailed(fl!(
+            crate::i18n::loader(),
+            "memory-approval-error",
+            error = e.to_string()
+        ))),
+    }
+}
+
+async fn approval_history(
+    candidates: &ene_runtime::MemoryCandidateHandle,
+) -> Result<CommandOutcome, CliError> {
+    let rows = candidates
+        .history(50)
+        .await
+        .map_err(|e| CliError::ExecutionFailed(format!("History error: {e}")))?;
+    if rows.is_empty() {
+        println!(
+            "{}",
+            fl!(crate::i18n::loader(), "memory-approval-history-empty")
+        );
+        return Ok(CommandOutcome::Continue);
+    }
+    println!(
+        "{}",
+        fl!(
+            crate::i18n::loader(),
+            "memory-approval-history-title",
+            count = rows.len()
+        )
+    );
+    for row in &rows {
+        print_approval_summary(row);
+    }
+    Ok(CommandOutcome::Continue)
+}
+
+struct EditFlags {
+    title: String,
+    content: String,
+    kind: ene_store::MemoryKind,
+    confidence: f32,
+}
+
+fn parse_edit_flags(arg: &str) -> Result<EditFlags, CliError> {
+    let mut title = None;
+    let mut content = None;
+    let mut kind = None;
+    let mut confidence = None;
+    let mut tokens = arg.split_whitespace();
+    while let Some(token) = tokens.next() {
+        let (key, value) = match token.split_once('=') {
+            Some((key, value)) if key.starts_with("--") => (key, Some(value.to_string())),
+            _ if token.starts_with("--") => (token, tokens.next().map(str::to_string)),
+            _ => {
+                return Err(CliError::UsageError {
+                    usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+                });
+            }
+        };
+        match key {
+            "--title" => {
+                title = Some(value.ok_or_else(|| CliError::UsageError {
+                    usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+                })?);
+            }
+            "--content" => {
+                content = Some(value.ok_or_else(|| CliError::UsageError {
+                    usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+                })?);
+            }
+            "--kind" => {
+                let kind_value = value.ok_or_else(|| CliError::UsageError {
+                    usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+                })?;
+                kind = Some(crate::util::parse_memory_kind(&kind_value).ok_or_else(|| {
+                    CliError::ExecutionFailed(fl!(
+                        crate::i18n::loader(),
+                        "memory-approval-edit-invalid-kind",
+                        kind = kind_value
+                    ))
+                })?);
+            }
+            "--confidence" => {
+                confidence = Some(
+                    value
+                        .ok_or_else(|| CliError::UsageError {
+                            usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+                        })?
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                        .ok_or_else(|| {
+                            CliError::ExecutionFailed(fl!(
+                                crate::i18n::loader(),
+                                "memory-approval-edit-invalid-confidence"
+                            ))
+                        })?,
+                );
+            }
+            _ => {
+                return Err(CliError::UsageError {
+                    usage: fl!(crate::i18n::loader(), "memory-approval-usage").to_string(),
+                });
+            }
+        }
+    }
+    let (Some(title), Some(content), Some(kind), Some(confidence)) =
+        (title, content, kind, confidence)
+    else {
+        return Err(CliError::ExecutionFailed(fl!(
+            crate::i18n::loader(),
+            "memory-approval-edit-missing-flag"
+        )));
+    };
+    Ok(EditFlags {
+        title,
+        content,
+        kind,
+        confidence,
+    })
+}
+
+fn print_approval_summary(row: &ene_runtime::handle::PendingCandidateSummary) {
+    println!(
+        "\n--- {}: {} [{}] ---",
+        fl!(crate::i18n::loader(), "memory-approval-label-id"),
+        row.id,
+        row.status
+    );
+    println!(
+        "  {}: {}",
+        fl!(crate::i18n::loader(), "memory-approval-label-title"),
+        row.title
+    );
+    println!(
+        "  {}: {}",
+        fl!(crate::i18n::loader(), "memory-approval-label-kind"),
+        row.kind
+    );
+    println!(
+        "  {}: {:.2}",
+        fl!(crate::i18n::loader(), "memory-approval-label-confidence"),
+        row.confidence
+    );
+    println!(
+        "  {}: {}",
+        fl!(crate::i18n::loader(), "memory-approval-label-reason"),
+        row.reason_detail
+    );
+    if !row.source_quote.is_empty() {
+        println!(
+            "  {}: {}",
+            fl!(crate::i18n::loader(), "memory-approval-label-source-quote"),
+            row.source_quote
+        );
+    }
+    if let Some(turn) = &row.source_turn {
+        println!(
+            "  {}: {}",
+            fl!(crate::i18n::loader(), "memory-approval-label-source-turn"),
+            turn
+        );
+    }
+    if let Some(existing) = &row.existing_memory_title {
+        println!(
+            "  {}: {} (id={})",
+            fl!(crate::i18n::loader(), "memory-approval-label-conflict"),
+            existing,
+            row.existing_memory_id.unwrap_or_default()
+        );
+    }
+    println!(
+        "  {}: {}",
+        fl!(crate::i18n::loader(), "memory-approval-label-created"),
+        row.created_at
+    );
+    if let Some(resolved) = &row.resolved_at {
+        println!(
+            "  {}: {}",
+            fl!(crate::i18n::loader(), "memory-approval-label-resolved"),
+            resolved
+        );
+    }
+    println!(
+        "  {}: {}",
+        fl!(crate::i18n::loader(), "memory-approval-label-status"),
+        match row.status.as_str() {
+            "approved" => fl!(crate::i18n::loader(), "memory-approval-status-approved"),
+            "rejected" => fl!(crate::i18n::loader(), "memory-approval-status-rejected"),
+            _ => fl!(crate::i18n::loader(), "memory-approval-status-pending"),
+        }
+    );
 }
 
 async fn handle_search(
@@ -412,7 +745,7 @@ async fn handle_retry(
 mod tests {
     #![expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")]
 
-    use super::{parse_kind_arg, parse_subcommand_and_tail};
+    use super::{parse_edit_flags, parse_kind_arg, parse_subcommand_and_tail};
 
     #[test]
     fn parse_subcommand_and_tail_preserves_multi_word_search_query() {
@@ -432,5 +765,35 @@ mod tests {
     #[test]
     fn parse_kind_arg_returns_error_for_unknown_kind() {
         assert!(parse_kind_arg("--kind unknown_kind").is_err());
+    }
+
+    #[test]
+    fn parse_edit_flags_reads_all_required_flags() {
+        let flags =
+            parse_edit_flags("--title tea --content matcha --kind preference --confidence 0.9")
+                .unwrap();
+        assert_eq!(flags.title, "tea");
+        assert_eq!(flags.content, "matcha");
+        assert_eq!(flags.kind, ene_store::MemoryKind::Preference);
+        assert!((flags.confidence - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parse_edit_flags_accepts_equals_form() {
+        let flags =
+            parse_edit_flags("--title=tea --content=coffee --kind=preference --confidence=0.5")
+                .unwrap();
+        assert_eq!(flags.title, "tea");
+        assert_eq!(flags.content, "coffee");
+        assert!((flags.confidence - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parse_edit_flags_rejects_missing_and_unknown_flags() {
+        assert!(parse_edit_flags("--title tea --kind preference --confidence 0.5").is_err());
+        assert!(parse_edit_flags("--bogus tea").is_err());
+        assert!(
+            parse_edit_flags("--confidence 1.5 --title t --content c --kind preference").is_err()
+        );
     }
 }

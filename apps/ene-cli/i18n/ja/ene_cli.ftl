@@ -33,6 +33,35 @@ greeting-failed = 挨拶を設定できませんでした: { $error }
 greeting-choose = 挨拶を選択 (Enter で確定)
 greeting-none = (なし)
 
+## /memory approval コマンド
+memory-approval-usage = /memory approval <list|inspect <id>|approve <id>|edit <id> --title <タイトル> --content <内容> --kind <種別> --confidence <0..1>|reject <id>|history>
+memory-approval-list-title = 承認待ちの候補 ({ $count })
+memory-approval-history-title = 解決済み候補の履歴 ({ $count })
+memory-approval-empty = 承認待ちの候補はありません。
+memory-approval-history-empty = 承認・却下された候補はまだありません。
+memory-approval-not-found = 候補 { $id } が見つからないか、すでに解決されています。
+memory-approval-label-id = id
+memory-approval-label-title = タイトル
+memory-approval-label-kind = 種別
+memory-approval-label-confidence = 信頼度
+memory-approval-label-reason = 理由
+memory-approval-label-source-quote = 出典
+memory-approval-label-source-turn = 出典ターン
+memory-approval-label-conflict = 競合対象
+memory-approval-label-status = 状態
+memory-approval-label-created = 作成日時
+memory-approval-label-resolved = 解決日時
+memory-approval-status-pending = 保留中
+memory-approval-status-approved = 承認済み
+memory-approval-status-rejected = 却下済み
+memory-approval-approve-ok = 候補 { $id } を承認しました。
+memory-approval-reject-ok = 候補 { $id } を却下しました。
+memory-approval-edit-ok = 候補 { $id } を編集しました。
+memory-approval-edit-missing-flag = 編集には --title・--content・--kind・--confidence がすべて必要です。
+memory-approval-edit-invalid-confidence = 信頼度は 0 から 1 の数値で指定してください。
+memory-approval-edit-invalid-kind = 不明なメモリ種別 '{ $kind }' です。有効: episodic, semantic, user_profile, relationship, affective, commitment, preference, procedure, reflection
+memory-approval-error = 承認エラー: { $error }
+
 ## /card コマンド
 card-loaded = キャラクターカードを読み込みました: { $name }
 
