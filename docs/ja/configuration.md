@@ -871,6 +871,77 @@ Edge の読み上げ機能が使う WebSocket エンドポイント（無料・�
 構築されるためです。一方、`plugins.list.edge-tts.config` と `ai.tts.voice` の
 編集は実行中のセッションにも反映されます。
 
+#### ElevenLabs TTS プロバイダ（`plugins.list.elevenlabs.config`）
+
+`elevenlabs` プロバイダプラグイン（`plugins/provider/elevenlabs`）は
+ElevenLabs API で音声合成を行います。トランスポートは 2 つあります:
+REST の `POST /text-to-speech/{voice_id}/stream` エンドポイント（既定）と、
+低遅延ストリーミング用の双方向 `stream-input` WebSocket（`mode = "ws"`）です。
+raw 16-bit モノラル PCM（`pcm_16000` / `pcm_24000` / `pcm_44100`）を要求し、
+WAV として返します。ホスト側のオーディオパイプラインが float サンプルへ
+デコードして再生します。`ai.tts.provider = "elevenlabs"` で選択します。
+汎用の `ai.tts.voice` には、設定済みの既定ボイスをリクエスト単位で
+上書きするボイス ID を任意で指定できます。
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "elevenlabs",
+      "voice": "21m00Tcm4TlvDq8ikWAM"
+    }
+  },
+  "plugins": {
+    "list": {
+      "elevenlabs": {
+        "enable": true,
+        "config": {
+          "api_key": "xi-...",
+          "mode": "rest",
+          "model_id": "eleven_multilingual_v2",
+          "voice_id": "21m00Tcm4TlvDq8ikWAM",
+          "sample_rate": 24000,
+          "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
+            "use_speaker_boost": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目：
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `api_key` | 未設定 | ElevenLabs API キー、または `{source: inline\|env\|auto}` ディスクリプタ。`ELEVENLABS_API_KEY` 環境変数にフォールバックします。`x-ene-secret` でマークされるため、ホストがマスク・redact します。 |
+| `mode` | `rest` | トランスポート: `rest`（`POST /text-to-speech/{voice_id}/stream`、チャンク音声）または `ws`（`stream-input` WebSocket、双方向 base64 音声フレーム）。 |
+| `model_id` | `eleven_multilingual_v2` | ElevenLabs モデル ID（例: `eleven_turbo_v2_5`）。 |
+| `voice_id` | 未設定 | 既定ボイス ID。リクエスト単位のボイスで上書き可能。リクエストにボイスがない場合は必須。 |
+| `sample_rate` | `24000` | PCM 出力サンプルレート（`16000` / `24000` / `44100`）。API の `pcm_{rate}` フォーマットと WAV ヘッダのレートの両方を決めます。 |
+| `voice_settings.stability` | `0.5` | ボイスの安定性（0.0–1.0、クランプされます）。 |
+| `voice_settings.similarity_boost` | `0.75` | 元のボイスへの類似度（0.0–1.0、クランプされます）。 |
+| `voice_settings.style` | `0.0` | スタイル誇張度（0.0–1.0、クランプされます。一部のモデルのみ対応）。 |
+| `voice_settings.use_speaker_boost` | `true` | ボイスの自然な特徴をブーストするかどうか。 |
+| `base_url` | `https://api.elevenlabs.io/v1` | API ベース URL の上書き。`ELEVENLABS_BASE_URL` 環境変数にフォールバックします。WebSocket モードではスキームを `http(s)` → `ws(s)` に置き換えます。 |
+
+プラグインは `xi-api-key` をリクエストヘッダー（クエリパラメータでは
+ありません）として送信し、API に `pcm_{sample_rate}` を要求して、音声を
+WAV（`formats = ["wav"]`）として返します。API の他のフォーマット
+（`mp3_44100_128` など）は公開しません。REST は一時的なエラー
+（408/429/5xx・ネットワーク）時にジッター付きバックオフで最大 2 回
+再試行します（合計 3 回試行）。WebSocket モードはトランスポート障害と
+レート制限（429）時にリクエスト全体を再試行し、途中までの音声は破棄します。
+
+`ai.tts.provider` 自体の変更（例：`edge-tts` から `elevenlabs` への切替）は
+次回起動時に反映されます。アクティブなプロバイダはブートストラップ時に
+一度だけ構築されるためです。一方、`plugins.list.elevenlabs.config` と
+`ai.tts.voice` の編集は実行中のセッションにも反映されます。
+
 #### シークレットのマーキング
 
 プラグインの `config_schema()` は、フィールドに `x-ene-secret: true` を付与できます。ホストはこれ（および既知の名前によるフォールバック：`api_key`・`token`・`password`・`authorization` など）を使って、設定 UI でフィールドをマスクする予定であり、ホストのログ出力からは値を削除（redact）します。インラインの API キーがログストリームに現れることはありません。`settings.json` の外部（キーリング/シークレットサービス）へのシークレット保存は別途追跡されており、それまではプラグインのシークレットは `plugins.list.<name>.config` 内に置かれ、スキーマでマークされ、ホスト境界で redact されます。
