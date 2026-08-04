@@ -70,7 +70,10 @@ kind は `"openai"`）で、デフォルトの `plugins.list` に含まれ、
 `openai` プラグインは埋め込みバックエンドも兼ねます。クラウド埋め込みを
 使うには `tasks.embedding` を `"openai"` kind のプロバイダに向けてください。
 プラグインシステムを無効化した場合（`plugins.enabled = false`）、クラウド
-プロバイダは利用できません。
+プロバイダは利用できません。ローカル GGUF 埋め込みは
+`tasks.embedding.provider = "local"` とし、実際の `dimensions` を宣言した
+`ai.local_models` のモデルキーを指定します（後述の llama-cpp プロファイル
+節を参照）。
 
 各プロバイダエントリには、任意で `context_window`（整数、トークン単位）を設定でき、
 バックエンドが申告するコンテキストウィンドウに上限を設けられます (#364)。
@@ -114,12 +117,13 @@ available = min(model_window, context_window)
 を明示的に下げられます。
 
 各 `ai.local_models.<name>` エントリのモデルパス/設定（`url`・`quantization`・
-`model_path`・`gpu_layers`）は、ローカル GGUF プロバイダプラグイン
-(`ene-plugin-llama-cpp`) が消費する `plugins.list.llama-cpp.profiles.<name>`
-ブロブへミラーされます。`local_models` のキー自体はルーティングおよび
-コンテキスト予算の情報としてここに残ります（特に `context_size` は解決時に
-読まれ、ミラーされません）。ミラーは v2→v3 設定マイグレーションによる
-一方向コピーです — プロファイルを編集しても `local_models` は書き換わりません。
+`model_path`・`gpu_layers`・`context_size`・`dimensions`）は、ローカル GGUF
+プロバイダプラグイン (`ene-plugin-llama-cpp`) が消費する
+`plugins.list.llama-cpp.profiles.<name>` ブロブへミラーされます。`local_models`
+のキー自体はルーティングおよびコンテキスト予算の情報としてここに残ります
+（`context_size` は解決時に読まれ、`dimensions` はローカル埋め込みの
+ストアスキーマ値です）。ミラーは v2→v3 設定マイグレーションによる一方向
+コピーです — プロファイルを編集しても `local_models` は書き換わりません。
 
 起動時、ランタイムは各生成タスク（`chat`、および設定されている場合は `proactive`）
 のウィンドウが必要量（プロンプト予算 + 応答予約 `tasks.<task>.max_tokens`）を
@@ -548,11 +552,11 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 
 バージョン 2 のファイルは読み込み時にバージョン 3 へマイグレーションされます。各
 `ai.local_models.<name>` エントリが `plugins.list.llama-cpp.profiles.<name>` へ
-ミラーされます（非空の `url`・`quantization`・`model_path`・`gpu_layers` のみ。
-既存の非空のプロファイル値は上書きされません。既存の空値は「なし」とみなされます）。
-`ai.local_models` 自体は無傷のまま
-残ります — `ene-ai` はランタイムがプラグインへ切り替わるまで、ローカルタスクの
-ルーティングとコンテキスト予算をここから読み続けます。
+ミラーされます（非空の `url`・`quantization`・`model_path`・`gpu_layers`・
+`context_size`・`dimensions` のみ。既存の非空のプロファイル値は上書きされません。
+既存の空値は「なし」とみなされます）。`ai.local_models` 自体は無傷のまま
+残ります — `ene-ai` はローカルタスクのルーティングとコンテキスト予算を
+ここから読み続け、ホストは宣言された埋め込み次元数をここから読みます。
 
 #### `plugins.list.<name>.profiles.<profile>` — プロファイル別設定 (#313)
 
@@ -590,21 +594,27 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 `quantization`（ラベル、例：`"F16"` / `"Q4_0"`）、`model_path`（非空の場合は
 ダウンロードをスキップするローカルパス）、`gpu_layers`（`"auto"` または整数
 文字列）、および省略可能な `context_size`（チャットのコンテキスト窓（トークン
-単位）。省略時は `16384`）。プラグインは初回使用時に `url` の重みをモデル
-キャッシュへダウンロードし（GGUF マジック検証付き）、プロファイルごとに
-ロードしたモデルをプロセス生存期間中保持します。`context_size` と
-`gpu_layers` はチャットのロードのみに効きます — 埋め込みモデルは内部で
-独自にコンテキストとオフロード計画を設定し、ホスト側のルーティング窓は
-`ai.local_models.<name>.context_size` に残ります。v2→v3 マイグレーションは
-`context_size` をミラーせず、プラグインにはホスト値を知る他の経路もない
-ため、プロファイルで省略した場合はホスト側の値に関係なく 16,384 で
-ロードされます：ホスト側の窓を引き上げた場合は、プロファイルの
-`context_size` にも同じ値以上を設定してください。設定しないと長いプロンプト
-が生成時にコンテキストオーバーフローで失敗します。プロファイルの*選択*は
-プラグイン側の責務で、値は `ConfigurablePlugin::set_profiles` で配信されます。
-v2→v3 マイグレーションは既存の `ai.local_models` エントリをこれらの
-プロファイルへミラーします（`context_size` はミラーしません）。ローカル
-モデルのキーはルーティング情報として `ai.local_models` に残ります。
+単位）。省略時は `16384`）、および省略可能な `dimensions`（宣言された埋め込み
+次元数。後述）。プラグインは初回使用時に `url` の重みをモデルキャッシュへ
+ダウンロードし（GGUF マジック検証付き）、プロファイルごとにロードしたモデルを
+プロセス生存期間中保持します。`context_size` と `gpu_layers` はチャットの
+ロードのみに効きます — 埋め込みモデルは内部で独自にコンテキストとオフロード
+計画を設定し、ホスト側のルーティング窓は `ai.local_models.<name>.context_size`
+に残ります。v2→v3 マイグレーションは `context_size` をミラーするため、
+プロファイルで省略した場合はホスト側の値でロードされます（ホスト側も既定値の
+場合は 16,384）。ミラーより前の手書きプロファイルだけが乖離し得るため、その
+場合はホスト側の値以上の `context_size` を設定してください。設定しないと長い
+プロンプトが生成時にコンテキストオーバーフローで失敗します。プロファイルの
+*選択*はプラグイン側の責務で、値は `ConfigurablePlugin::set_profiles` で
+配信されます。ローカルモデルのキーはルーティング情報として
+`ai.local_models` に残ります。
+
+`dimensions` は、モデルが `provider: "local"` の `tasks.embedding` を担う場合、
+`ai.local_models.<name>` に必須です：ホストはプラグインホストの起動前に
+メモリストアのベクトルスキーマをこの値で開き、プラグインはロード時に宣言値が
+モデルの実際の次元数と異なる場合に拒否します（同梱の `jina-v5-small` は
+`1024`）。埋め込みタスク自身の `dimensions` フィールドはクラウド専用のノブで、
+ローカルプロバイダでは無視されます。
 
 #### VOICEVOX / Aivis Speech TTS プロバイダ（`plugins.list.voicevox.config`）
 

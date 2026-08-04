@@ -70,7 +70,9 @@ OpenAI-compatible configurations (OpenRouter, local servers, …) keep working
 unchanged. The `openai` plugin is also the embedding backend: point
 `tasks.embedding` at an `"openai"`-kind provider for cloud embeddings. With
 the plugin system disabled (`plugins.enabled = false`) no cloud provider is
-available.
+available. Local GGUF embeddings use `tasks.embedding.provider = "local"`
+with a model key from `ai.local_models` that declares its real
+`dimensions` (see the llama-cpp profile section below).
 
 Each provider entry may set an optional `context_window` (integer, tokens) to
 cap the context window the backend advertises (#364). The effective window is
@@ -112,13 +114,14 @@ on top of the weights); a model used only for decision workloads can lower
 `context_size` explicitly.
 
 Each `ai.local_models.<name>` entry's model path/settings (`url`,
-`quantization`, `model_path`, `gpu_layers`) are mirrored into the
-`plugins.list.llama-cpp.profiles.<name>` blob consumed by the local GGUF
-provider plugin (`ene-plugin-llama-cpp`); the `local_models` keys themselves
-remain here as routing and context-budget information (`context_size` in
-particular is read at resolve time and is never mirrored). The mirror is a
-one-way copy made by the v2→v3 settings migration — editing a profile does
-not rewrite `local_models`.
+`quantization`, `model_path`, `gpu_layers`, `context_size`, `dimensions`) are
+mirrored into the `plugins.list.llama-cpp.profiles.<name>` blob consumed by
+the local GGUF provider plugin (`ene-plugin-llama-cpp`); the `local_models`
+keys themselves remain here as routing and context-budget information
+(`context_size` is read at resolve time, `dimensions` is the host's
+store-schema value for local embedding). The mirror is a one-way copy made by
+the v2→v3 settings migration — editing a profile does not rewrite
+`local_models`.
 
 At startup the runtime validates each generative task's window (`chat`, plus
 `proactive` when configured) against what it needs — the prompt budget plus the
@@ -714,11 +717,11 @@ stable across reloads.
 Version-2 files are migrated to version 3 on load: every
 `ai.local_models.<name>` entry is mirrored into
 `plugins.list.llama-cpp.profiles.<name>` (non-empty `url` / `quantization` /
-`model_path` / `gpu_layers` only; a non-empty existing profile value is never
-overwritten, and an existing empty value counts as absent). `ai.local_models`
-itself is left intact — `ene-ai` still routes
-local tasks and budgets context windows from it until the runtime switches to
-the plugin.
+`model_path` / `gpu_layers` / `context_size` / `dimensions` only; a non-empty
+existing profile value is never overwritten, and an existing empty value
+counts as absent). `ai.local_models` itself is left intact — `ene-ai` still
+routes local tasks and budgets context windows from it, and the host reads
+the declared embedding dimensions from it.
 
 #### `plugins.list.<name>.profiles.<profile>` — per-profile settings (#313)
 
@@ -759,21 +762,26 @@ per model: `url` (GGUF download URL), `quantization` (label, e.g. `"F16"` /
 `"Q4_0"`), `model_path` (local path override that skips download when
 non-empty), `gpu_layers` (`"auto"` or an integer string), and the optional
 `context_size` (chat context window in tokens; defaults to `16384` when
-omitted). The plugin downloads `url` weights into the model cache on first
+omitted) plus the optional `dimensions` (declared embedding dimensionality;
+see below). The plugin downloads `url` weights into the model cache on first
 use (GGUF magic validated) and keeps one loaded model per profile for its
 process lifetime. `context_size` and `gpu_layers` size chat loads only — the
 embedding model sizes its own context and offload plan internally, and the
-host's routing window stays in `ai.local_models.<name>.context_size`.
-Because the v2→v3 migration does not mirror `context_size` and the plugin has
-no other channel to learn the host value, a profile that omits it loads
-16,384 tokens regardless of `ai.local_models.<name>.context_size`: when you
-raise the host-side window, set the profile's `context_size` to at least that
-value, otherwise long prompts fail with a context overflow at generation
-time. Profile *selection* is plugin-owned; the values are delivered via
-`ConfigurablePlugin::set_profiles`. The v2→v3 migration mirrors existing
-`ai.local_models` entries into these profiles (it does not mirror
-`context_size`); the local-model keys stay in `ai.local_models` as routing
-information.
+host's routing window stays in `ai.local_models.<name>.context_size`. The
+v2→v3 migration mirrors `context_size`, so a profile that omits it loads the
+host-side value (16,384 when the host value is also the default); only
+manually written profiles that predate the mirror can drift — set their
+`context_size` to at least the host value to avoid a context overflow at
+generation time. Profile *selection* is plugin-owned; the values are
+delivered via `ConfigurablePlugin::set_profiles`.
+
+`dimensions` is required on `ai.local_models.<name>` when the model backs
+`tasks.embedding` with `provider: "local"`: the host opens the memory-store
+vector schema with this value before the plugin host starts, and the plugin
+rejects a declared value that differs from the model's real dimensionality at
+load time (e.g. `1024` for the bundled `jina-v5-small` entry). The embedding
+task's own `dimensions` field is a cloud-only knob and is ignored for local
+providers.
 
 #### VOICEVOX / Aivis Speech TTS provider (`plugins.list.voicevox.config`)
 
