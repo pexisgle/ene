@@ -129,9 +129,15 @@ fn interval_tick_strictly_after(
 
 fn next_cron_after(sched: &CronSchedule, tz: Tz, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let local_after = after.with_timezone(&tz);
+    // cron's iterator scans from `after + 1s`, so when `after` is exactly
+    // the first instant of a fall-back fold the whole fold pair is skipped
+    // (the second instant is never yielded). Backdating the scan by one
+    // second lands it on `after` itself; the strict filter then discards
+    // that equal candidate and keeps the fold's second instant.
+    let shifted = local_after - chrono::Duration::seconds(1);
     sched
-        .after_owned(local_after)
-        .next()
+        .after_owned(shifted)
+        .find(|candidate| *candidate > local_after)
         .map(|t| t.with_timezone(&Utc))
 }
 
