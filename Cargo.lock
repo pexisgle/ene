@@ -3020,6 +3020,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ene-plugin",
+ "futures",
  "reqwest",
  "serde",
  "serde_json",

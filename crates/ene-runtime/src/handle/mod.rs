@@ -596,6 +596,7 @@ impl EneHandle {
             && let Some(mut health_rx) = host.take_health_receiver()
         {
             let diag_tx = diag_tx.clone();
+            let cmd_tx = Arc::clone(&cmd_tx);
             let llm_factories_by_plugin = host.llm_factories_by_plugin();
             let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
             let tts_factories_by_plugin = host.tts_factories_by_plugin();
@@ -607,7 +608,9 @@ impl EneHandle {
                             plugin,
                             &embedding_factories_by_plugin,
                         );
-                        deregister_disabled_tts_factories(plugin, &tts_factories_by_plugin);
+                        if deregister_disabled_tts_factories(plugin, &tts_factories_by_plugin) {
+                            drop(cmd_tx.send(EneCommand::RebuildTtsProvider));
+                        }
                     }
                     emit_diag(&diag_tx, plugin_health_event_to_diag(event));
                 }
@@ -1447,10 +1450,21 @@ fn deregister_disabled_embedding_factories(
     }
 }
 
-fn deregister_disabled_tts_factories(plugin: &str, factories_by_plugin: &TtsFactoriesByPlugin) {
+/// Deregisters the TTS factories a permanently-disabled plugin provided.
+///
+/// Returns `true` when at least one factory was removed, so the health
+/// bridge can notify the actor to rebuild its live TTS provider (unlike
+/// LLM/embedding providers, the long-lived `TtsProvider` keeps a now-dead
+/// IPC connection otherwise).
+fn deregister_disabled_tts_factories(
+    plugin: &str,
+    factories_by_plugin: &TtsFactoriesByPlugin,
+) -> bool {
+    let mut removed = false;
     if let Some(factories) = factories_by_plugin.get(plugin) {
         for (kind, factory) in factories {
             if ene_ai::AudioProviderRegistry::deregister_tts_if_matches(kind, factory) {
+                removed = true;
                 tracing::info!(
                     component = "PluginHealthBridge",
                     plugin = %plugin,
@@ -1460,6 +1474,7 @@ fn deregister_disabled_tts_factories(plugin: &str, factories_by_plugin: &TtsFact
             }
         }
     }
+    removed
 }
 
 #[cfg(test)]

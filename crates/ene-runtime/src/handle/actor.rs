@@ -2579,6 +2579,10 @@ impl TurnActor {
                 self.rebuild_tts_provider();
                 true
             }
+            EneCommand::RebuildTtsProvider => {
+                self.rebuild_tts_provider();
+                true
+            }
             EneCommand::PermissionDecision {
                 request_id,
                 decision,
@@ -4141,6 +4145,7 @@ async fn reconfigure_plugin_host_bg(
         && let Some(mut health_rx) = host.take_health_receiver()
     {
         let diag_tx = diag_tx.clone();
+        let cmd_tx = cmd_tx.clone();
         let llm_factories_by_plugin = host.llm_factories_by_plugin();
         let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
         let tts_factories_by_plugin = host.tts_factories_by_plugin();
@@ -4152,7 +4157,9 @@ async fn reconfigure_plugin_host_bg(
                         plugin,
                         &embedding_factories_by_plugin,
                     );
-                    super::deregister_disabled_tts_factories(plugin, &tts_factories_by_plugin);
+                    if super::deregister_disabled_tts_factories(plugin, &tts_factories_by_plugin) {
+                        drop(cmd_tx.send(EneCommand::RebuildTtsProvider));
+                    }
                 }
                 emit_diag(&diag_tx, plugin_health_event_to_diag(event));
             }
@@ -4181,6 +4188,10 @@ async fn reconfigure_plugin_host_bg(
                 error = %e,
                 "Failed to rebuild tool registry after plugin reconfiguration"
             );
+            // The registries were already refreshed above; only the actor's
+            // live TTS provider still needs a rebuild, and without a tool
+            // registry there is no `PluginHostReconfigured` to carry it.
+            drop(cmd_tx.send(EneCommand::RebuildTtsProvider));
         }
     }
 

@@ -701,6 +701,15 @@ pub enum AudioProviderError {
     /// either by an explicit cancellation or because the caller went away.
     #[error("local engine job cancelled")]
     Cancelled,
+    /// An audio payload (e.g. a plugin's synthesized WAV) exceeded the
+    /// provider's size cap and was rejected before full allocation.
+    #[error("audio payload too large: {actual} bytes exceeds the {max_bytes}-byte limit")]
+    PayloadTooLarge {
+        /// The enforced cap in bytes.
+        max_bytes: usize,
+        /// The payload size that triggered the rejection.
+        actual: usize,
+    },
 }
 
 impl AudioProviderError {

@@ -9,6 +9,11 @@
 
 use ene_ai::AudioProviderError;
 
+/// Cap on the WAV byte size `decode_wav` accepts. 24 kHz s16 mono audio is
+/// ~2.9 MB per minute, so 64 MiB covers very long utterances while bounding
+/// the allocation a misbehaving plugin (or engine) can force on the host.
+pub const MAX_WAV_BYTES: usize = 64 * 1024 * 1024;
+
 /// Decoded PCM audio.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedWav {
@@ -25,6 +30,12 @@ pub struct DecodedWav {
 /// Returns [`AudioProviderError::UnsupportedFormat`] when the bytes are not
 /// a well-formed WAV file in one of the supported encodings.
 pub fn decode_wav(bytes: &[u8]) -> Result<DecodedWav, AudioProviderError> {
+    if bytes.len() > MAX_WAV_BYTES {
+        return Err(AudioProviderError::PayloadTooLarge {
+            max_bytes: MAX_WAV_BYTES,
+            actual: bytes.len(),
+        });
+    }
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(AudioProviderError::UnsupportedFormat(
             "not a RIFF/WAVE stream".to_string(),
@@ -300,5 +311,13 @@ mod tests {
         let wav = build_wav(WAVE_FORMAT_PCM, 1, 24_000, 16, &[]);
         let decoded = decode_wav(&wav).expect("empty data is valid");
         assert!(decoded.pcm.is_empty());
+    }
+
+    #[test]
+    fn rejects_oversized_payloads() {
+        let mut wav = build_wav(WAVE_FORMAT_PCM, 1, 24_000, 16, &[0, 1]);
+        wav.resize(MAX_WAV_BYTES + 1, 0);
+        let err = decode_wav(&wav).expect_err("oversized payload rejected");
+        assert!(matches!(err, AudioProviderError::PayloadTooLarge { .. }));
     }
 }
