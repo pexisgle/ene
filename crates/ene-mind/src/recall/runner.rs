@@ -3,6 +3,7 @@
 use chrono::Utc;
 use ene_core::MemoryPort;
 
+use super::MemoryRecallCache;
 use super::pending::gather_pending_candidates;
 use crate::character::is_lorebook_memory_row;
 use crate::commitments::CommitmentLedger;
@@ -32,6 +33,10 @@ pub struct ExecuteRecallInput<'a> {
     pub embedding_model: &'a str,
     /// Loaded affect state (optional).
     pub affect: Option<&'a ene_core::AffectState>,
+    /// L1 recall cache; `None` falls back to L2 for every query.
+    pub cache: Option<&'a MemoryRecallCache>,
+    /// Session identifier for cache scoping.
+    pub session_id: &'a str,
 }
 
 /// Execute hybrid typed recall and return plan + recalled memories.
@@ -39,14 +44,7 @@ pub async fn execute_hybrid_recall(
     config: &MindConfig,
     input: &ExecuteRecallInput<'_>,
 ) -> Result<(crate::recall::RecallPlan, Vec<RecalledMemory>), CognitionError> {
-    let commitments = match CommitmentLedger::list_active(
-        input.store,
-        input.character_id,
-        Some(input.user_id),
-        16,
-    )
-    .await
-    {
+    let commitments = match list_active_commitments(input).await {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(
@@ -81,11 +79,15 @@ pub async fn execute_hybrid_recall(
         &config.memory,
     );
 
-    let mut gathered = input
-        .store
-        .search(&search_options)
-        .await
-        .map_err(CognitionError::MemoryPort)?;
+    let mut gathered = match input.cache {
+        Some(cache) => {
+            cache
+                .search(input.store, input.session_id, &search_options)
+                .await
+        }
+        None => input.store.search(&search_options).await,
+    }
+    .map_err(CognitionError::MemoryPort)?;
 
     // Unconfirmed candidates deferred to the user-approval queue compete
     // in the same score competition as typed memories. They carry no
@@ -95,7 +97,14 @@ pub async fn execute_hybrid_recall(
     // candidate only surfaces when the conversation touches its topic.
     let pending_limit = config.memory.recall_pending_candidate_limit;
     if pending_limit > 0 {
-        gather_pending_candidates(input.store, &search_options, &mut gathered, pending_limit).await;
+        gather_pending_candidates(
+            input.cache,
+            input.store,
+            &search_options,
+            &mut gathered,
+            pending_limit,
+        )
+        .await;
     }
 
     // Lorebook rows are card data with a guaranteed-injection path of their
@@ -120,6 +129,25 @@ pub async fn execute_hybrid_recall(
     Ok((plan, recalled))
 }
 
+/// Load active commitments through the L1 cache when present, else L2.
+async fn list_active_commitments(
+    input: &ExecuteRecallInput<'_>,
+) -> Result<Vec<ene_core::Commitment>, ene_core::MemoryPortError> {
+    match input.cache {
+        Some(cache) => {
+            cache
+                .list_active_commitments(input.store, input.character_id, Some(input.user_id), 16)
+                .await
+        }
+        None => {
+            input
+                .store
+                .list_active_commitments(input.character_id, Some(input.user_id), 16)
+                .await
+        }
+    }
+}
+
 /// Load reflection memories and apply their boost/penalty to scored recall
 /// candidates, closing the self-reflection feedback loop.
 ///
@@ -139,7 +167,13 @@ async fn apply_reflection_to_scored(
         return;
     }
 
-    let reflections = load_reflection_memories(input.store, input.character_id).await;
+    let reflections = match input.cache {
+        Some(cache) => cache
+            .get_reflection_memories(input.store, input.character_id)
+            .await
+            .unwrap_or_default(),
+        None => load_reflection_memories(input.store, input.character_id).await,
+    };
     if reflections.is_empty() {
         return;
     }
@@ -186,7 +220,11 @@ async fn apply_reflection_to_scored(
 /// reinforce memories that were recalled but then dropped, feeding the
 /// self-reinforcing recall loop. Call this after prompt composition with
 /// `PromptPacketMeta::injected_memory_ids`.
-pub async fn bump_injected_memory_access(store: &dyn MemoryPort, injected_ids: &[i64]) {
+pub async fn bump_injected_memory_access(
+    store: &dyn MemoryPort,
+    cache: Option<&MemoryRecallCache>,
+    injected_ids: &[i64],
+) {
     for &id in injected_ids {
         if let Err(error) = store.bump_typed_memory_access(id).await {
             tracing::warn!(
@@ -195,6 +233,8 @@ pub async fn bump_injected_memory_access(store: &dyn MemoryPort, injected_ids: &
                 error = %error,
                 "Failed to bump typed memory access after prompt injection"
             );
+        } else if let Some(cache) = cache {
+            cache.refresh_access(&[id]);
         }
     }
 }
@@ -257,6 +297,8 @@ mod tests {
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -327,6 +369,8 @@ mod tests {
             query_embedding: &embedding,
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -414,6 +458,8 @@ mod tests {
             query_embedding: &embedding,
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -493,6 +539,8 @@ mod tests {
             query_embedding: &embedding,
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -571,6 +619,8 @@ mod tests {
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -642,6 +692,8 @@ mod tests {
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
@@ -726,6 +778,8 @@ mod tests {
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
             affect: None,
+            cache: None,
+            session_id: "sess",
         };
 
         let (_, recalled) = execute_hybrid_recall(&config, &input)
