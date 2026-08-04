@@ -12,6 +12,7 @@
 - [ランダム生成ツールガイド](guide/tools/random.md)
 - [地理情報ツールガイド](guide/tools/geo.md)
 - [Git ツールガイド](guide/tools/git.md)
+- [スケジュール：永続的な時刻指定アクション](guide/schedules.md)
 
 # リファレンス
 
