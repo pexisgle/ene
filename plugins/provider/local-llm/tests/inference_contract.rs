@@ -155,18 +155,26 @@ async fn fixture_hash_matches(path: &Path, expected_blake3: &str) -> bool {
 }
 
 /// Kills the spawned plugin on drop so tests never leave orphan processes.
-struct ChildGuard(Child);
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    /// SIGKILLs the plugin and reaps it, simulating an in-process crash.
+    fn kill(&mut self) -> Option<std::process::ExitStatus> {
+        let mut child = self.0.take()?;
+        drop(child.kill());
+        child.wait().ok()
+    }
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        drop(self.0.kill());
-        drop(self.0.wait());
+        let _ = self.kill();
     }
 }
 
 /// A spawned plugin process with a connected, handshaken IPC stream.
 struct PluginSession {
-    _child: ChildGuard,
+    child: ChildGuard,
     stream: IpcStream,
     socket_path: PathBuf,
 }
@@ -217,10 +225,15 @@ impl PluginSession {
             "expected HandshakeAck, got {ack:?}"
         );
         Self {
-            _child: ChildGuard(child),
+            child: ChildGuard(Some(child)),
             stream,
             socket_path,
         }
+    }
+
+    /// SIGKILLs the plugin process and reaps it, returning its exit status.
+    fn kill_plugin(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.kill()
     }
 
     async fn request(&mut self, request: PluginIpcRequest) -> PluginIpcResponse {
@@ -464,5 +477,88 @@ async fn inference_contract_round_trip() {
 
     let socket_path = session.socket_path.clone();
     drop(session);
+    cleanup_path(&socket_path);
+}
+
+/// A real plugin process dying (SIGKILL, as an in-process llama.cpp abort
+/// terminates it) must not take the host down, and a freshly restarted plugin
+/// must serve real inference again.
+#[tokio::test]
+async fn plugin_crash_isolation_recovers() {
+    let Some(fixtures) = Fixtures::fetch().await else {
+        return;
+    };
+    let profiles = json!({
+        "chat-fixture": {
+            "model_path": fixtures.chat.to_str().expect("utf8 fixture path"),
+            "quantization": "F16",
+            "gpu_layers": "0",
+            "context_size": 2048,
+        }
+    });
+
+    let mut first = PluginSession::start(&profiles).await;
+    write_plugin_request(
+        &mut first.stream,
+        &PluginIpcRequest::CreateChatStream {
+            request_id: "crash-before".to_string(),
+            provider_kind: "local".to_string(),
+            provider_config: json!({}),
+            model: "chat-fixture".to_string(),
+            max_tokens: None,
+            messages: vec![user_message("Once upon a time")],
+            tools: Vec::new(),
+        },
+        WireFormat::MsgPack,
+    )
+    .await
+    .expect("write create_chat_stream before crash");
+    let (deltas, full_text, _) = first.drain_chat_stream("crash-before").await;
+    assert!(
+        deltas >= 1 && !full_text.is_empty(),
+        "expected real streaming before the crash, got {deltas} deltas ({full_text:?})"
+    );
+
+    // Simulate an in-process llama.cpp abort: SIGKILL the plugin and reap it.
+    let status = first
+        .kill_plugin()
+        .expect("killed plugin reports an exit status");
+    assert!(
+        !status.success(),
+        "plugin process must not exit successfully after SIGKILL"
+    );
+    #[cfg(unix)]
+    assert!(
+        status.code().is_none(),
+        "SIGKILL must terminate via a signal, got exit code {:?}",
+        status.code()
+    );
+
+    // The host side (this test process) is still alive and a restarted
+    // plugin serves real inference again.
+    let mut second = PluginSession::start(&profiles).await;
+    write_plugin_request(
+        &mut second.stream,
+        &PluginIpcRequest::CreateChatStream {
+            request_id: "crash-after".to_string(),
+            provider_kind: "local".to_string(),
+            provider_config: json!({}),
+            model: "chat-fixture".to_string(),
+            max_tokens: None,
+            messages: vec![user_message("Once upon a time")],
+            tools: Vec::new(),
+        },
+        WireFormat::MsgPack,
+    )
+    .await
+    .expect("write create_chat_stream after restart");
+    let (deltas, full_text, _) = second.drain_chat_stream("crash-after").await;
+    assert!(
+        deltas >= 1 && !full_text.is_empty(),
+        "expected real streaming after restart, got {deltas} deltas ({full_text:?})"
+    );
+
+    let socket_path = second.socket_path.clone();
+    drop(second);
     cleanup_path(&socket_path);
 }
