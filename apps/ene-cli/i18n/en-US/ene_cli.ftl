@@ -36,6 +36,21 @@ greeting-none = (none)
 ## /card command
 card-loaded = Character card loaded: { $name }
 
+## /workspace command
+workspace-sync-started = Workspace index sync started. Use '/workspace status' to watch progress and '/workspace cancel' to stop it.
+workspace-sync-busy = A workspace sync is already running.
+workspace-cancel-sent = Cancellation requested for the running workspace sync.
+workspace-status-title = Workspace index status:
+workspace-status-disabled = Workspace RAG is disabled (rag.workspace.enabled).
+workspace-status-no-folders = No folders are configured; nothing will be scanned or searched.
+workspace-status-folders = Permitted folders:
+workspace-status-indexed = Indexed files: { $files }, chunks: { $chunks }
+workspace-status-progress = Sync in progress ({ $phase }): scanned { $scanned }, indexed { $indexed }, skipped { $skipped }, chunks { $chunks }
+workspace-status-report = Last sync: indexed { $indexed }, unchanged { $unchanged }, renamed { $renamed }, deleted { $deleted }, skipped { $skipped }, { $chunks } chunks in { $elapsed }s
+workspace-status-last-error = Last sync error: { $error }
+workspace-search-empty = No matching workspace documents found.
+workspace-search-title = Matching workspace documents:
+
 init-failed = Failed to initialize: { $error }
 turn-failed = Error: { $detail }
 runtime-error-no-character-card = Character card not found or could not be loaded.
@@ -46,6 +61,7 @@ runtime-error-config = Configuration error: { $detail }
 runtime-error-memory = Memory store error: { $detail }
 runtime-error-mind = Mind engine error: { $detail }
 runtime-error-tool = Tool error: { $detail }
+runtime-error-workspace = Workspace index error: { $detail }
 runtime-error-actor-busy = Ene is busy handling other requests right now. Try again in a moment.
 runtime-error-store-required = The scheduler requires the memory store. Enable `store.enabled` in your configuration.
 runtime-error-ai-auth = AI provider authentication failed. Check your API key.
