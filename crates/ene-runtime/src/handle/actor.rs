@@ -1399,6 +1399,7 @@ impl TurnActor {
             evaluate_quiet_hours(&mind.proactive.quiet_hours, (self.quiet_hours_clock)());
         let (history, observation, affect, commitments, user_instructions, pending_confirmation) =
             self.proactive_context_inputs(&mind).await;
+        let world_state = self.proactive.world_state.clone();
         let (tx, rx) = oneshot::channel();
         self.proactive_decision_rx = Some(rx);
         let config = mind.proactive.clone();
@@ -1408,6 +1409,7 @@ impl TurnActor {
                 config,
                 history,
                 observation,
+                Some(world_state),
                 suppression,
                 quiet_for_context,
                 pending_confirmation,
@@ -1524,6 +1526,7 @@ impl TurnActor {
             suppression,
             quiet.clone(),
             pending_confirmation,
+            Some(&self.proactive.world_state),
         );
         matches!(
             evaluate_deterministic_gates(&mind.proactive, &context),
@@ -1989,7 +1992,6 @@ impl TurnActor {
     ) -> crate::proactive::ProactiveDecisionResult {
         crate::proactive::ProactiveDecisionResult {
             epoch: self.proactive.epoch,
-            world_state_tick: 0,
             should_generate: true,
             should_speak: true,
             confidence: 1.0,
@@ -2761,15 +2763,24 @@ impl TurnActor {
                 true
             }
             EneCommand::UpdateProactiveObservation { observation } => {
-                self.proactive.observation = observation;
-                // When screen_summary is enabled, each observe cycle (fresh
-                // capture → vision) drives the decision LLM immediately.
-                let screen_driven = self
-                    .config
-                    .get_section::<ene_mind::MindConfig>()
-                    .is_ok_and(|m| m.proactive.enabled && m.proactive.sources.screen_summary);
-                if screen_driven {
-                    self.maybe_spawn_proactive_decision().await;
+                let seconds_since_user_input =
+                    self.proactive.suppression(false).seconds_since_user_input;
+                self.proactive.observation = observation.clone();
+                if observation.captured_at_unix_ms != 0
+                    && let Ok(mind) = self.config.get_section::<ene_mind::MindConfig>()
+                {
+                    self.proactive.world_state.push(
+                        ene_mind::WorldStateSnapshot::from_observation(
+                            &observation,
+                            seconds_since_user_input,
+                        ),
+                        &mind.proactive.world_state,
+                    );
+                    // When screen_summary is enabled, each observe cycle (fresh
+                    // capture → vision) drives the decision LLM immediately.
+                    if mind.proactive.enabled && mind.proactive.sources.screen_summary {
+                        self.maybe_spawn_proactive_decision().await;
+                    }
                 }
                 true
             }
@@ -5727,6 +5738,66 @@ mod tests {
 
         assert!(actor.proactive.quiet_hours_queue.is_empty());
         assert!(actor.proactive_decision_rx.is_none());
+    }
+
+    #[tokio::test]
+    async fn observation_updates_feed_the_world_state_ring() {
+        use crate::handle::tests::{EmptyRegistry, build_bare_actor};
+
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig::default();
+        let (mut actor, _diag_rx) = build_bare_actor(registry, &task_caps);
+
+        let observation = ene_mind::ProactiveObservation {
+            captured_at_unix_ms: 7,
+            activity: Some(ene_mind::ActivitySnapshot {
+                idle_seconds: Some(30),
+                active_window_label: "Code".into(),
+                recent_change: "focused Code".into(),
+            }),
+            screen_summary: None,
+            screen_summary_status: ene_mind::ScreenSummaryStatus::Disabled,
+        };
+        assert!(
+            actor
+                .handle_command(EneCommand::UpdateProactiveObservation {
+                    observation: observation.clone(),
+                })
+                .await
+        );
+        assert_eq!(actor.proactive.world_state.len(), 1);
+        let snap = actor
+            .proactive
+            .world_state
+            .latest()
+            .expect("latest world-state snapshot");
+        assert_eq!(snap.captured_at_unix_ms, 7);
+        assert_eq!(snap.idle_seconds, Some(30));
+        assert_eq!(snap.active_window_label, "Code");
+        assert_eq!(snap.recent_change, "focused Code");
+
+        assert!(
+            actor
+                .handle_command(EneCommand::UpdateProactiveObservation { observation })
+                .await
+        );
+        assert_eq!(actor.proactive.world_state.len(), 2);
+
+        // A zero-timestamp observation (no host yet) must not pollute the
+        // ring.
+        assert!(
+            actor
+                .handle_command(EneCommand::UpdateProactiveObservation {
+                    observation: ene_mind::ProactiveObservation::default(),
+                })
+                .await
+        );
+        assert_eq!(actor.proactive.world_state.len(), 2);
+
+        // A session reset drops the world-state history with the rest of the
+        // per-session proactive state.
+        actor.proactive.reset_session();
+        assert!(actor.proactive.world_state.is_empty());
     }
 
     /// A pending-candidate fixture for the shared (`user_id = ""`) scope,
