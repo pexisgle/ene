@@ -96,7 +96,7 @@ pub async fn execute_hybrid_recall(
     // applies the ordinary min_score floor and result limit, so a pending
     // candidate only surfaces when the conversation touches its topic.
     let pending_limit = config.memory.recall_pending_candidate_limit;
-    if pending_limit > 0 {
+    if pending_limit > 0 && !config.memory_approval.require_approval {
         gather_pending_candidates(
             input.cache,
             input.store,
@@ -659,8 +659,11 @@ mod tests {
                 existing_memory_title: None,
                 existing_memory_id: None,
                 source_quote: "I like matcha".into(),
+                source_turn: None,
+                approval_parked: false,
                 status: ene_core::PendingCandidateStatus::Pending,
                 created_at: now,
+                resolved_at: None,
             })
             .await
             .unwrap();
@@ -681,8 +684,11 @@ mod tests {
                 existing_memory_title: None,
                 existing_memory_id: None,
                 source_quote: "physics".into(),
+                source_turn: None,
+                approval_parked: false,
                 status: ene_core::PendingCandidateStatus::Pending,
                 created_at: now,
+                resolved_at: None,
             })
             .await
             .unwrap();
@@ -752,8 +758,11 @@ mod tests {
                     existing_memory_title: None,
                     existing_memory_id: None,
                     source_quote: "topic".into(),
+                    source_turn: None,
+                    approval_parked: false,
                     status: ene_core::PendingCandidateStatus::Pending,
                     created_at: now,
+                    resolved_at: None,
                 })
                 .await
                 .unwrap();
@@ -797,6 +806,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_mode_excludes_pending_candidates_from_recall() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        store
+            .insert_pending_candidate(ene_core::PendingCandidate {
+                id: 0,
+                character_id: "Ene".into(),
+                user_id: "User".into(),
+                title: "favorite drink".into(),
+                content: "the user's favorite drink is matcha".into(),
+                kind: MemoryKind::Preference,
+                confidence: 0.9,
+                reason_detail: "requires approval".into(),
+                existing_memory_title: None,
+                existing_memory_id: None,
+                source_quote: "I like matcha".into(),
+                source_turn: None,
+                approval_parked: true,
+                status: ene_core::PendingCandidateStatus::Pending,
+                created_at: Utc::now(),
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+        config.memory_approval.require_approval = true;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "What does the user like to drink?",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            affect: None,
+            cache: None,
+            session_id: "sess",
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input).await.unwrap();
+        assert!(recalled.iter().all(|memory| {
+            !memory
+                .sources
+                .contains(&ene_core::MemoryCandidateSource::Pending)
+        }));
+    }
+
+    #[tokio::test]
+    async fn approval_parked_candidates_stay_excluded_after_mode_toggle_off() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        store
+            .insert_pending_candidate(ene_core::PendingCandidate {
+                id: 0,
+                character_id: "Ene".into(),
+                user_id: "User".into(),
+                title: "favorite drink".into(),
+                content: "the user's favorite drink is matcha".into(),
+                kind: MemoryKind::Preference,
+                confidence: 0.9,
+                reason_detail: "approval mode enabled".into(),
+                existing_memory_title: None,
+                existing_memory_id: None,
+                source_quote: "I like matcha".into(),
+                source_turn: None,
+                approval_parked: true,
+                status: ene_core::PendingCandidateStatus::Pending,
+                created_at: Utc::now(),
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "What does the user like to drink?",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            affect: None,
+            cache: None,
+            session_id: "sess",
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input).await.unwrap();
+        assert!(recalled.iter().all(|memory| {
+            !memory
+                .sources
+                .contains(&ene_core::MemoryCandidateSource::Pending)
+        }));
+    }
+
+    #[tokio::test]
     async fn pending_candidate_visibility_is_applied_before_the_cap() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let now = Utc::now();
@@ -819,8 +935,11 @@ mod tests {
                 existing_memory_title: None,
                 existing_memory_id: None,
                 source_quote: "topic".into(),
+                source_turn: None,
+                approval_parked: false,
                 status: ene_core::PendingCandidateStatus::Pending,
                 created_at: now - chrono::Duration::minutes(2),
+                resolved_at: None,
             })
             .await
             .unwrap();
@@ -838,8 +957,11 @@ mod tests {
                     existing_memory_title: None,
                     existing_memory_id: None,
                     source_quote: "topic".into(),
+                    source_turn: None,
+                    approval_parked: false,
                     status: ene_core::PendingCandidateStatus::Pending,
                     created_at: now,
+                    resolved_at: None,
                 })
                 .await
                 .unwrap();

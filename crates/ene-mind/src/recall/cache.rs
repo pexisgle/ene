@@ -1209,8 +1209,11 @@ mod tests {
             existing_memory_title: None,
             existing_memory_id: None,
             source_quote: "pending".into(),
+            source_turn: None,
+            approval_parked: false,
             status: PendingCandidateStatus::Pending,
             created_at: Utc::now(),
+            resolved_at: None,
         });
         store
             .reflections
@@ -1461,8 +1464,11 @@ mod tests {
             existing_memory_title: None,
             existing_memory_id: None,
             source_quote: "coffee".into(),
+            source_turn: None,
+            approval_parked: false,
             status: PendingCandidateStatus::Pending,
             created_at: Utc::now(),
+            resolved_at: None,
         });
         store
             .reflections

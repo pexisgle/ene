@@ -1450,6 +1450,7 @@ mod recall_cache_tests {
             affect: AffectState::neutral("ene"),
             character_id: "ene".into(),
             user_id: "user".into(),
+            source_turn: None,
             interrupted: false,
             spoken_text: None,
         }

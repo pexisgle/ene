@@ -371,9 +371,47 @@ active-commitment count, bounding memory and embedding work if the ledger grows
 large. When a list returns exactly the limit the ledger warns that results may
 be truncated; raise `mind.memory_limits.commitment_active_match_limit` (or
 `ENE_MIND__MEMORY_LIMITS__COMMITMENT_ACTIVE_MATCH_LIMIT`) if matching misses
-active commitments. This is the **only** operator-configurable memory setting —
+active commitments. This is one of two operator-configurable memory settings;
 everything else under `mind.memory.*` stays at its code default
-(`MindMemoryConfig`).
+(`MindMemoryConfig`). The other is the approval-workflow switch below.
+
+### `mind.memory_approval.*` — pre-save candidate approval
+
+```json
+{
+  "mind": {
+    "memory_approval": {
+      "require_approval": false
+    }
+  }
+}
+```
+
+`require_approval` (default `false`, env:
+`ENE_MIND__MEMORY_APPROVAL__REQUIRE_APPROVAL`) switches typed-memory writes
+from auto-save to a review-before-save workflow. When `true`, every extracted
+candidate that would otherwise be persisted (or would supersede an existing
+memory) is parked in the `pending_candidates` queue instead, carrying its
+source turn, source quote, extraction reason, confidence, and supersede
+target. The queue is surfaced in the CLI (`/memory approval`) and the desktop
+Memory Journal, where each candidate can be inspected, edited,
+edit-and-approved, approved, or rejected. Approved candidates are persisted
+as typed memories with the original conflict target propagated as
+`supersedes_id` and the old memory deactivated (`Superseded`), mirroring the
+auto-save supersede semantics; rejected ones are discarded. Edits are
+validated before any write and resolution is conflict-safe, so a bad edit or
+a raced decision never loses the original candidate. Approval and edit
+operations carry the active turn id and are emitted as `CandidateChanged`
+audit events on the runtime lifecycle bus.
+
+In approval mode, unapproved candidates are excluded from normal recall: they
+surface only in the review queue, never in the prompt. Approval-parked
+candidates stay excluded even if the mode is later turned off — only
+weak-contradiction deferrals ever compete in recall under
+`recall_pending_candidate_limit` as described below. The default auto-save
+mode is unchanged (`false`). Commitment candidates (the dedicated ledger
+path) and explicit user forget / dispute decisions are applied immediately in
+both modes.
 
 The memory arbiter decides whether an incoming candidate contradicts an existing
 memory of the same kind by comparing the *similarity of their title embeddings*
@@ -409,6 +447,10 @@ topic comes up — surfacing candidates are marked `[unconfirmed]` in the prompt
 `recall_pending_candidate_limit` (default `3`) caps how many compete per turn;
 `0` disables the recall path without affecting the settings-screen review list.
 The cap is code-tunable in `MindMemoryConfig` and not yet exposed via settings.
+Resolved candidates (approved / rejected) stay in the queue as history until
+the retention sweep removes them (`mind.memory.pending_candidate_retention`,
+code-defaulted to 14 days / 200 rows), and the CLI `/memory approval history`
+and the desktop journal's history view list them with their resolution time.
 
 ### `plugins.*` — IPC Plugins & MCP Server Connections
 

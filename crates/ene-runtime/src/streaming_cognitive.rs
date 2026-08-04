@@ -263,6 +263,7 @@ fn spawn_interrupted_memory_work(
     turn_affect: &ene_core::AffectState,
     card_name: &str,
     user_name: &str,
+    turn: &crate::types::TurnId,
 ) {
     let Some(store) = mem_store.cloned() else {
         return;
@@ -276,6 +277,7 @@ fn spawn_interrupted_memory_work(
         affect: turn_affect.clone(),
         character_id: card_name.to_string(),
         user_id: user_name.to_string(),
+        source_turn: Some(turn.to_string()),
         interrupted: true,
         spoken_text: Some(spoken_text.to_string()),
     };
@@ -1076,6 +1078,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 &turn_affect,
                 &card_name,
                 &user_name,
+                &turn,
             );
             return finish_cancelled(
                 session,
@@ -1142,6 +1145,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     &turn_affect,
                     &card_name,
                     &user_name,
+                    &turn,
                 );
                 return finish_cancelled(
                     session,
@@ -1386,6 +1390,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             } else {
                 user_input.as_str()
             };
+            let source_turn = turn.to_string();
             let post = PostTurnInput {
                 turn: TurnInput {
                     user_message: post_user,
@@ -1395,6 +1400,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 affect: &turn_affect,
                 character_id: &card_name,
                 user_id: &user_name,
+                source_turn: Some(&source_turn),
                 interrupted: false,
                 spoken_text: None,
             };
@@ -1488,6 +1494,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     affect: turn_affect,
                     character_id: card_name.clone(),
                     user_id: user_name.clone(),
+                    source_turn: Some(turn.to_string()),
                     interrupted: false,
                     spoken_text: None,
                 };

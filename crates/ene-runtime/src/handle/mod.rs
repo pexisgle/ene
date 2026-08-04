@@ -353,7 +353,9 @@ pub struct EneHandle {
     host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Read-only session query handle, bypasses the actor mailbox.
     sessions: crate::query::sessions::SessionQueryHandle,
-    /// Pending memory-candidate approval handle, bypasses the actor mailbox.
+    /// Pending memory-candidate approval handle. Reads bypass the actor
+    /// mailbox; mutations route through it (see
+    /// [`crate::query::candidates::MemoryCandidateHandle`]).
     candidates: crate::query::candidates::MemoryCandidateHandle,
     /// Screen-image vision summarization handle, bypasses the actor mailbox.
     vision: crate::vision::VisionHandle,
@@ -720,8 +722,8 @@ impl EneHandle {
         let sessions = crate::query::sessions::SessionQueryHandle::new(memory_store.clone());
         let candidates = crate::query::candidates::MemoryCandidateHandle::new(
             memory_store.clone(),
+            Arc::clone(&cmd_tx),
             Arc::clone(&shared.card_name),
-            recall_cache,
         );
         let vision = crate::vision::VisionHandle::new(Arc::clone(&cmd_tx));
         let tools = crate::tools::ToolHandle::new(Arc::clone(&cmd_tx));
@@ -911,8 +913,11 @@ impl EneHandle {
         self.sessions.clone()
     }
 
-    /// Pending memory-candidate approval handle (list / approve / reject),
-    /// bypassing the turn-execution actor mailbox entirely.
+    /// Pending memory-candidate approval handle (list / inspect / history /
+    /// approve / edit / reject).
+    ///
+    /// Reads are mailbox-free; mutations route through the actor mailbox with
+    /// the active `TurnId` and emit `CandidateChanged` audit events.
     ///
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     pub fn candidates(&self) -> crate::query::candidates::MemoryCandidateHandle {

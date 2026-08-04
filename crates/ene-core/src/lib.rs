@@ -56,7 +56,9 @@ pub use memory::{
     MemoryJournalListOptions, MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown,
     MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query, ScoredMemory, TimeRange,
 };
-pub use pending::{NaturalDecayReport, PendingCandidate, PendingCandidateStatus};
+pub use pending::{
+    NaturalDecayReport, PendingCandidate, PendingCandidateEdit, PendingCandidateStatus,
+};
 pub use pending_write::{PendingMemoryWrite, PendingMemoryWriteStatus};
 pub use port::{
     EmbeddingStorePort, EmbeddingStorePortError, MemoryPort, MemoryPortError,

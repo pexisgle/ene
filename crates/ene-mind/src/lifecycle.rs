@@ -193,6 +193,12 @@ pub struct PostTurnInput<'a> {
     pub character_id: &'a str,
     /// User identifier.
     pub user_id: &'a str,
+    /// Source turn that produced this post-turn input, when available.
+    ///
+    /// Persisted on deferred memory candidates so the approval UI can point
+    /// back at the conversation. `None` for retried writes (old payloads)
+    /// and tests.
+    pub source_turn: Option<&'a str>,
     /// Whether the turn was interrupted (barge-in / cancel) before completion.
     pub interrupted: bool,
     /// The partial assistant text produced before interruption, if any.
@@ -221,6 +227,12 @@ pub struct OwnedPostTurnInput {
     pub character_id: String,
     /// User identifier.
     pub user_id: String,
+    /// Source turn that produced this post-turn input, when available.
+    ///
+    /// `#[serde(default)]` keeps pending-write payloads persisted before this
+    /// field existed deserializable on retry.
+    #[serde(default)]
+    pub source_turn: Option<String>,
     /// Whether the turn was interrupted (barge-in / cancel) before completion.
     #[serde(default)]
     pub interrupted: bool,
@@ -241,6 +253,7 @@ impl OwnedPostTurnInput {
             affect: &self.affect,
             character_id: &self.character_id,
             user_id: &self.user_id,
+            source_turn: self.source_turn.as_deref(),
             interrupted: self.interrupted,
             spoken_text: self.spoken_text.as_deref(),
         }

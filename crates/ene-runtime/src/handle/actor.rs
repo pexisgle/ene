@@ -2840,6 +2840,91 @@ impl TurnActor {
                 self.tool_rag = None;
                 true
             }
+            EneCommand::ResolveCandidate {
+                id,
+                status,
+                turn,
+                reply,
+            } => {
+                // This actor arm is the single mutation surface for candidate
+                // resolutions. The L1 recall cache invalidates here: approve
+                // persists a typed memory and reject removes a
+                // pending row, both of which feed hybrid recall, so the
+                // actor-owned cache must be dropped for the active character
+                // on success.
+                let Some(store) = self.concrete_store.clone() else {
+                    drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
+                        message: "Memory store is not enabled".to_string(),
+                    })));
+                    return true;
+                };
+                let result = match status {
+                    ene_store::PendingCandidateStatus::Approved => store
+                        .approve_pending_candidate(id)
+                        .await
+                        .map(|_| ())
+                        .map_err(crate::public_api::PublicApiError::from),
+                    ene_store::PendingCandidateStatus::Rejected => store
+                        .resolve_pending_candidate(id, false)
+                        .await
+                        .map_err(crate::public_api::PublicApiError::from),
+                    // Fail closed: a non-terminal status must never claim
+                    // a row; the handle only ever sends approved/rejected.
+                    ene_store::PendingCandidateStatus::Pending => {
+                        Err(crate::public_api::PublicApiError::Invalid {
+                            message: format!("cannot resolve pending candidate {id} to 'pending'"),
+                        })
+                    }
+                };
+                // Audit events must only record committed mutations; a failed
+                // approve/reject must not emit a false resolved record.
+                if result.is_ok() {
+                    if let Some(cache) = &self.session.memory.recall_cache {
+                        cache.invalidate_character(self.session.card_name());
+                    }
+                    drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
+                        id,
+                        status,
+                        turn,
+                    }));
+                }
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::EditCandidate {
+                id,
+                edit,
+                turn,
+                reply,
+            } => {
+                // Same invalidation contract as ResolveCandidate: the recall
+                // cache must be dropped for the active character on success
+                // here too — an edit changes title/content that feed lexical
+                // pending recall in auto mode.
+                let Some(store) = self.concrete_store.clone() else {
+                    drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
+                        message: "Memory store is not enabled".to_string(),
+                    })));
+                    return true;
+                };
+                let result = store
+                    .edit_pending_candidate(id, edit)
+                    .await
+                    .map(|_| ())
+                    .map_err(crate::public_api::PublicApiError::from);
+                if result.is_ok() {
+                    if let Some(cache) = &self.session.memory.recall_cache {
+                        cache.invalidate_character(self.session.card_name());
+                    }
+                    drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
+                        id,
+                        status: ene_store::PendingCandidateStatus::Pending,
+                        turn,
+                    }));
+                }
+                drop(reply.send(result));
+                true
+            }
             EneCommand::SetCcv3MemoryHash { hash, reply } => {
                 self.session.memory.ccv3_memory_hash = Some(hash);
                 // A oneshot send error is `Copy` here (it's just the unsent

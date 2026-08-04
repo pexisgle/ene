@@ -33,6 +33,35 @@ greeting-failed = Failed to set greeting: { $error }
 greeting-choose = Choose a greeting (Enter to confirm)
 greeting-none = (none)
 
+## /memory approval command
+memory-approval-usage = /memory approval <list|inspect <id>|approve <id>|edit <id> --title <title> --content <content> --kind <kind> --confidence <0..1>|reject <id>|history> (use --content="multi word text" for spaced values)
+memory-approval-list-title = Pending candidates awaiting approval ({ $count })
+memory-approval-history-title = Resolved candidate history ({ $count })
+memory-approval-empty = No pending candidates awaiting approval.
+memory-approval-history-empty = No approved or rejected candidates yet.
+memory-approval-not-found = Candidate { $id } not found or already resolved.
+memory-approval-label-id = id
+memory-approval-label-title = Title
+memory-approval-label-kind = Kind
+memory-approval-label-confidence = Confidence
+memory-approval-label-reason = Reason
+memory-approval-label-source-quote = Source
+memory-approval-label-source-turn = Source turn
+memory-approval-label-conflict = Conflicts with
+memory-approval-label-status = Status
+memory-approval-label-created = Created
+memory-approval-label-resolved = Resolved
+memory-approval-status-pending = pending
+memory-approval-status-approved = approved
+memory-approval-status-rejected = rejected
+memory-approval-approve-ok = Approved candidate { $id }.
+memory-approval-reject-ok = Rejected candidate { $id }.
+memory-approval-edit-ok = Edited candidate { $id }.
+memory-approval-edit-missing-flag = Edit requires --title, --content, --kind, and --confidence.
+memory-approval-edit-invalid-confidence = Confidence must be a number between 0 and 1.
+memory-approval-edit-invalid-kind = Unknown memory kind '{ $kind }'. Valid: episodic, semantic, user_profile, relationship, affective, commitment, preference, procedure, reflection.
+memory-approval-error = Approval error: { $error }
+
 ## /card command
 card-loaded = Character card loaded: { $name }
 

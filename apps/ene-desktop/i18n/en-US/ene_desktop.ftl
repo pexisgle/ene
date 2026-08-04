@@ -131,6 +131,20 @@ memory-commitment-due = Due
 memory-commitment-due-label = Due (label)
 memory-approve = Approve
 memory-reject = Reject
+memory-approve-edit = Edit
+memory-approve-edit-title = Edit candidate
+memory-approve-save = Save
+memory-approve-save-approve = Save & Approve
+memory-approve-cancel = Cancel
+memory-approve-edit-invalid-kind = Invalid memory kind
+memory-pending-history = History
+memory-pending-history-empty = No approved or rejected candidates yet.
+memory-pending-history-ok = Candidate history loaded
+memory-pending-history-error = Failed to load candidate history
+memory-approval-status-approved = Approved
+memory-approval-status-rejected = Rejected
+memory-approval-status-pending = Pending
+memory-approval-resolved-at = Resolved at
 memory-salience = Importance
 
 # Character
