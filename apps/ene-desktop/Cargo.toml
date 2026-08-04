@@ -18,6 +18,7 @@ voice = ["dep:cpal", "dep:rodio"]
 
 [dependencies]
 winit = "0.30"
+global-hotkey = { workspace = true }
 wgpu = { workspace = true }
 pollster = "1.0"
 bytemuck = { workspace = true }

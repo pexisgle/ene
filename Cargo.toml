@@ -32,6 +32,9 @@ gltf = { version = "1.4", default-features = false }
 image = { version = "0.25", default-features = false }
 wgpu = "29"
 
+# ── Desktop / Platform ──
+global-hotkey = "0.8"
+
 # ── Audio / DSP ──
 cpal = "0.18"
 rodio = { version = "0.22", default-features = false }
