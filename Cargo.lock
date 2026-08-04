@@ -2898,10 +2898,16 @@ name = "ene-plugin-llama-cpp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
+ "ene-ai",
+ "ene-ai-local",
  "ene-plugin",
  "ene-plugin-proto",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
 ]
