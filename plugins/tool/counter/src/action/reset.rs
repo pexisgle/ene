@@ -8,8 +8,8 @@ use std::sync::Arc;
 #[tool(
     namespace = "counter",
     name = "reset",
-    summary = "Reset the session counter to zero.",
-    description = "Deletes all counter rows for the shared database. The previous value cannot be recovered, so the call requires explicit user approval. Once approved for the turn, the reset runs and the counter starts again at 0.",
+    summary = "Reset all session counters to zero.",
+    description = "Deletes every counter row from the shared database, resetting all sessions to zero. The previous values cannot be recovered, so the call requires explicit user approval. Once approved for the turn, the reset runs and every counter starts again at 0.",
     category = "Utility",
     keywords_primary = "counter, count, reset, clear, delete",
     side_effects = "Destructive"
@@ -31,7 +31,7 @@ impl ResetAction {
         self.state.gate().check(
             COUNTER_RESET,
             "counter:reset",
-            "Reset the session counter to zero",
+            "Delete all counter rows and reset every session counter to zero",
         )?;
         let store = self.state.ensure_store().await?;
         store.reset().await?;
