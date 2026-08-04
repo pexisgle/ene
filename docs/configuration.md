@@ -349,6 +349,44 @@ quiet hours and every other gate. While paused, no proactive speech happens,
 any pending catch-up delivery is discarded, and the desktop settings screen
 shows the pause state explicitly.
 
+### Pending-candidate confirmation
+
+`mind.proactive.pending_confirmation` (disabled by default) lets old
+unconfirmed memory candidates be confirmed through proactive speech. Deferred
+candidates that topic-near recall never surfaces (their topics never come up)
+would otherwise sit in the queue forever; when this trigger is enabled, the
+proactive pipeline selects the oldest candidate that is still pending, is at
+least `min_age_days` old (default `3`), and carries at least `min_confidence`
+(default `0.7`, clamped to `0.0..=1.0`):
+
+```json
+"pending_confirmation": {
+  "enabled": false,
+  "min_age_days": 3,
+  "min_confidence": 0.7
+}
+```
+
+- Only weak-contradiction deferrals are eligible. Approval-mode rows
+  (`approval_parked`) stay review-queue-only and are never asked about —
+  an unapproved candidate must not surface as hearsay in conversation,
+  mirroring the recall exclusion.
+- At most one question is in flight. A selected candidate flows through the
+  normal decision pipeline: every deterministic gate (manual pause, quiet
+  hours, idle, cooldown, session limit, fatigue) applies unchanged, and the
+  decision model judges whether now is a good moment to interrupt.
+- The generation prompt asks a short, natural confirmation question; the
+  candidate is presented as hearsay, never as a fact, and never with internal
+  labels. With `confirmation_enabled` the model may still decline via
+  `<|silent|>`.
+- The user's reply is classified (approved / rejected / unclear) by the
+  proactive decision model. `approved` persists the candidate through the
+  approval APIs, `rejected` discards it, and `unclear` or any failure leaves
+  it pending for a later attempt. Resolutions invalidate the recall cache and
+  emit the same `CandidateChanged` lifecycle event as the manual review queue.
+- The asked marker is session-scoped and not persisted: a restart simply
+  re-selects the candidate on a later tick.
+
 Proactive decisions also consult stored memory. `mind.proactive.sources.memory` (default
 `true`) feeds the user's `Preference` / `UserProfile` memories — "don't talk while I work",
 "quiet at night" — into the decision context as `user_instructions`. These are injected
