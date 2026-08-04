@@ -810,6 +810,56 @@ Changing `ai.tts.provider` itself (e.g. switching from `kokoro` to
 once at bootstrap, while edits to `plugins.list.voicevox.config` and
 `ai.tts.voice` are picked up by running sessions.
 
+#### OpenAI Speech API TTS provider (`plugins.list.openai-tts.config`)
+
+The `openai-tts` provider plugin (`plugins/provider/openai-tts`) synthesizes
+speech through the OpenAI Speech API (`tts-1` / `tts-1-hd`) and returns
+streaming raw 24 kHz 16-bit mono PCM (`response_format=pcm`). It uses the
+same `OPENAI_API_KEY` credential family as the `openai` plugin. Select it
+with `ai.tts.provider = "openai_tts"`; the generic `ai.tts.voice` field can
+optionally hold a voice name that overrides the configured default per
+request.
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "openai_tts",
+      "voice": "nova"
+    }
+  },
+  "plugins": {
+    "list": {
+      "openai-tts": {
+        "enable": true,
+        "config": {
+          "api_key": "sk-...",
+          "model": "tts-1",
+          "voice": "alloy",
+          "speed": 1.0
+        }
+      }
+    }
+  }
+}
+```
+
+Settings:
+
+| Key | Default | Description |
+|---|---|---|
+| `api_key` | unset | OpenAI API key, or a `{source: inline\|env\|auto}` descriptor. Falls back to the `OPENAI_API_KEY` environment variable. Marked `x-ene-secret`, so the host masks and redacts it. |
+| `model` | `tts-1` | Speech synthesis model (`tts-1` for low latency, `tts-1-hd` for higher quality). |
+| `voice` | `alloy` | Default voice (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`); a per-request voice overrides it. |
+| `speed` | `1.0` | Speech speed multiplier (0.25–4.0). |
+| `base_url` | `https://api.openai.com/v1` | API base URL override (for OpenAI-compatible endpoints). Falls back to the `OPENAI_BASE_URL` environment variable. |
+
+The plugin requests `response_format=pcm` from the Speech API and returns
+the audio as WAV (24 kHz 16-bit mono PCM), which the host-side audio
+pipeline decodes into float samples for playback (`formats = ["wav"]`).
+Other formats accepted by the Speech API (`mp3`, `opus`, `flac`, `aac`) are
+not exposed.
+
 #### Secret marking
 
 A plugin's `config_schema()` may mark a field with `x-ene-secret: true`. The

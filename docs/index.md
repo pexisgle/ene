@@ -49,7 +49,7 @@ Ene Workspace
 │   ├── ene-plugin-db      (Plugin host-service `db` client)
 │   └── ene-plugin-macros  (Proc-macros for plugins)
 └── Out-of-Process Plugins
-    ├── plugins/provider/* (Provider plugins: anthropic, local-llm, openai, voicevox)
+    ├── plugins/provider/* (Provider plugins: anthropic, local-llm, openai, openai-tts, voicevox)
     └── plugins/tool/*     (Tool plugins: app, browser, calc, calendar, fs, geo, git, random, utility, web)
 ```
 

@@ -664,6 +664,55 @@ HTTP サーバーです。`ai.tts.provider = "voicevox"` で選択します。�
 構築されるためです。一方、`plugins.list.voicevox.config` と `ai.tts.voice` の
 編集は実行中のセッションにも反映されます。
 
+#### OpenAI Speech API TTS プロバイダ（`plugins.list.openai-tts.config`）
+
+`openai-tts` プロバイダプラグイン（`plugins/provider/openai-tts`）は OpenAI
+Speech API（`tts-1` / `tts-1-hd`）で音声合成を行い、ストリーミングの
+raw 24 kHz 16-bit モノラル PCM（`response_format=pcm`）を返します。
+`openai` プラグインと同じ `OPENAI_API_KEY` 資格情報ファミリーを使用します。
+`ai.tts.provider = "openai_tts"` で選択します。汎用の `ai.tts.voice` には、
+設定済みの既定ボイスをリクエスト単位で上書きするボイス名を任意で指定できます。
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "openai_tts",
+      "voice": "nova"
+    }
+  },
+  "plugins": {
+    "list": {
+      "openai-tts": {
+        "enable": true,
+        "config": {
+          "api_key": "sk-...",
+          "model": "tts-1",
+          "voice": "alloy",
+          "speed": 1.0
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目：
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `api_key` | 未設定 | OpenAI API キー、または `{source: inline\|env\|auto}` ディスクリプタ。`OPENAI_API_KEY` 環境変数にフォールバックします。`x-ene-secret` でマークされるため、ホストがマスク・redact します。 |
+| `model` | `tts-1` | 音声合成モデル（低遅延の `tts-1` / 高音質の `tts-1-hd`）。 |
+| `voice` | `alloy` | 既定ボイス（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）。リクエスト単位のボイスで上書き可能。 |
+| `speed` | `1.0` | 発話速度倍率（0.25–4.0）。 |
+| `base_url` | `https://api.openai.com/v1` | API ベース URL の上書き（OpenAI 互換エンドポイント用）。`OPENAI_BASE_URL` 環境変数にフォールバックします。 |
+
+プラグインは Speech API に `response_format=pcm` を要求し、音声を WAV
+（24 kHz 16-bit モノラル PCM）として返します。ホスト側のオーディオ
+パイプラインが float サンプルへデコードして再生します
+（`formats = ["wav"]`）。Speech API が受け付ける他のフォーマット
+（`mp3`、`opus`、`flac`、`aac`）は公開しません。
+
 #### シークレットのマーキング
 
 プラグインの `config_schema()` は、フィールドに `x-ene-secret: true` を付与できます。ホストはこれ（および既知の名前によるフォールバック：`api_key`・`token`・`password`・`authorization` など）を使って、設定 UI でフィールドをマスクする予定であり、ホストのログ出力からは値を削除（redact）します。インラインの API キーがログストリームに現れることはありません。`settings.json` の外部（キーリング/シークレットサービス）へのシークレット保存は別途追跡されており、それまではプラグインのシークレットは `plugins.list.<name>.config` 内に置かれ、スキーマでマークされ、ホスト境界で redact されます。
