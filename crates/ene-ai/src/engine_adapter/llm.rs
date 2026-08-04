@@ -58,7 +58,7 @@ pub struct LlmChatResponse {
 /// `EngineError::Model` is the one case that cannot be typed further here:
 /// `M::Error` is opaque to this adapter (any [`ene_infer::LocalModel`]'s own
 /// error type), so it becomes `LlmProviderError::LocalLlm` via `Display` —
-/// the same bucket `ene-ai-local`'s existing local providers already use for
+/// the same bucket the local-llm plugin's local providers already use for
 /// "the model itself failed".
 fn map_engine_error<E: std::error::Error>(err: EngineError<E>) -> LlmProviderError {
     match err {
@@ -99,10 +99,7 @@ impl<M: ene_infer::LocalModel> LocalLlmEngine<M> {
 
     /// The underlying handle, for callers whose model needs to submit
     /// request shapes beyond [`LlmChatRequest`] on the same worker/model
-    /// instance this adapter wraps (e.g. a raw-image vision variant
-    /// alongside ordinary chat text — see `ene-ai-local`'s
-    /// `LocalLlamaCppProvider`, which holds a `LocalLlmEngine` for the
-    /// `LlmProvider` half and reaches through this accessor for the other).
+    /// instance this adapter wraps.
     #[must_use]
     pub fn handle(&self) -> &EngineHandle<M> {
         &self.handle

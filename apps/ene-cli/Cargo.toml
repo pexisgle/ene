@@ -9,7 +9,6 @@ publish.workspace = true
 
 [dependencies]
 ene-ai = { workspace = true }
-ene-ai-local = { workspace = true }
 ene-runtime = { workspace = true }
 ene-mind = { workspace = true }
 ene-config = { workspace = true }
@@ -35,9 +34,6 @@ rust-embed = "8.11"
 i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
 i18n-embed-fl = "0.10"
 thiserror = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-ene-ai-local = { workspace = true, features = ["vulkan"] }
 
 [lints]
 workspace = true

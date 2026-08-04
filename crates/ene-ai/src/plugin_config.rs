@@ -2,10 +2,10 @@
 //!
 //! These settings used to live in `AiConfig` (which `ene-ai` never read
 //! itself) and were consumed only by the in-process local providers
-//! (`ene-ai-local`'s llama.cpp loader, `ene-voice`'s ONNX engines). They moved
-//! to host-opaque plugin config blobs in preparation for the provider-plugin
-//! epic; until the destination plugins exist, the in-process readers fall back
-//! to reading them from here.
+//! (the local-llm plugin's llama.cpp loader, `ene-voice`'s ONNX engines).
+//! They moved to host-opaque plugin config blobs in preparation for the
+//! provider-plugin epic; until the destination plugins exist, the in-process
+//! readers fall back to reading them from here.
 //!
 //! # Where the document comes from
 //!
@@ -17,8 +17,8 @@
 //! Paths that only hold the `AiConfig` section (or none at all) fall back to
 //! the global config singleton ([`ene_config::get_global_config`]) via
 //! [`global_plugin_config_blob`] / [`global_plugin_profile_blob`] /
-//! [`LlamaCppPluginConfig::global`] — e.g. `ene-ai-local`'s llama.cpp loader
-//! and the resolve-time reads in [`crate::resolve::ResolvedLocalModel`].
+//! [`LlamaCppPluginConfig::global`] — e.g. the local-llm plugin's llama.cpp
+//! loader and the resolve-time reads in [`crate::resolve::ResolvedLocalModel`].
 //!
 //! The global singleton is refreshed on every `load_full_config_from` /
 //! `ConfigStore` load, so a settings edit made after startup is picked up by

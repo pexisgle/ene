@@ -1,10 +1,10 @@
 //! Shared, safe model-file downloader for local inference backends.
 //!
-//! [`ene-ai-local`](../../ene_ai_local/index.html) (GGUF/llama.cpp) and
-//! [`ene-voice`](../../ene_voice/index.html) (Kokoro ONNX TTS) both need to
-//! fetch large model weights from the network before a local engine can
-//! start. This module is the one place that does it safely, so neither
-//! crate has to re-derive the same safety properties:
+//! The local-llm provider plugin (`plugins/provider/local-llm`,
+//! GGUF/llama.cpp) and [`ene-voice`](../../ene_voice/index.html) (Kokoro
+//! ONNX TTS) both need to fetch large model weights from the network before
+//! a local engine can start. This module is the one place that does it
+//! safely, so neither engine has to re-derive the same safety properties:
 //!
 //! - **In-flight coalescing** — concurrent requests for the same
 //!   destination path share one download instead of racing to write the

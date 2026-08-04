@@ -487,25 +487,6 @@ impl EneHandle {
         let rag_config = config.get_section::<ToolRagConfig>()?;
         let needs_embedder = mem_config.enabled || (plugin_config.enabled && rag_config.enabled);
 
-        {
-            let ai_config = config.get_section::<ene_ai::AiConfig>()?;
-            let needs_decision = mind.proactive.enabled;
-            if (needs_embedder || needs_decision)
-                && let Err(e) = ene_ai_local::prefetch_configured_gguf(
-                    &ai_config,
-                    needs_embedder,
-                    needs_decision,
-                )
-                .await
-            {
-                tracing::warn!(
-                    component = "GgufPrefetch",
-                    error = %e,
-                    "GGUF prefetch failed; will retry on load"
-                );
-            }
-        }
-
         // Fail-closed: memory / tool-RAG features require a working embedder.
         let embedder = if needs_embedder {
             Some(actor::init_embedding(&config)?)

@@ -173,11 +173,10 @@ pub async fn ensure_kokoro_files_exist(
 /// provider factory will later use — so the prefetched paths agree with the
 /// ones `LocalTtsProviderFactory::build` resolves.
 ///
-/// Intended to be called once from the runtime's async bootstrap path
-/// (mirrors `ene_ai_local::prefetch_configured_gguf`), before any TTS
-/// provider is constructed, so `provider::open` never needs to perform
-/// network I/O. A no-op when TTS is disabled or configured for a different
-/// provider (e.g. `"openai"`).
+/// Intended to be called once from the runtime's async bootstrap path,
+/// before any TTS provider is constructed, so `provider::open` never needs
+/// to perform network I/O. A no-op when TTS is disabled or configured for a
+/// different provider (e.g. `"openai"`).
 ///
 /// # Errors
 ///

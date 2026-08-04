@@ -13,7 +13,6 @@ crate-type = ["lib"]
 [dependencies]
 ene-mind = { workspace = true }
 ene-ai = { workspace = true }
-ene-ai-local = { workspace = true }
 ene-voice = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }

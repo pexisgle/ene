@@ -56,17 +56,17 @@
 //! bounded channel with the same cooperative
 //! cancellation/deadline/caller-gone handling `submit` has, and
 //! [`llm::StreamingLocalLlmEngine`] is the [`crate::LlmProvider`] adapter
-//! over it. `crates/ene-ai-local`'s `LlamaChatModel` implements
+//! over it. The local-llm plugin's `LlamaChatModel` implements
 //! [`ene_infer::StreamingLocalModel`] by pushing each detokenized piece
 //! `llama_cpp::generate::sample_tokens`'s existing per-token loop already
 //! produces into the sink, and `LocalLlamaCppProvider` wraps it in
 //! [`llm::StreamingLocalLlmEngine`] — real streaming end to end, proven
 //! against real llama.cpp inference by
-//! `crates/ene-ai-local/src/local_llm/mod.rs`'s `smoke_gguf_streaming` (a
+//! `plugins/provider/local-llm/src/local_llm/mod.rs`'s `smoke_gguf_streaming` (a
 //! manual, `--ignored` smoke test; automated coverage runs the same
 //! streaming battery this crate's own mock model does, against a
 //! `StreamingLocalModel` stand-in shaped like `LlamaChatModel`, in
-//! `crates/ene-ai-local/src/local_llm/model.rs`'s `conformance_tests`).
+//! `plugins/provider/local-llm/src/local_llm/model.rs`'s `conformance_tests`).
 //!
 //! What remains out of scope: only [`llm::StreamingLocalLlmEngine`] itself
 //! is provided — a chat model still has to *implement*
