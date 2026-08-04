@@ -963,6 +963,204 @@ impl Default for ProactiveDecisionConfig {
     }
 }
 
+/// Weekday enable flags for quiet hours.
+///
+/// Weekday names are stable English contract keys (`monday`..`sunday`), not
+/// display strings; the settings UI localizes them.
+#[derive(
+    Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct QuietHoursDaysConfig {
+    /// Monday.
+    pub monday: bool,
+    /// Tuesday.
+    pub tuesday: bool,
+    /// Wednesday.
+    pub wednesday: bool,
+    /// Thursday.
+    pub thursday: bool,
+    /// Friday.
+    pub friday: bool,
+    /// Saturday.
+    pub saturday: bool,
+    /// Sunday.
+    pub sunday: bool,
+}
+
+impl QuietHoursDaysConfig {
+    /// True when at least one weekday is enabled.
+    #[must_use]
+    pub const fn any(&self) -> bool {
+        self.monday
+            || self.tuesday
+            || self.wednesday
+            || self.thursday
+            || self.friday
+            || self.saturday
+            || self.sunday
+    }
+
+    /// Whether the given weekday is enabled.
+    #[must_use]
+    pub fn contains(&self, weekday: chrono::Weekday) -> bool {
+        match weekday {
+            chrono::Weekday::Mon => self.monday,
+            chrono::Weekday::Tue => self.tuesday,
+            chrono::Weekday::Wed => self.wednesday,
+            chrono::Weekday::Thu => self.thursday,
+            chrono::Weekday::Fri => self.friday,
+            chrono::Weekday::Sat => self.saturday,
+            chrono::Weekday::Sun => self.sunday,
+        }
+    }
+}
+
+/// Wall-clock time of day (`hour` 0..=23, `minute` 0..=59).
+#[derive(
+    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct QuietHoursTimeConfig {
+    /// Hour of day (0..=23).
+    pub hour: u8,
+    /// Minute of hour (0..=59).
+    pub minute: u8,
+}
+
+impl Default for QuietHoursTimeConfig {
+    fn default() -> Self {
+        Self {
+            hour: 22,
+            minute: 0,
+        }
+    }
+}
+
+impl QuietHoursTimeConfig {
+    /// Minutes since midnight; `None` when out of range.
+    #[must_use]
+    pub fn minutes_since_midnight(&self) -> Option<u32> {
+        (self.hour <= 23 && self.minute <= 59)
+            .then(|| u32::from(self.hour) * 60 + u32::from(self.minute))
+    }
+}
+
+/// Output channels suppressed during quiet hours.
+#[derive(
+    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct QuietHoursSuppressConfig {
+    /// Suppress the proactive turn's lifecycle status announcement
+    /// (`StatusChanged { Running }` / matching `Idle`).
+    pub notifications: bool,
+    /// Suppress the proactive decision pipeline entirely (deterministic gate;
+    /// no decision or generation runs).
+    pub decisions: bool,
+    /// Suppress TTS audio for proactive turns that do run (text still appears).
+    pub tts: bool,
+}
+
+impl Default for QuietHoursSuppressConfig {
+    fn default() -> Self {
+        Self {
+            notifications: true,
+            decisions: true,
+            tts: true,
+        }
+    }
+}
+
+/// What happens to speech suppressed by quiet hours.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case")]
+#[schemars(crate = "::ene_config::schemars")]
+pub enum QuietHoursPolicy {
+    /// Log the suppression and drop the opportunity.
+    #[default]
+    Discard,
+    /// Keep a bounded in-memory queue; when quiet hours end, deliver one
+    /// catch-up utterance per queued moment (paced one per tick).
+    Queue,
+    /// When quiet hours end, deliver a single aggregated catch-up utterance.
+    Summary,
+}
+
+impl std::fmt::Display for QuietHoursPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Discard => write!(f, "discard"),
+            Self::Queue => write!(f, "queue"),
+            Self::Summary => write!(f, "summary"),
+        }
+    }
+}
+
+/// Quiet-hours suppression policy for proactive speech.
+///
+/// During configured weekdays and times, selected output channels
+/// (`suppress`) are blocked. `decisions` suppression is a deterministic gate
+/// before any LLM call; `queue` / `summary` policies only apply to
+/// opportunities blocked by that gate. Manual pause (`ProactiveConfig::paused`)
+/// takes priority over quiet hours and discards any pending catch-up queue.
+///
+/// Timezone is an IANA name (`Asia/Tokyo`, `America/New_York`); empty means
+/// the system local timezone. DST transitions are resolved by converting the
+/// UTC instant to local wall time, so a fall-back repeated hour counts twice
+/// and a spring-forward skipped hour never counts.
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct QuietHoursConfig {
+    /// Master switch for quiet hours.
+    pub enabled: bool,
+    /// IANA timezone name; empty resolves to the system local timezone.
+    pub timezone: String,
+    /// Weekdays the window applies to.
+    pub days: QuietHoursDaysConfig,
+    /// Window start (inclusive), local wall time.
+    pub start: QuietHoursTimeConfig,
+    /// Window end (exclusive), local wall time. Earlier than `start` wraps
+    /// across midnight: the window covers the start day's evening and the
+    /// following morning, gated by the start day's weekday. Equal to `start`
+    /// is an empty window.
+    pub end: QuietHoursTimeConfig,
+    /// Output channels suppressed while the window is active.
+    pub suppress: QuietHoursSuppressConfig,
+    /// Disposition of speech suppressed by the `decisions` channel.
+    pub policy: QuietHoursPolicy,
+}
+
+impl Default for QuietHoursConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timezone: String::new(),
+            days: QuietHoursDaysConfig::default(),
+            start: QuietHoursTimeConfig::default(),
+            end: QuietHoursTimeConfig { hour: 7, minute: 0 },
+            suppress: QuietHoursSuppressConfig::default(),
+            policy: QuietHoursPolicy::default(),
+        }
+    }
+}
+
 /// Proactive companion speech policy.
 ///
 /// Default is disabled so existing chat behaviour is unchanged until the user
@@ -1067,6 +1265,13 @@ pub struct ProactiveConfig {
     /// speaks unprompted.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub fatigue_suppression_threshold: f32,
+    /// Manual pause: suppresses proactive speech regardless of quiet hours
+    /// and the other gates. Takes priority over quiet hours and clears any
+    /// pending quiet-hours catch-up queue.
+    pub paused: bool,
+    /// Quiet-hours suppression policy (see [`QuietHoursConfig`]).
+    #[serde(default)]
+    pub quiet_hours: QuietHoursConfig,
 }
 
 impl Default for ProactiveConfig {
@@ -1088,6 +1293,8 @@ impl Default for ProactiveConfig {
             max_screen_summary_chars: 800,
             max_memory_notes: 12,
             fatigue_suppression_threshold: 0.7,
+            paused: false,
+            quiet_hours: QuietHoursConfig::default(),
         }
     }
 }
@@ -1409,6 +1616,59 @@ mod tests {
         assert_eq!(cfg.proactive.interval_seconds, 60);
         assert!(cfg.proactive.sources.conversation);
         assert!(!cfg.proactive.sources.screen_summary);
+        assert!(!cfg.proactive.paused);
+        assert!(!cfg.proactive.quiet_hours.enabled);
+        assert_eq!(cfg.proactive.quiet_hours.policy, QuietHoursPolicy::Discard);
+        assert!(cfg.proactive.quiet_hours.suppress.decisions);
+    }
+
+    /// Quiet hours parse from the public schema with their `snake_case` wire
+    /// names and default to disabled when absent (old settings files).
+    #[test]
+    fn proactive_quiet_hours_round_trip_in_public_schema() {
+        let cfg: ProactiveConfig = serde_json::from_str(
+            r#"{
+                "paused": true,
+                "quiet_hours": {
+                    "enabled": true,
+                    "timezone": "Asia/Tokyo",
+                    "days": { "monday": true, "friday": true },
+                    "start": { "hour": 22, "minute": 30 },
+                    "end": { "hour": 7, "minute": 0 },
+                    "suppress": { "notifications": false, "decisions": true, "tts": true },
+                    "policy": "summary"
+                }
+            }"#,
+        )
+        .expect("deserialize");
+        assert!(cfg.paused);
+        let qh = &cfg.quiet_hours;
+        assert!(qh.enabled);
+        assert_eq!(qh.timezone, "Asia/Tokyo");
+        assert!(qh.days.monday);
+        assert!(qh.days.friday);
+        assert!(!qh.days.tuesday);
+        assert_eq!(qh.start.hour, 22);
+        assert_eq!(qh.start.minute, 30);
+        assert_eq!(qh.end.hour, 7);
+        assert!(!qh.suppress.notifications);
+        assert!(qh.suppress.decisions);
+        assert!(qh.suppress.tts);
+        assert_eq!(qh.policy, QuietHoursPolicy::Summary);
+
+        let json = serde_json::to_value(&cfg).expect("serialize");
+        assert_eq!(json["quiet_hours"]["days"]["monday"], true);
+        assert_eq!(json["quiet_hours"]["policy"], "summary");
+        assert_eq!(json["paused"], true);
+
+        // Old settings files without the section keep parsing and default to
+        // disabled / discard.
+        let old: ProactiveConfig =
+            serde_json::from_str(r#"{"enabled": true}"#).expect("deserialize");
+        assert!(!old.paused);
+        assert!(!old.quiet_hours.enabled);
+        assert_eq!(old.quiet_hours.policy, QuietHoursPolicy::Discard);
+        assert!(old.quiet_hours.suppress.decisions);
     }
 
     #[test]

@@ -51,6 +51,7 @@
     "generation_hint_with_topic_path": "en/proactive/generation_hint_with_topic.md",
 
     "confirmation_note_path": "en/proactive/confirmation_note.md",
+    "catch_up_note_path": "en/proactive/catch_up_note.md",
     "screen_summary_system_path": "en/proactive/screen_summary_system.md",
     "screen_summary_user_path": "en/proactive/screen_summary_user.md"
   },

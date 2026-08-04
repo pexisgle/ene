@@ -7,6 +7,10 @@ use std::fmt;
 /// Reasons a proactive tick is suppressed without calling the LLM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateRejectReason {
+    /// Manual pause (`ProactiveConfig::paused`) is active.
+    ManualPause,
+    /// The configured quiet-hours window is active and suppresses decisions.
+    QuietHours,
     /// A user turn / tool / permission wait is active.
     UserTurnBusy,
     /// Last user input was too recent.
@@ -24,6 +28,8 @@ pub enum GateRejectReason {
 impl fmt::Display for GateRejectReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ManualPause => write!(f, "manual pause"),
+            Self::QuietHours => write!(f, "quiet hours"),
             Self::UserTurnBusy => write!(f, "user turn busy"),
             Self::MinIdle => write!(f, "min idle not reached"),
             Self::Cooldown => write!(f, "proactive cooldown"),
@@ -39,6 +45,11 @@ pub fn evaluate_deterministic_gates(
     config: &ProactiveConfig,
     context: &ProactiveContext,
 ) -> Result<(), GateRejectReason> {
+    // Manual pause outranks quiet hours and the counter gates: an explicit
+    // user stop suppresses even outside the quiet-hours window.
+    if config.paused {
+        return Err(GateRejectReason::ManualPause);
+    }
     if context.suppression.user_turn_busy {
         return Err(GateRejectReason::UserTurnBusy);
     }
@@ -76,6 +87,14 @@ pub fn evaluate_deterministic_gates(
         return Err(GateRejectReason::HighFatigue);
     }
 
+    // Quiet hours are evaluated last: the warrant gates above decide whether
+    // an utterance opportunity exists at all, and quiet hours then decide
+    // whether it may be delivered. This ordering lets callers treat a
+    // `QuietHours` rejection as "the other gates would have passed".
+    if context.quiet_hours.active && config.quiet_hours.suppress.decisions {
+        return Err(GateRejectReason::QuietHours);
+    }
+
     Ok(())
 }
 
@@ -101,6 +120,7 @@ mod tests {
             commitments: vec![],
             user_instructions: vec![],
             suppression,
+            quiet_hours: crate::proactive::QuietHoursEval::inactive(),
         }
     }
 
@@ -134,6 +154,105 @@ mod tests {
             evaluate_deterministic_gates(&config, &idle),
             Err(GateRejectReason::MinIdle)
         );
+    }
+
+    #[test]
+    fn manual_pause_outranks_quiet_hours_and_counters() {
+        let config = ProactiveConfig {
+            enabled: true,
+            paused: true,
+            ..ProactiveConfig::default()
+        };
+        let mut ctx = ctx_with(ProactiveSuppressionState {
+            seconds_since_user_input: 120,
+            seconds_since_proactive: 120,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        });
+        // Even inside an active quiet-hours window the pause reason wins.
+        ctx.quiet_hours = crate::proactive::QuietHoursEval {
+            active: true,
+            ..crate::proactive::QuietHoursEval::inactive()
+        };
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Err(GateRejectReason::ManualPause)
+        );
+
+        // Outside quiet hours the pause still suppresses.
+        ctx.quiet_hours = crate::proactive::QuietHoursEval::inactive();
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Err(GateRejectReason::ManualPause)
+        );
+    }
+
+    #[test]
+    fn quiet_hours_is_reported_only_after_the_warrant_gates_pass() {
+        let config = ProactiveConfig {
+            enabled: true,
+            ..ProactiveConfig::default()
+        };
+        let mut ctx = ctx_with(ProactiveSuppressionState {
+            seconds_since_user_input: 120,
+            seconds_since_proactive: 120,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        });
+        ctx.quiet_hours = crate::proactive::QuietHoursEval {
+            active: true,
+            ..crate::proactive::QuietHoursEval::inactive()
+        };
+        // A warrant gate that fails (cooldown here) reports its own reason,
+        // not quiet hours: there was no utterance opportunity to suppress.
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Err(GateRejectReason::Cooldown)
+        );
+
+        ctx.suppression.seconds_since_proactive = 1000;
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Err(GateRejectReason::QuietHours)
+        );
+
+        // Outside the window the gates pass.
+        ctx.quiet_hours = crate::proactive::QuietHoursEval::inactive();
+        assert_eq!(evaluate_deterministic_gates(&config, &ctx), Ok(()));
+    }
+
+    #[test]
+    fn quiet_hours_pass_when_decisions_stay_enabled() {
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            quiet_hours: crate::config::QuietHoursConfig {
+                enabled: true,
+                suppress: crate::config::QuietHoursSuppressConfig {
+                    decisions: false,
+                    ..crate::config::QuietHoursSuppressConfig::default()
+                },
+                ..crate::config::QuietHoursConfig::default()
+            },
+            ..ProactiveConfig::default()
+        };
+        let mut ctx = ctx_with(ProactiveSuppressionState {
+            seconds_since_user_input: 120,
+            seconds_since_proactive: 120,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        });
+        ctx.quiet_hours = crate::proactive::QuietHoursEval {
+            active: true,
+            ..crate::proactive::QuietHoursEval::inactive()
+        };
+        assert_eq!(evaluate_deterministic_gates(&config, &ctx), Ok(()));
+
+        // Outside the window the gate also passes.
+        ctx.quiet_hours = crate::proactive::QuietHoursEval::inactive();
+        assert_eq!(evaluate_deterministic_gates(&config, &ctx), Ok(()));
     }
 
     #[test]

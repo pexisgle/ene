@@ -6,10 +6,12 @@
 mod gate;
 mod parse;
 mod prompt;
+mod quiet_hours;
 
 pub use gate::{GateRejectReason, evaluate_deterministic_gates};
 pub use parse::{decision_schema_object, parse_decision_json};
 pub use prompt::build_decision_messages;
+pub use quiet_hours::{QuietHoursEval, evaluate_quiet_hours};
 
 use std::fmt;
 use std::sync::Arc;
@@ -117,6 +119,9 @@ pub struct ProactiveContext {
     pub user_instructions: Vec<String>,
     /// Suppression counters at decision time.
     pub suppression: ProactiveSuppressionState,
+    /// Quiet-hours window evaluation for the decision instant. Inactive when
+    /// quiet hours are disabled or outside the window.
+    pub quiet_hours: QuietHoursEval,
 }
 
 /// Urgency hint from the decision model.
@@ -278,6 +283,7 @@ pub fn build_proactive_context(
     commitments: &[ActiveCommitmentPrompt],
     user_instructions: &[String],
     suppression: ProactiveSuppressionState,
+    quiet_hours: QuietHoursEval,
 ) -> ProactiveContext {
     let history = if config.sources.conversation {
         truncate_history(history, config.max_conversation_chars)
@@ -357,6 +363,7 @@ pub fn build_proactive_context(
         commitments,
         user_instructions,
         suppression,
+        quiet_hours,
     }
 }
 
@@ -923,6 +930,7 @@ mod tests {
                 proactive_turns_this_session: 0,
                 user_turn_busy: false,
             },
+            QuietHoursEval::inactive(),
         );
         assert!(ctx.history.is_empty());
         assert!(ctx.activity.is_none());
@@ -947,6 +955,7 @@ mod tests {
                 proactive_turns_this_session: 0,
                 user_turn_busy: false,
             },
+            quiet_hours: QuietHoursEval::inactive(),
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":1.0}"#.into(),
@@ -985,6 +994,7 @@ mod tests {
                 proactive_turns_this_session: 0,
                 user_turn_busy: false,
             },
+            quiet_hours: QuietHoursEval::inactive(),
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":1.0}"#.into(),
@@ -1023,6 +1033,7 @@ mod tests {
                 proactive_turns_this_session: 0,
                 user_turn_busy: false,
             },
+            quiet_hours: QuietHoursEval::inactive(),
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":0.9,"reason":"idle","topic_hint":"check in","urgency":"low"}"#.into(),
@@ -1064,6 +1075,7 @@ mod tests {
                 proactive_turns_this_session: 0,
                 user_turn_busy: false,
             },
+            quiet_hours: QuietHoursEval::inactive(),
         };
         let capture = Arc::new(SchemaCaptureProvider {
             body: r#"{"should_speak":false,"confidence":0.1,"reason":"quiet","topic_hint":"","urgency":"low"}"#.into(),
@@ -1114,6 +1126,7 @@ mod tests {
                 proactive_turns_this_session: 0,
                 user_turn_busy: false,
             },
+            quiet_hours: QuietHoursEval::inactive(),
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":false,"confidence":0.9,"reason":"quiet","topic_hint":"","urgency":"low"}"#.into(),
@@ -1164,6 +1177,7 @@ mod tests {
                 proactive_turns_this_session: 0,
                 user_turn_busy: false,
             },
+            quiet_hours: QuietHoursEval::inactive(),
         }
     }
 

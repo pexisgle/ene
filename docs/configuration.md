@@ -253,6 +253,59 @@ from the rate. Early cancellation applies to token-streaming providers; the
 non-streaming local adapter buffers the full completion before its first chunk,
 so a refusal there discards a completed generation rather than saving tokens.
 
+### Quiet hours and manual pause
+
+`mind.proactive.quiet_hours` suppresses proactive speech on a schedule. It is
+disabled by default. Fragment of `mind.proactive`:
+
+```json
+"quiet_hours": {
+  "enabled": true,
+  "timezone": "Asia/Tokyo",
+  "days": {
+    "monday": true, "tuesday": true, "wednesday": true,
+    "thursday": true, "friday": true, "saturday": false, "sunday": false
+  },
+  "start": { "hour": 22, "minute": 0 },
+  "end": { "hour": 7, "minute": 0 },
+  "suppress": { "notifications": true, "decisions": true, "tts": true },
+  "policy": "discard"
+}
+```
+
+- `timezone` is an IANA name (`Asia/Tokyo`, `America/New_York`); empty uses
+  the system local timezone. DST transitions are resolved by converting the
+  UTC instant to local wall time, so a fall-back repeated hour counts as
+  inside the window for both occurrences and a spring-forward skipped hour
+  never does.
+- `days` selects weekdays. `start` is inclusive and `end` exclusive; `end`
+  earlier than `start` wraps across midnight, so the window covers the start
+  day's evening and the following morning, and the start day's weekday must
+  be enabled. Equal start/end is an empty window.
+- `suppress` picks the output channels: `decisions` stops the whole
+  decision/generation pipeline at the deterministic gate (no LLM call),
+  `notifications` suppresses the proactive turn's status announcement, and
+  `tts` keeps the generated text but drops TTS audio for proactive turns.
+- `policy` decides what happens to speech blocked by `decisions`: `discard`
+  logs and drops it, `queue` delivers one catch-up utterance per missed
+  moment after the window ends, and `summary` delivers a single aggregated
+  catch-up line. Queue/summary only apply while `decisions` is suppressed.
+  The catch-up queue is bounded (oldest moments drop first) and session
+  scoped; a moment is recorded only when the deterministic warrant gates
+  (idle, cooldown, session limit, sources, fatigue) would have passed, and a
+  user turn clears the queue (the user is back at the desk). Catch-up items
+  carry the local date and time only — never screen data.
+- Background observation (activity, screen summaries) continues during quiet
+  hours, governed by the existing privacy settings (`sources.*`); quiet
+  hours only gate speech output. Suppression is recorded in structured logs
+  under `event="quiet_hours_suppression"` with policy and decision metadata
+  only — never screen images.
+
+`mind.proactive.paused` (default `false`) is a manual pause that outranks
+quiet hours and every other gate. While paused, no proactive speech happens,
+any pending catch-up delivery is discarded, and the desktop settings screen
+shows the pause state explicitly.
+
 Proactive decisions also consult stored memory. `mind.proactive.sources.memory` (default
 `true`) feeds the user's `Preference` / `UserProfile` memories — "don't talk while I work",
 "quiet at night" — into the decision context as `user_instructions`. These are injected

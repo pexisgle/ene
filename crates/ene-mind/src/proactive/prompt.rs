@@ -237,6 +237,7 @@ mod tests {
             commitments: vec![],
             user_instructions: vec![],
             suppression: ProactiveSuppressionState::default(),
+            quiet_hours: crate::proactive::QuietHoursEval::inactive(),
         }
     }
 
@@ -487,6 +488,7 @@ mod tests {
                 proactive_turns_this_session: 0,
                 user_turn_busy: false,
             },
+            crate::proactive::QuietHoursEval::inactive(),
         );
 
         // The producer emits the exact line the parser is coupled to…
