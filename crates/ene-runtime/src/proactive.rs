@@ -1,15 +1,17 @@
 use ene_ai::LlmProvider;
 use ene_mind::{
-    ActiveCommitmentPrompt, ProactiveConfig, ProactiveConfirmation, ProactiveObservation,
-    ProactiveSkipReason, ProactiveSuppressionState, QuietHoursEval, ScreenSummaryStatus,
-    build_proactive_context, decide_proactive_speech,
+    ActiveCommitmentPrompt, PendingConfirmationPrompt, PendingResolutionVerdict, ProactiveConfig,
+    ProactiveConfirmation, ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState,
+    QuietHoursEval, ScreenSummaryStatus, build_proactive_context, build_resolution_messages,
+    decide_proactive_speech, parse_resolution_json, resolution_schema_object,
 };
 use ene_store::AffectState as StoreAffectState;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::TerminalReason;
+use crate::types::TurnId;
 
 /// Mutable scheduler counters owned by the actor.
 #[derive(Debug)]
@@ -33,6 +35,18 @@ pub(crate) struct ProactiveScheduler {
     /// Suppressed quiet-hours moments awaiting catch-up delivery (times only,
     /// never screen data). Bounded; oldest entries are dropped first.
     pub(crate) quiet_hours_queue: VecDeque<QueuedQuietHour>,
+    /// Candidate whose confirmation question was delivered (visible speech)
+    /// and whose reply is still expected. Blocks re-selection so only one
+    /// confirmation is in flight; consumed when the reply is classified.
+    pub(crate) asked_pending_candidate: Option<PendingConfirmationPrompt>,
+    /// When each candidate's confirmation question was last delivered, for
+    /// per-candidate re-ask backoff. Survives the asked-marker consumption
+    /// so an unclear reply cannot re-arm the same question immediately.
+    pub(crate) pending_confirmation_asked_at: HashMap<i64, chrono::DateTime<chrono::Utc>>,
+    /// Bumped on session reset only, so reply classifications stay valid
+    /// across user turns (which bump [`Self::epoch`]) and go stale only when
+    /// the character/session actually changed.
+    pub(crate) session_epoch: u64,
 }
 
 impl Default for ProactiveScheduler {
@@ -47,6 +61,9 @@ impl Default for ProactiveScheduler {
             world_state_tick: 0,
             last_decision: None,
             quiet_hours_queue: VecDeque::new(),
+            asked_pending_candidate: None,
+            pending_confirmation_asked_at: HashMap::new(),
+            session_epoch: 0,
         }
     }
 }
@@ -63,6 +80,11 @@ pub(crate) struct QueuedQuietHour {
 
 /// Maximum queued quiet-hours moments kept for catch-up delivery.
 pub(crate) const QUIET_HOURS_QUEUE_CAP: usize = 32;
+
+/// Bounds the in-process fallback for pending-confirmation delivery timestamps.
+/// Resolved candidates are removed normally; this cap covers rows that expire
+/// or are resolved through another API while the actor remains alive.
+const PENDING_CONFIRMATION_BACKOFF_CAP: usize = 256;
 
 /// Maximum suppressed moments rendered into one summary catch-up hint.
 pub(crate) const QUIET_HOURS_SUMMARY_MAX_ITEMS: usize = 20;
@@ -105,6 +127,26 @@ impl ProactiveScheduler {
         self.last_user_input_at = Instant::now();
         self.last_decision = None;
         self.quiet_hours_queue.clear();
+        self.asked_pending_candidate = None;
+        // Keep delivery timestamps across session changes. A session reset
+        // must not make an unclear candidate immediately eligible again.
+        self.session_epoch = self.session_epoch.wrapping_add(1);
+    }
+
+    fn remember_pending_confirmation_delivery(&mut self, candidate_id: i64) {
+        if !self
+            .pending_confirmation_asked_at
+            .contains_key(&candidate_id)
+            && self.pending_confirmation_asked_at.len() >= PENDING_CONFIRMATION_BACKOFF_CAP
+            && let Some((&oldest_id, _)) = self
+                .pending_confirmation_asked_at
+                .iter()
+                .min_by_key(|(_, asked_at)| *asked_at)
+        {
+            self.pending_confirmation_asked_at.remove(&oldest_id);
+        }
+        self.pending_confirmation_asked_at
+            .insert(candidate_id, chrono::Utc::now());
     }
 
     /// Take the stashed screen image for a generation turn (clears the stash).
@@ -175,6 +217,9 @@ pub(crate) struct ProactiveDecisionResult {
     /// and no stashed screen frame may attach (the catch-up note only knows
     /// that moments occurred, never their content).
     pub(crate) catch_up: bool,
+    /// Due pending candidate the decision judged, if any. The actor renders
+    /// the confirmation question from it instead of a topic hint.
+    pub pending_confirmation: Option<PendingConfirmationPrompt>,
 }
 
 /// Drop stale activity/screen payloads so decisions do not act on old host signals.
@@ -218,6 +263,7 @@ pub(crate) async fn run_decision_task(
     observation: ProactiveObservation,
     suppression: ProactiveSuppressionState,
     quiet_hours: QuietHoursEval,
+    pending_confirmation: Option<PendingConfirmationPrompt>,
     provider: Option<Arc<dyn LlmProvider>>,
     epoch: u64,
     affect: Option<StoreAffectState>,
@@ -235,6 +281,7 @@ pub(crate) async fn run_decision_task(
         &user_instructions,
         suppression,
         quiet_hours,
+        pending_confirmation.clone(),
     );
     let outcome = decide_proactive_speech(&config, &context, provider, &prompt_language).await;
     let should_generate = outcome.skip.is_none()
@@ -265,6 +312,7 @@ pub(crate) async fn run_decision_task(
         detail,
         confirmation: outcome.confirmation,
         catch_up: false,
+        pending_confirmation: pending_confirmation.clone(),
     }
 }
 
@@ -277,7 +325,56 @@ pub(crate) fn proactive_generation_hint(
 ) -> String {
     let library = ene_config::PromptLibrary::load(prompt_language);
     let mut prompts = library.proactive().clone();
-    if confirmation_enabled && prompts.confirmation_note.trim().is_empty() {
+    if confirmation_enabled {
+        ensure_confirmation_note(&mut prompts, prompt_language);
+    }
+    prompts.render_generation_hint(topic_hint, confirmation_enabled)
+}
+
+/// Ensure the `<|silent|>` refusal note is non-empty for a pack that ships
+/// without one: fall back to the sibling locale, then to an embedded string,
+/// so confirmation-enabled generations never lose the refusal instruction.
+fn ensure_confirmation_note(
+    prompts: &mut ene_config::prompts::ProactivePrompts,
+    prompt_language: &str,
+) {
+    if !prompts.confirmation_note.trim().is_empty() {
+        return;
+    }
+    let fallback_language = if ene_config::resolve_language_alias(prompt_language) == "ja" {
+        "ja"
+    } else {
+        "en"
+    };
+    let fallback = ene_config::PromptLibrary::load(fallback_language)
+        .proactive()
+        .confirmation_note
+        .clone();
+    prompts.confirmation_note = if fallback.trim().is_empty() {
+        "If you decide not to speak, emit exactly <|silent|> as the first token and nothing else."
+            .to_string()
+    } else {
+        fallback
+    };
+    tracing::warn!(
+        component = "Proactive",
+        "confirmation_enabled requires a confirmation_note; using the embedded fallback"
+    );
+}
+
+/// Render the generation hint for a pending-candidate confirmation question.
+#[must_use]
+pub(crate) fn proactive_pending_confirmation_hint(
+    candidate: &PendingConfirmationPrompt,
+    prompt_language: &str,
+    confirmation_enabled: bool,
+) -> String {
+    let library = ene_config::PromptLibrary::load(prompt_language);
+    let mut prompts = library.proactive().clone();
+    if confirmation_enabled {
+        ensure_confirmation_note(&mut prompts, prompt_language);
+    }
+    if prompts.pending_confirmation_note.trim().is_empty() {
         let fallback_language = if ene_config::resolve_language_alias(prompt_language) == "ja" {
             "ja"
         } else {
@@ -285,20 +382,22 @@ pub(crate) fn proactive_generation_hint(
         };
         let fallback = ene_config::PromptLibrary::load(fallback_language)
             .proactive()
-            .confirmation_note
+            .pending_confirmation_note
             .clone();
-        prompts.confirmation_note = if fallback.trim().is_empty() {
-            "If you decide not to speak, emit exactly <|silent|> as the first token and nothing else."
+        prompts.pending_confirmation_note = if fallback.trim().is_empty() {
+            "Ask a short, natural question to confirm this unconfirmed memory candidate:\n{candidate}"
                 .to_string()
         } else {
             fallback
         };
         tracing::warn!(
             component = "Proactive",
-            "confirmation_enabled requires a confirmation_note; using the embedded fallback"
+            "pending_confirmation_note is empty; using the embedded fallback"
         );
     }
-    prompts.render_generation_hint(topic_hint, confirmation_enabled)
+    let title = candidate.title.chars().take(160).collect::<String>();
+    let content = candidate.content.chars().take(400).collect::<String>();
+    prompts.render_pending_confirmation_hint(&format!("{title}: {content}"), confirmation_enabled)
 }
 
 /// Render the catch-up generation hint for quiet-hours-suppressed moments.
@@ -396,12 +495,99 @@ pub(crate) fn apply_proactive_completion(
     terminal: &TerminalReason,
     spoke_visible_text: bool,
 ) -> ProactiveConfirmation {
+    let confirmation = resolve_confirmation(terminal, decision.confirmation, spoke_visible_text);
+    if let Some(candidate) = &decision.pending_confirmation {
+        // The asked marker tracks *delivery*, independent of the
+        // main-model-confirmation feature: with `confirmation_enabled` off
+        // the verdict stays `Disabled` even though the question was spoken.
+        if matches!(terminal, TerminalReason::Done) && spoke_visible_text {
+            scheduler.asked_pending_candidate = Some(candidate.clone());
+            scheduler.remember_pending_confirmation_delivery(candidate.id);
+        } else {
+            scheduler.asked_pending_candidate = None;
+        }
+    }
     match terminal {
         TerminalReason::Done => scheduler.on_proactive_completed(),
         TerminalReason::Declined => scheduler.on_proactive_declined(),
         _ => {}
     }
-    resolve_confirmation(terminal, decision.confirmation, spoke_visible_text)
+    confirmation
+}
+
+/// Result of the reply-classification task for an asked candidate.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingResolutionResult {
+    /// [`ProactiveScheduler::session_epoch`] at spawn; results from a
+    /// previous character/session are dropped.
+    pub session_epoch: u64,
+    /// `pending_candidates` row the verdict applies to.
+    pub candidate_id: i64,
+    /// Turn whose user message was classified; reported on
+    /// `CandidateChanged`.
+    pub turn: TurnId,
+    pub verdict: PendingResolutionVerdict,
+    pub detail: String,
+}
+
+/// Classify a user reply to a pending-candidate confirmation question
+/// (spawned off the actor). Fail-closed: any provider/parse failure yields
+/// [`PendingResolutionVerdict::Unclear`], which leaves the candidate pending.
+pub(crate) async fn run_resolution_task(
+    candidate: PendingConfirmationPrompt,
+    reply: String,
+    turn: TurnId,
+    session_epoch: u64,
+    provider: Arc<dyn LlmProvider>,
+    prompt_language: String,
+    timeout: Duration,
+) -> PendingResolutionResult {
+    let messages = build_resolution_messages(&candidate, &reply, &prompt_language);
+    let schema = resolution_schema_object();
+    let raw = match tokio::time::timeout(timeout, provider.chat_completion(&messages, Some(schema)))
+        .await
+    {
+        Ok(Ok(completion)) => completion.text,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                component = "Proactive",
+                event = "pending_resolution",
+                candidate_id = candidate.id,
+                error = %error,
+                "Pending-candidate reply classification failed; leaving the candidate pending"
+            );
+            return PendingResolutionResult {
+                session_epoch,
+                candidate_id: candidate.id,
+                turn,
+                verdict: PendingResolutionVerdict::Unclear,
+                detail: error.to_string(),
+            };
+        }
+        Err(_) => {
+            tracing::warn!(
+                component = "Proactive",
+                event = "pending_resolution",
+                candidate_id = candidate.id,
+                "Pending-candidate reply classification timed out; leaving the candidate pending"
+            );
+            return PendingResolutionResult {
+                session_epoch,
+                candidate_id: candidate.id,
+                turn,
+                verdict: PendingResolutionVerdict::Unclear,
+                detail: "timed out".to_string(),
+            };
+        }
+    };
+    let verdict = parse_resolution_json(&raw);
+    PendingResolutionResult {
+        session_epoch,
+        candidate_id: candidate.id,
+        turn,
+        verdict,
+        detail: raw.trim().chars().take(200).collect(),
+    }
 }
 
 /// Emit the decision/main-model agreement line for a confirmed generation.
@@ -563,6 +749,7 @@ mod tests {
                 user_turn_busy: false,
             },
             QuietHoursEval::inactive(),
+            None,
             Some(provider.clone() as Arc<dyn LlmProvider>),
             0,
             None,
@@ -643,6 +830,7 @@ mod tests {
             ProactiveObservation::default(),
             suppression,
             QuietHoursEval::inactive(),
+            None,
             Some(Arc::new(FixedBodyProvider {
                 body: speak.to_string(),
             }) as Arc<dyn LlmProvider>),
@@ -667,6 +855,7 @@ mod tests {
             ProactiveObservation::default(),
             suppression,
             QuietHoursEval::inactive(),
+            None,
             Some(Arc::new(FixedBodyProvider {
                 body: speak.to_string(),
             }) as Arc<dyn LlmProvider>),
@@ -696,6 +885,7 @@ mod tests {
             detail: String::new(),
             confirmation: ene_mind::ProactiveConfirmation::Pending,
             catch_up: false,
+            pending_confirmation: None,
         }
     }
 
@@ -904,5 +1094,263 @@ mod tests {
         };
         assert!(quiet_hours_suppresses_tts(&active, tts_only));
         assert!(!quiet_hours_suppresses_notifications(&active, tts_only));
+    }
+
+    fn pending_candidate() -> PendingConfirmationPrompt {
+        PendingConfirmationPrompt {
+            id: 7,
+            title: "cats".into(),
+            content: "user dislikes cats".into(),
+            age_days: 5.0,
+        }
+    }
+
+    fn decision_with_candidate() -> ProactiveDecisionResult {
+        ProactiveDecisionResult {
+            pending_confirmation: Some(pending_candidate()),
+            ..pending_decision()
+        }
+    }
+
+    #[test]
+    fn delivered_confirmation_sets_the_asked_marker() {
+        let mut scheduler = ProactiveScheduler::default();
+        let decision = decision_with_candidate();
+
+        let verdict =
+            apply_proactive_completion(&mut scheduler, &decision, &TerminalReason::Done, true);
+        assert_eq!(verdict, ene_mind::ProactiveConfirmation::Accepted);
+        assert_eq!(
+            scheduler.asked_pending_candidate,
+            Some(pending_candidate()),
+            "a delivered question must block re-selection until classified"
+        );
+        assert!(
+            scheduler.pending_confirmation_asked_at.contains_key(&7),
+            "delivery must arm the per-candidate re-ask backoff"
+        );
+    }
+
+    #[test]
+    fn delivery_sets_the_marker_even_without_the_confirmation_feature() {
+        let mut scheduler = ProactiveScheduler::default();
+        let decision = ProactiveDecisionResult {
+            confirmation: ene_mind::ProactiveConfirmation::Disabled,
+            ..decision_with_candidate()
+        };
+        let verdict =
+            apply_proactive_completion(&mut scheduler, &decision, &TerminalReason::Done, true);
+        assert_eq!(verdict, ene_mind::ProactiveConfirmation::Disabled);
+        assert_eq!(
+            scheduler.asked_pending_candidate,
+            Some(pending_candidate()),
+            "the question was delivered, so its reply must be classified"
+        );
+    }
+
+    #[test]
+    fn undelivered_confirmation_never_sets_the_asked_marker() {
+        for (terminal, spoke) in [
+            (TerminalReason::Declined, false),
+            (TerminalReason::Done, false),
+            (
+                TerminalReason::Failed {
+                    message: "boom".into(),
+                },
+                false,
+            ),
+            (TerminalReason::Cancelled, false),
+        ] {
+            let mut scheduler = ProactiveScheduler::default();
+            let verdict = apply_proactive_completion(
+                &mut scheduler,
+                &decision_with_candidate(),
+                &terminal,
+                spoke,
+            );
+            assert_ne!(verdict, ene_mind::ProactiveConfirmation::Accepted);
+            assert!(
+                scheduler.asked_pending_candidate.is_none(),
+                "an undelivered question ({verdict:?}) must not leave a marker"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_proactive_turns_do_not_touch_the_asked_marker() {
+        let mut scheduler = ProactiveScheduler {
+            asked_pending_candidate: Some(pending_candidate()),
+            ..ProactiveScheduler::default()
+        };
+        let verdict = apply_proactive_completion(
+            &mut scheduler,
+            &pending_decision(),
+            &TerminalReason::Done,
+            true,
+        );
+        assert_eq!(verdict, ene_mind::ProactiveConfirmation::Accepted);
+        assert_eq!(
+            scheduler.asked_pending_candidate,
+            Some(pending_candidate()),
+            "a non-confirmation proactive turn must not consume the marker"
+        );
+    }
+
+    #[test]
+    fn session_reset_clears_the_asked_marker_but_keeps_backoff() {
+        let mut scheduler = ProactiveScheduler {
+            asked_pending_candidate: Some(pending_candidate()),
+            pending_confirmation_asked_at: HashMap::from([(7, chrono::Utc::now())]),
+            ..ProactiveScheduler::default()
+        };
+        let epoch = scheduler.session_epoch;
+        scheduler.reset_session();
+        assert!(scheduler.asked_pending_candidate.is_none());
+        assert!(scheduler.pending_confirmation_asked_at.contains_key(&7));
+        assert_eq!(scheduler.session_epoch, epoch.wrapping_add(1));
+    }
+
+    #[test]
+    fn pending_confirmation_hint_renders_candidate_in_both_languages() {
+        let en = proactive_pending_confirmation_hint(&pending_candidate(), "en", false);
+        assert!(en.contains("cats: user dislikes cats"), "hint: {en}");
+        assert!(!en.contains("{candidate}"), "placeholder must be replaced");
+
+        let ja = proactive_pending_confirmation_hint(&pending_candidate(), "ja", false);
+        assert!(ja.contains("cats: user dislikes cats"), "hint: {ja}");
+
+        let with_note = proactive_pending_confirmation_hint(&pending_candidate(), "en", true);
+        assert!(with_note.contains("<|silent|>"), "hint: {with_note}");
+    }
+
+    #[test]
+    fn pending_confirmation_hint_truncates_long_candidate_text() {
+        let candidate = PendingConfirmationPrompt {
+            id: 1,
+            title: "t".repeat(300),
+            content: "c".repeat(900),
+            age_days: 5.0,
+        };
+        let hint = proactive_pending_confirmation_hint(&candidate, "en", false);
+        assert!(hint.contains(&format!("{}: {}", "t".repeat(160), "c".repeat(400))));
+        assert!(!hint.contains(&"t".repeat(161)), "title must be truncated");
+        assert!(
+            !hint.contains(&"c".repeat(401)),
+            "content must be truncated"
+        );
+    }
+
+    #[test]
+    fn pending_hint_fills_an_empty_confirmation_note_from_the_fallback() {
+        let mut prompts = ene_config::prompts::ProactivePrompts {
+            decision_system: String::new(),
+            generation_hint_idle: String::new(),
+            generation_hint_with_topic: String::new(),
+            confirmation_note: String::new(),
+            catch_up_note: String::new(),
+            pending_confirmation_note: "ask: {candidate}".into(),
+            pending_resolution_system: String::new(),
+            screen_summary_system: String::new(),
+            screen_summary_user: String::new(),
+            screen_summary_layout_note: String::new(),
+            screen_summary_code_note: String::new(),
+            screen_summary_ocr_note: String::new(),
+        };
+        ensure_confirmation_note(&mut prompts, "en");
+        assert!(
+            prompts.confirmation_note.contains("<|silent|>"),
+            "the refusal instruction must survive an empty pack note"
+        );
+        let hint = prompts.render_pending_confirmation_hint("cats", true);
+        assert!(hint.contains("<|silent|>"));
+        assert!(hint.contains("cats"));
+    }
+
+    #[tokio::test]
+    async fn resolution_task_parses_verdicts_and_fails_closed() {
+        let turn = TurnId::new();
+        for (body, expected) in [
+            (
+                r#"{"verdict":"approved"}"#,
+                PendingResolutionVerdict::Approved,
+            ),
+            (
+                r#"{"verdict":"rejected"}"#,
+                PendingResolutionVerdict::Rejected,
+            ),
+            (
+                r#"{"verdict":"unclear"}"#,
+                PendingResolutionVerdict::Unclear,
+            ),
+            ("not json", PendingResolutionVerdict::Unclear),
+        ] {
+            let provider = Arc::new(FixedBodyProvider {
+                body: body.to_string(),
+            }) as Arc<dyn LlmProvider>;
+            let result = run_resolution_task(
+                pending_candidate(),
+                "yes".into(),
+                turn.clone(),
+                0,
+                provider,
+                "en".to_string(),
+                Duration::from_secs(5),
+            )
+            .await;
+            assert_eq!(result.verdict, expected, "body: {body}");
+            assert_eq!(result.candidate_id, 7);
+            assert_eq!(result.turn, turn);
+            assert_eq!(result.session_epoch, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn resolution_task_returns_unclear_on_provider_error() {
+        struct FailingProvider;
+
+        #[async_trait::async_trait]
+        impl LlmProvider for FailingProvider {
+            fn name(&self) -> &'static str {
+                "failing"
+            }
+
+            async fn create_chat_stream(
+                &self,
+                _messages: &[ene_ai::LlmMessage],
+                _tools: &[ene_plugin_proto::ToolSpec],
+            ) -> Result<
+                std::pin::Pin<
+                    Box<
+                        dyn tokio_stream::Stream<
+                                Item = Result<ene_ai::LlmResponseChunk, ene_ai::LlmProviderError>,
+                            > + Send,
+                    >,
+                >,
+                ene_ai::LlmProviderError,
+            > {
+                Err(ene_ai::LlmProviderError::Provider("stream unused".into()))
+            }
+
+            async fn chat_completion(
+                &self,
+                _messages: &[ene_ai::LlmMessage],
+                _json_schema: Option<serde_json::Value>,
+            ) -> Result<ene_ai::LlmCompletion, ene_ai::LlmProviderError> {
+                Err(ene_ai::LlmProviderError::Provider("boom".into()))
+            }
+        }
+
+        let provider = Arc::new(FailingProvider) as Arc<dyn LlmProvider>;
+        let result = run_resolution_task(
+            pending_candidate(),
+            "yes".into(),
+            TurnId::new(),
+            0,
+            provider,
+            "en".to_string(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(result.verdict, PendingResolutionVerdict::Unclear);
     }
 }

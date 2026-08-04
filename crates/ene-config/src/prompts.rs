@@ -440,6 +440,14 @@ pub struct ProactivePrompts {
     /// screen data).
     #[serde(default)]
     pub catch_up_note: String,
+    /// Instruction for asking about an unconfirmed memory candidate; the
+    /// `{candidate}` placeholder carries the candidate text.
+    #[serde(default)]
+    pub pending_confirmation_note: String,
+    /// System prompt for classifying a user reply to a pending-candidate
+    /// confirmation question (verdict: approved / rejected / unclear).
+    #[serde(default)]
+    pub pending_resolution_system: String,
     /// System prompt for local screen-image summarization.
     pub screen_summary_system: String,
     /// User prompt for local screen-image summarization.
@@ -473,6 +481,10 @@ struct RawProactivePrompts {
     confirmation_note_path: String,
     #[serde(default = "default_proactive_catch_up_note_path")]
     catch_up_note_path: String,
+    #[serde(default = "default_proactive_pending_confirmation_note_path")]
+    pending_confirmation_note_path: String,
+    #[serde(default = "default_proactive_pending_resolution_system_path")]
+    pending_resolution_system_path: String,
     #[serde(default = "default_proactive_screen_summary_system_path")]
     screen_summary_system_path: String,
     #[serde(default = "default_proactive_screen_summary_user_path")]
@@ -513,6 +525,14 @@ fn default_proactive_confirmation_note_path() -> String {
 
 fn default_proactive_catch_up_note_path() -> String {
     "en/proactive/catch_up_note.md".into()
+}
+
+fn default_proactive_pending_confirmation_note_path() -> String {
+    "en/proactive/pending_confirmation_note.md".into()
+}
+
+fn default_proactive_pending_resolution_system_path() -> String {
+    "en/proactive/pending_resolution_system.md".into()
 }
 
 fn default_proactive_screen_summary_system_path() -> String {
@@ -567,6 +587,27 @@ impl ProactivePrompts {
         substitute(&self.catch_up_note, &[("items", items.trim())])
             .trim()
             .to_string()
+    }
+
+    /// Renders the pending-candidate confirmation question with the candidate
+    /// text, appending the `<|silent|>` refusal note when confirmation is
+    /// enabled so the model may still decline the interruption.
+    pub fn render_pending_confirmation_hint(
+        &self,
+        candidate: &str,
+        confirmation_enabled: bool,
+    ) -> String {
+        let base = substitute(
+            &self.pending_confirmation_note,
+            &[("candidate", candidate.trim())],
+        )
+        .trim()
+        .to_string();
+        if confirmation_enabled {
+            format!("{base}\n\n{}", self.confirmation_note.trim())
+        } else {
+            base
+        }
     }
 
     /// Renders the vision user prompt with the privacy-safe OS app label and
@@ -804,6 +845,20 @@ macro_rules! embedded_pack {
                     "/prompts/",
                     $lang,
                     "/proactive/catch_up_note.md"
+                ))
+                .to_string(),
+                pending_confirmation_note: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/pending_confirmation_note.md"
+                ))
+                .to_string(),
+                pending_resolution_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/pending_resolution_system.md"
                 ))
                 .to_string(),
                 screen_summary_system: include_str!(concat!(
@@ -1079,6 +1134,24 @@ mod tests {
     }
 
     #[test]
+    fn render_pending_confirmation_hint_substitutes_and_appends_refusal_note() {
+        let lib = PromptLibrary::built_in_english();
+        let candidate = "user dislikes cats";
+        let rendered = lib
+            .proactive()
+            .render_pending_confirmation_hint(candidate, true);
+        assert!(rendered.contains(candidate));
+        assert!(rendered.contains("<|silent|>"));
+        assert!(!rendered.contains("{candidate}"));
+
+        let without_note = lib
+            .proactive()
+            .render_pending_confirmation_hint(candidate, false);
+        assert!(without_note.contains(candidate));
+        assert!(!without_note.contains("<|silent|>"));
+    }
+
+    #[test]
     fn decision_system_labels_untrusted_observation_data() {
         // The decision system prompt must instruct the model to treat
         // third-party content (screen summary, conversation, window labels)
@@ -1168,6 +1241,16 @@ mod tests {
         assert!(
             note.contains("<|silent|>"),
             "[{source}] proactive.confirmation_note must name the <|silent|> token"
+        );
+
+        let pending_note = &lib.proactive().pending_confirmation_note;
+        assert!(
+            pending_note.contains("{candidate}"),
+            "[{source}] proactive.pending_confirmation_note must contain {{candidate}}"
+        );
+        assert!(
+            !lib.proactive().pending_resolution_system.is_empty(),
+            "[{source}] proactive.pending_resolution_system must be non-empty"
         );
     }
 

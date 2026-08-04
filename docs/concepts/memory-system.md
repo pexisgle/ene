@@ -44,6 +44,16 @@ Once a contradiction is found, the arbiter compares the candidate's confidence a
 
 Deferred candidates are parked in the `pending_candidates` queue (`AskConfirmationLater`). They are listed on the desktop settings screen for manual review, and they also compete in **normal hybrid recall**: since a deferred candidate has no embedding, recall loads the live queue and lets topic-related rows (lexical overlap with the query) compete in the ordinary score competition. A surfacing candidate is rendered with an `[unconfirmed]` marker in the prompt, so the character treats it as hearsay to verify in conversation rather than asserting it as fact. `recall_pending_candidate_limit` (default `3`) caps how many compete per turn; `0` disables the recall path entirely without affecting the settings-screen review list. The cap is code-tunable in `MindMemoryConfig` and not yet exposed via settings.
 
+Candidates whose topics never come up stay parked despite the recall path.
+When `mind.proactive.pending_confirmation` is enabled, the proactive-speech
+pipeline picks the oldest due candidate (age and confidence thresholds, at
+most one in flight) and asks a short confirmation question through the normal
+proactive gates; the user's reply is classified and resolved through the same
+approval APIs as the manual queue. Only weak-contradiction deferrals are
+eligible — approval-mode rows (`approval_parked`) are never asked about,
+matching their exclusion from recall. See
+`docs/configuration.md` for the trigger settings.
+
 ### Approval Mode (`mind.memory_approval.require_approval`)
 When `require_approval` is enabled, the pipeline becomes **review-before-save**:
 every candidate that would otherwise be persisted or supersede an existing

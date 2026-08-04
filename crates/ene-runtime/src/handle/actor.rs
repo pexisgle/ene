@@ -178,6 +178,8 @@ pub(super) struct TurnActor {
     proactive: crate::proactive::ProactiveScheduler,
     proactive_decision_rx: Option<oneshot::Receiver<crate::proactive::ProactiveDecisionResult>>,
     proactive_decision_handle: Option<tokio::task::JoinHandle<()>>,
+    proactive_resolution_rx: Option<oneshot::Receiver<crate::proactive::PendingResolutionResult>>,
+    proactive_resolution_handle: Option<tokio::task::JoinHandle<()>>,
     /// Wall-clock source for quiet-hours evaluation (injectable in tests).
     quiet_hours_clock: QuietHoursClock,
     /// True while a proactive turn runs with notifications suppressed, so the
@@ -366,6 +368,8 @@ impl TurnActor {
             proactive: crate::proactive::ProactiveScheduler::default(),
             proactive_decision_rx: None,
             proactive_decision_handle: None,
+            proactive_resolution_rx: None,
+            proactive_resolution_handle: None,
             quiet_hours_clock: Arc::new(chrono::Utc::now),
             quiet_hours_notifications_suppressed: false,
             proactive_llm: Arc::new(OnceCell::new()),
@@ -766,6 +770,26 @@ impl TurnActor {
                                 );
                                 crate::proactive::log_confirmation(&decision, confirmation);
                             }
+                            // A completed user turn is the reply to a
+                            // delivered confirmation question when one is
+                            // outstanding; classify it (fail-closed) and
+                            // resolve the candidate through the approval
+                            // APIs. Mid-stream failures and cancels still
+                            // recorded the user's message at turn start, so
+                            // they are classified too; only a provider-open
+                            // failure (no stream, no outcome) defers to the
+                            // next turn.
+                            if self.active_origin == crate::types::TurnOrigin::User
+                                && matches!(
+                                    outcome.terminal,
+                                    TerminalReason::Done
+                                        | TerminalReason::Failed { .. }
+                                        | TerminalReason::Cancelled
+                                )
+                                && self.proactive.asked_pending_candidate.is_some()
+                            {
+                                self.spawn_pending_resolution();
+                            }
                             // A scheduled prompt run finished with this
                             // outcome; record it before the run state below
                             // is cleared.
@@ -876,6 +900,26 @@ impl TurnActor {
                             }
                         }
                     }
+                } else if let Some(rx) = self.proactive_resolution_rx.as_mut() {
+                    tokio::select! {
+                        cmd = self.cmd_rx.recv() => {
+                            match cmd {
+                                Some(cmd) => {
+                                    if !self.run_command_isolated(cmd).await {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                        resolution = &mut *rx => {
+                            self.proactive_resolution_rx = None;
+                            self.proactive_resolution_handle = None;
+                            if let Ok(result) = resolution {
+                                self.handle_proactive_resolution(result).await;
+                            }
+                        }
+                    }
                 } else if proactive_enabled {
                     tokio::select! {
                         cmd = self.cmd_rx.recv() => {
@@ -922,6 +966,7 @@ impl TurnActor {
         // detach, not cancel, the worker).
         self.admit_aux_handles();
         self.abort_all_join_sets();
+        self.abort_proactive_resolution();
         self.drain_pending().await;
     }
 
@@ -960,6 +1005,16 @@ impl TurnActor {
             handle.abort();
         }
         self.proactive_decision_rx = None;
+    }
+
+    /// Drop an in-flight reply classification. Called on character/session
+    /// reset and shutdown; deliberately *not* on user-turn start, so a reply
+    /// already under classification is not lost when the user types again.
+    fn abort_proactive_resolution(&mut self) {
+        if let Some(handle) = self.proactive_resolution_handle.take() {
+            handle.abort();
+        }
+        self.proactive_resolution_rx = None;
     }
 
     /// Restarts the plugin host to apply a changed enabled-plugin set,
@@ -1342,7 +1397,7 @@ impl TurnActor {
         let suppression = self.proactive.suppression(user_turn_busy);
         let quiet_for_context =
             evaluate_quiet_hours(&mind.proactive.quiet_hours, (self.quiet_hours_clock)());
-        let (history, observation, affect, commitments, user_instructions) =
+        let (history, observation, affect, commitments, user_instructions, pending_confirmation) =
             self.proactive_context_inputs(&mind).await;
         let (tx, rx) = oneshot::channel();
         self.proactive_decision_rx = Some(rx);
@@ -1355,6 +1410,7 @@ impl TurnActor {
                 observation,
                 suppression,
                 quiet_for_context,
+                pending_confirmation,
                 decision_provider,
                 epoch,
                 affect,
@@ -1380,40 +1436,66 @@ impl TurnActor {
         Option<ene_store::AffectState>,
         Vec<ene_mind::ActiveCommitmentPrompt>,
         Vec<String>,
+        Option<ene_mind::PendingConfirmationPrompt>,
     ) {
         let observation = self.proactive.observation.clone();
         let history = self.session.history().to_vec();
         let card_name = self.session.card_name().to_string();
         let user_name = self.config.user_name.clone();
         let mem_store = self.session.memory.memory_store.clone();
-        let (affect, commitments, user_instructions) = if let Some(store) = mem_store.as_ref() {
-            let affect = store.get_affect_state(&card_name).await.ok();
-            let raw = store
-                .list_active_commitments(&card_name, Some(user_name.as_str()), 10)
-                .await
-                .unwrap_or_default();
-            let commitments = CommitmentLedger::active_prompt_candidates(&raw);
-            // Deterministic suppression-condition injection: loaded without
-            // recall scoring so a "don't talk" instruction can never lose a
-            // score competition. Errors degrade to no notes (fail-closed
-            // silence is the decision model's job, not the loader's).
-            let user_instructions = if mind.proactive.sources.memory {
-                ene_mind::load_proactive_memory_notes(
-                    store.as_ref(),
-                    &card_name,
-                    &user_name,
-                    mind.proactive.max_memory_notes,
-                )
-                .await
-                .unwrap_or_default()
+        let (affect, commitments, user_instructions, pending_confirmation) =
+            if let Some(store) = mem_store.as_ref() {
+                let affect = store.get_affect_state(&card_name).await.ok();
+                let raw = store
+                    .list_active_commitments(&card_name, Some(user_name.as_str()), 10)
+                    .await
+                    .unwrap_or_default();
+                let commitments = CommitmentLedger::active_prompt_candidates(&raw);
+                // Deterministic suppression-condition injection: loaded without
+                // recall scoring so a "don't talk" instruction can never lose a
+                // score competition. Errors degrade to no notes (fail-closed
+                // silence is the decision model's job, not the loader's).
+                let user_instructions = if mind.proactive.sources.memory {
+                    ene_mind::load_proactive_memory_notes(
+                        store.as_ref(),
+                        &card_name,
+                        &user_name,
+                        mind.proactive.max_memory_notes,
+                    )
+                    .await
+                    .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                // Only one confirmation question may be in flight; a due
+                // candidate is skipped while a delivered question still awaits
+                // its reply.
+                let pending_confirmation = if self.proactive.asked_pending_candidate.is_none() {
+                    ene_mind::load_due_pending_confirmation(
+                        self.session.memory.recall_cache.as_deref(),
+                        store.as_ref(),
+                        &card_name,
+                        &user_name,
+                        &mind.proactive.pending_confirmation,
+                        (self.quiet_hours_clock)(),
+                        &self.proactive.pending_confirmation_asked_at,
+                    )
+                    .await
+                } else {
+                    None
+                };
+                (affect, commitments, user_instructions, pending_confirmation)
             } else {
-                Vec::new()
+                (None, Vec::new(), Vec::new(), None)
             };
-            (affect, commitments, user_instructions)
-        } else {
-            (None, Vec::new(), Vec::new())
-        };
-        (history, observation, affect, commitments, user_instructions)
+        (
+            history,
+            observation,
+            affect,
+            commitments,
+            user_instructions,
+            pending_confirmation,
+        )
     }
 
     /// Whether a quiet-hours-suppressed tick was a real utterance
@@ -1430,7 +1512,7 @@ impl TurnActor {
             || !self.pending_permissions.lock().await.is_empty()
             || !self.pending_user_inputs.lock().await.is_empty();
         let suppression = self.proactive.suppression(user_turn_busy);
-        let (history, observation, affect, commitments, user_instructions) =
+        let (history, observation, affect, commitments, user_instructions, pending_confirmation) =
             self.proactive_context_inputs(mind).await;
         let context = build_proactive_context(
             &mind.proactive,
@@ -1441,6 +1523,7 @@ impl TurnActor {
             &user_instructions,
             suppression,
             quiet.clone(),
+            pending_confirmation,
         );
         matches!(
             evaluate_deterministic_gates(&mind.proactive, &context),
@@ -1487,11 +1570,20 @@ impl TurnActor {
             .config
             .get_section::<ene_mind::MindConfig>()
             .unwrap_or_default();
-        let hint = crate::proactive::proactive_generation_hint(
-            &result.topic_hint,
-            mind.resolved_classifier_language(),
-            mind.proactive.confirmation_enabled,
-        );
+        let language = mind.resolved_classifier_language();
+        let hint = if let Some(candidate) = &result.pending_confirmation {
+            crate::proactive::proactive_pending_confirmation_hint(
+                candidate,
+                language,
+                mind.proactive.confirmation_enabled,
+            )
+        } else {
+            crate::proactive::proactive_generation_hint(
+                &result.topic_hint,
+                language,
+                mind.proactive.confirmation_enabled,
+            )
+        };
         self.begin_proactive_generation(&result, hint).await;
     }
 
@@ -1606,6 +1698,162 @@ impl TurnActor {
             Some(generation_timeout),
         )
         .await
+    }
+
+    /// Classify the just-completed user turn as the reply to an outstanding
+    /// confirmation question and spawn the resolution task. Fail-closed:
+    /// when no provider, turn id, or reply text is available, the marker is
+    /// restored so the next user turn retries instead of dropping the reply
+    /// classification entirely.
+    fn spawn_pending_resolution(&mut self) {
+        if self.proactive_resolution_rx.is_some() {
+            return;
+        }
+        let Some(candidate) = self.proactive.asked_pending_candidate.take() else {
+            return;
+        };
+        let Some(handles) = self.proactive_llm.get() else {
+            tracing::warn!(
+                component = "Proactive",
+                event = "pending_resolution",
+                candidate_id = candidate.id,
+                "Reply classification deferred: proactive LLM handles not ready"
+            );
+            self.proactive.asked_pending_candidate = Some(candidate);
+            return;
+        };
+        let Some(turn) = self.active_turn.clone() else {
+            self.proactive.asked_pending_candidate = Some(candidate);
+            return;
+        };
+        let reply = self
+            .session
+            .history()
+            .iter()
+            .rev()
+            .find(|entry| entry.role == ene_ai::Role::User)
+            .map_or_else(String::new, |entry| entry.content.clone());
+        if reply.trim().is_empty() {
+            self.proactive.asked_pending_candidate = Some(candidate);
+            return;
+        }
+
+        let mind = self
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .unwrap_or_default();
+        let session_epoch = self.proactive.session_epoch;
+        let provider = Arc::clone(&handles.decision);
+        let prompt_language = mind.resolved_classifier_language().to_owned();
+        let timeout =
+            std::time::Duration::from_secs(mind.proactive.decision_timeout_seconds.max(1));
+        let (tx, rx) = oneshot::channel();
+        self.proactive_resolution_rx = Some(rx);
+        let handle = tokio::spawn(async move {
+            let result = crate::proactive::run_resolution_task(
+                candidate,
+                reply,
+                turn,
+                session_epoch,
+                provider,
+                prompt_language,
+                timeout,
+            )
+            .await;
+            drop(tx.send(result));
+        });
+        self.proactive_resolution_handle = Some(handle);
+    }
+
+    /// Apply a reply-classification verdict: approve or reject the candidate
+    /// through the store, invalidate the recall cache, and emit
+    /// `CandidateChanged`. `Unclear` and stale (post-reset) results leave the
+    /// candidate pending; claim-based store mutations make a double
+    /// resolution harmless.
+    async fn handle_proactive_resolution(
+        &mut self,
+        result: crate::proactive::PendingResolutionResult,
+    ) {
+        if result.session_epoch != self.proactive.session_epoch {
+            tracing::info!(
+                component = "Proactive",
+                event = "pending_resolution",
+                candidate_id = result.candidate_id,
+                "Stale pending-candidate resolution ignored after session reset"
+            );
+            return;
+        }
+        let status = match result.verdict {
+            ene_mind::PendingResolutionVerdict::Approved => {
+                ene_store::PendingCandidateStatus::Approved
+            }
+            ene_mind::PendingResolutionVerdict::Rejected => {
+                ene_store::PendingCandidateStatus::Rejected
+            }
+            ene_mind::PendingResolutionVerdict::Unclear => {
+                tracing::info!(
+                    component = "Proactive",
+                    event = "pending_resolution",
+                    candidate_id = result.candidate_id,
+                    detail = %result.detail,
+                    "Pending candidate reply was unclear; leaving it pending"
+                );
+                return;
+            }
+        };
+        let Some(store) = self.concrete_store.clone() else {
+            tracing::warn!(
+                component = "Proactive",
+                event = "pending_resolution",
+                candidate_id = result.candidate_id,
+                "Memory store unavailable; candidate left pending"
+            );
+            return;
+        };
+        let outcome = match status {
+            ene_store::PendingCandidateStatus::Approved => store
+                .approve_pending_candidate(result.candidate_id)
+                .await
+                .map(|_| ()),
+            ene_store::PendingCandidateStatus::Rejected => {
+                store
+                    .resolve_pending_candidate(result.candidate_id, false)
+                    .await
+            }
+            ene_store::PendingCandidateStatus::Pending => return,
+        };
+        match outcome {
+            Ok(()) => {
+                self.proactive
+                    .pending_confirmation_asked_at
+                    .remove(&result.candidate_id);
+                if let Some(cache) = &self.session.memory.recall_cache {
+                    cache.invalidate_character(self.session.card_name());
+                }
+                drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
+                    id: result.candidate_id,
+                    status,
+                    turn: Some(result.turn),
+                }));
+                tracing::info!(
+                    component = "Proactive",
+                    event = "pending_resolution",
+                    candidate_id = result.candidate_id,
+                    status = ?status,
+                    "Pending candidate resolved by user reply"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    component = "Proactive",
+                    event = "pending_resolution",
+                    candidate_id = result.candidate_id,
+                    status = ?status,
+                    error = %error,
+                    "Pending candidate resolution failed; leaving it pending"
+                );
+            }
+        }
     }
 
     /// Record one quiet-hours-suppressed moment: bounded queue entry for the
@@ -1737,6 +1985,7 @@ impl TurnActor {
             detail: "quiet hours ended".to_string(),
             confirmation: ene_mind::ProactiveConfirmation::Disabled,
             catch_up: true,
+            pending_confirmation: None,
         }
     }
 
@@ -2471,6 +2720,7 @@ impl TurnActor {
                 self.admit_aux_handles();
                 self.abort_all_join_sets();
                 self.abort_proactive_decision();
+                self.abort_proactive_resolution();
                 self.shutdown_proactive_llm_once().await;
                 self.drain_pending().await;
                 // Release the single-flight gate so a `run()` that races the
@@ -2489,6 +2739,7 @@ impl TurnActor {
                 *self.shared.character_card.lock() = Some(Arc::new(*card));
                 self.proactive.reset_session();
                 self.abort_proactive_decision();
+                self.abort_proactive_resolution();
                 drop(reply.send(Ok(())));
                 true
             }
@@ -2520,6 +2771,7 @@ impl TurnActor {
                     self.sync_shared_config();
                 }
                 self.abort_proactive_decision();
+                self.abort_proactive_resolution();
                 true
             }
             EneCommand::UpdateFeatureSettings { settings } => {
@@ -2546,6 +2798,7 @@ impl TurnActor {
                 drop(self.config.set_section(&rag));
                 self.sync_shared_config();
                 self.abort_proactive_decision();
+                self.abort_proactive_resolution();
 
                 if plugins_changed {
                     // The enabled plugin set changed: restart the plugin host
@@ -5461,6 +5714,366 @@ mod tests {
 
         assert!(actor.proactive.quiet_hours_queue.is_empty());
         assert!(actor.proactive_decision_rx.is_none());
+    }
+
+    /// A pending-candidate fixture for the shared (`user_id = ""`) scope,
+    /// which is visible to any session user.
+    fn pending_candidate_row() -> ene_core::PendingCandidate {
+        ene_core::PendingCandidate {
+            id: 0,
+            character_id: "default".into(),
+            user_id: String::new(),
+            kind: ene_core::MemoryKind::Preference,
+            title: "cats".into(),
+            content: "user dislikes cats".into(),
+            confidence: 0.9,
+            reason_detail: "test fixture".into(),
+            existing_memory_title: None,
+            existing_memory_id: None,
+            source_quote: "test".into(),
+            source_turn: None,
+            approval_parked: false,
+            status: ene_core::PendingCandidateStatus::Pending,
+            created_at: chrono::Utc::now() - chrono::Duration::days(5),
+            resolved_at: None,
+        }
+    }
+
+    fn proactive_with_pending_confirmation(mind: &mut ene_mind::MindConfig) {
+        mind.proactive.enabled = true;
+        mind.proactive.min_idle_seconds = 0;
+        mind.proactive.cooldown_seconds = 0;
+        mind.proactive.sources = ene_mind::ProactiveSourcesConfig {
+            conversation: false,
+            activity: false,
+            screen_summary: false,
+            memory: false,
+            ..ene_mind::ProactiveSourcesConfig::default()
+        };
+        mind.proactive.pending_confirmation.enabled = true;
+        mind.proactive.pending_confirmation.min_age_days = 0;
+        mind.proactive.pending_confirmation.min_confidence = 0.0;
+    }
+
+    async fn actor_with_pending_store() -> (
+        TurnActor,
+        broadcast::Receiver<DiagnosticEvent>,
+        broadcast::Receiver<LifecycleEvent>,
+        Arc<ene_store::MemoryStore>,
+    ) {
+        use crate::handle::tests::{EmptyRegistry, build_bare_actor_with_session_and_gate};
+
+        let store = Arc::new(
+            ene_store::MemoryStore::open_in_memory(4)
+                .await
+                .expect("in-memory store"),
+        );
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig::default();
+        let (mut actor, diag_rx, lifecycle_rx, _gate, _shared) =
+            build_bare_actor_with_session_and_gate(
+                registry,
+                &task_caps,
+                ConversationSession::new(),
+                EneConfig::default(),
+            );
+        actor.concrete_store = Some(Arc::clone(&store));
+        actor.session.memory.memory_store =
+            Some(Arc::clone(&store) as Arc<dyn ene_core::MemoryPort>);
+        let mut mind = actor
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .expect("mind config");
+        proactive_with_pending_confirmation(&mut mind);
+        actor
+            .config
+            .set_section(&mind)
+            .expect("set mind config on test actor");
+        (actor, diag_rx, lifecycle_rx, store)
+    }
+
+    #[tokio::test]
+    async fn pending_reply_approval_resolves_through_the_store() {
+        let (mut actor, _diag_rx, mut lifecycle_rx, store) = actor_with_pending_store().await;
+        let candidate_id = store
+            .insert_pending_candidate(pending_candidate_row())
+            .await
+            .expect("insert fixture");
+        let cache = actor
+            .session
+            .memory
+            .recall_cache
+            .clone()
+            .expect("recall cache");
+        let cached = cache
+            .list_pending_candidates(store.as_ref(), "default")
+            .await
+            .expect("prime the cache");
+        assert_eq!(cached.len(), 1);
+
+        let turn = TurnId::new();
+        actor.proactive.pending_confirmation_asked_at.insert(
+            candidate_id,
+            (actor.quiet_hours_clock)() - chrono::Duration::days(1),
+        );
+        let result = crate::proactive::PendingResolutionResult {
+            session_epoch: actor.proactive.session_epoch,
+            candidate_id,
+            turn: turn.clone(),
+            verdict: ene_mind::PendingResolutionVerdict::Approved,
+            detail: String::new(),
+        };
+        actor.handle_proactive_resolution(result).await;
+
+        let rows = store
+            .list_pending_candidates("default", None)
+            .await
+            .expect("list all rows");
+        let row = rows
+            .iter()
+            .find(|row| row.id == candidate_id)
+            .expect("fixture row present");
+        assert_eq!(row.status, ene_core::PendingCandidateStatus::Approved);
+        assert!(
+            !actor
+                .proactive
+                .pending_confirmation_asked_at
+                .contains_key(&candidate_id),
+            "a resolved candidate no longer needs re-ask backoff"
+        );
+        let after = cache
+            .list_pending_candidates(store.as_ref(), "default")
+            .await
+            .expect("re-list through the cache");
+        assert!(
+            after.is_empty(),
+            "approval must invalidate the recall cache"
+        );
+        assert!(
+            matches!(
+                lifecycle_rx.try_recv(),
+                Ok(LifecycleEvent::CandidateChanged { id, status, turn: Some(emitted_turn) })
+                    if id == candidate_id
+                        && status == ene_store::PendingCandidateStatus::Approved
+                        && emitted_turn == turn
+            ),
+            "approval must emit CandidateChanged for the classified turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_reply_rejection_resolves_through_the_store() {
+        let (mut actor, _diag_rx, mut lifecycle_rx, store) = actor_with_pending_store().await;
+        let candidate_id = store
+            .insert_pending_candidate(pending_candidate_row())
+            .await
+            .expect("insert fixture");
+
+        actor.proactive.pending_confirmation_asked_at.insert(
+            candidate_id,
+            (actor.quiet_hours_clock)() - chrono::Duration::days(1),
+        );
+        let result = crate::proactive::PendingResolutionResult {
+            session_epoch: actor.proactive.session_epoch,
+            candidate_id,
+            turn: TurnId::new(),
+            verdict: ene_mind::PendingResolutionVerdict::Rejected,
+            detail: String::new(),
+        };
+        actor.handle_proactive_resolution(result).await;
+
+        let rows = store
+            .list_pending_candidates("default", None)
+            .await
+            .expect("list all rows");
+        let row = rows
+            .iter()
+            .find(|row| row.id == candidate_id)
+            .expect("fixture row present");
+        assert_eq!(row.status, ene_core::PendingCandidateStatus::Rejected);
+        assert!(
+            !actor
+                .proactive
+                .pending_confirmation_asked_at
+                .contains_key(&candidate_id),
+            "a resolved candidate no longer needs re-ask backoff"
+        );
+        assert!(
+            matches!(
+                lifecycle_rx.try_recv(),
+                Ok(LifecycleEvent::CandidateChanged { id, status, .. })
+                    if id == candidate_id
+                        && status == ene_store::PendingCandidateStatus::Rejected
+            ),
+            "rejection must emit CandidateChanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn unclear_reply_leaves_the_candidate_pending() {
+        let (mut actor, _diag_rx, mut lifecycle_rx, store) = actor_with_pending_store().await;
+        let candidate_id = store
+            .insert_pending_candidate(pending_candidate_row())
+            .await
+            .expect("insert fixture");
+
+        actor.proactive.pending_confirmation_asked_at.insert(
+            candidate_id,
+            (actor.quiet_hours_clock)() - chrono::Duration::days(1),
+        );
+        let result = crate::proactive::PendingResolutionResult {
+            session_epoch: actor.proactive.session_epoch,
+            candidate_id,
+            turn: TurnId::new(),
+            verdict: ene_mind::PendingResolutionVerdict::Unclear,
+            detail: "unclear".into(),
+        };
+        actor.handle_proactive_resolution(result).await;
+
+        let rows = store
+            .list_pending_candidates("default", None)
+            .await
+            .expect("list all rows");
+        let row = rows
+            .iter()
+            .find(|row| row.id == candidate_id)
+            .expect("fixture row present");
+        assert_eq!(row.status, ene_core::PendingCandidateStatus::Pending);
+        assert!(
+            actor
+                .proactive
+                .pending_confirmation_asked_at
+                .contains_key(&candidate_id),
+            "an unclear verdict must keep the backoff armed"
+        );
+        assert!(
+            lifecycle_rx.try_recv().is_err(),
+            "an unclear verdict must not emit CandidateChanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolution_spawn_without_handles_restores_the_marker() {
+        let (mut actor, _diag_rx, _lifecycle_rx, _store) = actor_with_pending_store().await;
+        actor.proactive.asked_pending_candidate = Some(ene_mind::PendingConfirmationPrompt {
+            id: 1,
+            title: "cats".into(),
+            content: "user dislikes cats".into(),
+            age_days: 5.0,
+        });
+        actor.active_turn = Some(TurnId::new());
+        actor.session.add_user_message("yes, still true");
+
+        actor.spawn_pending_resolution();
+
+        assert!(
+            actor.proactive_resolution_rx.is_none(),
+            "no classification may spawn without LLM handles"
+        );
+        assert!(
+            actor.proactive.asked_pending_candidate.is_some(),
+            "the marker must survive so the next user turn retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_queue_a_due_pending_confirmation_as_an_opportunity() {
+        use chrono::TimeZone;
+
+        let (mut actor, _diag_rx, _lifecycle_rx, store) = actor_with_pending_store().await;
+        store
+            .insert_pending_candidate(pending_candidate_row())
+            .await
+            .expect("insert fixture");
+        quiet_hours_actor(
+            &mut actor,
+            ene_mind::QuietHoursPolicy::Queue,
+            ene_mind::QuietHoursSuppressConfig {
+                decisions: true,
+                ..ene_mind::QuietHoursSuppressConfig::default()
+            },
+            chrono::Utc
+                .with_ymd_and_hms(2026, 8, 3, 22, 30, 0)
+                .single()
+                .expect("valid utc instant"),
+        );
+        // The quiet-hours helper resets the mind config; re-apply the
+        // pending-confirmation trigger on top of it.
+        let mut mind = actor
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .expect("mind config");
+        proactive_with_pending_confirmation(&mut mind);
+        actor
+            .config
+            .set_section(&mind)
+            .expect("set mind config on test actor");
+
+        actor.maybe_spawn_proactive_decision().await;
+
+        assert!(
+            actor.proactive_decision_rx.is_none(),
+            "no decision task may spawn during quiet hours"
+        );
+        assert_eq!(
+            actor.proactive.quiet_hours_queue.len(),
+            1,
+            "a due pending candidate alone is a real quiet-hours opportunity"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_selection_skips_while_a_question_is_outstanding() {
+        let (mut actor, _diag_rx, _lifecycle_rx, store) = actor_with_pending_store().await;
+        let candidate_id = store
+            .insert_pending_candidate(pending_candidate_row())
+            .await
+            .expect("insert fixture");
+        let mind = actor
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .expect("mind config");
+
+        let (_, _, _, _, _, selected) = actor.proactive_context_inputs(&mind).await;
+        assert!(
+            selected.is_some(),
+            "a due candidate must be selected when nothing is asked"
+        );
+
+        actor.proactive.asked_pending_candidate = Some(ene_mind::PendingConfirmationPrompt {
+            id: 1,
+            title: "cats".into(),
+            content: "user dislikes cats".into(),
+            age_days: 5.0,
+        });
+        let (_, _, _, _, _, selected) = actor.proactive_context_inputs(&mind).await;
+        assert!(
+            selected.is_none(),
+            "selection must skip while a confirmation question is in flight"
+        );
+
+        // The backoff survives the marker: an unclear reply consumed the
+        // marker, but the delivered question still blocks re-selection.
+        actor.proactive.asked_pending_candidate = None;
+        actor.proactive.pending_confirmation_asked_at.insert(
+            candidate_id,
+            (actor.quiet_hours_clock)() - chrono::Duration::days(1),
+        );
+        let (_, _, _, _, _, selected) = actor.proactive_context_inputs(&mind).await;
+        assert!(
+            selected.is_none(),
+            "a recently asked candidate must wait out the re-ask backoff"
+        );
+
+        actor.proactive.pending_confirmation_asked_at.insert(
+            candidate_id,
+            (actor.quiet_hours_clock)() - chrono::Duration::days(8),
+        );
+        let (_, _, _, _, _, selected) = actor.proactive_context_inputs(&mind).await;
+        assert!(
+            selected.is_some(),
+            "after the backoff window the candidate is due again"
+        );
     }
 
     #[tokio::test]

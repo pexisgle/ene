@@ -15,7 +15,7 @@
     reason = "test support for memory-writer tests uses deliberate id/access-count arithmetic and indexes its in-memory pending-candidate buffer"
 )]
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -34,6 +34,7 @@ pub struct InMemoryMemoryPort {
     pending: Mutex<Vec<PendingCandidate>>,
     outcomes: Mutex<Vec<MemoryOutcome>>,
     next_id: AtomicI64,
+    fail_pending_list: AtomicBool,
 }
 
 impl InMemoryMemoryPort {
@@ -63,6 +64,11 @@ impl InMemoryMemoryPort {
     /// Snapshot of every recorded outcome, newest first.
     pub fn outcomes(&self) -> Vec<MemoryOutcome> {
         self.outcomes.lock().clone()
+    }
+
+    /// Make `list_pending_candidates` fail, exercising loader error paths.
+    pub fn fail_pending_list(&self, fail: bool) {
+        self.fail_pending_list.store(fail, Ordering::Relaxed);
     }
 
     fn alloc_id(&self) -> i64 {
@@ -370,6 +376,11 @@ impl MemoryPort for InMemoryMemoryPort {
         character_id: &str,
         status_filter: Option<ene_core::PendingCandidateStatus>,
     ) -> Result<Vec<PendingCandidate>, MemoryPortError> {
+        if self.fail_pending_list.load(Ordering::Relaxed) {
+            return Err(MemoryPortError::Other(
+                "in-memory store configured to fail".into(),
+            ));
+        }
         let pending = self.pending.lock();
         Ok(pending
             .iter()

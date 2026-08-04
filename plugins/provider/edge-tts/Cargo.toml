@@ -1,0 +1,30 @@
+[package]
+name = "ene-plugin-edge-tts"
+version.workspace = true
+edition.workspace = true
+description = "Microsoft Edge Neural Voice (Edge-TTS) provider plugin: free, keyless TTS over the unified plugin IPC"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ene-plugin = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+http = { workspace = true }
+nanomp3 = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "macros", "time"] }
+tokio-tungstenite = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+uuid = { workspace = true, features = ["v4"] }
+
+[lints]
+workspace = true

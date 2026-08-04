@@ -18,6 +18,7 @@ Ene ホストアプリケーション (ene-runtime)
         │     ├── ene-plugin-openai    (OpenAI 互換プロバイダプラグイン)
         │     ├── ene-plugin-llama-cpp (ローカル GGUF プロバイダプラグイン)
         │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS プロバイダプラグイン)
+        │     ├── ene-plugin-edge-tts  (Microsoft Edge Neural Voice TTS プロバイダプラグイン)
         │     ├── ene-plugin-app       (GUI 起動ツール)
         │     ├── ene-plugin-browser   (CDP ブラウザ自動化ツール)
         │     ├── ene-plugin-calc      (計算ツール)
@@ -105,6 +106,14 @@ TTS プロバイダプラグインも同じ規律に従います: `ene-plugin-ho
 の契約を保ちます。さらに `voicevox` プラグインはマネージドモード
 （`auto_start: true`）でローカルの VOICEVOX 互換エンジンバイナリの起動と
 監視を行います。
+
+`edge-tts` プラグイン（`plugins/provider/edge-tts`）は、同じ `TtsPlugin`
+契約を Microsoft の無料・キー不要な Edge 読み上げ WebSocket エンドポイント
+に対して実装します。ブラウザ拡張機能のハンドシェイク（`TrustedClientToken`
+と `Sec-MS-GEC` のクエリパラメータ・ヘッダー）を模倣し、48 kbps モノラルの
+MP3 フレームを受信してプロセス内でデコード（`nanomp3`）し、WAV 音声を返します
+—— API キーもエンジンもローカルサーバーも不要です。接続が失われた合成呼び出し
+は指数バックオフで再試行します。
 
 ### ローカル推論プラグイン作者向け: プロセス内でも同じ規律を
 
