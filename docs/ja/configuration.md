@@ -423,7 +423,8 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 バージョン 2 のファイルは読み込み時にバージョン 3 へマイグレーションされます。各
 `ai.local_models.<name>` エントリが `plugins.list.llama-cpp.profiles.<name>` へ
 ミラーされます（非空の `url`・`quantization`・`model_path`・`gpu_layers` のみ。
-既存のプロファイル値は上書きされません）。`ai.local_models` 自体は無傷のまま
+既存の非空のプロファイル値は上書きされません。既存の空値は「なし」とみなされます）。
+`ai.local_models` 自体は無傷のまま
 残ります — `ene-ai` はランタイムがプラグインへ切り替わるまで、ローカルタスクの
 ルーティングとコンテキスト予算をここから読み続けます。
 

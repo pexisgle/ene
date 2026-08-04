@@ -533,8 +533,9 @@ stable across reloads.
 Version-2 files are migrated to version 3 on load: every
 `ai.local_models.<name>` entry is mirrored into
 `plugins.list.llama-cpp.profiles.<name>` (non-empty `url` / `quantization` /
-`model_path` / `gpu_layers` only; an existing profile value is never
-overwritten). `ai.local_models` itself is left intact — `ene-ai` still routes
+`model_path` / `gpu_layers` only; a non-empty existing profile value is never
+overwritten, and an existing empty value counts as absent). `ai.local_models`
+itself is left intact — `ene-ai` still routes
 local tasks and budgets context windows from it until the runtime switches to
 the plugin.
 

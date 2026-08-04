@@ -255,8 +255,12 @@ unavailable until the inference slice lands.
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
 | `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — capability skeleton today, inference in a later slice | No |
 
-All thirteen plugins above are included in the default `plugins.list` and start
-automatically on fresh installs.
+All thirteen plugins above are included in the default `plugins.list` and
+start automatically when their binaries are present. Release packages
+currently ship the tool-plugin binaries only; the provider binaries
+(`ene-plugin-anthropic`, `ene-plugin-openai`, `ene-plugin-llama-cpp`) are
+built from source and must be installed next to the host binary for those
+entries to start.
 
 ### Filesystem tool reference (`filesystem.*`)
 

@@ -536,7 +536,9 @@ fn mirror_local_model_profile_key(
 /// This is a one-way mirror, not a move: `ai.local_models` stays intact
 /// because `ene-ai` still routes tasks and budgets context windows from it
 /// until the runtime switches to the plugin. Empty-string / `null` values
-/// are not mirrored, and an existing profile value is never overwritten.
+/// are not mirrored, and a non-empty existing profile value is never
+/// overwritten (an existing empty-string / `null` value counts as absent,
+/// matching the v1→v2 convention).
 /// A no-op (still `Ok`) when there are no local models.
 pub(crate) fn migrate_v2_to_v3(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
     let Some(models) = doc
