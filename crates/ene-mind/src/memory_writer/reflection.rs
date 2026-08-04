@@ -78,10 +78,11 @@ impl SelfReflectionPipeline {
             source_ref: source_ref.map(str::to_string),
             created_at: chrono::Utc::now(),
         };
-        persist_outcome_row(store, &outcome).await;
-        let mut s = self.state.lock();
-        s.turn_counter = s.turn_counter.saturating_add(1);
-        s.outcome_count = s.outcome_count.saturating_add(1);
+        if persist_outcome_row(store, &outcome).await {
+            let mut s = self.state.lock();
+            s.turn_counter = s.turn_counter.saturating_add(1);
+            s.outcome_count = s.outcome_count.saturating_add(1);
+        }
     }
 
     /// Returns `true` when enough turns and outcomes have accumulated to
@@ -89,6 +90,39 @@ impl SelfReflectionPipeline {
     pub fn should_reflect(&self) -> bool {
         let s = self.state.lock();
         s.turn_counter >= self.config.interval_turns && s.outcome_count >= self.config.min_outcomes
+    }
+
+    /// Check the local gate and then the durable queue so progress survives a
+    /// new pipeline instance or a process restart. Each persisted outcome is
+    /// one rated decision, which is the durable progress unit available at
+    /// this boundary.
+    pub async fn should_reflect_with_store(
+        &self,
+        store: &dyn MemoryPort,
+        character_id: &str,
+    ) -> bool {
+        if self.should_reflect() {
+            return true;
+        }
+        let threshold = self.config.interval_turns.max(self.config.min_outcomes);
+        if threshold == 0 {
+            return true;
+        }
+        match store
+            .list_memory_outcomes(character_id, None, threshold)
+            .await
+        {
+            Ok(rows) => rows.len() >= threshold,
+            Err(error) => {
+                tracing::warn!(
+                    component = "SelfReflection",
+                    error = %error,
+                    character_id,
+                    "Failed to load durable outcomes for reflection gate"
+                );
+                false
+            }
+        }
     }
 
     fn drain(&self) {
@@ -139,25 +173,29 @@ impl SelfReflectionPipeline {
                 "Outcome window limit reached; older evaluations wait for the next pass"
             );
         }
-        let ids: Vec<i64> = outcomes.iter().filter_map(|o| o.id).collect();
-        if let Err(error) = store.delete_memory_outcomes(character_id, &ids).await {
-            tracing::warn!(
-                component = "SelfReflection",
-                error = %error,
-                character_id,
-                "Failed to consume outcome window; evaluations stay queued for the next pass"
-            );
-            return Vec::new();
-        }
         let items = Self::build_reflections(&outcomes, character_id, source_ref, user_id);
+        let mut all_inserted = true;
         for item in &items {
             if let Err(e) = store.insert_typed_memory(item).await {
+                all_inserted = false;
                 tracing::warn!(
                     component = "SelfReflection",
                     error = %e,
                     title = %item.title,
                     "Failed to persist reflection memory"
                 );
+            }
+        }
+        if all_inserted {
+            let ids: Vec<i64> = outcomes.iter().filter_map(|o| o.id).collect();
+            if let Err(error) = store.delete_memory_outcomes(character_id, &ids).await {
+                tracing::warn!(
+                    component = "SelfReflection",
+                    error = %error,
+                    character_id,
+                    "Failed to consume outcome window; evaluations stay queued for the next pass"
+                );
+                return Vec::new();
             }
         }
         items
@@ -234,14 +272,18 @@ impl SelfReflectionPipeline {
 /// Persist one outcome row, warning instead of failing when the store write
 /// errors (the evaluated memory is already committed; a missing row only
 /// degrades the next reflection pass).
-async fn persist_outcome_row(store: &dyn MemoryPort, outcome: &MemoryOutcome) {
-    if let Err(error) = store.record_memory_outcome(outcome).await {
-        tracing::warn!(
-            component = "SelfReflection",
-            error = %error,
-            memory_id = outcome.memory_id,
-            "Failed to persist memory outcome; reflection pass will not see it"
-        );
+async fn persist_outcome_row(store: &dyn MemoryPort, outcome: &MemoryOutcome) -> bool {
+    match store.record_memory_outcome(outcome).await {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(
+                component = "SelfReflection",
+                error = %error,
+                memory_id = outcome.memory_id,
+                "Failed to persist memory outcome; reflection pass will not see it"
+            );
+            false
+        }
     }
 }
 

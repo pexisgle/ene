@@ -203,7 +203,16 @@ impl MemoryWriter {
             );
         }
 
+        let reflection = config
+            .memory
+            .reflection
+            .enabled
+            .then(|| reflection::SelfReflectionPipeline::new(config.memory.reflection.clone()));
+
         if batches.is_empty() {
+            if let Some(pipeline) = reflection {
+                generate_reflection_if_due(store, config, input, pipeline).await;
+            }
             return Ok(0);
         }
 
@@ -233,12 +242,6 @@ impl MemoryWriter {
             active_match_limit: config.memory_limits.commitment_active_match_limit,
         };
         let mut outcome_summary = ArbiterOutcomeSummary::default();
-        let reflection = config
-            .memory
-            .reflection
-            .enabled
-            .then(|| reflection::SelfReflectionPipeline::new(config.memory.reflection.clone()));
-
         for (candidates, provenance) in batches {
             let semantic_matches = build_semantic_matches(
                 store,
@@ -331,25 +334,8 @@ impl MemoryWriter {
             "Post-turn memory arbitration complete"
         );
 
-        if let Some(pipeline) = reflection
-            && pipeline.should_reflect()
-        {
-            let reflections = pipeline
-                .generate_reflection(
-                    store,
-                    input.character_id,
-                    input.source_turn,
-                    input.user_id,
-                    config.memory.reflection.success_boost,
-                    config.memory.reflection.failure_penalty,
-                )
-                .await;
-            tracing::info!(
-                component = "MemoryWriter",
-                character_id = %input.character_id,
-                reflection_count = reflections.len(),
-                "Self-reflection memories generated"
-            );
+        if let Some(pipeline) = reflection {
+            generate_reflection_if_due(store, config, input, pipeline).await;
         }
 
         Ok(outcome_summary.deferred)
@@ -405,6 +391,36 @@ impl MemoryWriter {
         Self::apply_forgetting(store, config, &input).await?;
         Self::finalize_turn(store, config, &input).await
     }
+}
+
+async fn generate_reflection_if_due(
+    store: &dyn MemoryPort,
+    config: &MindConfig,
+    input: &PostTurnInput<'_>,
+    pipeline: reflection::SelfReflectionPipeline,
+) {
+    if !pipeline
+        .should_reflect_with_store(store, input.character_id)
+        .await
+    {
+        return;
+    }
+    let reflections = pipeline
+        .generate_reflection(
+            store,
+            input.character_id,
+            input.source_turn,
+            input.user_id,
+            config.memory.reflection.success_boost,
+            config.memory.reflection.failure_penalty,
+        )
+        .await;
+    tracing::info!(
+        component = "MemoryWriter",
+        character_id = %input.character_id,
+        reflection_count = reflections.len(),
+        "Self-reflection memories generated"
+    );
 }
 
 async fn build_semantic_matches(
