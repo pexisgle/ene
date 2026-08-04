@@ -14,7 +14,7 @@ default = ["voice"]
 # without the native audio toolchain (ALSA / PipeWire); the `audio` module
 # compiles to inert stubs and `ene-ai`'s voice providers stay registered but
 # unreachable from the UI.
-voice = ["dep:cpal", "dep:rodio"]
+voice = ["dep:cpal", "dep:rodio", "dep:rustfft"]
 
 [dependencies]
 winit = "0.30"
@@ -65,6 +65,7 @@ indexmap = { workspace = true }
 # Local voice pipeline I/O (optional; enabled by the `voice` feature).
 cpal = { workspace = true, optional = true }
 rodio = { workspace = true, optional = true }
+rustfft = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ene-ai-local = { workspace = true, features = ["vulkan"] }

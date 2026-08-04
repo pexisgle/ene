@@ -62,6 +62,9 @@ pub enum AppEvent {
     /// `LookAt` cue — gaze target hint from LLM performance markers.
     /// Forwarded to VRM gaze when the gaze system is implemented.
     LookAtCue { target: String },
+    /// Beat pulse from system audio (Beat Sync), relayed through the
+    /// runtime chat bus from [`ene_runtime::EneEvent::BeatPulse`].
+    BeatPulse { bpm: f32, intensity: f32 },
     /// Microphone capture started (`active = true`) or stopped
     /// (`active = false`). Emitted by the audio capture subsystem so
     /// the chat UI can refresh its mic-toggle indicator.

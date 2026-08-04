@@ -10,7 +10,8 @@ use crate::event::chat::OpenChat;
 use crate::event::{
     ai::{
         AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-        CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
+        BeatPulse, CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
+        PendingCandidatesCount,
     },
     input::{KeyboardKey, PointerButton, PointerMoved},
     lifecycle::{TickGtk, WindowCloseRequested, WindowResized},
@@ -83,6 +84,7 @@ pub fn build_app(
     app.insert_resource(EmotionPipelineState::default());
     app.insert_resource(MotionLayerState::default());
     app.init_resource::<crate::caption_overlay::CaptionFeed>();
+    app.insert_resource(crate::resource::beat_sync::BeatSyncState::default());
     app.insert_resource(EventChannels {
         tx: event_tx,
         rx: event_rx,
@@ -101,6 +103,7 @@ pub fn build_app(
     app.add_message::<MotionCommand>();
     app.add_message::<ExpressionCommand>();
     app.add_message::<CancelCommand>();
+    app.add_message::<BeatPulse>();
     app.add_message::<OpenSettings>();
     app.add_message::<OpenChat>();
     app.add_message::<SettingsActionEvent>();

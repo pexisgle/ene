@@ -360,6 +360,13 @@ pub enum PublicChatEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+    /// A detected system-audio beat pulse (Beat Sync), turn-independent.
+    BeatPulse {
+        /// Estimated tempo in beats per minute.
+        bpm: f32,
+        /// Normalized onset strength in `[0, 1]`.
+        intensity: f32,
+    },
 }
 
 /// Stable JSON mirror of the lifecycle [`LifecycleEvent`] bus.
@@ -515,6 +522,10 @@ impl PublicChatEvent {
                     message,
                 }
             }
+            EneEvent::BeatPulse { bpm, intensity } => Self::BeatPulse {
+                bpm: *bpm,
+                intensity: *intensity,
+            },
         }
     }
 }
@@ -728,6 +739,22 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serializable");
         assert_eq!(value["type"], "text_delta");
         assert_eq!(value["origin"], "user");
+    }
+
+    #[test]
+    fn beat_pulse_mirrors_verbatim() {
+        let event = EneEvent::BeatPulse {
+            bpm: 128.0,
+            intensity: 0.4,
+        };
+        let public = PublicChatEvent::from_ene_event(&event);
+        let PublicChatEvent::BeatPulse { bpm, intensity } = public else {
+            panic!("expected BeatPulse");
+        };
+        assert!((bpm - 128.0).abs() < f32::EPSILON);
+        assert!((intensity - 0.4).abs() < f32::EPSILON);
+        let value = serde_json::to_value(&public).expect("serializable");
+        assert_eq!(value["type"], "beat_pulse");
     }
 
     #[test]

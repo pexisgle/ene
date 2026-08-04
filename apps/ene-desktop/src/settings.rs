@@ -143,6 +143,23 @@ ene_config::define_config!(
         /// `None` means "pinned until the user changes it".
         #[serde(default)]
         pub caption_pinned: Option<bool>,
+        /// Beat Sync: react to system audio rhythm with avatar sway.
+        #[serde(default)]
+        pub beat_sync: BeatSyncSection,
+    }
+);
+
+ene_config::define_config!(
+    DesktopSection,
+    "beat_sync",
+    pub struct BeatSyncSection {
+        /// Whether system-audio loopback capture and beat detection run.
+        #[serde(default)]
+        pub enabled: bool,
+        /// Loopback device name override; `None` auto-selects an available
+        /// monitor input.
+        #[serde(default)]
+        pub device: Option<String>,
     }
 );
 
@@ -852,6 +869,19 @@ impl CharacterSettings {
         self.store.read().with_config_mut(|c| {
             if let Ok(mut d) = c.get_section::<DesktopSection>() {
                 d.mic_device = mic_device;
+                drop(c.set_section(&d));
+            }
+        });
+    }
+
+    pub fn beat_sync_device(&self) -> Option<String> {
+        self.config_section::<DesktopSection>().beat_sync.device
+    }
+
+    pub fn set_beat_sync_enabled(&self, enabled: bool) {
+        self.store.read().with_config_mut(|c| {
+            if let Ok(mut d) = c.get_section::<DesktopSection>() {
+                d.beat_sync.enabled = enabled;
                 drop(c.set_section(&d));
             }
         });

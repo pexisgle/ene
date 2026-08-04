@@ -26,6 +26,7 @@
 //! Per-frame render parameters stay on `Runtime`, not in resources,
 //! because they are GPU- and `!Send`/`!Sync`-bound.
 pub mod ai_bridge;
+pub mod beat_sync;
 pub mod cursor_state;
 pub mod emotion_pipeline;
 pub mod event_channels;

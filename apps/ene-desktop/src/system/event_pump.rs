@@ -9,7 +9,7 @@ use bevy_ecs::prelude::*;
 
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
+    BeatPulse, CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
 };
 use crate::event::chat::OpenChat;
 use crate::event::lifecycle::TickGtk;
@@ -37,9 +37,9 @@ pub fn pump_legacy_events(
     mut motion: MessageWriter<MotionCommand>,
     mut expression: MessageWriter<ExpressionCommand>,
     mut cancel: MessageWriter<CancelCommand>,
+    mut beat_pulse: MessageWriter<BeatPulse>,
     mut open_settings: MessageWriter<OpenSettings>,
     mut open_chat: MessageWriter<OpenChat>,
-    #[cfg(target_os = "linux")] mut tick_gtk: MessageWriter<TickGtk>,
     mut runtime_disconnected: MessageWriter<crate::event::lifecycle::RuntimeDisconnected>,
     mut pending_candidates: MessageWriter<PendingCandidatesCount>,
 ) {
@@ -56,17 +56,22 @@ pub fn pump_legacy_events(
             &mut motion,
             &mut expression,
             &mut cancel,
+            &mut beat_pulse,
             &mut open_settings,
             &mut open_chat,
             &mut runtime_disconnected,
             &mut pending_candidates,
         );
     }
-    // Publish a `TickGtk` every frame on Linux so the tray icon
-    // library makes progress. The actual `tick_gtk()` call still
-    // lives in `Runtime::about_to_wait` because the
-    // `Rc<RefCell<TrayHandle>>` is not `Send + Sync`.
-    #[cfg(target_os = "linux")]
+}
+
+/// Publish a `TickGtk` every frame on Linux so the tray icon library makes
+/// progress. Split from [`pump_legacy_events`] to keep that system within
+/// bevy's 16-parameter limit. The actual `tick_gtk()` call still lives in
+/// `Runtime::about_to_wait` because the `Rc<RefCell<TrayHandle>>` is not
+/// `Send + Sync`.
+#[cfg(target_os = "linux")]
+pub fn publish_tick_gtk_system(mut tick_gtk: MessageWriter<TickGtk>) {
     tick_gtk.write(TickGtk);
 }
 
@@ -82,6 +87,7 @@ fn translate_event(
     motion: &mut MessageWriter<MotionCommand>,
     expression: &mut MessageWriter<ExpressionCommand>,
     cancel: &mut MessageWriter<CancelCommand>,
+    beat_pulse: &mut MessageWriter<BeatPulse>,
     open_settings: &mut MessageWriter<OpenSettings>,
     open_chat: &mut MessageWriter<OpenChat>,
     runtime_disconnected: &mut MessageWriter<crate::event::lifecycle::RuntimeDisconnected>,
@@ -157,6 +163,9 @@ fn translate_event(
                 duration,
             });
         }
+        AppEvent::BeatPulse { bpm, intensity } => {
+            beat_pulse.write(BeatPulse { bpm, intensity });
+        }
         AppEvent::Ai(
             AiStreamUpdate::ToolCallStart { .. } | AiStreamUpdate::ToolCallResult { .. },
         ) => {}
@@ -218,6 +227,7 @@ mod tests {
         world.init_resource::<Messages<MotionCommand>>();
         world.init_resource::<Messages<ExpressionCommand>>();
         world.init_resource::<Messages<CancelCommand>>();
+        world.init_resource::<Messages<BeatPulse>>();
         world.init_resource::<Messages<OpenSettings>>();
         world.init_resource::<Messages<OpenChat>>();
         world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
@@ -348,6 +358,24 @@ mod tests {
         let events: Vec<_> = cursor.read(&*messages).collect();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "expr");
+    }
+
+    #[test]
+    #[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
+    fn beat_pulse_emits_typed_message() {
+        let (mut world, tx) = build_world();
+        tx.send(AppEvent::BeatPulse {
+            bpm: 128.0,
+            intensity: 0.6,
+        })
+        .unwrap();
+        run_pump(&mut world);
+        let messages = world.resource_mut::<Messages<BeatPulse>>();
+        let mut cursor = messages.get_cursor();
+        let events: Vec<_> = cursor.read(&*messages).collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].bpm, 128.0);
+        assert_eq!(events[0].intensity, 0.6);
     }
 
     #[test]

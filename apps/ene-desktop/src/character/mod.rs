@@ -11,12 +11,13 @@ use std::path::PathBuf;
 
 use crate::settings::AntialiasingMode;
 use ene_vrm::{
+    BeatSway, SpringBoneProperties, SpringBoneSimulator, VrmaAsset, VrmaPlayer,
+    post_process::PostProcessor,
+};
+use ene_vrm::{
     ExpressionName, HumanoidBoneEntry, LookAtBoneOutput, LookAtEvaluator, LookAtOutput,
     LookAtProperties, ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, evaluate_clip,
     load_vrm, load_vrma,
-};
-use ene_vrm::{
-    SpringBoneProperties, SpringBoneSimulator, VrmaAsset, VrmaPlayer, post_process::PostProcessor,
 };
 use glam::{Mat4, Quat, Vec3};
 
@@ -48,6 +49,7 @@ pub struct CharacterRenderer {
     vrma: Option<VrmaAsset>,
     vrma_player: VrmaPlayer,
     vrma_path: Option<PathBuf>,
+    beat_sway: BeatSway,
     assets_dir: Option<PathBuf>,
     active_bone_nodes: Vec<usize>,
     /// Spring-bone simulator. `None` for models without `VRMC_springBone`.
@@ -85,6 +87,7 @@ impl CharacterRenderer {
             vrma: None,
             vrma_player: VrmaPlayer::default(),
             vrma_path: None,
+            beat_sway: BeatSway::default(),
             assets_dir: Some(assets_dir.to_path_buf()),
             active_bone_nodes: Vec::new(),
         }
@@ -199,6 +202,23 @@ impl CharacterRenderer {
         self.vrma_player.playing = playing;
     }
 
+    /// Register a detected beat (Beat Sync): snaps the procedural sway to
+    /// the beat. The clip playback speed is re-synced per frame in
+    /// [`update_motion`](Self::update_motion) so it relaxes to 1.0 once the
+    /// beat tail expires.
+    pub fn beat_pulse(&mut self, bpm: f32, intensity: f32) {
+        self.beat_sway.on_pulse(bpm, intensity);
+    }
+
+    /// Enable or disable beat-synced motion; disabling resets the sway and
+    /// the per-frame speed sync restores normal clip playback speed.
+    pub fn set_beat_sync_enabled(&mut self, enabled: bool) {
+        if enabled {
+            return;
+        }
+        self.beat_sway = BeatSway::default();
+    }
+
     /// Load a `.vrma` from disk and store the asset. Safe to call
     /// before the model is loaded. Errors are logged and the
     /// previous motion is kept.
@@ -234,6 +254,10 @@ impl CharacterRenderer {
     /// [`VrmRenderer::update_skin_palette`]; `None` when there is no
     /// motion, no model, or the player is paused.
     pub fn update_motion(&mut self, dt_secs: f32) -> Option<Vec<glam::Mat4>> {
+        self.beat_sway.update(dt_secs);
+        // Keep the clip tempo in sync with the sway every frame so the
+        // speed returns to 1.0 after the last beat's tail expires.
+        self.vrma_player.speed = self.beat_sway.locomotion_speed_multiplier();
         let mut frame = if self.vrma_player.playing {
             if let Some(asset) = &self.vrma
                 && let Some(clip) = asset.clips.first()
@@ -290,6 +314,8 @@ impl CharacterRenderer {
             }
             frame.bone_rotations = retargeted;
         }
+
+        self.beat_sway.apply_to(&mut frame);
 
         let model = self.model.as_mut()?;
 
@@ -1454,5 +1480,47 @@ mod camera_target_tests {
         renderer.update_camera_target(1.0);
         let (_eye, target, _vh, _aspect) = renderer.camera.debug();
         assert_eq!(target, [0.0, 0.0, 0.0]);
+    }
+}
+
+#[cfg(test)]
+mod beat_sync_tests {
+    use super::*;
+
+    #[test]
+    fn motion_speed_follows_beat_and_relaxes_after_tail() {
+        let mut renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");
+        renderer.beat_pulse(180.0, 1.0);
+        renderer.update_motion(0.01);
+        assert!(
+            (renderer.vrma_player.speed - 1.2).abs() < 1e-5,
+            "speed should scale to 180 BPM, got {}",
+            renderer.vrma_player.speed
+        );
+        // Advance past the 1.5 s beat tail; the per-frame speed sync must
+        // relax the clip back to 1.0.
+        for _ in 0..20 {
+            renderer.update_motion(0.1);
+        }
+        assert!(
+            (renderer.vrma_player.speed - 1.0).abs() < 1e-5,
+            "speed must relax to 1.0 after the beat tail, got {}",
+            renderer.vrma_player.speed
+        );
+    }
+
+    #[test]
+    fn disabling_beat_sync_resets_sway_and_speed() {
+        let mut renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");
+        renderer.beat_pulse(120.0, 1.0);
+        renderer.update_motion(0.01);
+        assert!(renderer.beat_sway.is_active());
+        renderer.set_beat_sync_enabled(false);
+        renderer.update_motion(0.01);
+        assert!(!renderer.beat_sway.is_active());
+        assert!(
+            (renderer.vrma_player.speed - 1.0).abs() < 1e-5,
+            "speed must reset to 1.0 when beat sync is disabled"
+        );
     }
 }

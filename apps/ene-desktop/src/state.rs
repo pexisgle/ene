@@ -142,6 +142,13 @@ impl AppState {
         #[cfg(not(feature = "voice"))]
         let audio_tx: Option<crate::audio::AudioChunkSender> = None;
 
+        // Snapshot the desktop section before `config` moves into the
+        // bridge; the beat-sync startup decision reads it later.
+        #[cfg(feature = "voice")]
+        let desktop_section = config
+            .get_section::<crate::settings::DesktopSection>()
+            .unwrap_or_default();
+
         let (ai, runtime_startup_error) =
             match AiBridge::try_new(tx.clone(), bootstrap_handle, config, audio_tx.clone()) {
                 Ok(bridge) => (Some(Arc::new(bridge)), None),
@@ -162,7 +169,7 @@ impl AppState {
         #[cfg(feature = "voice")]
         let mut app = build_app(bootstrap_handle.clone(), rx, tx.clone());
         #[cfg(not(feature = "voice"))]
-        let app = build_app(bootstrap_handle.clone(), rx, tx.clone());
+        let mut app = build_app(bootstrap_handle.clone(), rx, tx.clone());
 
         // Register the shared audio resources so the mic toggle, playback
         // thread, and render-loop viseme hook can all reach them. The
@@ -173,6 +180,42 @@ impl AppState {
             app.insert_resource(audio_state);
             app.insert_resource(viseme_state);
         }
+
+        // Beat sync: start loopback capture at launch when enabled. The
+        // handle lives in a bevy resource so the Features-page toggle can
+        // stop/start it without restarting the app.
+        #[cfg(feature = "voice")]
+        let (beat_state, beat_runtime) = {
+            let desktop = desktop_section;
+            let mut state = crate::resource::beat_sync::BeatSyncState::default();
+            let mut runtime = crate::resource::beat_sync::BeatSyncRuntime::default();
+            if desktop.beat_sync.enabled
+                && let Some(ai) = ai.as_ref()
+            {
+                match crate::audio::beat_sync::spawn_beat_sync(
+                    desktop.beat_sync.device.clone(),
+                    Arc::clone(ai),
+                ) {
+                    Ok(handle) => {
+                        runtime.replace(handle);
+                        state.set_enabled(true);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            component = "BeatSync",
+                            error = %e,
+                            "beat sync start failed; feature disabled"
+                        );
+                    }
+                }
+            }
+            (state, runtime)
+        };
+        #[cfg(not(feature = "voice"))]
+        let beat_state = crate::resource::beat_sync::BeatSyncState::default();
+        app.insert_resource(beat_state);
+        #[cfg(feature = "voice")]
+        app.insert_resource(beat_runtime);
 
         (
             Self {

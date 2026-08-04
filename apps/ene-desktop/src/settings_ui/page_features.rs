@@ -740,6 +740,40 @@ fn render_audio(
         ));
         ui.weak(provider_display(&ai_cfg.tts.provider));
     });
+    #[cfg(feature = "voice")]
+    {
+        // Display the live capture state (a dead thread after a device
+        // unplug shows as disabled even though the config flag is set);
+        // writes still go to the persisted config.
+        let mut enabled = world
+            .get_resource::<crate::resource::beat_sync::BeatSyncRuntime>()
+            .is_some_and(crate::resource::beat_sync::BeatSyncRuntime::is_running);
+        if ui
+            .checkbox(
+                &mut enabled,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "beat-sync-enabled"),
+            )
+            .on_hover_text(i18n_embed_fl::fl!(crate::i18n::loader(), "beat-sync-hint"))
+            .changed()
+        {
+            settings.set_beat_sync_enabled(enabled);
+            settings.mark_dirty();
+            if let Err(e) =
+                crate::audio::set_beat_sync_enabled(world, ai, enabled, settings.beat_sync_device())
+            {
+                tracing::warn!(
+                    component = "BeatSync",
+                    error = %e,
+                    "beat sync toggle failed"
+                );
+                // Roll the persisted setting back so a failed start (no
+                // loopback device, unsupported format) does not leave the
+                // feature enabled forever.
+                settings.set_beat_sync_enabled(!enabled);
+                settings.mark_dirty();
+            }
+        }
+    }
     ui.weak(i18n_embed_fl::fl!(
         crate::i18n::loader(),
         "audio-open-voice-settings"

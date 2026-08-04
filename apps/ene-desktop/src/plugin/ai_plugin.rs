@@ -10,6 +10,7 @@
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 
+use crate::resource::beat_sync::apply_beat_pulses_system;
 use crate::schedule::AppSet;
 use crate::system::ui_consumers::{
     apply_ai_permission_system, apply_ai_stream_error_system, apply_ai_stream_finished_system,
@@ -42,6 +43,7 @@ impl Plugin for AiPlugin {
                 apply_expression_commands_system,
                 apply_cancel_system,
                 apply_motion_commands_system,
+                apply_beat_pulses_system,
                 apply_pending_candidates_count_system,
             )
                 .in_set(AppSet::Settings),

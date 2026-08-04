@@ -350,7 +350,7 @@ async fn process_turn(
                 }
                 break;
             }
-            EneEvent::ContextCompressed { .. } => {}
+            EneEvent::ContextCompressed { .. } | EneEvent::BeatPulse { .. } => {}
         }
     }
 

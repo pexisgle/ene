@@ -131,6 +131,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\n[ContextCompressed: {level}]");
             }
             EneEvent::TurnStarted { .. } => {}
+            EneEvent::BeatPulse { bpm, intensity } => {
+                println!("\n[BeatPulse: {bpm} BPM, intensity {intensity:.2}]");
+            }
             EneEvent::Terminal {
                 turn: t,
                 origin: _,

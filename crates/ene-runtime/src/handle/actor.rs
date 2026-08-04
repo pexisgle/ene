@@ -2509,6 +2509,10 @@ impl TurnActor {
                 }
                 true
             }
+            EneCommand::BeatPulse { bpm, intensity } => {
+                drop(self.event_tx.send(EneEvent::BeatPulse { bpm, intensity }));
+                true
+            }
             EneCommand::UpdateProactiveSettings { mind } => {
                 if let Ok(mut mind_cfg) = self.config.get_section::<ene_mind::MindConfig>() {
                     mind_cfg.proactive = mind;

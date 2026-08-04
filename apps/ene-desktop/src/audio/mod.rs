@@ -24,6 +24,8 @@
 pub mod viseme_driver;
 
 #[cfg(feature = "voice")]
+pub mod beat_sync;
+#[cfg(feature = "voice")]
 pub mod capture;
 #[cfg(feature = "voice")]
 pub mod playback;
@@ -333,6 +335,44 @@ pub fn toggle_mic_capture(
 
     *mic_handle = Some(handle);
     Ok(())
+}
+
+/// Start or stop the beat-sync capture thread.
+///
+/// `enabled` is the persisted `desktop.beat_sync.enabled` setting; starting
+/// fails with a descriptive error when no loopback (monitor) device is
+/// available. `device` is the optional `desktop.beat_sync.device` override.
+#[cfg(feature = "voice")]
+pub fn set_beat_sync_enabled(
+    world: &mut bevy_ecs::world::World,
+    ai: &Arc<crate::ai_bridge::AiBridge>,
+    enabled: bool,
+    device: Option<String>,
+) -> Result<(), String> {
+    let Some(mut runtime) = world.get_resource_mut::<crate::resource::beat_sync::BeatSyncRuntime>()
+    else {
+        return Err("beat sync runtime resource missing".to_string());
+    };
+    if enabled {
+        if runtime.is_running() {
+            return Ok(());
+        }
+        let handle =
+            beat_sync::spawn_beat_sync(device, Arc::clone(ai)).map_err(|e| e.to_string())?;
+        runtime.replace(handle);
+        sync_beat_state_enabled(world, true);
+    } else {
+        runtime.stop();
+        sync_beat_state_enabled(world, false);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "voice")]
+fn sync_beat_state_enabled(world: &mut bevy_ecs::world::World, enabled: bool) {
+    if let Some(mut state) = world.get_resource_mut::<crate::resource::beat_sync::BeatSyncState>() {
+        state.set_enabled(enabled);
+    }
 }
 
 /// Text-only stub: microphone capture is unavailable without the

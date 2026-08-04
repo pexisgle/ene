@@ -30,6 +30,8 @@
 use bevy_app::{App, First, Last, PostUpdate, Startup, Update};
 use bevy_ecs::prelude::*;
 
+#[cfg(target_os = "linux")]
+use crate::system::event_pump::publish_tick_gtk_system;
 use crate::system::event_pump::pump_legacy_events;
 
 /// Per-stage ordering labels used inside the five standard `bevy_app` stages.
@@ -67,7 +69,14 @@ pub fn configure_schedule(app: &mut App) {
     app.configure_sets(PostUpdate, AppSet::Render);
     app.configure_sets(Last, (AppSet::Render, AppSet::Present).chain());
 
-    app.add_systems(First, pump_legacy_events.in_set(AppSet::EventDispatch));
+    app.add_systems(
+        First,
+        (
+            pump_legacy_events.in_set(AppSet::EventDispatch),
+            #[cfg(target_os = "linux")]
+            publish_tick_gtk_system,
+        ),
+    );
 }
 
 /// `Startup` schedule marker: all one-shot setup systems are added here.

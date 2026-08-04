@@ -27,6 +27,9 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle, activ
         match rx.recv().await {
             // The turn is already known to the caller; nothing to do here.
             Ok(EneEvent::TurnStarted { .. }) => {}
+            Ok(EneEvent::BeatPulse { bpm, intensity }) => {
+                tracing::debug!(bpm, intensity, "Beat pulse");
+            }
             Ok(EneEvent::TextDelta {
                 turn,
                 origin: _,

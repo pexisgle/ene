@@ -1332,6 +1332,17 @@ impl EneHandle {
             .map_err(|_| PublicApiError::ActorDead)
     }
 
+    /// Report a detected system-audio beat pulse for broadcast.
+    ///
+    /// The actor relays the pulse as [`EneEvent::BeatPulse`] on the chat bus.
+    /// The caller is expected to send normalized values (tempo in a plausible
+    /// range, intensity in `[0, 1]`); the runtime forwards them verbatim.
+    pub fn report_beat_pulse(&self, bpm: f32, intensity: f32) -> Result<(), PublicApiError> {
+        self.cmd_tx
+            .send(EneCommand::BeatPulse { bpm, intensity })
+            .map_err(|_| PublicApiError::ActorDead)
+    }
+
     /// Hot-update proactive policy in the running actor.
     ///
     /// Prefer [`Self::update_feature_settings`] when emotion / store / tools
@@ -2593,6 +2604,36 @@ mod tests {
             event_rx.try_recv().is_err(),
             "a skipped fire must not emit turn events"
         );
+    }
+
+    /// A host-reported beat pulse is relayed verbatim to chat-bus
+    /// subscribers, independent of any active turn.
+    #[tokio::test]
+    async fn beat_pulse_command_broadcasts_event() {
+        let store = Arc::new(
+            ene_store::MemoryStore::open_in_memory(4)
+                .await
+                .expect("in-memory store"),
+        );
+        let (mut actor, mut event_rx, _gate) =
+            build_bare_actor_with_store(store.clone(), Arc::new(EmptyRegistry));
+
+        assert!(
+            actor
+                .handle_command(EneCommand::BeatPulse {
+                    bpm: 123.0,
+                    intensity: 0.75,
+                })
+                .await
+        );
+
+        match event_rx.recv().await {
+            Ok(EneEvent::BeatPulse { bpm, intensity }) => {
+                assert!((bpm - 123.0).abs() < f32::EPSILON);
+                assert!((intensity - 0.75).abs() < f32::EPSILON);
+            }
+            other => panic!("expected BeatPulse on the chat bus, got {other:?}"),
+        }
     }
 
     /// A fire beyond the late-execution grace window is recorded
