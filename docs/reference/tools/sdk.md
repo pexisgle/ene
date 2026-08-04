@@ -32,10 +32,12 @@ One import line covers the whole tool authoring surface:
 use ene_plugin::prelude::*;
 ```
 
-This brings in `ToolAction`, the `ToolAction`/`ToolSpec` derives, `ToolSpec`,
-`ToolError`, `schemars::JsonSchema`, `serde::Deserialize`, and
-`async_trait::async_trait` (plus `ActionSetProvider` /
-`SingleActionProvider`).
+This brings in the `ToolAction` and `ToolSpec` derive macros, the
+`ToolAction` trait (imported anonymously — the generated code resolves
+it), `ToolError`, `schemars::JsonSchema`, `serde::Deserialize`,
+`async_trait::async_trait`, and `ActionSetProvider` /
+`SingleActionProvider`. The `ToolSpec` type itself is re-exported at the
+crate root (`ene_plugin::ToolSpec`), not through the prelude.
 
 ### The action pattern
 
@@ -169,14 +171,18 @@ for the full protocol description; the author-relevant rules are:
 `SideEffects` is declared in the `#[tool(...)]` attribute:
 
 ```rust
-side_effects = "ReadOnly"       // no observable effects
-side_effects = "Idempotent"     // same args ⇒ same effect
-side_effects = "Destructive"    // data loss possible, rollback not guaranteed
-side_effects = "FileSystem"     // file interaction; mutates flag
-side_effects = "Network"        // network access; external flag
-side_effects = "System"         // process spawn, signals; privileged flag
-side_effects = "Browser"        // DOM automation; mutates_dom flag
+side_effects = "ReadOnly"                       // no observable effects
+side_effects = "Idempotent"                     // same args ⇒ same effect
+side_effects = "Destructive"                    // data loss possible, rollback not guaranteed
+side_effects = "FileSystem { mutates: true }"   // file writes
+side_effects = "Network { external: true }"     // external network access
+side_effects = "System { privileged: true }"    // privileged system access
+side_effects = "Browser { mutates_dom: true }"  // DOM mutations
 ```
+
+The attribute accepts either a bare unit variant (`ReadOnly`,
+`Idempotent`, `Destructive`) or the braced struct form shown above; the
+braces are part of the string literal.
 
 Parallel dispatch is **fail-closed**: only an explicit
 `SideEffects::ReadOnly` makes a tool eligible for bounded parallel
@@ -267,9 +273,10 @@ for a working task-registry example.
 
 ## Naming rules
 
-- Plugin names match `[a-zA-Z0-9_-]`; the binary must be named
-  `ene-plugin-<name>` and be executable (host discovery scans for this
-  prefix only).
+- Plugin names match `[a-zA-Z0-9_-]`. The primary binary convention is
+  `ene-plugin-<name>` (host discovery scans for this prefix only);
+  `find_plugin_binary` additionally falls back to a bare `<name>`
+  executable.
 - Tool names are `<namespace>.<action>`: ASCII alphanumeric, `_`, `.`,
   `:`; no leading/trailing `.`/`:`; no consecutive separators. `-` is
   **not** allowed — convert hyphens to underscores in namespaces.

@@ -31,10 +31,12 @@
 use ene_plugin::prelude::*;
 ```
 
-これで `ToolAction`、`ToolAction`/`ToolSpec` の derive、`ToolSpec`、
-`ToolError`、`schemars::JsonSchema`、`serde::Deserialize`、
-`async_trait::async_trait`（および `ActionSetProvider` /
-`SingleActionProvider`）が入ります。
+これで `ToolAction` / `ToolSpec` の derive マクロ、`ToolAction` トレイト
+（匿名インポート — 生成コードが解決します）、`ToolError`、
+`schemars::JsonSchema`、`serde::Deserialize`、`async_trait::async_trait`、
+および `ActionSetProvider` / `SingleActionProvider` が入ります。
+`ToolSpec` 型自体はクレートルート（`ene_plugin::ToolSpec`）からの再エクスポートで、
+prelude からは来ません。
 
 ### アクションのパターン
 
@@ -168,14 +170,18 @@ async fn main() {
 `SideEffects` は `#[tool(...)]` 属性で宣言します:
 
 ```rust
-side_effects = "ReadOnly"       // 観測可能な副作用なし
-side_effects = "Idempotent"     // 同じ引数 ⇒ 同じ効果
-side_effects = "Destructive"    // データ損失の可能性、ロールバック保証なし
-side_effects = "FileSystem"     // ファイル操作（mutates フラグ）
-side_effects = "Network"        // ネットワークアクセス（external フラグ）
-side_effects = "System"         // プロセス起動・シグナル（privileged フラグ）
-side_effects = "Browser"        // DOM 自動操作（mutates_dom フラグ）
+side_effects = "ReadOnly"                       // 観測可能な副作用なし
+side_effects = "Idempotent"                     // 同じ引数 ⇒ 同じ効果
+side_effects = "Destructive"                    // データ損失の可能性、ロールバック保証なし
+side_effects = "FileSystem { mutates: true }"   // ファイル書き込み
+side_effects = "Network { external: true }"     // 外部ネットワークアクセス
+side_effects = "System { privileged: true }"    // 特権システムアクセス
+side_effects = "Browser { mutates_dom: true }"  // DOM 変更
 ```
+
+属性はユニットバリアント（`ReadOnly`、`Idempotent`、`Destructive`）か、
+上記のような波括弧付き構造体形式のどちらかを受け付けます。波括弧は
+文字列リテラルの一部です。
 
 並列ディスパッチは**フェイルクローズ**です。明示的な
 `SideEffects::ReadOnly` だけが並列実行の対象になり、`None`（不明）、
@@ -261,9 +267,9 @@ side_effects = "Browser"        // DOM 自動操作（mutates_dom フラグ）
 
 ## 命名規則
 
-- プラグイン名は `[a-zA-Z0-9_-]` に一致し、バイナリ名は `ene-plugin-<name>`
-  で実行可能ビットが必要です（ホストのディスカバリはこのプレフィックスのみを
-  走査します）。
+- プラグイン名は `[a-zA-Z0-9_-]` に一致します。バイナリの基本規約は
+  `ene-plugin-<name>`（ホストのディスカバリはこのプレフィックスのみを走査）。
+  `find_plugin_binary` は素の `<name>` 実行ファイルへのフォールバックも持ちます。
 - ツール名は `<namespace>.<action>`: ASCII 英数字、`_`、`.`、`:` のみ。
   先頭・末尾の `.`/`:` なし、区切り文字の連続なし。`-` は**不可** —
   名前空間ではハイフンをアンダースコアに変換します。
