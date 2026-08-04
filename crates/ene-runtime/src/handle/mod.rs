@@ -3103,6 +3103,89 @@ mod tests {
         );
     }
 
+    /// Records the per-call context of every `call_tool` invocation so
+    /// tests can pin the host's scoping contract.
+    struct RecordingContextRegistry {
+        contexts: Arc<std::sync::Mutex<Vec<Option<ene_plugin_proto::CallContext>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ene_plugin_host::ToolRegistry for RecordingContextRegistry {
+        fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
+            Vec::new()
+        }
+
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _arguments: &str,
+            context: Option<&ene_plugin_proto::CallContext>,
+        ) -> Result<ene_plugin_proto::ToolResult, ene_plugin_host::PluginHostError> {
+            self.contexts.lock().unwrap().push(context.cloned());
+            Ok(ene_plugin_proto::ToolResult::text("done"))
+        }
+    }
+
+    /// Direct `CallTool` commands (turn: `None`, e.g. `ene-cli tool call`)
+    /// must still receive a per-call context: a unique synthetic turn keeps
+    /// plugin approval scopes from leaking between calls.
+    #[tokio::test]
+    async fn direct_call_tool_always_receives_a_fresh_synthetic_context() {
+        let contexts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(RecordingContextRegistry {
+            contexts: contexts.clone(),
+        });
+        let task_caps = crate::task_config::ToolRuntimeConfig {
+            call_tool_cap: 4,
+            ..Default::default()
+        };
+        let (mut actor, _diag_rx) = build_bare_actor(registry, &task_caps);
+
+        let explicit_turn = crate::types::TurnId::new();
+        for turn in [None, Some(explicit_turn.clone()), None] {
+            let (tx, rx) = oneshot::channel();
+            assert!(
+                actor
+                    .handle_command(EneCommand::CallTool {
+                        name: "anything".into(),
+                        arguments: "{}".into(),
+                        turn,
+                        reply: tx,
+                    })
+                    .await
+            );
+            rx.await
+                .expect("reply channel not dropped")
+                .expect("direct call must succeed");
+        }
+
+        let recorded = contexts.lock().unwrap();
+        assert_eq!(recorded.len(), 3);
+        let first = recorded[0]
+            .as_ref()
+            .expect("direct call must receive a context");
+        let second = recorded[1]
+            .as_ref()
+            .expect("turned call must receive a context");
+        let third = recorded[2]
+            .as_ref()
+            .expect("direct call must receive a context");
+        assert!(
+            first.turn_id.starts_with("direct:"),
+            "synthetic turn id expected, got {}",
+            first.turn_id
+        );
+        assert_ne!(
+            first.turn_id, third.turn_id,
+            "each direct call must get a fresh scope"
+        );
+        assert_eq!(second.turn_id, explicit_turn.to_string());
+        assert_eq!(
+            first.conversation_id, third.conversation_id,
+            "direct calls stay in the session conversation"
+        );
+    }
+
     /// Same shape as the `CallTool` test above, for `EneCommand::SearchTools`
     /// and `search_cap`.
     #[tokio::test]

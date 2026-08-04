@@ -2606,10 +2606,17 @@ impl TurnActor {
                 let session_id = self.session.memory.session_id.to_string();
                 let card_name = self.session.card_name().to_string();
                 self.call_tool_tasks.spawn(async move {
-                    let context = turn.as_ref().map(|turn| ene_plugin_proto::CallContext {
+                    // Direct calls (`PublicApi::call_tool`) carry no turn;
+                    // a unique synthetic turn keeps the per-turn approval
+                    // expiry in plugins running uniformly, so a direct call
+                    // can never inherit an approval granted in a chat turn.
+                    let context = ene_plugin_proto::CallContext {
                         conversation_id: session_id,
-                        turn_id: turn.to_string(),
-                    });
+                        turn_id: turn.map_or_else(
+                            || format!("direct:{}", uuid::Uuid::new_v4()),
+                            |turn| turn.to_string(),
+                        ),
+                    };
                     let result: Result<String, EneRuntimeError> = if name == "system.search_tools" {
                         let query = serde_json::from_str::<serde_json::Value>(&arguments)
                             .ok()
@@ -2625,7 +2632,7 @@ impl TurnActor {
                         .map_err(EneRuntimeError::from)
                     } else {
                         registry
-                            .call_tool(&name, &arguments, context.as_ref())
+                            .call_tool(&name, &arguments, Some(&context))
                             .await
                             .map(|r| r.text_for_llm())
                             .map_err(EneRuntimeError::from)
