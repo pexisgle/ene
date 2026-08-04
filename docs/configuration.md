@@ -349,6 +349,49 @@ quiet hours and every other gate. While paused, no proactive speech happens,
 any pending catch-up delivery is discarded, and the desktop settings screen
 shows the pause state explicitly.
 
+### Pending-candidate confirmation
+
+`mind.proactive.pending_confirmation` (disabled by default) lets old
+unconfirmed memory candidates be confirmed through proactive speech. Deferred
+candidates that topic-near recall never surfaces (their topics never come up)
+would otherwise sit in the queue forever; when this trigger is enabled, the
+proactive pipeline selects the oldest candidate that is still pending, is at
+least `min_age_days` old (default `3`), and carries at least `min_confidence`
+(default `0.7`, clamped to `0.0..=1.0`):
+
+```json
+"pending_confirmation": {
+  "enabled": false,
+  "min_age_days": 3,
+  "min_confidence": 0.7,
+  "reask_after_days": 7
+}
+```
+
+- Only weak-contradiction deferrals are eligible. Approval-mode rows
+  (`approval_parked`) stay review-queue-only and are never asked about —
+  an unapproved candidate must not surface as hearsay in conversation,
+  mirroring the recall exclusion.
+- At most one question is in flight. A selected candidate flows through the
+  normal decision pipeline: every deterministic gate (manual pause, quiet
+  hours, idle, cooldown, session limit, fatigue) applies unchanged, and the
+  decision model judges whether now is a good moment to interrupt.
+- The generation prompt asks a short, natural confirmation question; the
+  candidate is presented as hearsay, never as a fact, and never with internal
+  labels. With `confirmation_enabled` the model may still decline via
+  `<|silent|>`.
+- The user's reply is classified (approved / rejected / unclear) by the
+  proactive decision model. `approved` persists the candidate through the
+  approval APIs, `rejected` discards it, and `unclear` or any failure leaves
+  it pending for a later attempt. Resolutions invalidate the recall cache and
+  emit the same `CandidateChanged` lifecycle event as the manual review queue.
+- A candidate is not selected again within `reask_after_days` (default `7`)
+  of a delivered question, so an unclear reply or a failed classification
+  cannot re-arm the same question on the next tick and nag the user. `0`
+  disables the backoff.
+- The asked marker is session-scoped and not persisted: a restart simply
+  re-selects the candidate on a later tick.
+
 Proactive decisions also consult stored memory. `mind.proactive.sources.memory` (default
 `true`) feeds the user's `Preference` / `UserProfile` memories — "don't talk while I work",
 "quiet at night" — into the decision context as `user_instructions`. These are injected
@@ -861,6 +904,67 @@ the audio as WAV (16-bit mono PCM at `sample_rate`), which the host-side
 audio pipeline decodes into float samples for playback
 (`formats = ["wav"]`). Other formats accepted by the Speech API (`mp3`,
 `opus`, `flac`, `aac`) are not exposed.
+
+#### Microsoft Edge Neural Voice TTS provider (`plugins.list.edge-tts.config`)
+
+The `edge-tts` provider plugin (`plugins/provider/edge-tts`) talks to
+Microsoft's Edge Read Aloud WebSocket endpoint — the same free, keyless
+neural voices the browser's read-aloud feature uses. No API key and no local
+server are needed. Select it with `ai.tts.provider = "edge-tts"`; the generic
+`ai.tts.voice` field can hold an Edge voice name (short form, e.g.
+`ja-JP-NanamiNeural`) that overrides the configured default per request.
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "edge-tts",
+      "voice": "ja-JP-NanamiNeural"
+    }
+  },
+  "plugins": {
+    "list": {
+      "edge-tts": {
+        "enable": true,
+        "config": {
+          "voice": "ja-JP-NanamiNeural",
+          "locale": "ja-JP",
+          "rate": "+0%",
+          "pitch": "+0Hz",
+          "volume": "+0%",
+          "max_retries": 3
+        }
+      }
+    }
+  }
+}
+```
+
+Settings:
+
+| Key | Default | Description |
+|---|---|---|
+| `voice` | `ja-JP-NanamiNeural` | Edge voice name, short (`ja-JP-NanamiNeural`) or long form. |
+| `locale` | `ja-JP` | SSML `xml:lang` value on the `<speak>` element. |
+| `rate` | `+0%` | Prosody rate adjustment (e.g. `+10%`, `-10%`). |
+| `pitch` | `+0Hz` | Prosody pitch adjustment (e.g. `+5Hz`, `-5Hz`). |
+| `volume` | `+0%` | Prosody volume adjustment (e.g. `+10%`, `-10%`). |
+| `max_retries` | `3` | Reconnect attempts for the whole synthesize request (shared across text chunks), with exponential backoff (0–10). |
+| `endpoint_url` | `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1` | WebSocket endpoint; must not carry a query string. |
+
+The connection mimics the Edge Read Aloud extension (Chrome/Edge user agent,
+extension `Origin`, `Sec-MS-GEC` token) and requests
+`audio-24khz-48kbitrate-mono-mp3`. Text longer than 4096 bytes is split at
+whitespace/UTF-8/XML-entity-safe boundaries and synthesized chunk by chunk
+over the same connection; the plugin decodes the MP3 stream and returns WAV
+audio (24 kHz mono). If the connection drops, the current chunk is retried
+with exponential backoff, up to `max_retries` times in total per request
+(the budget is shared across chunks).
+
+Changing `ai.tts.provider` itself (e.g. switching from `voicevox` to
+`edge-tts`) takes effect at the next startup: the active provider is built
+once at bootstrap, while edits to `plugins.list.edge-tts.config` and
+`ai.tts.voice` are picked up by running sessions.
 
 #### Secret marking
 

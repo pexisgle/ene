@@ -295,6 +295,26 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 
 `mind.proactive.paused`（既定 `false`）は手動一時停止で、クワイエットアワーや他のすべてのゲートより優先されます。一時停止中は自発発話が一切行われず、保留中のキャッチアップ配信も破棄され、デスクトップの設定画面に一時停止状態が明示されます。
 
+### 保留候補の確認
+
+`mind.proactive.pending_confirmation`（既定は無効）は、古い未確認の記憶候補を自発発話で確認できるようにします。話題ベースの想起で一度も表面化しない保留候補は、話題が近づかない限りキューに残り続けます。このトリガーを有効にすると、自発発話パイプラインが「まだ `Pending` で、`min_age_days`（既定 `3`）以上経過し、`min_confidence`（既定 `0.7`、`0.0..=1.0` にクランプ）以上の確信度を持つ」最古の候補を選択します:
+
+```json
+"pending_confirmation": {
+  "enabled": false,
+  "min_age_days": 3,
+  "min_confidence": 0.7,
+  "reask_after_days": 7
+}
+```
+
+- 対象は弱い矛盾による保留（`AskConfirmationLater`）だけです。承認モードの行（`approval_parked`）はレビューキュー専用のままで、絶対に質問されません — 未承認の候補が会話の中で伝聞として表面化してはいけないためです（想起からの除外と同じ理由）。
+- 同時に進行する質問は最大1件です。選択された候補は通常の判定パイプラインを通ります。すべての決定論的ゲート（手動一時停止、クワイエットアワー、待機、クールダウン、セッション上限、疲労）はそのまま適用され、判定モデルが「今話しかけるのに本当に良い瞬間か」を判断します。
+- 生成プロンプトは短く自然な確認質問を作ります。候補は事実ではなく伝聞として提示され、内部ラベルは一切出しません。`confirmation_enabled` が有効なら、モデルは `<|silent|>` で辞退することもできます。
+- ユーザーの返答は（approved / rejected / unclear に）判定モデルが分類します。`approved` は承認 API を通じて候補を永続化し、`rejected` は破棄します。`unclear` や失敗は保留のまま残し、後の機会に再試行します。解決時は想起キャッシュを無効化し、手動レビューキューと同じ `CandidateChanged` ライフサイクルイベントを発行します。
+- 同じ候補は、質問を届けてから `reask_after_days`（既定 `7`）以内には再選択されません。`unclear` の返答や分類失敗で、次のティックに同じ質問が再発火してユーザーを煩わせるのを防ぎます。`0` でバックオフを無効化できます。
+- 質問中マーカーはセッション単位で永続化されません。再起動後は後のティックで同じ候補が再選択されるだけです。
+
 自発発話の判定は保存された記憶も参照します。`mind.proactive.sources.memory`（既定 `true`）は、ユーザーの `Preference` / `UserProfile` 記憶（「作業中は話しかけないで」「夜は静かに」など）を判定コンテキストの `user_instructions` として注入します。これらは決定論的に注入され（新しい順、最大 `mind.proactive.max_memory_notes`、既定 12 件。この上限はステージドロールアウトの間は 12 件に固定されており、まだユーザー設定できません）、想起スコアの競争には一切乗らないため、抑制条件が低スコアで落ちることはありません。判定モデルには、該当する恒常ルールがあれば `should_speak=false` で従うよう指示されます。生成フェーズでも同じ設定が話題の想起を有効にします。判定の `topic_hint` を語彙のみの検索クエリ（埋め込みプロバイダー不要）として使い、話しかける話題に関して覚えていることに触れられます。`sources.memory` を `false` にすると、コスト/レイテンシを気にする構成向けに従来の「記憶なし」挙動へ戻ります。
 
 `redacted_title` はタイトルをフィールド単位でフィルタします。空白に加えてウィンドウタイトルで
@@ -714,6 +734,66 @@ raw 24 kHz 16-bit モノラル PCM（`response_format=pcm`）を返します。
 オーディオパイプラインが float サンプルへデコードして再生します
 （`formats = ["wav"]`）。Speech API が受け付ける他のフォーマット
 （`mp3`、`opus`、`flac`、`aac`）は公開しません。
+
+#### Microsoft Edge Neural Voice TTS プロバイダ（`plugins.list.edge-tts.config`）
+
+`edge-tts` プロバイダプラグイン（`plugins/provider/edge-tts`）は、Microsoft
+Edge の読み上げ機能が使う WebSocket エンドポイント（無料・キー不要のニューラル
+音声）と通信します。API キーもローカルサーバーも不要です。
+`ai.tts.provider = "edge-tts"` で選択します。汎用の `ai.tts.voice` には、
+設定済みの既定音声をリクエスト単位で上書きする Edge 音声名（短縮形、例：
+`ja-JP-NanamiNeural`）を指定できます。
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "edge-tts",
+      "voice": "ja-JP-NanamiNeural"
+    }
+  },
+  "plugins": {
+    "list": {
+      "edge-tts": {
+        "enable": true,
+        "config": {
+          "voice": "ja-JP-NanamiNeural",
+          "locale": "ja-JP",
+          "rate": "+0%",
+          "pitch": "+0Hz",
+          "volume": "+0%",
+          "max_retries": 3
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目：
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `voice` | `ja-JP-NanamiNeural` | Edge 音声名。短縮形（`ja-JP-NanamiNeural`）または長い形式。 |
+| `locale` | `ja-JP` | `<speak>` 要素の SSML `xml:lang` 値。 |
+| `rate` | `+0%` | 発話速度の調整（例：`+10%`、`-10%`）。 |
+| `pitch` | `+0Hz` | ピッチの調整（例：`+5Hz`、`-5Hz`）。 |
+| `volume` | `+0%` | 音量の調整（例：`+10%`、`-10%`）。 |
+| `max_retries` | `3` | 合成リクエスト全体の再接続試行回数（テキストチャンク間で共有、指数バックオフ、0–10）。 |
+| `endpoint_url` | `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1` | WebSocket エンドポイント。クエリ文字列を含めてはいけません。 |
+
+接続は Edge 読み上げ拡張機能を模倣し（Chrome/Edge の User-Agent、拡張機能の
+`Origin`、`Sec-MS-GEC` トークン）、`audio-24khz-48kbitrate-mono-mp3` を要求
+します。4096 バイトを超えるテキストは、空白・UTF-8・XML エンティティの境界で
+分割され、同じ接続上でチャンク単位に合成されます。プラグインは MP3 ストリームを
+デコードし、WAV 音声（24 kHz モノラル）を返します。接続が切断された場合は、
+失敗したチャンクから指数バックオフで再試行します。試行回数の上限
+`max_retries` はリクエスト全体で共有されます。
+
+`ai.tts.provider` 自体の変更（例：`voicevox` から `edge-tts` への切替）は次回
+起動時に反映されます。アクティブなプロバイダはブートストラップ時に一度だけ
+構築されるためです。一方、`plugins.list.edge-tts.config` と `ai.tts.voice` の
+編集は実行中のセッションにも反映されます。
 
 #### シークレットのマーキング
 

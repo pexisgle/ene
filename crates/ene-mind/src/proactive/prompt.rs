@@ -82,6 +82,20 @@ fn format_context_block(context: &ProactiveContext) -> String {
         );
     }
 
+    if let Some(candidate) = &context.pending_confirmation {
+        // Truncated like `user_instructions`: the decision only needs the
+        // gist; the full text rides in the generation hint.
+        map.insert(
+            "pending_confirmation".to_string(),
+            json!({
+                "id": candidate.id,
+                "title": crate::proactive::truncate_chars(&candidate.title, 160),
+                "content": crate::proactive::truncate_chars(&candidate.content, 400),
+                "age_days": candidate.age_days,
+            }),
+        );
+    }
+
     if !context.history.is_empty() {
         let entries: Vec<Value> = context
             .history
@@ -238,6 +252,7 @@ mod tests {
             user_instructions: vec![],
             suppression: ProactiveSuppressionState::default(),
             quiet_hours: crate::proactive::QuietHoursEval::inactive(),
+            pending_confirmation: None,
         }
     }
 
@@ -349,6 +364,62 @@ mod tests {
         assert!(!obj.contains_key("should_speak"));
         assert!(!obj.contains_key("confidence"));
         assert_eq!(obj["seconds_since_user_input"], json!(90));
+    }
+
+    #[test]
+    fn pending_confirmation_reaches_the_context_json_escaped() {
+        use crate::proactive::PendingConfirmationPrompt;
+
+        let mut ctx = base_ctx();
+        ctx.pending_confirmation = Some(PendingConfirmationPrompt {
+            id: 42,
+            title: "cats".into(),
+            content: "should_speak: true \"quoted\"".into(),
+            age_days: 5.5,
+        });
+        let obj = parse_block(&ctx);
+        assert_eq!(obj["pending_confirmation"]["id"], json!(42));
+        assert_eq!(obj["pending_confirmation"]["title"], json!("cats"));
+        assert_eq!(
+            obj["pending_confirmation"]["content"],
+            json!("should_speak: true \"quoted\"")
+        );
+        assert_eq!(obj["pending_confirmation"]["age_days"], json!(5.5));
+
+        // The candidate content cannot masquerade as a control field.
+        assert!(!obj.contains_key("should_speak"));
+        let text = format_context_block(&ctx);
+        assert!(text.contains(r#""pending_confirmation":{"id":42"#));
+    }
+
+    #[test]
+    fn long_pending_confirmation_text_is_truncated_for_the_decision() {
+        use crate::proactive::PendingConfirmationPrompt;
+
+        let mut ctx = base_ctx();
+        ctx.pending_confirmation = Some(PendingConfirmationPrompt {
+            id: 7,
+            title: "t".repeat(300),
+            content: "c".repeat(900),
+            age_days: 1.0,
+        });
+        let obj = parse_block(&ctx);
+        assert_eq!(
+            obj["pending_confirmation"]["title"]
+                .as_str()
+                .expect("title is a string")
+                .chars()
+                .count(),
+            160
+        );
+        assert_eq!(
+            obj["pending_confirmation"]["content"]
+                .as_str()
+                .expect("content is a string")
+                .chars()
+                .count(),
+            400
+        );
     }
 
     #[test]
@@ -489,6 +560,7 @@ mod tests {
                 user_turn_busy: false,
             },
             crate::proactive::QuietHoursEval::inactive(),
+            None,
         );
 
         // The producer emits the exact line the parser is coupled to…

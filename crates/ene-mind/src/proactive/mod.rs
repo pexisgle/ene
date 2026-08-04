@@ -5,11 +5,17 @@
 
 mod gate;
 mod parse;
+mod pending_confirmation;
 mod prompt;
 mod quiet_hours;
 
 pub use gate::{GateRejectReason, evaluate_deterministic_gates};
 pub use parse::{decision_schema_object, parse_decision_json};
+pub use pending_confirmation::{
+    PendingConfirmationPrompt, PendingResolutionVerdict, build_resolution_messages,
+    load_due_pending_confirmation, parse_resolution_json, resolution_schema_object,
+    select_due_pending_candidate,
+};
 pub use prompt::build_decision_messages;
 pub use quiet_hours::{QuietHoursEval, evaluate_quiet_hours};
 
@@ -122,6 +128,12 @@ pub struct ProactiveContext {
     /// Quiet-hours window evaluation for the decision instant. Inactive when
     /// quiet hours are disabled or outside the window.
     pub quiet_hours: QuietHoursEval,
+    /// Overdue unconfirmed memory candidate selected for confirmation, if any.
+    ///
+    /// When present, the decision model judges whether now is a good moment to
+    /// ask about it; the generation hint then renders a confirmation question
+    /// instead of a topic hint.
+    pub pending_confirmation: Option<PendingConfirmationPrompt>,
 }
 
 /// Urgency hint from the decision model.
@@ -284,6 +296,7 @@ pub fn build_proactive_context(
     user_instructions: &[String],
     suppression: ProactiveSuppressionState,
     quiet_hours: QuietHoursEval,
+    pending_confirmation: Option<PendingConfirmationPrompt>,
 ) -> ProactiveContext {
     let history = if config.sources.conversation {
         truncate_history(history, config.max_conversation_chars)
@@ -364,6 +377,7 @@ pub fn build_proactive_context(
         user_instructions,
         suppression,
         quiet_hours,
+        pending_confirmation,
     }
 }
 
@@ -540,7 +554,7 @@ fn truncate_history(history: &[HistoryEntry], max_chars: usize) -> Vec<HistoryEn
     out
 }
 
-fn truncate_chars(input: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
     }
@@ -931,6 +945,7 @@ mod tests {
                 user_turn_busy: false,
             },
             QuietHoursEval::inactive(),
+            None,
         );
         assert!(ctx.history.is_empty());
         assert!(ctx.activity.is_none());
@@ -956,6 +971,7 @@ mod tests {
                 user_turn_busy: false,
             },
             quiet_hours: QuietHoursEval::inactive(),
+            pending_confirmation: None,
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":1.0}"#.into(),
@@ -995,6 +1011,7 @@ mod tests {
                 user_turn_busy: false,
             },
             quiet_hours: QuietHoursEval::inactive(),
+            pending_confirmation: None,
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":1.0}"#.into(),
@@ -1034,6 +1051,7 @@ mod tests {
                 user_turn_busy: false,
             },
             quiet_hours: QuietHoursEval::inactive(),
+            pending_confirmation: None,
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":0.9,"reason":"idle","topic_hint":"check in","urgency":"low"}"#.into(),
@@ -1076,6 +1094,7 @@ mod tests {
                 user_turn_busy: false,
             },
             quiet_hours: QuietHoursEval::inactive(),
+            pending_confirmation: None,
         };
         let capture = Arc::new(SchemaCaptureProvider {
             body: r#"{"should_speak":false,"confidence":0.1,"reason":"quiet","topic_hint":"","urgency":"low"}"#.into(),
@@ -1127,6 +1146,7 @@ mod tests {
                 user_turn_busy: false,
             },
             quiet_hours: QuietHoursEval::inactive(),
+            pending_confirmation: None,
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":false,"confidence":0.9,"reason":"quiet","topic_hint":"","urgency":"low"}"#.into(),
@@ -1178,6 +1198,7 @@ mod tests {
                 user_turn_busy: false,
             },
             quiet_hours: QuietHoursEval::inactive(),
+            pending_confirmation: None,
         }
     }
 

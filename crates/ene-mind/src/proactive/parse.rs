@@ -88,7 +88,7 @@ pub fn parse_decision_json(raw: &str) -> ProactiveDecision {
     }
 }
 
-fn extract_json_object(raw: &str) -> Option<&str> {
+pub(crate) fn extract_json_object(raw: &str) -> Option<&str> {
     let start = raw.find('{')?;
     let end = raw.rfind('}')?;
     if end < start {

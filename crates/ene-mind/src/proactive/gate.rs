@@ -62,7 +62,8 @@ pub fn evaluate_deterministic_gates(
     if context.suppression.proactive_turns_this_session >= config.max_turns_per_session {
         return Err(GateRejectReason::SessionLimit);
     }
-    if !config.sources.any_enabled() {
+    let has_pending_confirmation = context.pending_confirmation.is_some();
+    if !config.sources.any_enabled() && !has_pending_confirmation {
         return Err(GateRejectReason::NoSources);
     }
 
@@ -72,7 +73,12 @@ pub fn evaluate_deterministic_gates(
     // User standing rules are decision input too: a memory-only configuration
     // still has something to decide on (and to be suppressed by).
     let has_instructions = config.sources.memory && !context.user_instructions.is_empty();
-    if !(has_conversation || has_activity || has_screen || has_instructions) {
+    if !(has_conversation
+        || has_activity
+        || has_screen
+        || has_instructions
+        || has_pending_confirmation)
+    {
         return Err(GateRejectReason::NoSources);
     }
 
@@ -121,6 +127,7 @@ mod tests {
             user_instructions: vec![],
             suppression,
             quiet_hours: crate::proactive::QuietHoursEval::inactive(),
+            pending_confirmation: None,
         }
     }
 
@@ -358,5 +365,86 @@ mod tests {
         // A stored standing rule is decision input on its own.
         ctx.user_instructions = vec!["don't talk while I work".into()];
         assert_eq!(evaluate_deterministic_gates(&config, &ctx), Ok(()));
+    }
+
+    #[test]
+    fn pending_confirmation_alone_satisfies_the_source_gate() {
+        use crate::proactive::PendingConfirmationPrompt;
+
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            sources: ProactiveSourcesConfig {
+                conversation: false,
+                activity: false,
+                screen_summary: false,
+                memory: false,
+                ..ProactiveSourcesConfig::default()
+            },
+            ..ProactiveConfig::default()
+        };
+        let mut ctx = ctx_with(ProactiveSuppressionState {
+            seconds_since_user_input: 60,
+            seconds_since_proactive: 1000,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        });
+        ctx.history.clear();
+        ctx.activity = None;
+        ctx.user_instructions.clear();
+
+        // Without a candidate every source is empty, so the gate rejects.
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Err(GateRejectReason::NoSources)
+        );
+
+        ctx.pending_confirmation = Some(PendingConfirmationPrompt {
+            id: 1,
+            title: "cats".into(),
+            content: "user dislikes cats".into(),
+            age_days: 5.0,
+        });
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Ok(()),
+            "a due candidate is decision input on its own"
+        );
+    }
+
+    #[test]
+    fn quiet_hours_still_suppress_pending_confirmation() {
+        use crate::proactive::PendingConfirmationPrompt;
+
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            ..ProactiveConfig::default()
+        };
+        let mut ctx = ctx_with(ProactiveSuppressionState {
+            seconds_since_user_input: 60,
+            seconds_since_proactive: 1000,
+            proactive_turns_this_session: 0,
+            user_turn_busy: false,
+        });
+        ctx.pending_confirmation = Some(PendingConfirmationPrompt {
+            id: 1,
+            title: "cats".into(),
+            content: "user dislikes cats".into(),
+            age_days: 5.0,
+        });
+        ctx.quiet_hours = crate::proactive::QuietHoursEval {
+            active: true,
+            ..crate::proactive::QuietHoursEval::inactive()
+        };
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Err(GateRejectReason::QuietHours),
+            "a confirmation must wait out the quiet-hours window"
+        );
     }
 }
