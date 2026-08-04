@@ -24,7 +24,10 @@
 //!
 //! `#[provider(provides = "...", requires = "...")]` declares plugin-wide
 //! capabilities; the derive emits the `provides()` / `requires()` methods
-//! from the `LlmPlugin` expansion only (see `expand_plugin_derive`).
+//! from the `LlmPlugin` expansion only (see `expand_plugin_derive`). On a
+//! Tts-only or Stt-only derive the literals are still validated against the
+//! capability grammar but no method is generated — pair the derive with
+//! `LlmPlugin` to declare capabilities.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -32,6 +35,8 @@ use quote::quote;
 use syn::{DeriveInput, LitInt, parse_macro_input};
 
 use crate::attr::{parse_flag, path_ident_str};
+
+use ene_plugin_proto::{CapabilityRef, CapabilityRequirement};
 
 /// Which provider trait a derive expands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,10 +128,14 @@ impl ProviderAttrs {
                     attrs.context_window = Some(parse_u32(&meta)?);
                 } else if meta.path.is_ident("provides") {
                     let s: syn::LitStr = meta.value()?.parse()?;
-                    attrs.provides = split_list(&s.value());
+                    attrs.provides = validate_capability_items(&s, "provides", |item| {
+                        CapabilityRef::parse(item).map(|_| ())
+                    })?;
                 } else if meta.path.is_ident("requires") {
                     let s: syn::LitStr = meta.value()?.parse()?;
-                    attrs.requires = split_list(&s.value());
+                    attrs.requires = validate_capability_items(&s, "requires", |item| {
+                        CapabilityRequirement::parse(item).map(|_| ())
+                    })?;
                 } else {
                     let name = path_ident_str(&meta.path);
                     return Err(syn::Error::new_spanned(
@@ -160,6 +169,29 @@ fn split_list(s: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// Validates a comma-separated capability declaration list against the wire
+/// grammar, returning the split items.
+///
+/// The generated `provides()` / `requires()` methods re-parse these literals
+/// at runtime; validating here turns a typo into a compile error instead of
+/// a startup panic in the plugin process.
+fn validate_capability_items<E: std::fmt::Display>(
+    lit: &syn::LitStr,
+    attribute: &str,
+    parse: impl Fn(&str) -> Result<(), E>,
+) -> syn::Result<Vec<String>> {
+    let items = split_list(&lit.value());
+    for item in &items {
+        if let Err(err) = parse(item) {
+            return Err(syn::Error::new_spanned(
+                lit,
+                format!("invalid `{attribute}` capability literal `{item}`: {err}"),
+            ));
+        }
+    }
+    Ok(items)
 }
 
 fn parse_u32(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<u32> {
@@ -290,7 +322,8 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
                 #[expect(
                     clippy::unwrap_used,
                     reason = "provider attribute capability strings are \
-                              compile-time literals; parse cannot fail"
+                              validated against the capability grammar at \
+                              macro expansion, so the runtime parse cannot fail"
                 )]
                 pub fn provides() -> ::std::vec::Vec<::ene_plugin::CapabilityRef> {
                     ::std::vec![
@@ -308,7 +341,8 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
                 #[expect(
                     clippy::unwrap_used,
                     reason = "provider attribute capability strings are \
-                              compile-time literals; parse cannot fail"
+                              validated against the capability grammar at \
+                              macro expansion, so the runtime parse cannot fail"
                 )]
                 pub fn requires() -> ::std::vec::Vec<::ene_plugin::CapabilityRequirement> {
                     ::std::vec![
