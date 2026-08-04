@@ -29,7 +29,6 @@ flowchart TD
   Runtime --> Mind[crates/ene-mind]
   Runtime --> Store[crates/ene-store]
   Runtime --> Ai[crates/ene-ai]
-  Runtime --> AiLocal[crates/ene-ai-local]
   Runtime --> ToolHost[crates/ene-plugin-host]
   Runtime --> Rag[crates/ene-rag]
   Runtime --> Config[crates/ene-config]
@@ -42,9 +41,6 @@ flowchart TD
 
   ToolHost --> Ai
   ToolHost --> Proto
-
-  AiLocal --> Ai
-  AiLocal --> Config
 
   Voice --> Ai
   Voice --> Config
@@ -136,7 +132,6 @@ flowchart TD
 | `ene-store` | SQLite / SeaORM エンティティ、マイグレーション、ベクトル検索 (`sqlite-vec`)、コミットメント台帳 |
 | `ene-core` | 永続化に依存しないドメイン語彙 (`AffectState`、typed-memory の種別/ステータス/クエリ、コミットメント台帳の型) および `MemoryPort` トレイト抽象 |
 | `ene-ai` | プロバイダトレイトとレジストリ、メッセージ/ストリーミング型、設定ルーティング、ヘルスプローブ、リトライポリシー |
-| `ene-ai-local` | `llama-cpp-4` によるローカル GGUF LLM 推論 |
 | `ene-voice` | ローカル STT (Whisper)、TTS、VAD (Silero ONNX)、cpal オーディオ I/O |
 | `ene-connector` | 外部サービスの認証情報権威 (OAuth2/API キー保管、コネクタアイデンティティ、許可スコープ)。現時点で利用クレートなし — #412/#415 の MCP 認証情報ブリッジにより再導入予定 |
 | `ene-plugin-host` | プラグインプロセス監視、MCP サーバー発見、ヘルスチェック、サーキットブレーカー |

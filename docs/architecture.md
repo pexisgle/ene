@@ -29,7 +29,6 @@ flowchart TD
   Runtime --> Mind[crates/ene-mind]
   Runtime --> Store[crates/ene-store]
   Runtime --> Ai[crates/ene-ai]
-  Runtime --> AiLocal[crates/ene-ai-local]
   Runtime --> ToolHost[crates/ene-plugin-host]
   Runtime --> Rag[crates/ene-rag]
   Runtime --> Config[crates/ene-config]
@@ -42,9 +41,6 @@ flowchart TD
 
   ToolHost --> Ai
   ToolHost --> Proto
-
-  AiLocal --> Ai
-  AiLocal --> Config
 
   Voice --> Ai
   Voice --> Config
@@ -142,7 +138,6 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-store` | SQLite / SeaORM database entities, migrations, vector recall (`sqlite-vec`), commitment ledger |
 | `ene-core` | Persistence-agnostic domain vocabulary (`AffectState`, typed-memory kinds/statuses/queries, commitment ledger types) and the `MemoryPort` trait abstraction |
 | `ene-ai` | Provider traits and registries, message/streaming types, config routing, health probing, retry policy |
-| `ene-ai-local` | Local GGUF LLM inference via `llama-cpp-4` |
 | `ene-voice` | Local STT (Whisper), TTS, VAD (Silero ONNX), cpal audio I/O |
 | `ene-connector` | External-service credential authority (OAuth2/API-key storage, connector identity, permission scopes); no consumer yet — reintroduced by the MCP credential bridge under #412/#415 |
 | `ene-plugin-host` | Plugin process supervision, MCP server discovery, health checks, circuit breaker |

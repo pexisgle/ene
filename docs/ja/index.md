@@ -36,7 +36,6 @@ Ene ワークスペース
 │   ├── ene-store          (SQLite + SeaORM + sqlite-vec 記憶・ベクトルストア)
 │   ├── ene-config         (設定読み込み、キャラクターカード、スキーマ定義)
 │   ├── ene-ai             (コア AI プロバイダトレイト、OpenAI、Anthropic アダプタ)
-│   ├── ene-ai-local       (llama-cpp-4 によるローカル LLM 推論)
 │   ├── ene-voice          (ローカル STT/TTS/VAD 音声パイプライン)
 │   ├── ene-rag            (RAG ポリシー: 記憶スコアリング/減衰、ツール選択)
 │   ├── ene-connector      (外部サービスの認証情報 & アイデンティティ権威)
