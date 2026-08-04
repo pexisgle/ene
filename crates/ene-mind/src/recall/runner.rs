@@ -93,8 +93,10 @@ pub async fn execute_hybrid_recall(
     // queue and merge the topic-related ones here. `score_and_rank` below then
     // applies the ordinary min_score floor and result limit, so a pending
     // candidate only surfaces when the conversation touches its topic.
+    // Approval mode turns this off: candidates waiting for a user decision
+    // must not leak into normal recall at all.
     let pending_limit = config.memory.recall_pending_candidate_limit;
-    if pending_limit > 0 {
+    if pending_limit > 0 && !config.memory_approval.require_approval {
         gather_pending_candidates(input.store, &search_options, &mut gathered, pending_limit).await;
     }
 
@@ -527,8 +529,10 @@ mod tests {
                 existing_memory_title: None,
                 existing_memory_id: None,
                 source_quote: "I like matcha".into(),
+                source_turn: None,
                 status: ene_core::PendingCandidateStatus::Pending,
                 created_at: now,
+                resolved_at: None,
             })
             .await
             .unwrap();
@@ -549,8 +553,10 @@ mod tests {
                 existing_memory_title: None,
                 existing_memory_id: None,
                 source_quote: "physics".into(),
+                source_turn: None,
                 status: ene_core::PendingCandidateStatus::Pending,
                 created_at: now,
+                resolved_at: None,
             })
             .await
             .unwrap();
@@ -618,8 +624,10 @@ mod tests {
                     existing_memory_title: None,
                     existing_memory_id: None,
                     source_quote: "topic".into(),
+                    source_turn: None,
                     status: ene_core::PendingCandidateStatus::Pending,
                     created_at: now,
+                    resolved_at: None,
                 })
                 .await
                 .unwrap();
@@ -661,6 +669,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_mode_excludes_pending_candidates_from_recall() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        store
+            .insert_pending_candidate(ene_core::PendingCandidate {
+                id: 0,
+                character_id: "Ene".into(),
+                user_id: "User".into(),
+                title: "favorite drink".into(),
+                content: "the user's favorite drink is matcha".into(),
+                kind: MemoryKind::Preference,
+                confidence: 0.9,
+                reason_detail: "requires approval".into(),
+                existing_memory_title: None,
+                existing_memory_id: None,
+                source_quote: "I like matcha".into(),
+                source_turn: None,
+                status: ene_core::PendingCandidateStatus::Pending,
+                created_at: now,
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+        config.memory_approval.require_approval = true;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "What does the user like to drink?",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            affect: None,
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
+        assert!(
+            recalled.iter().all(|m| {
+                !m.sources
+                    .contains(&ene_core::MemoryCandidateSource::Pending)
+            }),
+            "unapproved candidates must never leak into recall in approval mode"
+        );
+    }
+
+    #[tokio::test]
     async fn pending_candidate_visibility_is_applied_before_the_cap() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let now = Utc::now();
@@ -683,8 +747,10 @@ mod tests {
                 existing_memory_title: None,
                 existing_memory_id: None,
                 source_quote: "topic".into(),
+                source_turn: None,
                 status: ene_core::PendingCandidateStatus::Pending,
                 created_at: now - chrono::Duration::minutes(2),
+                resolved_at: None,
             })
             .await
             .unwrap();
@@ -702,8 +768,10 @@ mod tests {
                     existing_memory_title: None,
                     existing_memory_id: None,
                     source_quote: "topic".into(),
+                    source_turn: None,
                     status: ene_core::PendingCandidateStatus::Pending,
                     created_at: now,
+                    resolved_at: None,
                 })
                 .await
                 .unwrap();

@@ -192,8 +192,10 @@ mod tests {
                 existing_memory_title: None,
                 existing_memory_id: None,
                 source_quote: String::new(),
+                source_turn: None,
                 status: PendingCandidateStatus::Pending,
                 created_at: now,
+                resolved_at: None,
             })
             .await
             .unwrap();

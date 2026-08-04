@@ -56,6 +56,9 @@ pub struct ArbiterOptions {
     /// without an embedder the arbiter falls back to exact normalized-title
     /// equality.
     pub contradiction_title_similarity_threshold: f32,
+    /// Park every persist/supersede decision in the user-approval queue
+    /// instead of writing it to typed memory.
+    pub require_approval: bool,
 }
 
 impl Default for ArbiterOptions {
@@ -68,6 +71,7 @@ impl Default for ArbiterOptions {
             source_quote_ngram_threshold: 0.85,
             source_quote_ngram_confidence_penalty: 0.15,
             contradiction_title_similarity_threshold: 0.82,
+            require_approval: false,
         }
     }
 }
@@ -78,7 +82,7 @@ impl ArbiterOptions {
     /// The float thresholds are clamped into the unit interval defensively,
     /// mirroring `MemoryDiversifyOptions::from_config`; deserialization already
     /// clamps, but options may be built from a programmatically constructed config.
-    pub fn from_config(config: &MindMemoryConfig) -> Self {
+    pub fn from_config(config: &MindMemoryConfig, require_approval: bool) -> Self {
         Self {
             min_confidence: config.min_confidence_to_persist as f32,
             supersede_confidence_delta: config.supersede_confidence_delta.clamp(0.0, 1.0),
@@ -90,6 +94,7 @@ impl ArbiterOptions {
                 .clamp(0.0, 1.0),
             contradiction_title_similarity_threshold: config
                 .contradiction_title_similarity_threshold,
+            require_approval,
         }
     }
 }
@@ -105,6 +110,10 @@ pub struct ArbiterContext<'a> {
     pub user_id: &'a str,
     /// Optional session/turn reference stored as `source_ref`.
     pub source_ref: Option<&'a str>,
+    /// Source turn that produced the candidates, when extraction ran inside
+    /// a turn. Persisted on deferred candidates so the approval UI can point
+    /// back at the conversation.
+    pub source_turn: Option<&'a str>,
     /// How the candidates were produced.
     pub provenance: CandidateProvenance,
     /// Decision thresholds.
@@ -127,6 +136,7 @@ impl std::fmt::Debug for ArbiterContext<'_> {
             .field("character_id", &self.character_id)
             .field("user_id", &self.user_id)
             .field("source_ref", &self.source_ref)
+            .field("source_turn", &self.source_turn)
             .field("provenance", &self.provenance)
             .field("options", &self.options)
             .field("semantic_matches", &self.semantic_matches)
@@ -165,6 +175,8 @@ pub enum ArbiterReasonCode {
     DeletionRequest,
     /// Contradiction is ambiguous — defer to user confirmation.
     AskUserConfirmation,
+    /// Approval mode is enabled — candidate parked for review before save.
+    ApprovalRequired,
     /// Candidate passed validation and has no conflicts.
     ValidNewMemory,
     /// Duplicate candidate within the same batch.
@@ -776,6 +788,41 @@ impl MemoryArbiter {
         ctx: &ArbiterContext<'_>,
     ) -> Result<AppliedDecision, CognitionError> {
         let affect_valence = ctx.affect_valence;
+        // Approval mode converts persist/supersede decisions into queue
+        // deferrals before the action match, so a supersede target survives
+        // as `existing_memory_id` for the approval flow and the deferred
+        // outcome accounting (AskConfirmationLater arm) stays correct.
+        let decision = if ctx.options.require_approval {
+            match &decision.action {
+                ArbiterAction::Persist(_) => CandidateDecision {
+                    candidate: decision.candidate.clone(),
+                    action: ArbiterAction::AskConfirmationLater {
+                        existing_memory_id: None,
+                        existing_memory_title: None,
+                    },
+                    reason: ArbiterReason::new(
+                        ArbiterReasonCode::ApprovalRequired,
+                        "Approval mode enabled; candidate stored for review before saving"
+                            .to_string(),
+                    ),
+                },
+                ArbiterAction::Supersede { superseded_id, .. } => CandidateDecision {
+                    candidate: decision.candidate.clone(),
+                    action: ArbiterAction::AskConfirmationLater {
+                        existing_memory_id: Some(*superseded_id),
+                        existing_memory_title: None,
+                    },
+                    reason: ArbiterReason::new(
+                        ArbiterReasonCode::ApprovalRequired,
+                        "Approval mode enabled; candidate stored for review before saving"
+                            .to_string(),
+                    ),
+                },
+                _ => decision.clone(),
+            }
+        } else {
+            decision.clone()
+        };
         match &decision.action {
             ArbiterAction::Persist(item) => {
                 let id = store
@@ -847,8 +894,10 @@ impl MemoryArbiter {
                     existing_memory_title: existing_memory_title.clone(),
                     existing_memory_id: *existing_memory_id,
                     source_quote: decision.candidate.source_quote.clone(),
+                    source_turn: ctx.source_turn.map(str::to_string),
                     status: PendingCandidateStatus::Pending,
                     created_at: chrono::Utc::now(),
+                    resolved_at: None,
                 };
                 let inserted_id = store
                     .insert_pending_candidate(pending)
@@ -1252,6 +1301,7 @@ mod tests {
             character_id: "ene",
             user_id: "user1",
             source_ref: Some("session-1"),
+            source_turn: None,
             provenance: CandidateProvenance::Deterministic,
             options: ArbiterOptions::default(),
             semantic_matches: HashMap::new(),
@@ -2654,6 +2704,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn require_approval_defers_persist_and_supersede_to_queue() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let options = ArbiterOptions {
+            require_approval: true,
+            ..ArbiterOptions::default()
+        };
+        let arbiter_ctx = ArbiterContext {
+            options,
+            ..ctx(turn)
+        };
+
+        // A plain valid candidate that would normally persist.
+        let applied =
+            MemoryArbiter::arbitrate_and_apply(&store, &[sample_candidate(0.9)], &arbiter_ctx)
+                .await
+                .unwrap();
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].inserted_id.is_none());
+
+        // A contradiction that would normally supersede keeps its target.
+        let existing_item = NewMemoryItem {
+            scope: MemoryScope::User,
+            character_id: "ene".to_string(),
+            user_id: "user1".to_string(),
+            kind: MemoryKind::Preference,
+            title: "drink".to_string(),
+            content: "likes coffee".to_string(),
+            source: MemorySource::Inferred,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.5),
+            salience: MemorySalience::default(),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        let existing_id = store.insert_typed_memory(&existing_item).await.unwrap();
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Preference,
+            title: "drink".to_string(),
+            content: "likes tea".to_string(),
+            source_quote: "I switched to tea".to_string(),
+            confidence: 0.95,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let existing = store.get_typed_memory(existing_id).await.unwrap().unwrap();
+        let supersede_ctx = ArbiterContext {
+            turn: TurnInput {
+                user_message: "I switched to tea",
+                assistant_message: None,
+                tool_results: &[],
+            },
+            ..arbiter_ctx.clone()
+        };
+        let decisions =
+            MemoryArbiter::evaluate_all(&[candidate], &[existing], &supersede_ctx).await;
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Supersede { .. }
+        ));
+        MemoryArbiter::apply_decisions(&store, &decisions, &supersede_ctx)
+            .await
+            .unwrap();
+
+        let pending = store
+            .list_pending_candidates("ene", Some(ene_store::PendingCandidateStatus::Pending))
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 2, "both candidates must land in the queue");
+        let supersede = pending
+            .iter()
+            .find(|p| p.title == "drink")
+            .expect("supersede candidate present");
+        assert_eq!(
+            supersede.existing_memory_id,
+            Some(existing_id),
+            "the supersede target must survive deferral"
+        );
+        assert_eq!(
+            store.count_typed_memories("ene", None).await.unwrap(),
+            1,
+            "nothing may be written to typed memory in approval mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn require_approval_keeps_source_turn_and_reason() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let turn = TurnInput {
+            user_message: "I like matcha, remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let options = ArbiterOptions {
+            require_approval: true,
+            ..ArbiterOptions::default()
+        };
+        let arbiter_ctx = ArbiterContext {
+            options,
+            source_turn: Some("turn-7"),
+            ..ctx(turn)
+        };
+        MemoryArbiter::arbitrate_and_apply(&store, &[sample_candidate(0.9)], &arbiter_ctx)
+            .await
+            .unwrap();
+
+        let pending = store
+            .list_pending_candidates("ene", Some(ene_store::PendingCandidateStatus::Pending))
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].source_turn.as_deref(), Some("turn-7"));
+        assert_eq!(
+            pending[0].reason_detail,
+            "Approval mode enabled; candidate stored for review before saving"
+        );
+    }
+
+    #[tokio::test]
     async fn arbitrate_and_apply_marks_user_deleted() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let existing_item = NewMemoryItem {
@@ -2878,7 +3060,7 @@ mod tests {
             ..MindMemoryConfig::default()
         };
 
-        let options = ArbiterOptions::from_config(&config);
+        let options = ArbiterOptions::from_config(&config, false);
         assert!((options.min_confidence - 0.70).abs() < f32::EPSILON);
         assert!((options.supersede_confidence_delta - 0.12).abs() < f32::EPSILON);
         assert!((options.semantic_similarity_threshold - 0.90).abs() < f32::EPSILON);
@@ -2891,7 +3073,7 @@ mod tests {
     #[test]
     fn from_config_defaults_match_struct_default() {
         let config = MindMemoryConfig::default();
-        let from_config = ArbiterOptions::from_config(&config);
+        let from_config = ArbiterOptions::from_config(&config, false);
         let default = ArbiterOptions::default();
         assert!((from_config.min_confidence - default.min_confidence).abs() < f32::EPSILON);
         assert!(

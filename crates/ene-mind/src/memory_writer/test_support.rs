@@ -470,8 +470,10 @@ mod tests {
             existing_memory_title: None,
             existing_memory_id: None,
             source_quote: String::new(),
+            source_turn: None,
             status,
             created_at,
+            resolved_at: None,
         }
     }
 
