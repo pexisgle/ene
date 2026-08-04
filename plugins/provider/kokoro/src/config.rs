@@ -111,9 +111,8 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }
 
-/// Fully-resolved model settings; doubles as the cache key of the loaded
-/// engine, so a changed value forces a rebuild.
-#[derive(Debug, Clone, PartialEq)]
+/// Fully-resolved model settings handed to the engine builder.
+#[derive(Debug, Clone)]
 pub struct ResolvedConfig {
     /// ONNX model file path.
     pub model_path: PathBuf,
@@ -127,6 +126,38 @@ pub struct ResolvedConfig {
     pub language: Option<String>,
     /// ONNX Runtime dynamic library path override.
     pub ort_dylib_path: Option<String>,
+}
+
+impl ResolvedConfig {
+    /// The engine cache key: everything the loaded model depends on except
+    /// `ort_dylib_path`, which ONNX Runtime fixes at first init
+    /// (process-global, first caller wins) and therefore cannot be reloaded
+    /// live.
+    #[must_use]
+    pub fn key(&self) -> EngineKey {
+        EngineKey {
+            model_path: self.model_path.clone(),
+            voices_path: self.voices_path.clone(),
+            voice: self.voice.clone(),
+            speed: self.speed,
+            language: self.language.clone(),
+        }
+    }
+}
+
+/// Cache key of a loaded engine; see [`ResolvedConfig::key`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineKey {
+    /// ONNX model file path.
+    pub model_path: PathBuf,
+    /// `voices.bin` path.
+    pub voices_path: PathBuf,
+    /// Effective voice name.
+    pub voice: String,
+    /// Speech speed multiplier.
+    pub speed: f32,
+    /// G2P language.
+    pub language: Option<String>,
 }
 
 #[cfg(test)]

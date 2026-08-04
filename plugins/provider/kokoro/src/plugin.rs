@@ -13,12 +13,13 @@ use crate::wav;
 /// Builds the ONNX-backed engine for a fully-resolved config. Injectable so
 /// synthesis can be tested without a model file or ONNX Runtime.
 pub(crate) type EngineBuilder =
-    Box<dyn Fn(&ResolvedConfig) -> Result<Arc<dyn TtsProvider>, PluginError> + Send + Sync>;
+    Arc<dyn Fn(&ResolvedConfig) -> Result<Arc<dyn TtsProvider>, PluginError> + Send + Sync>;
 
-/// A loaded engine plus the config it was built from; a changed key (voice,
-/// paths, speed, language, ORT dylib) forces a rebuild.
+/// A loaded engine plus the config it was built from; a changed key forces
+/// a rebuild. Only the last engine is kept — each holds a ~300 MB model, so
+/// alternating per-request voices reload the model on every switch.
 struct CachedEngine {
-    key: ResolvedConfig,
+    key: crate::config::EngineKey,
     provider: Arc<dyn TtsProvider>,
 }
 
@@ -43,7 +44,7 @@ pub struct KokoroPlugin {
     /// `kokoro` profile carries the legacy `voices_path` slot.
     profiles: Mutex<Option<Value>>,
     /// Lazily-built engine, keyed by its resolved config.
-    engine: Mutex<Option<CachedEngine>>,
+    engine: Arc<Mutex<Option<CachedEngine>>>,
     build: EngineBuilder,
 }
 
@@ -51,39 +52,76 @@ impl KokoroPlugin {
     /// Creates the plugin with the real ONNX-backed engine builder.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_builder(Box::new(build_real))
+        Self::with_builder(Arc::new(build_real))
     }
 
     pub(crate) fn with_builder(build: EngineBuilder) -> Self {
         Self {
             profiles: Mutex::new(None),
-            engine: Mutex::new(None),
+            engine: Arc::new(Mutex::new(None)),
             build,
         }
     }
 
-    /// Returns the cached engine for `resolved`, building it on a cache miss
-    /// or when the key changed.
-    fn engine(&self, resolved: &ResolvedConfig) -> Result<Arc<dyn TtsProvider>, PluginError> {
-        let mut guard = self.engine.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(cached) = guard.as_ref()
-            && cached.key == *resolved
-        {
-            return Ok(Arc::clone(&cached.provider));
+    /// Rejects voice names the model cannot load before a doomed build pays
+    /// the ONNX session load.
+    fn ensure_known_voice(voice: &str) -> Result<(), PluginError> {
+        if voice.is_empty() {
+            return Ok(());
         }
-        let provider = (self.build)(resolved)?;
-        tracing::info!(
-            component = "ene-plugin-kokoro",
-            model = %resolved.model_path.display(),
-            voices = %resolved.voices_path.display(),
-            voice = %resolved.voice,
-            "loaded Kokoro TTS engine"
-        );
-        *guard = Some(CachedEngine {
-            key: resolved.clone(),
-            provider: Arc::clone(&provider),
-        });
-        Ok(provider)
+        let available = KokoroPlugin::tts_spec().voices;
+        if available.iter().any(|v| v == voice) {
+            return Ok(());
+        }
+        Err(PluginError::provider(format!(
+            "unknown Kokoro voice {voice:?}; available voices: {}",
+            available.join(", ")
+        )))
+    }
+
+    /// Returns the cached engine for `resolved`, or `None` on a miss.
+    fn cached(&self, resolved: &ResolvedConfig) -> Option<Arc<dyn TtsProvider>> {
+        let guard = self.engine.lock().unwrap_or_else(PoisonError::into_inner);
+        guard
+            .as_ref()
+            .filter(|cached| cached.key == resolved.key())
+            .map(|cached| Arc::clone(&cached.provider))
+    }
+
+    /// Returns the engine for `resolved`, building it on a cache miss or a
+    /// key change. The ONNX session load can take seconds, so the build runs
+    /// on the blocking pool; concurrent misses serialize on the mutex and
+    /// re-check, so only one build per key happens.
+    async fn engine(&self, resolved: &ResolvedConfig) -> Result<Arc<dyn TtsProvider>, PluginError> {
+        if let Some(cached) = self.cached(resolved) {
+            return Ok(cached);
+        }
+        let build = Arc::clone(&self.build);
+        let engine = Arc::clone(&self.engine);
+        let resolved = resolved.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = engine.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(cached) = guard.as_ref()
+                && cached.key == resolved.key()
+            {
+                return Ok(Arc::clone(&cached.provider));
+            }
+            let provider = (build)(&resolved)?;
+            tracing::info!(
+                component = "ene-plugin-kokoro",
+                model = %resolved.model_path.display(),
+                voices = %resolved.voices_path.display(),
+                voice = %resolved.voice,
+                "loaded Kokoro TTS engine"
+            );
+            *guard = Some(CachedEngine {
+                key: resolved.key(),
+                provider: Arc::clone(&provider),
+            });
+            Ok(provider)
+        })
+        .await
+        .map_err(|e| PluginError::provider(format!("kokoro engine build task failed: {e}")))?
     }
 }
 
@@ -114,7 +152,7 @@ impl ene_plugin::ConfigurablePlugin for KokoroPlugin {
                 },
                 "voice": {
                     "type": "string",
-                    "description": "Default voice (e.g. af_heart, jf_alpha); a per-request voice overrides it; empty selects the first voice in voices.bin"
+                    "description": "Default voice (e.g. af_heart, jf_alpha); a per-request voice overrides it; empty selects the first voice in voices.bin. Alternating voices reload the model on each switch."
                 },
                 "speed": {
                     "type": "number",
@@ -129,7 +167,7 @@ impl ene_plugin::ConfigurablePlugin for KokoroPlugin {
                 },
                 "ort_dylib_path": {
                     "type": "string",
-                    "description": "ONNX Runtime dynamic library path override (ort default resolution when unset)"
+                    "description": "ONNX Runtime dynamic library path override (ort default resolution when unset). Fixed at process start: ONNX Runtime initializes once, so a change requires a restart"
                 }
             }
         }))
@@ -169,7 +207,8 @@ impl TtsPlugin for KokoroPlugin {
             .clone();
         let profile = profiles.as_ref().and_then(|p| p.get(DEFAULT_PROFILE));
         let resolved = parsed.resolve(&voice, profile);
-        let provider = self.engine(&resolved)?;
+        Self::ensure_known_voice(&resolved.voice)?;
+        let provider = self.engine(&resolved).await?;
         synthesize_with(provider.as_ref(), &text).await
     }
 }
@@ -193,10 +232,9 @@ async fn synthesize_with(provider: &dyn TtsProvider, text: &str) -> Result<Vec<u
         .synthesize(text)
         .await
         .map_err(|e| PluginError::provider(format!("kokoro synthesis failed: {e}")))?;
+    let sample_rate = chunks.first().map_or(24_000, |chunk| chunk.sample_rate);
     let mut pcm = Vec::new();
-    let mut sample_rate = 24_000;
     for chunk in chunks {
-        sample_rate = chunk.sample_rate;
         pcm.extend_from_slice(&chunk.pcm);
     }
     wav::encode_wav(&pcm, sample_rate)

@@ -63,7 +63,7 @@ fn counting_builder(
     builds: Arc<AtomicUsize>,
     seen: Arc<Mutex<Vec<ResolvedConfig>>>,
 ) -> crate::plugin::EngineBuilder {
-    Box::new(move |resolved| {
+    Arc::new(move |resolved| {
         builds.fetch_add(1, Ordering::SeqCst);
         seen.lock().expect("seen log").push(resolved.clone());
         Ok(Arc::new(FakeTts::single_chunk()) as Arc<dyn TtsProvider>)
@@ -71,7 +71,7 @@ fn counting_builder(
 }
 
 fn test_plugin() -> KokoroPlugin {
-    KokoroPlugin::with_builder(Box::new(|_| {
+    KokoroPlugin::with_builder(Arc::new(|_| {
         Ok(Arc::new(FakeTts::single_chunk()) as Arc<dyn TtsProvider>)
     }))
 }
@@ -192,7 +192,7 @@ async fn request_voice_wins_over_configured_voice() {
 async fn profile_voices_path_is_used_as_fallback() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen_in_builder = Arc::clone(&seen);
-    let plugin = KokoroPlugin::with_builder(Box::new(move |resolved| {
+    let plugin = KokoroPlugin::with_builder(Arc::new(move |resolved| {
         seen_in_builder
             .lock()
             .expect("seen log")
@@ -258,6 +258,150 @@ async fn engine_is_reused_until_resolved_config_changes() {
         builds.load(Ordering::SeqCst),
         2,
         "voice change rebuilds the engine"
+    );
+}
+
+#[tokio::test]
+async fn unknown_voice_fails_before_building_the_engine() {
+    let builds = Arc::new(AtomicUsize::new(0));
+    let builds_in_builder = Arc::clone(&builds);
+    let plugin = KokoroPlugin::with_builder(Arc::new(move |_| {
+        builds_in_builder.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(FakeTts::single_chunk()) as Arc<dyn TtsProvider>)
+    }));
+
+    for voice in ["not_a_voice", "  not_a_voice  "] {
+        let err = plugin
+            .synthesize(
+                KIND,
+                json!({}),
+                "hello".to_string(),
+                voice.to_string(),
+                "wav".to_string(),
+            )
+            .await
+            .expect_err("unknown voice rejected");
+        assert!(err.to_string().contains("unknown Kokoro voice"));
+        assert!(err.to_string().contains("available voices"));
+    }
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        0,
+        "no engine build attempted"
+    );
+}
+
+#[tokio::test]
+async fn engine_rebuilds_on_model_path_change() {
+    let builds = Arc::new(AtomicUsize::new(0));
+    let builds_in_builder = Arc::clone(&builds);
+    let plugin = KokoroPlugin::with_builder(Arc::new(move |_| {
+        builds_in_builder.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(FakeTts::single_chunk()) as Arc<dyn TtsProvider>)
+    }));
+
+    plugin
+        .synthesize(
+            KIND,
+            json!({}),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("synthesis succeeds");
+    plugin
+        .synthesize(
+            KIND,
+            json!({"model_path": "/other/kokoro.onnx"}),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("synthesis succeeds");
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        2,
+        "model path change rebuilds"
+    );
+}
+
+#[tokio::test]
+async fn failed_build_preserves_the_cached_engine() {
+    let builds = Arc::new(AtomicUsize::new(0));
+    let builds_in_builder = Arc::clone(&builds);
+    let plugin = KokoroPlugin::with_builder(Arc::new(move |resolved| {
+        builds_in_builder.fetch_add(1, Ordering::SeqCst);
+        if resolved
+            .model_path
+            .to_string_lossy()
+            .ends_with("missing.onnx")
+        {
+            return Err(ene_plugin::PluginError::provider("model init failed"));
+        }
+        Ok(Arc::new(FakeTts::single_chunk()) as Arc<dyn TtsProvider>)
+    }));
+
+    plugin
+        .synthesize(
+            KIND,
+            json!({}),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("synthesis succeeds");
+    let err = plugin
+        .synthesize(
+            KIND,
+            json!({"model_path": "/data/missing.onnx"}),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect_err("failed build surfaces the error");
+    assert!(err.to_string().contains("model init failed"));
+
+    plugin
+        .synthesize(
+            KIND,
+            json!({}),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("cached engine still serves");
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        2,
+        "failed build did not evict the cached engine"
+    );
+}
+
+#[test]
+fn tts_capabilities_shape() {
+    let caps = test_plugin().tts_capabilities();
+    assert_eq!(caps.len(), 1);
+    let spec = &caps[0];
+    assert_eq!(spec.kind, "kokoro");
+    assert_eq!(spec.formats, vec!["wav"]);
+    assert_eq!(spec.voices.len(), 53);
+    for voice in ["af_heart", "jf_alpha", "zf_xiaoyi"] {
+        assert!(
+            spec.voices.iter().any(|v| v == voice),
+            "voice {voice} advertised"
+        );
+    }
+    assert_eq!(
+        spec.concurrency,
+        ene_plugin::ConcurrencyHint {
+            max_in_flight: 1,
+            queue_depth: 2,
+        }
     );
 }
 
