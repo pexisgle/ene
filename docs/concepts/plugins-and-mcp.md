@@ -270,6 +270,7 @@ tests against pinned GGUF fixtures.
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
 | `ene-plugin-openai-tts` | Provider | OpenAI Speech API TTS provider (tts-1 / tts-1-hd) — WAV (24 kHz PCM) audio | No |
 | `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — chat streaming, completion, and GGUF embeddings | No |
+| `ene-plugin-voicevox` | Provider | VOICEVOX / Aivis Speech TTS provider — WAV audio via the 2-step `audio_query` → `synthesis` flow | No |
 
 All seventeen plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.

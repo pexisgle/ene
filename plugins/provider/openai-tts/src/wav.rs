@@ -50,7 +50,16 @@ mod tests {
             u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]),
             24_000
         );
+        assert_eq!(
+            u32::from_le_bytes([wav[28], wav[29], wav[30], wav[31]]),
+            48_000
+        );
+        assert_eq!(u16::from_le_bytes([wav[32], wav[33]]), 2);
         assert_eq!(u16::from_le_bytes([wav[34], wav[35]]), 16);
+        assert_eq!(
+            u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]),
+            pcm.len() as u32
+        );
         assert_eq!(&wav[WAV_HEADER_LEN..], pcm.as_slice());
     }
 }

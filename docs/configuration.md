@@ -836,7 +836,8 @@ request.
           "api_key": "sk-...",
           "model": "tts-1",
           "voice": "alloy",
-          "speed": 1.0
+          "speed": 1.0,
+          "sample_rate": 24000
         }
       }
     }
@@ -852,13 +853,14 @@ Settings:
 | `model` | `tts-1` | Speech synthesis model (`tts-1` for low latency, `tts-1-hd` for higher quality). |
 | `voice` | `alloy` | Default voice (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`); a per-request voice overrides it. |
 | `speed` | `1.0` | Speech speed multiplier (0.25–4.0). |
+| `sample_rate` | `24000` | Sample rate written into the WAV header. The Speech API's `pcm` format is fixed at 24 kHz, so only set this when `base_url` points at a compatible endpoint with a different output rate. |
 | `base_url` | `https://api.openai.com/v1` | API base URL override (for OpenAI-compatible endpoints). Falls back to the `OPENAI_BASE_URL` environment variable. |
 
 The plugin requests `response_format=pcm` from the Speech API and returns
-the audio as WAV (24 kHz 16-bit mono PCM), which the host-side audio
-pipeline decodes into float samples for playback (`formats = ["wav"]`).
-Other formats accepted by the Speech API (`mp3`, `opus`, `flac`, `aac`) are
-not exposed.
+the audio as WAV (16-bit mono PCM at `sample_rate`), which the host-side
+audio pipeline decodes into float samples for playback
+(`formats = ["wav"]`). Other formats accepted by the Speech API (`mp3`,
+`opus`, `flac`, `aac`) are not exposed.
 
 #### Secret marking
 

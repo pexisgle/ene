@@ -1,19 +1,22 @@
-//! Raw 16-bit little-endian PCM to `f32` sample conversion.
+//! Raw 16-bit little-endian PCM helpers.
 //!
 //! The Speech API's `pcm` response format is a headerless stream of 24 kHz
-//! mono s16 samples. The plugin wire contract carries whole audio bytes, so
-//! the conversion doubles as stream-integrity validation: an odd trailing
-//! byte means the upstream stream was truncated mid-sample.
+//! mono s16 samples. The plugin wire contract carries WAV bytes, so the
+//! production path only needs stream-integrity validation: an odd trailing
+//! byte means the upstream stream was truncated mid-sample. The full s16 →
+//! `f32` conversion is exercised by tests and kept for a future streaming
+//! path; converting the whole payload just to validate parity would waste
+//! ~2x the audio size per request.
 
 use ene_plugin::{PluginError, ProviderErrorKind};
 
-/// Converts 2-byte little-endian s16 samples into `f32` values.
+/// Rejects byte streams that end mid-sample.
 ///
 /// # Errors
 ///
 /// Returns a typed [`Truncated`](ProviderErrorKind::Truncated) provider
 /// error when the byte count is odd (the stream ends mid-sample).
-pub fn samples_from_bytes(bytes: &[u8]) -> Result<Vec<f32>, PluginError> {
+pub fn validate_pcm(bytes: &[u8]) -> Result<(), PluginError> {
     if !bytes.len().is_multiple_of(2) {
         return Err(PluginError::provider_typed(
             ProviderErrorKind::Truncated,
@@ -23,6 +26,18 @@ pub fn samples_from_bytes(bytes: &[u8]) -> Result<Vec<f32>, PluginError> {
             ),
         ));
     }
+    Ok(())
+}
+
+/// Converts 2-byte little-endian s16 samples into `f32` values.
+///
+/// # Errors
+///
+/// Returns a typed [`Truncated`](ProviderErrorKind::Truncated) provider
+/// error when the byte count is odd (the stream ends mid-sample).
+#[cfg(test)]
+pub fn samples_from_bytes(bytes: &[u8]) -> Result<Vec<f32>, PluginError> {
+    validate_pcm(bytes)?;
     // 32768.0 (not 32767.0) keeps the mapping symmetric, so the full-scale
     // negative sample stays inside the documented [-1.0, 1.0] range.
     Ok(bytes

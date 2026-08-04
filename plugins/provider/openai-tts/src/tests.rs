@@ -14,7 +14,7 @@ use std::time::Duration;
 use ene_plugin::{ConfigurablePlugin as _, PluginError, ProviderErrorKind, TtsPlugin as _};
 use serde_json::{Value, json};
 
-use crate::client::MAX_PCM_BYTES;
+use crate::client::{MAX_ERROR_BODY_BYTES, MAX_PCM_BYTES};
 use crate::config::{
     DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_VOICE, SUPPORTED_VOICES, resolve_api_key,
     resolve_base_url,
@@ -221,10 +221,12 @@ async fn auth_errors_map_to_typed_auth() {
 async fn rate_limit_maps_to_typed_rate_limit() {
     let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let mock = MockSpeechServer::spawn().expect("mock server");
-    mock.push(MockResponse::with_status(
-        429,
-        b"{\"error\":\"slow down\"}".to_vec(),
-    ));
+    for _ in 0..3 {
+        mock.push(
+            MockResponse::with_status(429, b"{\"error\":\"slow down\"}".to_vec())
+                .with_header("Retry-After", "0"),
+        );
+    }
 
     let err = test_plugin()
         .synthesize(
@@ -441,6 +443,215 @@ async fn out_of_range_speed_is_rejected_before_the_request() {
     assert!(mock.requests.lock().expect("request log").is_empty());
 }
 
+#[tokio::test]
+async fn rate_limit_retries_then_succeeds() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockSpeechServer::spawn().expect("mock server");
+    mock.push(
+        MockResponse::with_status(429, b"{\"error\":\"slow down\"}".to_vec())
+            .with_header("Retry-After", "0"),
+    );
+    mock.push(MockResponse::ok(pcm_fixture()));
+
+    let audio = test_plugin()
+        .synthesize(
+            KIND,
+            config_json(&mock_url(&mock)),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("retry succeeds");
+    assert_wav_payload(&audio, &pcm_fixture());
+    assert_eq!(mock.requests.lock().expect("request log").len(), 2);
+}
+
+#[tokio::test]
+async fn empty_audio_response_is_rejected() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockSpeechServer::spawn().expect("mock server");
+    mock.push(MockResponse::ok(Vec::new()));
+
+    let err = test_plugin()
+        .synthesize(
+            KIND,
+            config_json(&mock_url(&mock)),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect_err("empty audio rejected");
+    assert!(err.to_string().contains("empty"));
+}
+
+#[tokio::test]
+async fn input_longer_than_the_api_limit_is_rejected() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockSpeechServer::spawn().expect("mock server");
+    let err = test_plugin()
+        .synthesize(
+            KIND,
+            config_json(&mock_url(&mock)),
+            "a".repeat(4097),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect_err("overlong input rejected");
+    assert!(err.to_string().contains("4096"));
+    assert!(mock.requests.lock().expect("request log").is_empty());
+
+    mock.push(MockResponse::ok(pcm_fixture()));
+    test_plugin()
+        .synthesize(
+            KIND,
+            config_json(&mock_url(&mock)),
+            "a".repeat(4096),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("4096-character input is accepted");
+}
+
+#[tokio::test]
+async fn unknown_voice_is_rejected_before_the_request() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockSpeechServer::spawn().expect("mock server");
+    let err = test_plugin()
+        .synthesize(
+            KIND,
+            config_json(&mock_url(&mock)),
+            "hello".to_string(),
+            "clippy".to_string(),
+            "wav".to_string(),
+        )
+        .await
+        .expect_err("unknown voice rejected");
+    assert!(err.to_string().contains("unknown voice"));
+    assert!(mock.requests.lock().expect("request log").is_empty());
+}
+
+#[tokio::test]
+async fn unknown_model_is_rejected_before_the_request() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockSpeechServer::spawn().expect("mock server");
+    let err = test_plugin()
+        .synthesize(
+            KIND,
+            json!({
+                "api_key": TEST_KEY,
+                "base_url": mock_url(&mock),
+                "model": "tts-2"
+            }),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect_err("unknown model rejected");
+    assert!(err.to_string().contains("model"));
+    assert!(mock.requests.lock().expect("request log").is_empty());
+}
+
+#[tokio::test]
+async fn configured_sample_rate_is_written_into_the_wav_header() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockSpeechServer::spawn().expect("mock server");
+    mock.push(MockResponse::ok(pcm_fixture()));
+
+    let audio = test_plugin()
+        .synthesize(
+            KIND,
+            json!({
+                "api_key": TEST_KEY,
+                "base_url": mock_url(&mock),
+                "sample_rate": 48_000
+            }),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("synthesis succeeds");
+    assert_eq!(
+        u32::from_le_bytes([audio[24], audio[25], audio[26], audio[27]]),
+        48_000
+    );
+    assert_eq!(
+        u32::from_le_bytes([audio[28], audio[29], audio[30], audio[31]]),
+        96_000
+    );
+}
+
+#[tokio::test]
+async fn base_url_trailing_slash_is_normalized() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockSpeechServer::spawn().expect("mock server");
+    mock.push(MockResponse::ok(pcm_fixture()));
+
+    test_plugin()
+        .synthesize(
+            KIND,
+            json!({
+                "api_key": TEST_KEY,
+                "base_url": format!("{}/v1/", mock.url)
+            }),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("trailing slash tolerated");
+
+    let requests = mock.requests.lock().expect("request log");
+    assert_eq!(requests[0].path, "/v1/audio/speech");
+}
+
+#[tokio::test]
+async fn oversized_error_body_is_bounded() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mock = MockSpeechServer::spawn().expect("mock server");
+    mock.push(
+        MockResponse::with_status(500, b"boom".to_vec())
+            .with_declared_length(MAX_ERROR_BODY_BYTES + 1),
+    );
+
+    let err = test_plugin()
+        .synthesize(
+            KIND,
+            config_json(&mock_url(&mock)),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect_err("oversized error body bounded");
+    assert!(err.to_string().contains("too large"));
+}
+
+#[test]
+fn base_url_env_falls_back_after_config() {
+    let _env = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+    let original = std::env::var("OPENAI_BASE_URL").ok();
+    // SAFETY: test-only env mutation, serialized by `ENV_MUTEX`.
+    unsafe {
+        std::env::set_var("OPENAI_BASE_URL", "https://env.example/v1");
+    }
+    assert_eq!(resolve_base_url(None, &json!({})), "https://env.example/v1");
+    // SAFETY: test-only env restore, serialized by `ENV_MUTEX`.
+    match original {
+        Some(value) => unsafe {
+            std::env::set_var("OPENAI_BASE_URL", value);
+        },
+        None => unsafe {
+            std::env::remove_var("OPENAI_BASE_URL");
+        },
+    }
+}
+
 #[test]
 fn capabilities_declare_kind_voices_formats_and_concurrency() {
     let capabilities = test_plugin().tts_capabilities();
@@ -464,6 +675,8 @@ fn config_schema_marks_api_key_secret_and_constrains_settings() {
     );
     assert_eq!(schema["properties"]["speed"]["minimum"], 0.25);
     assert_eq!(schema["properties"]["speed"]["maximum"], 4.0);
+    assert_eq!(schema["properties"]["sample_rate"]["default"], 24_000);
+    assert_eq!(schema["properties"]["sample_rate"]["minimum"], 1);
 }
 
 #[test]
@@ -572,6 +785,12 @@ fn missing_key_everywhere_is_an_error() {
 
 #[test]
 fn base_url_precedence_and_default() {
+    let _env = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+    let original = std::env::var("OPENAI_BASE_URL").ok();
+    // SAFETY: test-only env mutation, serialized by `ENV_MUTEX`.
+    unsafe {
+        std::env::remove_var("OPENAI_BASE_URL");
+    }
     assert_eq!(resolve_base_url(None, &json!({})), DEFAULT_BASE_URL);
     assert_eq!(
         resolve_base_url(None, &json!({"base_url": "https://request.example/v1"})),
@@ -584,4 +803,13 @@ fn base_url_precedence_and_default() {
         ),
         "https://host.example/v1"
     );
+    // SAFETY: test-only env restore, serialized by `ENV_MUTEX`.
+    match original {
+        Some(value) => unsafe {
+            std::env::set_var("OPENAI_BASE_URL", value);
+        },
+        None => unsafe {
+            std::env::remove_var("OPENAI_BASE_URL");
+        },
+    }
 }

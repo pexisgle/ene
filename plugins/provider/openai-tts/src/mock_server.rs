@@ -28,6 +28,8 @@ pub struct RecordedRequest {
 pub struct MockResponse {
     status: u16,
     body: Vec<u8>,
+    /// Extra response headers (e.g. `Retry-After`).
+    headers: Vec<(String, String)>,
     /// Content-Length header override; lets tests declare an oversized
     /// payload without materializing it.
     declared_content_length: Option<usize>,
@@ -43,6 +45,7 @@ impl MockResponse {
         Self {
             status: 200,
             body,
+            headers: Vec::new(),
             declared_content_length: None,
             chunked: false,
             chunk_delay: Duration::ZERO,
@@ -56,6 +59,7 @@ impl MockResponse {
         Self {
             status,
             body: body.into(),
+            headers: Vec::new(),
             declared_content_length: None,
             chunked: false,
             chunk_delay: Duration::ZERO,
@@ -71,6 +75,7 @@ impl MockResponse {
         Self {
             status: 200,
             body,
+            headers: Vec::new(),
             declared_content_length: None,
             chunked: true,
             chunk_delay,
@@ -83,6 +88,13 @@ impl MockResponse {
     #[must_use]
     pub fn with_declared_length(mut self, length: usize) -> Self {
         self.declared_content_length = Some(length);
+        self
+    }
+
+    /// Adds a response header (e.g. `Retry-After`).
+    #[must_use]
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
         self
     }
 }
@@ -254,9 +266,16 @@ async fn write_response(socket: &mut TcpStream, response: &MockResponse) -> io::
         let content_length = response
             .declared_content_length
             .unwrap_or(response.body.len());
+        let mut extra_headers = String::new();
+        for (name, value) in &response.headers {
+            extra_headers.push_str(name);
+            extra_headers.push_str(": ");
+            extra_headers.push_str(value);
+            extra_headers.push_str("\r\n");
+        }
         let head = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: application/octet-stream\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n",
+             {extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
             response.status,
             reason_phrase(response.status),
             content_length
@@ -270,9 +289,16 @@ async fn write_response(socket: &mut TcpStream, response: &MockResponse) -> io::
 /// Writes the body as HTTP chunked transfer encoding with a delay between
 /// chunks, so the client observes incremental arrival.
 async fn write_chunked(socket: &mut TcpStream, response: &MockResponse) -> io::Result<()> {
+    let mut extra_headers = String::new();
+    for (name, value) in &response.headers {
+        extra_headers.push_str(name);
+        extra_headers.push_str(": ");
+        extra_headers.push_str(value);
+        extra_headers.push_str("\r\n");
+    }
     let head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: application/octet-stream\r\n\
-         Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+         {extra_headers}Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
         response.status,
         reason_phrase(response.status)
     );

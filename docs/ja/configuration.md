@@ -689,7 +689,8 @@ raw 24 kHz 16-bit モノラル PCM（`response_format=pcm`）を返します。
           "api_key": "sk-...",
           "model": "tts-1",
           "voice": "alloy",
-          "speed": 1.0
+          "speed": 1.0,
+          "sample_rate": 24000
         }
       }
     }
@@ -705,11 +706,12 @@ raw 24 kHz 16-bit モノラル PCM（`response_format=pcm`）を返します。
 | `model` | `tts-1` | 音声合成モデル（低遅延の `tts-1` / 高音質の `tts-1-hd`）。 |
 | `voice` | `alloy` | 既定ボイス（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）。リクエスト単位のボイスで上書き可能。 |
 | `speed` | `1.0` | 発話速度倍率（0.25–4.0）。 |
+| `sample_rate` | `24000` | WAV ヘッダに書き込むサンプルレート。Speech API の `pcm` フォーマットは 24 kHz 固定のため、`base_url` が異なる出力レートの互換エンドポイントを指す場合のみ設定します。 |
 | `base_url` | `https://api.openai.com/v1` | API ベース URL の上書き（OpenAI 互換エンドポイント用）。`OPENAI_BASE_URL` 環境変数にフォールバックします。 |
 
 プラグインは Speech API に `response_format=pcm` を要求し、音声を WAV
-（24 kHz 16-bit モノラル PCM）として返します。ホスト側のオーディオ
-パイプラインが float サンプルへデコードして再生します
+（`sample_rate` の 16-bit モノラル PCM）として返します。ホスト側の
+オーディオパイプラインが float サンプルへデコードして再生します
 （`formats = ["wav"]`）。Speech API が受け付ける他のフォーマット
 （`mp3`、`opus`、`flac`、`aac`）は公開しません。
 

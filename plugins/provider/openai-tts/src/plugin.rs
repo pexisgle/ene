@@ -7,7 +7,12 @@ use ene_plugin::prelude::*;
 use serde_json::{Value, json};
 
 use crate::client;
-use crate::config::{OpenAiTtsConfig, SUPPORTED_VOICES, resolve_api_key, resolve_base_url};
+use crate::config::{
+    DEFAULT_SAMPLE_RATE, OpenAiTtsConfig, SUPPORTED_VOICES, resolve_api_key, resolve_base_url,
+};
+
+/// Character limit for the `input` field imposed by the Speech API.
+const MAX_INPUT_CHARS: usize = 4096;
 
 /// Configuration delivered by the host at handshake time
 /// (`plugins.list.openai-tts.config`), stored per process.
@@ -88,6 +93,12 @@ impl ene_plugin::ConfigurablePlugin for OpenAiTtsPlugin {
                     "maximum": 4.0,
                     "default": 1.0,
                     "description": "Speech speed multiplier (0.25-4.0)"
+                },
+                "sample_rate": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": DEFAULT_SAMPLE_RATE,
+                    "description": "Output sample rate written into the WAV header (the Speech API's pcm format is fixed at 24 kHz; override for compatible endpoints)"
                 }
             }
         }))
@@ -119,15 +130,25 @@ impl TtsPlugin for OpenAiTtsPlugin {
         if text.trim().is_empty() {
             return Err(PluginError::provider("cannot synthesize empty text"));
         }
+        if text.chars().count() > MAX_INPUT_CHARS {
+            return Err(PluginError::provider(format!(
+                "input exceeds the Speech API's {MAX_INPUT_CHARS}-character limit"
+            )));
+        }
 
         let parsed = OpenAiTtsConfig::from_value(&config)?;
+        let voice = parsed.resolve_voice(&voice);
+        if !SUPPORTED_VOICES.contains(&voice.as_str()) {
+            return Err(PluginError::provider(format!(
+                "unknown voice {voice:?}; expected one of {SUPPORTED_VOICES:?}"
+            )));
+        }
         let host_config = PLUGIN_CONFIG
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let api_key = resolve_api_key(host_config.as_ref(), &config)?;
         let base_url = resolve_base_url(host_config.as_ref(), &config);
-        let voice = parsed.resolve_voice(&voice);
         client::synthesize(&parsed, &api_key, &base_url, &text, &voice).await
     }
 }
