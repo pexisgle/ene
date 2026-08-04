@@ -120,6 +120,14 @@ pub trait MemoryPort: Send + Sync {
         limit: usize,
     ) -> Result<Vec<MemoryOutcome>, MemoryPortError>;
 
+    /// Delete outcome evaluations by id (character-scoped), returning the
+    /// number of rows removed.
+    async fn delete_memory_outcomes(
+        &self,
+        character_id: &str,
+        ids: &[i64],
+    ) -> Result<usize, MemoryPortError>;
+
     /// Gather typed-memory candidates with explainable hybrid scoring.
     ///
     /// Returns *gathered* candidates (vector/lexical/commitment/recent sources

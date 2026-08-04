@@ -69,9 +69,10 @@ impl MigrationTrait for MemoryOutcomesMigration {
             .create_index(
                 Index::create()
                     .if_not_exists()
-                    .name("idx_memory_outcomes_character_id_id")
+                    .name("idx_memory_outcomes_character_created_id")
                     .table(MemoryOutcomes::Table)
                     .col(MemoryOutcomes::CharacterId)
+                    .col(MemoryOutcomes::CreatedAt)
                     .col(MemoryOutcomes::Id)
                     .to_owned(),
             )

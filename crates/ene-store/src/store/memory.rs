@@ -491,6 +491,26 @@ impl MemoryStore {
         Ok(models.into_iter().map(model_to_memory_outcome).collect())
     }
 
+    /// Delete outcome evaluations by id (character-scoped), returning the
+    /// number of rows removed.
+    ///
+    /// The reflection pass calls this after aggregating a window so consumed
+    /// evaluations do not accumulate or get aggregated twice.
+    pub async fn delete_memory_outcomes(
+        &self,
+        character_id: &str,
+        ids: &[i64],
+    ) -> Result<usize, EneMemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter};
+
+        let res = entities::memory_outcomes::Entity::delete_many()
+            .filter(entities::memory_outcomes::Column::CharacterId.eq(character_id))
+            .filter(entities::memory_outcomes::Column::Id.is_in(ids.to_vec()))
+            .exec(&self.db)
+            .await?;
+        Ok(res.rows_affected as usize)
+    }
+
     /// Retrieve a typed memory item by its ID.
     pub async fn get_typed_memory(
         &self,

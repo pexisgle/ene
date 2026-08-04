@@ -24,6 +24,7 @@ pub struct Model {
     pub source_turn: Option<String>,
     pub approval_parked: bool,
     pub existing_memory_id: Option<i64>,
+    pub outcome_rating: Option<f32>,
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
@@ -66,6 +67,7 @@ pub fn model_to_dto(m: Model) -> Option<PendingCandidate> {
         // `existing_memory_id` at list time instead.
         existing_memory_title: None,
         existing_memory_id: m.existing_memory_id,
+        outcome_rating: m.outcome_rating,
         source_quote: m.source_quote,
         source_turn: m.source_turn,
         approval_parked: m.approval_parked,

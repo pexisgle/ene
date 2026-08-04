@@ -119,6 +119,14 @@ impl MemoryPort for MemoryStore {
         Ok(Self::list_memory_outcomes(self, character_id, since, limit).await?)
     }
 
+    async fn delete_memory_outcomes(
+        &self,
+        character_id: &str,
+        ids: &[i64],
+    ) -> Result<usize, MemoryPortError> {
+        Ok(Self::delete_memory_outcomes(self, character_id, ids).await?)
+    }
+
     async fn search(&self, query: &Query<'_>) -> Result<Vec<GatheredCandidate>, MemoryPortError> {
         Ok(Self::search(self, query).await?)
     }

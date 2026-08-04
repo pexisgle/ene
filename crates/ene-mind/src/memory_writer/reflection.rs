@@ -12,11 +12,11 @@ use crate::config::ReflectionConfig;
 use crate::memory_writer::arbiter::AppliedDecision;
 use ene_core::{
     AffectAnnotation, MemoryConfidence, MemoryKind, MemoryOutcome, MemoryPort, MemorySalience,
-    MemoryScope, MemorySource, MemoryStatus, NewMemoryItem, OutcomeRatingSource,
+    MemoryScope, MemorySource, MemoryStatus, NewMemoryItem, OutcomeRatingSource, PendingCandidate,
 };
 use parking_lot::Mutex;
 
-/// Upper bound on outcome records read per reflection pass.
+/// Upper bound on outcome records consumed per reflection pass.
 const OUTCOME_WINDOW_LIMIT: usize = 500;
 
 /// Pipeline that accumulates memory outcomes and periodically generates
@@ -31,9 +31,6 @@ pub struct SelfReflectionPipeline {
 struct PipelineState {
     turn_counter: usize,
     outcome_count: usize,
-    /// Outcomes recorded after this instant belong to this pipeline instance
-    /// and are aggregated by its reflection pass; earlier rows are excluded.
-    born_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl SelfReflectionPipeline {
@@ -44,15 +41,15 @@ impl SelfReflectionPipeline {
             state: Mutex::new(PipelineState {
                 turn_counter: 0,
                 outcome_count: 0,
-                born_at: chrono::Utc::now(),
             }),
         }
     }
 
     /// Record the outcome of an applied arbiter decision.
     ///
-    /// Only decisions with a non-zero `outcome_rating` and a valid `inserted_id`
-    /// are recorded. The record is persisted through the store so the
+    /// Only decisions with an `outcome_rating` and a valid `inserted_id` are
+    /// recorded (neutral 0.0 ratings are stored but contribute to neither
+    /// strategy bucket). The record is persisted through the store so the
     /// evaluation survives restarts; persistence failure is non-fatal (the
     /// memory itself is already committed) and only degrades the next
     /// reflection pass.
@@ -81,14 +78,7 @@ impl SelfReflectionPipeline {
             source_ref: source_ref.map(str::to_string),
             created_at: chrono::Utc::now(),
         };
-        if let Err(error) = store.record_memory_outcome(&outcome).await {
-            tracing::warn!(
-                component = "SelfReflection",
-                error = %error,
-                memory_id,
-                "Failed to persist memory outcome; reflection pass will not see it"
-            );
-        }
+        persist_outcome_row(store, &outcome).await;
         let mut s = self.state.lock();
         s.turn_counter = s.turn_counter.saturating_add(1);
         s.outcome_count = s.outcome_count.saturating_add(1);
@@ -110,24 +100,23 @@ impl SelfReflectionPipeline {
     /// Generate reflection memories from accumulated outcomes and persist them.
     ///
     /// Returns the list of newly created [`NewMemoryItem`]s (already inserted
-    /// into the store). The aggregation window is the outcomes recorded after
-    /// this pipeline instance was created, read back from the store so the
-    /// durable records are the single source of truth.
+    /// into the store). The window is every unconsumed outcome for the
+    /// character, so rows recorded by calls that did not meet the gate — and
+    /// rows recorded before a restart — are aggregated by the next pass.
+    /// Consumed rows are deleted, which keeps the table bounded and prevents
+    /// double aggregation. Post-turn writes for one character are serialized
+    /// by the caller, so the unconsumed pool is not split across sessions.
     pub async fn generate_reflection(
         &self,
         store: &dyn MemoryPort,
         character_id: &str,
-        session_id: &str,
+        source_ref: Option<&str>,
         user_id: &str,
         _success_boost: f32,
         _failure_penalty: f32,
     ) -> Vec<NewMemoryItem> {
-        let born_at = {
-            let s = self.state.lock();
-            s.born_at
-        };
         let outcomes = store
-            .list_memory_outcomes(character_id, Some(born_at), OUTCOME_WINDOW_LIMIT)
+            .list_memory_outcomes(character_id, None, OUTCOME_WINDOW_LIMIT)
             .await
             .unwrap_or_else(|error| {
                 tracing::warn!(
@@ -142,7 +131,25 @@ impl SelfReflectionPipeline {
         if outcomes.is_empty() {
             return Vec::new();
         }
-        let items = Self::build_reflections(&outcomes, character_id, session_id, user_id);
+        if outcomes.len() == OUTCOME_WINDOW_LIMIT {
+            tracing::warn!(
+                component = "SelfReflection",
+                character_id,
+                limit = OUTCOME_WINDOW_LIMIT,
+                "Outcome window limit reached; older evaluations wait for the next pass"
+            );
+        }
+        let ids: Vec<i64> = outcomes.iter().filter_map(|o| o.id).collect();
+        if let Err(error) = store.delete_memory_outcomes(character_id, &ids).await {
+            tracing::warn!(
+                component = "SelfReflection",
+                error = %error,
+                character_id,
+                "Failed to consume outcome window; evaluations stay queued for the next pass"
+            );
+            return Vec::new();
+        }
+        let items = Self::build_reflections(&outcomes, character_id, source_ref, user_id);
         for item in &items {
             if let Err(e) = store.insert_typed_memory(item).await {
                 tracing::warn!(
@@ -163,7 +170,7 @@ impl SelfReflectionPipeline {
     pub fn build_reflections(
         outcomes: &[MemoryOutcome],
         character_id: &str,
-        session_id: &str,
+        source_ref: Option<&str>,
         user_id: &str,
     ) -> Vec<NewMemoryItem> {
         let pos: Vec<_> = outcomes.iter().filter(|o| o.rating > 0.3).collect();
@@ -179,7 +186,7 @@ impl SelfReflectionPipeline {
                 title: "Successful strategies".into(),
                 content: format!("Successful interaction strategies: {}", titles.join(", ")),
                 source: MemorySource::Inferred,
-                source_ref: Some(session_id.to_string()),
+                source_ref: source_ref.map(str::to_string),
                 confidence: MemoryConfidence::new(0.7),
                 salience: MemorySalience::new(0.6),
                 affect: AffectAnnotation::default(),
@@ -206,7 +213,7 @@ impl SelfReflectionPipeline {
                     titles.join(", ")
                 ),
                 source: MemorySource::Inferred,
-                source_ref: Some(session_id.to_string()),
+                source_ref: source_ref.map(str::to_string),
                 confidence: MemoryConfidence::new(0.7),
                 salience: MemorySalience::new(0.4),
                 affect: AffectAnnotation::default(),
@@ -222,6 +229,52 @@ impl SelfReflectionPipeline {
         }
         r
     }
+}
+
+/// Persist one outcome row, warning instead of failing when the store write
+/// errors (the evaluated memory is already committed; a missing row only
+/// degrades the next reflection pass).
+async fn persist_outcome_row(store: &dyn MemoryPort, outcome: &MemoryOutcome) {
+    if let Err(error) = store.record_memory_outcome(outcome).await {
+        tracing::warn!(
+            component = "SelfReflection",
+            error = %error,
+            memory_id = outcome.memory_id,
+            "Failed to persist memory outcome; reflection pass will not see it"
+        );
+    }
+}
+
+/// Record the outcome of an approved deferred candidate.
+///
+/// Approval persists the candidate outside the arbiter (the store's
+/// `approve_pending_candidate` path), so the rating carried on the pending
+/// row is written back here; the row joins the character's unconsumed pool
+/// and is aggregated by the next reflection pass. No-op when the candidate
+/// carries no rating.
+pub async fn record_approved_outcome(
+    store: &dyn MemoryPort,
+    candidate: &PendingCandidate,
+    memory_id: i64,
+) {
+    let Some(rating) = candidate.outcome_rating else {
+        return;
+    };
+    persist_outcome_row(
+        store,
+        &MemoryOutcome {
+            id: None,
+            memory_id,
+            memory_title: candidate.title.clone(),
+            character_id: candidate.character_id.clone(),
+            user_id: candidate.user_id.clone(),
+            rating,
+            source: OutcomeRatingSource::Affect,
+            source_ref: candidate.source_turn.clone(),
+            created_at: chrono::Utc::now(),
+        },
+    )
+    .await;
 }
 
 /// Load active reflection memories for a character (up to 50).
@@ -333,6 +386,7 @@ mod tests {
     };
     use crate::memory_writer::candidate::MemoryCandidate;
     use crate::memory_writer::test_support::InMemoryMemoryPort;
+    use ene_core::PendingCandidateStatus;
     use ene_store::MemoryKind;
 
     fn config(interval: usize, min_outcomes: usize) -> ReflectionConfig {
@@ -392,7 +446,8 @@ mod tests {
             outcome(2, "bad strategy", -0.6),
             outcome(3, "neutral", 0.0),
         ];
-        let items = SelfReflectionPipeline::build_reflections(&outcomes, "ene", "sess", "user1");
+        let items =
+            SelfReflectionPipeline::build_reflections(&outcomes, "ene", Some("sess"), "user1");
         assert_eq!(items.len(), 2);
         assert!(items.iter().any(|i| i.title == "Successful strategies"));
         assert!(items.iter().any(|i| i.title == "Strategies to avoid"));
@@ -472,34 +527,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_reflection_reads_durable_window() {
+    async fn generate_reflection_aggregates_across_calls_and_restarts() {
         let port = InMemoryMemoryPort::new();
-        let pipeline = SelfReflectionPipeline::new(config(1, 2));
 
-        pipeline
+        // First call records one outcome but never meets the gate.
+        let first_call = SelfReflectionPipeline::new(config(1, 2));
+        first_call
             .record_outcome(
                 &port,
                 "ene",
                 "user1",
-                None,
+                Some("turn-1"),
                 &applied_with_rating("good", 0.8),
             )
             .await;
-        pipeline
+        assert!(!first_call.should_reflect());
+
+        // A fresh pipeline (next call, or a restart) aggregates the earlier
+        // row together with its own once the gate is met.
+        let second_call = SelfReflectionPipeline::new(config(1, 2));
+        second_call
             .record_outcome(
                 &port,
                 "ene",
                 "user1",
-                None,
+                Some("turn-2"),
                 &applied_with_rating("bad", -0.6),
             )
             .await;
-        assert!(pipeline.should_reflect());
-
-        let items = pipeline
-            .generate_reflection(&port, "ene", "sess", "user1", 1.2, 0.8)
+        second_call
+            .record_outcome(
+                &port,
+                "ene",
+                "user1",
+                Some("turn-2"),
+                &applied_with_rating("worse", -0.8),
+            )
             .await;
-        assert_eq!(items.len(), 2);
+        assert!(second_call.should_reflect());
+
+        let items = second_call
+            .generate_reflection(&port, "ene", Some("turn-2"), "user1", 1.2, 0.8)
+            .await;
+        assert_eq!(items.len(), 2, "both calls' outcomes must be aggregated");
+        assert!(
+            port.outcomes().is_empty(),
+            "consumed outcomes must be pruned"
+        );
         let stored = port.all_items();
         assert_eq!(
             stored
@@ -508,6 +582,71 @@ mod tests {
                 .count(),
             2,
             "both strategy reflections must be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_approved_outcome_persists_rating_row() {
+        let port = InMemoryMemoryPort::new();
+        let candidate = PendingCandidate {
+            id: 7,
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            title: "warm greeting".into(),
+            content: String::new(),
+            kind: MemoryKind::Semantic,
+            confidence: 0.8,
+            reason_detail: String::new(),
+            existing_memory_title: None,
+            existing_memory_id: None,
+            outcome_rating: Some(0.7),
+            source_quote: String::new(),
+            source_turn: Some("turn-9".into()),
+            approval_parked: true,
+            status: PendingCandidateStatus::Pending,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+
+        record_approved_outcome(&port, &candidate, 42).await;
+
+        let rows = port.outcomes();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].memory_id, 42);
+        assert_eq!(rows[0].memory_title, "warm greeting");
+        assert!((rows[0].rating - 0.7).abs() < f32::EPSILON);
+        assert_eq!(rows[0].character_id, "ene");
+        assert_eq!(rows[0].user_id, "user1");
+        assert_eq!(rows[0].source_ref.as_deref(), Some("turn-9"));
+    }
+
+    #[tokio::test]
+    async fn record_approved_outcome_skips_unrated_candidates() {
+        let port = InMemoryMemoryPort::new();
+        let candidate = PendingCandidate {
+            id: 8,
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            title: "unrated".into(),
+            content: String::new(),
+            kind: MemoryKind::Semantic,
+            confidence: 0.8,
+            reason_detail: String::new(),
+            existing_memory_title: None,
+            existing_memory_id: None,
+            outcome_rating: None,
+            source_quote: String::new(),
+            source_turn: None,
+            approval_parked: true,
+            status: PendingCandidateStatus::Pending,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+        record_approved_outcome(&port, &candidate, 43).await;
+
+        assert!(
+            port.outcomes().is_empty(),
+            "candidates without a rating must not write outcome rows"
         );
     }
 

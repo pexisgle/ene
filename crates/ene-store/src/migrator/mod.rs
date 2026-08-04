@@ -5,6 +5,7 @@ mod embeddings_cleanup;
 mod memory_outcomes;
 mod pending_candidates;
 mod pending_candidates_approval_parked;
+mod pending_candidates_outcome_rating;
 mod pending_candidates_source_turn;
 mod scheduler;
 mod vec0_memory;
@@ -15,6 +16,7 @@ use embeddings_cleanup::EmbeddingsCleanupIndexMigration;
 use memory_outcomes::MemoryOutcomesMigration;
 use pending_candidates::PendingCandidatesMigration;
 use pending_candidates_approval_parked::PendingCandidatesApprovalParkedMigration;
+use pending_candidates_outcome_rating::PendingCandidatesOutcomeRatingMigration;
 use pending_candidates_source_turn::PendingCandidatesSourceTurnMigration;
 use scheduler::SchedulerMigration;
 use sea_orm_migration::prelude::*;
@@ -40,6 +42,7 @@ impl MigratorTrait for Migrator {
             Box::new(SchedulerMigration),
             Box::new(WorkspaceDocumentsMigration),
             Box::new(MemoryOutcomesMigration),
+            Box::new(PendingCandidatesOutcomeRatingMigration),
         ]
     }
 }

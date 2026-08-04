@@ -3102,11 +3102,27 @@ impl TurnActor {
                     return true;
                 };
                 let result = match status {
-                    ene_store::PendingCandidateStatus::Approved => store
-                        .approve_pending_candidate(id)
-                        .await
-                        .map(|_| ())
-                        .map_err(crate::public_api::PublicApiError::from),
+                    ene_store::PendingCandidateStatus::Approved => {
+                        let approved = store.approve_pending_candidate(id).await;
+                        if let Ok(memory_id) = approved
+                            && let Ok(mind_cfg) = self.config.get_section::<ene_mind::MindConfig>()
+                            && mind_cfg.memory.reflection.enabled
+                            && let Ok(Some(candidate)) = store.get_pending_candidate(id).await
+                        {
+                            // The approval insert bypasses the arbiter, so the
+                            // deferred rating is written back here to keep the
+                            // approved memory in the self-reflection loop.
+                            ene_mind::memory_writer::reflection::record_approved_outcome(
+                                store.as_ref(),
+                                &candidate,
+                                memory_id,
+                            )
+                            .await;
+                        }
+                        approved
+                            .map(|_| ())
+                            .map_err(crate::public_api::PublicApiError::from)
+                    }
                     ene_store::PendingCandidateStatus::Rejected => store
                         .resolve_pending_candidate(id, false)
                         .await

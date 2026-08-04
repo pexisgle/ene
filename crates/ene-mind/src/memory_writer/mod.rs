@@ -338,7 +338,7 @@ impl MemoryWriter {
                 .generate_reflection(
                     store,
                     input.character_id,
-                    input.character_id,
+                    input.source_turn,
                     input.user_id,
                     config.memory.reflection.success_boost,
                     config.memory.reflection.failure_penalty,
@@ -933,6 +933,178 @@ mod tests {
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].title, "presentation today");
         assert_eq!(memories[0].kind, ene_store::MemoryKind::Episodic);
+    }
+
+    #[tokio::test]
+    async fn reflection_disabled_records_no_outcomes() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
+
+        let provider = MockProvider::new(candidate_json(
+            "likes mushrooms",
+            "User likes mushrooms",
+            "I like mushrooms",
+        ));
+        let mut affect = AffectState::neutral("ene");
+        affect.valence = 0.6;
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "Please remember that I like mushrooms",
+                assistant_message: Some("Nice!"),
+                tool_results: &[],
+            },
+            affect: &affect,
+            character_id: "ene",
+            user_id: "user",
+            source_turn: Some("turn-1"),
+            interrupted: false,
+            spoken_text: None,
+        };
+
+        MemoryWriter::write_memories(
+            &store,
+            &config,
+            &post,
+            MemoryWriteProviders {
+                llm: Some(&provider),
+                embedder: None,
+            },
+        )
+        .await
+        .expect("write_memories");
+
+        let outcomes = store.list_memory_outcomes("ene", None, 100).await.unwrap();
+        assert!(
+            outcomes.is_empty(),
+            "disabled reflection must not record outcome rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn reflection_aggregates_outcomes_across_calls() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig {
+            language: "en".into(),
+            ..MindConfig::default()
+        };
+        config.memory.reflection.enabled = true;
+        config.memory.reflection.interval_turns = 1;
+        config.memory.reflection.min_outcomes = 2;
+
+        // Call 1 records one outcome; the gate (2 outcomes) is not met.
+        let mut affect = AffectState::neutral("ene");
+        affect.valence = 0.7;
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "Please remember that I like mushrooms",
+                assistant_message: Some("Nice!"),
+                tool_results: &[],
+            },
+            affect: &affect,
+            character_id: "ene",
+            user_id: "user",
+            source_turn: Some("turn-1"),
+            interrupted: false,
+            spoken_text: None,
+        };
+        MemoryWriter::write_memories(
+            &store,
+            &config,
+            &post,
+            MemoryWriteProviders {
+                llm: Some(&MockProvider::new(candidate_json(
+                    "likes mushrooms",
+                    "User likes mushrooms",
+                    "I like mushrooms",
+                ))),
+                embedder: None,
+            },
+        )
+        .await
+        .expect("write_memories call 1");
+
+        let outcomes = store.list_memory_outcomes("ene", None, 100).await.unwrap();
+        assert_eq!(
+            outcomes.len(),
+            1,
+            "the first call's row must wait for a later pass"
+        );
+
+        // Call 2 records two outcomes and meets the gate; the pass must
+        // aggregate all three rows, including the first call's.
+        let mut affect = AffectState::neutral("ene");
+        affect.valence = -0.5;
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "Remember I hate rain and I love the sun",
+                assistant_message: Some("Okay!"),
+                tool_results: &[],
+            },
+            affect: &affect,
+            character_id: "ene",
+            user_id: "user",
+            source_turn: Some("turn-2"),
+            interrupted: false,
+            spoken_text: None,
+        };
+        MemoryWriter::write_memories(
+            &store,
+            &config,
+            &post,
+            MemoryWriteProviders {
+                llm: Some(&MockProvider::new(two_candidates_json())),
+                embedder: None,
+            },
+        )
+        .await
+        .expect("write_memories call 2");
+
+        let outcomes = store.list_memory_outcomes("ene", None, 100).await.unwrap();
+        assert!(
+            outcomes.is_empty(),
+            "consumed outcomes must be pruned after the reflection pass"
+        );
+        let reflections = store
+            .get_typed_memories_by_character(
+                "ene",
+                Some(ene_store::MemoryKind::Reflection),
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reflections.len(),
+            2,
+            "positive and negative strategy reflections must be persisted"
+        );
+        let success = reflections
+            .iter()
+            .find(|i| i.title == "Successful strategies")
+            .expect("success reflection");
+        assert!(
+            success.content.contains("likes mushrooms"),
+            "the first call's outcome must appear in the aggregated reflection"
+        );
+    }
+
+    fn candidate_json(title: &str, content: &str, source_quote: &str) -> String {
+        format!(
+            r#"{{"candidates": [{{"kind": "Preference", "title": "{title}", "content": "{content}", "source_quote": "{source_quote}", "confidence": 0.8, "should_persist": true, "deletion_target_key": null, "commitment_due": null}}]}}"#
+        )
+    }
+
+    fn two_candidates_json() -> String {
+        r#"{"candidates": [
+            {"kind": "Preference", "title": "hates rain", "content": "User hates rain", "source_quote": "I hate rain", "confidence": 0.8, "should_persist": true, "deletion_target_key": null, "commitment_due": null},
+            {"kind": "Preference", "title": "loves sun", "content": "User loves the sun", "source_quote": "I love the sun", "confidence": 0.8, "should_persist": true, "deletion_target_key": null, "commitment_due": null}
+        ]}"#
+            .to_string()
     }
 
     #[tokio::test]

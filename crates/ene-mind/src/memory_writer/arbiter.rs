@@ -245,6 +245,10 @@ pub enum ArbiterAction {
         existing_memory_id: Option<i64>,
         /// Title of that existing memory (display hint only; not persisted).
         existing_memory_title: Option<String>,
+        /// Outcome rating of the interaction that produced this decision
+        /// (-1.0 negative ..= 1.0 positive), preserved so approval of the
+        /// deferred candidate still enters the self-reflection loop.
+        outcome_rating: Option<f32>,
     },
 }
 
@@ -788,6 +792,7 @@ impl MemoryArbiter {
                 action: ArbiterAction::AskConfirmationLater {
                     existing_memory_id: Some(existing_id),
                     existing_memory_title: Some(existing.title.clone()),
+                    outcome_rating: Some(ctx.affect_valence),
                 },
                 reason: ArbiterReason::new(ask_code, detail),
             });
@@ -808,11 +813,12 @@ impl MemoryArbiter {
         // outcome accounting (AskConfirmationLater arm) stays correct.
         let decision = if ctx.options.require_approval {
             match &decision.action {
-                ArbiterAction::Persist { .. } => CandidateDecision {
+                ArbiterAction::Persist { outcome_rating, .. } => CandidateDecision {
                     candidate: decision.candidate.clone(),
                     action: ArbiterAction::AskConfirmationLater {
                         existing_memory_id: None,
                         existing_memory_title: None,
+                        outcome_rating: *outcome_rating,
                     },
                     reason: ArbiterReason::new(
                         ArbiterReasonCode::ApprovalRequired,
@@ -820,11 +826,16 @@ impl MemoryArbiter {
                             .to_string(),
                     ),
                 },
-                ArbiterAction::Supersede { superseded_id, .. } => CandidateDecision {
+                ArbiterAction::Supersede {
+                    superseded_id,
+                    outcome_rating,
+                    ..
+                } => CandidateDecision {
                     candidate: decision.candidate.clone(),
                     action: ArbiterAction::AskConfirmationLater {
                         existing_memory_id: Some(*superseded_id),
                         existing_memory_title: None,
+                        outcome_rating: *outcome_rating,
                     },
                     reason: ArbiterReason::new(
                         ArbiterReasonCode::ApprovalRequired,
@@ -896,6 +907,7 @@ impl MemoryArbiter {
             ArbiterAction::AskConfirmationLater {
                 existing_memory_id,
                 existing_memory_title,
+                outcome_rating,
             } => {
                 // Deferred candidates persist to the user-approval queue for
                 // later review; the conflicting memory's identity is recorded
@@ -911,6 +923,7 @@ impl MemoryArbiter {
                     reason_detail: decision.reason.detail.clone(),
                     existing_memory_title: existing_memory_title.clone(),
                     existing_memory_id: *existing_memory_id,
+                    outcome_rating: *outcome_rating,
                     source_quote: decision.candidate.source_quote.clone(),
                     source_turn: ctx.source_turn.map(str::to_string),
                     approval_parked: ctx.options.require_approval,
@@ -933,7 +946,7 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: None,
                     updated_existing: false,
-                    outcome_rating: Some(affect_valence),
+                    outcome_rating: *outcome_rating,
                 })
             }
             ArbiterAction::Ignore => Ok(AppliedDecision {
@@ -2462,6 +2475,7 @@ mod tests {
             ArbiterAction::AskConfirmationLater {
                 existing_memory_id,
                 existing_memory_title,
+                ..
             } => {
                 assert_eq!(*existing_memory_id, Some(8));
                 assert_eq!(existing_memory_title.as_deref(), Some("love: coffee"));
@@ -2773,6 +2787,7 @@ mod tests {
         };
         let arbiter_ctx = ArbiterContext {
             options,
+            affect_valence: 0.6,
             ..ctx(turn)
         };
 
@@ -2825,6 +2840,7 @@ mod tests {
                 assistant_message: None,
                 tool_results: &[],
             },
+            affect_valence: -0.4,
             ..arbiter_ctx.clone()
         };
         let decisions =
@@ -2854,6 +2870,20 @@ mod tests {
         assert!(
             pending.iter().all(|p| p.approval_parked),
             "approval-mode deferrals must be marked approval-parked"
+        );
+        let persist = pending
+            .iter()
+            .find(|p| p.title == "project X")
+            .expect("persist candidate present");
+        assert_eq!(
+            persist.outcome_rating,
+            Some(0.6),
+            "the persist rating must survive deferral"
+        );
+        assert_eq!(
+            supersede.outcome_rating,
+            Some(-0.4),
+            "the supersede rating must survive deferral"
         );
         assert_eq!(
             store.count_typed_memories("ene", None).await.unwrap(),

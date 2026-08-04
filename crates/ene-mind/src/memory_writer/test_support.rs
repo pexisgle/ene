@@ -221,6 +221,19 @@ impl MemoryPort for InMemoryMemoryPort {
         Ok(rows)
     }
 
+    async fn delete_memory_outcomes(
+        &self,
+        character_id: &str,
+        ids: &[i64],
+    ) -> Result<usize, MemoryPortError> {
+        let mut outcomes = self.outcomes.lock();
+        let before = outcomes.len();
+        outcomes.retain(|o| {
+            o.character_id != character_id || !o.id.is_some_and(|id| ids.contains(&id))
+        });
+        Ok(before - outcomes.len())
+    }
+
     async fn search(&self, _query: &Query<'_>) -> Result<Vec<GatheredCandidate>, MemoryPortError> {
         // No test using this double exercises hybrid recall scoring; kept
         // trivially empty rather than reimplementing `ene-store`'s gather.
@@ -504,6 +517,7 @@ mod tests {
             reason_detail: String::new(),
             existing_memory_title: None,
             existing_memory_id: None,
+            outcome_rating: None,
             source_quote: String::new(),
             source_turn: None,
             approval_parked: false,

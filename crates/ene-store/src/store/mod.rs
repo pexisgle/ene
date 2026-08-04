@@ -653,6 +653,7 @@ impl MemoryStore {
             source_turn: Set(candidate.source_turn),
             approval_parked: Set(candidate.approval_parked),
             existing_memory_id: Set(candidate.existing_memory_id),
+            outcome_rating: Set(candidate.outcome_rating),
             status: Set(PendingCandidateStatus::Pending.as_str().to_string()),
             created_at: Set(candidate.created_at),
             resolved_at: Set(candidate.resolved_at),

@@ -1790,6 +1790,89 @@ async fn memory_outcome_roundtrip_orders_newest_first_and_respects_since() {
 }
 
 #[tokio::test]
+async fn memory_outcome_delete_prunes_consumed_rows() {
+    let store = setup_store().await;
+
+    let first = store
+        .record_memory_outcome(&crate::MemoryOutcome {
+            id: None,
+            memory_id: 1,
+            memory_title: "a".into(),
+            character_id: "Ene".into(),
+            user_id: "User".into(),
+            rating: 0.8,
+            source: crate::OutcomeRatingSource::Affect,
+            source_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let second = store
+        .record_memory_outcome(&crate::MemoryOutcome {
+            id: None,
+            memory_id: 2,
+            memory_title: "b".into(),
+            character_id: "Ene".into(),
+            user_id: "User".into(),
+            rating: -0.6,
+            source: crate::OutcomeRatingSource::Affect,
+            source_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let other = store
+        .record_memory_outcome(&crate::MemoryOutcome {
+            id: None,
+            memory_id: 3,
+            memory_title: "c".into(),
+            character_id: "Mira".into(),
+            user_id: "User".into(),
+            rating: 0.5,
+            source: crate::OutcomeRatingSource::Affect,
+            source_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let removed = store
+        .delete_memory_outcomes("Ene", &[first, second])
+        .await
+        .unwrap();
+    assert_eq!(removed, 2);
+
+    let remaining = store.list_memory_outcomes("Ene", None, 100).await.unwrap();
+    assert!(remaining.is_empty(), "consumed rows must be pruned");
+    let untouched = store.list_memory_outcomes("Mira", None, 100).await.unwrap();
+    assert_eq!(untouched.len(), 1);
+    assert_eq!(untouched[0].id, Some(other));
+}
+
+#[tokio::test]
+async fn pending_candidate_outcome_rating_roundtrip() {
+    let store = setup_store().await;
+
+    let mut candidate = sample_pending_candidate("ene", "warm greeting");
+    candidate.outcome_rating = Some(0.7);
+    let id = store
+        .insert_pending_candidate(candidate)
+        .await
+        .expect("insert");
+
+    let loaded = store
+        .get_pending_candidate(id)
+        .await
+        .expect("load")
+        .expect("present");
+    assert_eq!(
+        loaded.outcome_rating,
+        Some(0.7),
+        "the deferred rating must survive the DB round-trip"
+    );
+}
+
+#[tokio::test]
 async fn hybrid_search_lexical_component_for_matching_query() {
     let store = setup_store().await;
     let now = Utc::now();
@@ -2825,6 +2908,7 @@ fn sample_pending_candidate(character_id: &str, title: &str) -> PendingCandidate
         reason_detail: "extracted from conversation".to_string(),
         existing_memory_title: None,
         existing_memory_id: None,
+        outcome_rating: None,
         source_quote: "I like tea".to_string(),
         source_turn: None,
         approval_parked: false,
@@ -3196,6 +3280,7 @@ fn sample_pending_candidate_for(
         reason_detail: "extracted from conversation".to_string(),
         existing_memory_title: None,
         existing_memory_id,
+        outcome_rating: None,
         source_quote: "I like tea".to_string(),
         source_turn: None,
         approval_parked: false,
