@@ -9,9 +9,9 @@
 //! existed only because the work "must not block the command loop".
 //!
 //! [`VisionHandle`] removes both problems: the raw buffer never enters
-//! [`crate::handle::EneCommand`], and the expensive `summarize_rgb` call
-//! happens directly here, awaited by the caller, never inside the actor's
-//! command loop or any actor-owned `JoinSet`.
+//! [`crate::handle::EneCommand`], and the expensive vision inference happens
+//! directly here, awaited by the caller, never inside the actor's command
+//! loop or any actor-owned `JoinSet`.
 //!
 //! What *does* still cross the mailbox (deliberately, see the PR
 //! description for the tradeoff) is a small, payload-free
@@ -28,8 +28,11 @@
 
 use crate::handle::EneCommand;
 use crate::public_api::PublicApiError;
+use ene_ai::message::{LlmMessage, UserMessagePart};
+use ene_ai::traits::LlmProvider;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 /// Maximum accepted pixel count for a screen capture (1920x1080).
@@ -43,7 +46,7 @@ pub const MAX_PIXELS: u64 = 1920 * 1080;
 /// actual vision inference outside the actor.
 pub struct VisionPrepared {
     /// Cloned handle to the local vision-capable model.
-    pub local: Arc<ene_ai_local::LocalLlamaCppProvider>,
+    pub local: Arc<dyn LlmProvider>,
     /// Rendered system prompt for the screen-summary task.
     pub system: String,
     /// Rendered user prompt (includes the privacy-safe app label).
@@ -51,10 +54,10 @@ pub struct VisionPrepared {
     /// Cancellation token for this specific vision request. The actor mints
     /// a fresh token per [`EneCommand::PrepareVisionSummary`] reply and
     /// cancels it when a new user turn starts, so a long-running vision
-    /// inference does not keep the local model busy behind a request the
-    /// user has already moved past. Threaded into `ene_infer::JobContext`
-    /// (via `summarize_rgb_with_cancel`'s `EngineHandle::submit` call) and
-    /// checked cooperatively by the worker, not by this actor's mailbox.
+    /// inference does not keep the local plugin busy behind a request the
+    /// user has already moved past. Observed here via `select!`; when it
+    /// fires, the stream is dropped and the host sends `CancelStream` to the
+    /// plugin.
     pub cancel: CancellationToken,
 }
 
@@ -91,9 +94,10 @@ impl VisionHandle {
     /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`.
     ///
-    /// The `rgb` buffer and the actual model call never touch the actor's
-    /// command mailbox — see the module docs for what small, payload-free
-    /// messages still do.
+    /// The `rgb` buffer is encoded to a JPEG data URI and sent to the local
+    /// plugin as an image-part chat message; the actual model call never
+    /// touches the actor's command mailbox — see the module docs for what
+    /// small, payload-free messages still do.
     pub async fn summarize_screen_image(
         &self,
         width: u32,
@@ -132,20 +136,58 @@ impl VisionHandle {
         // The actual (potentially multi-second) inference call happens
         // here, entirely outside the actor's command loop. `prepared.cancel`
         // lets a new user turn abort it early (see `VisionPrepared::cancel`).
-        prepared
+        let data_uri = crate::proactive::rgb_to_jpeg_data_uri(width, height, &rgb)
+            .map_err(|e| PublicApiError::Internal { message: e })?;
+        let messages = vec![
+            LlmMessage::System {
+                content: prepared.system,
+            },
+            LlmMessage::User {
+                parts: vec![
+                    UserMessagePart::Text {
+                        text: prepared.user,
+                    },
+                    UserMessagePart::Image {
+                        base64_image_data: data_uri,
+                    },
+                ],
+            },
+        ];
+        let mut stream = prepared
             .local
-            .summarize_rgb_with_cancel(
-                width,
-                height,
-                rgb,
-                &prepared.system,
-                &prepared.user,
-                prepared.cancel,
-            )
+            .create_chat_stream(&messages, &[])
             .await
             .map_err(|e| PublicApiError::Internal {
                 message: e.to_string(),
-            })
+            })?;
+        let mut summary = String::new();
+        loop {
+            tokio::select! {
+                () = prepared.cancel.cancelled() => {
+                    // Dropping the stream aborts the reader task and sends a
+                    // best-effort `CancelStream` so the plugin stops
+                    // generating the abandoned request.
+                    drop(stream);
+                    return Err(PublicApiError::Internal {
+                        message: "vision summarization cancelled".to_string(),
+                    });
+                }
+                chunk = stream.next() => match chunk {
+                    Some(Ok(chunk)) => {
+                        if let Some(delta) = chunk.text_delta {
+                            summary.push_str(&delta);
+                        }
+                    }
+                    Some(Err(e)) => {
+                        return Err(PublicApiError::Internal {
+                            message: e.to_string(),
+                        });
+                    }
+                    None => break,
+                },
+            }
+        }
+        Ok(summary)
     }
 }
 
