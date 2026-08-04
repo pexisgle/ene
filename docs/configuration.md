@@ -111,6 +111,15 @@ llama.cpp KV cache realistic (~2.3 GB vs ~4.6 GB for a Gemma-3-4B-class model,
 on top of the weights); a model used only for decision workloads can lower
 `context_size` explicitly.
 
+Each `ai.local_models.<name>` entry's model path/settings (`url`,
+`quantization`, `model_path`, `gpu_layers`) are mirrored into the
+`plugins.list.llama-cpp.profiles.<name>` blob consumed by the local GGUF
+provider plugin (`ene-plugin-llama-cpp`); the `local_models` keys themselves
+remain here as routing and context-budget information (`context_size` in
+particular is read at resolve time and is never mirrored). The mirror is a
+one-way copy made by the v2→v3 settings migration — editing a profile does
+not rewrite `local_models`.
+
 At startup the runtime validates each generative task's window (`chat`, plus
 `proactive` when configured) against what it needs — the prompt budget plus the
 response reserve (`tasks.<task>.max_tokens`) — and logs a warning when the
@@ -521,6 +530,15 @@ delivered config blob at startup, with explicit `config` keys taking
 precedence — the file on disk is not rewritten for this, so the fold is
 stable across reloads.
 
+Version-2 files are migrated to version 3 on load: every
+`ai.local_models.<name>` entry is mirrored into
+`plugins.list.llama-cpp.profiles.<name>` (non-empty `url` / `quantization` /
+`model_path` / `gpu_layers` only; a non-empty existing profile value is never
+overwritten, and an existing empty value counts as absent). `ai.local_models`
+itself is left intact — `ene-ai` still routes
+local tasks and budgets context windows from it until the runtime switches to
+the plugin.
+
 #### `plugins.list.<name>.profiles.<profile>` — per-profile settings (#313)
 
 A single plugin can need different settings per model/voice/profile. The
@@ -537,11 +555,31 @@ plugin-owned:
         "profiles": {
           "kokoro": { "voices_path": "/data/voices.bin" }
         }
+      },
+      "llama-cpp": {
+        "enable": true,
+        "profiles": {
+          "gemma-4-e4b": {
+            "url": "https://example.com/gemma-4-e4b.gguf",
+            "quantization": "Q4_0",
+            "model_path": "",
+            "gpu_layers": "33"
+          }
+        }
       }
     }
   }
 }
 ```
+
+The local GGUF provider plugin (`ene-plugin-llama-cpp`) consumes one profile
+per model: `url` (GGUF download URL), `quantization` (label, e.g. `"F16"` /
+`"Q4_0"`), `model_path` (local path override that skips download when
+non-empty), and `gpu_layers` (`"auto"` or an integer string). Profile
+*selection* is plugin-owned; the values are delivered via
+`ConfigurablePlugin::set_profiles`. The v2→v3 migration mirrors existing
+`ai.local_models` entries into these profiles; the local-model keys stay in
+`ai.local_models` as routing information.
 
 #### Secret marking
 

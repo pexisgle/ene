@@ -50,12 +50,20 @@
 //!    from a `ctor` in the crate that owns the affected schema, or eagerly at
 //!    startup before the first [`load_config`](crate::load_config).
 //!
-//! One real migration ships today: version 1 → 2 relocates provider-specific
-//! settings out of `ai.*` into the `plugins.list.*` sections that now own them
-//! (see `migrate_v1_to_v2`). It is registered by a `ctor` in this crate
-//! because `ene-config` owns the settings document schema, and the step must be
-//! in place wherever a `settings.json` is loaded — the runtime, the desktop
-//! app, and the CLI alike.
+//! Two real migrations ship today:
+//!
+//! - version 1 → 2 relocates provider-specific settings out of `ai.*` into
+//!   the `plugins.list.*` sections that now own them (see
+//!   `migrate_v1_to_v2`);
+//! - version 2 → 3 mirrors each `ai.local_models.<name>` entry's model
+//!   path/settings into `plugins.list.llama-cpp.profiles.<name>`, the model
+//!   profiles the local GGUF provider plugin consumes (see
+//!   `migrate_v2_to_v3`).
+//!
+//! They are registered by a `ctor` in this crate because `ene-config` owns
+//! the settings document schema, and the steps must be in place wherever a
+//! `settings.json` is loaded — the runtime, the desktop app, and the CLI
+//! alike.
 
 use crate::error::EneConfigError;
 use std::collections::HashMap;
@@ -67,7 +75,7 @@ use std::sync::OnceLock;
 /// one whose `version` exceeds it is rejected (see
 /// [`EneConfigError::ConfigVersionTooNew`]). Bump this whenever you register a
 /// new migration step.
-pub const CURRENT_CONFIG_VERSION: u32 = 2;
+pub const CURRENT_CONFIG_VERSION: u32 = 3;
 
 /// The JSON key holding the schema version in `settings.json`.
 const VERSION_KEY: &str = "version";
@@ -83,6 +91,14 @@ const KOKORO_PLUGIN: &str = "kokoro";
 /// Default profile name under `plugins.list.kokoro.profiles` for the single
 /// Kokoro voice set shipped today.
 const KOKORO_DEFAULT_PROFILE: &str = "kokoro";
+
+/// `ai.local_models.<name>` keys mirrored into
+/// `plugins.list.llama-cpp.profiles.<name>` by the v2→v3 migration.
+///
+/// `context_size` is deliberately excluded: it is routing/budget information
+/// (`ene-ai` sizes prompts and the KV cache against it), not a model
+/// path/setting the plugin consumes to locate and load weights.
+const LOCAL_MODEL_PROFILE_KEYS: [&str; 4] = ["url", "quantization", "model_path", "gpu_layers"];
 
 /// A single migration step.
 ///
@@ -483,10 +499,73 @@ pub(crate) fn migrate_v1_to_v2(doc: &mut serde_json::Value) -> Result<(), EneCon
     Ok(())
 }
 
-/// Registers the v1→v2 step at process start, wherever a `settings.json` is
-/// loaded. `ene-config` owns this step because the `version` field and the
-/// migration machinery live here, and the relocated keys are host document
-/// schema rather than the property of any single runtime crate.
+/// Returns the existing `plugins.list.llama-cpp.profiles.<model>.<key>`
+/// value, or `None` when any level of the path is absent.
+fn existing_profile_value<'a>(
+    doc: &'a serde_json::Value,
+    model: &str,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    doc.get("plugins")?
+        .get("list")?
+        .get(LLAMA_CPP_PLUGIN)?
+        .get("profiles")?
+        .get(model)?
+        .get(key)
+}
+
+/// Mirrors one `ai.local_models.<model>` field into
+/// `plugins.list.llama-cpp.profiles.<model>`, unless the profile already
+/// carries a non-empty value for that key (explicit plugin config wins over
+/// the mirror).
+fn mirror_local_model_profile_key(
+    doc: &mut serde_json::Value,
+    model: &str,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), EneConfigError> {
+    if !has_value(value) || existing_profile_value(doc, model, key).is_some_and(has_value) {
+        return Ok(());
+    }
+    set_plugin_profile_key(doc, LLAMA_CPP_PLUGIN, model, key, value.clone())
+}
+
+/// v2 → v3: mirrors the model path/settings of every `ai.local_models` entry
+/// into the llama-cpp plugin's `profiles.<name>` blob.
+///
+/// This is a one-way mirror, not a move: `ai.local_models` stays intact
+/// because `ene-ai` still routes tasks and budgets context windows from it
+/// until the runtime switches to the plugin. Empty-string / `null` values
+/// are not mirrored, and a non-empty existing profile value is never
+/// overwritten (an existing empty-string / `null` value counts as absent,
+/// matching the v1→v2 convention).
+/// A no-op (still `Ok`) when there are no local models.
+pub(crate) fn migrate_v2_to_v3(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+    let Some(models) = doc
+        .pointer("/ai/local_models")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+    else {
+        return Ok(());
+    };
+    for (model, entry) in &models {
+        let Some(entry) = entry.as_object() else {
+            continue;
+        };
+        for key in LOCAL_MODEL_PROFILE_KEYS {
+            if let Some(value) = entry.get(key) {
+                mirror_local_model_profile_key(doc, model, key, value)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Registers the v1→v2 and v2→v3 steps at process start, wherever a
+/// `settings.json` is loaded. `ene-config` owns these steps because the
+/// `version` field and the migration machinery live here, and the relocated
+/// keys are host document schema rather than the property of any single
+/// runtime crate.
 const _: () = {
     /// # Safety
     ///
@@ -499,6 +578,13 @@ const _: () = {
                 component = "Config",
                 error = %err,
                 "failed to register settings.json migration v1->v2"
+            );
+        }
+        if let Err(err) = register_migration(2, migrate_v2_to_v3) {
+            tracing::error!(
+                component = "Config",
+                error = %err,
+                "failed to register settings.json migration v2->v3"
             );
         }
     }
@@ -954,6 +1040,207 @@ pub(crate) mod tests {
             assert_eq!(
                 migrated.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
                 Some(&serde_json::json!("https://cdn.example/mmproj.gguf"))
+            );
+        });
+    }
+
+    /// A v2 document's `ai.local_models` entries are mirrored into
+    /// `plugins.list.llama-cpp.profiles.<name>` without touching the originals
+    /// (routing still reads them) or `context_size` (host-side budget only).
+    #[test]
+    fn v2_to_v3_mirrors_local_models_into_profiles() {
+        with_test_version(3, || {
+            let mut doc = serde_json::json!({
+                "version": 2,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "url": "https://cdn.example/gemma-4-e4b.gguf",
+                            "quantization": "Q4_0",
+                            "model_path": "/data/gemma.gguf",
+                            "gpu_layers": "33",
+                            "context_size": 16384
+                        }
+                    }
+                }
+            });
+            migrate_v2_to_v3(&mut doc).expect("v2->v3 migration succeeds");
+
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/url"),
+                Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/quantization"),
+                Some(&serde_json::json!("Q4_0"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/model_path"),
+                Some(&serde_json::json!("/data/gemma.gguf"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/gpu_layers"),
+                Some(&serde_json::json!("33"))
+            );
+            // The source entry and the routing-only field survive untouched.
+            assert_eq!(
+                doc.pointer("/ai/local_models/gemma-4-e4b/url"),
+                Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf"))
+            );
+            assert_eq!(
+                doc.pointer("/ai/local_models/gemma-4-e4b/context_size"),
+                Some(&serde_json::json!(16384))
+            );
+            assert!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/context_size")
+                    .is_none(),
+                "context_size is routing information and must stay in ene-ai"
+            );
+        });
+    }
+
+    /// An existing profile value wins over the mirror: the migration never
+    /// overwrites explicitly configured plugin profiles.
+    #[test]
+    fn v2_to_v3_preserves_existing_profile_values() {
+        with_test_version(3, || {
+            let mut doc = serde_json::json!({
+                "version": 2,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "url": "https://cdn.example/old.gguf",
+                            "gpu_layers": "auto"
+                        }
+                    }
+                },
+                "plugins": {
+                    "list": {
+                        "llama-cpp": {
+                            "profiles": {
+                                "gemma-4-e4b": {
+                                    "url": "https://cdn.example/user-pinned.gguf"
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            migrate_v2_to_v3(&mut doc).expect("v2->v3 migration succeeds");
+
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/url"),
+                Some(&serde_json::json!("https://cdn.example/user-pinned.gguf")),
+                "existing profile url must not be overwritten"
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/gpu_layers"),
+                Some(&serde_json::json!("auto")),
+                "absent profile keys are still mirrored"
+            );
+        });
+    }
+
+    /// Empty-string / `null` model fields are not mirrored (the v1→v2
+    /// convention: defaults are not values).
+    #[test]
+    fn v2_to_v3_skips_empty_values() {
+        with_test_version(3, || {
+            let mut doc = serde_json::json!({
+                "version": 2,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "url": "",
+                            "model_path": null,
+                            "gpu_layers": "auto"
+                        }
+                    }
+                }
+            });
+            migrate_v2_to_v3(&mut doc).expect("v2->v3 migration succeeds");
+
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/gpu_layers"),
+                Some(&serde_json::json!("auto"))
+            );
+            assert!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/url")
+                    .is_none(),
+                "empty url must not be mirrored"
+            );
+            assert!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/model_path")
+                    .is_none(),
+                "null model_path must not be mirrored"
+            );
+        });
+    }
+
+    /// A document without local models is left untouched.
+    #[test]
+    fn v2_to_v3_without_local_models_is_noop() {
+        with_test_version(3, || {
+            let mut doc = serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "list": {
+                        "llama-cpp": { "enable": true }
+                    }
+                }
+            });
+            let before = doc.clone();
+            migrate_v2_to_v3(&mut doc).expect("no-local-models document migrates ok");
+            assert_eq!(doc, before);
+        });
+    }
+
+    /// The full chain: a v1 document reaches version 3 with both the
+    /// v1→v2 relocations and the v2→v3 profile mirror in place.
+    #[test]
+    fn apply_migrations_migrates_v1_to_v3() {
+        with_test_version(3, || {
+            register_migration(1, migrate_v1_to_v2).expect("registration succeeds");
+            register_migration(2, migrate_v2_to_v3).expect("registration succeeds");
+
+            let doc = serde_json::json!({
+                "version": 1,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "url": "https://cdn.example/gemma-4-e4b.gguf",
+                            "mmproj_url": "https://cdn.example/mmproj.gguf",
+                            "acceleration": "vulkan",
+                            "gpu_layers": "33"
+                        }
+                    }
+                }
+            });
+            let migrated = apply_migrations(doc).expect("migration chain succeeds");
+
+            assert_eq!(migrated.get("version"), Some(&serde_json::json!(3)));
+            assert_eq!(
+                migrated.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
+                Some(&serde_json::json!("https://cdn.example/mmproj.gguf"))
+            );
+            assert_eq!(
+                migrated.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/url"),
+                Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf"))
+            );
+            assert_eq!(
+                migrated.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/gpu_layers"),
+                Some(&serde_json::json!("33"))
+            );
+            assert!(
+                migrated
+                    .pointer("/ai/local_models/gemma-4-e4b/mmproj_url")
+                    .is_none(),
+                "v1->v2 still removes the relocated mmproj key"
+            );
+            assert_eq!(
+                migrated.pointer("/ai/local_models/gemma-4-e4b/url"),
+                Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf")),
+                "the mirror keeps the routing entry intact"
             );
         });
     }

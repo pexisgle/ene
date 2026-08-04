@@ -16,6 +16,7 @@ Ene ホストアプリケーション (ene-runtime)
         ├── IPC Protocol v6 (stdio 上の長さプレフィックス付きフレーム)
         │     ├── ene-plugin-anthropic (Anthropic LLM プロバイダプラグイン)
         │     ├── ene-plugin-openai    (OpenAI 互換プロバイダプラグイン)
+        │     ├── ene-plugin-llama-cpp (ローカル GGUF プロバイダプラグイン)
         │     ├── ene-plugin-app       (GUI 起動ツール)
         │     ├── ene-plugin-browser   (CDP ブラウザ自動化ツール)
         │     ├── ene-plugin-calc      (計算ツール)
@@ -179,6 +180,13 @@ runner API は設計上**非ストリーミング**です。トークンスト�
 
 `model` は提供プラグインに設定されたモデルプロファイルを識別します。`json_schema`（指定時）は `generate` を構造化出力に制約します。`unload` はロード済みモデルの常駐メモリ（VRAM）を解放し、将来のリソース常駐管理のフックです。これらのメソッド名とペイロード形状が第三者実装の対象となる契約で、ワイヤエンコーディングは仲介層とともに定義されます。
 
+`gguf-runner@1` を提供する組み込みプロバイダは `ene-plugin-llama-cpp`
+(`plugins/provider/local-llm`) で、`llm/chat@1` と `embed@1` も宣言します。
+推論コアは未実装です — 現在のプラグインは能力を宣言するのみで、推論
+アクションには `NotSupported` を返します。したがってサードパーティは
+「契約は公開済み・ランタイムは推論スライスが着地するまで利用不可」と
+扱ってください。
+
 ---
 
 ## 5. 組み込みプラグインカタログ
@@ -197,9 +205,13 @@ runner API は設計上**非ストリーミング**です。トークンスト�
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude プロバイダプラグイン | いいえ |
 | `ene-plugin-openai` | Provider | OpenAI 互換プロバイダプラグイン（チャット・ストリーミング・埋め込み） | いいえ |
+| `ene-plugin-llama-cpp` | Provider | ローカル GGUF (llama.cpp) プロバイダプラグイン — 現在は能力骨格のみ、推論は後続スライス | いいえ |
 
-上記 12 プラグインはすべてデフォルトの `plugins.list` に含まれており、
-新規インストール時に自動的に起動します。
+上記 13 プラグインはすべてデフォルトの `plugins.list` に含まれており、
+バイナリが存在すれば自動的に起動します。リリースパッケージは現在
+ツールプラグインのバイナリのみを同梱します。プロバイダバイナリ
+（`ene-plugin-anthropic`・`ene-plugin-openai`・`ene-plugin-llama-cpp`）は
+ソースからビルドしてホストバイナリの隣へ配置する必要があります。
 
 ### ファイルツールリファレンス (`filesystem.*`)
 
@@ -353,7 +365,8 @@ runner API は設計上**非ストリーミング**です。トークンスト�
     "list": {
       "fs": { "enable": true },
       "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] },
-      "openai": { "enable": true, "env_passthrough": ["OPENAI_API_KEY"] }
+      "openai": { "enable": true, "env_passthrough": ["OPENAI_API_KEY"] },
+      "llama-cpp": { "enable": true }
     }
   }
 }

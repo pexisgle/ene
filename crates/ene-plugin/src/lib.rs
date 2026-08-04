@@ -144,6 +144,20 @@ pub mod prelude {
     }
 
     /// Provider plugin authoring imports (LLM, TTS, STT, embedding).
+    ///
+    /// ## Compile-time capability validation
+    ///
+    /// Capability strings in `#[provider(provides = "...", requires = "...")]`
+    /// are validated at macro expansion, so a typo fails the build instead of
+    /// panicking in the plugin process at startup:
+    ///
+    /// ```compile_fail
+    /// use ene_plugin::prelude::provider::LlmPlugin;
+    ///
+    /// #[derive(LlmPlugin)]
+    /// #[provider(kind = "invalid", provides = "llm/chat@01")]
+    /// struct InvalidCapabilityProvider;
+    /// ```
     pub mod provider {
         #[doc(no_inline)]
         pub use ene_infer::{
@@ -155,10 +169,11 @@ pub mod prelude {
 
         #[doc(no_inline)]
         pub use crate::{
-            ConcurrencyHint, ConfigurablePlugin, EmbedPlugin, LlmPlugin, LlmProviderSpec,
-            PluginCompletion, PluginDispatch, PluginError, PluginStream, PluginStreamChunk,
-            ProviderErrorKind, SttPlugin, SttProviderSpec, TokenUsage, ToolPlugin,
-            ToolPluginCapabilities, TtsPlugin, TtsProviderSpec, run_plugin_server,
+            CapabilityRef, CapabilityRequirement, ConcurrencyHint, ConfigurablePlugin, EmbedPlugin,
+            LlmPlugin, LlmProviderSpec, PluginCompletion, PluginDispatch, PluginError,
+            PluginStream, PluginStreamChunk, ProviderErrorKind, SttPlugin, SttProviderSpec,
+            TokenUsage, ToolPlugin, ToolPluginCapabilities, TtsPlugin, TtsProviderSpec,
+            run_plugin_server,
         };
     }
 

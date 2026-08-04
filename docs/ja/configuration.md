@@ -113,6 +113,14 @@ available = min(model_window, context_window)
 重みに加えて約 2.3 GB、32K では約 4.6 GB）。決定タスク専用モデルは `context_size`
 を明示的に下げられます。
 
+各 `ai.local_models.<name>` エントリのモデルパス/設定（`url`・`quantization`・
+`model_path`・`gpu_layers`）は、ローカル GGUF プロバイダプラグイン
+(`ene-plugin-llama-cpp`) が消費する `plugins.list.llama-cpp.profiles.<name>`
+ブロブへミラーされます。`local_models` のキー自体はルーティングおよび
+コンテキスト予算の情報としてここに残ります（特に `context_size` は解決時に
+読まれ、ミラーされません）。ミラーは v2→v3 設定マイグレーションによる
+一方向コピーです — プロファイルを編集しても `local_models` は書き換わりません。
+
 起動時、ランタイムは各生成タスク（`chat`、および設定されている場合は `proactive`）
 のウィンドウが必要量（プロンプト予算 + 応答予約 `tasks.<task>.max_tokens`）を
 満たしているかを検証し、設定されたウィンドウが小さすぎる場合は警告をログに出します。
@@ -412,6 +420,14 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 
 バージョン 1 の `settings.json` は読み込み時に自動でマイグレーションされます。上記の移設対象キーは `plugins.list.*` の移動先へ移され（旧 `ai.*` の場所からは削除され）、その後にファイルが読み込まれて、マイグレーション後のドキュメントが永続化されます。対象キーを持たないファイルは論理的に変更されません。また、ネストした `config`/`profiles` 階層より前のレガシーなフラットなエントリレベルキー（`plugins.list.<name>.<key>`）も、起動時に配信される設定ブロブへ折り込まれます（明示的な `config` キーが優先）。この折り込みはディスク上のファイルを書き換えないため、リロードをまたいで安定しています。
 
+バージョン 2 のファイルは読み込み時にバージョン 3 へマイグレーションされます。各
+`ai.local_models.<name>` エントリが `plugins.list.llama-cpp.profiles.<name>` へ
+ミラーされます（非空の `url`・`quantization`・`model_path`・`gpu_layers` のみ。
+既存の非空のプロファイル値は上書きされません。既存の空値は「なし」とみなされます）。
+`ai.local_models` 自体は無傷のまま
+残ります — `ene-ai` はランタイムがプラグインへ切り替わるまで、ローカルタスクの
+ルーティングとコンテキスト予算をここから読み続けます。
+
 #### `plugins.list.<name>.profiles.<profile>` — プロファイル別設定 (#313)
 
 1 つのプラグインがモデル/音声/プロファイルごとに異なる設定を必要とすることがあります。`profiles` マップは、ホストからは不透明なプロファイル別ブロブを保持し、ハンドシェイク時にプラグインへ配信されます（`ConfigurablePlugin::set_profiles`）。プロファイルの*選択*はプラグイン側の責務です：
@@ -425,11 +441,31 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
         "profiles": {
           "kokoro": { "voices_path": "/data/voices.bin" }
         }
+      },
+      "llama-cpp": {
+        "enable": true,
+        "profiles": {
+          "gemma-4-e4b": {
+            "url": "https://example.com/gemma-4-e4b.gguf",
+            "quantization": "Q4_0",
+            "model_path": "",
+            "gpu_layers": "33"
+          }
+        }
       }
     }
   }
 }
 ```
+
+ローカル GGUF プロバイダプラグイン（`ene-plugin-llama-cpp`）はモデルごとに
+1 つのプロファイルを消費します：`url`（GGUF ダウンロード URL）、
+`quantization`（ラベル、例：`"F16"` / `"Q4_0"`）、`model_path`（非空の場合は
+ダウンロードをスキップするローカルパス）、`gpu_layers`（`"auto"` または整数
+文字列）。プロファイルの*選択*はプラグイン側の責務で、値は
+`ConfigurablePlugin::set_profiles` で配信されます。v2→v3 マイグレーションは
+既存の `ai.local_models` エントリをこれらのプロファイルへミラーします。
+ローカルモデルのキーはルーティング情報として `ai.local_models` に残ります。
 
 #### シークレットのマーキング
 

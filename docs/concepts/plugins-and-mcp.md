@@ -16,6 +16,7 @@ Ene Host Application (ene-runtime)
         ├── IPC Protocol v6 (Length-prefixed frames over stdio)
         │     ├── ene-plugin-anthropic (Anthropic LLM Provider Plugin)
         │     ├── ene-plugin-openai    (OpenAI-Compatible Provider Plugin)
+        │     ├── ene-plugin-llama-cpp (Local GGUF Provider Plugin)
         │     ├── ene-plugin-app       (GUI Launcher Tool)
         │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
         │     ├── ene-plugin-calc      (Calculation Tool)
@@ -227,6 +228,13 @@ future resource-residency management. These method names and payload shapes
 are the contract third parties build against; the wire encoding is defined
 with the mediation layer.
 
+The built-in provider that serves `gguf-runner@1` is `ene-plugin-llama-cpp`
+(`plugins/provider/local-llm`), which also declares `llm/chat@1` and
+`embed@1`. Its inference core is not implemented yet — the plugin currently
+declares the capabilities and returns `NotSupported` for inference actions —
+so third parties should treat the contract as published but the runtime as
+unavailable until the inference slice lands.
+
 ---
 
 ## 5. Built-In Plugin Catalog
@@ -245,9 +253,14 @@ with the mediation layer.
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
+| `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — capability skeleton today, inference in a later slice | No |
 
-All twelve plugins above are included in the default `plugins.list` and start
-automatically on fresh installs.
+All thirteen plugins above are included in the default `plugins.list` and
+start automatically when their binaries are present. Release packages
+currently ship the tool-plugin binaries only; the provider binaries
+(`ene-plugin-anthropic`, `ene-plugin-openai`, `ene-plugin-llama-cpp`) are
+built from source and must be installed next to the host binary for those
+entries to start.
 
 ### Filesystem tool reference (`filesystem.*`)
 
@@ -403,7 +416,8 @@ auto-execute" attack vector.
     "list": {
       "fs": { "enable": true },
       "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] },
-      "openai": { "enable": true, "env_passthrough": ["OPENAI_API_KEY"] }
+      "openai": { "enable": true, "env_passthrough": ["OPENAI_API_KEY"] },
+      "llama-cpp": { "enable": true }
     }
   }
 }

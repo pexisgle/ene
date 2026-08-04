@@ -50,6 +50,11 @@ pub fn derive_llm_plugin(input: TokenStream) -> TokenStream {
 /// The `impl TtsPlugin` block stays hand-written: a one-line
 /// `fn tts_capabilities(&self) -> Vec<TtsProviderSpec> { vec![Self::tts_spec()] }`
 /// alongside the async `synthesize` handler.
+///
+/// Capability declarations (`provides` / `requires` in the attribute) are
+/// emitted by the `LlmPlugin` derive only; on a Tts-only (or Stt-only)
+/// derive they are validated but not generated — pair the derive with
+/// `LlmPlugin` on the same struct to declare plugin-wide capabilities.
 #[proc_macro_derive(TtsPlugin, attributes(provider))]
 pub fn derive_tts_plugin(input: TokenStream) -> TokenStream {
     provider::expand_plugin(input, provider::ProviderKind::Tts)
@@ -62,6 +67,11 @@ pub fn derive_tts_plugin(input: TokenStream) -> TokenStream {
 /// The `impl SttPlugin` block stays hand-written: a one-line
 /// `fn stt_capabilities(&self) -> Vec<SttProviderSpec> { vec![Self::stt_spec()] }`
 /// alongside the async `transcribe` handler.
+///
+/// Capability declarations (`provides` / `requires` in the attribute) are
+/// emitted by the `LlmPlugin` derive only; on an Stt-only derive they are
+/// validated but not generated — pair the derive with `LlmPlugin` on the
+/// same struct to declare plugin-wide capabilities.
 #[proc_macro_derive(SttPlugin, attributes(provider))]
 pub fn derive_stt_plugin(input: TokenStream) -> TokenStream {
     provider::expand_plugin(input, provider::ProviderKind::Stt)

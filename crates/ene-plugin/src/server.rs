@@ -11,12 +11,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use ene_plugin_proto::{DeferredOutcome, VersionRange};
 use ene_plugin_proto::{
-    IpcListener, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
-    PluginIpcRequest, PluginIpcResponse, WireFormat, cleanup_path, read_plugin_request,
-    write_plugin_response,
+    CapabilityRef, CapabilityRequirement, IpcListener, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION,
+    PluginCapabilities, PluginError, PluginIpcRequest, PluginIpcResponse, WireFormat, cleanup_path,
+    read_plugin_request, write_plugin_response,
 };
+use ene_plugin_proto::{DeferredOutcome, VersionRange};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -52,6 +52,12 @@ pub struct PluginDispatch {
     pub tts: Option<Arc<dyn TtsPlugin>>,
     /// Optional STT plugin implementation.
     pub stt: Option<Arc<dyn SttPlugin>>,
+    /// Capabilities this plugin provides to other plugins, declared via the
+    /// `#[provider(provides = "...")]` attribute (see `ene-plugin-macros`).
+    provides: Vec<CapabilityRef>,
+    /// Capabilities this plugin requires from other plugins, declared via the
+    /// `#[provider(requires = "...")]` attribute (see `ene-plugin-macros`).
+    requires: Vec<CapabilityRequirement>,
 }
 
 impl PluginDispatch {
@@ -69,7 +75,48 @@ impl PluginDispatch {
             embed,
             tts,
             stt,
+            provides: Vec::new(),
+            requires: Vec::new(),
         }
+    }
+
+    /// Sets the plugin-wide capability declarations sent in the handshake
+    /// `HandshakeAck` (`provides` / `requires`).
+    ///
+    /// Plugin authors normally obtain the values from the derive-generated
+    /// `provides()` / `requires()` inherent methods backed by the
+    /// `#[provider(provides = "...", requires = "...")]` attribute:
+    ///
+    /// ```rust,no_run
+    /// use std::sync::Arc;
+    /// use ene_plugin::{LlmPlugin, PluginDispatch};
+    /// # struct MyLlmPlugin;
+    /// # impl ene_plugin::ConfigurablePlugin for MyLlmPlugin {}
+    /// # #[async_trait::async_trait]
+    /// # impl LlmPlugin for MyLlmPlugin {
+    /// #     fn llm_capabilities(&self) -> Vec<ene_plugin::LlmProviderSpec> { Vec::new() }
+    /// # }
+    /// # impl MyLlmPlugin {
+    /// #     pub fn provides() -> Vec<ene_plugin::CapabilityRef> { Vec::new() }
+    /// # }
+    /// let dispatch = PluginDispatch::new(
+    ///     None,
+    ///     Some(Arc::new(MyLlmPlugin)),
+    ///     None,
+    ///     None,
+    ///     None,
+    /// )
+    /// .with_capability_declarations(MyLlmPlugin::provides(), Vec::new());
+    /// ```
+    #[must_use]
+    pub fn with_capability_declarations(
+        mut self,
+        provides: Vec<CapabilityRef>,
+        requires: Vec<CapabilityRequirement>,
+    ) -> Self {
+        self.provides = provides;
+        self.requires = requires;
+        self
     }
 
     /// Delivers the plugin configuration blob to every registered trait
@@ -1218,8 +1265,8 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
         supports_validate_config: dispatch.supports_validate_config(),
         supports_migrate_config: dispatch.supports_migrate_config(),
         config_version: dispatch.config_version(),
-        provides: Vec::new(),
-        requires: Vec::new(),
+        provides: dispatch.provides.clone(),
+        requires: dispatch.requires.clone(),
     }
 }
 
@@ -1663,6 +1710,8 @@ mod tests {
             embed: embed.then(|| Arc::new(MockEmbedPlugin) as Arc<dyn EmbedPlugin>),
             tts: None,
             stt: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
         }
     }
 
@@ -1673,6 +1722,8 @@ mod tests {
             embed: None,
             tts: Some(Arc::new(MockTtsPlugin) as Arc<dyn TtsPlugin>),
             stt: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
         }
     }
 
@@ -1683,6 +1734,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: Some(Arc::new(MockSttPlugin) as Arc<dyn SttPlugin>),
+            provides: Vec::new(),
+            requires: Vec::new(),
         }
     }
 
@@ -1869,6 +1922,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
         };
         let req = PluginIpcRequest::Handshake {
             version: VersionRange {
@@ -1900,6 +1955,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
         };
         let resp = dispatch_request(
             &dispatch,
@@ -1935,6 +1992,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
         };
         let _ = dispatch_request(
             &dispatch,
@@ -1978,6 +2037,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
         };
         let resp = dispatch_request(
             &dispatch,
@@ -2098,6 +2159,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
         }
     }
 
@@ -2163,6 +2226,40 @@ mod tests {
         assert!(caps.supports_validate_config);
         assert!(caps.supports_migrate_config);
         assert_eq!(caps.config_version, 2);
+    }
+
+    #[tokio::test]
+    async fn handshake_carries_capability_declarations() {
+        let dispatch = make_dispatch(true, false, false).with_capability_declarations(
+            vec![CapabilityRef::parse("gguf-runner@1").unwrap()],
+            vec![CapabilityRequirement::parse("g2p/ja@^1?").unwrap()],
+        );
+        let resp = dispatch_request(
+            &dispatch,
+            &PluginIpcRequest::Handshake {
+                version: VersionRange {
+                    min: PLUGIN_IPC_PROTOCOL_VERSION,
+                    max: PLUGIN_IPC_PROTOCOL_VERSION,
+                },
+                sandbox: ene_plugin_proto::SandboxConfigData::default(),
+                plugin_config: None,
+                plugin_profiles: None,
+            },
+        )
+        .await;
+        match resp {
+            PluginIpcResponse::HandshakeAck { capabilities, .. } => {
+                assert_eq!(
+                    capabilities.provides,
+                    vec![CapabilityRef::parse("gguf-runner@1").unwrap()]
+                );
+                assert_eq!(
+                    capabilities.requires,
+                    vec![CapabilityRequirement::parse("g2p/ja@^1?").unwrap()]
+                );
+            }
+            other => panic!("expected HandshakeAck, got {other:?}"),
+        }
     }
 
     #[tokio::test]
