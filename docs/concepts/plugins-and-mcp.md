@@ -18,6 +18,7 @@ Ene Host Application (ene-runtime)
         │     ├── ene-plugin-openai    (OpenAI-Compatible Provider Plugin)
         │     ├── ene-plugin-llama-cpp (Local GGUF Provider Plugin)
         │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS Provider Plugin)
+        │     ├── ene-plugin-edge-tts  (Microsoft Edge Neural Voice TTS Provider Plugin)
         │     ├── ene-plugin-app       (GUI Launcher Tool)
         │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
         │     ├── ene-plugin-calc      (Calculation Tool)
@@ -105,6 +106,14 @@ returning a whole audio file (WAV); the host decodes it to PCM and slices it
 into `TtsChunk`s, preserving the `TtsProvider::synthesize_stream` contract.
 The `voicevox` plugin additionally spawns and supervises a local
 VOICEVOX-compatible engine binary in managed mode (`auto_start: true`).
+
+The `edge-tts` plugin (`plugins/provider/edge-tts`) implements the same
+`TtsPlugin` contract against Microsoft's free, keyless Edge Read Aloud
+WebSocket endpoint: it mimics the browser extension's handshake
+(`TrustedClientToken` + `Sec-MS-GEC` query parameters and headers), streams
+48 kbps mono MP3 frames, decodes them in-process (`nanomp3`), and returns WAV
+audio — no API key, engine, or local server involved. A synthesize call that
+loses its connection retries with exponential backoff.
 
 ### Local-inference plugin authors: the same discipline, in-process
 

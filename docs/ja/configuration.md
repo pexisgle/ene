@@ -664,6 +664,65 @@ HTTP サーバーです。`ai.tts.provider = "voicevox"` で選択します。�
 構築されるためです。一方、`plugins.list.voicevox.config` と `ai.tts.voice` の
 編集は実行中のセッションにも反映されます。
 
+#### Microsoft Edge Neural Voice TTS プロバイダ（`plugins.list.edge-tts.config`）
+
+`edge-tts` プロバイダプラグイン（`plugins/provider/edge-tts`）は、Microsoft
+Edge の読み上げ機能が使う WebSocket エンドポイント（無料・キー不要のニューラル
+音声）と通信します。API キーもローカルサーバーも不要です。
+`ai.tts.provider = "edge-tts"` で選択します。汎用の `ai.tts.voice` には、
+設定済みの既定音声をリクエスト単位で上書きする Edge 音声名（短縮形、例：
+`ja-JP-NanamiNeural`）を指定できます。
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "edge-tts",
+      "voice": "ja-JP-NanamiNeural"
+    }
+  },
+  "plugins": {
+    "list": {
+      "edge-tts": {
+        "enable": true,
+        "config": {
+          "voice": "ja-JP-NanamiNeural",
+          "locale": "ja-JP",
+          "rate": "+0%",
+          "pitch": "+0Hz",
+          "volume": "+0%",
+          "max_retries": 3
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目：
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `voice` | `ja-JP-NanamiNeural` | Edge 音声名。短縮形（`ja-JP-NanamiNeural`）または長い形式。 |
+| `locale` | `ja-JP` | `<speak>` 要素の SSML `xml:lang` 値。 |
+| `rate` | `+0%` | 発話速度の調整（例：`+10%`、`-10%`）。 |
+| `pitch` | `+0Hz` | ピッチの調整（例：`+5Hz`、`-5Hz`）。 |
+| `volume` | `+0%` | 音量の調整（例：`+10%`、`-10%`）。 |
+| `max_retries` | `3` | テキストチャンクあたりの再接続試行回数（指数バックオフ、0–10）。 |
+| `endpoint_url` | `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1` | WebSocket エンドポイント。クエリ文字列を含めてはいけません。 |
+
+接続は Edge 読み上げ拡張機能を模倣し（Chrome/Edge の User-Agent、拡張機能の
+`Origin`、`Sec-MS-GEC` トークン）、`audio-24khz-48kbitrate-mono-mp3` を要求
+します。4096 バイトを超えるテキストは、空白・UTF-8・XML エンティティの境界で
+分割され、同じ接続上でチャンク単位に合成されます。プラグインは MP3 ストリームを
+デコードし、WAV 音声（24 kHz モノラル）を返します。接続が切断された場合は、
+現在のチャンクを `max_retries` 回まで指数バックオフで再試行します。
+
+`ai.tts.provider` 自体の変更（例：`voicevox` から `edge-tts` への切替）は次回
+起動時に反映されます。アクティブなプロバイダはブートストラップ時に一度だけ
+構築されるためです。一方、`plugins.list.edge-tts.config` と `ai.tts.voice` の
+編集は実行中のセッションにも反映されます。
+
 #### シークレットのマーキング
 
 プラグインの `config_schema()` は、フィールドに `x-ene-secret: true` を付与できます。ホストはこれ（および既知の名前によるフォールバック：`api_key`・`token`・`password`・`authorization` など）を使って、設定 UI でフィールドをマスクする予定であり、ホストのログ出力からは値を削除（redact）します。インラインの API キーがログストリームに現れることはありません。`settings.json` の外部（キーリング/シークレットサービス）へのシークレット保存は別途追跡されており、それまではプラグインのシークレットは `plugins.list.<name>.config` 内に置かれ、スキーマでマークされ、ホスト境界で redact されます。
