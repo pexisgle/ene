@@ -114,6 +114,32 @@ contract.
 The `voicevox` plugin additionally spawns and supervises a local
 VOICEVOX-compatible engine binary in managed mode (`auto_start: true`).
 
+### Cross-provider admission (`ResourceClass`)
+
+`ConcurrencyHint` bounds requests against one plugin's provider; it says
+nothing about two *different* plugins that contend on the same physical
+device. Every `LlmProviderSpec` therefore also carries a
+`resource_class: ResourceClass` declaration (`"Cpu"` / `{"Gpu":{"device":0}}`
+/ `"Network"` on the wire, `#[serde(default)]` to `Cpu`), and the host shares
+**one admission budget per class across every plugin** that declares it:
+a request is not sent until the class permit is acquired, so two
+GPU-offloaded local models on device 0 never run concurrently even from
+separate plugin processes. Permits are held host-side for the request
+lifetime and released by drop glue when the request ends, is cancelled, or
+the serving plugin crashes — the host never relies on a crashed process to
+release anything. `Gpu` classes are gated by default (one job per device,
+up to 8 waiters, then `Busy`); `Cpu`/`Network` are gated only when listed in
+`plugins.resource_classes` (see `docs/configuration.md`), so cloud providers
+keep their declared per-plugin concurrency.
+
+The `#[provider(...)]` derive exposes this as
+`resource_class = ::ene_plugin::ResourceClass::Gpu { device: 0 }` (omitted
+defaults to `Cpu`); the built-in local GGUF plugin declares dynamically from
+its `acceleration` config, since a single binary can serve CPU and GPU
+models. `EmbedPlugin` has no wire declaration surface yet, so embedding
+requests are not host-gated — providers that run GPU embeddings keep their
+own in-process admission as a process-local backstop.
+
 The `kokoro` plugin (`plugins/provider/kokoro`) runs the local Kokoro-82M
 ONNX model directly in its own process (via `ene-voice`'s ONNX engine) — no
 API key, engine, or local server involved. It loads the model lazily on

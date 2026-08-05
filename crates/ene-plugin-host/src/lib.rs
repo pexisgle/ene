@@ -38,6 +38,8 @@
 //!   [`IpcTtsProviderFactory`] implement.
 #![warn(missing_docs)]
 
+/// Host-side per-ResourceClass admission control for provider requests.
+pub mod admission;
 /// Host-side registry of plugin capability declarations and resolution.
 pub mod capability_registry;
 /// Host mediation for plugin-to-plugin capability calls.

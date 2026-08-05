@@ -24,6 +24,11 @@
 //! `EmbedPlugin` is deliberately out of scope: it has no static capability
 //! declaration to generate (`embed_batch` is the entire trait).
 //!
+//! `resource_class` is LLM-only: `TtsProviderSpec` / `SttProviderSpec` do not
+//! carry the field yet, so a Tts/Stt-only derive parses the attribute but
+//! never emits it. On a compound derive (`LlmPlugin` + `TtsPlugin`, sharing
+//! one attribute) it applies to the LLM spec only.
+//!
 //! `#[provider(provides = "...", requires = "...")]` declares plugin-wide
 //! capabilities; the derive emits the `provides()` / `requires()` methods
 //! from the `LlmPlugin` expansion only (see `expand_plugin_derive`). On a
@@ -89,6 +94,7 @@ struct ProviderAttrs {
     context_window: Option<u32>,
     frame_size: Option<u32>,
     sample_rate: Option<u32>,
+    resource_class: Option<TokenStream2>,
     provides: Vec<String>,
     requires: Vec<String>,
 }
@@ -137,6 +143,9 @@ impl ProviderAttrs {
                     attrs.frame_size = Some(parse_u32(&meta)?);
                 } else if meta.path.is_ident("sample_rate") {
                     attrs.sample_rate = Some(parse_u32(&meta)?);
+                } else if meta.path.is_ident("resource_class") {
+                    let expr: syn::Expr = meta.value()?.parse()?;
+                    attrs.resource_class = Some(quote! { #expr });
                 } else if meta.path.is_ident("provides") {
                     let s: syn::LitStr = meta.value()?.parse()?;
                     attrs.provides = validate_capability_items(&s, "provides", |item| {
@@ -263,6 +272,9 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
             } else {
                 quote! { ::std::option::Option::None }
             };
+            let resource_class = attrs.resource_class.unwrap_or_else(|| {
+                quote! { ::ene_plugin::ResourceClass::Cpu }
+            });
             quote! {
                 pub fn #spec_method() -> ::ene_plugin::LlmProviderSpec {
                     ::ene_plugin::LlmProviderSpec {
@@ -272,6 +284,7 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
                         supports_vision: #vision,
                         concurrency: #concurrency,
                         context_window: #context_window,
+                        resource_class: #resource_class,
                     }
                 }
             }

@@ -1122,6 +1122,7 @@ mod tests {
                     supports_vision: true,
                     concurrency: crate::capabilities::ConcurrencyHint::default(),
                     context_window: None,
+                    resource_class: crate::capabilities::ResourceClass::default(),
                 }],
                 tts_providers: vec![],
                 stt_providers: vec![],

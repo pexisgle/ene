@@ -75,8 +75,8 @@ pub use ene_plugin_proto::{
     CapabilityCall, CapabilityCallError, CapabilityCallErrorCode, CapabilityParseError,
     CapabilityRef, CapabilityRequirement, ConcurrencyHint, ConfigFieldError, ConfigOption,
     DEFAULT_SAMPLE_RATE, LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities,
-    PluginError, PluginIpcRequest, PluginIpcResponse, ProviderErrorKind, SttProviderSpec,
-    TokenUsage, TtsProviderSpec, VadEvent, VadProviderSpec, VersionRange,
+    PluginError, PluginIpcRequest, PluginIpcResponse, ProviderErrorKind, ResourceClass,
+    SttProviderSpec, TokenUsage, TtsProviderSpec, VadEvent, VadProviderSpec, VersionRange,
 };
 /// Cross-platform IPC transport (re-exported from `ene-plugin-proto`).
 pub use ene_plugin_proto::{IpcListener, IpcStream, cleanup_path};
@@ -177,7 +177,7 @@ pub mod prelude {
             CapabilityProvider, CapabilityRef, CapabilityRequirement, ConcurrencyHint,
             ConfigurablePlugin, EmbedPlugin, LlmPlugin, LlmProviderSpec, PluginCompletion,
             PluginDispatch, PluginError, PluginStream, PluginStreamChunk, PluginTranscription,
-            ProviderErrorKind, SttPlugin, SttProviderSpec, TokenUsage, ToolPlugin,
+            ProviderErrorKind, ResourceClass, SttPlugin, SttProviderSpec, TokenUsage, ToolPlugin,
             ToolPluginCapabilities, TtsPlugin, TtsProviderSpec, VadEvent, VadPlugin,
             VadProviderSpec, run_plugin_server,
         };
