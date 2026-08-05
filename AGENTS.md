@@ -117,10 +117,12 @@ Violating these is the most common way to break this repo:
 ## Docs and where truth lives
 
 **rustdoc is authoritative for all signatures** (`cargo doc -p <crate> --open`).
-`docs/crates/*.md` intentionally contain no hand-written signatures — they cover role,
-boundaries, and rationale only. Do not transcribe signatures into Markdown.
+`docs/reference/crates.md` intentionally contains no hand-written signatures —
+it covers role, boundaries, and rationale only. Do not transcribe signatures
+into Markdown.
 
-Orientation: `docs/architecture.md`, `docs/configuration.md`, `docs/concepts/`, `docs/apps/`.
+Orientation: `docs/index.md`, `docs/quickstart.md`, `docs/configuration.md`,
+`docs/concepts/`, `docs/apps/`, `docs/guides/`, `docs/reference/`.
 User-facing docs are bilingual: every change under `docs/` needs the matching file under
 `docs/ja/`. UI strings live in `apps/ene-desktop/i18n/{en-US,ja}/` and
 `apps/ene-cli/i18n/{en-US,ja}/` — keep both locales in sync. Backend event and status names

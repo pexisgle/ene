@@ -1,53 +1,40 @@
 # Summary
 
-[Introduction](index.md)
-[Getting Started](getting-started.md)
-[Architecture](architecture.md)
+[Index](index.md)
+[Quickstart](quickstart.md)
 [Configuration](configuration.md)
-
-# Guides
-
-- [Write a Tool Guide](guide/tools/write-a-tool.md)
-- [MCP Server Setup Guide](guide/tools/mcp-servers.md)
-- [Random Generation Tool Guide](guide/tools/random.md)
-- [Geo Tool Guide](guide/tools/geo.md)
-- [Git Tool Guide](guide/tools/git.md)
-- [Schedules: Persistent Timed Actions](guide/schedules.md)
-- [Character Card Editor Guide](guide/character-card-editor.md)
-- [Workspace RAG Guide](guide/workspace-rag.md)
-- [Memory Ledger: Interactive Memory & Commitment Management](guide/memory-ledger.md)
-
-# Reference
-
-- [Tool SDK Reference](reference/tools/sdk.md)
 
 # Concepts
 
-- [Turn & Session](concepts/turn-and-session.md)
-- [Memory System](concepts/memory-system.md)
-- [Character Card Macros](concepts/character-card-macros.md)
-- [Character Card Lorebook](concepts/character-card-lorebook.md)
-- [Character Card Assets & Import](concepts/character-card-assets.md)
-- [Character Card Localization](concepts/character-card-locales.md)
-- [Persona Formats (W++ / AliChat / YAML)](concepts/character-card-persona-formats.md)
-- [Voice & Avatar](concepts/voice-and-avatar.md)
+- [Architecture](concepts/architecture.md)
+- [Character cards](concepts/character-cards.md)
+- [Memory](concepts/memory.md)
+- [Turns & sessions](concepts/turns-and-sessions.md)
 - [Plugins & MCP](concepts/plugins-and-mcp.md)
 - [Connectors](concepts/connectors.md)
+- [Voice & avatar](concepts/voice-and-avatar.md)
 
-# Crates API Reference
+# Apps
 
-- [Runtime (`ene-runtime`)](crates/runtime.md)
-- [Mind (`ene-mind`)](crates/mind.md)
-- [Store (`ene-store`)](crates/store.md)
-- [AI (`ene-ai`)](crates/ai.md)
-- [Voice (`ene-voice`)](crates/voice.md)
-- [Connector (`ene-connector`)](crates/connector.md)
-- [Plugin System (`ene-plugin-*`)](crates/plugin-system.md)
-- [Tool Authoring (`ene-plugin-macros` & friends)](crates/tool-sdk.md)
-- [Utilities (`ene-util`)](crates/util.md)
-- [VRM (`ene-vrm`)](crates/vrm.md)
+- [CLI user guide](apps/cli.md)
+- [Desktop user guide](apps/desktop.md)
 
-# Applications
+# Guides
 
-- [CLI User Guide](apps/cli.md)
-- [Desktop User Guide](apps/desktop.md)
+- [Character editor](guides/character-editor.md)
+- [Memory ledger](guides/memory-ledger.md)
+- [Schedules](guides/schedules.md)
+- [Workspace RAG](guides/workspace-rag.md)
+- [Write a tool](guides/tools/write-a-tool.md)
+- [MCP servers](guides/tools/mcp-servers.md)
+- [Built-in tools](guides/tools/builtin-tools.md)
+
+# Reference
+
+- [Crate reference](reference/crates.md)
+- [Cognitive runtime](reference/architecture/cognitive-runtime.md)
+- [API v1 contract](reference/architecture/api-v1.md)
+- [Plugin IPC protocol](reference/plugin-ipc.md)
+- [Tool SDK](reference/tools/sdk.md)
+- [Derive macros](reference/tools/derive-macro.md)
+- [ene-vrm API](reference/api/ene-vrm.md)

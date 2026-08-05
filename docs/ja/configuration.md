@@ -1,1304 +1,239 @@
-# 設定・コンフィグレーションリファレンス
+# 設定
 
-Ene は `figment` をベースとした多層コンフィグレーションシステムを採用しています。設定は以下の優先順位に従ってロードされます：
+Ene はグローバル設定ファイル 1 つと、キャラクターごとの設定ファイルを
+読みます。すべての値にデフォルトがあるため、空の設定でも動作します。
 
-$$\text{デフォルト値} \longrightarrow \text{JSON 設定ファイル} \longrightarrow \text{環境変数 (\texttt{ENE\_*})}$$
+## 設定ファイル
 
----
+| ファイル | 目的 |
+|---|---|
+| `settings.json` | グローバル設定（AI プロバイダー・mind・store・ツール・プラグイン・デスクトップ）。アセットディレクトリに置かれます。 |
+| `assets/characters/<name>/character.json` | キャラクターカード本体（[キャラクターカード](concepts/character-cards.md)参照）。 |
+| `assets/characters/<name>/character_settings.json` | キャラクターごとの表示設定（位置・スケール・デフォルトモーション/表情・カード言語）。 |
+| `assets/characters/<name>/character.<lang>.json` | 任意のローカライズ差分（[ローカライズ](concepts/character-cards.md#ローカライズ)参照）。 |
+| `assets/lang/<lang>/prompts.json`, `patterns.json` | 実行時プロンプトパック・忘却パターンパック（埋め込みコピーにフォールバック）。 |
 
-## 1. 環境変数の優先順位
+### アセットディレクトリの場所
 
-環境変数は、デフォルト構造体や JSON 設定ファイルで指定された設定を上書きします。環境変数は `ENE_` プレフィックスを使用し、ネストされたセクションキーはダブルアンダースコア (`__`) で区切ります：
+- デバッグビルド: リポジトリの `assets/`（変更が即反映されます）。
+- リリースビルド: OS のアプリケーションデータディレクトリ
+  （Linux は `~/.local/share/ene`、Windows は `%APPDATA%\ene`）。
 
-```bash
-# 例: デフォルトの LLM チャットモデルを上書き
-export ENE_AI__TASKS__CHAT__MODEL="gpt-4o"
+デスクトップアプリと CLI はどちらも `--config <path>` で別の
+`settings.json` を指定できます。CLI は `--character <name>` と
+`--lang <en|ja>` も受け付けます。
 
-# 例: SQLite データベースファイルパスを指定
-export ENE_STORE__DB_PATH="/path/to/custom_memory.db"
+## 優先順位
 
-# Example: プロアクティブ発話間隔（秒）を設定
-export ENE_MIND__PROACTIVE__INTERVAL_SECONDS="300"
+設定は次の順でマージされます（後が優先）:
+
+1. 組み込みデフォルト
+2. ディスク上の `settings.json`
+3. `ENE_*` 環境変数（ネストは `__` で区切り）
+
+例:
+
+```sh
+ENE_AI__TASKS__CHAT__MODEL="openai/gpt-5.6-luna"
+ENE_MIND__EMOTION__ENABLED="false"
+ENE_TOOLS__LIST__WEB__ENABLE="false"
 ```
 
-環境変数による上書きは**一時的**です。現在のプロセスの実行時にのみ適用され、`settings.json` に書き戻されることはありません。設定を保存しても JSON 層の値のみが永続化されるため、`ENE_*` 変数を削除すれば、次回の起動時に元の JSON／デフォルト値に戻ります (#326)。
+環境変数は `settings.json` にある任意のキーを上書きできます（値が JSON と
+して解釈できる場合はセクション全体も指定可能）。
 
----
+## スキーマと検証
 
-## 2. 設定セクション一覧
+各設定セクションは、所有クレート（`ene-ai`・`ene-mind`・`ene-store`・
+`ene-plugin-host`・`apps/ene-desktop` など）の `define_config!` 呼び出しで
+定義されます。起動時に Ene は JSON Schema を `assets/schema/`
+（`settings.schema.json`・`character_settings.schema.json` など）へ再生成する
+ため、エディタで補完・検証が効きます。これらのスキーマファイルは生成物で、
+Git 管理されません。
 
-パブリックな設定セクションは、所有クレート内の `define_config!` マクロ宣言によって定義されます。
+`settings.json` は `version` フィールドを持ち、古いファイルは読み込み時に
+自動で前方マイグレーションされます（`ene-config` のマイグレーション）。
+後方互換のマイグレーションはなく、ファイルはその場で更新されます。
 
-### `ai.*` — LLM、埋め込み、および音声パイプライン設定
+## トップレベルキー
 
-プロバイダ定義、タスクルーティング、リトライ/フォールバックルール、および音声 (STT/TTS/VAD) 設定を含みます：
+| キー | 型 | デフォルト | 意味 |
+|---|---|---|---|
+| `$schema` | string | — | エディタ用スキーマポインタ（保存時に自動入力）。 |
+| `version` | number | 1 | 設定スキーマバージョン。自動マイグレーション。 |
+| `character` | string | `"Alicia"` | 読み込むキャラクターカード名（またはパス）。 |
+| `user_name` | string | `"User"` | プロンプトに使う表示名（`{{user}}`）。 |
+| `runtime_rules` | string | 組み込み | すべてのシステムプロンプトに注入される行動規則。 |
+| `user_persona` | object | — | 構造化ユーザーペルソナ。`{{user_persona}}` を展開。 |
+| `ai` | object | 下記 | プロバイダー・タスク・リトライ・フォールバック・TTS/STT/VAD。 |
+| `mind` | object | 下記 | 感情・プロアクティブ・メモリ上限・トピック境界・セッション。 |
+| `store` | object | `{ "enabled": true }` | メモリストアの有効化。 |
+| `tools` | object | 下記 | ツールの有効化・MCP サーバー・ツール RAG。 |
+| `plugins` | object | 下記 | プロバイダー/ツールプラグインの一覧と個別設定。 |
+| `desktop` | object | 下記 | デスクトップ専用設定（グラフィック・言語・字幕など）。 |
+
+未知のトップレベルキーは保存時も保持されます（ラウンドトリップ安全）。
+
+## `ai.*` — AI プロバイダーとタスク
 
 ```json
 {
   "ai": {
     "providers": {
-      "openai": {
-        "kind": "openai",
-        "api_key": "sk-...",
-        "base_url": "https://api.openai.com/v1"
+      "openrouter": {
+        "kind": "openai_compatible",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key": { "source": "env", "env": "OPENROUTER_API_KEY", "inline": "" },
+        "context_window": null
       }
     },
     "tasks": {
-      "chat": {
-        "provider": "openai",
-        "model": "gpt-4o-mini"
-      },
-      "embedding": {
-        "provider": "openai",
-        "model": "text-embedding-3-small"
-      }
+      "chat":       { "provider": "openrouter", "model": "openai/gpt-5.6-luna", "max_tokens": 8192, "supports_vision": true },
+      "classifier": { "provider": "openrouter", "model": "openai/gpt-5.6-luna" },
+      "embedding":  { "provider": "local",      "model": "jina-v5-small" },
+      "proactive":  { "provider": "local",      "model": "gemma-4-e4b" }
     },
-    "stt": { "enabled": true },
-    "tts": { "enabled": true },
-    "vad": { "enabled": true }
+    "retry":     { "max_attempts": 3, "base_delay_ms": 500, "max_delay_ms": 30000, "timeout_ms": 120000 },
+    "fallback":  { "enabled": false, "health_check_timeout_ms": 5000, "cache_ttl_ms": 60000, "max_history": 32 },
+    "tts":       { "provider": "kokoro", "model": "kokoro-v1_0.onnx", "voice": "af_heart", "speed": 1.0, "language": "ja" },
+    "stt":       { "provider": "whisper", "model": "", "language": "" },
+    "vad":       { "provider": "none" }
   }
 }
 ```
 
-プロバイダのバックエンドはプラグインとして提供されます。OpenAI 互換
-バックエンドは `openai` プロバイダプラグイン（`plugins/provider/openai`、
-kind は `"openai"`）で、デフォルトの `plugins.list` に含まれ、
-`OPENAI_API_KEY` と `OPENAI_BASE_URL` が子プロセスへ受け渡されます。旧 kind 値
-`"openai_compatible"` はエイリアスとして引き続き受け付けられ、プロバイダごとの
-`base_url` / `api_key` はリクエストごとにプラグインへ転送されるため、
-既存の OpenAI 互換設定（OpenRouter、ローカルサーバなど）はそのまま動作します。
-`openai` プラグインは埋め込みバックエンドも兼ねます。クラウド埋め込みを
-使うには `tasks.embedding` を `"openai"` kind のプロバイダに向けてください。
-プラグインシステムを無効化した場合（`plugins.enabled = false`）、クラウド
-プロバイダは利用できません。ローカル GGUF 埋め込みは
-`tasks.embedding.provider = "local"` とし、実際の `dimensions` を宣言した
-`ai.local_models` のモデルキーを指定します（後述の llama-cpp プロファイル
-節を参照）。
+- **`ai.providers`** — 名前付きプロバイダー定義。`kind` はプロバイダー種別
+  （`openai`・`openai_compatible`・`anthropic`・`local` など）。`api_key` は
+  `source: "env"`（指定した環境変数から読む）・`source: "inline"`・
+  `source: "file"` に対応。プロバイダー *kind* 名は組み込みセットに対して
+  検証され、タイポ候補が提案されます。
+- **`ai.tasks`** — パイプラインの各タスクにどのプロバイダー+モデルを使うか:
+  `chat`（会話）、`classifier`（LLM 感情分類）、`embedding`（メモリ/ツール
+  ベクトル）、`proactive`（プロアクティブ発話の判断）。`dimensions` は
+  埋め込み次元を上書き、`query_prefix` は埋め込みクエリの接頭辞。
+- **`ai.retry`** — 一時的プロバイダーエラーのリトライポリシー。
+- **`ai.fallback`** — ヘルスチェック失敗時に代替プロバイダーへフェイルオーバー。
+- **`ai.tts` / `ai.stt` / `ai.vad`** — 音声パイプラインのプロバイダー選択
+  （[音声とアバター](concepts/voice-and-avatar.md)参照）。`model`/`voice` は
+  プロバイダー固有です。
+- **`ai.local_models`** — `local` プロバイダーが使うローカル GGUF モデル定義
+  （URL・コンテキストサイズ・GPU レイヤー・量子化・次元）。
 
-各プロバイダエントリには、任意で `context_window`（整数、トークン単位）を設定でき、
-バックエンドが申告するコンテキストウィンドウに上限を設けられます (#364)。
-有効ウィンドウは `min(advertised, context_window)` となるため、オーバーライドは
-モデルの公称上限を「縮小」できるだけであって、決して上回ることはできません。
-省略すれば、完全にプロバイダの申告に従います。プラグインプロバイダは
-`LlmProviderSpec.context_window` 経由でウィンドウを申告し、ローカルモデルは
-`LocalModelDef.context_size` を報告します。ランタイムはこの有効ウィンドウから、
-モデルの応答用の余地としてタスクの `max_tokens`（`tasks.<task>.max_tokens`）を
-予約し、さらにトークン推定の誤差を吸収するための安全マージンを差し引いて、
-残りをプロンプトの予算とします：
+## `mind.*` — 認知エンジン
 
-```
-available = min(model_window, context_window)
-          − response_reserve    // tasks.<task>.max_tokens
-          − safety_margin       // 推定誤差。usage が計測되면ほぼ 0 (#365)
-```
-
-```json
-{
-  "ai": {
-    "providers": {
-      "openai": {
-        "kind": "openai",
-        "api_key": "sk-...",
-        "base_url": "https://api.openai.com/v1",
-        "context_window": 32000
-      }
-    }
-  }
-}
-```
-
-ローカルモデルの `context_size` の既定値は 16,384 トークンです (#366)。これは
-システム自身の既定プロンプト予算（`mind.context.max_prompt_tokens` = 12,000）に
-モデルの応答を加えた分を収容できるよう較正されています。従来の既定値 2,048 は
-小さな決定タスク向けのもので、ローカルモデルがメイン会話を担うとプロンプトの
-大部分のセクションが黙って欠落していました。llama.cpp の KV キャッシュを現実的な
-範囲に収めるため、32K ではなく 16K を採用しています（Gemma 3 4B 相当のモデルで
-重みに加えて約 2.3 GB、32K では約 4.6 GB）。決定タスク専用モデルは `context_size`
-を明示的に下げられます。
-
-各 `ai.local_models.<name>` エントリのモデルパス/設定（`url`・`quantization`・
-`model_path`・`gpu_layers`・`context_size`・`dimensions`）は、ローカル GGUF
-プロバイダプラグイン (`ene-plugin-llama-cpp`) が消費する
-`plugins.list.llama-cpp.profiles.<name>` ブロブへミラーされます。`local_models`
-のキー自体はルーティングおよびコンテキスト予算の情報としてここに残ります
-（`context_size` は解決時に読まれ、`dimensions` はローカル埋め込みの
-ストアスキーマ値です）。ミラーは v2→v3 設定マイグレーションによる一方向
-コピーです — プロファイルを編集しても `local_models` は書き換わりません。
-
-起動時、ランタイムは各生成タスク（`chat`、および設定されている場合は `proactive`）
-のウィンドウが必要量（プロンプト予算 + 応答予約 `tasks.<task>.max_tokens`）を
-満たしているかを検証し、設定されたウィンドウが小さすぎる場合は警告をログに出します。
-さもなくば、何の表示もなく毎ターンプロンプトのセクションが欠落するためです。
-明示的な `context_window` オーバーライドのないクラウドタスクは、プロバイダが
-実際のウィンドウを報告する実行時に検証されます。
-
-#### トークン使用量の集計 (#365)
-
-すべての補完には、任意のトークン使用量レコード（`prompt_tokens`、
-`completion_tokens`、`total_tokens`）が 3 つのプロバイダ層すべて
-（`ene-ai` のプロセス内型、プラグイン IPC、ストリーミングチャンク）を通じて
-付随します。設定方法はバックエンドによって異なります：
-
-- **使用量を報告するプロバイダ**（OpenAI 互換、Anthropic）は API レスポンスから
-  直接設定します。ストリーミングでは、使用量は**最終**チャンクでのみ到着し、
-  中間チャンクでは空のままです。
-- **ローカルモデル**（llama.cpp）はトークンを自分でカウントします。コンテキストに
-  投入された正確なプロンプト長とサンプリングされたトークン数です。そのため、
-  ワンショット補完とストリーミング補完の両方で実際の使用量を報告します。
-- **何も報告しないプロバイダ**は、粗い文字ベースの推定（おおよそ 3 文字あたり
-  1 トークン）にフォールバックします。これは英語を過大評価し、日本語を
-  単純な 4 文字/トークンルールよりも過小評価します。
-
-測定されたカウントには推定誤差がないため、使用量が利用可能になると、上記の
-`safety_margin` をゼロに近づけることができます。推定値は、バックエンドが何も
-報告しない間のみ保守的なマージンを維持します。この動作に設定はありません。
-プロバイダごとに自動です。
-
-### `store.*` — データベースおよびベクトル永続化
-
-SQLite データベースの永続化、整合性チェック、およびバックアップ保持制御 (#239)：
-
-```json
-{
-  "store": {
-    "enabled": true,
-    "backup_on_migrate": true,
-    "max_backups": 5,
-    "integrity_check_on_open": false
-  }
-}
-```
-
-### `mind.*` — 認知エンジンおよび感情パラメータ
-
-コンテキストウィンドウのパッキング、ハイブリッド記憶想起、感情減衰、キャラクターコンパイル、およびプロアクティブ発話ポリシー (#103) を設定します：
-
-```json
-{
-  "mind": {
-    "context": {
-      "max_prompt_tokens": 4096
-    },
-    "emotion": {
-      "enabled": true,
-      "decay_half_life_minutes": 30.0
-    },
-    "proactive": {
-      "enabled": true,
-      "interval_seconds": 600,
-      "fatigue_suppression_threshold": 0.7,
-      "confirmation_enabled": false,
-      "world_state": {
-        "enabled": false
-      },
-      "sources": {
-        "window_title_level": "app_only"
-      }
-    },
-    "memory_limits": {
-      "commitment_active_match_limit": 4096
-    }
-  }
-}
-```
-
-プロンプトのパッキングは、セクション別のトークン予算配分を廃止しました (#370)。
-代わりに、モデルの実効コンテキストウィンドウ (#364) を優先度順に充填します。
-必須セクション（アイデンティティカーネル、出力契約、ユーザー入力）は常に保持
-され、プロンプトがウィンドウを超過した場合は最も優先度の低いドロップ可能
-セクションから順に落としていきます。`mind.context.max_prompt_tokens` は任意の
-オペレーター上限で、`min(advertised, max_prompt_tokens)` としてウィンドウを
-縮小します。これを省略する（デフォルト）と、プロンプトはモデルが広告する
-コンテキストサイズに自動的に追随します。
-
-チャットモデルが出す表情マーカーは正典です。ターン中に表情提案があれば
-感情→表情マッピングより優先し、マーカーが無いときだけ感情マッピングを
-フォールバックとして使います。ヒステリシスは発生源によらず適用し、ターン中の
-連続マーカーによるちらつきを防ぎます。発話タイミングに同期した表情変化は、
-この解決経路とは別に扱います。
-
-プロアクティブ活動観測は、自発発話の判断材料としてフォーカス中のアプリケーションを取得します。
-`mind.proactive.sources.window_title_level` は、フォーカス中ウィンドウのタイトルをどこまで
-読み取るかを制御します (#378)。ウィンドウタイトルにはプライベート情報が日常的に含まれます
-（文書名・ファイル名（顧客名・案件名を含みうる）、ページ URL、チャット相手名、メール件名）。
-既定は `app_only`（アプリ名のみ。従来の挙動）です。このテキストは自発発話の判定モデルへ送られ、
-クラウドプロバイダーを設定している場合は**ローカルマシンの外へ送信されます**。レベルは次のとおりです：
-
-| レベル | 取得内容 |
-|---|---|
-| `app_only` | アプリ名のみ（既定。タイトルは読み取りません） |
-| `redacted_title` | アプリ名 + ウィンドウタイトル（ファイルパス・メールアドレス・URL・数字列を除去。`report.xlsx` のような単独の文書名は保持） |
-| `full_title` | アプリ名 + 生のウィンドウタイトル |
-
-`full_title` はローカルモデル使用時のみ選択してください。クラウドプロバイダー使用時は生のタイトルが外部へ送信されます。
-
-### 画面要約パイプライン（ROI・差分ゲート・OCR）
-
-`mind.proactive.sources.screen_summary`（既定 `false`）は、フォーカス中のウィンドウ
-（Ene 自身がフォーカス中のときはプライマリディスプレイ）の短いテキスト要約を生成します。
-パイプラインはすべてデスクトッププロセス内で完結します:
-
-1. **キャプチャ + ROI 合成**: フル解像度でキャプチャし、ビジョンモデルには 50% 縮小の概要と、
-   カーソル周辺の **512×512 の等倍 (100%) クロップ** を暗い区切りバーで左右に並べた
-   合成画像を渡します。クロップのアンカーは 64px グリッドに量子化されるため、
-   小さなポインタ移動ではクロップが安定します。クロップが生成されるのは、カーソル位置と
-   キャプチャ面のグローバル座標の両方が分かる場合のみです。X11（xcap のウィンドウ/モニター）は
-   完全対応です。Wayland ではベストエフォートになります: KWin/Hyprland は
-   `active_win_pos_rs` でウィンドウ座標を提供しますが、ポインタ位置は依然として
-   `device_query`（XWayland 経由）から取得するため、ネイティブな Wayland サーフェス上では
-   座標が更新されずクロップが遅れることがあり、HiDPI では論理座標（ジオメトリ）と
-   物理ピクセル（キャプチャ）が混在してクロップがずれます。GNOME Wayland ではウィンドウの
-   座標が取得できないため、概要のみを使います。クロップは**ポインタ**追従であり、
-   テキストキャレット追従ではありません（キャレット追従にはアクセシビリティ API (AT-SPI) が
-   必要で、フォローアップ予定です）。
-2. **差分ゲート**: 毎 tick、概要と ROI の 64×64 グレースケール指紋を計算します。
-   アクティブアプリのラベルが一致し、概要の変化セルが 48 未満（1 セルあたりの輝度変化 ≥ 6/255）、
-   かつ ROI の指紋の変化セルが 12 未満の場合（点滅トレランス — ROI はポインタ上にあり、
-   テキストキャレットの点滅がまさにそこに発生します）、キャッシュされた要約を再利用して
-   ローカルビジョンモデルを**実行しません**。ウィンドウ切替・スクロール・ROI 内の
-   単語単位の編集・サーフェスのリサイズでは再推論が強制されます。
-   ヒットは構造化ログの `event="screen_diff_gate"` と `cached=true` で確認できます。
-3. **OCR / テキストヒント**: このパイプラインに OCR エンジンは同梱されません
-   （Tesseract は Nix flake にも CI イメージにも存在せず、純 Rust の OCR は重い新規依存に
-   なります）。代わりに、ウィンドウタイトル/クラスの軽量ヒューリスティックでコードエディタや
-   ターミナルを検出し、モデルに「見えるコード・エラーを優先して引用する」よう伝えます。
-   将来のローカル OCR バックエンド向けに、キャプチャ時のテキストヒントフックを用意しています
-   （抽出テキストがあればビジョンのプロンプトに添付されます）。現状、細かい文字を読むための
-   主要な仕組みは 100% 等倍の ROI です。
-
-すべての処理はローカルです: 生のフレームはデスクトッププロセスから外に出ず（要約後に破棄）、
-新しいネットワーク経路はなく、既存の `sources.*` プライバシー設定がそのまま適用されます。
-5K 以上の超大画面では概要側をビジョンモデルの画素予算に合わせて縮小します — ROI は
-常に等倍を維持します。
-
-`mind.proactive.fatigue_suppression_threshold`（0.0〜1.0、既定 `0.7`）は、キャラクターの感情疲労度が閾値以上のとき自発発話の判定を抑制します — 疲れているキャラクターは自分から話しかけません。既定値はムードラベル `"tired"` の境界（`compute_mood_label`）と一致しており、ゲートとキャラクターの見た目の機嫌が食い違いません。`1.0` にするとゲートが無効になり、疲労度の判断はモデルに委ねられます。閾値の有無にかかわらず、全8次元とムードラベルは常に判定モデルへ渡されます。
-
-`mind.proactive.confirmation_enabled`（既定 `false`）を有効にすると、本体の生成モデルが**同じ生成呼び出しの中で**判定を確認します（往復は増えません）。生成プロンプトは「話す価値がなければ応答の最初に `<|silent|>` だけを出力してよい」と指示し、可視テキストより先にそのトークンが届いた時点でランタイムはストリームを即キャンセルし、表示・発話は一切行われません。確認は精度しか上げません（判定モデルの「話す」誤りは拾えますが、「話さない」誤りは拾えません）。確認を有効にすると、判定閾値（`mind.proactive.decision.min_confidence`、ステージドロールアウト中は現在 0.55 固定）は**自動的に 0.15 引き下げられます** — 安価な判定モデルは再現率優先の前段として境界ケースを通し、本体モデルが精度を担う後段として却下します。判定モデルと本体モデルの一致率（生成に到達した判定のうち accepted / declined）は、構造化ログの `event="confirmation"` に記録されます。可視テキストが無い空応答は `confirmation=empty` として記録され、一致率からは除外されます。早期キャンセルが有効なのはトークンをストリーミングするプロバイダーだけです。非ストリーミングのローカルアダプターは最初のチャンクの前に完了応答全体をバッファするため、その経路での辞退は生成済みの応答を破棄する形になり、トークン節約にはなりません。
-
-### 世界状態メモリ（時系列トレンド）
-
-`mind.proactive.world_state`（既定は無効）は、構造化スナップショットの有界なインメモリ時系列を追跡します: フォーカス中ウィンドウのラベル、ウィンドウ切替、ホストが測定する場合の OS アイドル時間、直前のユーザーメッセージからの経過秒数 — 観測間隔ごとに 1 回取得します。スナップショットは永続化されません。短命なテレメトリ（プライバシーに敏感なラベル、数分で陳腐化）であり、判定に必要なのは直近の窓だけです。
-
-```json
-"world_state": {
-  "enabled": true,
-  "max_snapshots": 64,
-  "min_snapshots_for_trend": 3,
-  "engaged_idle_seconds": 60,
-  "change_window": 3
-}
-```
-
-- `enabled`（既定 `false`）: マスタースイッチ。無効時はスナップショットを参照せず、判定コンテキストとプロンプトは従来と完全に同じです。
-- `max_snapshots`（既定 `64`）: リングの容量 — 新しいスナップショットが保持され、古いものから破棄されます。
-- `min_snapshots_for_trend`（既定 `3`）: トレンド要約とそのゲートが有効になるために必要な履歴数。
-- `engaged_idle_seconds`（既定 `60`）: 直近の OS アイドルがこの秒数未満だと「作業中」とみなします。ホストがアイドルを測定する場合のみ使用されます（現行デスクトップホストは測定しません）。
-- `change_window`（既定 `3`）: ウィンドウ切替トレンドの集計対象となる直近スナップショット数。
-
-有効かつ十分な履歴があるとき、決定的ゲートはユーザーが実際に作業中（直近のウィンドウ切替、低い OS アイドル、またはアイドルが減少傾向）の間、判定を抑制します。また判定プロンプトには `world_state` 要約（アイドルトレンド、ウィンドウ切替回数、作業中フラグ、直近ウィンドウのラベル、スナップショット数）が渡されます。ウィンドウラベルは `sources.window_title_level` に従い、画面要約がリングに保存されることはありません。
-
-### クワイエットアワーと手動一時停止
-
-`mind.proactive.quiet_hours` は、スケジュールに基づいて自発発話を抑制します。既定は無効です。`mind.proactive` の一部として記述します:
-
-```json
-"quiet_hours": {
-  "enabled": true,
-  "timezone": "Asia/Tokyo",
-  "days": {
-    "monday": true, "tuesday": true, "wednesday": true,
-    "thursday": true, "friday": true, "saturday": false, "sunday": false
-  },
-  "start": { "hour": 22, "minute": 0 },
-  "end": { "hour": 7, "minute": 0 },
-  "suppress": { "notifications": true, "decisions": true, "tts": true },
-  "policy": "discard"
-}
-```
-
-- `timezone` は IANA タイムゾーン名です（`Asia/Tokyo`、`America/New_York` など）。空欄はシステムのローカルタイムゾーンを使用します。夏時間（DST）の切り替えは、UTC の瞬間をローカルの壁時計時刻に変換して判定するため、秋の繰り返し時刻は2回ともウィンドウ内として扱われ、春にスキップされる時刻は決してウィンドウ内になりません。
-- `days` で曜日を選択します。`start` は含み、`end` は含みません。`end` が `start` より早い場合は日付をまたいで深夜に折り返します（開始日の夜と翌朝をカバーし、開始日の曜日が有効である必要があります）。`start` と `end` が同じ場合は空のウィンドウです。
-- `suppress` で抑制する出力チャンネルを選びます: `decisions` は決定論的ゲートで判定/生成パイプライン全体を止め（LLM は呼ばれません）、`notifications` は自発発話ターンのステータス通知を抑え、`tts` は生成テキストを表示しつつ自発発話ターンの TTS 音声だけを止めます。
-- `policy` は `decisions` の抑制で止められた発話の扱いです: `discard` はログのみ残して破棄、`queue` はウィンドウ終了後に1件ずつキャッチアップ発話として届け、`summary` は終了後に1件にまとめて届けます。キュー/要約が機能するのは `decisions` の抑制が有効な場合だけです。キャッチアップキューには上限があり（古いものから破棄）、セッション単位です。記録されるのは決定論的ゲート（待機・クールダウン・セッション上限・ソース・疲労）を通過した瞬間だけであり、ユーザーターンが始まるとキューは破棄されます（ユーザーが席に戻ったため）。キャッチアップ項目にはローカルの日付と時刻のみが含まれ、画面データは一切含まれません。
-- バックグラウンドの観測（アクティビティ、画面要約）は、既存のプライバシー設定（`sources.*`）に従ってクワイエットアワー中も継続します。クワイエットアワーは発話出力のみを止めます。抑制は構造化ログの `event="quiet_hours_suppression"` に記録され、ポリシーと判定メタデータのみを含みます — 画面画像は一切保存されません。
-
-`mind.proactive.paused`（既定 `false`）は手動一時停止で、クワイエットアワーや他のすべてのゲートより優先されます。一時停止中は自発発話が一切行われず、保留中のキャッチアップ配信も破棄され、デスクトップの設定画面に一時停止状態が明示されます。
-
-### 保留候補の確認
-
-`mind.proactive.pending_confirmation`（既定は無効）は、古い未確認の記憶候補を自発発話で確認できるようにします。話題ベースの想起で一度も表面化しない保留候補は、話題が近づかない限りキューに残り続けます。このトリガーを有効にすると、自発発話パイプラインが「まだ `Pending` で、`min_age_days`（既定 `3`）以上経過し、`min_confidence`（既定 `0.7`、`0.0..=1.0` にクランプ）以上の確信度を持つ」最古の候補を選択します:
-
-```json
-"pending_confirmation": {
-  "enabled": false,
-  "min_age_days": 3,
-  "min_confidence": 0.7,
-  "reask_after_days": 7
-}
-```
-
-- 対象は弱い矛盾による保留（`AskConfirmationLater`）だけです。承認モードの行（`approval_parked`）はレビューキュー専用のままで、絶対に質問されません — 未承認の候補が会話の中で伝聞として表面化してはいけないためです（想起からの除外と同じ理由）。
-- 同時に進行する質問は最大1件です。選択された候補は通常の判定パイプラインを通ります。すべての決定論的ゲート（手動一時停止、クワイエットアワー、待機、クールダウン、セッション上限、疲労）はそのまま適用され、判定モデルが「今話しかけるのに本当に良い瞬間か」を判断します。
-- 生成プロンプトは短く自然な確認質問を作ります。候補は事実ではなく伝聞として提示され、内部ラベルは一切出しません。`confirmation_enabled` が有効なら、モデルは `<|silent|>` で辞退することもできます。
-- ユーザーの返答は（approved / rejected / unclear に）判定モデルが分類します。`approved` は承認 API を通じて候補を永続化し、`rejected` は破棄します。`unclear` や失敗は保留のまま残し、後の機会に再試行します。解決時は想起キャッシュを無効化し、手動レビューキューと同じ `CandidateChanged` ライフサイクルイベントを発行します。
-- 同じ候補は、質問を届けてから `reask_after_days`（既定 `7`）以内には再選択されません。`unclear` の返答や分類失敗で、次のティックに同じ質問が再発火してユーザーを煩わせるのを防ぎます。`0` でバックオフを無効化できます。
-- 質問中マーカーはセッション単位で永続化されません。再起動後は後のティックで同じ候補が再選択されるだけです。
-
-自発発話の判定は保存された記憶も参照します。`mind.proactive.sources.memory`（既定 `true`）は、ユーザーの `Preference` / `UserProfile` 記憶（「作業中は話しかけないで」「夜は静かに」など）を判定コンテキストの `user_instructions` として注入します。これらは決定論的に注入され（新しい順、最大 `mind.proactive.max_memory_notes`、既定 12 件。この上限はステージドロールアウトの間は 12 件に固定されており、まだユーザー設定できません）、想起スコアの競争には一切乗らないため、抑制条件が低スコアで落ちることはありません。判定モデルには、該当する恒常ルールがあれば `should_speak=false` で従うよう指示されます。生成フェーズでも同じ設定が話題の想起を有効にします。判定の `topic_hint` を語彙のみの検索クエリ（埋め込みプロバイダー不要）として使い、話しかける話題に関して覚えていることに触れられます。`sources.memory` を `false` にすると、コスト/レイテンシを気にする構成向けに従来の「記憶なし」挙動へ戻ります。
-
-`redacted_title` はタイトルをフィールド単位でフィルタします。空白に加えてウィンドウタイトルで
-使われる区切り文字（`_ - | 、 ・ 【】 「」 ｜ ：` など）でも分割するため、日本語・中国語で
-一般的な「空白を含まないタイトル」も、1 つの塊として素通りするのではなくフィールド単位で
-フィルタされます。`.` `/` および半角 `:` では分割しません。これらはパス・URL・拡張子を
-つなぐ文字であり、検出器が完全なトークンを必要とするためです。区切り文字に囲まれていない
-フィールド（人名を含む地の文など）はそのまま残るため、`redacted_title` は露出を
-「なくす」のではなく「減らす」設定です。タイトルを一切外部に出したくない場合は
-`app_only` を使用してください。
-
-記憶想起はハイブリッドスコア `(relevance × quality + commitment_boost) × penalty`
-（`crates/ene-rag/src/scoring.rs` を参照）を使用します。新しくて関連性の強い記憶は
-`1.0` に近いスコアになり、最近の/語彙一致のみの候補は `0.1〜0.5` 程度、無関係な
-ノイズは `0.0` になります。`recall_min_score`（デフォルト `0.10`）は最終ランキングを
-フィルタリングし、`recall_similarity_threshold`（デフォルト `0.35`）はベクトル収集を
-制御し、`commitment_boost`（デフォルト `0.25`）はクエリとの関連性がゼロでもアクティブな
-約束を表面化させます。`access_boost_half_life_days`（デフォルト `14.0`、
-`ene_rag::ACCESS_BOOST_HALF_LIFE_DAYS` と同じ）は、品質係数における過去アクセス
-ブーストの減衰半減期を制御します。内容の忘却 / 新近性用の
-`default_forgetting_half_life_days` とは独立です。
-
-`mind.language`（デフォルト: システムロケールから解決。プライマリ言語コードが `ja` の
-場合のみ `"ja"`、それ以外は `"en"`）は、認知プロンプトと決定論的パターンのアプリ全体の
-言語です。感情分類器・認知出力契約・圧縮要約・想起意図キーワード・記憶抽出パターンは、
-それぞれのタスク別 override が設定されていない限りこれに従います。
-`mind.language` を設定していない既存インストールでは、アップグレード後にプロンプトと
-分類器の言語が変わる可能性があります。デフォルトは以前は英語に固定されていましたが、
-現在はシステムロケールから導出されます（日本語システムでは `ja` になります）。
-`mind.emotion.classifier_language` と `mind.context.compression_language` はタスク別の
-override で、空（デフォルト）の場合は `mind.language` を継承します。記憶抽出は
-`mind.language` に直接従い、分類器設定を参照しません。ユーザー向け LLM 指示文字列は
-`assets/lang/{lang}/prompts.json` から、決定論的な
-パターンは `assets/lang/{lang}/patterns.json` から実行時にロードされます。その
-パックが存在しない場合、`ene_config::SUPPORTED_LANGUAGES`（`en`, `ja`）の言語に
-ついてはコンパイル時埋め込みパックへ、それ以外は英語へフォールバックします。詳細は
-[ターン・セッション](concepts/turn-and-session.md) §3 を参照してください。
-
-コミットメント台帳は、着信したコミットメントをタイトル埋め込みの類似度でアクティブな
-コミットメントと照合します。`commitment_title_similarity_threshold`（デフォルト
-`0.82`）はコサイン類似度の閾値で、これを上回ると言い回しの異なる約束は二重登録ではなく
-既存コミットメントの更新（supersede）として扱われます。埋め込みプロバイダーが未設定の
-場合、台帳は正規化タイトルの完全一致にフォールバックし、この閾値は使用されません。
-照合は適用バッチごとにアクティブな台帳行をメモリへ読み込みます。
-`mind.memory_limits.commitment_active_match_limit`（デフォルト `4096`）がその件数の上限で、現実的な
-同時アクティブ約束数をはるかに上回る値とし、台帳が肥大化した場合のメモリと埋め込み
-計算を抑えます。返却件数がちょうど上限と一致すると台帳は切り捨てを警告します。
-照合漏れが疑われる場合は `mind.memory_limits.commitment_active_match_limit`（または
-`ENE_MIND__MEMORY_LIMITS__COMMITMENT_ACTIVE_MATCH_LIMIT`）を引き上げてください。
-これはオペレーターが設定できる 2 つのメモリ項目のうちの 1 つです。`mind.memory.*` の
-その他の挙動はコード既定値（`MindMemoryConfig`）のままです。もう 1 つは下記の
-承認ワークフロー切り替えです。
-
-### `mind.memory_approval.*` — 保存前候補承認
-
-```json
-{
-  "mind": {
-    "memory_approval": {
-      "require_approval": false
-    }
-  }
-}
-```
-
-`require_approval`（既定 `false`、環境変数:
-`ENE_MIND__MEMORY_APPROVAL__REQUIRE_APPROVAL`）は、typed memory の書き込みを
-自動保存から「保存前レビュー」ワークフローに切り替えます。`true` のとき、通常は
-永続化される（または既存記憶を上書きする）抽出候補はすべて `pending_candidates`
-キューに留め置かれ、出典ターン・出典引用・抽出理由・confidence・上書き対象を保持します。
-キューは CLI（`/memory approval`）とデスクトップの Memory Journal に表示され、
-各候補を確認・編集・編集して承認・承認・却下できます。承認された候補は typed memory
-として永続化され、元の競合対象は `supersedes_id` として引き継がれ、古い記憶は
-自動保存と同じ上書きセマンティクスで `Superseded` に移行します。却下された候補は
-破棄されます。編集は書き込み前に検証され、解決は競合安全なので、不正な編集や
-競合しても元の候補が失われることはありません。承認・編集操作は実行中のターン ID を
-保持し、ランタイムのライフサイクルバス上で `CandidateChanged` 監査イベントとして
-発行されます。
-
-承認モードでは、未承認の候補は通常の想起から除外されます。プロンプトには現れず、
-レビューキューでのみ表示されます。承認モードで保留された候補は、後でモードを
-オフにしても想起に戻りません。通常の想起に参加できるのは弱い矛盾による保留のみです。
-既定の自動保存モード（`false`）は変更されません。弱い矛盾による候補は従来どおり
-確認待ちとなり、下記の
-`recall_pending_candidate_limit` の範囲で想起に参加できます。コミットメント候補
-（専用の台帳パス）と明示的なユーザー忘却・係争（dispute）判定は、どちらのモードでも
-即時に適用されます。
-
-メモリー調停器（arbiter）は、着信した候補が同じ種別の既存記憶と矛盾するかどうかを、
-*タイトル埋め込みの類似度* で判定します (#351)。`contradiction_title_similarity_threshold`
-（デフォルト `0.82`）はコサイン類似度の閾値で、これを上回ると同義のタイトル
-（「職業」と「仕事」、「住んでいる場所」と「居住地」）は同じ主題として扱われ、
-無関係な重複として永続化される代わりに矛盾検査の対象となります。埋め込みプロバイダーが
-未設定の場合、調停器は正規化タイトルの完全一致にフォールバックし、この閾値は使用されません。
-
-メモリー調停器の 4 つの判定閾値は `MindMemoryConfig` でコード既定（code default）であり、
-設定からは変更できません (#352)。これらは合わせて、着信した候補をいつ永続化するか、
-いつ既存の矛盾する記憶を *上書き（supersede）* するか、いつ既存記憶を
-*係争中（disputed）* とマークするか、そしていつ判定をユーザー確認へ回すかを決めます：
-
-| 設定 | 既定 | 意味 |
+| セクション | 主なキー | 意味 |
 |---|---|---|
-| `min_confidence_to_persist` | `0.65` | 永続化に必要な候補の最低 confidence。 |
-| `supersede_confidence_delta` | `0.05` | 候補が既存記憶の confidence を上回り、上書きするために必要な差。 |
-| `semantic_similarity_threshold` | `0.85` | 2 つの記憶を意味的な重複とみなすコサイン類似度の閾値（以上で重複）。 |
-| `dispute_confidence_gap` | `0.15` | 矛盾する候補が既存記憶を上書きせず係争中とマークする、confidence の差の下限。 |
+| `mind.language` | `"ja"` | プロンプト・分類器のデフォルト言語。 |
+| `mind.emotion` | `enabled`, `classifier_language` | PAD 感情エンジンと LLM 分類器。 |
+| `mind.proactive` | `enabled`, `cooldown_seconds`, `interval_seconds`, `min_idle_seconds`, `sources`, `quiet_hours`, `paused` | プロアクティブ発話のゲート（[プロアクティブ](reference/architecture/cognitive-runtime.md#プロアクティブ発話)参照）。 |
+| `mind.memory_limits` | `commitment_active_match_limit` | 想起の上限。 |
+| `mind.memory_approval` | `require_approval` | true の場合、抽出メモリは活性化前にレビューキューで待機。 |
+| `mind.topic_boundary` | `enabled`, `boundary_threshold`, 重み | セッション分割のヒューリスティック。 |
+| `mind.session` | `session_timeout_minutes` | セッションを終了するアイドルタイムアウト。 |
 
-4 つとも確率・比率であり、読み込み時に `0.0..=1.0` へ clamp されます。
-特に `semantic_similarity_threshold` は埋め込みモデルの類似度分布に強く依存するため、
-埋め込みプロバイダーを切り替えた際は再調整してください。
-
-ユーザー確認へ回された候補（`AskConfirmationLater`）は `pending_candidates` キューに保持されます。
-デスクトップの設定画面のレビュー一覧に加えて、これらはハイブリッド想起にも参加します。
-話題が浮上したときにキャラクターが自然に確認できるよう、表面化した候補はプロンプト内で `[unconfirmed]` とマークされます。
-`recall_pending_candidate_limit`（デフォルト `3`）はターンごとに競争へ参加する数を上限し、
-`0` にすると設定画面のレビュー一覧に影響を与えずに想起経路を無効化できます。
-この上限は `MindMemoryConfig` でコード調整でき、設定としてはまだ公開されていません。
-承認・却下された候補は履歴としてキューに残り、保持スイープ（
-`mind.memory.pending_candidate_retention`、コード既定 14 日 / 200 件）で削除される
-まで、CLI の `/memory approval history` とデスクトップの履歴ビューから解決日時と
-ともに確認できます。
-
-### `plugins.*` — IPC プラグインおよび MCP サーバー接続
-
-プロセス外ツールプラグインおよび Model Context Protocol (MCP) サーバーを管理します：
+## `store.*` — 永続化
 
 ```json
-{
-  "plugins": {
-    "enabled": true,
-    "list": {
-      "app": { "enable": true },
-      "browser": { "enable": true },
-      "fs": { "enable": true, "db_quota_mb": 256 },
-      "utility": { "enable": true },
-      "web": { "enable": true }
-    },
-    "max_concurrent": 8,
-    "parallel_tool_calls_max": 4,
-    "mcp_servers": [
-      {
-        "name": "filesystem",
-        "enabled": true,
-        "transport": {
-          "type": "stdio",
-          "command": "npx",
-          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/allowed"]
-        }
-      }
-    ]
-  }
-}
+{ "store": { "enabled": true } }
 ```
 
-#### `plugins.mcp_servers` — MCP サーバーエントリ
-
-各エントリは 1 つの MCP サーバーを宣言し、`name`（ルーティングとツールの名前空間にそのまま使われる）、`enabled`、`transport`、任意の `env_passthrough` リストを持ちます：
-
-```jsonc
-"mcp_servers": [
-  {
-    "name": "github",
-    "enabled": true,
-    "transport": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"]
-    },
-    "env_passthrough": ["GITHUB_PERSONAL_ACCESS_TOKEN"]
-  },
-  {
-    "name": "local-dev",
-    "enabled": true,
-    "transport": {
-      "type": "http",
-      "url": "https://example.com/mcp",
-      "auth_header": "Bearer <token>"
-    }
-  }
-]
-```
-
-- `enabled` と `transport` は必須です。`enabled: false` にするとサーバーはスキップされます。
-- `transport.type` は `"stdio"`（`command` を `args` 付きで子プロセスとして起動）または `"http"`（`url` に接続し、`auth_header` を `Authorization` ヘッダーとして送信。不正なヘッダーは認証なしへのダウングレードではなく接続拒否になります）。
-- stdio の子プロセスは**クリアされた環境**で実行されます：転送されるのは `PATH`・`HOME`・`TMPDIR`・`LANG`・`TZ`・`LD_LIBRARY_PATH` と Windows 必須変数のみです。それ以外 — 特に API キー — はホスト環境にエクスポートし、`env_passthrough` でホワイトリスト登録する必要があります。サーバーごとのインライン `env` マップはありません。
-- `mcp_servers` は配列のため、エントリは `settings.json` で宣言します：`ENE_` 環境変数はスカラー値（例：`ENE_PLUGINS__MCP_ALLOW_INSECURE_URLS`）の上書きはできますが、配列要素を追加することはできません。
-
-HTTP の MCP エンドポイントは接続前に URL を検証します (既定では HTTPS のみ。
-ループバックおよびクラウドメタデータ/リンクローカルアドレスは拒否)。`plugins` 内で
-`"mcp_allow_insecure_urls": true` を設定すると、ローカル開発用にプレーン `http://` と
-ループバック URL を許可できます。リンクローカルアドレスは拒否されたままです。
-詳細は[プラグインと MCP](concepts/plugins-and-mcp.md) を参照。
-サービス別の設定例（Calendar、Mail/Chat、Notes、Map、RSS）は
-[MCP サーバー設定ガイド](guide/tools/mcp-servers.md) を参照してください。
-
-`max_concurrent` は、**プラグイン接続ごと**の同時進行中 IPC リクエスト数の上限です。ツール呼び出しだけでなく、ping・`list_tools`・`chat_completion` など*すべて*のリクエスト種別を対象とします。上限を超えたリクエストは、プラグインへ無制限に送出されるのではなく（自身のタイムアウトを上限として）キューイングされます。チャット*ストリーム* (`CreateChatStream`) は例外で、この上限をバイパスし、カウントされません。
-
-`parallel_tool_calls_max` は、1 つの LLM 応答に含まれる**副作用のない**ツール呼び出しを同時にいくつ実行するかの上限です。モデルが 1 ターンで複数のツール呼び出しを出力したとき、`ToolSpec` で `side_effects: ReadOnly` を宣言しているもの（かつバックグラウンド非対応のもの）を、この上限まで並列にディスパッチします。並列化は応答内の*すべて*の呼び出しが副作用のない場合にのみ適用されます。混合ラウンドでは、読み取り専用の呼び出しが同じ応答内の先行する書き込みを追い越してはならない（read-after-write）ため、厳密に元の順序で逐次実行されます。それ以外 — 副作用のあるツール、副作用を宣言していないツール、`system.search_tools` — は従来どおり逐次実行されます。結果は元の `tool_calls` の順序へ並べ戻されるため、権限/ユーザー入力のプロンプト、undo スタック、`ToolCallStart`/`ToolCallResult` イベント、`ToolResultSummary` の順序はすべて保たれます。`0` を設定すると並列化が完全に無効になり、以前の完全逐次動作に戻ります。分類はフェイルクローズドです。`ReadOnly` の副作用を宣言していないツールは決して並列化されません。
-
-#### `plugins.resource_classes` — クラス別 GPU 入場予算
-
-各 LLM プロバイダープラグインは、ハンドシェイクの capabilities で `resource_class`（`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"` — ここで使うのと同じ外部タグ JSON）により、自身のジョブが競合する物理リソースを申告します。ホストは**同じクラスを申告するすべてのプラグインで 1 つの入場予算を共有**するため、デバイス 0 にオフロードする 2 つのローカルモデルが別々のプラグインプロセスに由来する場合でも同時実行されません。permit はリクエストの間（ストリーム、または単発の completion）ホスト側で保持され、リクエスト終了・キャンセル・**配信プラグインのクラッシュ**のいずれでも自動的に解放されます — クラッシュしたプラグインが GPU スロットをリークすることはありません。
-
-`Gpu` クラスは既定でゲートされます: **デバイスごとに同時実行 1 ジョブ**、さらに最大 8 呼び出しまで待機し、それを超えると型付き `Busy` エラーで即時失敗します。`Cpu` / `Network` クラスはエントリで明示しない限りゲートされないため、クラウドプロバイダーの宣言済みプラグイン別並行度は変わりません。既定は `plugins.resource_classes` で上書きできます:
-
-```jsonc
-{
-  "plugins": {
-    "resource_classes": [
-      { "class": { "Gpu": { "device": 0 } }, "permits": 1, "queue_depth": 8 },
-      { "class": "Cpu", "permits": 8 }
-    ]
-  }
-}
-```
-
-- `class` — 予算を割り当てるクラス（ワイヤと同じ外部タグ形式）。
-- `permits` — このクラスの同時実行ジョブの上限。省略時はクラス既定（GPU デバイスは 1、`Cpu` は論理 CPU 数、`Network` は 4）。
-- `queue_depth` — permit を待てる追加呼び出し数。超えると `Busy` で即時失敗。省略時は 8。
-
-ローカル GGUF プロバイダー（`ene-plugin-llama-cpp`）は、`plugins.list.llama-cpp.config.acceleration` が `vulkan`/`cuda`（または GPU 対応ビルドでの `auto`）のとき `Gpu { device: 0 }`、それ以外は `Cpu` を申告します。申告はハンドシェイク時に固定されるため、`acceleration` のライブ変更は次回ホスト起動時に反映されます。なお、このクラス別ゲートが制御するのは*実行*並行度のみです。VRAM 常駐（2 つのプラグインが同じデバイスにモデルを載せ続けること）は別の、未解決の課題です。
-埋め込みリクエスト（`EmbedPlugin`）にはまだワイヤ上のクラス申告手段が無いため、**ホスト側ではゲートされません**。ローカル GGUF プラグインは、埋め込みに申告面が追加されるまでプロセスローカルのバックストップとしてプロセス内入場制御を維持します。
-
-`plugins.list.<name>.db_quota_mb` は、プラグインのテーブルが**共有 `memory.db`** 内で占有できる上限をメビバイト単位で設定します (#424)。ステートフルなプラグインはすべて 1 つの共有データベースへ書き込むため、上限がなければ 1 つの暴走（または悪意ある）プラグインがディスクを使い切ったり、`memory.db` を肥大化させて記憶システムのクエリ・バックアップ・整合性検査を劣化させたりするおそれがあります。ホストは各プラグインの使用量（宣言済みテーブル全体の全セルのバイト長合計）を測定し、上限に達するか超えるようなストレージを増やす書き込み（`Insert`/`Upsert`、`Batch` 内のものを含む）を拒否し、`QUOTA_EXCEEDED` エラーを返します。読み取りと削除は一切制限されないため、上限に達したプラグインでも常に空きを確保できます。既定値は `256` で、組み込みプラグインが近づけないほど十分に大きい一方、暴走プラグインが実際の被害を出す前に抑制できます。無制限のストレージが正当に必要なプラグインには、このフィールドを `null` に設定して強制を無効化できます。
-
-#### `plugins.list.<name>.config` — プラグイン所有の設定 (#313)
-
-各プラグインエントリは、ホストからは**不透明**な設定ブロブを保持できます：
-
-```json
-{
-  "plugins": {
-    "list": {
-      "anthropic": {
-        "enable": true,
-        "config": {
-          "api_key": { "source": "env", "env": "ANTHROPIC_API_KEY" }
-        }
-      },
-      "llama-cpp": {
-        "enable": true,
-        "config": {
-          "mmproj_url": "https://example.com/mmproj.gguf",
-          "acceleration": "vulkan"
-        }
-      }
-    }
-  }
-}
-```
-
-ホストはこのブロブを**そのまま**保存・配信します。ブロブ内のキーを解釈・書き換え・破棄することは決してありません（未知のキーもロード→セーブの往復で保持されます）。ブロブはハンドシェイク時に一度だけプラグインへ送信されます（`ConfigurablePlugin::set_config`）。プロバイダートレイト（LLM/embed/TTS/STT）を実装するプラグインも、ツールプラグインと同じ方法で受け取ります。単一キーの環境変数オーバーライドは `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>`（例：`ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY`）です。従来 `ai.*` にあったプロバイダー固有設定はここへ移動しました。たとえば `plugins.list.llama-cpp.config.{mmproj_url,mmproj_path,acceleration}`（旧 `ai.local_models.<name>.{mmproj_url,mmproj_path,acceleration}`）、`plugins.list.onnx.config.ort_dylib_path`（旧 `ai.ort_dylib_path`）、`plugins.list.kokoro.profiles.kokoro.voices_path`（旧 `ai.tts.voices_path`）。
-
-llama-cpp プラグインの `acceleration` 値はバイナリのビルドと一致している必要があります：リリース版の Linux パッケージは `vulkan` バックエンドをコンパイル済みで同梱しますが、CPU デフォルトのビルド（`--features vulkan` なしの `cargo build -p ene-plugin-llama-cpp`）は `"vulkan"` / `"cuda"` をロード時に型付きエラーで拒否します。`"auto"`（既定値）は常に動作します：コンパイル済みの GPU バックエンドがあればそれを選択し、なければ CPU にフォールバックします。
-
-バージョン 1 の `settings.json` は読み込み時に自動でマイグレーションされます。上記の移設対象キーは `plugins.list.*` の移動先へ移され（旧 `ai.*` の場所からは削除され）、その後にファイルが読み込まれて、マイグレーション後のドキュメントが永続化されます。対象キーを持たないファイルは論理的に変更されません。また、ネストした `config`/`profiles` 階層より前のレガシーなフラットなエントリレベルキー（`plugins.list.<name>.<key>`）も、起動時に配信される設定ブロブへ折り込まれます（明示的な `config` キーが優先）。この折り込みはディスク上のファイルを書き換えないため、リロードをまたいで安定しています。
-
-バージョン 2 のファイルは読み込み時にバージョン 3 へマイグレーションされます。各
-`ai.local_models.<name>` エントリが `plugins.list.llama-cpp.profiles.<name>` へ
-ミラーされます（非空の `url`・`quantization`・`model_path`・`gpu_layers`・
-`context_size`・`dimensions` のみ。既存の非空のプロファイル値は上書きされません。
-既存の空値は「なし」とみなされます）。`ai.local_models` 自体は無傷のまま
-残ります — `ene-ai` はローカルタスクのルーティングとコンテキスト予算を
-ここから読み続け、ホストは宣言された埋め込み次元数をここから読みます。
-バージョン 3 のファイルは読み込み時にバージョン 4 へマイグレーションされます。
-`context_size` / `dimensions` がミラー対象になる前に v3 へ到達した
-インストールにも同じミラーが再実行されて反映されます（既存の非空の
-プロファイル値は引き続き上書きされません）。バージョン 4 のファイルは
-読み込み時にバージョン 5 へマイグレーションされます。`ai.stt.model_path` は
-`plugins.list.whisper.config.model_path` へ、
-`ai.vad.{model,model_path,threshold}` は
-`plugins.list.onnx.config.{model,model_path,threshold}` へ移動します
-（これらの設定はプロバイダプラグインが所有します）。
-
-#### `plugins.list.<name>.profiles.<profile>` — プロファイル別設定 (#313)
-
-1 つのプラグインがモデル/音声/プロファイルごとに異なる設定を必要とすることがあります。`profiles` マップは、ホストからは不透明なプロファイル別ブロブを保持し、ハンドシェイク時にプラグインへ配信されます（`ConfigurablePlugin::set_profiles`）。プロファイルの*選択*はプラグイン側の責務です：
-
-```json
-{
-  "plugins": {
-    "list": {
-      "kokoro": {
-        "enable": true,
-        "profiles": {
-          "kokoro": { "voices_path": "/data/voices.bin" }
-        }
-      },
-      "llama-cpp": {
-        "enable": true,
-        "profiles": {
-          "gemma-4-e4b": {
-            "url": "https://example.com/gemma-4-e4b.gguf",
-            "quantization": "Q4_0",
-            "model_path": "",
-            "gpu_layers": "33",
-            "context_size": 16384
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-ローカル GGUF プロバイダプラグイン（`ene-plugin-llama-cpp`）はモデルごとに
-1 つのプロファイルを消費します：`url`（GGUF ダウンロード URL）、
-`quantization`（ラベル、例：`"F16"` / `"Q4_0"`）、`model_path`（非空の場合は
-ダウンロードをスキップするローカルパス）、`gpu_layers`（`"auto"` または整数
-文字列）、および省略可能な `context_size`（チャットのコンテキスト窓（トークン
-単位）。省略時は `16384`）、および省略可能な `dimensions`（宣言された埋め込み
-次元数。後述）。プラグインは初回使用時に `url` の重みをモデルキャッシュへ
-ダウンロードし（GGUF マジック検証付き）、プロファイルごとにロードしたモデルを
-ライブの config/profile 更新でキャッシュが無効化されるまで保持します。更新中の
-リクエストは旧モデルを使い、その後のリクエストは新しい設定でロードします。
-初回ダウンロードはプロアクティブ決定のウォームアップ予算（5 分）の中で
-実行されるため、それ以上かかるモデルはフェイルクローズします
-（プロアクティブはホスト再起動まで `Disabled`）。非常に大きなモデルは
-`model_path` であらかじめ取得済みのキャッシュを指定してください。
-`context_size` と `gpu_layers` はチャットの
-ロードのみに効きます — 埋め込みモデルは内部で独自にコンテキストとオフロード
-計画を設定し、ホスト側のルーティング窓は `ai.local_models.<name>.context_size`
-に残ります。v2→v3 マイグレーションは `context_size` をミラーするため、
-プロファイルで省略した場合はホスト側の値でロードされます（ホスト側も既定値の
-場合は 16,384）。ミラーより前の手書きプロファイルだけが乖離し得るため、その
-場合はホスト側の値以上の `context_size` を設定してください。設定しないと長い
-プロンプトが生成時にコンテキストオーバーフローで失敗します。プロファイルの
-*選択*はプラグイン側の責務で、値は `ConfigurablePlugin::set_profiles` で
-配信されます。ローカルモデルのキーはルーティング情報として
-`ai.local_models` に残ります。
-
-`dimensions` は、モデルが `provider: "local"` の `tasks.embedding` を担う場合、
-`ai.local_models.<name>` に必須です：ホストはプラグインホストの起動前に
-メモリストアのベクトルスキーマをこの値で開き、プラグインは最初の
-`embed_batch` リクエスト（モデルロード時）に宣言値がモデルの実際の次元数と
-異なる場合に拒否します（同梱の `jina-v5-small` は `1024`）。埋め込みタスク
-自身の `dimensions` フィールドはクラウド専用のノブで、ローカルプロバイダでは
-無視されます。
-
-#### VOICEVOX / Aivis Speech TTS プロバイダ（`plugins.list.voicevox.config`）
-
-`voicevox` プロバイダプラグイン（`plugins/provider/voicevox`）は VOICEVOX
-HTTP API を話すため、VOICEVOX Engine・Aivis Speech・その他の互換エンジン
-（COEIROINK など）で動作します。API キーは不要です — エンジンはローカルの
-HTTP サーバーです。`ai.tts.provider = "voicevox"` で選択します。汎用の
-`ai.tts.voice` には、設定済みの既定話者をリクエスト単位で上書きする
-話者/スタイル ID（数値文字列）を任意で指定できます。
-
-```json
-{
-  "ai": {
-    "tts": {
-      "provider": "voicevox",
-      "voice": "14"
-    }
-  },
-  "plugins": {
-    "list": {
-      "voicevox": {
-        "enable": true,
-        "config": {
-          "server_url": "http://127.0.0.1:50021",
-          "speaker_id": 3,
-          "speed_scale": 1.0,
-          "pitch_scale": 0.0,
-          "intonation_scale": 1.0,
-          "volume_scale": 1.0,
-          "tempo_dynamics_scale": 1.0,
-          "output_sampling_rate": 24000,
-          "auto_start": false,
-          "engine_path": "/opt/voicevox/run.exe",
-          "engine_args": ["--port", "50021"],
-          "startup_timeout_secs": 10
-        }
-      }
-    }
-  }
-}
-```
-
-設定項目：
-
-| キー | 既定値 | 説明 |
-|---|---|---|
-| `server_url` | `http://127.0.0.1:50021` | エンジンの HTTP ベース URL。VOICEVOX は既定でポート 50021、Aivis Speech は 10101。 |
-| `speaker_id` | `0` | 既定の話者/スタイル ID（64 ビット整数。Aivis のスタイル ID は 32 ビットを超えます）。 |
-| `speed_scale` | `1.0` | 発話速度倍率（エンジン側で検証、例：0.5–2.0）。 |
-| `pitch_scale` | `0.0` | ピッチ（エンジン側で検証、VOICEVOX では例：−0.15–0.15）。 |
-| `intonation_scale` | `1.0` | 抑揚の強さ（エンジン側で検証、例：0–2）。 |
-| `volume_scale` | `1.0` | 出力音量（エンジン側で検証、例：0–2）。 |
-| `tempo_dynamics_scale` | `1.0` | Aivis Speech 拡張：テンポの強弱（0–2）。VOICEVOX は未知フィールドを拒否するため、既定値以外のときだけ送信されます。 |
-| `output_sampling_rate` | 未設定 | 出力サンプルレート（例：24000/48000）。設定時のみ送信され、未設定ならエンジン既定値を使います。 |
-| `auto_start` | `false` | マネージドモード：サーバーが起動していない場合にエンジンバイナリを起動します。 |
-| `engine_path` | 未設定 | マネージドモードで使うエンジン実行ファイルのパス。 |
-| `engine_args` | `[]` | エンジンバイナリへ渡す追加コマンドライン引数。 |
-| `startup_timeout_secs` | `10` | 起動後にマネージドモードが `GET /version` を待つ秒数。 |
-
-各キーは環境変数 `ENE_PLUGINS__LIST__VOICEVOX__CONFIG__<KEY>`
-（例：`ENE_PLUGINS__LIST__VOICEVOX__CONFIG__SPEAKER_ID`）でも上書きできます。
-
-**外部モード（既定）。** 自分でエンジンを起動します — VOICEVOX アプリや
-`run.exe`、Aivis Speech / COEIROINK サーバーを起動し、`server_url` に指定します。
-プラグインは標準の 2 段階フロー（`POST /audio_query` → `POST /synthesis`）を
-呼び、WAV 音声を返します。
-
-**マネージドモード（`auto_start: true`）。** 初回利用時にプラグインが
-`GET /version` をプローブします。応答するエンジンが無ければ `engine_path` を
-`engine_args` 付きで起動し、`startup_timeout_secs` 秒まで `/version` をポーリング
-します。起動したエンジンはプラグインプロセスの終了時に停止されます。エンジンの
-バイナリは事前にインストールされている必要があり、プラグインはダウンロードを
-行いません。
-
-`ai.tts.provider` 自体の変更（例：`kokoro` から `voicevox` への切替）は次回
-起動時に反映されます。アクティブなプロバイダはブートストラップ時に一度だけ
-構築されるためです。一方、`plugins.list.voicevox.config` と `ai.tts.voice` の
-編集は実行中のセッションにも反映されます。
-
-#### ローカル Kokoro-TTS プロバイダ（`plugins.list.kokoro.config`）
-
-`kokoro` プロバイダプラグイン（`plugins/provider/kokoro`）は、Kokoro-82M
-ONNX モデルを自プロセス内で直接実行します。完全ローカルで、API キーも HTTP
-エンジンも不要です。`ai.tts.provider = "kokoro"` で選択します。汎用の
-`ai.tts.voice` には Kokoro ボイス名（例：`af_heart`、`jf_alpha`）を指定でき、
-設定済みの既定ボイスをリクエスト単位で上書きします。
-
-ONNX モデルと `voices.bin` ボイス埋め込みは共有モデルキャッシュに取得されます
-（プラグイン自身が初回利用時に取得します。存在して妥当なファイルは
-再ダウンロードされません）。カスタムの `model_path` / `voices_path` は
-キャッシュ位置を上書きし、ファイルが無い場合は同じパスへ取得します。
-
-```json
-{
-  "ai": {
-    "tts": {
-      "provider": "kokoro",
-      "voice": "af_heart"
-    }
-  },
-  "plugins": {
-    "list": {
-      "kokoro": {
-        "enable": true,
-        "config": {
-          "model_path": "/data/kokoro.onnx",
-          "voices_path": "/data/voices.bin",
-          "voice": "af_heart",
-          "speed": 1.0,
-          "language": "en",
-          "ort_dylib_path": "/opt/onnxruntime/lib/libonnxruntime.so"
-        }
-      }
-    }
-  }
-}
-```
-
-設定項目:
-
-| キー | 既定値 | 説明 |
-|---|---|---|
-| `model_path` | 共有モデルキャッシュ（`models/gguf/kokoro.onnx`） | Kokoro ONNX モデルファイルのパス。 |
-| `voices_path` | `plugins.list.kokoro.profiles.kokoro.voices_path` → 共有モデルキャッシュ（`models/gguf/voices.bin`） | `voices.bin` ボイス埋め込みのパス。プロファイルのスロットは旧 `ai.tts.voices_path` の移行先です。 |
-| `voice` | `""`（`voices.bin` の先頭ボイス `af_alloy`） | 既定ボイス。リクエスト単位の `ai.tts.voice` が優先されます。全 53 ボイス名はケーパビリティ一覧を参照。ボイスを切り替えるたびにモデルが再ロードされます。 |
-| `speed` | `1.0` | 発話速度倍率（0.5–2.0）。 |
-| `language` | 未設定（英語 G2P） | 書記素→音素変換の言語。`"ja"` で日本語のかなルール、それ以外は英語ルールを使用。 |
-| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き。プロセス起動時に固定されます（ONNX Runtime はプロセスごとに一度だけ初期化）。変更には再起動が必要です。共有スロットの `plugins.list.onnx.config.ort_dylib_path` にフォールバックします。 |
-
-各キーは環境変数で個別に上書きできます：
-`ENE_PLUGINS__LIST__KOKORO__CONFIG__<KEY>`
-（例：`ENE_PLUGINS__LIST__KOKORO__CONFIG__SPEED`）。
-
-モデルは最初の合成時に遅延ロードされ、プラグインプロセス内に常駐します。
-モデル/ボイスのパス、ボイス、速度、言語を変更すると再ロードされます
-（`ort_dylib_path` はプロセス起動時に固定）。プラグインは 24 kHz モノラル
-WAV を返し、ホスト側の音声パイプラインが float サンプルにデコードして
-`TtsChunk` に分割し、ストリーミング再生します
-（`formats = ["wav"]`）。
-
-ローカル音声プロバイダ（TTS・STT・VAD）はすべてプラグインプロセスでのみ
-動作します。`ene-runtime` / `ene-desktop` はもう `ene-voice` に依存しません。
-
-#### ローカル whisper.cpp STT プロバイダ（`plugins.list.whisper.config`）
-
-`whisper` プロバイダプラグイン（`plugins/provider/whisper`）は whisper.cpp を
-自プロセスで実行します。完全ローカルで API キーは不要です。
-`ai.stt.provider = "whisper"` で選択します。汎用の `ai.stt.language`
-（例：`"ja"`、`"en"`。空 = 自動検出）と `ai.stt.model`（パスフォールバック）は
-TTS アダプタが `ai.tts.voice` を転送するのと同様に、リクエスト単位で
-プラグインへ転送されます。
-
-```json
-{
-  "ai": {
-    "stt": {
-      "provider": "whisper",
-      "model": "ggml-base.bin",
-      "language": "ja"
-    }
-  },
-  "plugins": {
-    "list": {
-      "whisper": {
-        "enable": true,
-        "config": {
-          "model_path": "/data/ggml-base.bin"
-        }
-      }
-    }
-  }
-}
-```
-
-設定項目:
-
-| キー | 既定値 | 説明 |
-|---|---|---|
-| `model_path` | `ai.stt.model` → 共有モデルキャッシュ（`models/gguf/whisper.gguf`） | whisper.cpp GGUF モデルファイルのパス。旧 `ai.stt.model_path` は設定バージョン 5 でここへ移動しました。 |
-
-各キーは環境変数で個別に上書きできます：
-`ENE_PLUGINS__LIST__WHISPER__CONFIG__<KEY>`
-（例：`ENE_PLUGINS__LIST__WHISPER__CONFIG__MODEL_PATH`）。
-
-モデルは最初の文字起こし時に遅延ロードされ、プラグインプロセス内に常駐します。
-`model_path` か言語ヒントを変更すると再ロードされます。ホストはキャプチャした
-PCM を `TranscribeAudio` ラウンドトリップの前に WAV へエンコードするため
-（`formats = ["wav"]`）、プラグインに音声キャプチャコードは不要です。
-
-#### ローカル Silero VAD エンジン（`plugins.list.onnx.config`）
-
-`onnx` プロバイダプラグイン（`plugins/provider/onnx`）は Silero VAD ONNX
-エンジンを自プロセスで実行し、共有の `onnx-runner@1` / `g2p/en@1` 能力を
-宣言します。`ai.vad.provider = "silero"` で選択します（デスクトップの
-マイクキャプチャは VAD が `"none"` のとき既定でこれを使います）。
-
-```json
-{
-  "ai": {
-    "vad": {
-      "provider": "silero"
-    }
-  },
-  "plugins": {
-    "list": {
-      "onnx": {
-        "enable": true,
-        "config": {
-          "model_path": "/data/silero_vad.onnx",
-          "threshold": 0.5,
-          "ort_dylib_path": "/opt/onnxruntime/lib/libonnxruntime.so"
-        }
-      }
-    }
-  }
-}
-```
-
-設定項目:
-
-| キー | 既定値 | 説明 |
-|---|---|---|
-| `model` | `""` | Silero VAD モデル名。`model_path` 未設定時のパスフォールバックとして使われます。 |
-| `model_path` | `model` → 共有モデルキャッシュ（`models/gguf/silero_vad.onnx`） | Silero VAD ONNX モデルファイルのパス。旧 `ai.vad.model_path` は設定バージョン 5 でここへ移動しました。 |
-| `threshold` | `0.5` | 発話確率の閾値（0.0–1.0）。旧 `ai.vad.threshold` は設定バージョン 5 でここへ移動しました。デスクトップの設定 → 音声 / 機能画面のスライダーはこのキーを書き込みます。 |
-| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き（旧 `ai.ort_dylib_path` の移設先）。プロセス起動時に固定されます。 |
-
-各キーは環境変数で個別に上書きできます：
-`ENE_PLUGINS__LIST__ONNX__CONFIG__<KEY>`
-（例：`ENE_PLUGINS__LIST__ONNX__CONFIG__THRESHOLD`）。
-
-エンジンはキャプチャセッションの最初のチャンク処理時に遅延ロードされ、常駐
-します。VAD の状態（リカレントセル状態、発話エッジ追跡）はホスト生成の
-`session_id` をキーとしてプラグインプロセス側に保持され、`process_chunk` は
-32 ms フレームあたり IPC 往復 1 回です。
-
-#### OpenAI Speech API TTS プロバイダ（`plugins.list.openai-tts.config`）
-
-`openai-tts` プロバイダプラグイン（`plugins/provider/openai-tts`）は OpenAI
-Speech API（`tts-1` / `tts-1-hd`）で音声合成を行い、ストリーミングの
-raw 24 kHz 16-bit モノラル PCM（`response_format=pcm`）を返します。
-`openai` プラグインと同じ `OPENAI_API_KEY` 資格情報ファミリーを使用します。
-`ai.tts.provider = "openai_tts"` で選択します。汎用の `ai.tts.voice` には、
-設定済みの既定ボイスをリクエスト単位で上書きするボイス名を任意で指定できます。
-
-```json
-{
-  "ai": {
-    "tts": {
-      "provider": "openai_tts",
-      "voice": "nova"
-    }
-  },
-  "plugins": {
-    "list": {
-      "openai-tts": {
-        "enable": true,
-        "config": {
-          "api_key": "sk-...",
-          "model": "tts-1",
-          "voice": "alloy",
-          "speed": 1.0,
-          "sample_rate": 24000
-        }
-      }
-    }
-  }
-}
-```
-
-設定項目：
-
-| キー | 既定値 | 説明 |
-|---|---|---|
-| `api_key` | 未設定 | OpenAI API キー、または `{source: inline\|env\|auto}` ディスクリプタ。`OPENAI_API_KEY` 環境変数にフォールバックします。`x-ene-secret` でマークされるため、ホストがマスク・redact します。 |
-| `model` | `tts-1` | 音声合成モデル（低遅延の `tts-1` / 高音質の `tts-1-hd`）。 |
-| `voice` | `alloy` | 既定ボイス（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）。リクエスト単位のボイスで上書き可能。 |
-| `speed` | `1.0` | 発話速度倍率（0.25–4.0）。 |
-| `sample_rate` | `24000` | WAV ヘッダに書き込むサンプルレート。Speech API の `pcm` フォーマットは 24 kHz 固定のため、`base_url` が異なる出力レートの互換エンドポイントを指す場合のみ設定します。 |
-| `base_url` | `https://api.openai.com/v1` | API ベース URL の上書き（OpenAI 互換エンドポイント用）。`OPENAI_BASE_URL` 環境変数にフォールバックします。 |
-
-プラグインは Speech API に `response_format=pcm` を要求し、音声を WAV
-（`sample_rate` の 16-bit モノラル PCM）として返します。ホスト側の
-オーディオパイプラインが float サンプルへデコードして再生します
-（`formats = ["wav"]`）。Speech API が受け付ける他のフォーマット
-（`mp3`、`opus`、`flac`、`aac`）は公開しません。
-
-#### Microsoft Edge Neural Voice TTS プロバイダ（`plugins.list.edge-tts.config`）
-
-`edge-tts` プロバイダプラグイン（`plugins/provider/edge-tts`）は、Microsoft
-Edge の読み上げ機能が使う WebSocket エンドポイント（無料・キー不要のニューラル
-音声）と通信します。API キーもローカルサーバーも不要です。
-`ai.tts.provider = "edge-tts"` で選択します。汎用の `ai.tts.voice` には、
-設定済みの既定音声をリクエスト単位で上書きする Edge 音声名（短縮形、例：
-`ja-JP-NanamiNeural`）を指定できます。
-
-```json
-{
-  "ai": {
-    "tts": {
-      "provider": "edge-tts",
-      "voice": "ja-JP-NanamiNeural"
-    }
-  },
-  "plugins": {
-    "list": {
-      "edge-tts": {
-        "enable": true,
-        "config": {
-          "voice": "ja-JP-NanamiNeural",
-          "locale": "ja-JP",
-          "rate": "+0%",
-          "pitch": "+0Hz",
-          "volume": "+0%",
-          "max_retries": 3
-        }
-      }
-    }
-  }
-}
-```
-
-設定項目：
-
-| キー | 既定値 | 説明 |
-|---|---|---|
-| `voice` | `ja-JP-NanamiNeural` | Edge 音声名。短縮形（`ja-JP-NanamiNeural`）または長い形式。 |
-| `locale` | `ja-JP` | `<speak>` 要素の SSML `xml:lang` 値。 |
-| `rate` | `+0%` | 発話速度の調整（例：`+10%`、`-10%`）。 |
-| `pitch` | `+0Hz` | ピッチの調整（例：`+5Hz`、`-5Hz`）。 |
-| `volume` | `+0%` | 音量の調整（例：`+10%`、`-10%`）。 |
-| `max_retries` | `3` | 合成リクエスト全体の再接続試行回数（テキストチャンク間で共有、指数バックオフ、0–10）。 |
-| `endpoint_url` | `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1` | WebSocket エンドポイント。クエリ文字列を含めてはいけません。 |
-
-接続は Edge 読み上げ拡張機能を模倣し（Chrome/Edge の User-Agent、拡張機能の
-`Origin`、`Sec-MS-GEC` トークン）、`audio-24khz-48kbitrate-mono-mp3` を要求
-します。4096 バイトを超えるテキストは、空白・UTF-8・XML エンティティの境界で
-分割され、同じ接続上でチャンク単位に合成されます。プラグインは MP3 ストリームを
-デコードし、WAV 音声（24 kHz モノラル）を返します。接続が切断された場合は、
-失敗したチャンクから指数バックオフで再試行します。試行回数の上限
-`max_retries` はリクエスト全体で共有されます。
-
-`ai.tts.provider` 自体の変更（例：`voicevox` から `edge-tts` への切替）は次回
-起動時に反映されます。アクティブなプロバイダはブートストラップ時に一度だけ
-構築されるためです。一方、`plugins.list.edge-tts.config` と `ai.tts.voice` の
-編集は実行中のセッションにも反映されます。
-
-#### ElevenLabs TTS プロバイダ（`plugins.list.elevenlabs.config`）
-
-`elevenlabs` プロバイダプラグイン（`plugins/provider/elevenlabs`）は
-ElevenLabs API で音声合成を行います。トランスポートは 2 つあります:
-REST の `POST /text-to-speech/{voice_id}/stream` エンドポイント（既定）と、
-低遅延ストリーミング用の双方向 `stream-input` WebSocket（`mode = "ws"`）です。
-raw 16-bit モノラル PCM（`pcm_16000` / `pcm_24000` / `pcm_44100`）を要求し、
-WAV として返します。ホスト側のオーディオパイプラインが float サンプルへ
-デコードして再生します。`ai.tts.provider = "elevenlabs"` で選択します。
-汎用の `ai.tts.voice` には、設定済みの既定ボイスをリクエスト単位で
-上書きするボイス ID を任意で指定できます。
-
-```json
-{
-  "ai": {
-    "tts": {
-      "provider": "elevenlabs",
-      "voice": "21m00Tcm4TlvDq8ikWAM"
-    }
-  },
-  "plugins": {
-    "list": {
-      "elevenlabs": {
-        "enable": true,
-        "config": {
-          "api_key": "xi-...",
-          "mode": "rest",
-          "model_id": "eleven_multilingual_v2",
-          "voice_id": "21m00Tcm4TlvDq8ikWAM",
-          "sample_rate": 24000,
-          "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75,
-            "style": 0.0,
-            "use_speaker_boost": true
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-設定項目：
-
-| キー | 既定値 | 説明 |
-|---|---|---|
-| `api_key` | 未設定 | ElevenLabs API キー、または `{source: inline\|env\|auto}` ディスクリプタ。`ELEVENLABS_API_KEY` 環境変数にフォールバックします。`x-ene-secret` でマークされるため、ホストがマスク・redact します。 |
-| `mode` | `rest` | トランスポート: `rest`（`POST /text-to-speech/{voice_id}/stream`、チャンク音声）または `ws`（`stream-input` WebSocket、双方向 base64 音声フレーム）。 |
-| `model_id` | `eleven_multilingual_v2` | ElevenLabs モデル ID（例: `eleven_turbo_v2_5`）。 |
-| `voice_id` | 未設定 | 既定ボイス ID。リクエスト単位のボイスで上書き可能。リクエストにボイスがない場合は必須。 |
-| `sample_rate` | `24000` | PCM 出力サンプルレート（`16000` / `24000` / `44100`）。API の `pcm_{rate}` フォーマットと WAV ヘッダのレートの両方を決めます。 |
-| `voice_settings.stability` | `0.5` | ボイスの安定性（0.0–1.0、クランプされます）。 |
-| `voice_settings.similarity_boost` | `0.75` | 元のボイスへの類似度（0.0–1.0、クランプされます）。 |
-| `voice_settings.style` | `0.0` | スタイル誇張度（0.0–1.0、クランプされます。一部のモデルのみ対応）。 |
-| `voice_settings.use_speaker_boost` | `true` | ボイスの自然な特徴をブーストするかどうか。 |
-| `base_url` | `https://api.elevenlabs.io/v1` | API ベース URL の上書き。`ELEVENLABS_BASE_URL` 環境変数にフォールバックします。WebSocket モードではスキームを `http(s)` → `ws(s)` に置き換えます。 |
-
-プラグインは `xi-api-key` をリクエストヘッダー（クエリパラメータでは
-ありません）として送信し、API に `pcm_{sample_rate}` を要求して、音声を
-WAV（`formats = ["wav"]`）として返します。API の他のフォーマット
-（`mp3_44100_128` など）は公開しません。REST は一時的なエラー
-（408/429/5xx・ネットワーク）時にジッター付きバックオフで最大 2 回
-再試行します（合計 3 回試行）。WebSocket モードはトランスポート障害と
-レート制限（429）時にリクエスト全体を再試行し、途中までの音声は破棄します。
-
-`ai.tts.provider` 自体の変更（例：`edge-tts` から `elevenlabs` への切替）は
-次回起動時に反映されます。アクティブなプロバイダはブートストラップ時に
-一度だけ構築されるためです。一方、`plugins.list.elevenlabs.config` と
-`ai.tts.voice` の編集は実行中のセッションにも反映されます。
-
-#### シークレットのマーキング
-
-プラグインの `config_schema()` は、フィールドに `x-ene-secret: true` を付与できます。ホストはこれ（および既知の名前によるフォールバック：`api_key`・`token`・`password`・`authorization` など）を使って、設定 UI でフィールドをマスクする予定であり、ホストのログ出力からは値を削除（redact）します。インラインの API キーがログストリームに現れることはありません。`settings.json` の外部（キーリング/シークレットサービス）へのシークレット保存は別途追跡されており、それまではプラグインのシークレットは `plugins.list.<name>.config` 内に置かれ、スキーマでマークされ、ホスト境界で redact されます。
-
-### `tools.*` — ツール実行ランタイムの挙動
-
-`plugins.*`（プラグインの プロセス／IPC 層を管理）とは別に、`tools.*` は
-`ene-runtime` と `ene-rag` が所有するツール呼び出しランタイムの設定を扱います。`tools.rag` は Tool RAG 選択パイプライン (`ene_rag::ToolRagConfig`) を設定し、以下のフィールド (`ene_runtime::ToolRuntimeConfig`) はアクターが同時に保持するバックグラウンドタスク数の上限と、遅延ツールのポーリング予算を制御します。上限に達すると、無制限にキューイングされるのではなく、admission（受け入れ）が拒否されます（フェイルファスト）。`CallTool`/`CancelDeferredTool` および `SearchTools` の呼び出し元には具体的な "busy" エラーが返りますが、ポストターンの分類器・メモリライター・遅延ツールのポーラーには返信チャンネルがないため、そこでの拒否は `TaskRejected` 診断イベントとしてのみ観測できます：
+メモリストアは、会話履歴・型付きメモリ・埋め込み・約束台帳・スケジュール・
+監査ログをひとつの SQLite データベース（アセットディレクトリ内の
+`memory.db`）に保持します。ストアを無効にするとメモリ機能が無効になります
+（永続化なしでもチャットは動きます）。
+
+## `tools.*` — ツールと MCP
 
 ```json
 {
   "tools": {
-    "call_tool_cap": 64,
-    "deferred_tool_cap": 32,
-    "classifier_cap": 16,
-    "memory_writer_cap": 16,
-    "search_cap": 16,
-    "deferred_max_polls": 600,
-    "rag": {
-      "enabled": true,
-      "top_k": 12,
-      "min_similarity": 0.20,
-      "use_failure_feedback": true,
-      "failure_penalty": 0.5,
-      "weights": {
-        "summary": 1.0,
-        "description": 0.6,
-        "capability": 0.8,
-        "example": 0.4,
-        "negative": -0.5,
-        "negative_threshold": 0.70
+    "enabled": true,
+    "list": {
+      "fs": { "enable": true },
+      "web": { "enable": true, "brave_api_key": "", "exa_api_key": "", "tavily_api_key": "" },
+      "homeassistant": { "enable": true, "base_url": "http://homeassistant.local:8123", "token": "" }
+    },
+    "mcp_servers": [],
+    "rag": { "enabled": true }
+  }
+}
+```
+
+- `tools.list.<name>.enable` は組み込みツールプラグインのオン/オフ。
+  各ツールは `define_tool_config!` で独自の追加キー（API キー・URL など）を
+  定義します。
+- `tools.mcp_servers` は外部 MCP サーバーを接続します
+  （[MCP サーバーガイド](guides/tools/mcp-servers.md)参照）。
+- `tools.rag` は埋め込みベースのツール選択（`ene-rag` の `tool`
+  フィーチャー）を設定します。
+
+## `plugins.*` — プラグイン一覧
+
+```json
+{
+  "plugins": {
+    "list": {
+      "llama-cpp": {
+        "config": { "mmproj_url": "...", "acceleration": "auto" },
+        "profiles": {
+          "gemma-4-e2b": { "url": "...", "gpu_layers": "auto", "context_size": 16384 }
+        }
       }
     }
   }
 }
 ```
 
-Tool RAG は各ツールを、そのフィールドごとの埋め込み類似度の重み付き平均
-（`[-1, 1]`）でスコアリングします。`min_similarity`（デフォルト `0.20`）はその
-平均に対する包含下限です。`weights.negative_threshold`（デフォルト `0.70`）は
-ツールのネガティブ例埋め込みがこの値以上に一致した場合にそのツールを完全に
-除外するゲートです — 自身のネガティブ例と強く一致するツールはペナルティ
-ではなく除外されます。
+各キーはプラグインバイナリ名（`plugins.list.<name>`）で、各プラグインは
+独自の設定スキーマ（`config`）と任意の名前付き `profiles`（モデルプリセット）
+を宣言します。ホストは起動時に該当セクションを IPC 経由でプラグインへ
+渡します。[プラグインと MCP](concepts/plugins-and-mcp.md) 参照。
 
-`use_failure_feedback`（デフォルト `true`）が有効な場合、アクティブなキャラクターに
-対して最近失敗したツールの重みが下がります：そのスコアはランキング前に
-`failure_penalty`（デフォルト `0.5`、失敗したツールのスコアは半分になります）倍され、
-ペナルティによって
-`min_similarity` を下回ったツールは除外されます。最近の失敗は
-`ene_core::ToolFailureSignalPort`（`ene-store` が実装）経由で読み取られるため、
-パイプラインは永続化への依存を持ちません — 詳細は
-[記憶システム §5](concepts/memory-system.md#5-ツール由来記憶のガードレール) を参照してください。
+## `desktop.*` — デスクトップアプリ
 
-### `scheduler.*` — 永続スケジューラーのポリシー
+| キー | デフォルト | 意味 |
+|---|---|---|
+| `desktop.graphics.quality` | `"medium"` | 描画品質プリセット。 |
+| `desktop.language` | `"ja"` | UI 言語（デスクトップ i18n は `en-US` / `ja`）。 |
+| `desktop.mic_device` | `null` | 音声入力用マイクデバイス ID。 |
+| `desktop.spotlight_enabled` | `true` | グローバルスポットライトオーバーレイ。 |
+| `desktop.caption_enabled` | `true` | キャラクター発話の字幕オーバーレイ。 |
+| `desktop.caption_position` / `caption_pinned` | `null` | 字幕の配置。 |
+| `desktop.beat_sync` | `{ "enabled": false, "device": null }` | 音楽ビート同期（アバターモーション）。 |
 
-単発・インターバル・cron・起動時スケジュールを実行する永続スケジューラー
-（`ene_runtime::scheduler::SchedulerConfig`）を制御します。スケジューラーは
-メモリストア（`store.enabled`）を必要とし、無効な場合はどのスケジュールも
-実行されません。スケジュール定義と実行履歴はストアのデータベースに保存され、
-再起動後も復元されます。CLI の操作は
-[スケジュールガイド](guide/schedules.md) を参照してください。
+## キャラクターごとの設定（`character_settings.json`）
 
 ```json
 {
-  "scheduler": {
-    "enabled": true,
-    "late_grace_secs": 60,
-    "confirmation_timeout_secs": 300
-  }
+  "character_position": [0, 0, 0],
+  "model_scale": 1.0,
+  "look_at_strength": 0.6,
+  "default_motion": "",
+  "default_expression": "neutral",
+  "language": ""
 }
 ```
 
-- `enabled`（デフォルト `true`）— マスタースイッチ。`false` の間はどの
-  スケジュールも実行されません。`ENE_SCHEDULER__ENABLED`。
-- `late_grace_secs`（デフォルト `60`）— 予定時刻からこの秒数を超えて処理された
-  実行（システムのサスペンド、時刻のズレ、アプリの終了中など）は
-  `skipped_late` として記録され、**実行されません**。次の実行時刻は現在時刻から
-  再計算されます。`ENE_SCHEDULER__LATE_GRACE_SECS`。
-- `confirmation_timeout_secs`（デフォルト `300`）— ユーザー確認を待つスケジュール
-  実行が、`timed_out` として記録されるまでの待機時間。
-  `ENE_SCHEDULER__CONFIRMATION_TIMEOUT_SECS`。
+- `character_position` / `model_scale` — デスクトップシーンでの VRM モデルの
+  配置。
+- `look_at_strength` — アバターがカーソルを追従する強さ（0–1）。
+- `default_motion` / `default_expression` — カードのモーションカタログ/
+  表情の名前。
+- `language` — カードの言語オーバーライド（空ならアプリ言語を継承）。
 
-### `rag.workspace` — ドキュメント／ワークスペース RAG 設定
+## 実行時の設定編集
 
-ローカルの文書やプロジェクトフォルダをインデックス化し、出典付きで会話コンテキストに取得するための機能です。**プライバシー第一の既定値: 明示的に有効化するまで、この機能は無効で何もスキャンされません。** `folders` に列挙したフォルダだけが読み取られ、検索結果も同じフォルダだけに制限されます。完全なプライバシーモデルは[ワークスペース RAG ガイド](guide/workspace-rag.md) を参照してください。
+- **CLI REPL:** `/config set <ドット区切りキー> <値>`
+  （例: `/config set ai.tasks.chat.model openai/gpt-5.6-luna`）。JSON として
+  解釈できる値は JSON で、それ以外は文字列で保存されます。
+- **デスクトップ:** 設定ウィンドウの各ページ（AI・キャラクター・メモリ・
+  権限・コネクタ・音声など）が同じセクションを編集します。
+- CLI・デスクトップのフラグ（`--config`・`--character`・`--lang`）は
+  プロセス起動時にファイルを上書きします。
 
-```json
-{
-  "rag": {
-    "workspace": {
-      "enabled": false,
-      "folders": [],
-      "include_extensions": [
-        "md", "markdown", "txt", "rs", "toml", "json", "yaml", "yml",
-        "py", "ts", "js", "tsx", "jsx", "html", "css", "sh", "xml", "ini",
-        "cfg", "csv"
-      ],
-      "ignore_globs": [
-        ".git/**", "node_modules/**", "target/**", "dist/**", ".venv/**",
-        "**/.env", "**/.env.*", "*.gguf", "*.safetensors", "*.ckpt",
-        "*.pth", "*.onnx", "*.bin", "*.db", "*.db-wal", "*.db-shm",
-        "assets/models/**"
-      ],
-      "max_file_bytes": 1048576,
-      "chunk_chars": 1200,
-      "chunk_overlap_chars": 200,
-      "max_chunks_per_file": 256,
-      "top_k": 8,
-      "final_n": 4,
-      "min_similarity": 0.20,
-      "sync_on_startup": false
-    }
-  }
-}
-```
+## シークレット
 
-- `enabled` — 総合スイッチ。`false`（既定）の間は、スキャン・検索・プロンプトへの注入は一切行われません。
-- `folders` — スキャンと検索が許可される**唯一の**フォルダ。スキャン前にパスを正規化し、ディレクトリシンボリックリンクは辿らず、正規化後のパスが設定フォルダの外に出るファイルはスキップします。
-   ファイルシンボリックリンクは、正規化後のターゲットが設定フォルダの内側にある場合のみインデックス化されます。
-- `include_extensions` — インデックス対象の拡張子（大文字小文字を無視、ドットなし）。
-- `ignore_globs` — 各フォルダ相対で除外する glob パターン。既定値はバージョン管理メタデータ、依存／ビルドディレクトリ、`.env` 系の機密ファイル、モデルデータ（`.gguf`、`.safetensors` など）、データベースファイルを対象にしています。`*` はセグメント内、`**` はセグメントをまたぐ一致、`?` は1文字に一致します。`/` を含まないパターンはファイル名のみに一致します。
-- `max_file_bytes` — このサイズを超えるファイルは丸ごとスキップ（既定 1 MiB）。
-- `chunk_chars` / `chunk_overlap_chars` — チャンクの目標サイズと、次チャンク先頭に繰り返す重複量（行単位）。
-- `max_chunks_per_file` — チャンク数の上限。超過したファイルは黙って切り詰めず、丸ごとスキップします。
-- `top_k` / `final_n` — スコアリング前のベクトル過剰取得数と、プロンプト（または `/workspace search`）に注入する最大チャンク数。
-- `min_similarity` — 結果として返すためのハイブリッドスコアの下限。
-- `sync_on_startup` — ランタイム起動時にバックグラウンド同期を実行（`enabled` が必要）。
-
-すべてのキーは標準の `ENE_` 上書き形式に対応します。例: `ENE_RAG__WORKSPACE__ENABLED=true`、`ENE_RAG__WORKSPACE__FOLDERS=/path/a,/path/b`（JSON 配列のエンコードも可）。
-
-### `desktop.*` — デスクトップ GUI およびグラフィックスパラメータ
-
-表示言語、グラフィックス描画パラメータ、マイク入力デバイス、およびビート同期（システム音声のリズムに合わせたアバターモーション）を制御します：
-
-```json
-{
-  "desktop": {
-    "language": "ja",
-    "mic_device": null,
-    "beat_sync": {
-      "enabled": false,
-      "device": null
-    },
-    "graphics": {
-      "vsync": true
-    }
-  }
-}
-```
-
-- `desktop.beat_sync.enabled` — システム音声ループバックをキャプチャし、検出したビートに合わせてアバターを揺らします。既定値は `false` です（既定でシステム音声をキャプチャするのはプライバシー上好ましくないため）。キャプチャデバイスとして公開された PulseAudio / PipeWire のモニターデバイスが必要です。存在しない場合はログを出して無効のままになります。
-- `desktop.beat_sync.device` — 任意の明示的なループバックデバイス名。未設定の場合はデフォルト出力デバイスのモニターが自動選択されます（フォールバックとして "monitor" を含む任意の入力デバイス）。
-
-検出アルゴリズムとプラットフォーム対応の詳細は [音声とアバター](concepts/voice-and-avatar.md) を参照してください。
-
----
-
-## 3. キャラクターカード形式 (`character.json`)
-
-Ene は JSON キャラクターカードを介して、キャラクターのパーソナリティとプロンプトテンプレートをロードします：
-
-```json
-{
-  "name": "Alicia",
-  "identity": "電脳世界に住む人工知能の少女。コンピュータの中でユーザーをサポートする。",
-  "system_prompt": "あなたはアリシアです。元気にユーザーをサポートしてください。簡潔かつ的確に答えてください。",
-  "greeting": "システム正常稼働中だよ。今日は何をするの？",
-  "initial_affect": {
-    "pleasure": 0.6,
-    "arousal": 0.7,
-    "dominance": 0.5
-  }
-}
-```
-
-### キャラクターの解決と列挙
-
-キャラクターは `assets/characters/` 配下のフォルダーに格納され、カードファイル名は `character.json` です：
-
-```
-assets/characters/<name>/
-  character.json
-  character_settings.json
-  model.vrm
-  motions/VRMA_01.vrma
-```
-
-- `character` 設定は**ベア名**（`"Alicia"` など）を指定すると `assets/characters/Alicia/character.json` に解決され、**カードパス**（例: `assets/cards/ene.json`、相対・絶対どちらも可）を指定するとそのままカードとして読み込みます。
-- 列挙（`ene characters list`、デスクトップのキャラクター選択）も同じ規則を使用します: `character.json` を含むフォルダーのみがキャラクターとして扱われます。旧来の誤記 `charactor.json` は受け付けません。
-- **未設定と不在の区別。** 空の `character` 値は「キャラクター未選択」のエラーとなり、ハードコードされた既定キャラクターへ黙ってフォールバックしません。空でない名前でカードファイルが存在しない場合は「ファイル不在」として報告されます。
-- **パス検証。** `..` によるパストラバーサルは拒否されます（キャラクター名は第三者製のカード配布物から来るため）。
-
----
-
-## 4. スキーマ自動生成
-
-設定スキーマは、各所有クレートの `define_config!` マクロによって宣言されます。スキーマは設定読み込みのたびにではなく、アプリケーション起動時（CLI の `init`、デスクトップの初回起動、ランタイムの open 経路）にプロセスあたり一度だけ書き込まれます。各スキーマファイルはアトミックに（一時ファイル + `fsync` + リネームで）書き込まれるため、クラッシュしても途中で切れたスキーマファイルが残ることはありません。
-
-`settings.json` を保存する際、Ene は相対的な `$schema` ポインタ（`./schema/settings.schema.json`）をファイル先頭に自動で書き込みます。これにより、キーを手書きしなくてもエディタが補完とバリデーションを提供します。既存の `$schema` 値はそのまま保持され、ポインタは存在しない場合にのみ補完されます。同様に、ユーザーが手動で並べ替えたトップレベルのセクション順も保存をまたいで維持され、新しく追加されたセクションは末尾に追加されます。
-
-> [!CAUTION]
-> `assets/schema/*` 下の無視されたスキーマファイルを直接手修正したりコミットしたりしないでください。
+API キーやトークンはログやイベントストリームに書き込まれません。ツール
+引数と自由文イベントは、出力・永続化の前にリダクションを通過し、プラグイン
+設定値はホスト境界でリダクションされます。API キーは `source: "env"` を使い、
+`settings.json` 自体にシークレットを置かないことを推奨します。

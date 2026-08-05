@@ -7,7 +7,7 @@
 //! Core cognitive concepts — the PAD affect state, typed-memory
 //! kinds/statuses, the commitment ledger's vocabulary — live here rather
 //! than in the `SQLite` persistence crate, so that `ene-mind` (documented
-//! as a "Pure Cognitive Mind" in `docs/architecture.md`) does not have to
+//! as a "Pure Cognitive Mind" in `docs/concepts/architecture.md`) does not have to
 //! depend on the concrete persistence crate just to name its own domain
 //! concepts.
 //!

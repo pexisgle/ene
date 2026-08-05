@@ -1,53 +1,40 @@
-# 概要
+# 目次
 
-[はじめに](index.md)
-[スタートガイド](getting-started.md)
-[アーキテクチャ](architecture.md)
-[設定リファレンス](configuration.md)
+[インデックス](index.md)
+[クイックスタート](quickstart.md)
+[設定](configuration.md)
+
+# コンセプト
+
+- [アーキテクチャ](concepts/architecture.md)
+- [キャラクターカード](concepts/character-cards.md)
+- [メモリ](concepts/memory.md)
+- [ターンとセッション](concepts/turns-and-sessions.md)
+- [プラグインと MCP](concepts/plugins-and-mcp.md)
+- [コネクタ](concepts/connectors.md)
+- [音声とアバター](concepts/voice-and-avatar.md)
+
+# アプリ
+
+- [CLI ユーザーガイド](apps/cli.md)
+- [デスクトップユーザーガイド](apps/desktop.md)
 
 # ガイド
 
-- [ツールの作成ガイド](guide/tools/write-a-tool.md)
-- [MCP サーバー設定ガイド](guide/tools/mcp-servers.md)
-- [ランダム生成ツールガイド](guide/tools/random.md)
-- [地理情報ツールガイド](guide/tools/geo.md)
-- [Git ツールガイド](guide/tools/git.md)
-- [スケジュール：永続的な時刻指定アクション](guide/schedules.md)
-- [キャラクターカードエディターガイド](guide/character-card-editor.md)
-- [ワークスペース RAG ガイド](guide/workspace-rag.md)
-- [記憶台帳：インタラクティブな記憶・コミットメント管理](guide/memory-ledger.md)
+- [キャラクターエディタ](guides/character-editor.md)
+- [メモリ台帳](guides/memory-ledger.md)
+- [スケジュール](guides/schedules.md)
+- [ワークスペース RAG](guides/workspace-rag.md)
+- [ツールを書く](guides/tools/write-a-tool.md)
+- [MCP サーバー](guides/tools/mcp-servers.md)
+- [同梱ツール](guides/tools/builtin-tools.md)
 
 # リファレンス
 
-- [ツール SDK リファレンス](reference/tools/sdk.md)
-
-# コア概念
-
-- [ターンとセッション](concepts/turn-and-session.md)
-- [長期記憶システム](concepts/memory-system.md)
-- [キャラクターカードマクロ](concepts/character-card-macros.md)
-- [キャラクターカード・ロアブック](concepts/character-card-lorebook.md)
-- [キャラクターカードのアセットとインポート](concepts/character-card-assets.md)
-- [キャラクターカードの多言語対応](concepts/character-card-locales.md)
-- [ペルソナフォーマット（W++ / AliChat / YAML）](concepts/character-card-persona-formats.md)
-- [音声とアバター](concepts/voice-and-avatar.md)
-- [プラグインと MCP](concepts/plugins-and-mcp.md)
-- [コネクター](concepts/connectors.md)
-
-# クレート API リファレンス
-
-- [Runtime (`ene-runtime`)](crates/runtime.md)
-- [Mind (`ene-mind`)](crates/mind.md)
-- [Store (`ene-store`)](crates/store.md)
-- [AI (`ene-ai`)](crates/ai.md)
-- [Voice (`ene-voice`)](crates/voice.md)
-- [Connector (`ene-connector`)](crates/connector.md)
-- [プラグインシステム (`ene-plugin-*`)](crates/plugin-system.md)
-- [ツール開発 (`ene-plugin-macros` 他)](crates/tool-sdk.md)
-- [ユーティリティ (`ene-util`)](crates/util.md)
-- [VRM (`ene-vrm`)](crates/vrm.md)
-
-# アプリケーション
-
-- [CLI ユーザーガイド](apps/cli.md)
-- [Desktop ユーザーガイド](apps/desktop.md)
+- [クレートリファレンス](reference/crates.md)
+- [認知ランタイム](reference/architecture/cognitive-runtime.md)
+- [API v1 契約](reference/architecture/api-v1.md)
+- [プラグイン IPC プロトコル](reference/plugin-ipc.md)
+- [ツール SDK](reference/tools/sdk.md)
+- [derive マクロ](reference/tools/derive-macro.md)
+- [ene-vrm API](reference/api/ene-vrm.md)
