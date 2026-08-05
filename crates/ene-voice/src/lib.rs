@@ -1,9 +1,9 @@
 //! Local voice pipeline engines (STT / TTS / VAD) for the ene AI character
 //! platform.
 //!
-//! These engines no longer register into [`ene_ai::AudioProviderRegistry`];
-//! provider plugin binaries (`plugins/provider/onnx`, `whisper`, `kokoro`)
-//! consume them over the plugin IPC instead.
+//! These engines are consumed by provider plugin binaries
+//! (`plugins/provider/onnx`, `whisper`, `kokoro`) over the plugin IPC; the
+//! former in-process `ene_ai::AudioProviderRegistry` is removed.
 //!
 //! `clippy::expect_used` is opted out of per test module (not crate-wide):
 //! only the `local-tts`-gated tests in `local_tts` actually use `.expect(`,

@@ -1,8 +1,9 @@
 //! STT provider factory backed by a plugin IPC connection.
 //!
 //! [`IpcSttProviderFactory`] implements [`ene_ai::SttProviderFactory`] so
-//! that plugin-provided STT providers integrate with the global
-//! [`AudioProviderRegistry`](ene_ai::AudioProviderRegistry), mirroring how
+//! that plugin-provided STT providers resolve through the host's factory
+//! registry (the [`PluginHostManager`](crate::PluginHostManager) implements
+//! [`ene_ai::ProviderHost`] over its factory maps), mirroring how
 //! [`IpcTtsProviderFactory`](crate::tts_factory::IpcTtsProviderFactory)
 //! integrates TTS providers. The factory is keyed by the plugin's
 //! `SttProviderSpec.kind`, which is also the name users select via

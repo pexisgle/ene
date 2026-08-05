@@ -118,6 +118,9 @@ pub enum AiError {
     /// Embedding provider failure.
     #[error(transparent)]
     Embedding(#[from] crate::traits::EmbeddingError),
+    /// Audio provider (TTS / STT / VAD) failure.
+    #[error(transparent)]
+    Audio(#[from] crate::traits::AudioProviderError),
     /// API key is missing or empty.
     #[error("API key not configured: {0}")]
     MissingApiKey(String),

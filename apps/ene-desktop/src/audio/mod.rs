@@ -316,23 +316,18 @@ pub fn toggle_mic_capture(
         ai_cfg.vad.provider.clone()
     };
 
-    let stt = ene_ai::AudioProviderRegistry::create_stt_provider(
-        &stt_resolved.provider,
-        &audio_state.config,
-    )
-    .map_err(|e| e.to_string())?;
-    let vad = ene_ai::AudioProviderRegistry::create_vad_engine(&vad_provider, &audio_state.config)
+    // The desktop process has no plugin-host access; the runtime resolves
+    // these through the live host on its behalf.
+    let stt = ai
+        .create_stt_provider_blocking(&stt_resolved.provider)
+        .map_err(|e| e.to_string())?;
+    let vad = ai
+        .create_vad_engine_blocking(&vad_provider)
         .map_err(|e| e.to_string())?;
 
-    let handle = capture::start_mic_capture(
-        &audio_state,
-        Arc::from(stt),
-        vad,
-        Arc::clone(ai),
-        tokio,
-        event_tx,
-    )
-    .map_err(|e| e.to_string())?;
+    let handle =
+        capture::start_mic_capture(&audio_state, stt, vad, Arc::clone(ai), tokio, event_tx)
+            .map_err(|e| e.to_string())?;
 
     *mic_handle = Some(handle);
     Ok(())

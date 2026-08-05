@@ -1,8 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::config::TaskRef;
@@ -283,6 +282,20 @@ pub trait ProviderHost: Send + Sync {
         kind: &str,
         config: &ene_config::EneConfig,
     ) -> Result<Box<dyn TtsProvider>, AudioProviderError>;
+
+    /// Creates an STT provider for a provider kind.
+    async fn create_stt_provider(
+        &self,
+        kind: &str,
+        config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn SttProvider>, AudioProviderError>;
+
+    /// Creates a VAD engine for an engine kind.
+    async fn create_vad_engine(
+        &self,
+        kind: &str,
+        config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn VadEngine>, AudioProviderError>;
 }
 
 #[cfg(test)]
@@ -564,297 +577,9 @@ pub trait VadFactory: Send + Sync {
     ) -> Result<Box<dyn VadEngine>, AudioProviderError>;
 }
 
-/// Global registry of in-process audio provider factories (STT, VAD, and the
-/// legacy local TTS fallback).
-///
-/// Plugin-provided TTS providers are registered and served by the plugin
-/// host; this registry only holds the in-process `ene-voice` factories
-/// (whisper, silero VAD, local Kokoro) until `ene-voice` is pluginized, at
-/// which point the registry is removed entirely. Uses a `OnceLock` +
-/// `parking_lot::Mutex` pattern with separate maps per modality (poison-free,
-/// so no poisoning checks are required at the call sites).
-pub struct AudioProviderRegistry {
-    tts: parking_lot::Mutex<HashMap<String, Arc<dyn TtsProviderFactory>>>,
-    stt: parking_lot::Mutex<HashMap<String, Arc<dyn SttProviderFactory>>>,
-    vad: parking_lot::Mutex<HashMap<String, Arc<dyn VadFactory>>>,
-}
-
-impl AudioProviderRegistry {
-    fn global() -> &'static Self {
-        static REGISTRY: OnceLock<AudioProviderRegistry> = OnceLock::new();
-        REGISTRY.get_or_init(|| Self {
-            tts: parking_lot::Mutex::new(HashMap::new()),
-            stt: parking_lot::Mutex::new(HashMap::new()),
-            vad: parking_lot::Mutex::new(HashMap::new()),
-        })
-    }
-
-    /// Registers a TTS provider factory.
-    pub fn register_tts(factory: Arc<dyn TtsProviderFactory>) {
-        let name = factory.provider_name().to_string();
-        Self::global().tts.lock().insert(name, factory);
-    }
-
-    /// Removes a registered TTS provider factory by provider name.
-    ///
-    /// Returns `true` when a factory was actually removed, `false` when no
-    /// factory was registered under `name`. Deregistration evicts factories
-    /// whose backing plugin process has been stopped, so
-    /// [`create_tts_provider`](Self::create_tts_provider) can no longer
-    /// select a stale entry that points at a dead connection.
-    pub fn deregister_tts(name: &str) -> bool {
-        Self::global().tts.lock().remove(name).is_some()
-    }
-
-    /// Removes a TTS provider factory only when `name` still points to
-    /// `expected`.
-    ///
-    /// The identity check prevents one runtime handle from deregistering a
-    /// replacement factory installed by another handle during concurrent
-    /// host reconfiguration.
-    pub fn deregister_tts_if_matches(name: &str, expected: &Arc<dyn TtsProviderFactory>) -> bool {
-        let mut guard = Self::global().tts.lock();
-        if guard
-            .get(name)
-            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
-        {
-            guard.remove(name).is_some()
-        } else {
-            false
-        }
-    }
-
-    /// Registers an STT provider factory.
-    pub fn register_stt(factory: Arc<dyn SttProviderFactory>) {
-        let name = factory.provider_name().to_string();
-        Self::global().stt.lock().insert(name, factory);
-    }
-
-    /// Removes an STT provider factory only when `name` still points to
-    /// `expected`, mirroring [`deregister_tts_if_matches`](Self::deregister_tts_if_matches).
-    pub fn deregister_stt_if_matches(name: &str, expected: &Arc<dyn SttProviderFactory>) -> bool {
-        let mut guard = Self::global().stt.lock();
-        if guard
-            .get(name)
-            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
-        {
-            guard.remove(name).is_some()
-        } else {
-            false
-        }
-    }
-
-    /// Registers a VAD engine factory.
-    pub fn register_vad(factory: Arc<dyn VadFactory>) {
-        let name = factory.provider_name().to_string();
-        Self::global().vad.lock().insert(name, factory);
-    }
-
-    /// Removes a VAD engine factory only when `name` still points to
-    /// `expected`, mirroring [`deregister_tts_if_matches`](Self::deregister_tts_if_matches).
-    pub fn deregister_vad_if_matches(name: &str, expected: &Arc<dyn VadFactory>) -> bool {
-        let mut guard = Self::global().vad.lock();
-        if guard
-            .get(name)
-            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
-        {
-            guard.remove(name).is_some()
-        } else {
-            false
-        }
-    }
-
-    /// Tries to instantiate a TTS provider by name using the registered factories.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AudioProviderError::Provider`] if no factory is registered for
-    /// `name`, or the factory's own error if initialization fails.
-    pub fn create_tts_provider(
-        name: &str,
-        config: &ene_config::EneConfig,
-    ) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
-        let factory = Self::global().tts.lock().get(name).cloned();
-        match factory {
-            Some(f) => f.create_provider(config),
-            None => Err(AudioProviderError::Provider(format!(
-                "No TtsProviderFactory registered for provider name: '{name}'"
-            ))),
-        }
-    }
-
-    /// Tries to instantiate an STT provider by name using the registered factories.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AudioProviderError::Provider`] if no factory is registered for
-    /// `name`, or the factory's own error if initialization fails.
-    pub fn create_stt_provider(
-        name: &str,
-        config: &ene_config::EneConfig,
-    ) -> Result<Box<dyn SttProvider>, AudioProviderError> {
-        let factory = Self::global().stt.lock().get(name).cloned();
-        match factory {
-            Some(f) => f.create_provider(config),
-            None => Err(AudioProviderError::Provider(format!(
-                "No SttProviderFactory registered for provider name: '{name}'"
-            ))),
-        }
-    }
-
-    /// Tries to instantiate a VAD engine by name using the registered factories.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AudioProviderError::Provider`] if no factory is registered for
-    /// `name`, or the factory's own error if initialization fails.
-    pub fn create_vad_engine(
-        name: &str,
-        config: &ene_config::EneConfig,
-    ) -> Result<Box<dyn VadEngine>, AudioProviderError> {
-        let factory = Self::global().vad.lock().get(name).cloned();
-        match factory {
-            Some(f) => f.create_engine(config),
-            None => Err(AudioProviderError::Provider(format!(
-                "No VadFactory registered for provider name: '{name}'"
-            ))),
-        }
-    }
-}
-
 #[cfg(test)]
 mod audio_tests {
     use super::*;
-    use std::sync::Arc;
-
-    struct DummyTtsFactory;
-
-    impl TtsProviderFactory for DummyTtsFactory {
-        fn provider_name(&self) -> &'static str {
-            "dummy-tts"
-        }
-
-        fn create_provider(
-            &self,
-            _config: &ene_config::EneConfig,
-        ) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
-            Err(AudioProviderError::Init("dummy".to_string()))
-        }
-    }
-
-    struct DummySttFactory;
-
-    impl SttProviderFactory for DummySttFactory {
-        fn provider_name(&self) -> &'static str {
-            "dummy-stt"
-        }
-
-        fn create_provider(
-            &self,
-            _config: &ene_config::EneConfig,
-        ) -> Result<Box<dyn SttProvider>, AudioProviderError> {
-            Err(AudioProviderError::Init("dummy".to_string()))
-        }
-    }
-
-    struct DummyVadFactory;
-
-    impl VadFactory for DummyVadFactory {
-        fn provider_name(&self) -> &'static str {
-            "dummy-vad"
-        }
-
-        fn create_engine(
-            &self,
-            _config: &ene_config::EneConfig,
-        ) -> Result<Box<dyn VadEngine>, AudioProviderError> {
-            Err(AudioProviderError::Init("dummy".to_string()))
-        }
-    }
-
-    fn config() -> ene_config::EneConfig {
-        ene_config::EneConfig::default()
-    }
-
-    static TTS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Assert that `result` is an `Err` and return it. Used instead of
-    /// `expect_err` because the boxed provider types are not `Debug`.
-    fn unwrap_err<T>(result: Result<T, AudioProviderError>) -> AudioProviderError {
-        match result {
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => e,
-        }
-    }
-
-    #[test]
-    fn tts_registration_lookup_round_trip() {
-        let _guard = TTS_TEST_LOCK.lock().expect("TTS test lock poisoned");
-        AudioProviderRegistry::register_tts(Arc::new(DummyTtsFactory));
-        let err = unwrap_err(AudioProviderRegistry::create_tts_provider(
-            "dummy-tts",
-            &config(),
-        ));
-        assert!(matches!(err, AudioProviderError::Init(_)));
-    }
-
-    #[test]
-    fn tts_deregister_makes_lookup_fail() {
-        let _guard = TTS_TEST_LOCK.lock().expect("TTS test lock poisoned");
-        AudioProviderRegistry::register_tts(Arc::new(DummyTtsFactory));
-        assert!(AudioProviderRegistry::deregister_tts("dummy-tts"));
-        let err = unwrap_err(AudioProviderRegistry::create_tts_provider(
-            "dummy-tts",
-            &config(),
-        ));
-        assert!(matches!(err, AudioProviderError::Provider(_)));
-        assert!(!AudioProviderRegistry::deregister_tts("dummy-tts"));
-    }
-
-    #[test]
-    fn tts_deregister_if_matches_is_identity_checked() {
-        let _guard = TTS_TEST_LOCK.lock().expect("TTS test lock poisoned");
-        let original: Arc<dyn TtsProviderFactory> = Arc::new(DummyTtsFactory);
-        AudioProviderRegistry::register_tts(Arc::clone(&original));
-        let replacement: Arc<dyn TtsProviderFactory> = Arc::new(DummyTtsFactory);
-        assert!(!AudioProviderRegistry::deregister_tts_if_matches(
-            "dummy-tts",
-            &replacement
-        ));
-        assert!(AudioProviderRegistry::deregister_tts_if_matches(
-            "dummy-tts",
-            &original
-        ));
-    }
-
-    #[test]
-    fn stt_registration_lookup_round_trip() {
-        AudioProviderRegistry::register_stt(Arc::new(DummySttFactory));
-        let err = unwrap_err(AudioProviderRegistry::create_stt_provider(
-            "dummy-stt",
-            &config(),
-        ));
-        assert!(matches!(err, AudioProviderError::Init(_)));
-    }
-
-    #[test]
-    fn vad_registration_lookup_round_trip() {
-        AudioProviderRegistry::register_vad(Arc::new(DummyVadFactory));
-        let err = unwrap_err(AudioProviderRegistry::create_vad_engine(
-            "dummy-vad",
-            &config(),
-        ));
-        assert!(matches!(err, AudioProviderError::Init(_)));
-    }
-
-    #[test]
-    fn unknown_provider_name_errors() {
-        let err = unwrap_err(AudioProviderRegistry::create_tts_provider(
-            "does-not-exist",
-            &config(),
-        ));
-        assert!(matches!(err, AudioProviderError::Provider(_)));
-    }
 
     #[test]
     fn io_error_converts_via_from() {

@@ -466,8 +466,9 @@ pub enum EneCommand {
     /// factories must be evicted from the host registry.
     ///
     /// Sent by the plugin health bridges. The actor locks the shared plugin
-    /// host, evicts the plugin's LLM/embedding/TTS factories, and rebuilds
-    /// the live TTS provider when one of the evicted kinds was selected.
+    /// host, evicts the plugin's LLM/embedding/TTS/STT/VAD factories, and
+    /// rebuilds the live TTS provider when one of the evicted kinds was
+    /// selected.
     PluginProviderDisabled {
         /// Name of the disabled plugin whose factories to evict.
         plugin: String,
@@ -495,6 +496,26 @@ pub enum EneCommand {
     CreateChatProvider {
         /// Reply channel carrying the provider or a string error.
         reply: oneshot::Sender<Result<Arc<dyn ene_ai::LlmProvider>, String>>,
+    },
+    /// Build an STT provider for the given kind through the provider host.
+    ///
+    /// Used by the desktop microphone capture path, which runs outside the
+    /// actor and cannot reach the plugin host directly.
+    CreateSttProvider {
+        /// Provider kind (the `ai.stt.provider` value).
+        kind: String,
+        /// Reply channel carrying the provider or a typed audio error.
+        reply: oneshot::Sender<Result<Box<dyn ene_ai::SttProvider>, ene_ai::AudioProviderError>>,
+    },
+    /// Build a VAD engine for the given kind through the provider host.
+    ///
+    /// Used by the desktop microphone capture path, which runs outside the
+    /// actor and cannot reach the plugin host directly.
+    CreateVadEngine {
+        /// Engine kind (the `ai.vad.provider` value, `"silero"` when unset).
+        kind: String,
+        /// Reply channel carrying the engine or a typed audio error.
+        reply: oneshot::Sender<Result<Box<dyn ene_ai::VadEngine>, ene_ai::AudioProviderError>>,
     },
     /// Test-only: mutates `pending_permissions`, `permission_scopes`, and
     /// `undo_stack` — the three shared-state fields a panicking command can

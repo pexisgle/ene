@@ -126,6 +126,11 @@ fn user_message_from_ai(error: &ene_ai::AiError) -> String {
             "runtime-error-ai-embedding",
             detail = err.to_string()
         ),
+        ene_ai::AiError::Audio(err) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-ai-provider",
+            detail = err.to_string()
+        ),
         ene_ai::AiError::MissingApiKey(_) => {
             i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-ai-auth")
         }

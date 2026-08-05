@@ -8,7 +8,7 @@
 
 ## Architectural boundaries
 
-- `ene-voice` depends on `ene-ai` (for provider-adjacent types) and `ene-config`; it has no dependency on `ene-mind`, `ene-runtime`, or `ene-store`. It registers nothing into `ene_ai::AudioProviderRegistry` — the provider plugins bridge the engines to the host over the plugin IPC.
+- `ene-voice` depends on `ene-ai` (for provider-adjacent types) and `ene-config`; it has no dependency on `ene-mind`, `ene-runtime`, or `ene-store`. It exposes no in-process provider registry (`ene_ai::AudioProviderRegistry` has been removed) — the provider plugins bridge the engines to the host over the plugin IPC.
 - All inference here (Whisper transcription, Silero VAD) runs locally and in-process; there is no network call in the voice pipeline itself.
 
 ## Design rationale

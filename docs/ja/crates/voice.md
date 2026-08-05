@@ -8,7 +8,7 @@
 
 ## アーキテクチャ境界
 
-- `ene-voice` は `ene-ai` (プロバイダ関連型) と `ene-config` に依存します。`ene-mind`、`ene-runtime`、`ene-store` への依存はありません。`ene_ai::AudioProviderRegistry` には何も登録しません — プロバイダプラグインがプラグイン IPC 越しにエンジンをホストへ橋渡しします。
+- `ene-voice` は `ene-ai` (プロバイダ関連型) と `ene-config` に依存します。`ene-mind`、`ene-runtime`、`ene-store` への依存はありません。プロセス内プロバイダレジストリは持ちません（`ene_ai::AudioProviderRegistry` は削除済み）— プロバイダプラグインがプラグイン IPC 越しにエンジンをホストへ橋渡しします。
 - ここでの推論 (Whisper のテキスト化、Silero VAD) はすべてローカルかつプロセス内で実行されます。音声パイプライン自体にネットワーク呼び出しはありません。
 
 ## 設計思想

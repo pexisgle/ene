@@ -327,6 +327,28 @@ impl AiBridge {
         Ok(self.block_on_timeout(self.handle.undo())??)
     }
 
+    /// Build an STT provider through the runtime's plugin host. Blocks the
+    /// calling thread while the actor answers; used by the microphone
+    /// capture path, which runs on the UI thread.
+    pub fn create_stt_provider_blocking(
+        &self,
+        kind: &str,
+    ) -> Result<Arc<dyn ene_ai::SttProvider>, AiBridgeError> {
+        Ok(Arc::from(self.block_on_timeout(
+            self.handle.create_stt_provider(kind),
+        )??))
+    }
+
+    /// Build a VAD engine through the runtime's plugin host. Blocks the
+    /// calling thread while the actor answers; used by the microphone
+    /// capture path, which runs on the UI thread.
+    pub fn create_vad_engine_blocking(
+        &self,
+        kind: &str,
+    ) -> Result<Box<dyn ene_ai::VadEngine>, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.create_vad_engine(kind))??)
+    }
+
     /// Open the session with the greeting at `index` (`0` = `first_mes`,
     /// `i+1` = `alternate_greetings[i]`). Returns the applied greeting text.
     pub fn set_greeting_blocking(&self, index: u32) -> Result<String, AiBridgeError> {
