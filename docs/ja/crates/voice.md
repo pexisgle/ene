@@ -1,14 +1,14 @@
 # `ene-voice`
 
-> **クレート**: `ene-voice` | **役割**: ローカル音声 STT, TTS, VAD, およびクロスプラットフォーム PCM デバイス I/O
+> **クレート**: `ene-voice` | **役割**: ローカル STT / TTS / VAD エンジン実装
 
-`ene-voice` は、ローカルの音声認識 (`whisper-rs` による Whisper)、音声合成、発話区間検出 (ONNX Runtime による Silero VAD)、およびクロスプラットフォームのオーディオデバイスストリーム (`cpal`/`rodio`) をカプセル化します。`apps/ene-desktop` から直接利用され、`ene-runtime` からは利用されません。
+`ene-voice` は、ローカルの音声認識 (`whisper-rs` による Whisper)、音声合成 (Kokoro ONNX)、発話区間検出 (ONNX Runtime による Silero VAD) をカプセル化します。プロバイダプラグインエピック以降は、プロバイダプラグインバイナリ（`plugins/provider/{kokoro,onnx,whisper}`）だけが利用し、`ene-runtime` / `ene-desktop` は依存しません。
 
 ---
 
 ## アーキテクチャ境界
 
-- `ene-voice` は `ene-ai` (プロバイダ関連型) と `ene-config` に依存します。`ene-mind`、`ene-runtime`、`ene-store` への依存はありません — 音声 I/O はプレゼンテーション層の関心事であり、ホストアプリがチャットターンの周辺で配線するものであって、認知/ランタイム層が知る必要はありません。
+- `ene-voice` は `ene-ai` (プロバイダ関連型) と `ene-config` に依存します。`ene-mind`、`ene-runtime`、`ene-store` への依存はありません。`ene_ai::AudioProviderRegistry` には何も登録しません — プロバイダプラグインがプラグイン IPC 越しにエンジンをホストへ橋渡しします。
 - ここでの推論 (Whisper のテキスト化、Silero VAD) はすべてローカルかつプロセス内で実行されます。音声パイプライン自体にネットワーク呼び出しはありません。
 
 ## 設計思想

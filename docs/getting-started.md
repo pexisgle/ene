@@ -11,7 +11,7 @@ Ene is built as a Rust 2024 workspace requiring the following system tools:
 - **Rust toolchain**: 1.85+ (Rust 2024 edition support)
 - **C/C++ Compiler**: `clang` / `gcc` and `cmake` (for `llama-cpp-4` and `libsqlite3-sys` bundling)
 - **Graphics Libraries**: Vulkan / Wayland / X11 dev headers (for `ene-desktop` and `ene-vrm` via `wgpu`)
-- **Audio Libraries**: `alsa` / `jack` dev headers (for `ene-voice` via `cpal`)
+- **Audio Libraries**: `alsa` / `jack` dev headers (for `ene-desktop`'s microphone capture via `cpal`)
 
 ### Recommended Setup: Nix + direnv (Linux)
 
