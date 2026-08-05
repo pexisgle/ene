@@ -571,7 +571,7 @@ pub struct MemoryJournalRow {
     pub id: i64,
     pub title: String,
     pub kind: String,
-    pub status: String,
+    pub status: ene_store::MemoryStatus,
     pub confidence: f32,
     pub salience: f32,
     pub last_accessed: Option<String>,
