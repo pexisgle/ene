@@ -108,6 +108,43 @@ impl MemoryStore {
             .collect::<Result<Vec<_>, _>>()
     }
 
+    /// List commitments for a character in every lifecycle status.
+    ///
+    /// Optional status filter; ordered by `created_at` descending so the most
+    /// recent ledger entries surface first, with `id` descending as a
+    /// deterministic tie-breaker for same-timestamp inserts.
+    pub async fn list_commitments(
+        &self,
+        character_id: &str,
+        user_id: Option<&str>,
+        status: Option<crate::CommitmentStatus>,
+        limit: usize,
+    ) -> Result<Vec<crate::Commitment>, EneMemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let mut query = entities::commitments::Entity::find()
+            .filter(entities::commitments::Column::CharacterId.eq(character_id));
+
+        if let Some(uid) = user_id {
+            query = query.filter(entities::commitments::Column::UserId.eq(uid));
+        }
+        if let Some(status) = status {
+            query = query.filter(entities::commitments::Column::Status.eq(status.as_str()));
+        }
+
+        let models = query
+            .order_by_desc(entities::commitments::Column::CreatedAt)
+            .order_by_desc(entities::commitments::Column::Id)
+            .limit(limit as u64)
+            .all(&self.db)
+            .await?;
+
+        models
+            .into_iter()
+            .map(model_to_commitment)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     /// Transition an active commitment to a new lifecycle status.
     ///
     /// Returns `Ok(false)` when the row does not exist or is no longer `active`.

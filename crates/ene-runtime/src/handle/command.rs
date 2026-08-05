@@ -264,6 +264,39 @@ pub enum EneCommand {
         /// Reply channel.
         reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
     },
+    /// Edit a persisted typed memory in place (title / content / kind /
+    /// confidence).
+    ///
+    /// Executed against the memory store inside the actor so the edit is
+    /// serialized with turn execution and emitted as a
+    /// [`super::event::LifecycleEvent::MemoryLedgerChanged`] audit event. The
+    /// actor also refreshes the row's embeddings in the background so vector
+    /// recall does not serve stale text.
+    EditMemory {
+        /// Typed-memory row id.
+        id: i64,
+        /// New field values (validated before any write).
+        edit: ene_store::MemoryEdit,
+        /// Active turn context for the audit event (`None` outside a turn).
+        turn: Option<TurnId>,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
+    },
+    /// Set the salience (importance / Preference weight) of a typed memory.
+    ///
+    /// Executed against the memory store inside the actor so the adjustment
+    /// is serialized with turn execution and emitted as a
+    /// [`super::event::LifecycleEvent::MemoryLedgerChanged`] audit event.
+    SetMemorySalience {
+        /// Typed-memory row id.
+        id: i64,
+        /// New salience value (clamped into `0.0..=1.0` by the store).
+        salience: f32,
+        /// Active turn context for the audit event (`None` outside a turn).
+        turn: Option<TurnId>,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
+    },
     /// Invalidate the Tool RAG index, forcing re-embedding on next query.
     InvalidateToolIndex,
     /// Start a background workspace document index sync.
