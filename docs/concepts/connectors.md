@@ -89,6 +89,13 @@ features; the framework ships no built-in connector.
    rejected by `grant`, and the permission center lists them for status
    display.
 
+5. Custom actions (beyond `connect` / `disconnect`, which the framework
+   gates itself) are enforced by your implementation: after registration,
+   grab the connector's gate with `registry.gate(id)` and call
+   `gate.check(action, target, description)` inside each action before
+   touching the service. This makes per-action grants and revokes apply to
+   custom actions too.
+
 ## Secret-handling contract
 
 - Secrets are handled exclusively through `AccountCredentials` /

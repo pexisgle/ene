@@ -3575,6 +3575,41 @@ mod tests {
                 .is_empty()
         );
 
+        // Allow-once is one-shot: a second connect outside any turn must
+        // prompt again instead of reusing the expired approval.
+        let connector_handle = handle.connectors();
+        let credential = ene_connector::AccountCredentials::new(
+            "default",
+            ene_connector::CredentialStore::from_api_key("sk-test"),
+        );
+        let task_id = id.clone();
+        let second =
+            tokio::spawn(async move { connector_handle.connect(&task_id, credential).await });
+        let request_id = loop {
+            match event_rx.recv().await {
+                Ok(EneEvent::PermissionRequired {
+                    request_id, action, ..
+                }) => {
+                    assert_eq!(action, "connector.connect");
+                    break request_id;
+                }
+                Ok(_) => {}
+                Err(
+                    tokio::sync::broadcast::error::RecvError::Lagged(_)
+                    | tokio::sync::broadcast::error::RecvError::Closed,
+                ) => {
+                    panic!("event bus closed");
+                }
+            }
+        };
+        handle
+            .decide_permission(request_id, PermissionDecision::AllowOnce)
+            .expect("second decision accepted");
+        second
+            .await
+            .expect("second connect task completes")
+            .expect("second allow-once approval unblocks connect");
+
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 

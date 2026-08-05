@@ -124,6 +124,38 @@ impl ConnectorError {
             Self::Transport(_) | Self::Io(_) | Self::RateLimited { .. }
         )
     }
+
+    /// Scrub any secret-shaped content out of the error's string fields.
+    ///
+    /// Applied at the registry boundary so connector-supplied error text can
+    /// never carry a secret into events, status caches, or the CLI/desktop
+    /// surfaces. Structured fields (request ids, identifiers) are preserved.
+    #[must_use]
+    pub fn scrub(self) -> Self {
+        use crate::redaction::scrub_secrets;
+        match self {
+            Self::Auth(message) => Self::Auth(scrub_secrets(&message)),
+            Self::TokenExpired(message) => Self::TokenExpired(scrub_secrets(&message)),
+            Self::Transport(message) => Self::Transport(scrub_secrets(&message)),
+            Self::Timeout(message) => Self::Timeout(scrub_secrets(&message)),
+            Self::PermissionRequired {
+                request_id,
+                action,
+                target,
+                description,
+            } => Self::PermissionRequired {
+                request_id,
+                action: scrub_secrets(&action),
+                target: scrub_secrets(&target),
+                description: scrub_secrets(&description),
+            },
+            Self::RateLimited { retry_after } => Self::RateLimited { retry_after },
+            Self::WebhookRejected(reason) => Self::WebhookRejected(scrub_secrets(&reason)),
+            Self::NotFound(message) => Self::NotFound(scrub_secrets(&message)),
+            Self::Io(error) => Self::Io(error),
+            Self::Internal(message) => Self::Internal(scrub_secrets(&message)),
+        }
+    }
 }
 
 impl From<std::io::Error> for ConnectorError {

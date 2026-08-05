@@ -173,18 +173,71 @@ fn key_value_at(bytes: &[u8], start: usize) -> Option<(String, usize)> {
 /// text to keep after the redaction (quotes and delimiters).
 fn value_span(input: &str, value_start: usize) -> (usize, &str) {
     let bytes = input.as_bytes();
-    if bytes.get(value_start) == Some(&b'"') {
-        // Quoted value: redact the inner content and keep the closing quote.
-        match bytes[value_start + 1..].iter().position(|b| *b == b'"') {
-            Some(close) => (value_start + close + 2, "\""),
-            None => (bytes.len(), ""),
+    match bytes.get(value_start) {
+        Some(b'"') => {
+            // Quoted value: redact the inner content and keep the closing
+            // quote; a backslash escapes the next byte, so `\"` cannot
+            // terminate the value early.
+            let mut i = value_start + 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else if bytes[i] == b'"' {
+                    return (i + 1, "\"");
+                } else {
+                    i += 1;
+                }
+            }
+            (bytes.len(), "")
         }
-    } else {
-        let end = bytes[value_start..]
-            .iter()
-            .position(|b| b.is_ascii_whitespace() || matches!(b, b',' | b'}' | b']' | b')' | b'"'))
-            .map_or(bytes.len(), |p| value_start + p);
-        (end, "")
+        Some(b'{' | b'[') => {
+            // Nested object/array: redact the whole container so embedded
+            // values cannot survive under a secret-bearing key.
+            let mut depth = 1_u32;
+            let mut in_string = false;
+            let mut i = value_start + 1;
+            while i < bytes.len() {
+                if in_string {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                    } else if bytes[i] == b'"' {
+                        in_string = false;
+                        i += 1;
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    match bytes[i] {
+                        b'"' => {
+                            in_string = true;
+                            i += 1;
+                        }
+                        b'{' | b'[' => {
+                            depth += 1;
+                            i += 1;
+                        }
+                        b'}' | b']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return (i + 1, "");
+                            }
+                            i += 1;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            (bytes.len(), "")
+        }
+        _ => {
+            let end = bytes[value_start..]
+                .iter()
+                .position(|b| {
+                    b.is_ascii_whitespace() || matches!(b, b',' | b'}' | b']' | b')' | b'"')
+                })
+                .map_or(bytes.len(), |p| value_start + p);
+            (end, "")
+        }
     }
 }
 
@@ -241,6 +294,34 @@ mod tests {
         assert_eq!(
             scrub_secrets(r#"{"nested": {"access_token": "abc"}}"#),
             r#"{"nested": {"access_token": "***"}}"#
+        );
+    }
+
+    #[test]
+    fn scrub_nested_values_wholesale() {
+        // A nested container under a secret key must be replaced entirely —
+        // the embedded value can never survive inside the redaction.
+        assert_eq!(
+            scrub_secrets(r#"{"api_key": {"value": "sk-top-secret-123"}}"#),
+            r#"{"api_key": ***}"#
+        );
+        assert_eq!(
+            scrub_secrets(r#"{"api_key": ["a", {"secret": "b"}]}"#),
+            r#"{"api_key": ***}"#
+        );
+    }
+
+    #[test]
+    fn scrub_escaped_quotes_inside_values() {
+        // Escaped quotes belong to the value; redaction must not stop at
+        // them and leak the remainder.
+        assert_eq!(
+            scrub_secrets(r#"{"api_key": "sk-\"secret\"", "keep": "v"}"#),
+            r#"{"api_key": "***", "keep": "v"}"#
+        );
+        assert_eq!(
+            scrub_secrets(r#"{"token": "a\\b\"c"}"#),
+            r#"{"token": "***"}"#
         );
     }
 

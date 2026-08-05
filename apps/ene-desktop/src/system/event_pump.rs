@@ -190,10 +190,6 @@ fn translate_event(
         AppEvent::PendingCandidatesCount(count) => {
             pending_candidates.write(PendingCandidatesCount(count));
         }
-        // Connector lifecycle changes are consumed by the connectors
-        // settings page, which refetches cached summaries when shown or
-        // on explicit refresh; the event stays for future push consumers.
-        AppEvent::ConnectorsChanged => {}
     }
 }
 

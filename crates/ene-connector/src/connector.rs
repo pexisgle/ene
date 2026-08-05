@@ -26,6 +26,8 @@ pub mod actions {
     pub const CONNECT: &str = "connector.connect";
     /// Tearing down an authenticated session.
     pub const DISCONNECT: &str = "connector.disconnect";
+    /// Probing service reachability.
+    pub const CHECK: &str = "connector.check";
 }
 
 /// A permission surface entry declared by a connector.
@@ -190,12 +192,22 @@ pub struct PermissionGrant {
 /// permission decisions through the shared gate. Secrets are handled
 /// exclusively via [`AccountCredentials`] and must never be placed in
 /// status messages, events, or error strings.
+///
+/// The framework enforces permissions for the lifecycle operations
+/// (`connect` / `disconnect`). Declared custom actions are enforced by the
+/// implementation itself: obtain the connector's
+/// [`PermissionGate`](crate::gate::PermissionGate) via
+/// [`ConnectorRegistry::gate`](crate::registry::ConnectorRegistry::gate)
+/// after registration and call `check` inside each action before touching
+/// the service, so per-action grants and revokes apply beyond lifecycle.
 #[async_trait]
 pub trait Connector: Send + Sync {
     /// Stable identity and display metadata.
     fn identity(&self) -> &ConnectorIdentity;
 
-    /// Declared permission surface.
+    /// Declared permission surface: every user-visible action, so grants
+    /// and permission-status display cover it. Enforcement for these actions
+    /// lives in the implementation (see the trait docs).
     fn actions(&self) -> &'static [ConnectorAction];
 
     /// Transport policy applied to lifecycle operations by the registry.

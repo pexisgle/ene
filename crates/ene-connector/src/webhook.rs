@@ -63,10 +63,14 @@ impl WebhookValidator {
         let Some(provided) = signature.strip_prefix("sha256=") else {
             return Err(ConnectorError::webhook_rejected("malformed signature"));
         };
-        let message = format!("{timestamp}.{}", String::from_utf8_lossy(body));
         let mut mac = HmacSha256::new_from_slice(self.secret.expose_secret().as_bytes())
             .map_err(|_| ConnectorError::webhook_rejected("invalid secret"))?;
-        mac.update(message.as_bytes());
+        // The MAC input is the raw delivery bytes: `timestamp.body` with no
+        // lossy transformation, so two distinct payloads can never collide
+        // on the same signed message.
+        mac.update(timestamp.as_bytes());
+        mac.update(b".");
+        mac.update(body);
         let provided_bytes = hex::decode(provided)
             .map_err(|_| ConnectorError::webhook_rejected("malformed signature"))?;
         mac.verify_slice(&provided_bytes)
@@ -85,13 +89,14 @@ mod tests {
         mac.finalize().into_bytes().to_vec()
     }
 
-    fn signature_for(secret: &str, timestamp: &str, body: &str) -> String {
+    fn signature_for(secret: &str, timestamp: &str, body: &[u8]) -> String {
+        let mut message = Vec::with_capacity(timestamp.len() + 1 + body.len());
+        message.extend_from_slice(timestamp.as_bytes());
+        message.push(b'.');
+        message.extend_from_slice(body);
         format!(
             "sha256={}",
-            hex::encode(hmac_sha256(
-                secret.as_bytes(),
-                format!("{timestamp}.{body}").as_bytes()
-            ))
+            hex::encode(hmac_sha256(secret.as_bytes(), &message))
         )
     }
 
@@ -107,7 +112,7 @@ mod tests {
         let now = Utc::now();
         let timestamp = now.to_rfc3339();
         let body = r#"{"event":"push"}"#;
-        let signature = signature_for("whsec-secret", &timestamp, body);
+        let signature = signature_for("whsec-secret", &timestamp, body.as_bytes());
         validator()
             .validate(&signature, &timestamp, body.as_bytes(), now)
             .expect("matching signature passes");
@@ -118,7 +123,7 @@ mod tests {
         let now = Utc::now();
         let timestamp = now.to_rfc3339();
         let body = "payload";
-        let signature = signature_for("wrong-secret", &timestamp, body);
+        let signature = signature_for("wrong-secret", &timestamp, body.as_bytes());
         assert!(
             validator()
                 .validate(&signature, &timestamp, body.as_bytes(), now)
@@ -130,7 +135,7 @@ mod tests {
     fn tampered_body_is_rejected() {
         let now = Utc::now();
         let timestamp = now.to_rfc3339();
-        let signature = signature_for("whsec-secret", &timestamp, "payload");
+        let signature = signature_for("whsec-secret", &timestamp, b"payload");
         assert!(
             validator()
                 .validate(&signature, &timestamp, b"tampered", now)
@@ -139,10 +144,31 @@ mod tests {
     }
 
     #[test]
+    fn invalid_utf8_bytes_are_signed_verbatim() {
+        // A lossy transformation would collapse distinct invalid-UTF-8
+        // sequences onto the same replacement character; signing the raw
+        // bytes must keep each distinct payload distinguishable.
+        let now = Utc::now();
+        let timestamp = now.to_rfc3339();
+        let body: &[u8] = b"payload\xff\xfe\x01";
+        let mutated: &[u8] = b"payload\xfe\xff\x01";
+        let signature = signature_for("whsec-secret", &timestamp, body);
+        validator()
+            .validate(&signature, &timestamp, body, now)
+            .expect("verbatim body validates");
+        assert!(
+            validator()
+                .validate(&signature, &timestamp, mutated, now)
+                .is_err(),
+            "mutated invalid-UTF-8 bytes must not share the signature"
+        );
+    }
+
+    #[test]
     fn old_timestamp_is_rejected() {
         let now = Utc::now();
         let old = (now - Duration::minutes(10)).to_rfc3339();
-        let signature = signature_for("whsec-secret", &old, "payload");
+        let signature = signature_for("whsec-secret", &old, b"payload");
         assert!(
             validator()
                 .validate(&signature, &old, b"payload", now)
@@ -162,7 +188,7 @@ mod tests {
         assert!(
             validator()
                 .validate(
-                    &signature_for("whsec-secret", &timestamp, "payload"),
+                    &signature_for("whsec-secret", &timestamp, b"payload"),
                     "garbage",
                     b"payload",
                     now

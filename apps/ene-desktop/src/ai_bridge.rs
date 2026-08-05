@@ -1004,11 +1004,9 @@ async fn pump_events(
             Ok(
                 LifecycleEvent::StatusChanged { .. }
                 | LifecycleEvent::ToolBackgroundCompleted { .. }
-                | LifecycleEvent::CandidateChanged { .. },
+                | LifecycleEvent::CandidateChanged { .. }
+                | LifecycleEvent::ConnectorChanged { .. },
             ) => {}
-            Ok(LifecycleEvent::ConnectorChanged { .. }) => {
-                drop(event_tx.send(AppEvent::ConnectorsChanged));
-            }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!("[Ene] Dropped {n} lifecycle events (broadcast lag)");
             }

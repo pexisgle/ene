@@ -237,9 +237,20 @@ impl ConnectorRegistry {
     ) -> Result<HealthStatus, ConnectorError> {
         let registered = self.lookup(id)?;
         let timeout = registered.connector.policy().timeout;
-        let result = tokio::time::timeout(timeout, registered.connector.check_connectivity())
-            .await
-            .map_err(|_| ConnectorError::timeout(format!("connectivity check for {id}")))??;
+        let result =
+            match tokio::time::timeout(timeout, registered.connector.check_connectivity()).await {
+                Ok(result) => match result {
+                    Ok(health) => health,
+                    Err(error) => return Err(self.fail(id, actions::CHECK, error)),
+                },
+                Err(_) => {
+                    return Err(self.fail(
+                        id,
+                        actions::CHECK,
+                        ConnectorError::timeout(format!("connectivity check for {id}")),
+                    ));
+                }
+            };
         let health = HealthStatus {
             healthy: result.healthy,
             message: result.message.as_deref().map(scrub_secrets),
@@ -278,9 +289,19 @@ impl ConnectorRegistry {
         let timeout = registered.connector.policy().timeout;
         let accounts =
             match tokio::time::timeout(timeout, registered.connector.connect(credential)).await {
-                Ok(result) => result?,
+                Ok(result) => match result {
+                    Ok(accounts) => accounts,
+                    Err(error) if matches!(error, ConnectorError::PermissionRequired { .. }) => {
+                        return Err(error);
+                    }
+                    Err(error) => return Err(self.fail(id, actions::CONNECT, error)),
+                },
                 Err(_) => {
-                    return Err(ConnectorError::timeout(format!("connect for {id}")));
+                    return Err(self.fail(
+                        id,
+                        actions::CONNECT,
+                        ConnectorError::timeout(format!("connect for {id}")),
+                    ));
                 }
             };
         let refs: Vec<AccountRef> = accounts
@@ -337,9 +358,19 @@ impl ConnectorRegistry {
 
         let timeout = registered.connector.policy().timeout;
         match tokio::time::timeout(timeout, registered.connector.disconnect(&account)).await {
-            Ok(result) => result?,
+            Ok(result) => match result {
+                Ok(()) => {}
+                Err(error) if matches!(error, ConnectorError::PermissionRequired { .. }) => {
+                    return Err(error);
+                }
+                Err(error) => return Err(self.fail(id, actions::DISCONNECT, error)),
+            },
             Err(_) => {
-                return Err(ConnectorError::timeout(format!("disconnect for {id}")));
+                return Err(self.fail(
+                    id,
+                    actions::DISCONNECT,
+                    ConnectorError::timeout(format!("disconnect for {id}")),
+                ));
             }
         }
         self.update(id, |status| {
@@ -370,12 +401,21 @@ impl ConnectorRegistry {
         target_pattern: &str,
     ) -> Result<(), ConnectorError> {
         let registered = self.lookup(id)?;
-        let declared = matches!(action, actions::CONNECT | actions::DISCONNECT)
-            || registered
-                .connector
-                .actions()
-                .iter()
-                .any(|declared| declared.name == action);
+        if action.trim().is_empty() || target_pattern.trim().is_empty() {
+            // An empty target prefix would match every target, granting
+            // more than the user asked for.
+            return Err(ConnectorError::internal(
+                "grant requires a non-empty action and target pattern",
+            ));
+        }
+        let declared = matches!(
+            action,
+            actions::CONNECT | actions::DISCONNECT | actions::CHECK
+        ) || registered
+            .connector
+            .actions()
+            .iter()
+            .any(|declared| declared.name == action);
         if !declared {
             return Err(ConnectorError::internal(format!(
                 "action {action} is not declared by connector {id}"
@@ -456,6 +496,32 @@ impl ConnectorRegistry {
         Ok(())
     }
 
+    /// Expires an allow-once approval after its operation completed.
+    ///
+    /// Out-of-turn operations (no active turn) would otherwise keep the
+    /// approval until the next turn boundary; the runtime expires it as soon
+    /// as the retried operation finishes, restoring deny-by-default.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorError::NotFound`] for an unknown connector.
+    pub fn expire_request(&self, id: &ConnectorId, request_id: &str) -> Result<(), ConnectorError> {
+        self.lookup(id)?.gate.remove_approval(request_id);
+        Ok(())
+    }
+
+    /// Returns the connector's permission gate.
+    ///
+    /// Connectors enforce declared custom actions themselves: grab the gate
+    /// after registration and call [`PermissionGate::check`] inside action
+    /// implementations so per-action grants apply beyond the framework
+    /// lifecycle operations.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorError::NotFound`] for an unknown connector.
+    pub fn gate(&self, id: &ConnectorId) -> Result<PermissionGate, ConnectorError> {
+        Ok(self.lookup(id)?.gate.clone())
+    }
+
     /// Forwards the host's call context to every gate so approvals expire
     /// exactly like tool approvals (turn boundary for allow-once,
     /// conversation boundary for patterns).
@@ -484,6 +550,28 @@ impl ConnectorRegistry {
         if let Some(sink) = self.event_sink.read().clone() {
             sink(event);
         }
+    }
+
+    /// Records a lifecycle failure: scrubs the error, caches it as the
+    /// connector's connection state, emits a `Failed` event, and returns
+    /// the scrubbed error for the caller.
+    fn fail(&self, id: &ConnectorId, action: &str, error: ConnectorError) -> ConnectorError {
+        let scrubbed = error.scrub();
+        let message = scrubbed.to_string();
+        self.update(id, |status| {
+            status.connection = ConnectionState::Error {
+                message: message.clone(),
+            };
+        });
+        self.emit(ConnectorEvent {
+            connector: id.clone(),
+            at: Utc::now(),
+            kind: ConnectorEventKind::Failed {
+                action: action.to_string(),
+                error: message,
+            },
+        });
+        scrubbed
     }
 }
 
@@ -557,7 +645,12 @@ mod tests {
             credential: &AccountCredentials,
         ) -> Result<Vec<AuthenticatedAccount>, ConnectorError> {
             if credential.credential.api_key() == Some("reject-me") {
-                return Err(ConnectorError::auth("credential rejected"));
+                // Deliberately builds the error from raw secret material —
+                // the registry boundary must scrub it before it surfaces.
+                return Err(ConnectorError::auth(format!(
+                    "credential rejected: api_key={}",
+                    credential.credential.api_key().unwrap_or_default()
+                )));
             }
             *self.last_credential.lock().unwrap() = Some(
                 credential
@@ -713,6 +806,11 @@ mod tests {
     #[tokio::test]
     async fn auth_failure_surfaces_without_the_secret() {
         let registry = ConnectorRegistry::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink_events = events.clone();
+        registry.set_event_sink(Some(Arc::new(move |event| {
+            sink_events.lock().unwrap().push(event);
+        })));
         let mock = Arc::new(MockConnector::new());
         registry.register(mock).expect("register succeeds");
         registry
@@ -731,6 +829,23 @@ mod tests {
             .await
             .expect_err("credential rejected");
         assert!(!err.to_string().contains("reject-me"));
+        assert!(matches!(err, ConnectorError::Auth(_)));
+
+        // The failure is cached as the connection state and emitted as a
+        // scrubbed Failed event, never the raw secret.
+        let status = registry.status(&demo_connector_id()).expect("status");
+        let ConnectionState::Error { message } = &status.connection else {
+            panic!("expected Error connection state");
+        };
+        assert!(!message.contains("reject-me"));
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            events.last().map(|e| &e.kind),
+            Some(ConnectorEventKind::Failed { .. })
+        ));
+        for event in events.iter() {
+            assert!(!format!("{event:?}").contains("reject-me"));
+        }
     }
 
     #[tokio::test]
@@ -823,5 +938,57 @@ mod tests {
             .await
             .expect_err("slow check times out");
         assert!(matches!(err, ConnectorError::Timeout(_)));
+        let status = registry.status(&demo_connector_id()).expect("status");
+        assert!(
+            matches!(status.connection, ConnectionState::Error { .. }),
+            "failed lifecycle op must be cached as Error state"
+        );
+    }
+
+    #[tokio::test]
+    async fn grant_rejects_empty_target_and_undeclared_action() {
+        let registry = ConnectorRegistry::new();
+        registry
+            .register(Arc::new(MockConnector::new()))
+            .expect("register succeeds");
+        let id = demo_connector_id();
+        assert!(
+            registry.grant(&id, actions::CONNECT, "").is_err(),
+            "empty target pattern must be rejected (it would match every target)"
+        );
+        assert!(
+            registry
+                .grant(&id, "no.such.action", "connector:mock.demo")
+                .is_err(),
+            "undeclared actions must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_accessor_shares_the_connector_gate() {
+        let registry = ConnectorRegistry::new();
+        registry
+            .register(Arc::new(MockConnector::new()))
+            .expect("register succeeds");
+        let id = demo_connector_id();
+        registry
+            .grant(&id, actions::CONNECT, "connector:mock.demo")
+            .expect("grant records");
+        let gate = registry.gate(&id).expect("gate accessor");
+        gate.check(actions::CONNECT, "connector:mock.demo", "Connect Mock Demo")
+            .expect("grant recorded through the registry passes the shared gate");
+        let request_id = gate
+            .check(actions::CONNECT, "connector:other", "Connect other")
+            .expect_err("unrelated target stays denied");
+        let ConnectorError::PermissionRequired { request_id, .. } = request_id else {
+            panic!("expected PermissionRequired");
+        };
+        gate.approve_request(&request_id);
+        gate.remove_approval(&request_id);
+        assert!(
+            gate.check(actions::CONNECT, "connector:other", "Connect other")
+                .is_err(),
+            "expired allow-once approval must deny again"
+        );
     }
 }

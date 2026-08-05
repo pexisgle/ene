@@ -76,9 +76,6 @@ pub enum AppEvent {
     RuntimeDisconnected,
     /// Pending memory candidates available for user approval.
     PendingCandidatesCount(usize),
-    /// A connector's state changed; the connectors settings page should
-    /// refetch its cached summaries.
-    ConnectorsChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

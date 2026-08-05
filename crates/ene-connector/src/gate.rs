@@ -11,20 +11,24 @@ use crate::error::ConnectorError;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Standing `(action, target-prefix)` grants keyed to their grant time.
 type AllowedPatterns = HashMap<(String, String), DateTime<Utc>>;
+
+/// Last call context seen by the gate: conversation id and turn id.
+type CallContext = Option<(String, Option<String>)>;
 
 /// Per-connector permission gate.
 ///
 /// Each registered connector owns one gate; the registry checks lifecycle
 /// operations against it and routes approvals from the permission center
 /// into it, so connector permissions share the tool permission model.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PermissionGate {
-    approved_requests: RwLock<HashSet<String>>,
-    allowed_patterns: RwLock<AllowedPatterns>,
-    context: RwLock<Option<(String, Option<String>)>>,
+    approved_requests: Arc<RwLock<HashSet<String>>>,
+    allowed_patterns: Arc<RwLock<AllowedPatterns>>,
+    context: Arc<RwLock<CallContext>>,
 }
 
 impl PermissionGate {
@@ -39,6 +43,11 @@ impl PermissionGate {
         self.approved_requests
             .write()
             .insert(request_id.to_string());
+    }
+
+    /// Expires a previously recorded allow-once approval.
+    pub fn remove_approval(&self, request_id: &str) {
+        self.approved_requests.write().remove(request_id);
     }
 
     /// Records a conversation-scoped `(action, target-prefix)` pattern.

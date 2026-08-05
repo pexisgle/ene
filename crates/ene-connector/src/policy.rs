@@ -118,7 +118,7 @@ pub fn backoff_delay(policy: &RetryPolicy, attempt: u32, jitter_seed: u64) -> Du
     if !policy.jitter {
         return capped;
     }
-    let fraction = (0.5 + 0.5 * deterministic_unit(jitter_seed)).clamp(0.5, 1.5);
+    let fraction = (0.5 + deterministic_unit(jitter_seed)).clamp(0.5, 1.5);
     Duration::from_secs_f64(capped.as_secs_f64() * fraction)
 }
 
@@ -149,11 +149,14 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<(), ConnectorError>>,
 {
+    // A zero-attempt policy (constructed via the public fields) still runs
+    // once: the caller asked for an operation, not for an error.
+    let attempts = policy.max_attempts.max(1);
     let mut last_error = None;
-    for attempt in 1..=policy.max_attempts {
+    for attempt in 1..=attempts {
         match op().await {
             Ok(()) => return Ok(()),
-            Err(err) if err.is_retryable() && attempt < policy.max_attempts => {
+            Err(err) if err.is_retryable() && attempt < attempts => {
                 let seed = now_seed() ^ u64::from(attempt);
                 tokio::time::sleep(backoff_delay(policy, attempt, seed)).await;
                 last_error = Some(err);
@@ -298,6 +301,27 @@ mod tests {
         .await
         .expect("third attempt succeeds");
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn zero_attempt_policy_still_runs_once() {
+        let attempts = AtomicU32::new(0);
+        let policy = RetryPolicy {
+            max_attempts: 0,
+            base_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(10),
+            jitter: false,
+        };
+        retry_with_backoff(&policy, || {
+            let attempts = &attempts;
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await
+        .expect("zero-attempt policy still runs the operation");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]

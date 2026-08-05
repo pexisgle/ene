@@ -232,8 +232,15 @@ where
 {
     const MAX_PENDING_ROUNDS: usize = 8;
     let mut audit_decision = ene_store::AuditDecision::NotRequired;
-    let mut audit_action = String::new();
-    let mut audit_target = String::new();
+    // Ops that never prompt (check) or fail before prompting still record
+    // their canonical action and target, so failed-op audit rows carry
+    // context instead of empty fields.
+    let mut audit_action = match op {
+        "connect" => ene_connector::actions::CONNECT.to_string(),
+        "disconnect" => ene_connector::actions::DISCONNECT.to_string(),
+        _ => format!("connector.{op}"),
+    };
+    let mut audit_target = format!("connector:{id}");
     let tool_name = format!("connector.{id}.{op}");
     let mut result = run().await;
     for _ in 0..MAX_PENDING_ROUNDS {
@@ -246,6 +253,7 @@ where
         else {
             break;
         };
+        let request_id = request_id.clone();
         audit_action.clone_from(action);
         audit_target.clone_from(target);
         let req_id = RequestId::from(request_id.clone());
@@ -272,12 +280,47 @@ where
         match decision {
             Some(PermissionDecision::AllowOnce) => {
                 audit_decision = ene_store::AuditDecision::AllowOnce;
-                registry.approve_request(id, request_id)?;
+                if let Err(error) = registry.approve_request(id, &request_id) {
+                    record_connector_audit(
+                        audit_store.as_ref(),
+                        &session_id,
+                        active_turn.as_ref(),
+                        &tool_name,
+                        &audit_action,
+                        &audit_target,
+                        audit_decision,
+                        false,
+                    );
+                    return Err(error);
+                }
                 result = run().await;
+                // Allow-once is one-shot: outside a turn there is no later
+                // turn boundary to expire it, so drop it as soon as the
+                // retried operation finishes.
+                if let Err(error) = registry.expire_request(id, &request_id) {
+                    tracing::warn!(
+                        component = "connectors",
+                        connector = %id,
+                        error = %error,
+                        "failed to expire connector approval"
+                    );
+                }
             }
             Some(PermissionDecision::AllowSession) => {
                 audit_decision = ene_store::AuditDecision::AllowSession;
-                registry.grant(id, action, target)?;
+                if let Err(error) = registry.grant(id, action, target) {
+                    record_connector_audit(
+                        audit_store.as_ref(),
+                        &session_id,
+                        active_turn.as_ref(),
+                        &tool_name,
+                        &audit_action,
+                        &audit_target,
+                        audit_decision,
+                        false,
+                    );
+                    return Err(error);
+                }
                 let mut guard = permission_scopes.lock().await;
                 let next_id = guard
                     .iter()
@@ -314,7 +357,7 @@ where
                     false,
                 );
                 return Err(ConnectorError::permission_required(
-                    request_id.clone(),
+                    request_id,
                     action.clone(),
                     target.clone(),
                     description.clone(),
