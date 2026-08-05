@@ -113,10 +113,28 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // `ai.tts.provider = "voicevox"` selects it.
     list.insert("voicevox".to_string(), PluginEntry::default());
 
+    // The local Kokoro-TTS provider plugin loads the ONNX model on first use
+    // (no host environment or credentials); it is inert until
+    // `ai.tts.provider = "kokoro"` selects it.
+    list.insert("kokoro".to_string(), PluginEntry::default());
+
     // The Edge-TTS provider plugin talks to Microsoft's free, keyless Edge
     // Read Aloud WebSocket endpoint; it is inert until
     // `ai.tts.provider = "edge-tts"` selects it.
     list.insert("edge-tts".to_string(), PluginEntry::default());
+
+    // The ElevenLabs TTS provider plugin needs ELEVENLABS_API_KEY forwarded
+    // from the host environment; without it the provider cannot authenticate.
+    list.insert(
+        "elevenlabs".to_string(),
+        PluginEntry {
+            env_passthrough: vec![
+                "ELEVENLABS_API_KEY".to_string(),
+                "ELEVENLABS_BASE_URL".to_string(),
+            ],
+            ..PluginEntry::default()
+        },
+    );
 
     list
 }

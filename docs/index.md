@@ -50,8 +50,8 @@ Ene Workspace
 │   ├── ene-plugin-db      (Plugin host-service `db` client)
 │   └── ene-plugin-macros  (Proc-macros for plugins)
 └── Out-of-Process Plugins
-    ├── plugins/provider/* (Provider plugins: anthropic, edge-tts, local-llm, openai, openai-tts, voicevox)
-    └── plugins/tool/*     (Tool plugins: app, browser, calc, calendar, counter, fs, geo, git, homeassistant, random, utility, web)
+    ├── plugins/provider/* (Provider plugins: anthropic, edge-tts, elevenlabs, kokoro, local-llm, openai, openai-tts, voicevox)
+    └── plugins/tool/*     (Tool plugins: app, browser, calc, calendar, fs, geo, git, random, utility, web)
 ```
 
 ---

@@ -18,8 +18,10 @@ Ene Host Application (ene-runtime)
         │     ├── ene-plugin-openai    (OpenAI-Compatible Provider Plugin)
         │     ├── ene-plugin-openai-tts (OpenAI Speech API TTS Provider Plugin)
         │     ├── ene-plugin-llama-cpp (Local GGUF Provider Plugin)
+        │     ├── ene-plugin-kokoro     (Kokoro-TTS ONNX Local TTS Provider Plugin)
         │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS Provider Plugin)
         │     ├── ene-plugin-edge-tts  (Microsoft Edge Neural Voice TTS Provider Plugin)
+        │     ├── ene-plugin-elevenlabs (ElevenLabs TTS Provider Plugin)
         │     ├── ene-plugin-app       (GUI Launcher Tool)
         │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
         │     ├── ene-plugin-calc      (Calculation Tool)
@@ -108,6 +110,12 @@ into `TtsChunk`s, preserving the `TtsProvider::synthesize_stream` contract.
 The `voicevox` plugin additionally spawns and supervises a local
 VOICEVOX-compatible engine binary in managed mode (`auto_start: true`).
 
+The `kokoro` plugin (`plugins/provider/kokoro`) runs the local Kokoro-82M
+ONNX model directly in its own process (via `ene-voice`'s ONNX engine) — no
+API key, engine, or local server involved. It loads the model lazily on
+first use, emits 24 kHz mono WAV, and rebuilds the engine when its resolved
+config (model/voices paths, voice, speed, language) changes.
+
 The `edge-tts` plugin (`plugins/provider/edge-tts`) implements the same
 `TtsPlugin` contract against Microsoft's free, keyless Edge Read Aloud
 WebSocket endpoint: it mimics the browser extension's handshake
@@ -115,6 +123,15 @@ WebSocket endpoint: it mimics the browser extension's handshake
 48 kbps mono MP3 frames, decodes them in-process (`nanomp3`), and returns WAV
 audio — no API key, engine, or local server involved. A synthesize call that
 loses its connection retries with exponential backoff.
+
+The `elevenlabs` plugin (`plugins/provider/elevenlabs`) implements the same
+`TtsPlugin` contract against the ElevenLabs API with two transports: the REST
+`POST /text-to-speech/{voice_id}/stream` endpoint (default) and the
+bidirectional `stream-input` WebSocket for low-latency streaming. Audio is
+requested as raw 16-bit PCM (`pcm_16000` / `pcm_24000` / `pcm_44100`) and
+returned as WAV. The API key travels in the `xi-api-key` request header from
+`plugins.list.elevenlabs.config.api_key` or the `ELEVENLABS_API_KEY`
+environment variable — never in the URL.
 
 ### Local-inference plugin authors: the same discipline, in-process
 
@@ -278,10 +295,13 @@ tests against pinned GGUF fixtures.
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 | `ene-plugin-openai` | Provider | OpenAI-compatible provider plugin (chat, streaming, embeddings) | No |
 | `ene-plugin-openai-tts` | Provider | OpenAI Speech API TTS provider (tts-1 / tts-1-hd) — WAV (24 kHz PCM) audio | No |
+| `ene-plugin-edge-tts` | Provider | Microsoft Edge Neural Voice TTS provider — free, keyless WebSocket (24 kHz MP3 decoded to WAV) | No |
+| `ene-plugin-elevenlabs` | Provider | ElevenLabs TTS provider (REST + WebSocket streaming) — WAV (16-bit PCM) audio | No |
 | `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — chat streaming, completion, and GGUF embeddings | No |
+| `ene-plugin-kokoro` | Provider | Local Kokoro-82M ONNX TTS provider — 24 kHz WAV via in-process ONNX inference | No |
 | `ene-plugin-voicevox` | Provider | VOICEVOX / Aivis Speech TTS provider — WAV audio via the 2-step `audio_query` → `synthesis` flow | No |
 
-All seventeen plugins above are included in the default `plugins.list` and start
+All nineteen plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.
 
 ### Filesystem tool reference (`filesystem.*`)

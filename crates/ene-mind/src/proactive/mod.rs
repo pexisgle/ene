@@ -8,6 +8,7 @@ mod parse;
 mod pending_confirmation;
 mod prompt;
 mod quiet_hours;
+mod world_state;
 
 pub use gate::{GateRejectReason, evaluate_deterministic_gates};
 pub use parse::{decision_schema_object, parse_decision_json};
@@ -18,6 +19,7 @@ pub use pending_confirmation::{
 };
 pub use prompt::build_decision_messages;
 pub use quiet_hours::{QuietHoursEval, evaluate_quiet_hours};
+pub use world_state::{IdleTrend, WorldStateMemory, WorldStateSnapshot, WorldStateSummary};
 
 use std::fmt;
 use std::sync::Arc;
@@ -134,6 +136,9 @@ pub struct ProactiveContext {
     /// ask about it; the generation hint then renders a confirmation question
     /// instead of a topic hint.
     pub pending_confirmation: Option<PendingConfirmationPrompt>,
+    /// Recent world-state trend summary when world-state memory is enabled
+    /// and has enough history. `None` otherwise.
+    pub world_state: Option<WorldStateSummary>,
 }
 
 /// Urgency hint from the decision model.
@@ -297,6 +302,7 @@ pub fn build_proactive_context(
     suppression: ProactiveSuppressionState,
     quiet_hours: QuietHoursEval,
     pending_confirmation: Option<PendingConfirmationPrompt>,
+    world_state: Option<&WorldStateMemory>,
 ) -> ProactiveContext {
     let history = if config.sources.conversation {
         truncate_history(history, config.max_conversation_chars)
@@ -366,6 +372,8 @@ pub fn build_proactive_context(
         Vec::new()
     };
 
+    let world_state = world_state.and_then(|memory| memory.summary(&config.world_state));
+
     ProactiveContext {
         history,
         seconds_since_user_input: suppression.seconds_since_user_input,
@@ -378,6 +386,7 @@ pub fn build_proactive_context(
         suppression,
         quiet_hours,
         pending_confirmation,
+        world_state,
     }
 }
 
@@ -946,10 +955,85 @@ mod tests {
             },
             QuietHoursEval::inactive(),
             None,
+            None,
         );
         assert!(ctx.history.is_empty());
         assert!(ctx.activity.is_none());
         assert!(ctx.screen_summary.is_none());
+    }
+
+    #[test]
+    fn world_state_summary_reaches_context_only_when_enabled() {
+        use crate::config::WorldStateConfig;
+
+        let mut memory = WorldStateMemory::default();
+        let world_cfg = WorldStateConfig {
+            enabled: true,
+            ..WorldStateConfig::default()
+        };
+        for i in 0..3 {
+            let observation = ProactiveObservation {
+                captured_at_unix_ms: i + 1,
+                activity: Some(ActivitySnapshot {
+                    idle_seconds: Some(10 * (i + 1)),
+                    active_window_label: "Code".into(),
+                    recent_change: String::new(),
+                }),
+                screen_summary: None,
+                screen_summary_status: ScreenSummaryStatus::Disabled,
+            };
+            memory.push(
+                WorldStateSnapshot::from_observation(&observation, 60),
+                &world_cfg,
+            );
+        }
+        let mut config = base_config();
+        config.world_state = world_cfg.clone();
+        let ctx = build_proactive_context(
+            &config,
+            &[],
+            &ProactiveObservation::default(),
+            None,
+            &[],
+            &[],
+            ProactiveSuppressionState {
+                seconds_since_user_input: 60,
+                seconds_since_proactive: 1000,
+                proactive_turns_this_session: 0,
+                user_turn_busy: false,
+            },
+            QuietHoursEval::inactive(),
+            None,
+            Some(&memory),
+        );
+        let summary = ctx
+            .world_state
+            .as_ref()
+            .expect("enabled world state must produce a summary");
+        assert_eq!(summary.idle_trend, IdleTrend::Rising);
+        assert_eq!(summary.snapshot_count, 3);
+
+        // The feature defaults to off: the same memory must not reach the
+        // context, so the prompt and gates are byte-identical to before.
+        let config = base_config();
+        let ctx = build_proactive_context(
+            &config,
+            &[],
+            &ProactiveObservation::default(),
+            None,
+            &[],
+            &[],
+            ProactiveSuppressionState {
+                seconds_since_user_input: 60,
+                seconds_since_proactive: 1000,
+                proactive_turns_this_session: 0,
+                user_turn_busy: false,
+            },
+            QuietHoursEval::inactive(),
+            None,
+            Some(&memory),
+        );
+        assert!(ctx.world_state.is_none());
     }
 
     #[tokio::test]
@@ -972,6 +1056,7 @@ mod tests {
             },
             quiet_hours: QuietHoursEval::inactive(),
             pending_confirmation: None,
+            world_state: None,
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":1.0}"#.into(),
@@ -1012,6 +1097,7 @@ mod tests {
             },
             quiet_hours: QuietHoursEval::inactive(),
             pending_confirmation: None,
+            world_state: None,
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":1.0}"#.into(),
@@ -1052,6 +1138,7 @@ mod tests {
             },
             quiet_hours: QuietHoursEval::inactive(),
             pending_confirmation: None,
+            world_state: None,
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":0.9,"reason":"idle","topic_hint":"check in","urgency":"low"}"#.into(),
@@ -1095,6 +1182,7 @@ mod tests {
             },
             quiet_hours: QuietHoursEval::inactive(),
             pending_confirmation: None,
+            world_state: None,
         };
         let capture = Arc::new(SchemaCaptureProvider {
             body: r#"{"should_speak":false,"confidence":0.1,"reason":"quiet","topic_hint":"","urgency":"low"}"#.into(),
@@ -1147,6 +1235,7 @@ mod tests {
             },
             quiet_hours: QuietHoursEval::inactive(),
             pending_confirmation: None,
+            world_state: None,
         };
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":false,"confidence":0.9,"reason":"quiet","topic_hint":"","urgency":"low"}"#.into(),
@@ -1199,6 +1288,7 @@ mod tests {
             },
             quiet_hours: QuietHoursEval::inactive(),
             pending_confirmation: None,
+            world_state: None,
         }
     }
 

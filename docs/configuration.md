@@ -120,7 +120,7 @@ the local GGUF provider plugin (`ene-plugin-llama-cpp`); the `local_models`
 keys themselves remain here as routing and context-budget information
 (`context_size` is read at resolve time, `dimensions` is the host's
 store-schema value for local embedding). The mirror is a one-way copy made by
-the settings migration — editing a profile does not rewrite
+the v2→v3 settings migration — editing a profile does not rewrite
 `local_models`.
 
 At startup the runtime validates each generative task's window (`chat`, plus
@@ -187,6 +187,9 @@ Configures context-window packing, hybrid memory recall, emotion decay, characte
       "interval_seconds": 600,
       "fatigue_suppression_threshold": 0.7,
       "confirmation_enabled": false,
+      "world_state": {
+        "enabled": false
+      },
       "sources": {
         "window_title_level": "app_only"
       }
@@ -298,6 +301,44 @@ responses (no visible text) are logged with `confirmation=empty` and excluded
 from the rate. Early cancellation applies to token-streaming providers; the
 non-streaming local adapter buffers the full completion before its first chunk,
 so a refusal there discards a completed generation rather than saving tokens.
+
+### World state memory (time-series trend)
+
+`mind.proactive.world_state` (default disabled) tracks a bounded in-memory
+time-series of structured snapshots: the focused window label, window
+switches, OS idle when the host measures it, and seconds since the last user
+message — captured once per observation interval. Snapshots are never
+persisted: they are short-lived telemetry (privacy-sensitive labels, stale
+within minutes) and the decision only needs the recent window.
+
+```json
+"world_state": {
+  "enabled": true,
+  "max_snapshots": 64,
+  "min_snapshots_for_trend": 3,
+  "engaged_idle_seconds": 60,
+  "change_window": 3
+}
+```
+
+- `enabled` (default `false`): master switch. When off, no snapshots are
+  consulted and the decision context and prompt are unchanged.
+- `max_snapshots` (default `64`): ring capacity — the newest snapshots are
+  kept, the oldest dropped.
+- `min_snapshots_for_trend` (default `3`): history needed before the trend
+  summary and its gate apply.
+- `engaged_idle_seconds` (default `60`): latest OS idle below this counts as
+  "engaged". Only used when the host measures idle; the current desktop host
+  does not.
+- `change_window` (default `3`): how many recent snapshots count toward the
+  window-switch trend.
+
+When enabled with enough history, the deterministic gate suppresses decisions
+while the user is actively working (a fresh window switch, low OS idle, or
+idle decreasing toward activity), and the decision prompt receives a
+`world_state` summary (idle trend, window-change count, engaged flag, latest
+window label, snapshot count). Window labels obey
+`sources.window_title_level`; screen summaries are never stored in the ring.
 
 ### Quiet hours and manual pause
 
@@ -774,21 +815,21 @@ non-empty), `gpu_layers` (`"auto"` or an integer string), and the optional
 `context_size` (chat context window in tokens; defaults to `16384` when
 omitted) plus the optional `dimensions` (declared embedding dimensionality;
 see below). The plugin downloads `url` weights into the model cache on first
-use (GGUF magic validated) and keeps one loaded model per profile for its
-process lifetime. The first download runs inside the proactive decision
-warm-up's 5-minute budget; a model that takes longer to fetch fails closed
-(proactive stays `Disabled` until the host restarts), so point
-`model_path` at a pre-fetched cache for very large models. `context_size`
-and `gpu_layers` size chat loads only — the embedding model sizes its own
-context and offload plan internally, and the
-host's routing window stays in `ai.local_models.<name>.context_size`. The
-migrations mirror `context_size`, so a profile that omits it loads the
-host-side value (16,384 when the host value is also the default); the mirror
-is a one-time migration, so a *later* edit of
-`ai.local_models.<name>.context_size` does not re-sync the profile — set the
-profile's `context_size` to at least the host value to avoid a context
-overflow at generation time. Profile *selection* is plugin-owned; the values
-are delivered via `ConfigurablePlugin::set_profiles`.
+use (GGUF magic validated) and keeps one loaded model per profile until a live
+config/profile update invalidates that cache. Existing requests retain their
+model; subsequent requests load the new settings. The first download runs
+inside the proactive decision warm-up's 5-minute budget; a model that takes
+longer to fetch fails closed (proactive stays `Disabled` until the host
+restarts), so point `model_path` at a pre-fetched cache for very large models.
+`context_size` and `gpu_layers` size chat loads only — the embedding model
+sizes its own context and offload plan internally, and the host's routing
+window stays in `ai.local_models.<name>.context_size`. The v2→v3 migration
+mirrors `context_size`, so a profile that omits it loads the host-side value
+(16,384 when the host value is also the default); only manually written
+profiles that predate the mirror can drift — set their `context_size` to at
+least the host value to avoid a context overflow at generation time. Profile
+*selection* is plugin-owned; the values are delivered via
+`ConfigurablePlugin::set_profiles`.
 
 `dimensions` is required on `ai.local_models.<name>` when the model backs
 `tasks.embedding` with `provider: "local"`: the host opens the memory-store
@@ -875,6 +916,82 @@ Changing `ai.tts.provider` itself (e.g. switching from `kokoro` to
 `voicevox`) takes effect at the next startup: the active provider is built
 once at bootstrap, while edits to `plugins.list.voicevox.config` and
 `ai.tts.voice` are picked up by running sessions.
+
+#### Local Kokoro-TTS provider (`plugins.list.kokoro.config`)
+
+The `kokoro` provider plugin (`plugins/provider/kokoro`) runs the Kokoro-82M
+ONNX model directly in its own process — fully local, no API key, no HTTP
+engine. Select it with `ai.tts.provider = "kokoro"`; the generic
+`ai.tts.voice` field can hold a Kokoro voice name (e.g. `af_heart`,
+`jf_alpha`) that overrides the configured default per request.
+
+The ONNX model and `voices.bin` embeddings are fetched into the shared
+models cache (`ene_voice`'s download/prefetch path; the desktop Settings →
+Voice page downloads them on demand). Custom `model_path` / `voices_path`
+values override the cache locations and are prefetched to those same paths
+when missing (bootstrap resolves them from this plugin config); files
+already present are never re-downloaded.
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "kokoro",
+      "voice": "af_heart"
+    }
+  },
+  "plugins": {
+    "list": {
+      "kokoro": {
+        "enable": true,
+        "config": {
+          "model_path": "/data/kokoro.onnx",
+          "voices_path": "/data/voices.bin",
+          "voice": "af_heart",
+          "speed": 1.0,
+          "language": "en",
+          "ort_dylib_path": "/opt/onnxruntime/lib/libonnxruntime.so"
+        }
+      }
+    }
+  }
+}
+```
+
+Settings:
+
+| Key | Default | Description |
+|---|---|---|
+| `model_path` | shared models cache (`models/gguf/kokoro.onnx`) | Kokoro ONNX model file path. |
+| `voices_path` | `plugins.list.kokoro.profiles.kokoro.voices_path` → shared models cache (`models/gguf/voices.bin`) | `voices.bin` voice embeddings path. The profile slot is the migration target of the former `ai.tts.voices_path`. |
+| `voice` | `""` (first voice in `voices.bin`, `af_alloy`) | Default voice; a per-request `ai.tts.voice` overrides it. See the capability list for all 53 voice names. Alternating per-request voices reload the model on each switch. |
+| `speed` | `1.0` | Speech speed multiplier (0.5–2.0). |
+| `language` | unset (English G2P) | Grapheme-to-phoneme language: `"ja"` selects the Japanese kana rules, anything else the English rules. |
+| `ort_dylib_path` | unset (`ort` default resolution) | ONNX Runtime dynamic library path override. Fixed at process start: ONNX Runtime initializes once per process, so a change requires a restart. The in-process fallback honors this key first, then the legacy `plugins.list.onnx.config.ort_dylib_path`. |
+
+Every key can be overridden per environment variable as
+`ENE_PLUGINS__LIST__KOKORO__CONFIG__<KEY>`
+(e.g. `ENE_PLUGINS__LIST__KOKORO__CONFIG__SPEED`).
+
+The model loads lazily on the first synthesize and stays resident in the
+plugin process; changing the model or voices paths, voice, speed, or
+language reloads it (`ort_dylib_path` is fixed at process start). The plugin
+returns 24 kHz mono WAV, which the host-side audio pipeline decodes into
+float samples and slices into `TtsChunk`s for streaming playback
+(`formats = ["wav"]`).
+
+Note that `ai.tts.model_path` / `ai.tts.model` are honored only by the
+in-process fallback path (see below); the plugin path reads `model_path`
+from its own config.
+
+**In-process fallback.** If the plugin host is unavailable at startup or the
+`kokoro` plugin is disabled, the runtime's built-in `ene-voice` factory still
+serves `ai.tts.provider = "kokoro"` in-process (honoring `ai.tts.model_path`
+/ `ai.tts.model` / `ai.tts.speed` and the `profiles.kokoro.voices_path`
+slot). The fallback only applies while the plugin never registered: once the
+plugin factory registers, a later plugin failure leaves `kokoro` unavailable
+until the next restart, because the in-process factory is not re-registered
+mid-session.
 
 #### OpenAI Speech API TTS provider (`plugins.list.openai-tts.config`)
 
@@ -987,6 +1104,77 @@ with exponential backoff, up to `max_retries` times in total per request
 Changing `ai.tts.provider` itself (e.g. switching from `voicevox` to
 `edge-tts`) takes effect at the next startup: the active provider is built
 once at bootstrap, while edits to `plugins.list.edge-tts.config` and
+`ai.tts.voice` are picked up by running sessions.
+
+#### ElevenLabs TTS provider (`plugins.list.elevenlabs.config`)
+
+The `elevenlabs` provider plugin (`plugins/provider/elevenlabs`) synthesizes
+speech through the ElevenLabs API with two transports: the REST
+`POST /text-to-speech/{voice_id}/stream` endpoint (default) and the
+bidirectional `stream-input` WebSocket for low-latency streaming
+(`mode = "ws"`). It requests raw 16-bit mono PCM (`pcm_16000` / `pcm_24000` /
+`pcm_44100`) and returns WAV, which the host-side audio pipeline decodes into
+float samples. Select it with `ai.tts.provider = "elevenlabs"`; the generic
+`ai.tts.voice` field can hold a voice ID that overrides the configured
+default per request.
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "elevenlabs",
+      "voice": "21m00Tcm4TlvDq8ikWAM"
+    }
+  },
+  "plugins": {
+    "list": {
+      "elevenlabs": {
+        "enable": true,
+        "config": {
+          "api_key": "xi-...",
+          "mode": "rest",
+          "model_id": "eleven_multilingual_v2",
+          "voice_id": "21m00Tcm4TlvDq8ikWAM",
+          "sample_rate": 24000,
+          "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
+            "use_speaker_boost": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Settings:
+
+| Key | Default | Description |
+|---|---|---|
+| `api_key` | unset | ElevenLabs API key, or a `{source: inline\|env\|auto}` descriptor. Falls back to the `ELEVENLABS_API_KEY` environment variable. Marked `x-ene-secret`, so the host masks and redacts it. |
+| `mode` | `rest` | Transport: `rest` (`POST /text-to-speech/{voice_id}/stream`, chunked audio) or `ws` (`stream-input` WebSocket, bidirectional base64 audio frames). |
+| `model_id` | `eleven_multilingual_v2` | ElevenLabs model ID (e.g. `eleven_turbo_v2_5`). |
+| `voice_id` | unset | Default voice ID; a per-request voice overrides it. Required when the request carries none. |
+| `sample_rate` | `24000` | PCM output sample rate (`16000` / `24000` / `44100`); selects the API's `pcm_{rate}` format and the WAV header rate. |
+| `voice_settings.stability` | `0.5` | Voice stability (0.0–1.0, clamped). |
+| `voice_settings.similarity_boost` | `0.75` | Voice similarity boost (0.0–1.0, clamped). |
+| `voice_settings.style` | `0.0` | Style exaggeration (0.0–1.0, clamped; only some models support it). |
+| `voice_settings.use_speaker_boost` | `true` | Whether to boost the voice's natural characteristics. |
+| `base_url` | `https://api.elevenlabs.io/v1` | API base URL override. Falls back to the `ELEVENLABS_BASE_URL` environment variable. WebSocket mode swaps the scheme (`http(s)` → `ws(s)`). |
+
+The plugin sends `xi-api-key` as a request header (never a query parameter),
+requests `pcm_{sample_rate}` from the API, and returns the audio as WAV
+(`formats = ["wav"]`). The API's other formats (`mp3_44100_128`, …) are not
+exposed. REST failures are retried up to twice (3 attempts total) on
+transient errors (408/429/5xx, network) with jittered backoff; WebSocket mode
+retries the whole request on transport failures and rate limits (429) and
+discards partial audio.
+
+Changing `ai.tts.provider` itself (e.g. switching from `edge-tts` to
+`elevenlabs`) takes effect at the next startup: the active provider is built
+once at bootstrap, while edits to `plugins.list.elevenlabs.config` and
 `ai.tts.voice` are picked up by running sessions.
 
 #### Secret marking

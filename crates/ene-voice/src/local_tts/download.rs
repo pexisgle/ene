@@ -170,8 +170,12 @@ pub async fn ensure_kokoro_files_exist(
 /// TTS section selects the local Kokoro provider ([`super::PROVIDER_NAME`]).
 ///
 /// Reads its settings from the passed-in config document — the same one the
-/// provider factory will later use — so the prefetched paths agree with the
-/// ones `LocalTtsProviderFactory::build` resolves.
+/// provider plugin and the in-process fallback factory will later use — so
+/// the prefetched paths agree with the ones the active path resolves. The
+/// kokoro plugin's own config blob (`plugins.list.kokoro.config.model_path`
+/// / `voices_path`) wins, matching the plugin's resolution precedence;
+/// `ai.tts.*` / the `kokoro` profile are used when the plugin config is
+/// absent.
 ///
 /// Intended to be called once from the runtime's async bootstrap path,
 /// before any TTS provider is constructed, so `provider::open` never needs
@@ -196,9 +200,24 @@ pub async fn prefetch_if_configured(
     if resolved.provider != super::PROVIDER_NAME {
         return Ok(());
     }
-    let model_path = resolve_model_path(&ai);
-    let voices_path = resolve_voices_path(config);
+    let model_path =
+        plugin_config_path(config, "model_path").unwrap_or_else(|| resolve_model_path(&ai));
+    let voices_path =
+        plugin_config_path(config, "voices_path").unwrap_or_else(|| resolve_voices_path(config));
     ensure_kokoro_files_exist(&model_path, &voices_path).await
+}
+
+/// Reads a path key from the kokoro plugin's config blob
+/// (`plugins.list.kokoro.config`), the source the provider plugin resolves
+/// before the profile or the `ai.tts.*` fallbacks.
+fn plugin_config_path(config: &ene_config::EneConfig, key: &str) -> Option<std::path::PathBuf> {
+    ene_ai::plugin_config::plugin_config_blob(config, ene_ai::plugin_config::KOKORO_PLUGIN)
+        .as_ref()
+        .and_then(|blob| blob.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 #[cfg(test)]
@@ -221,6 +240,33 @@ mod tests {
                 .to_string_lossy()
                 .contains("voices.bin")
         );
+    }
+
+    #[test]
+    fn plugin_config_path_reads_custom_paths() {
+        let mut config = ene_config::EneConfig::default();
+        config
+            .set_path(
+                "plugins.list.kokoro.config.model_path",
+                "/custom/kokoro.onnx",
+            )
+            .expect("set model path");
+        config
+            .set_path(
+                "plugins.list.kokoro.config.voices_path",
+                "/custom/voices.bin",
+            )
+            .expect("set voices path");
+
+        assert_eq!(
+            plugin_config_path(&config, "model_path"),
+            Some(std::path::PathBuf::from("/custom/kokoro.onnx"))
+        );
+        assert_eq!(
+            plugin_config_path(&config, "voices_path"),
+            Some(std::path::PathBuf::from("/custom/voices.bin"))
+        );
+        assert_eq!(plugin_config_path(&config, "voice"), None);
     }
 
     #[tokio::test]

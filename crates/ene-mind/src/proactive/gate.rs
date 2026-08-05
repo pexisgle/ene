@@ -19,6 +19,8 @@ pub enum GateRejectReason {
     Cooldown,
     /// Session proactive turn cap reached.
     SessionLimit,
+    /// World-state trend shows the user actively working at the machine.
+    ActivityEngaged,
     /// Every configured input source is disabled or empty.
     NoSources,
     /// Character fatigue is at or above `fatigue_suppression_threshold`.
@@ -34,6 +36,7 @@ impl fmt::Display for GateRejectReason {
             Self::MinIdle => write!(f, "min idle not reached"),
             Self::Cooldown => write!(f, "proactive cooldown"),
             Self::SessionLimit => write!(f, "session proactive limit"),
+            Self::ActivityEngaged => write!(f, "user is active at the keyboard"),
             Self::NoSources => write!(f, "no proactive sources available"),
             Self::HighFatigue => write!(f, "high fatigue"),
         }
@@ -62,8 +65,17 @@ pub fn evaluate_deterministic_gates(
     if context.suppression.proactive_turns_this_session >= config.max_turns_per_session {
         return Err(GateRejectReason::SessionLimit);
     }
+    // World-state trend: a user who is actively working (fresh window switch,
+    // low OS idle, or idle decreasing toward activity) is not interruptible
+    // even when the chat-based min-idle gate has passed.
+    if config.world_state.enabled
+        && let Some(world) = &context.world_state
+        && (world.engaged || world.idle_trend == crate::proactive::IdleTrend::Falling)
+    {
+        return Err(GateRejectReason::ActivityEngaged);
+    }
     let has_pending_confirmation = context.pending_confirmation.is_some();
-    if !config.sources.any_enabled() && !has_pending_confirmation {
+    if !config.sources.any_enabled() && !config.world_state.enabled && !has_pending_confirmation {
         return Err(GateRejectReason::NoSources);
     }
 
@@ -73,10 +85,12 @@ pub fn evaluate_deterministic_gates(
     // User standing rules are decision input too: a memory-only configuration
     // still has something to decide on (and to be suppressed by).
     let has_instructions = config.sources.memory && !context.user_instructions.is_empty();
+    let has_world_state = config.world_state.enabled && context.world_state.is_some();
     if !(has_conversation
         || has_activity
         || has_screen
         || has_instructions
+        || has_world_state
         || has_pending_confirmation)
     {
         return Err(GateRejectReason::NoSources);
@@ -128,7 +142,192 @@ mod tests {
             suppression,
             quiet_hours: crate::proactive::QuietHoursEval::inactive(),
             pending_confirmation: None,
+            world_state: None,
         }
+    }
+
+    fn ctx_with_world_state(summary: crate::proactive::WorldStateSummary) -> ProactiveContext {
+        ProactiveContext {
+            world_state: Some(summary),
+            ..ctx_with(ProactiveSuppressionState {
+                seconds_since_user_input: 120,
+                seconds_since_proactive: 1000,
+                proactive_turns_this_session: 0,
+                user_turn_busy: false,
+            })
+        }
+    }
+
+    #[test]
+    fn rejects_when_world_state_shows_engaged_user() {
+        use crate::proactive::{IdleTrend, WorldStateSummary};
+
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            world_state: crate::config::WorldStateConfig {
+                enabled: true,
+                ..crate::config::WorldStateConfig::default()
+            },
+            ..ProactiveConfig::default()
+        };
+        let engaged = ctx_with_world_state(WorldStateSummary {
+            idle_trend: IdleTrend::Unknown,
+            window_changes: 1,
+            engaged: true,
+            latest_window: "Editor".into(),
+            snapshot_count: 3,
+        });
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &engaged),
+            Err(GateRejectReason::ActivityEngaged)
+        );
+
+        // A falling idle trend (user returning to the machine) also
+        // suppresses even before the engaged threshold is reached.
+        let returning = ctx_with_world_state(WorldStateSummary {
+            idle_trend: IdleTrend::Falling,
+            window_changes: 0,
+            engaged: false,
+            latest_window: "Browser".into(),
+            snapshot_count: 3,
+        });
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &returning),
+            Err(GateRejectReason::ActivityEngaged)
+        );
+    }
+
+    #[test]
+    fn world_state_gate_passes_when_disabled_or_calm() {
+        use crate::proactive::{IdleTrend, WorldStateSummary};
+
+        let enabled = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            world_state: crate::config::WorldStateConfig {
+                enabled: true,
+                ..crate::config::WorldStateConfig::default()
+            },
+            ..ProactiveConfig::default()
+        };
+        let calm = ctx_with_world_state(WorldStateSummary {
+            idle_trend: IdleTrend::Rising,
+            window_changes: 0,
+            engaged: false,
+            latest_window: "Code".into(),
+            snapshot_count: 3,
+        });
+        assert_eq!(evaluate_deterministic_gates(&enabled, &calm), Ok(()));
+
+        // Disabled feature: even an engaged summary must not reject.
+        let disabled = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            world_state: crate::config::WorldStateConfig {
+                enabled: false,
+                ..crate::config::WorldStateConfig::default()
+            },
+            ..ProactiveConfig::default()
+        };
+        let engaged = ctx_with_world_state(WorldStateSummary {
+            idle_trend: IdleTrend::Unknown,
+            window_changes: 1,
+            engaged: true,
+            latest_window: "Editor".into(),
+            snapshot_count: 3,
+        });
+        assert_eq!(evaluate_deterministic_gates(&disabled, &engaged), Ok(()));
+    }
+
+    #[test]
+    fn activity_engaged_outranks_quiet_hours() {
+        use crate::proactive::{IdleTrend, WorldStateSummary};
+
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            world_state: crate::config::WorldStateConfig {
+                enabled: true,
+                ..crate::config::WorldStateConfig::default()
+            },
+            ..ProactiveConfig::default()
+        };
+        let mut ctx = ctx_with_world_state(WorldStateSummary {
+            idle_trend: IdleTrend::Unknown,
+            window_changes: 1,
+            engaged: true,
+            latest_window: "Editor".into(),
+            snapshot_count: 3,
+        });
+        ctx.quiet_hours = crate::proactive::QuietHoursEval {
+            active: true,
+            ..crate::proactive::QuietHoursEval::inactive()
+        };
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &ctx),
+            Err(GateRejectReason::ActivityEngaged),
+            "an engaged user is not a quiet-hours opportunity to queue"
+        );
+    }
+
+    #[test]
+    fn world_state_alone_satisfies_the_source_gate() {
+        use crate::proactive::{IdleTrend, WorldStateSummary};
+
+        let config = ProactiveConfig {
+            enabled: true,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            sources: ProactiveSourcesConfig {
+                conversation: false,
+                activity: false,
+                screen_summary: false,
+                memory: false,
+                ..ProactiveSourcesConfig::default()
+            },
+            world_state: crate::config::WorldStateConfig {
+                enabled: true,
+                ..crate::config::WorldStateConfig::default()
+            },
+            ..ProactiveConfig::default()
+        };
+        let calm = ctx_with_world_state(WorldStateSummary {
+            idle_trend: IdleTrend::Rising,
+            window_changes: 0,
+            engaged: false,
+            latest_window: "Code".into(),
+            snapshot_count: 3,
+        });
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &calm),
+            Ok(()),
+            "a calm world-state summary is decision input on its own"
+        );
+
+        // Without any summary the source gate still rejects.
+        let empty = ProactiveContext {
+            world_state: None,
+            ..ctx_with(ProactiveSuppressionState {
+                seconds_since_user_input: 60,
+                seconds_since_proactive: 1000,
+                proactive_turns_this_session: 0,
+                user_turn_busy: false,
+            })
+        };
+        assert_eq!(
+            evaluate_deterministic_gates(&config, &empty),
+            Err(GateRejectReason::NoSources)
+        );
     }
 
     #[test]

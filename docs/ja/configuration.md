@@ -122,8 +122,8 @@ available = min(model_window, context_window)
 `plugins.list.llama-cpp.profiles.<name>` ブロブへミラーされます。`local_models`
 のキー自体はルーティングおよびコンテキスト予算の情報としてここに残ります
 （`context_size` は解決時に読まれ、`dimensions` はローカル埋め込みの
-ストアスキーマ値です）。ミラーは設定マイグレーションによる一方向コピーです
-— プロファイルを編集しても `local_models` は書き換わりません。
+ストアスキーマ値です）。ミラーは v2→v3 設定マイグレーションによる一方向
+コピーです — プロファイルを編集しても `local_models` は書き換わりません。
 
 起動時、ランタイムは各生成タスク（`chat`、および設定されている場合は `proactive`）
 のウィンドウが必要量（プロンプト予算 + 応答予約 `tasks.<task>.max_tokens`）を
@@ -188,6 +188,9 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
       "interval_seconds": 600,
       "fatigue_suppression_threshold": 0.7,
       "confirmation_enabled": false,
+      "world_state": {
+        "enabled": false
+      },
       "sources": {
         "window_title_level": "app_only"
       }
@@ -271,6 +274,28 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 `mind.proactive.fatigue_suppression_threshold`（0.0〜1.0、既定 `0.7`）は、キャラクターの感情疲労度が閾値以上のとき自発発話の判定を抑制します — 疲れているキャラクターは自分から話しかけません。既定値はムードラベル `"tired"` の境界（`compute_mood_label`）と一致しており、ゲートとキャラクターの見た目の機嫌が食い違いません。`1.0` にするとゲートが無効になり、疲労度の判断はモデルに委ねられます。閾値の有無にかかわらず、全8次元とムードラベルは常に判定モデルへ渡されます。
 
 `mind.proactive.confirmation_enabled`（既定 `false`）を有効にすると、本体の生成モデルが**同じ生成呼び出しの中で**判定を確認します（往復は増えません）。生成プロンプトは「話す価値がなければ応答の最初に `<|silent|>` だけを出力してよい」と指示し、可視テキストより先にそのトークンが届いた時点でランタイムはストリームを即キャンセルし、表示・発話は一切行われません。確認は精度しか上げません（判定モデルの「話す」誤りは拾えますが、「話さない」誤りは拾えません）。確認を有効にすると、判定閾値（`mind.proactive.decision.min_confidence`、ステージドロールアウト中は現在 0.55 固定）は**自動的に 0.15 引き下げられます** — 安価な判定モデルは再現率優先の前段として境界ケースを通し、本体モデルが精度を担う後段として却下します。判定モデルと本体モデルの一致率（生成に到達した判定のうち accepted / declined）は、構造化ログの `event="confirmation"` に記録されます。可視テキストが無い空応答は `confirmation=empty` として記録され、一致率からは除外されます。早期キャンセルが有効なのはトークンをストリーミングするプロバイダーだけです。非ストリーミングのローカルアダプターは最初のチャンクの前に完了応答全体をバッファするため、その経路での辞退は生成済みの応答を破棄する形になり、トークン節約にはなりません。
+
+### 世界状態メモリ（時系列トレンド）
+
+`mind.proactive.world_state`（既定は無効）は、構造化スナップショットの有界なインメモリ時系列を追跡します: フォーカス中ウィンドウのラベル、ウィンドウ切替、ホストが測定する場合の OS アイドル時間、直前のユーザーメッセージからの経過秒数 — 観測間隔ごとに 1 回取得します。スナップショットは永続化されません。短命なテレメトリ（プライバシーに敏感なラベル、数分で陳腐化）であり、判定に必要なのは直近の窓だけです。
+
+```json
+"world_state": {
+  "enabled": true,
+  "max_snapshots": 64,
+  "min_snapshots_for_trend": 3,
+  "engaged_idle_seconds": 60,
+  "change_window": 3
+}
+```
+
+- `enabled`（既定 `false`）: マスタースイッチ。無効時はスナップショットを参照せず、判定コンテキストとプロンプトは従来と完全に同じです。
+- `max_snapshots`（既定 `64`）: リングの容量 — 新しいスナップショットが保持され、古いものから破棄されます。
+- `min_snapshots_for_trend`（既定 `3`）: トレンド要約とそのゲートが有効になるために必要な履歴数。
+- `engaged_idle_seconds`（既定 `60`）: 直近の OS アイドルがこの秒数未満だと「作業中」とみなします。ホストがアイドルを測定する場合のみ使用されます（現行デスクトップホストは測定しません）。
+- `change_window`（既定 `3`）: ウィンドウ切替トレンドの集計対象となる直近スナップショット数。
+
+有効かつ十分な履歴があるとき、決定的ゲートはユーザーが実際に作業中（直近のウィンドウ切替、低い OS アイドル、またはアイドルが減少傾向）の間、判定を抑制します。また判定プロンプトには `world_state` 要約（アイドルトレンド、ウィンドウ切替回数、作業中フラグ、直近ウィンドウのラベル、スナップショット数）が渡されます。ウィンドウラベルは `sources.window_title_level` に従い、画面要約がリングに保存されることはありません。
 
 ### クワイエットアワーと手動一時停止
 
@@ -603,21 +628,23 @@ llama-cpp プラグインの `acceleration` 値はバイナリのビルドと一
 単位）。省略時は `16384`）、および省略可能な `dimensions`（宣言された埋め込み
 次元数。後述）。プラグインは初回使用時に `url` の重みをモデルキャッシュへ
 ダウンロードし（GGUF マジック検証付き）、プロファイルごとにロードしたモデルを
-プロセス生存期間中保持します。初回ダウンロードはプロアクティブ決定の
-ウォームアップ予算（5 分）の中で実行されるため、それ以上かかるモデルは
-フェイルクローズします（プロアクティブはホスト再起動まで `Disabled`）。
-非常に大きなモデルは `model_path` であらかじめ取得済みのキャッシュを
-指定してください。`context_size` と `gpu_layers` はチャットの
+ライブの config/profile 更新でキャッシュが無効化されるまで保持します。更新中の
+リクエストは旧モデルを使い、その後のリクエストは新しい設定でロードします。
+初回ダウンロードはプロアクティブ決定のウォームアップ予算（5 分）の中で
+実行されるため、それ以上かかるモデルはフェイルクローズします
+（プロアクティブはホスト再起動まで `Disabled`）。非常に大きなモデルは
+`model_path` であらかじめ取得済みのキャッシュを指定してください。
+`context_size` と `gpu_layers` はチャットの
 ロードのみに効きます — 埋め込みモデルは内部で独自にコンテキストとオフロード
 計画を設定し、ホスト側のルーティング窓は `ai.local_models.<name>.context_size`
-に残ります。マイグレーションは `context_size` をミラーするため、プロファイルで
-省略した場合はホスト側の値でロードされます（ホスト側も既定値の場合は 16,384）。
-ミラーは一度きりのため、その後の `ai.local_models.<name>.context_size` 編集は
-プロファイルに再同期されません — プロファイル側にもホスト側の値以上の
-`context_size` を設定してください。設定しないと長いプロンプトが生成時に
-コンテキストオーバーフローで失敗します。プロファイルの*選択*はプラグイン側の
-責務で、値は `ConfigurablePlugin::set_profiles` で配信されます。ローカルモデルの
-キーはルーティング情報として `ai.local_models` に残ります。
+に残ります。v2→v3 マイグレーションは `context_size` をミラーするため、
+プロファイルで省略した場合はホスト側の値でロードされます（ホスト側も既定値の
+場合は 16,384）。ミラーより前の手書きプロファイルだけが乖離し得るため、その
+場合はホスト側の値以上の `context_size` を設定してください。設定しないと長い
+プロンプトが生成時にコンテキストオーバーフローで失敗します。プロファイルの
+*選択*はプラグイン側の責務で、値は `ConfigurablePlugin::set_profiles` で
+配信されます。ローカルモデルのキーはルーティング情報として
+`ai.local_models` に残ります。
 
 `dimensions` は、モデルが `provider: "local"` の `tasks.embedding` を担う場合、
 `ai.local_models.<name>` に必須です：ホストはプラグインホストの起動前に
@@ -704,6 +731,82 @@ HTTP サーバーです。`ai.tts.provider = "voicevox"` で選択します。�
 起動時に反映されます。アクティブなプロバイダはブートストラップ時に一度だけ
 構築されるためです。一方、`plugins.list.voicevox.config` と `ai.tts.voice` の
 編集は実行中のセッションにも反映されます。
+
+#### ローカル Kokoro-TTS プロバイダ（`plugins.list.kokoro.config`）
+
+`kokoro` プロバイダプラグイン（`plugins/provider/kokoro`）は、Kokoro-82M
+ONNX モデルを自プロセス内で直接実行します。完全ローカルで、API キーも HTTP
+エンジンも不要です。`ai.tts.provider = "kokoro"` で選択します。汎用の
+`ai.tts.voice` には Kokoro ボイス名（例：`af_heart`、`jf_alpha`）を指定でき、
+設定済みの既定ボイスをリクエスト単位で上書きします。
+
+ONNX モデルと `voices.bin` ボイス埋め込みは共有モデルキャッシュに取得されます
+（`ene_voice` のダウンロード/プリフェッチ経由。デスクトップの設定 → 音声画面
+からもダウンロードできます）。カスタムの `model_path` / `voices_path` は
+キャッシュ位置を上書きし、ファイルが無い場合はブートストラップが同じ
+パスにプリフェッチします（このプラグイン設定から解決）。既存ファイルが
+再ダウンロードされることはありません。
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "kokoro",
+      "voice": "af_heart"
+    }
+  },
+  "plugins": {
+    "list": {
+      "kokoro": {
+        "enable": true,
+        "config": {
+          "model_path": "/data/kokoro.onnx",
+          "voices_path": "/data/voices.bin",
+          "voice": "af_heart",
+          "speed": 1.0,
+          "language": "en",
+          "ort_dylib_path": "/opt/onnxruntime/lib/libonnxruntime.so"
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目:
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `model_path` | 共有モデルキャッシュ（`models/gguf/kokoro.onnx`） | Kokoro ONNX モデルファイルのパス。 |
+| `voices_path` | `plugins.list.kokoro.profiles.kokoro.voices_path` → 共有モデルキャッシュ（`models/gguf/voices.bin`） | `voices.bin` ボイス埋め込みのパス。プロファイルのスロットは旧 `ai.tts.voices_path` の移行先です。 |
+| `voice` | `""`（`voices.bin` の先頭ボイス `af_alloy`） | 既定ボイス。リクエスト単位の `ai.tts.voice` が優先されます。全 53 ボイス名はケーパビリティ一覧を参照。ボイスを切り替えるたびにモデルが再ロードされます。 |
+| `speed` | `1.0` | 発話速度倍率（0.5–2.0）。 |
+| `language` | 未設定（英語 G2P） | 書記素→音素変換の言語。`"ja"` で日本語のかなルール、それ以外は英語ルールを使用。 |
+| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き。プロセス起動時に固定されます（ONNX Runtime はプロセスごとに一度だけ初期化）。変更には再起動が必要です。プロセス内フォールバックはこのキーを優先し、次に従来の `plugins.list.onnx.config.ort_dylib_path` を参照します。 |
+
+各キーは環境変数で個別に上書きできます：
+`ENE_PLUGINS__LIST__KOKORO__CONFIG__<KEY>`
+（例：`ENE_PLUGINS__LIST__KOKORO__CONFIG__SPEED`）。
+
+モデルは最初の合成時に遅延ロードされ、プラグインプロセス内に常駐します。
+モデル/ボイスのパス、ボイス、速度、言語を変更すると再ロードされます
+（`ort_dylib_path` はプロセス起動時に固定）。プラグインは 24 kHz モノラル
+WAV を返し、ホスト側の音声パイプラインが float サンプルにデコードして
+`TtsChunk` に分割し、ストリーミング再生します
+（`formats = ["wav"]`）。
+
+なお、`ai.tts.model_path` / `ai.tts.model` は後述のプロセス内フォールバック
+でのみ有効です。プラグイン経由では `model_path` を自プラグインの設定から
+読み取ります。
+
+**プロセス内フォールバック。** プラグインホストが起動時に利用できない場合や
+`kokoro` プラグインが無効な場合、ランタイム内蔵の `ene-voice` ファクトリが
+`ai.tts.provider = "kokoro"` をプロセス内で引き続き提供します（`ai.tts.model_path`
+/ `ai.tts.model` / `ai.tts.speed` と `profiles.kokoro.voices_path` を参照）。
+フォールバックが有効なのはプラグインが一度も登録されなかった場合のみです。
+プラグインファクトリが登録された後でプラグインが失敗すると、`kokoro` は
+次回の再起動まで利用できません（プロセス内ファクトリはセッション中に
+再登録されないため）。
 
 #### OpenAI Speech API TTS プロバイダ（`plugins.list.openai-tts.config`）
 
@@ -815,6 +918,77 @@ Edge の読み上げ機能が使う WebSocket エンドポイント（無料・�
 起動時に反映されます。アクティブなプロバイダはブートストラップ時に一度だけ
 構築されるためです。一方、`plugins.list.edge-tts.config` と `ai.tts.voice` の
 編集は実行中のセッションにも反映されます。
+
+#### ElevenLabs TTS プロバイダ（`plugins.list.elevenlabs.config`）
+
+`elevenlabs` プロバイダプラグイン（`plugins/provider/elevenlabs`）は
+ElevenLabs API で音声合成を行います。トランスポートは 2 つあります:
+REST の `POST /text-to-speech/{voice_id}/stream` エンドポイント（既定）と、
+低遅延ストリーミング用の双方向 `stream-input` WebSocket（`mode = "ws"`）です。
+raw 16-bit モノラル PCM（`pcm_16000` / `pcm_24000` / `pcm_44100`）を要求し、
+WAV として返します。ホスト側のオーディオパイプラインが float サンプルへ
+デコードして再生します。`ai.tts.provider = "elevenlabs"` で選択します。
+汎用の `ai.tts.voice` には、設定済みの既定ボイスをリクエスト単位で
+上書きするボイス ID を任意で指定できます。
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "elevenlabs",
+      "voice": "21m00Tcm4TlvDq8ikWAM"
+    }
+  },
+  "plugins": {
+    "list": {
+      "elevenlabs": {
+        "enable": true,
+        "config": {
+          "api_key": "xi-...",
+          "mode": "rest",
+          "model_id": "eleven_multilingual_v2",
+          "voice_id": "21m00Tcm4TlvDq8ikWAM",
+          "sample_rate": 24000,
+          "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
+            "use_speaker_boost": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目：
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `api_key` | 未設定 | ElevenLabs API キー、または `{source: inline\|env\|auto}` ディスクリプタ。`ELEVENLABS_API_KEY` 環境変数にフォールバックします。`x-ene-secret` でマークされるため、ホストがマスク・redact します。 |
+| `mode` | `rest` | トランスポート: `rest`（`POST /text-to-speech/{voice_id}/stream`、チャンク音声）または `ws`（`stream-input` WebSocket、双方向 base64 音声フレーム）。 |
+| `model_id` | `eleven_multilingual_v2` | ElevenLabs モデル ID（例: `eleven_turbo_v2_5`）。 |
+| `voice_id` | 未設定 | 既定ボイス ID。リクエスト単位のボイスで上書き可能。リクエストにボイスがない場合は必須。 |
+| `sample_rate` | `24000` | PCM 出力サンプルレート（`16000` / `24000` / `44100`）。API の `pcm_{rate}` フォーマットと WAV ヘッダのレートの両方を決めます。 |
+| `voice_settings.stability` | `0.5` | ボイスの安定性（0.0–1.0、クランプされます）。 |
+| `voice_settings.similarity_boost` | `0.75` | 元のボイスへの類似度（0.0–1.0、クランプされます）。 |
+| `voice_settings.style` | `0.0` | スタイル誇張度（0.0–1.0、クランプされます。一部のモデルのみ対応）。 |
+| `voice_settings.use_speaker_boost` | `true` | ボイスの自然な特徴をブーストするかどうか。 |
+| `base_url` | `https://api.elevenlabs.io/v1` | API ベース URL の上書き。`ELEVENLABS_BASE_URL` 環境変数にフォールバックします。WebSocket モードではスキームを `http(s)` → `ws(s)` に置き換えます。 |
+
+プラグインは `xi-api-key` をリクエストヘッダー（クエリパラメータでは
+ありません）として送信し、API に `pcm_{sample_rate}` を要求して、音声を
+WAV（`formats = ["wav"]`）として返します。API の他のフォーマット
+（`mp3_44100_128` など）は公開しません。REST は一時的なエラー
+（408/429/5xx・ネットワーク）時にジッター付きバックオフで最大 2 回
+再試行します（合計 3 回試行）。WebSocket モードはトランスポート障害と
+レート制限（429）時にリクエスト全体を再試行し、途中までの音声は破棄します。
+
+`ai.tts.provider` 自体の変更（例：`edge-tts` から `elevenlabs` への切替）は
+次回起動時に反映されます。アクティブなプロバイダはブートストラップ時に
+一度だけ構築されるためです。一方、`plugins.list.elevenlabs.config` と
+`ai.tts.voice` の編集は実行中のセッションにも反映されます。
 
 #### シークレットのマーキング
 

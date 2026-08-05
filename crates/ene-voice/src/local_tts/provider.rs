@@ -376,7 +376,7 @@ fn load_voice_embedding(
 /// [`ene_ai::TtsProvider::synthesize_stream`] call reporting an opaque
 /// `EngineDown` — which is when the runtime bootstrap path expects to see
 /// this error (and log a clear warning), not on first use.
-pub(super) fn open(
+pub fn open(
     model_path: &std::path::Path,
     voices_path: &std::path::Path,
     voice_name: &str,
