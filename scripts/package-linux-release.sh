@@ -23,6 +23,7 @@ TOOLS=(
 
 PLUGINS=(
   ene-plugin-llama-cpp
+  ene-plugin-llama-server
 )
 
 mkdir -p "$DIST_DIR"
@@ -46,6 +47,11 @@ done
 for plugin in "${PLUGINS[@]}"; do
   cp "$TARGET_DIR/$plugin" "$CLI_ROOT/plugins/"
 done
+# Ship a sidecar llama-server binary when the release build provides one
+# (optional: the plugin also resolves it from PATH / server_path config).
+if [[ -f "$TARGET_DIR/llama-server" ]]; then
+  cp "$TARGET_DIR/llama-server" "$CLI_ROOT/plugins/llama-server"
+fi
 tar -czf "$DIST_DIR/ene-cli-${VERSION}-linux-x86_64.tar.gz" -C "$DIST_DIR" "ene-cli-${VERSION}-linux-x86_64"
 rm -rf "$CLI_ROOT"
 
@@ -69,6 +75,10 @@ for plugin in "${PLUGINS[@]}"; do
   cp "$TARGET_DIR/$plugin" "$DEB_ROOT/usr/bin/plugins/"
   chmod 755 "$DEB_ROOT/usr/bin/plugins/$plugin"
 done
+if [[ -f "$TARGET_DIR/llama-server" ]]; then
+  cp "$TARGET_DIR/llama-server" "$DEB_ROOT/usr/bin/plugins/llama-server"
+  chmod 755 "$DEB_ROOT/usr/bin/plugins/llama-server"
+fi
 
 cat >"$DEB_ROOT/usr/share/applications/ene.desktop" <<EOF
 [Desktop Entry]

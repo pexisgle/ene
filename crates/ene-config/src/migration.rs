@@ -63,7 +63,9 @@
 //!   `context_size` / `dimensions` became profile keys receive them too (see
 //!   `migrate_v3_to_v4`);
 //! - version 4 → 5 relocates the voice engine paths and VAD tuning that the
-//!   provider plugins now own out of `ai.*` (see `migrate_v4_to_v5`).
+//!   provider plugins now own out of `ai.*` (see `migrate_v4_to_v5`);
+//! - version 5 → 6 mirrors the llama-cpp plugin's config and profiles into
+//!   the experimental llama-server plugin (see `migrate_v5_to_v6`).
 //!
 //! They are registered by a `ctor` in this crate because `ene-config` owns
 //! the settings document schema, and the steps must be in place wherever a
@@ -80,7 +82,7 @@ use std::sync::OnceLock;
 /// one whose `version` exceeds it is rejected (see
 /// [`EneConfigError::ConfigVersionTooNew`]). Bump this whenever you register a
 /// new migration step.
-pub const CURRENT_CONFIG_VERSION: u32 = 5;
+pub const CURRENT_CONFIG_VERSION: u32 = 6;
 
 /// The JSON key holding the schema version in `settings.json`.
 const VERSION_KEY: &str = "version";
@@ -91,6 +93,8 @@ const VERSION_KEY: &str = "version";
 /// defines the canonical names in `plugin_config.rs`); the migration tests pin
 /// the two to stay in sync.
 const LLAMA_CPP_PLUGIN: &str = "llama-cpp";
+/// Plugin list key the v5→v6 migration mirrors the llama-cpp settings into.
+const LLAMA_SERVER_PLUGIN: &str = "llama-server";
 const ONNX_PLUGIN: &str = "onnx";
 /// Plugin list key the v4→v5 migration relocates `ai.stt.model_path` into.
 const WHISPER_PLUGIN: &str = "whisper";
@@ -560,39 +564,43 @@ pub(crate) fn migrate_v1_to_v2(doc: &mut serde_json::Value) -> Result<(), EneCon
     Ok(())
 }
 
-/// Returns the existing `plugins.list.llama-cpp.profiles.<model>.<key>`
+/// Returns the existing `plugins.list.<plugin>.profiles.<model>.<key>`
 /// value, or `None` when any level of the path is absent.
-fn existing_profile_value<'a>(
+fn existing_plugin_profile_value<'a>(
     doc: &'a serde_json::Value,
+    plugin: &str,
     model: &str,
     key: &str,
 ) -> Option<&'a serde_json::Value> {
     doc.get("plugins")?
         .get("list")?
-        .get(LLAMA_CPP_PLUGIN)?
+        .get(plugin)?
         .get("profiles")?
         .get(model)?
         .get(key)
 }
 
 /// Mirrors one `ai.local_models.<model>` field into
-/// `plugins.list.llama-cpp.profiles.<model>`, unless the profile already
+/// `plugins.list.<plugin>.profiles.<model>`, unless the profile already
 /// carries a non-empty value for that key (explicit plugin config wins over
 /// the mirror).
-fn mirror_local_model_profile_key(
+fn mirror_local_model_profile_key_for_plugin(
     doc: &mut serde_json::Value,
+    plugin: &str,
     model: &str,
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), EneConfigError> {
-    if !has_value(value) || existing_profile_value(doc, model, key).is_some_and(has_value) {
+    if !has_value(value)
+        || existing_plugin_profile_value(doc, plugin, model, key).is_some_and(has_value)
+    {
         return Ok(());
     }
-    set_plugin_profile_key(doc, LLAMA_CPP_PLUGIN, model, key, value.clone())
+    set_plugin_profile_key(doc, plugin, model, key, value.clone())
 }
 
 /// Mirrors the model path/settings of every `ai.local_models` entry into the
-/// llama-cpp plugin's `profiles.<name>` blob.
+/// `<plugin>`'s `profiles.<name>` blob.
 ///
 /// This is a one-way mirror, not a move: `ai.local_models` stays intact
 /// because `ene-ai` still routes tasks and budgets context windows from it.
@@ -600,7 +608,10 @@ fn mirror_local_model_profile_key(
 /// profile value is never overwritten (an existing empty-string / `null`
 /// value counts as absent, matching the v1→v2 convention). A no-op (still
 /// `Ok`) when there are no local models.
-fn mirror_local_models_into_profiles(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+fn mirror_local_models_into_plugin_profiles(
+    doc: &mut serde_json::Value,
+    plugin: &str,
+) -> Result<(), EneConfigError> {
     let Some(models) = doc
         .pointer("/ai/local_models")
         .and_then(serde_json::Value::as_object)
@@ -614,7 +625,7 @@ fn mirror_local_models_into_profiles(doc: &mut serde_json::Value) -> Result<(), 
         };
         for key in LOCAL_MODEL_PROFILE_KEYS {
             if let Some(value) = entry.get(key) {
-                mirror_local_model_profile_key(doc, model, key, value)?;
+                mirror_local_model_profile_key_for_plugin(doc, plugin, model, key, value)?;
             }
         }
     }
@@ -623,7 +634,7 @@ fn mirror_local_models_into_profiles(doc: &mut serde_json::Value) -> Result<(), 
 
 /// v2 → v3: mirrors `ai.local_models` into the llama-cpp plugin profiles.
 pub(crate) fn migrate_v2_to_v3(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
-    mirror_local_models_into_profiles(doc)
+    mirror_local_models_into_plugin_profiles(doc, LLAMA_CPP_PLUGIN)
 }
 
 /// v3 → v4: re-runs the `ai.local_models` → llama-cpp profile mirror.
@@ -636,10 +647,83 @@ pub(crate) fn migrate_v2_to_v3(doc: &mut serde_json::Value) -> Result<(), EneCon
 /// a hand edit. Same fill-only-missing-keys semantics as the v2→v3 step, so
 /// a v4 file re-run is a no-op.
 pub(crate) fn migrate_v3_to_v4(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
-    mirror_local_models_into_profiles(doc)
+    mirror_local_models_into_plugin_profiles(doc, LLAMA_CPP_PLUGIN)
 }
 
-/// Registers the v1→v2 … v4→v5 steps at process start, wherever a
+/// Writes `plugins.list.<plugin>.config.<key>` only when the slot is absent
+/// or empty (existing explicit values win over the mirror).
+fn fill_plugin_config_key(
+    doc: &mut serde_json::Value,
+    plugin: &str,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), EneConfigError> {
+    let path = format!("/plugins/list/{plugin}/config/{key}");
+    if doc.pointer(&path).is_some_and(has_value) {
+        return Ok(());
+    }
+    set_plugin_config_key(doc, plugin, key, value)
+}
+
+/// Writes `plugins.list.<plugin>.profiles.<model>.<key>` only when the slot
+/// is absent or empty.
+fn fill_plugin_profile_key(
+    doc: &mut serde_json::Value,
+    plugin: &str,
+    model: &str,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), EneConfigError> {
+    if existing_plugin_profile_value(doc, plugin, model, key).is_some_and(has_value) {
+        return Ok(());
+    }
+    set_plugin_profile_key(doc, plugin, model, key, value)
+}
+
+/// v5 → v6: mirrors the llama-cpp plugin's config and profiles into the
+/// experimental llama-server plugin, and re-runs the `ai.local_models`
+/// profile mirror for it.
+///
+/// The llama-server plugin is the sidecar-based successor to the in-process
+/// llama-cpp plugin and starts disabled, so existing users keep working
+/// without hand-editing: every non-empty llama-cpp config key and profile
+/// value is copied over, and `ai.local_models` fills any profile keys the
+/// llama-cpp section never carried. Same fill-only-missing semantics as the
+/// older mirrors: an existing non-empty llama-server value is never
+/// overwritten. The llama-cpp section is left untouched so the old plugin
+/// keeps working until the switch-over is complete.
+pub(crate) fn migrate_v5_to_v6(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+    let llama_cpp_config = doc
+        .pointer("/plugins/list/llama-cpp/config")
+        .and_then(serde_json::Value::as_object)
+        .cloned();
+    if let Some(config) = llama_cpp_config {
+        for (key, value) in &config {
+            if has_value(value) {
+                fill_plugin_config_key(doc, LLAMA_SERVER_PLUGIN, key, value.clone())?;
+            }
+        }
+    }
+    let llama_cpp_profiles = doc
+        .pointer("/plugins/list/llama-cpp/profiles")
+        .and_then(serde_json::Value::as_object)
+        .cloned();
+    if let Some(profiles) = llama_cpp_profiles {
+        for (model, raw) in &profiles {
+            let Some(entry) = raw.as_object() else {
+                continue;
+            };
+            for (key, value) in entry {
+                if has_value(value) {
+                    fill_plugin_profile_key(doc, LLAMA_SERVER_PLUGIN, model, key, value.clone())?;
+                }
+            }
+        }
+    }
+    mirror_local_models_into_plugin_profiles(doc, LLAMA_SERVER_PLUGIN)
+}
+
+/// Registers the v1→v2 … v5→v6 steps at process start, wherever a
 /// `settings.json` is loaded. `ene-config` owns these steps because the
 /// `version` field and the migration machinery live here, and the relocated
 /// keys are host document schema rather than the property of any single
@@ -677,6 +761,13 @@ const _: () = {
                 component = "Config",
                 error = %err,
                 "failed to register settings.json migration v4->v5"
+            );
+        }
+        if let Err(err) = register_migration(5, migrate_v5_to_v6) {
+            tracing::error!(
+                component = "Config",
+                error = %err,
+                "failed to register settings.json migration v5->v6"
             );
         }
     }
@@ -1023,6 +1114,138 @@ pub(crate) mod tests {
             migrate_v4_to_v5(&mut doc).expect("v4->v5 migration succeeds");
             assert!(doc.pointer("/plugins/list/whisper").is_none());
             assert!(doc.pointer("/plugins/list/onnx").is_none());
+        });
+    }
+
+    /// The v5→v6 step mirrors the llama-cpp config and profiles into
+    /// llama-server and re-runs the `ai.local_models` mirror, leaving the
+    /// llama-cpp section untouched.
+    #[test]
+    fn v5_to_v6_mirrors_llama_cpp_into_llama_server() {
+        with_test_version(6, || {
+            let mut doc = serde_json::json!({
+                "version": 5,
+                "plugins": {
+                    "list": {
+                        "llama-cpp": {
+                            "config": {
+                                "mmproj_url": "https://cdn.example/mmproj.gguf",
+                                "acceleration": "vulkan"
+                            },
+                            "profiles": {
+                                "gemma-4-e4b": {
+                                    "url": "https://cdn.example/gemma-4-e4b.gguf",
+                                    "context_size": 4096
+                                }
+                            }
+                        }
+                    }
+                },
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "url": "https://cdn.example/gemma-4-e4b.gguf",
+                            "dimensions": 1024
+                        }
+                    }
+                }
+            });
+            migrate_v5_to_v6(&mut doc).expect("v5->v6 migration succeeds");
+
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-server/config/mmproj_url"),
+                Some(&serde_json::json!("https://cdn.example/mmproj.gguf"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-server/config/acceleration"),
+                Some(&serde_json::json!("vulkan"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-server/profiles/gemma-4-e4b/url"),
+                Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-server/profiles/gemma-4-e4b/context_size"),
+                Some(&serde_json::json!(4096))
+            );
+            // The ai.local_models mirror fills keys the llama-cpp profile did
+            // not carry.
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-server/profiles/gemma-4-e4b/dimensions"),
+                Some(&serde_json::json!(1024))
+            );
+            // The source section is untouched.
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
+                Some(&serde_json::json!("https://cdn.example/mmproj.gguf"))
+            );
+            assert!(
+                doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/dimensions")
+                    .is_none()
+            );
+        });
+    }
+
+    /// Existing non-empty llama-server values win; empty slots are still
+    /// filled. A document with no llama-cpp section is a no-op.
+    #[test]
+    fn v5_to_v6_fills_only_missing_keys() {
+        with_test_version(6, || {
+            let mut doc = serde_json::json!({
+                "version": 5,
+                "plugins": {
+                    "list": {
+                        "llama-cpp": {
+                            "config": {
+                                "mmproj_url": "https://cdn.example/mmproj.gguf",
+                                "acceleration": "cuda"
+                            },
+                            "profiles": {
+                                "gemma-4-e4b": {
+                                    "url": "https://cdn.example/gemma-4-e4b.gguf",
+                                    "model_path": "/data/model.gguf"
+                                }
+                            }
+                        },
+                        "llama-server": {
+                            "config": {
+                                "mmproj_url": "https://cdn.example/custom-mmproj.gguf"
+                            },
+                            "profiles": {
+                                "gemma-4-e4b": {
+                                    "url": "https://cdn.example/custom.gguf"
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            migrate_v5_to_v6(&mut doc).expect("v5->v6 migration succeeds");
+
+            // Existing non-empty values win.
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-server/config/mmproj_url"),
+                Some(&serde_json::json!("https://cdn.example/custom-mmproj.gguf"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-server/profiles/gemma-4-e4b/url"),
+                Some(&serde_json::json!("https://cdn.example/custom.gguf"))
+            );
+            // Empty / missing slots are filled.
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-server/config/acceleration"),
+                Some(&serde_json::json!("cuda"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-server/profiles/gemma-4-e4b/model_path"),
+                Some(&serde_json::json!("/data/model.gguf"))
+            );
+        });
+
+        with_test_version(6, || {
+            let mut doc = serde_json::json!({ "version": 5, "ai": {} });
+            migrate_v5_to_v6(&mut doc).expect("empty v5->v6 migration succeeds");
+            assert!(doc.pointer("/plugins/list").is_none());
         });
     }
 
