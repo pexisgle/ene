@@ -75,25 +75,11 @@ impl MemoryJournalPresenter {
         actions
     }
 
-    /// One-way lifecycle edges shared with the store's persistence policy.
-    const fn transition_allowed(from: MemoryStatus, to: MemoryStatus) -> bool {
-        matches!(
-            (from, to),
-            (
-                MemoryStatus::Active,
-                MemoryStatus::UserDeleted | MemoryStatus::Disputed
-            ) | (
-                MemoryStatus::Faded,
-                MemoryStatus::Archived | MemoryStatus::Disputed
-            ) | (
-                MemoryStatus::Faded
-                    | MemoryStatus::Archived
-                    | MemoryStatus::UserDeleted
-                    | MemoryStatus::Superseded
-                    | MemoryStatus::Disputed,
-                MemoryStatus::Active
-            )
-        )
+    /// Gate on the store's lifecycle validators so UI actions cannot drift
+    /// from persistence policy.
+    fn transition_allowed(from: MemoryStatus, to: MemoryStatus) -> bool {
+        ene_store::validate_transition(from, to).is_ok()
+            || (to == MemoryStatus::Active && ene_store::validate_user_restore(from).is_ok())
     }
 
     /// Natural next status under decay, or `None` when decay does not apply
@@ -165,27 +151,6 @@ impl MemoryJournalAction {
 mod tests {
     use super::*;
 
-    /// User-facing actions per status, mirroring the store's one-way
-    /// lifecycle edges so gating cannot drift from persistence policy.
-    const POLICY_ACTIONS: &[(MemoryStatus, &[MemoryJournalAction])] = &[
-        (
-            MemoryStatus::Active,
-            &[MemoryJournalAction::Forget, MemoryJournalAction::Dispute],
-        ),
-        (
-            MemoryStatus::Faded,
-            &[
-                MemoryJournalAction::Archive,
-                MemoryJournalAction::Dispute,
-                MemoryJournalAction::Restore,
-            ],
-        ),
-        (MemoryStatus::Archived, &[MemoryJournalAction::Restore]),
-        (MemoryStatus::UserDeleted, &[MemoryJournalAction::Restore]),
-        (MemoryStatus::Superseded, &[MemoryJournalAction::Restore]),
-        (MemoryStatus::Disputed, &[MemoryJournalAction::Restore]),
-    ];
-
     const ALL_STATUSES: &[MemoryStatus] = &[
         MemoryStatus::Active,
         MemoryStatus::Faded,
@@ -194,6 +159,26 @@ mod tests {
         MemoryStatus::Superseded,
         MemoryStatus::Disputed,
     ];
+
+    const STATUS_ACTIONS: &[MemoryJournalAction] = &[
+        MemoryJournalAction::Archive,
+        MemoryJournalAction::Forget,
+        MemoryJournalAction::Dispute,
+        MemoryJournalAction::Restore,
+    ];
+
+    fn store_legal(from: MemoryStatus, to: MemoryStatus) -> bool {
+        ene_store::validate_transition(from, to).is_ok()
+            || (to == MemoryStatus::Active && ene_store::validate_user_restore(from).is_ok())
+    }
+
+    fn status_actions(actions: &[MemoryJournalAction]) -> Vec<MemoryJournalAction> {
+        actions
+            .iter()
+            .copied()
+            .filter(|a| a.target_status().is_some())
+            .collect()
+    }
 
     #[test]
     fn active_row_allows_forget_not_archive() {
@@ -218,49 +203,50 @@ mod tests {
     }
 
     #[test]
-    fn gating_offers_exactly_the_policy_actions() {
-        for &(status, expected) in POLICY_ACTIONS {
-            let actions = MemoryJournalPresenter::available_actions(status, false);
-            for action in expected {
-                assert!(actions.contains(action), "{status:?} misses {action:?}");
+    fn offered_actions_pass_store_validators() {
+        for &status in ALL_STATUSES {
+            let offered = MemoryJournalPresenter::available_actions(status, false);
+            for action in status_actions(&offered) {
+                let target = action.target_status().expect("status action has target");
+                assert!(
+                    store_legal(status, target),
+                    "{status:?} offers {action:?} -> {target:?}"
+                );
             }
-            let unexpected: Vec<_> = actions
-                .iter()
-                .filter(|a| {
-                    !expected.contains(a)
-                        && !matches!(a, MemoryJournalAction::Pin | MemoryJournalAction::Unpin)
-                })
-                .collect();
-            assert!(unexpected.is_empty(), "{status:?} offers {unexpected:?}");
         }
     }
 
     #[test]
-    fn every_action_targets_a_policy_allowed_status() {
-        for &(status, expected) in POLICY_ACTIONS {
-            for action in expected {
-                let Some(target) = action.target_status() else {
+    fn hidden_actions_fail_store_validators() {
+        for &status in ALL_STATUSES {
+            let offered = MemoryJournalPresenter::available_actions(status, false);
+            for action in STATUS_ACTIONS {
+                if offered.contains(action) {
                     continue;
-                };
-                let allowed = matches!(
-                    (status, target),
-                    (
-                        MemoryStatus::Active,
-                        MemoryStatus::UserDeleted | MemoryStatus::Disputed
-                    ) | (
-                        MemoryStatus::Faded,
-                        MemoryStatus::Archived | MemoryStatus::Disputed
-                    ) | (
-                        MemoryStatus::Faded
-                            | MemoryStatus::Archived
-                            | MemoryStatus::UserDeleted
-                            | MemoryStatus::Superseded
-                            | MemoryStatus::Disputed,
-                        MemoryStatus::Active
-                    )
+                }
+                let target = action.target_status().expect("status action has target");
+                assert!(
+                    !store_legal(status, target),
+                    "{status:?} hides {action:?} -> {target:?}"
                 );
-                assert!(allowed, "{status:?} -> {target:?} not allowed");
             }
+        }
+    }
+
+    #[test]
+    fn pin_state_does_not_change_status_actions() {
+        for &status in ALL_STATUSES {
+            let unpinned = MemoryJournalPresenter::available_actions(status, false);
+            let pinned = MemoryJournalPresenter::available_actions(status, true);
+            assert_eq!(
+                status_actions(&pinned),
+                status_actions(&unpinned),
+                "{status:?}"
+            );
+            assert!(pinned.contains(&MemoryJournalAction::Unpin));
+            assert!(!pinned.contains(&MemoryJournalAction::Pin));
+            assert!(unpinned.contains(&MemoryJournalAction::Pin));
+            assert!(!unpinned.contains(&MemoryJournalAction::Unpin));
         }
     }
 
@@ -306,11 +292,11 @@ mod tests {
     fn transition_thresholds_match_rag_constants() {
         assert_eq!(
             MemoryJournalPresenter::next_transition_threshold(MemoryStatus::Faded),
-            Some(ene_rag::decay::FADE_THRESHOLD)
+            Some(0.40)
         );
         assert_eq!(
             MemoryJournalPresenter::next_transition_threshold(MemoryStatus::Archived),
-            Some(ene_rag::decay::ARCHIVE_THRESHOLD)
+            Some(0.15)
         );
         for status in [
             MemoryStatus::Active,

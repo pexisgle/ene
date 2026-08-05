@@ -113,7 +113,6 @@ memory-journal-next-restore = Restore to reactivate
 memory-journal-error-timeout = timed out
 memory-journal-error-invalid = rejected — the memory state no longer allows this
 memory-journal-error-storage = storage error
-memory-journal-error-not-found = the memory no longer exists
 memory-journal-error-actor-dead = background runtime unavailable
 
 # Memory Journal v2 (pending approval and history)

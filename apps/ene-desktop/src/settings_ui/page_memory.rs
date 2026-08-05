@@ -824,12 +824,11 @@ fn render_browse_rows(
                     ui.horizontal_wrapped(|ui| {
                         for action in &row.available_actions {
                             if ui.button(action_label(*action)).clicked() {
-                                set_action_message(
-                                    world,
-                                    ui_entity,
-                                    ai.execute_journal_action(row.id, *action),
-                                    action.i18n_key(),
-                                );
+                                let result = ai.execute_journal_action(row.id, *action);
+                                if result.is_ok() {
+                                    refresh_journal(ai, world, ui_entity);
+                                }
+                                set_action_message(world, ui_entity, result, action.i18n_key());
                             }
                         }
                     });
@@ -1165,9 +1164,6 @@ fn error_category_label(error: &crate::ai_bridge::AiBridgeError) -> Option<Strin
         }
         crate::ai_bridge::AiBridgeError::Api(PublicApiError::Storage { .. }) => {
             Some(fl!(crate::i18n::loader(), "memory-journal-error-storage"))
-        }
-        crate::ai_bridge::AiBridgeError::Api(PublicApiError::NotFound { .. }) => {
-            Some(fl!(crate::i18n::loader(), "memory-journal-error-not-found"))
         }
         crate::ai_bridge::AiBridgeError::Api(PublicApiError::ActorDead) => Some(fl!(
             crate::i18n::loader(),

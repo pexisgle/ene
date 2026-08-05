@@ -123,7 +123,7 @@ pub use export::{
     ExportedMessage, ExportedToolLog, SESSION_EXPORT_FORMAT_VERSION, SessionExport, redact_secrets,
 };
 /// Forgetting lifecycle helpers.
-pub use forgetting::InvalidTransition;
+pub use forgetting::{InvalidTransition, validate_transition, validate_user_restore};
 /// Persistent scheduler domain types.
 pub use schedule::{
     NewSchedule, Schedule, ScheduleAction, ScheduleConfirmation, ScheduleError, ScheduleKind,

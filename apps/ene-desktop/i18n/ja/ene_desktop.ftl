@@ -113,7 +113,6 @@ memory-journal-next-restore = 復元して再有効化
 memory-journal-error-timeout = タイムアウトしました
 memory-journal-error-invalid = 拒否されました — メモリの状態がこの操作を許可しません
 memory-journal-error-storage = ストレージエラー
-memory-journal-error-not-found = メモリはもう存在しません
 memory-journal-error-actor-dead = バックグラウンドランタイムが利用できません
 
 # Memory Journal v2 (pending approval and history)
