@@ -299,6 +299,38 @@ fn warn_reserved_config_keys(plugin_name: &str, config: &serde_json::Value) {
     }
 }
 
+/// Admission budget override for one [`ResourceClass`](ene_plugin_proto::ResourceClass).
+///
+/// The `class` value uses the same externally tagged JSON form as the wire
+/// (`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`), so one vocabulary covers
+/// both the plugin declaration and the host configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ResourceClassBudget {
+    /// The class this entry budgets. `Gpu` classes are gated by default
+    /// (one concurrent job per device); `Cpu` / `Network` are only gated
+    /// when an entry names them.
+    pub class: ene_plugin_proto::ResourceClass,
+    /// Maximum concurrent in-flight jobs for this class. `None` uses the
+    /// class default: 1 for GPU devices, the logical CPU count for `Cpu`,
+    /// 4 for `Network`.
+    #[serde(default)]
+    pub permits: Option<usize>,
+    /// How many additional callers may wait for a permit before requests
+    /// fail fast with `Busy`. `None` uses the default of 8.
+    #[serde(default)]
+    pub queue_depth: Option<usize>,
+}
+
+impl Default for ResourceClassBudget {
+    fn default() -> Self {
+        Self {
+            class: ene_plugin_proto::ResourceClass::Cpu,
+            permits: None,
+            queue_depth: None,
+        }
+    }
+}
+
 // Register the `fs` sandbox tool schema from the host crate: the proto crate
 // is wire-ABI only and must not depend on `ene-config`, so the host crate
 // (which links both) takes over the registration.
@@ -410,6 +442,20 @@ ene_config::define_config!(
         pub mcp_allow_insecure_urls: bool = false,
         /// MCP servers to connect to.
         pub mcp_servers: Vec<crate::mcp_config::McpServerConfig> = Vec::new(),
+        /// Per-`ResourceClass` admission budgets for provider requests.
+        ///
+        /// Every plugin that declares the same class (e.g. two local LLM
+        /// plugins offloading to GPU device 0) shares the class's budget, so
+        /// the host never sends more concurrent GPU-bound requests than the
+        /// device can serve. `Gpu` classes are gated even without an entry
+        /// (one job per device, up to 8 callers waiting); add an entry to
+        /// raise the concurrency or widen the wait queue. `Cpu` and
+        /// `Network` classes are not gated unless an entry names them, so
+        /// cloud providers keep their declared per-plugin concurrency
+        /// untouched. Permits are held for the duration of a request (a
+        /// stream, or a single completion) and released automatically when
+        /// the request ends or the serving plugin crashes.
+        pub resource_classes: Vec<ResourceClassBudget> = Vec::new(),
     }
 );
 

@@ -54,7 +54,7 @@ use async_trait::async_trait;
 use ene_ai::RetryPolicy;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk, LlmToolCallChunk};
-use ene_plugin_proto::{ConcurrencyHint, PluginIpcResponse};
+use ene_plugin_proto::{ConcurrencyHint, PluginIpcResponse, ResourceClass};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, wrappers::ReceiverStream};
@@ -78,6 +78,22 @@ pub struct ConcurrencyLimiter {
     /// lost the fast-path `try_acquire` race). Bounded by `queue_depth`.
     waiting: AtomicU32,
     queue_depth: u32,
+}
+
+/// Releases a reserved [`ConcurrencyLimiter`] wait slot on drop.
+///
+/// The wait reservation must survive cancellation of the awaiting task: a
+/// caller that is dropped while blocked on `acquire_owned` would otherwise
+/// leave `waiting` inflated forever, and after `queue_depth` cancellations
+/// every later acquire would fail `Busy` even when the limiter is idle.
+struct WaiterGuard<'a> {
+    limiter: &'a ConcurrencyLimiter,
+}
+
+impl Drop for WaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.limiter.waiting.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl ConcurrencyLimiter {
@@ -109,6 +125,18 @@ impl ConcurrencyLimiter {
             return Ok(permit);
         }
 
+        let guard = self.reserve_waiter(kind)?;
+        let result = Arc::clone(&self.semaphore).acquire_owned().await;
+        drop(guard);
+        result.map_err(|_| {
+            LlmProviderError::Provider(format!("provider '{kind}' concurrency limiter closed"))
+        })
+    }
+
+    /// Reserves one of the `queue_depth` wait slots, failing fast with
+    /// [`LlmProviderError::Busy`] when none remain. The returned guard
+    /// releases the slot when dropped, including on task cancellation.
+    fn reserve_waiter(&self, kind: &str) -> Result<WaiterGuard<'_>, LlmProviderError> {
         let mut current = self.waiting.load(Ordering::Acquire);
         loop {
             if current >= self.queue_depth {
@@ -132,12 +160,7 @@ impl ConcurrencyLimiter {
                 Err(actual) => current = actual,
             }
         }
-
-        let result = Arc::clone(&self.semaphore).acquire_owned().await;
-        self.waiting.fetch_sub(1, Ordering::AcqRel);
-        result.map_err(|_| {
-            LlmProviderError::Provider(format!("provider '{kind}' concurrency limiter closed"))
-        })
+        Ok(WaiterGuard { limiter: self })
     }
 }
 
@@ -163,6 +186,12 @@ pub struct IpcLlmProvider {
     /// `create_task_chat_provider` builds (one per call), not just within a
     /// single instance's lifetime.
     limiter: Arc<ConcurrencyLimiter>,
+    /// The [`ResourceClass`] this provider's jobs contend on, declared by
+    /// the plugin during the handshake. Used for class admission diagnostics.
+    resource_class: ResourceClass,
+    /// Shared class admission limiter for `resource_class`, or `None` when
+    /// the class is not gated (Cpu/Network without a configured budget).
+    class_limiter: Option<Arc<ConcurrencyLimiter>>,
 }
 
 impl IpcLlmProvider {
@@ -180,6 +209,8 @@ impl IpcLlmProvider {
         retry_policy: RetryPolicy,
         context_window: Option<u32>,
         limiter: Arc<ConcurrencyLimiter>,
+        resource_class: ResourceClass,
+        class_limiter: Option<Arc<ConcurrencyLimiter>>,
     ) -> Self {
         Self {
             kind,
@@ -190,6 +221,8 @@ impl IpcLlmProvider {
             retry_policy,
             context_window,
             limiter,
+            resource_class,
+            class_limiter,
         }
     }
 }
@@ -235,6 +268,11 @@ fn map_host_error(e: PluginHostError) -> LlmProviderError {
     }
 }
 
+/// Diagnostic label for a [`ResourceClass`] in limiter logs.
+fn class_label(class: ResourceClass) -> String {
+    format!("{class:?}")
+}
+
 fn is_ipc_retryable(error: &LlmProviderError) -> bool {
     matches!(error, LlmProviderError::Network(_))
 }
@@ -264,6 +302,7 @@ struct IpcChatStream {
     request_id: String,
     completed: Arc<std::sync::atomic::AtomicBool>,
     _permit: OwnedSemaphorePermit,
+    _class_permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for IpcChatStream {
@@ -333,6 +372,17 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
             .collect();
 
         let request_id = uuid::Uuid::new_v4().to_string();
+
+        // Class admission control: hold the shared per-ResourceClass permit
+        // for the stream's entire lifetime, acquired *before* this provider's
+        // own concurrency slot so a caller waiting on the (cross-plugin) GPU
+        // budget never occupies a per-plugin slot while it waits. Released by
+        // drop glue when the stream ends, is cancelled, or the serving plugin
+        // crashes (reader failure closes the stream channel).
+        let class_permit = match &self.class_limiter {
+            Some(limiter) => Some(limiter.acquire(&class_label(self.resource_class)).await?),
+            None => None,
+        };
 
         // Admission control: acquire this provider's concurrency
         // slot *before* establishing the stream and *before* the retry loop,
@@ -475,6 +525,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
             request_id: request_id.clone(),
             completed,
             _permit: permit,
+            _class_permit: class_permit,
         }))
     }
 
@@ -494,6 +545,10 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
         // max_in_flight=1 provider against itself). Released when this
         // function returns, on every path (success, error, or panic
         // unwind).
+        let _class_permit = match &self.class_limiter {
+            Some(limiter) => Some(limiter.acquire(&class_label(self.resource_class)).await?),
+            None => None,
+        };
         let _permit = self.limiter.acquire(&self.kind).await?;
 
         // Retry transient (transport) failures with the same policy as the
@@ -559,6 +614,7 @@ fn parse_tool_call_delta(value: &serde_json::Value, index: usize) -> LlmToolCall
     reason = "unit tests use unwrap/expect/panic for concise failure messages"
 )]
 mod concurrency_limiter_tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use ene_ai::error::LlmProviderError;
@@ -709,5 +765,46 @@ mod concurrency_limiter_tests {
         drop(permit);
 
         assert!(limiter.acquire("test").await.is_ok());
+    }
+
+    /// A caller cancelled while waiting for a permit must release its wait
+    /// slot; otherwise `queue_depth` cancellations would make every later
+    /// acquire fail `Busy` forever even with an idle limiter.
+    #[tokio::test]
+    async fn cancelled_waiter_releases_its_queue_slot() {
+        let limiter = Arc::new(ConcurrencyLimiter::new(ConcurrencyHint {
+            max_in_flight: 1,
+            queue_depth: 1,
+        }));
+        let _permit = limiter.acquire("test").await.unwrap();
+
+        // The only wait slot is now occupied by a blocked caller.
+        let waiter = tokio::spawn({
+            let limiter = Arc::clone(&limiter);
+            async move { limiter.acquire("test").await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Cancelling the waiter must free the slot it reserved.
+        waiter.abort();
+        let _ = waiter.await;
+
+        // A fresh caller can reserve the slot again (with the leaked counter
+        // this would fail Busy immediately).
+        let second = tokio::spawn({
+            let limiter = Arc::clone(&limiter);
+            async move { limiter.acquire("test").await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !second.is_finished(),
+            "second caller must be admitted to the freed wait slot"
+        );
+
+        drop(_permit);
+        assert!(
+            second.await.unwrap().is_ok(),
+            "queued caller must succeed once the permit is released"
+        );
     }
 }

@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use sha2::Digest;
 
+use crate::admission::ResourceClassAdmission;
 use crate::capability_registry::{
     CapabilityDeclaration, CapabilityRegistry, evaluate_capability_gate,
 };
@@ -749,6 +750,11 @@ impl PluginHostManager {
         // `Self` exists so the registration step is a `&self` method that unit
         // tests can drive without a plugin process.
         let mut credential_schemas: Vec<(String, Option<serde_json::Value>)> = Vec::new();
+        // One admission registry per host process: factories created below
+        // share it so providers that declare the same ResourceClass share a
+        // single budget regardless of which plugin process serves them.
+        let class_admission =
+            Arc::new(ResourceClassAdmission::new(&plugin_config.resource_classes));
 
         std::fs::create_dir_all(ene_config::plugin_socket_dir()).map_err(|e| {
             PluginHostError::ExecutionFailed {
@@ -999,6 +1005,8 @@ impl PluginHostManager {
                     is_builtin_plugin(name),
                     spec.context_window,
                     spec.concurrency,
+                    spec.resource_class,
+                    Arc::clone(&class_admission),
                 );
                 llm_factories.insert(
                     spec.kind.clone(),
