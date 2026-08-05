@@ -4284,22 +4284,29 @@ async fn reconfigure_plugin_host_bg(
         handle.abort();
     }
 
-    let db_tokens = match spawn_db_ipc_servers(&config, memory_store.as_ref()) {
-        Ok((tokens, new_handle)) => {
-            *host_service_handle.lock().await = new_handle;
-            tokens
-        }
-        Err(e) => {
-            *host_service_handle.lock().await = None;
-            tracing::warn!(
-                component = "TurnActor",
-                error = %e,
-                "Failed to spawn host service during plugin reconfiguration; \
-                 continuing without plugin DB access"
-            );
-            HashMap::new()
-        }
-    };
+    // The capability mediator resolves providers through the live host, so
+    // it is wired before the host starts; calls landing during startup fail
+    // with a typed "host is not running" error and are retryable.
+    let mediator: Arc<dyn ene_plugin_proto::CapabilityServiceHandler> = Arc::new(
+        ene_plugin_host::CapabilityMediator::new(Arc::clone(&plugin_host)),
+    );
+    let db_tokens =
+        match spawn_db_ipc_servers(&config, memory_store.as_ref(), Some(Arc::clone(&mediator))) {
+            Ok((tokens, new_handle)) => {
+                *host_service_handle.lock().await = new_handle;
+                tokens
+            }
+            Err(e) => {
+                *host_service_handle.lock().await = None;
+                tracing::warn!(
+                    component = "TurnActor",
+                    error = %e,
+                    "Failed to spawn host service during plugin reconfiguration; \
+                     continuing without plugin DB access"
+                );
+                HashMap::new()
+            }
+        };
 
     // Start the new host before removing old entries. A surviving provider
     // kind remains available until its replacement is registered, and stale
@@ -4903,6 +4910,7 @@ pub(super) type DbIpcServers = (HashMap<String, String>, Option<tokio::task::Joi
 pub(super) fn spawn_db_ipc_servers(
     config: &EneConfig,
     memory_store: Option<&Arc<ene_store::MemoryStore>>,
+    capability_handler: Option<Arc<dyn ene_plugin_proto::CapabilityServiceHandler>>,
 ) -> Result<DbIpcServers, EneRuntimeError> {
     let mut db_tokens = HashMap::new();
     let Some(store) = memory_store else {
@@ -5006,7 +5014,10 @@ pub(super) fn spawn_db_ipc_servers(
         }
 
         let socket_path = host_service_socket_path();
-        let server = HostServiceServer::new(db, socket_path, db_plugins);
+        let mut server = HostServiceServer::new(db, socket_path, db_plugins);
+        if let Some(handler) = capability_handler {
+            server = server.with_capability_handler(handler);
+        }
 
         let handle = tokio::spawn(async move {
             if let Err(e) = server.run().await {
