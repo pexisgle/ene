@@ -2082,11 +2082,9 @@ impl TurnActor {
     ///
     /// The previous provider instance (built at bootstrap) holds an IPC
     /// connection to the old host's plugin process, which `shutdown()` has
-    /// killed, so it must be replaced by a fresh instance from the host
-    /// registry (falling back to the in-process `ene-voice` Kokoro factory
-    /// when the plugin host is gone). Mirrors the bootstrap path's failure
-    /// handling: an unbuildable provider disables TTS with a warning rather
-    /// than failing the turn.
+    /// killed, so it must be replaced by a fresh instance from the live host
+    /// registry. Mirrors the bootstrap path's failure handling: an unbuildable
+    /// provider disables TTS with a warning rather than failing the turn.
     async fn rebuild_tts_provider(&mut self) {
         let ai_config = match self.config.get_section::<ene_ai::AiConfig>() {
             Ok(config) => config,
