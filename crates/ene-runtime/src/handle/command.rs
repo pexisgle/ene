@@ -379,6 +379,35 @@ pub enum EneCommand {
     /// when the tool registry failed to rebuild (the reconfiguration path
     /// normally rebuilds TTS via [`Self::PluginHostReconfigured`]).
     RebuildTtsProvider,
+    /// Internal: a plugin was permanently disabled and its provider
+    /// factories must be evicted from the host registry.
+    ///
+    /// Sent by the plugin health bridges. The actor locks the shared plugin
+    /// host, evicts the plugin's LLM/embedding/TTS factories, and rebuilds
+    /// the live TTS provider when one of the evicted kinds was selected.
+    PluginProviderDisabled {
+        /// Name of the disabled plugin whose factories to evict.
+        plugin: String,
+    },
+    /// Probe every chat failover candidate through the provider host and
+    /// return the resulting health reports.
+    ///
+    /// Runs in a background task so a slow probe cannot stall the actor
+    /// loop. Used by the CLI `/doctor` fallback check; the shared health
+    /// monitor is updated as a side effect.
+    ProbeChatCandidates {
+        /// Reply channel carrying one report per probed candidate.
+        reply: oneshot::Sender<Vec<ene_ai::ProviderHealthReport>>,
+    },
+    /// Build a chat provider for the configured chat task through the
+    /// provider host.
+    ///
+    /// Used by CLI commands that need a provider outside a turn (e.g. the
+    /// memory-write retry drain), where no `StreamContext` exists.
+    CreateChatProvider {
+        /// Reply channel carrying the provider or a string error.
+        reply: oneshot::Sender<Result<Arc<dyn ene_ai::LlmProvider>, String>>,
+    },
     /// Test-only: mutates `pending_permissions`, `permission_scopes`, and
     /// `undo_stack` — the three shared-state fields a panicking command can
     /// mutate — then panics, so the panic hits mid-command with in-flight

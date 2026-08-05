@@ -882,6 +882,24 @@ impl EneDiagnostics {
         self.health_monitor.fallback_history()
     }
 
+    /// Probe every chat failover candidate through the provider host.
+    ///
+    /// Returns one health report per probed candidate (using the monitor's
+    /// TTL cache for recent results) and records the outcomes into the
+    /// shared monitor. Runs in a background task inside the actor, so slow
+    /// probes cannot stall the actor loop.
+    pub async fn probe_chat_candidates(&self) -> Vec<ene_ai::ProviderHealthReport> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::ProbeChatCandidates { reply: tx })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Subscribe to diagnostic events (pipeline phases/metrics).
     pub fn subscribe(&self) -> DiagnosticEventReceiver {
         DiagnosticEventReceiver {
