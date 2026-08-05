@@ -59,6 +59,29 @@ pub(crate) fn config_changed() {
     embed_gates.clear();
 }
 
+/// Releases a profile's resident models (chat and embedding) and load gates.
+///
+/// In-flight requests hold their own `Arc` clones, so an engine stays alive
+/// until those requests finish; the next request reloads the profile.
+pub(crate) fn unload(model: &str) {
+    CHAT_MODELS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(model);
+    EMBED_MODELS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(model);
+    CHAT_LOAD_GATES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(model);
+    EMBED_LOAD_GATES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(model);
+}
+
 /// Returns the chat model for `model`, loading it on first use.
 pub(crate) async fn chat_provider(model: &str) -> Result<Arc<LocalLlamaCppProvider>, PluginError> {
     let model_key = model.to_string();
