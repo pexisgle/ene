@@ -54,6 +54,8 @@
 
 /// Plugin capability declarations.
 pub mod capabilities;
+/// Capability-call wire types and the host-service `capability` passenger.
+pub mod capability_service;
 /// Plugin error types.
 pub mod error;
 /// Multiplexed host-service channel wire types.
@@ -80,6 +82,13 @@ mod wire;
 pub use capabilities::{
     CapabilityParseError, CapabilityRef, CapabilityRequirement, ConcurrencyHint, LlmProviderSpec,
     PluginCapabilities, ResourceClass, SttProviderSpec, TtsProviderSpec,
+};
+/// Capability-call wire types, framing helpers, and the passenger interface.
+pub use capability_service::{
+    CapabilityCall, CapabilityCallError, CapabilityCallErrorCode, CapabilityCallResult,
+    CapabilityServiceHandler, CapabilityServiceRequest, CapabilityServiceResponse,
+    read_capability_service_request, read_capability_service_response,
+    write_capability_service_request, write_capability_service_response,
 };
 /// Plugin error type.
 pub use error::{PluginError, ProviderErrorKind};
