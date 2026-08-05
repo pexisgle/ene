@@ -218,7 +218,6 @@ impl VadFactory for IpcVadFactory {
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
-    clippy::panic,
     reason = "unit tests use expect/unwrap for concise assertions"
 )]
 mod tests {
@@ -312,7 +311,7 @@ mod tests {
             512,
             tokio::runtime::Handle::current(),
         );
-        let mut engine = factory
+        let engine = factory
             .create_engine(&ene_config::EneConfig::default())
             .expect("create engine");
         assert_eq!(engine.frame_size(), 512);

@@ -208,9 +208,33 @@ impl TtsPlugin for KokoroPlugin {
         let profile = profiles.as_ref().and_then(|p| p.get(DEFAULT_PROFILE));
         let resolved = parsed.resolve(&voice, profile);
         Self::ensure_known_voice(&resolved.voice)?;
+        // Model acquisition lives in the plugin process since #321 removed
+        // the runtime prefetch and the desktop download UI; the shared
+        // fetcher skips files that already exist and validate. Non-fatal:
+        // engine construction reports the clear missing-file error.
+        if let Err(e) =
+            ene_voice::ensure_kokoro_files_exist(&resolved.model_path, &resolved.voices_path).await
+        {
+            tracing::warn!(
+                component = "ene-plugin-kokoro",
+                error = %e,
+                "Kokoro model download failed; will report a clear error on engine load"
+            );
+        }
         let provider = self.engine(&resolved).await?;
         synthesize_with(provider.as_ref(), &text).await
     }
+}
+
+/// Capabilities this plugin provides to other plugins: the shared ONNX
+/// Runtime loading (this plugin and the `onnx` plugin both load the dylib
+/// in their own processes).
+#[must_use]
+pub fn provides() -> Vec<CapabilityRef> {
+    ["onnx-runner@1"]
+        .into_iter()
+        .filter_map(|c| CapabilityRef::parse(c).ok())
+        .collect()
 }
 
 fn build_real(resolved: &ResolvedConfig) -> Result<Arc<dyn TtsProvider>, PluginError> {

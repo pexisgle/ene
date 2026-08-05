@@ -12,7 +12,7 @@ default = ["voice"]
 # Local voice pipeline I/O: microphone capture (cpal) and TTS playback
 # (rodio). Disable (`--no-default-features`) to build a text-only shell
 # without the native audio toolchain (ALSA / PipeWire); the `audio` module
-# compiles to inert stubs and `ene-ai`'s voice providers stay registered but
+# compiles to inert stubs and the plugin-provided voice providers stay
 # unreachable from the UI.
 voice = ["dep:cpal", "dep:rodio", "dep:rustfft"]
 
@@ -32,7 +32,6 @@ egui-winit = "0.35"
 ene-runtime = { workspace = true }
 ene-mind = { workspace = true }
 ene-ai = { workspace = true }
-ene-voice = { workspace = true, features = ["voice"] }
 ene-store = { workspace = true }
 ene-config = { workspace = true }
 ene-plugin-proto = { workspace = true }

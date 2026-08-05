@@ -2814,10 +2814,7 @@ mod tests {
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
-            PluginIpcResponse::VadChunkResult {
-                request_id,
-                event,
-            } => {
+            PluginIpcResponse::VadChunkResult { request_id, event } => {
                 assert_eq!(request_id, "req-vad-1");
                 assert_eq!(event, VadEvent::SpeechStart);
             }
@@ -2839,7 +2836,10 @@ mod tests {
         let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(
             resp,
-            PluginIpcResponse::VadChunkResult { event: VadEvent::Silence, .. }
+            PluginIpcResponse::VadChunkResult {
+                event: VadEvent::Silence,
+                ..
+            }
         ));
     }
 

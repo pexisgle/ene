@@ -1,14 +1,13 @@
 //! Feature-independent Kokoro model download and path resolution.
 //!
 //! Everything in this module compiles and can be called with the
-//! `local-tts` feature disabled — [`prefetch_if_configured`] is invoked from
-//! the runtime's async bootstrap path
-//! (`ene-runtime/src/handle/mod.rs`), which never enables `local-tts` (that
-//! feature only gates the `ort` / ONNX Runtime native dependency). Network
-//! I/O goes through the shared [`ene_ai::ModelFetcher`], which supplies
-//! in-flight coalescing, `.part` + atomic rename, RAII partial cleanup,
-//! HTTPS-only enforcement, and progress reporting; this module supplies the
-//! two Kokoro-specific [`ene_ai::ModelValidator`]s.
+//! `local-tts` feature disabled — the kokoro provider plugin invokes
+//! [`ensure_kokoro_files_exist`] from its own process before loading the
+//! model (that feature only gates the `ort` / ONNX Runtime native
+//! dependency). Network I/O goes through the shared [`ene_ai::ModelFetcher`],
+//! which supplies in-flight coalescing, `.part` + atomic rename, RAII
+//! partial cleanup, HTTPS-only enforcement, and progress reporting; this
+//! module supplies the two Kokoro-specific [`ene_ai::ModelValidator`]s.
 
 use ene_ai::model_fetch::{PrefixPredicateValidator, SizeMultipleValidator};
 use ene_ai::{AudioProviderError, ModelFetcher, ModelValidator};
@@ -47,55 +46,6 @@ pub fn default_kokoro_model_path() -> std::path::PathBuf {
 #[must_use]
 pub fn default_kokoro_voices_path() -> std::path::PathBuf {
     ene_config::models_dir().join("gguf").join("voices.bin")
-}
-
-/// Resolve the Kokoro ONNX model path from configuration.
-///
-/// Precedence: `TtsConfig::model_path` when non-empty, then `TtsConfig::model`
-/// when non-empty, then a default cache location. Environment overrides are
-/// handled by the config system (`ENE_AI__TTS__MODEL_PATH`).
-pub(crate) fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
-    if let Some(path) = ai
-        .tts
-        .model_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
-        return std::path::PathBuf::from(path);
-    }
-    if !ai.tts.model.trim().is_empty() {
-        return std::path::PathBuf::from(ai.tts.model.trim());
-    }
-    default_kokoro_model_path()
-}
-
-/// Resolve the Kokoro `voices.bin` path from configuration.
-///
-/// Precedence: the Kokoro plugin profile
-/// `plugins.list.kokoro.profiles.kokoro.voices_path` when set (the previous
-/// `TtsConfig::voices_path` moved here in #313), then a default cache
-/// location.
-///
-/// Reads from the passed-in config document (not the global singleton) so the
-/// result agrees with the other `plugins.list` reads made from that same
-/// document (e.g. `ort_dylib_path` in `LocalTtsProviderFactory::build`).
-pub(crate) fn resolve_voices_path(config: &ene_config::EneConfig) -> std::path::PathBuf {
-    let profile = ene_ai::plugin_config::plugin_profile_blob(
-        config,
-        ene_ai::plugin_config::KOKORO_PLUGIN,
-        ene_ai::plugin_config::KOKORO_DEFAULT_PROFILE,
-    );
-    if let Some(path) = profile
-        .as_ref()
-        .and_then(|p| p.get("voices_path"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
-        return std::path::PathBuf::from(path);
-    }
-    default_kokoro_voices_path()
 }
 
 /// Heuristic ONNX validity check.
@@ -146,9 +96,8 @@ async fn ensure_file_downloaded(
 /// Ensure Kokoro ONNX model and `voices.bin` files exist on disk, downloading them
 /// automatically if missing.
 ///
-/// Performs network I/O; must be awaited from an async context (settings UI
-/// download button, or [`prefetch_if_configured`] during bootstrap). Never
-/// called from `provider::open`.
+/// Performs network I/O; must be awaited from an async context (the kokoro
+/// plugin's first synthesize). Never called from `provider::open`.
 pub async fn ensure_kokoro_files_exist(
     model_path: &std::path::Path,
     voices_path: &std::path::Path,
@@ -182,44 +131,6 @@ pub async fn ensure_kokoro_files_exist(
 /// to perform network I/O. A no-op when TTS is disabled or configured for a
 /// different provider (e.g. `"openai"`).
 ///
-/// # Errors
-///
-/// Returns [`AudioProviderError`] when the download fails (or the AI config
-/// section cannot be parsed). Callers should treat this as non-fatal: log it
-/// and continue, since `provider::open` performs its own file-existence check
-/// and reports a clear error either way.
-pub async fn prefetch_if_configured(
-    config: &ene_config::EneConfig,
-) -> Result<(), AudioProviderError> {
-    let ai = config
-        .get_section::<ene_ai::AiConfig>()
-        .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
-    let Some(resolved) = ai.resolve_tts() else {
-        return Ok(());
-    };
-    if resolved.provider != super::PROVIDER_NAME {
-        return Ok(());
-    }
-    let model_path =
-        plugin_config_path(config, "model_path").unwrap_or_else(|| resolve_model_path(&ai));
-    let voices_path =
-        plugin_config_path(config, "voices_path").unwrap_or_else(|| resolve_voices_path(config));
-    ensure_kokoro_files_exist(&model_path, &voices_path).await
-}
-
-/// Reads a path key from the kokoro plugin's config blob
-/// (`plugins.list.kokoro.config`), the source the provider plugin resolves
-/// before the profile or the `ai.tts.*` fallbacks.
-fn plugin_config_path(config: &ene_config::EneConfig, key: &str) -> Option<std::path::PathBuf> {
-    ene_ai::plugin_config::plugin_config_blob(config, ene_ai::plugin_config::KOKORO_PLUGIN)
-        .as_ref()
-        .and_then(|blob| blob.get(key))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(std::path::PathBuf::from)
-}
-
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "unit tests use expect for assertions")]
@@ -240,33 +151,6 @@ mod tests {
                 .to_string_lossy()
                 .contains("voices.bin")
         );
-    }
-
-    #[test]
-    fn plugin_config_path_reads_custom_paths() {
-        let mut config = ene_config::EneConfig::default();
-        config
-            .set_path(
-                "plugins.list.kokoro.config.model_path",
-                "/custom/kokoro.onnx",
-            )
-            .expect("set model path");
-        config
-            .set_path(
-                "plugins.list.kokoro.config.voices_path",
-                "/custom/voices.bin",
-            )
-            .expect("set voices path");
-
-        assert_eq!(
-            plugin_config_path(&config, "model_path"),
-            Some(std::path::PathBuf::from("/custom/kokoro.onnx"))
-        );
-        assert_eq!(
-            plugin_config_path(&config, "voices_path"),
-            Some(std::path::PathBuf::from("/custom/voices.bin"))
-        );
-        assert_eq!(plugin_config_path(&config, "voice"), None);
     }
 
     #[tokio::test]

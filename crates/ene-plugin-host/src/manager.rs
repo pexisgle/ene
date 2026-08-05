@@ -1787,12 +1787,14 @@ pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] = &[
     "homeassistant",
     "kokoro",
     "llama-cpp",
+    "onnx",
     "openai",
     "openai-tts",
     "random",
     "utility",
     "voicevox",
     "web",
+    "whisper",
 ];
 
 /// Returns `true` when the plugin is one of the trusted built-ins that ship
@@ -2228,12 +2230,14 @@ mod tests {
                 "homeassistant",
                 "kokoro",
                 "llama-cpp",
+                "onnx",
                 "openai",
                 "openai-tts",
                 "random",
                 "utility",
                 "voicevox",
-                "web"
+                "web",
+                "whisper"
             ]
         );
 

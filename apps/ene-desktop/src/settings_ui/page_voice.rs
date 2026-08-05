@@ -4,7 +4,7 @@ use super::input::SettingsInputState;
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
 use bevy_ecs::world::World;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 /// Known Kokoro TTS voice presets with human-readable Japanese descriptions.
 const KOKORO_VOICE_PRESETS: &[(&str, &str)] = &[
@@ -23,12 +23,6 @@ const KOKORO_VOICE_PRESETS: &[(&str, &str)] = &[
     ("jf_alpha", "jf_alpha (日本語女性)"),
     ("jf_gongitsune", "jf_gongitsune (日本語童話風)"),
 ];
-
-/// Global download status tracker for the settings UI.
-fn download_status() -> &'static Mutex<Option<Result<String, String>>> {
-    static STATUS: OnceLock<Mutex<Option<Result<String, String>>>> = OnceLock::new();
-    STATUS.get_or_init(|| Mutex::new(None))
-}
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -106,89 +100,6 @@ pub fn render(
         });
 
         ui.add_space(4.0);
-
-        if ai_cfg.tts.provider == "kokoro" {
-            ui.group(|ui| {
-                let model_path = ene_voice::default_kokoro_model_path();
-                let voices_path = ene_voice::default_kokoro_voices_path();
-                let ready = model_path.is_file() && voices_path.is_file();
-
-                ui.horizontal(|ui| {
-                    ui.label(i18n_embed_fl::fl!(
-                        crate::i18n::loader(),
-                        "audio-model-status"
-                    ));
-                    if ready {
-                        ui.colored_label(
-                            egui::Color32::LIGHT_GREEN,
-                            i18n_embed_fl::fl!(crate::i18n::loader(), "audio-status-ready"),
-                        );
-                    } else {
-                        ui.colored_label(
-                            egui::Color32::GOLD,
-                            i18n_embed_fl::fl!(crate::i18n::loader(), "audio-status-missing"),
-                        );
-                    }
-                });
-
-                let status_guard = download_status()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(ref res) = *status_guard {
-                    match res {
-                        Ok(msg) => {
-                            ui.colored_label(egui::Color32::LIGHT_GREEN, msg);
-                        }
-                        Err(err) => {
-                            ui.colored_label(
-                                egui::Color32::LIGHT_RED,
-                                i18n_embed_fl::fl!(
-                                    crate::i18n::loader(),
-                                    "audio-download-error",
-                                    error = err
-                                ),
-                            );
-                        }
-                    }
-                }
-                drop(status_guard);
-
-                if !ready
-                    && ui
-                        .button(i18n_embed_fl::fl!(
-                            crate::i18n::loader(),
-                            "audio-download-button"
-                        ))
-                        .clicked()
-                {
-                    // `ensure_kokoro_files_exist` is now async (it performs
-                    // network I/O); spawn it on the tokio runtime rather than
-                    // a bare OS thread. `Handle::current()` works here because
-                    // this is called from the UI thread, which holds a live
-                    // `runtime.enter()` guard for the whole process (see
-                    // `main.rs`) even though it is not itself a worker thread.
-                    tokio::runtime::Handle::current().spawn(async move {
-                        let res =
-                            ene_voice::ensure_kokoro_files_exist(&model_path, &voices_path).await;
-                        let mut lock = download_status()
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        match res {
-                            Ok(()) => {
-                                *lock = Some(Ok(i18n_embed_fl::fl!(
-                                    crate::i18n::loader(),
-                                    "audio-download-success"
-                                )));
-                            }
-                            Err(e) => {
-                                *lock = Some(Err(e.to_string()));
-                            }
-                        }
-                    });
-                }
-            });
-            ui.add_space(4.0);
-        }
 
         ui.horizontal(|ui| {
             ui.label(i18n_embed_fl::fl!(
@@ -403,15 +314,11 @@ pub fn render(
                         crate::i18n::loader(),
                         "audio-stt-model-path"
                     ));
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut input.stt_model_path).desired_width(220.0),
-                    );
+                    let mut model_path = settings.whisper_model_path();
+                    let response =
+                        ui.add(egui::TextEdit::singleline(&mut model_path).desired_width(220.0));
                     if response.changed() {
-                        ai_cfg.stt.model_path = if input.stt_model_path.trim().is_empty() {
-                            None
-                        } else {
-                            Some(input.stt_model_path.trim().to_string())
-                        };
+                        settings.set_whisper_model_path(&model_path);
                         changed = true;
                     }
                 });
@@ -454,12 +361,12 @@ pub fn render(
                 crate::i18n::loader(),
                 "audio-vad-threshold"
             ));
-            let mut threshold = ai_cfg.vad.threshold;
+            let mut threshold = settings.vad_threshold();
             if ui
                 .add(egui::Slider::new(&mut threshold, 0.0..=1.0))
                 .changed()
             {
-                ai_cfg.vad.threshold = threshold;
+                settings.set_vad_threshold(threshold);
                 changed = true;
             }
         });

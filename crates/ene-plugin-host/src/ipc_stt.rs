@@ -70,10 +70,25 @@ impl IpcSttProvider {
         }
     }
 
-    /// Returns the live plugin blob (or the creation-time snapshot).
+    /// Returns the live plugin blob (or the creation-time snapshot) merged
+    /// with the resolved `ai.stt.model` / `ai.stt.language`, mirroring how
+    /// the TTS adapter forwards `ai.tts.voice` so the desktop settings keep
+    /// working without duplicating them in the plugin config.
     fn current_provider_config(&self) -> serde_json::Value {
-        ene_ai::plugin_config::global_plugin_config_blob(&self.plugin_name)
-            .unwrap_or_else(|| self.config_snapshot.clone())
+        let mut blob = ene_ai::plugin_config::global_plugin_config_blob(&self.plugin_name)
+            .unwrap_or_else(|| self.config_snapshot.clone());
+        if let Ok(ai) = ene_config::get_global_config().get_section::<ene_ai::AiConfig>()
+            && let Some(resolved) = ai.resolve_stt()
+            && resolved.provider == self.kind
+        {
+            if !resolved.model.trim().is_empty() {
+                blob["model"] = serde_json::Value::String(resolved.model.clone());
+            }
+            if let Some(language) = &resolved.language {
+                blob["language"] = serde_json::Value::String(language.clone());
+            }
+        }
+        blob
     }
 }
 
@@ -146,7 +161,6 @@ impl SttProvider for IpcSttProvider {
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
-    clippy::panic,
     reason = "unit tests use expect/unwrap for concise assertions"
 )]
 mod tests {
@@ -250,7 +264,7 @@ mod tests {
         let result = provider.transcribe(&pcm, 16_000).await.expect("transcribe");
         assert_eq!(result.text, "hello world");
         assert_eq!(result.language, None);
-        assert_eq!(result.duration_secs, 1.0);
+        assert!((result.duration_secs - 1.0).abs() < 1e-4);
         server.abort();
     }
 }

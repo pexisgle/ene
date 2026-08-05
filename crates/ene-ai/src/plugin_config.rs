@@ -37,6 +37,8 @@ pub const LLAMA_CPP_PLUGIN: &str = "llama-cpp";
 pub const ONNX_PLUGIN: &str = "onnx";
 /// Plugin list key for the Kokoro TTS plugin.
 pub const KOKORO_PLUGIN: &str = "kokoro";
+/// Plugin list key for the whisper.cpp STT plugin.
+pub const WHISPER_PLUGIN: &str = "whisper";
 /// Default profile name under `plugins.list.kokoro.profiles` for the single
 /// Kokoro voice set shipped today.
 pub const KOKORO_DEFAULT_PROFILE: &str = "kokoro";
