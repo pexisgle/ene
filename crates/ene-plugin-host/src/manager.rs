@@ -3,10 +3,10 @@
 //! [`PluginHostManager`] starts only plugins explicitly listed in
 //! `plugins.list` with `enable: true` (opt-in discovery). Each plugin is
 //! spawned with a hardened environment (`env_clear()` + whitelist), performs
-//! the v3 handshake, and routes advertised capabilities (tools, LLM
-//! providers) into the appropriate host registries. It also connects to
-//! configured MCP servers and exposes their tools alongside plugin-provided
-//! tools.
+//! the versioned IPC handshake, and routes advertised capabilities (tools,
+//! LLM providers, audio providers) into the appropriate host registries. It
+//! also connects to configured MCP servers and exposes their tools alongside
+//! plugin-provided tools.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -634,11 +634,13 @@ pub type VadFactoriesByPlugin = HashMap<String, Vec<(String, VadFactoryHandle)>>
 /// `enable: true` (opt-in discovery). Binaries found on disk that are
 /// not listed emit a warning suggesting the user add them. Each plugin
 /// is spawned with a hardened environment (`env_clear()` + whitelist),
-/// performs the v3 handshake, and routes capabilities:
+/// performs the versioned IPC handshake, and routes capabilities:
 ///
 /// - `capabilities.tools` (count) → wrapped in a [`ToolRegistry`] adapter (specs fetched via `ListTools`)
 /// - `capabilities.llm_providers` → registered as [`IpcLlmProviderFactory`] entries
 /// - `capabilities.tts_providers` → registered as [`IpcTtsProviderFactory`] entries
+/// - `capabilities.stt_providers` / `vad_providers` → registered as
+///   [`IpcSttProviderFactory`] / [`IpcVadFactory`] entries
 ///
 /// Additionally connects to any MCP servers declared in `plugins.mcp_servers`
 /// and includes their tools in [`tool_registries`](Self::tool_registries).
