@@ -1053,6 +1053,8 @@ mod audio_tests {
         ene_config::EneConfig::default()
     }
 
+    static TTS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Assert that `result` is an `Err` and return it. Used instead of
     /// `expect_err` because the boxed provider types are not `Debug`.
     fn unwrap_err<T>(result: Result<T, AudioProviderError>) -> AudioProviderError {
@@ -1064,6 +1066,7 @@ mod audio_tests {
 
     #[test]
     fn tts_registration_lookup_round_trip() {
+        let _guard = TTS_TEST_LOCK.lock().expect("TTS test lock poisoned");
         AudioProviderRegistry::register_tts(Arc::new(DummyTtsFactory));
         let err = unwrap_err(AudioProviderRegistry::create_tts_provider(
             "dummy-tts",
@@ -1074,6 +1077,7 @@ mod audio_tests {
 
     #[test]
     fn tts_deregister_makes_lookup_fail() {
+        let _guard = TTS_TEST_LOCK.lock().expect("TTS test lock poisoned");
         AudioProviderRegistry::register_tts(Arc::new(DummyTtsFactory));
         assert!(AudioProviderRegistry::deregister_tts("dummy-tts"));
         let err = unwrap_err(AudioProviderRegistry::create_tts_provider(
@@ -1086,6 +1090,7 @@ mod audio_tests {
 
     #[test]
     fn tts_deregister_if_matches_is_identity_checked() {
+        let _guard = TTS_TEST_LOCK.lock().expect("TTS test lock poisoned");
         let original: Arc<dyn TtsProviderFactory> = Arc::new(DummyTtsFactory);
         AudioProviderRegistry::register_tts(Arc::clone(&original));
         let replacement: Arc<dyn TtsProviderFactory> = Arc::new(DummyTtsFactory);
