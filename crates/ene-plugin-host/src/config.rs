@@ -312,12 +312,14 @@ pub struct ResourceClassBudget {
     pub class: ene_plugin_proto::ResourceClass,
     /// Maximum concurrent in-flight jobs for this class. `None` uses the
     /// class default: 1 for GPU devices, the logical CPU count for `Cpu`,
-    /// 4 for `Network`.
-    #[serde(default)]
+    /// 4 for `Network`. The value is clamped to at least 1: a zero-permit
+    /// class would deadlock every request against it, which is a worse
+    /// failure mode than the clamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permits: Option<usize>,
     /// How many additional callers may wait for a permit before requests
     /// fail fast with `Busy`. `None` uses the default of 8.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<usize>,
 }
 
@@ -582,5 +584,38 @@ mod tests {
         assert_eq!(blob.get("enable"), Some(&serde_json::json!(false)));
         assert_eq!(blob.get("checksum"), Some(&serde_json::json!("deadbeef")));
         assert_eq!(blob.get("api_key"), Some(&serde_json::json!("sk-test")));
+    }
+
+    /// `plugins.resource_classes` must round-trip through JSON with the same
+    /// externally tagged class form the wire uses, and default to empty when
+    /// absent.
+    #[test]
+    fn resource_classes_config_round_trips() {
+        let json = serde_json::json!({
+            "resource_classes": [
+                { "class": { "Gpu": { "device": 0 } }, "permits": 2, "queue_depth": 4 },
+                { "class": "Cpu", "permits": 8 }
+            ]
+        });
+        let config: PluginConfig = serde_json::from_value(json.clone()).expect("parses");
+        assert_eq!(config.resource_classes.len(), 2);
+        let gpu = &config.resource_classes[0];
+        assert_eq!(
+            gpu.class,
+            ene_plugin_proto::ResourceClass::Gpu { device: 0 }
+        );
+        assert_eq!(gpu.permits, Some(2));
+        assert_eq!(gpu.queue_depth, Some(4));
+        let cpu = &config.resource_classes[1];
+        assert_eq!(cpu.class, ene_plugin_proto::ResourceClass::Cpu);
+        assert_eq!(cpu.permits, Some(8));
+        assert_eq!(cpu.queue_depth, None);
+
+        let back = serde_json::to_value(&config).expect("serializes");
+        assert_eq!(back.get("resource_classes"), json.get("resource_classes"));
+
+        let empty: PluginConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults apply");
+        assert!(empty.resource_classes.is_empty());
     }
 }

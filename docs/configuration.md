@@ -729,7 +729,10 @@ The local GGUF provider (`ene-plugin-llama-cpp`) declares `Gpu { device: 0 }`
 when its `plugins.list.llama-cpp.config.acceleration` is `vulkan`/`cuda` (or
 `auto` on a GPU-enabled build) and `Cpu` otherwise — the declaration is fixed
 at handshake, so changing `acceleration` live takes effect on the next host
-start. Note the per-class gate controls *execution* concurrency only; VRAM
+start. Embedding requests (`EmbedPlugin`) have no wire class declaration yet,
+so they are **not** host-gated; the local GGUF plugin keeps its in-process
+admission as a process-local backstop until embeddings gain a declaration
+surface. Note the per-class gate controls *execution* concurrency only; VRAM
 residency (two plugins both keeping models loaded on the same device) is a
 separate, not-yet-solved concern.
 

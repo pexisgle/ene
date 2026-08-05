@@ -846,10 +846,10 @@ mod tests {
 /// concurrently at all) is an admission-layer decision, not part of this
 /// type.
 ///
-/// Wire note: not yet carried on any message. The externally tagged serde
-/// form (`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`) is the initial
-/// choice; re-confirm it when this type is first wired into a message (the
-/// follow-up host-side resource admission work) before it becomes load-bearing.
+/// Wire note: carried on `LlmProviderSpec.resource_class` in the externally
+/// tagged serde form (`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`), which
+/// the host's per-class admission budgets key on; the form is pinned by the
+/// serde tests below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum ResourceClass {
     /// A specific GPU device index, as used by `with_main_gpu(n)` /

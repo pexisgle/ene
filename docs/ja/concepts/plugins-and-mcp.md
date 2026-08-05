@@ -132,7 +132,10 @@ permit はリクエストの間ホスト側で保持され、リクエスト終�
 `resource_class = ::ene_plugin::ResourceClass::Gpu { device: 0 }` と宣言
 できます（省略時は `Cpu`）。組み込みのローカル GGUF プラグインは 1 つの
 バイナリで CPU モデルと GPU モデルの両方を提供できるため、`acceleration`
-設定から動的に申告します。
+設定から動的に申告します。`EmbedPlugin` にはまだワイヤ上の申告面が無い
+ため、埋め込みリクエストはホスト側ではゲートされません — GPU 埋め込みを
+実行するプロバイダーは、プロセスローカルのバックストップとして自前の
+プロセス内入場制御を維持します。
 
 `kokoro` プラグイン（`plugins/provider/kokoro`）は、ローカルの
 Kokoro-82M ONNX モデルを自プロセス内で直接実行します（`ene-voice` の ONNX

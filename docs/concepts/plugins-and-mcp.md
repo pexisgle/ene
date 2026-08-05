@@ -132,7 +132,9 @@ The `#[provider(...)]` derive exposes this as
 `resource_class = ::ene_plugin::ResourceClass::Gpu { device: 0 }` (omitted
 defaults to `Cpu`); the built-in local GGUF plugin declares dynamically from
 its `acceleration` config, since a single binary can serve CPU and GPU
-models.
+models. `EmbedPlugin` has no wire declaration surface yet, so embedding
+requests are not host-gated — providers that run GPU embeddings keep their
+own in-process admission as a process-local backstop.
 
 The `kokoro` plugin (`plugins/provider/kokoro`) runs the local Kokoro-82M
 ONNX model directly in its own process (via `ene-voice`'s ONNX engine) — no

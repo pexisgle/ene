@@ -64,6 +64,10 @@ impl ResourceClassAdmission {
             .map(|b| {
                 let permits = b.permits.unwrap_or_else(|| default_permits(b.class));
                 let queue_depth = b.queue_depth.unwrap_or(DEFAULT_CLASS_QUEUE_DEPTH);
+                // A zero-permit class would make every request wait forever
+                // (or fail Busy outright with queue_depth 0) — clamping keeps
+                // the failure mode at "serialized", matching
+                // `ConcurrencyLimiter`'s max_in_flight clamp.
                 (b.class, (permits.max(1), queue_depth))
             })
             .collect();
@@ -180,6 +184,23 @@ mod tests {
             .await
             .expect_err("third job must be rejected: two permits, no queue");
         assert!(matches!(err, ene_ai::error::LlmProviderError::Busy { .. }));
+    }
+
+    #[tokio::test]
+    async fn zero_permit_budget_is_clamped_to_one() {
+        let admission = ResourceClassAdmission::new(&[ResourceClassBudget {
+            class: ResourceClass::Gpu { device: 306 },
+            permits: Some(0),
+            queue_depth: Some(0),
+        }]);
+        let limiter = admission
+            .limiter(ResourceClass::Gpu { device: 306 })
+            .expect("configured class is gated");
+        let _permit = limiter
+            .acquire("test")
+            .await
+            .expect("clamped permit admits one");
+        assert!(limiter.acquire("test").await.is_err());
     }
 
     #[tokio::test]

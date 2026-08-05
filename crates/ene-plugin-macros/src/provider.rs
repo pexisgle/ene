@@ -22,6 +22,11 @@
 //! `EmbedPlugin` is deliberately out of scope: it has no static capability
 //! declaration to generate (`embed_batch` is the entire trait).
 //!
+//! `resource_class` is LLM-only: `TtsProviderSpec` / `SttProviderSpec` do not
+//! carry the field yet, so a Tts/Stt-only derive parses the attribute but
+//! never emits it. On a compound derive (`LlmPlugin` + `TtsPlugin`, sharing
+//! one attribute) it applies to the LLM spec only.
+//!
 //! `#[provider(provides = "...", requires = "...")]` declares plugin-wide
 //! capabilities; the derive emits the `provides()` / `requires()` methods
 //! from the `LlmPlugin` expansion only (see `expand_plugin_derive`). On a

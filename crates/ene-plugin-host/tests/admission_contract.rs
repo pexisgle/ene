@@ -16,6 +16,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use tokio::sync::watch;
+
 use ene_ai::message::{LlmMessage, UserMessagePart};
 use ene_ai::traits::LlmProviderFactory;
 use ene_config::EneConfig;
@@ -62,65 +64,85 @@ fn mock_spec(resource_class: ResourceClass) -> LlmProviderSpec {
     }
 }
 
-/// Serves handshakes with a mock plugin declaring `resource_class`, then
-/// swallows every further request (streams stay open until the server dies).
-async fn run_admission_server(socket_path: PathBuf, resource_class: ResourceClass) {
+/// Serves handshakes with a mock plugin declaring `resource_class`, switching
+/// to the negotiated wire format after the handshake, then swallowing every
+/// non-ping request so a stream stays genuinely in flight until the server
+/// (or its connection) shuts down. Dropping the last `watch::Sender` for
+/// `shutdown` closes all accepted connections — the in-process stand-in for
+/// the serving process dying.
+async fn run_admission_server(
+    socket_path: PathBuf,
+    resource_class: ResourceClass,
+    mut shutdown: watch::Receiver<()>,
+) {
     cleanup_path(&socket_path);
     let Ok(mut listener) = IpcListener::bind(&socket_path) else {
         return;
     };
     loop {
-        let Ok(mut stream) = listener.accept().await else {
-            break;
-        };
-        let capabilities = PluginCapabilities {
-            llm_providers: vec![mock_spec(resource_class)],
-            ..PluginCapabilities::default()
-        };
-        tokio::spawn(async move {
-            let Ok(Some(PluginIpcRequest::Handshake {
-                version: host_range,
-                ..
-            })) = read_plugin_request(&mut stream, WireFormat::Json).await
-            else {
-                return;
-            };
-            let negotiated = VersionRange {
-                min: PLUGIN_IPC_PROTOCOL_VERSION,
-                max: PLUGIN_IPC_PROTOCOL_VERSION,
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            accepted = listener.accept() => {
+                let Ok(mut stream) = accepted else { break; };
+                let mut shutdown = shutdown.clone();
+                let capabilities = PluginCapabilities {
+                    llm_providers: vec![mock_spec(resource_class)],
+                    ..PluginCapabilities::default()
+                };
+                tokio::spawn(async move {
+                    // The handshake frame is always JSON; the negotiated
+                    // version decides the framing of every later frame.
+                    let mut format = WireFormat::Json;
+                    loop {
+                        tokio::select! {
+                            _ = shutdown.changed() => break,
+                            frame = read_plugin_request(&mut stream, format) => {
+                                let Ok(Some(req)) = frame else { break; };
+                                match req {
+                                    PluginIpcRequest::Handshake { version: host_range, .. } => {
+                                        let negotiated = VersionRange {
+                                            min: PLUGIN_IPC_PROTOCOL_VERSION,
+                                            max: PLUGIN_IPC_PROTOCOL_VERSION,
+                                        }
+                                        .negotiate(&host_range)
+                                        .unwrap_or(PLUGIN_IPC_PROTOCOL_VERSION);
+                                        format = WireFormat::for_version(negotiated);
+                                        if write_plugin_response(
+                                            &mut stream,
+                                            &PluginIpcResponse::HandshakeAck {
+                                                version: negotiated,
+                                                capabilities: capabilities.clone(),
+                                            },
+                                            WireFormat::Json,
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    PluginIpcRequest::Ping { request_id } => {
+                                        if write_plugin_response(
+                                            &mut stream,
+                                            &PluginIpcResponse::Pong { request_id },
+                                            format,
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    // Stream requests are deliberately never
+                                    // answered, keeping the stream in flight.
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                });
             }
-            .negotiate(&host_range)
-            .unwrap_or(PLUGIN_IPC_PROTOCOL_VERSION);
-            if write_plugin_response(
-                &mut stream,
-                &PluginIpcResponse::HandshakeAck {
-                    version: negotiated,
-                    capabilities,
-                },
-                WireFormat::Json,
-            )
-            .await
-            .is_err()
-            {
-                return;
-            }
-            // Answer pings; deliberately never answer stream requests so a
-            // stream stays in flight until the connection dies.
-            while let Ok(Some(PluginIpcRequest::Ping { request_id })) =
-                read_plugin_request(&mut stream, WireFormat::Json).await
-            {
-                if write_plugin_response(
-                    &mut stream,
-                    &PluginIpcResponse::Pong { request_id },
-                    WireFormat::Json,
-                )
-                .await
-                .is_err()
-                {
-                    break;
-                }
-            }
-        });
+        }
     }
 }
 
@@ -134,7 +156,15 @@ async fn connect_mock(
     std::sync::Arc<IpcPluginConnection>,
 ) {
     let socket_path = test_socket_path(name);
-    let server = tokio::spawn(run_admission_server(socket_path.clone(), resource_class));
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let server_path = socket_path.clone();
+    let server = tokio::spawn(async move {
+        // Keep the sender alive for the task's lifetime: when the task is
+        // aborted (or exits), the sender drops and every accepted connection
+        // observes shutdown and closes.
+        let _sender = shutdown_tx;
+        run_admission_server(server_path, resource_class, shutdown_rx).await;
+    });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let conn = IpcPluginConnection::connect(
         &socket_path,
@@ -338,11 +368,19 @@ async fn permit_released_when_serving_task_dies() {
     let admission = std::sync::Arc::new(ResourceClassAdmission::new(&[]));
     let class = ResourceClass::Gpu { device: 0 };
     let (socket_a, server_a, conn_a) = connect_mock("crash-a", class).await;
+    let ping_conn = std::sync::Arc::clone(&conn_a);
     let factory_a = mock_factory(conn_a, class, &admission);
     let task = ene_ai::TaskRef::default();
     let stream_a = start_hold_stream(&factory_a, &task)
         .await
         .expect("first provider admitted");
+
+    // The mock must be alive with the stream genuinely in flight — a ping
+    // round-trip proves the connection did not die on a decode error.
+    ping_conn
+        .ping()
+        .await
+        .expect("mock connection alive mid-stream");
 
     server_a.abort();
     drain_until_end(stream_a).await;
@@ -375,7 +413,11 @@ async fn mock_server_child() {
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or(ResourceClass::Cpu);
-    run_admission_server(PathBuf::from(socket), class).await;
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    // The sender outlives the server so connections stay open until this
+    // process is SIGKILLed by the parent test.
+    let _sender = shutdown_tx;
+    run_admission_server(PathBuf::from(socket), class, shutdown_rx).await;
     loop {
         tokio::time::sleep(Duration::from_hours(1)).await;
     }
@@ -411,12 +453,15 @@ async fn permit_released_when_serving_process_is_sigkilled() {
     )
     .await
     .expect("handshake with child mock server");
-    let factory = mock_factory(std::sync::Arc::new(conn), class, &admission);
+    let conn = std::sync::Arc::new(conn);
+    let ping_conn = std::sync::Arc::clone(&conn);
+    let factory = mock_factory(conn, class, &admission);
     let factory = std::sync::Arc::new(factory);
     let task = ene_ai::TaskRef::default();
     let stream_a = start_hold_stream(&factory, &task)
         .await
         .expect("first provider admitted");
+    ping_conn.ping().await.expect("child mock alive mid-stream");
 
     // A second request on the same class queues on the held permit.
     let queued = tokio::spawn({
