@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin};
+use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin, VadPlugin};
 
 fn provider_error_message(error: &PluginError) -> String {
     error.provider_error_kind().map_or_else(
@@ -39,7 +39,7 @@ const DEFERRED_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 /// Dispatch table holding up to five focused trait implementations.
 ///
 /// A plugin struct implements any subset of [`ToolPlugin`], [`LlmPlugin`],
-/// [`EmbedPlugin`], [`TtsPlugin`], and [`SttPlugin`]; the server routes
+/// [`EmbedPlugin`], [`TtsPlugin`], [`SttPlugin`], and [`VadPlugin`]; the server routes
 /// incoming IPC requests to the corresponding trait object.
 pub struct PluginDispatch {
     /// Optional tool plugin implementation.
@@ -52,6 +52,8 @@ pub struct PluginDispatch {
     pub tts: Option<Arc<dyn TtsPlugin>>,
     /// Optional STT plugin implementation.
     pub stt: Option<Arc<dyn SttPlugin>>,
+    /// Optional VAD plugin implementation.
+    pub vad: Option<Arc<dyn VadPlugin>>,
     /// Capabilities this plugin provides to other plugins, declared via the
     /// `#[provider(provides = "...")]` attribute (see `ene-plugin-macros`).
     provides: Vec<CapabilityRef>,
@@ -75,9 +77,21 @@ impl PluginDispatch {
             embed,
             tts,
             stt,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
+    }
+
+    /// Attaches a VAD plugin implementation.
+    ///
+    /// VAD arrived after the five-positional-argument constructor, so it is
+    /// a builder step rather than a sixth parameter (which would force every
+    /// existing plugin binary's entry point to change).
+    #[must_use]
+    pub fn with_vad(mut self, vad: Arc<dyn VadPlugin>) -> Self {
+        self.vad = Some(vad);
+        self
     }
 
     /// Sets the plugin-wide capability declarations sent in the handshake
@@ -1208,6 +1222,40 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 },
             }
         }
+        PluginIpcRequest::ProcessVadChunk {
+            request_id,
+            provider_kind,
+            provider_config,
+            session_id,
+            pcm,
+            reset,
+        } => {
+            let Some(vad) = &dispatch.vad else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no VAD plugin registered".to_string(),
+                };
+            };
+            match vad
+                .process_chunk(
+                    provider_kind,
+                    provider_config.clone(),
+                    session_id.clone(),
+                    pcm.clone(),
+                    *reset,
+                )
+                .await
+            {
+                Ok(event) => PluginIpcResponse::VadChunkResult {
+                    request_id: request_id.clone(),
+                    event,
+                },
+                Err(e) => PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: e.to_string(),
+                },
+            }
+        }
         PluginIpcRequest::Shutdown => PluginIpcResponse::Ack {
             request_id: String::new(),
         },
@@ -1261,6 +1309,10 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
             .stt
             .as_ref()
             .map_or(Vec::new(), |s| s.stt_capabilities()),
+        vad_providers: dispatch
+            .vad
+            .as_ref()
+            .map_or(Vec::new(), |v| v.vad_capabilities()),
         supports_list_config_options: dispatch.supports_list_config_options(),
         supports_validate_config: dispatch.supports_validate_config(),
         supports_migrate_config: dispatch.supports_migrate_config(),
@@ -1413,7 +1465,7 @@ mod tests {
     use ene_plugin_proto::ToolName;
     use ene_plugin_proto::{
         ConcurrencyHint, DeferredStatus, LlmProviderSpec, SttProviderSpec, ToolSpec,
-        TtsProviderSpec, VersionRange,
+        TtsProviderSpec, VadEvent, VadProviderSpec, VersionRange,
     };
 
     /// A mock tool plugin for testing dispatch logic.
@@ -1684,6 +1736,37 @@ mod tests {
 
     impl ConfigurablePlugin for MockSttPlugin {}
 
+    /// A mock VAD plugin for testing dispatch logic.
+    struct MockVadPlugin;
+
+    #[async_trait]
+    impl VadPlugin for MockVadPlugin {
+        fn vad_capabilities(&self) -> Vec<VadProviderSpec> {
+            vec![VadProviderSpec {
+                kind: "mock_vad".into(),
+                frame_size: 512,
+                concurrency: ConcurrencyHint::default(),
+            }]
+        }
+
+        async fn process_chunk(
+            &self,
+            _kind: &str,
+            _config: serde_json::Value,
+            _session_id: String,
+            _pcm: Vec<f32>,
+            reset: bool,
+        ) -> Result<VadEvent, PluginError> {
+            if reset {
+                Ok(VadEvent::Silence)
+            } else {
+                Ok(VadEvent::SpeechStart)
+            }
+        }
+    }
+
+    impl ConfigurablePlugin for MockVadPlugin {}
+
     /// A mock embed plugin for testing dispatch logic.
     struct MockEmbedPlugin;
 
@@ -1710,6 +1793,7 @@ mod tests {
             embed: embed.then(|| Arc::new(MockEmbedPlugin) as Arc<dyn EmbedPlugin>),
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1722,6 +1806,7 @@ mod tests {
             embed: None,
             tts: Some(Arc::new(MockTtsPlugin) as Arc<dyn TtsPlugin>),
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1734,6 +1819,20 @@ mod tests {
             embed: None,
             tts: None,
             stt: Some(Arc::new(MockSttPlugin) as Arc<dyn SttPlugin>),
+            vad: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
+        }
+    }
+
+    fn make_vad_dispatch() -> PluginDispatch {
+        PluginDispatch {
+            tool: None,
+            llm: None,
+            embed: None,
+            tts: None,
+            stt: None,
+            vad: Some(Arc::new(MockVadPlugin) as Arc<dyn VadPlugin>),
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1922,6 +2021,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -1955,6 +2055,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -1992,6 +2093,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -2037,6 +2139,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -2159,6 +2262,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -2616,6 +2720,7 @@ mod tests {
                 assert!(capabilities.llm_providers.is_empty());
                 assert!(capabilities.tts_providers.is_empty());
                 assert!(capabilities.stt_providers.is_empty());
+                assert!(capabilities.vad_providers.is_empty());
             }
             other => panic!("expected HandshakeAck, got {other:?}"),
         }
@@ -2691,6 +2796,63 @@ mod tests {
             provider_config: serde_json::json!({}),
             audio_base64: "AAAA".into(),
             format: "wav".into(),
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(resp, PluginIpcResponse::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_process_vad_chunk_ok() {
+        let dispatch = make_vad_dispatch();
+        let req = PluginIpcRequest::ProcessVadChunk {
+            request_id: "req-vad-1".into(),
+            provider_kind: "mock_vad".into(),
+            provider_config: serde_json::json!({}),
+            session_id: "session-1".into(),
+            pcm: vec![0.0; 512],
+            reset: false,
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        match resp {
+            PluginIpcResponse::VadChunkResult {
+                request_id,
+                event,
+            } => {
+                assert_eq!(request_id, "req-vad-1");
+                assert_eq!(event, VadEvent::SpeechStart);
+            }
+            other => panic!("expected VadChunkResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_process_vad_chunk_reset_forwards_flag() {
+        let dispatch = make_vad_dispatch();
+        let req = PluginIpcRequest::ProcessVadChunk {
+            request_id: "req-vad-2".into(),
+            provider_kind: "mock_vad".into(),
+            provider_config: serde_json::json!({}),
+            session_id: "session-1".into(),
+            pcm: Vec::new(),
+            reset: true,
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(
+            resp,
+            PluginIpcResponse::VadChunkResult { event: VadEvent::Silence, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_process_vad_chunk_no_vad_returns_error() {
+        let dispatch = make_dispatch(false, false, false);
+        let req = PluginIpcRequest::ProcessVadChunk {
+            request_id: "req-vad-3".into(),
+            provider_kind: "mock_vad".into(),
+            provider_config: serde_json::json!({}),
+            session_id: "session-1".into(),
+            pcm: vec![0.0; 512],
+            reset: false,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));

@@ -3,15 +3,17 @@
 //! Proc-macro crate for plugin authoring. Generates `ToolSpec` / `ToolRagProfile`
 //! implementations and `ToolAction` glue code from declarative attributes on
 //! tool argument structs, plus static provider-capability declarations
-//! (`#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]`).
+//! (`#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]` /
+//! `#[derive(VadPlugin)]`).
 //!
 //! - `#[derive(ToolSpec)]` — spec/profile construction from `#[tool(...)]`/`#[arg(...)]`
 //! - `#[derive(ToolAction)]` — `ToolSpec` + an automatic `impl ToolAction`
 //! - `#[tool_action(args = ...)]` — fills `name()`/`definition()`/`rag_profile()`
 //!   forwarders on a hand-written `ToolAction` impl
-//! - `#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]` —
-//!   static spec constructors (`llm_spec()` / `tts_spec()` / `stt_spec()`) and
-//!   per-trait kind consts from a `#[provider(...)]` attribute
+//! - `#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]` /
+//!   `#[derive(VadPlugin)]` — static spec constructors (`llm_spec()` /
+//!   `tts_spec()` / `stt_spec()` / `vad_spec()`) and per-trait kind consts
+//!   from a `#[provider(...)]` attribute
 //!
 //! See `docs/reference/tools/derive-macro.md` for the full attribute reference.
 
@@ -75,6 +77,25 @@ pub fn derive_tts_plugin(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(SttPlugin, attributes(provider))]
 pub fn derive_stt_plugin(input: TokenStream) -> TokenStream {
     provider::expand_plugin(input, provider::ProviderKind::Stt)
+}
+
+/// Derive macro generating the static VAD capability declaration (an
+/// inherent `vad_spec()` constructor and `VAD_PROVIDER_KIND` const) from a
+/// `#[provider(...)]` attribute.
+///
+/// The `impl VadPlugin` block stays hand-written: a one-line
+/// `fn vad_capabilities(&self) -> Vec<VadProviderSpec> { vec![Self::vad_spec()] }`
+/// alongside the async `process_chunk` handler.
+///
+/// The attribute must set `frame_size` (PCM samples per `ProcessVadChunk`
+/// call; e.g. `frame_size = 512` for Silero VAD). Capability declarations
+/// (`provides` / `requires` in the attribute) are emitted by the `LlmPlugin`
+/// derive only; on a Vad-only derive they are validated but not generated —
+/// pair the derive with `LlmPlugin` on the same struct to declare
+/// plugin-wide capabilities.
+#[proc_macro_derive(VadPlugin, attributes(provider))]
+pub fn derive_vad_plugin(input: TokenStream) -> TokenStream {
+    provider::expand_plugin(input, provider::ProviderKind::Vad)
 }
 
 /// Derive macro that generates `ToolSpec::spec()` on the args struct.

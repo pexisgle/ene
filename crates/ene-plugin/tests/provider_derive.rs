@@ -1,5 +1,6 @@
 //! Integration tests for the provider capability derive macros:
-//! `#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]`.
+//! `#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]` /
+//! `#[derive(VadPlugin)]`.
 #![expect(
     clippy::expect_used,
     reason = "proc-macro integration tests use expect for spec assertions"
@@ -149,6 +150,41 @@ fn stt_capabilities_match_attributes() {
 #[test]
 fn stt_provider_kind_const() {
     assert_eq!(TestSttProvider::STT_PROVIDER_KIND, "test-stt");
+}
+
+// ── VadPlugin ────────────────────────────────────────────────────────────
+
+#[derive(VadPlugin)]
+#[provider(kind = "test-vad", frame_size = 512, concurrency = 1, queue_depth = 2)]
+pub struct TestVadProvider;
+
+impl ConfigurablePlugin for TestVadProvider {}
+
+impl VadPlugin for TestVadProvider {
+    fn vad_capabilities(&self) -> Vec<VadProviderSpec> {
+        vec![Self::vad_spec()]
+    }
+}
+
+#[test]
+fn vad_capabilities_match_attributes() {
+    let caps = TestVadProvider.vad_capabilities();
+    assert_eq!(caps.len(), 1);
+    let spec = caps.first().expect("one generated spec");
+    assert_eq!(spec.kind, "test-vad");
+    assert_eq!(spec.frame_size, 512);
+    assert_eq!(
+        spec.concurrency,
+        ConcurrencyHint {
+            max_in_flight: 1,
+            queue_depth: 2,
+        }
+    );
+}
+
+#[test]
+fn vad_provider_kind_const() {
+    assert_eq!(TestVadProvider::VAD_PROVIDER_KIND, "test-vad");
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────────

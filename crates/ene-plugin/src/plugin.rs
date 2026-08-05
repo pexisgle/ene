@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use ene_plugin_proto::{
     CallContext, ConfigFieldError, ConfigOption, DeferredOutcome, DeferredStatus, LlmProviderSpec,
     PluginError, SandboxConfigData, SttProviderSpec, TokenUsage, ToolError, ToolResult, ToolSpec,
-    TtsProviderSpec,
+    TtsProviderSpec, VadEvent, VadProviderSpec,
 };
 use tokio_stream::Stream;
 
@@ -380,5 +380,37 @@ pub trait SttPlugin: ConfigurablePlugin + Send + Sync {
         _format: String,
     ) -> Result<String, PluginError> {
         Err(PluginError::not_supported("transcribe"))
+    }
+}
+
+// ── VadPlugin ───────────────────────────────────────────────────────────
+
+/// Plugin trait for voice activity detection.
+///
+/// VAD is stateful per session: the host generates a unique `session_id`
+/// per engine instance and streams fixed-size PCM chunks to it, one
+/// [`process_chunk`](Self::process_chunk) call per chunk. `reset` discards
+/// the session's state, mirroring `ene_ai::VadEngine::reset`. The trait is
+/// `&self` like the other plugin traits, so implementations keep per-session
+/// engine state behind a mutex keyed by `session_id`.
+#[async_trait]
+pub trait VadPlugin: ConfigurablePlugin + Send + Sync {
+    /// Returns VAD capabilities advertised during the handshake.
+    fn vad_capabilities(&self) -> Vec<VadProviderSpec>;
+
+    /// Processes one PCM chunk (or resets a session) and returns the
+    /// resulting voice activity event.
+    ///
+    /// The default returns [`PluginError::NotSupported`] for plugins that
+    /// do not provide VAD.
+    async fn process_chunk(
+        &self,
+        _kind: &str,
+        _config: serde_json::Value,
+        _session_id: String,
+        _pcm: Vec<f32>,
+        _reset: bool,
+    ) -> Result<VadEvent, PluginError> {
+        Err(PluginError::not_supported("process_chunk"))
     }
 }
