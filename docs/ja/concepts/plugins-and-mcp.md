@@ -110,6 +110,30 @@ TTS プロバイダプラグインも同じ規律に従います: `ene-plugin-ho
 （`auto_start: true`）でローカルの VOICEVOX 互換エンジンバイナリの起動と
 監視を行います。
 
+### クロスプロバイダ入場制御（`ResourceClass`）
+
+`ConcurrencyHint` は 1 つのプラグインのプロバイダに対するリクエスト数を
+制限しますが、**別々の**プラグインが同じ物理デバイスで競合することには
+何も言いません。すべての `LlmProviderSpec` は `resource_class: ResourceClass`
+の申告（ワイヤ上では `"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`。
+`#[serde(default)]` で `Cpu`）を持ち、ホストは**同じクラスを申告する
+すべてのプラグインで 1 つの入場予算を共有**します。クラス permit を取得
+できるまでリクエストは送出されないため、デバイス 0 にオフロードする 2 つの
+ローカルモデルは別々のプラグインプロセスに由来しても同時実行されません。
+permit はリクエストの間ホスト側で保持され、リクエスト終了・キャンセル・
+配信プラグインのクラッシュのいずれでも drop で解放されます——ホストは
+クラッシュしたプロセスに何かの解放を頼ることはありません。`Gpu` クラスは
+既定でゲートされ（デバイスごとに 1 ジョブ、最大 8 待機、超過は `Busy`）、
+`Cpu` / `Network` は `plugins.resource_classes`（`docs/configuration.md`
+参照）に列挙した場合のみゲートされるため、クラウドプロバイダーの宣言済み
+プラグイン別並行度は保たれます。
+
+`#[provider(...)]` derive では
+`resource_class = ::ene_plugin::ResourceClass::Gpu { device: 0 }` と宣言
+できます（省略時は `Cpu`）。組み込みのローカル GGUF プラグインは 1 つの
+バイナリで CPU モデルと GPU モデルの両方を提供できるため、`acceleration`
+設定から動的に申告します。
+
 `kokoro` プラグイン（`plugins/provider/kokoro`）は、ローカルの
 Kokoro-82M ONNX モデルを自プロセス内で直接実行します（`ene-voice` の ONNX
 エンジン経由）。API キー・外部エンジン・ローカルサーバーは不要です。モデル
