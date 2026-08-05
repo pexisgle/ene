@@ -84,7 +84,7 @@ pub use capability_registry::{
 /// Capability call mediation.
 pub use capability_service::{
     CapabilityCallHandler, CapabilityMediator, ManagerCapabilityHandler,
-    resolve_capability_provider,
+    ensure_capability_calls_supported, resolve_capability_provider,
 };
 /// Per-plugin circuit breaker.
 pub use circuit_breaker::{BreakerState, CircuitBreaker};

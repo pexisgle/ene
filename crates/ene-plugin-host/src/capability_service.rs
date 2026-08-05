@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use ene_plugin_proto::{
     CapabilityCall, CapabilityCallError, CapabilityCallErrorCode, CapabilityRef,
     CapabilityServiceHandler, CapabilityServiceRequest, CapabilityServiceResponse, IpcStream,
-    read_capability_service_request, write_capability_service_response,
+    PluginCapabilities, read_capability_service_request, write_capability_service_response,
 };
 
 use crate::capability_registry::CapabilityRegistry;
@@ -60,6 +60,25 @@ pub fn resolve_capability_provider<'a>(
             format!("no provider registered for {requested}"),
         )
     })
+}
+
+/// Rejects calls into a provider whose binary predates capability calls.
+///
+/// A Slice B/C-era provider already declares `gguf-runner@1` but cannot
+/// decode the call message; without this guard the mediation would surface as
+/// a connection-level decode failure instead of a clean typed `not_supported`.
+pub fn ensure_capability_calls_supported(
+    capabilities: &PluginCapabilities,
+    provider: &str,
+) -> Result<(), CapabilityCallError> {
+    if capabilities.supports_capability_calls {
+        Ok(())
+    } else {
+        Err(CapabilityCallError::new(
+            CapabilityCallErrorCode::NotSupported,
+            format!("provider plugin {provider} predates capability calls"),
+        ))
+    }
 }
 
 /// Executes one authenticated capability call on behalf of a consumer.
@@ -113,12 +132,7 @@ impl CapabilityCallHandler for ManagerCapabilityHandler {
                 format!("provider plugin {provider} is not connected"),
             )
         })?;
-        if !connection.capabilities().supports_capability_calls {
-            return Err(CapabilityCallError::new(
-                CapabilityCallErrorCode::NotSupported,
-                format!("provider plugin {provider} predates capability calls"),
-            ));
-        }
+        ensure_capability_calls_supported(&connection.capabilities(), provider)?;
         drop(guard);
         connection.call_capability(&call).await
     }

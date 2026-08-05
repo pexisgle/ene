@@ -22,7 +22,8 @@ use async_trait::async_trait;
 use ene_plugin::CapabilityClient;
 use ene_plugin_host::{
     CapabilityCallHandler, CapabilityDeclaration, CapabilityMediator, CapabilityRegistry,
-    IpcPluginConnection, evaluate_capability_gate, resolve_capability_provider,
+    IpcPluginConnection, ensure_capability_calls_supported, evaluate_capability_gate,
+    resolve_capability_provider,
 };
 use ene_plugin_proto::{
     CapabilityCall, CapabilityCallError, CapabilityCallErrorCode, CapabilityRef,
@@ -47,14 +48,14 @@ fn test_socket_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ene-m-{}-{id}-{name}.sock", std::process::id()))
 }
 
-fn provider_capabilities(requires: &[&str]) -> PluginCapabilities {
+fn provider_capabilities(requires: &[&str], supports_calls: bool) -> PluginCapabilities {
     PluginCapabilities {
         provides: vec![CapabilityRef::parse("gguf-runner@1").unwrap()],
         requires: requires
             .iter()
             .map(|raw| CapabilityRequirement::parse(raw).unwrap())
             .collect(),
-        supports_capability_calls: true,
+        supports_capability_calls: supports_calls,
         ..PluginCapabilities::default()
     }
 }
@@ -183,6 +184,7 @@ impl CapabilityCallHandler for RegistryHandler {
                 format!("provider plugin {provider} is not connected"),
             )
         })?;
+        ensure_capability_calls_supported(&connection.capabilities(), provider)?;
         connection.call_capability(&call).await
     }
 }
@@ -203,11 +205,15 @@ impl Drop for Harness {
 
 /// Builds the full mediation path: mock provider connection + post-gate
 /// registry + real host-service acceptor with the mediator installed.
-async fn harness(provider_requires: &[&str], consumers: &[(&str, &[&str])]) -> Harness {
+async fn harness(
+    provider_requires: &[&str],
+    provider_supports_calls: bool,
+    consumers: &[(&str, &[&str])],
+) -> Harness {
     let provider_socket = test_socket_path("p");
     let provider_server = tokio::spawn(run_provider_server(
         provider_socket.clone(),
-        provider_capabilities(provider_requires),
+        provider_capabilities(provider_requires, provider_supports_calls),
     ));
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -294,7 +300,7 @@ fn generate_call(payload: Value) -> CapabilityCall {
 /// provider's echo arrives verbatim.
 #[tokio::test]
 async fn mediated_call_round_trips_through_host_service() {
-    let harness = harness(&[], &[("consumer-a", &["gguf-runner@^1"])]).await;
+    let harness = harness(&[], true, &[("consumer-a", &["gguf-runner@^1"])]).await;
     let mut client = open_client(&harness, "consumer-a").await;
     let result = client
         .call(&generate_call(
@@ -317,7 +323,7 @@ async fn mediated_call_round_trips_through_host_service() {
 /// A consumer with no capability declarations at all is forbidden.
 #[tokio::test]
 async fn caller_without_requirement_is_forbidden() {
-    let harness = harness(&[], &[("consumer-a", &[])]).await;
+    let harness = harness(&[], true, &[("consumer-a", &[])]).await;
     let mut client = open_client(&harness, "consumer-a").await;
     let error = client
         .call(&generate_call(json!({})))
@@ -329,7 +335,7 @@ async fn caller_without_requirement_is_forbidden() {
 /// A requirement for a different capability does not authorize the call.
 #[tokio::test]
 async fn mismatched_requirement_is_forbidden() {
-    let harness = harness(&[], &[("consumer-a", &["embed@^1"])]).await;
+    let harness = harness(&[], true, &[("consumer-a", &["embed@^1"])]).await;
     let mut client = open_client(&harness, "consumer-a").await;
     let error = client
         .call(&generate_call(json!({})))
@@ -341,7 +347,7 @@ async fn mismatched_requirement_is_forbidden() {
 /// Soft requirements authorize calls (they are still declarations of intent).
 #[tokio::test]
 async fn soft_requirement_authorizes() {
-    let harness = harness(&[], &[("consumer-a", &["gguf-runner@^1?"])]).await;
+    let harness = harness(&[], true, &[("consumer-a", &["gguf-runner@^1?"])]).await;
     let mut client = open_client(&harness, "consumer-a").await;
     let result = client
         .call(&generate_call(json!({ "model": "m" })))
@@ -353,7 +359,7 @@ async fn soft_requirement_authorizes() {
 /// A malformed capability reference is a request error, not a provider error.
 #[tokio::test]
 async fn malformed_capability_is_invalid_request() {
-    let harness = harness(&[], &[("consumer-a", &["gguf-runner@^1"])]).await;
+    let harness = harness(&[], true, &[("consumer-a", &["gguf-runner@^1"])]).await;
     let mut client = open_client(&harness, "consumer-a").await;
     let malformed = CapabilityCall {
         capability: serde_json::from_value(json!("not a capability")).unwrap(),
@@ -366,7 +372,7 @@ async fn malformed_capability_is_invalid_request() {
 /// The provider's typed rejection propagates through the host unchanged.
 #[tokio::test]
 async fn provider_rejection_propagates_unchanged() {
-    let harness = harness(&[], &[("consumer-a", &["gguf-runner@^1"])]).await;
+    let harness = harness(&[], true, &[("consumer-a", &["gguf-runner@^1"])]).await;
     let mut client = open_client(&harness, "consumer-a").await;
     let error = client
         .call(&CapabilityCall {
@@ -379,12 +385,38 @@ async fn provider_rejection_propagates_unchanged() {
     assert_eq!(error.message, "mock provider refuses method 'fail'");
 }
 
+/// A provider binary that predates capability calls (declares the capability
+/// but not `supports_capability_calls`) is refused with a typed
+/// `not_supported` — never a connection-level decode failure — and the
+/// consumer session survives for a subsequent call.
+#[tokio::test]
+async fn predating_provider_yields_typed_not_supported() {
+    let harness = harness(&[], false, &[("consumer-a", &["gguf-runner@^1"])]).await;
+    let mut client = open_client(&harness, "consumer-a").await;
+    let error = client
+        .call(&generate_call(json!({})))
+        .await
+        .expect_err("predating provider must be refused");
+    assert_eq!(error.code, CapabilityCallErrorCode::NotSupported);
+    assert!(
+        error.message.contains("predates"),
+        "refusal must name the N-1 cause: {}",
+        error.message
+    );
+
+    let again = client
+        .call(&generate_call(json!({})))
+        .await
+        .expect_err("session survives; still refused");
+    assert_eq!(again.code, CapabilityCallErrorCode::NotSupported);
+}
+
 /// A provider disabled by the startup gate never satisfies a mediated call:
 /// the post-gate registry has no provider left, so the consumer gets
 /// `NoProvider` even though its requirement is declared.
 #[tokio::test]
 async fn gate_disabled_provider_yields_no_provider() {
-    let harness = harness(&["missing@1"], &[("consumer-a", &["gguf-runner@^1"])]).await;
+    let harness = harness(&["missing@1"], true, &[("consumer-a", &["gguf-runner@^1"])]).await;
     let mut client = open_client(&harness, "consumer-a").await;
     let error = client
         .call(&generate_call(json!({})))
@@ -398,7 +430,7 @@ async fn gate_disabled_provider_yields_no_provider() {
 /// the connection's reconnect machinery.
 #[tokio::test]
 async fn provider_crash_propagates_transport_and_session_survives() {
-    let harness = harness(&[], &[("consumer-a", &["gguf-runner@^1"])]).await;
+    let harness = harness(&[], true, &[("consumer-a", &["gguf-runner@^1"])]).await;
     let mut client = open_client(&harness, "consumer-a").await;
     let error = client
         .call(&CapabilityCall {
@@ -419,7 +451,7 @@ async fn provider_crash_propagates_transport_and_session_survives() {
 /// An unknown token is rejected when opening the capability session.
 #[tokio::test]
 async fn unknown_token_is_rejected_at_open() {
-    let harness = harness(&[], &[("consumer-a", &["gguf-runner@^1"])]).await;
+    let harness = harness(&[], true, &[("consumer-a", &["gguf-runner@^1"])]).await;
     let Err(error) = CapabilityClient::open(&harness.host_service, "ene-db-impostor").await else {
         panic!("unknown token must be rejected");
     };
