@@ -558,13 +558,11 @@ impl PublicLifecycleEvent {
                 status: status.as_str().to_string(),
                 turn: turn.as_ref().map(ToString::to_string),
             },
-            LifecycleEvent::MemoryLedgerChanged { id, action, turn } => {
-                Self::MemoryLedgerChanged {
-                    id: *id,
-                    action: action.as_str().to_string(),
-                    turn: turn.as_ref().map(ToString::to_string),
-                }
-            }
+            LifecycleEvent::MemoryLedgerChanged { id, action, turn } => Self::MemoryLedgerChanged {
+                id: *id,
+                action: action.as_str().to_string(),
+                turn: turn.as_ref().map(ToString::to_string),
+            },
             LifecycleEvent::ToolBackgroundCompleted {
                 tool_name,
                 task_id,
@@ -872,12 +870,7 @@ mod tests {
             turn: Some(TurnId::from("turn-9")),
         };
         let public = PublicLifecycleEvent::from_lifecycle_event(&event);
-        let PublicLifecycleEvent::MemoryLedgerChanged {
-            id,
-            action,
-            turn,
-        } = &public
-        else {
+        let PublicLifecycleEvent::MemoryLedgerChanged { id, action, turn } = &public else {
             panic!("expected MemoryLedgerChanged");
         };
         assert_eq!(*id, 42);

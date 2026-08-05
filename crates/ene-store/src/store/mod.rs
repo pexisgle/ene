@@ -1106,9 +1106,7 @@ fn pending_candidate_scope(character_id: &str, user_id: Option<&str>) -> sea_orm
 /// never leave a row with the scope of its previous kind.
 pub(crate) fn canonical_scope_for_kind(kind: crate::MemoryKind) -> crate::MemoryScope {
     match kind {
-        crate::MemoryKind::UserProfile | crate::MemoryKind::Preference => {
-            crate::MemoryScope::User
-        }
+        crate::MemoryKind::UserProfile | crate::MemoryKind::Preference => crate::MemoryScope::User,
         crate::MemoryKind::Relationship | crate::MemoryKind::Reflection => {
             crate::MemoryScope::Shared
         }

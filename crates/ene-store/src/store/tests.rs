@@ -1283,7 +1283,11 @@ async fn update_typed_memory_applies_edit_and_recomputes_scope() {
         crate::MemoryScope::User,
         "kind change must re-derive the canonical scope"
     );
-    assert_eq!(loaded.status, crate::MemoryStatus::Active, "status untouched");
+    assert_eq!(
+        loaded.status,
+        crate::MemoryStatus::Active,
+        "status untouched"
+    );
 }
 
 #[tokio::test]
@@ -1636,7 +1640,12 @@ async fn list_commitments_covers_all_statuses_with_filters() {
     assert_eq!(all.get(2).unwrap().id, Some(active));
 
     let done_only = store
-        .list_commitments("ene", Some("user1"), Some(crate::CommitmentStatus::Done), 10)
+        .list_commitments(
+            "ene",
+            Some("user1"),
+            Some(crate::CommitmentStatus::Done),
+            10,
+        )
         .await
         .unwrap();
     assert_eq!(done_only.len(), 1);

@@ -1599,7 +1599,10 @@ impl MemoryStore {
                 entities::typed_memories::Column::Confidence,
                 Expr::value(confidence),
             )
-            .col_expr(entities::typed_memories::Column::UpdatedAt, Expr::value(now))
+            .col_expr(
+                entities::typed_memories::Column::UpdatedAt,
+                Expr::value(now),
+            )
             .filter(entities::typed_memories::Column::Id.eq(id))
             .exec(&self.db)
             .await?;
@@ -1610,7 +1613,11 @@ impl MemoryStore {
     ///
     /// The value is clamped into `0.0..=1.0` via [`crate::MemorySalience::new`];
     /// returns `Ok(false)` when no row with `id` exists.
-    pub async fn set_memory_salience(&self, id: i64, salience: f32) -> Result<bool, EneMemoryError> {
+    pub async fn set_memory_salience(
+        &self,
+        id: i64,
+        salience: f32,
+    ) -> Result<bool, EneMemoryError> {
         use sea_orm::sea_query::Expr;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -1620,7 +1627,10 @@ impl MemoryStore {
                 entities::typed_memories::Column::Salience,
                 Expr::value(crate::MemorySalience::new(salience).get()),
             )
-            .col_expr(entities::typed_memories::Column::UpdatedAt, Expr::value(now))
+            .col_expr(
+                entities::typed_memories::Column::UpdatedAt,
+                Expr::value(now),
+            )
             .filter(entities::typed_memories::Column::Id.eq(id))
             .exec(&self.db)
             .await?;

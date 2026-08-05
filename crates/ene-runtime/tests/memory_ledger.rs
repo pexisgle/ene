@@ -81,7 +81,11 @@ async fn ledger_lists_memories_and_commitments_across_statuses() {
     let (handle, seeder) = open_seeded_handle("LedgerListTest").await;
 
     let memory_id = seeder
-        .insert_typed_memory(&test_memory("coffee", MemoryKind::Preference, MemoryStatus::Active))
+        .insert_typed_memory(&test_memory(
+            "coffee",
+            MemoryKind::Preference,
+            MemoryStatus::Active,
+        ))
         .await
         .unwrap();
     seeder
@@ -131,10 +135,7 @@ async fn ledger_lists_memories_and_commitments_across_statuses() {
         limit: 50,
         offset: 0,
     };
-    let memories = ledger
-        .list_memories(&options)
-        .await
-        .expect("list memories");
+    let memories = ledger.list_memories(&options).await.expect("list memories");
     assert_eq!(memories.len(), 2);
     assert!(memories.iter().any(|m| m.id == Some(memory_id)));
 
@@ -166,9 +167,11 @@ async fn ledger_lists_memories_and_commitments_across_statuses() {
         .await
         .expect("list after delete");
     assert_eq!(after_delete.len(), 2);
-    assert!(after_delete
-        .iter()
-        .any(|m| m.id == Some(memory_id) && m.status == MemoryStatus::UserDeleted));
+    assert!(
+        after_delete
+            .iter()
+            .any(|m| m.id == Some(memory_id) && m.status == MemoryStatus::UserDeleted)
+    );
 
     // Commitment lifecycle reuses the existing MemoryHandle surface.
     assert!(memory.complete_commitment(active_commitment).await.unwrap());
@@ -176,12 +179,16 @@ async fn ledger_lists_memories_and_commitments_across_statuses() {
         .list_commitments(None, Some(CommitmentStatus::Done), 50)
         .await
         .expect("done after complete");
-    assert!(after_complete.iter().any(|c| c.id == Some(active_commitment)));
+    assert!(
+        after_complete
+            .iter()
+            .any(|c| c.id == Some(active_commitment))
+    );
 
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
-    drop(std::fs::remove_dir_all(
-        ene_config::paths::character_dir("LedgerListTest"),
-    ));
+    drop(std::fs::remove_dir_all(ene_config::paths::character_dir(
+        "LedgerListTest",
+    )));
 }
 
 #[tokio::test]
@@ -189,7 +196,11 @@ async fn ledger_edit_and_salience_persist_and_emit_audit_events() {
     let (handle, seeder) = open_seeded_handle("LedgerEditTest").await;
 
     let memory_id = seeder
-        .insert_typed_memory(&test_memory("coffee", MemoryKind::Preference, MemoryStatus::Active))
+        .insert_typed_memory(&test_memory(
+            "coffee",
+            MemoryKind::Preference,
+            MemoryStatus::Active,
+        ))
         .await
         .unwrap();
     drop(seeder);
@@ -236,12 +247,7 @@ async fn ledger_edit_and_salience_persist_and_emit_audit_events() {
         let Ok(event) = lifecycle.try_recv() else {
             break;
         };
-        if let LifecycleEvent::MemoryLedgerChanged {
-            id,
-            action,
-            turn,
-        } = event
-        {
+        if let LifecycleEvent::MemoryLedgerChanged { id, action, turn } = event {
             assert_eq!(id, memory_id);
             assert!(turn.is_none());
             match action {
@@ -254,16 +260,19 @@ async fn ledger_edit_and_salience_persist_and_emit_audit_events() {
             }
         }
     }
-    assert!(saw_edited, "edit must emit a MemoryLedgerChanged audit event");
+    assert!(
+        saw_edited,
+        "edit must emit a MemoryLedgerChanged audit event"
+    );
     assert!(
         saw_salience,
         "salience adjustment must emit a MemoryLedgerChanged audit event"
     );
 
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
-    drop(std::fs::remove_dir_all(
-        ene_config::paths::character_dir("LedgerEditTest"),
-    ));
+    drop(std::fs::remove_dir_all(ene_config::paths::character_dir(
+        "LedgerEditTest",
+    )));
 }
 
 #[tokio::test]
@@ -291,7 +300,10 @@ async fn ledger_mutations_report_missing_rows_without_events() {
         Err(ene_runtime::PublicApiError::NotFound { .. })
     ));
     assert!(
-        ledger.set_memory_salience(999_999, 0.5, None).await.is_err(),
+        ledger
+            .set_memory_salience(999_999, 0.5, None)
+            .await
+            .is_err(),
         "missing row must fail closed"
     );
     assert!(
@@ -300,7 +312,7 @@ async fn ledger_mutations_report_missing_rows_without_events() {
     );
 
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
-    drop(std::fs::remove_dir_all(
-        ene_config::paths::character_dir("LedgerMissingTest"),
-    ));
+    drop(std::fs::remove_dir_all(ene_config::paths::character_dir(
+        "LedgerMissingTest",
+    )));
 }
