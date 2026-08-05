@@ -689,6 +689,50 @@ are all preserved. Set it to `0` to disable parallelism entirely and force the
 previous fully-sequential behavior. The classification is fail-closed: a tool
 that does not declare `ReadOnly` side effects is never parallelized.
 
+#### `plugins.resource_classes` — per-class GPU admission budgets
+
+Every LLM provider plugin declares the physical resource its jobs contend on
+via `resource_class` in its handshake capabilities (`"Cpu"`,
+`{"Gpu":{"device":0}}`, or `"Network"` — the same externally tagged JSON used
+here). The host shares **one admission budget per class across every plugin**
+that declares it, so two GPU-offloaded local models on device 0 never run
+concurrently even when they come from different plugin processes. The permit
+is held host-side for the duration of a request (a stream, or a single
+completion) and is released automatically when the request ends, is cancelled,
+or the serving plugin crashes — a crashed plugin can never leak a GPU slot.
+
+`Gpu` classes are gated by default: **one concurrent job per device**, with up
+to 8 further callers waiting before requests fail fast with a typed `Busy`
+error. `Cpu` and `Network` classes are **not** gated unless an entry names
+them, so cloud providers keep their declared per-plugin concurrency. Override
+the defaults with `plugins.resource_classes`:
+
+```jsonc
+{
+  "plugins": {
+    "resource_classes": [
+      { "class": { "Gpu": { "device": 0 } }, "permits": 1, "queue_depth": 8 },
+      { "class": "Cpu", "permits": 8 }
+    ]
+  }
+}
+```
+
+- `class` — the class to budget, in the wire's externally tagged form.
+- `permits` — maximum concurrent in-flight jobs for this class. `None`/omitted
+  uses the class default (1 for GPU devices, the logical CPU count for `Cpu`,
+  4 for `Network`).
+- `queue_depth` — how many additional callers may wait for a permit before
+  further requests fail fast with `Busy`. `None`/omitted uses 8.
+
+The local GGUF provider (`ene-plugin-llama-cpp`) declares `Gpu { device: 0 }`
+when its `plugins.list.llama-cpp.config.acceleration` is `vulkan`/`cuda` (or
+`auto` on a GPU-enabled build) and `Cpu` otherwise — the declaration is fixed
+at handshake, so changing `acceleration` live takes effect on the next host
+start. Note the per-class gate controls *execution* concurrency only; VRAM
+residency (two plugins both keeping models loaded on the same device) is a
+separate, not-yet-solved concern.
+
 `plugins.list.<name>.db_quota_mb` caps how much of the **shared `memory.db`** a
  plugin's tables may occupy, in mebibytes (#424). Stateful plugins write into
  one shared database, so without a cap a single runaway or malicious plugin
