@@ -83,6 +83,17 @@ pub struct PluginCapabilities {
     #[serde(default)]
     pub config_version: u32,
 
+    /// Whether the plugin handles [`crate::PluginIpcRequest::CapabilityCall`].
+    ///
+    /// Absent on older binaries (`#[serde(default)]` → `false`); the host
+    /// then refuses to mediate capability calls into this plugin — a binary
+    /// that predates the call message cannot decode it, and a clean typed
+    /// error beats a connection-level decode failure. A plugin must also
+    /// declare the capability in [`provides`](Self::provides) for the host to
+    /// route calls to it at all.
+    #[serde(default)]
+    pub supports_capability_calls: bool,
+
     /// Capabilities this plugin provides to other plugins, each written
     /// `name@major` (e.g. `gguf-runner@1`).
     ///
@@ -543,6 +554,7 @@ mod tests {
         assert!(!caps.supports_validate_config);
         assert!(!caps.supports_migrate_config);
         assert_eq!(caps.config_version, 0);
+        assert!(!caps.supports_capability_calls);
         assert!(caps.provides.is_empty());
         assert!(caps.requires.is_empty());
     }
@@ -570,6 +582,7 @@ mod tests {
             supports_validate_config: true,
             supports_migrate_config: true,
             config_version: 2,
+            supports_capability_calls: true,
             provides: vec![
                 CapabilityRef::parse("llm/chat@1").unwrap(),
                 CapabilityRef::parse("embed@1").unwrap(),
@@ -590,6 +603,7 @@ mod tests {
         assert!(!caps.supports_validate_config);
         assert!(!caps.supports_migrate_config);
         assert_eq!(caps.config_version, 0);
+        assert!(!caps.supports_capability_calls);
         assert!(caps.provides.is_empty());
         assert!(caps.requires.is_empty());
     }

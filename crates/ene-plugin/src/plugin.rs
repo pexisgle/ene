@@ -12,9 +12,9 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use ene_plugin_proto::{
-    CallContext, ConfigFieldError, ConfigOption, DeferredOutcome, DeferredStatus, LlmProviderSpec,
-    PluginError, SandboxConfigData, SttProviderSpec, TokenUsage, ToolError, ToolResult, ToolSpec,
-    TtsProviderSpec, VadEvent, VadProviderSpec,
+    CallContext, CapabilityRef, ConfigFieldError, ConfigOption, DeferredOutcome, DeferredStatus,
+    LlmProviderSpec, PluginError, SandboxConfigData, SttProviderSpec, TokenUsage, ToolError,
+    ToolResult, ToolSpec, TtsProviderSpec, VadEvent, VadProviderSpec,
 };
 use tokio_stream::Stream;
 
@@ -343,6 +343,37 @@ pub trait EmbedPlugin: ConfigurablePlugin + Send + Sync {
         _items: Vec<String>,
     ) -> Result<Vec<Vec<f32>>, PluginError> {
         Err(PluginError::not_supported("embed_batch"))
+    }
+}
+
+// ── CapabilityProvider ──────────────────────────────────────────────────
+
+/// Plugin trait for serving mediated capability calls from other plugins.
+///
+/// A plugin that declares capabilities in its `provides` list (via
+/// `#[provider(provides = "...")]`) implements this trait to serve them: the
+/// host routes a consumer's [`CapabilityCall`](ene_plugin_proto::CapabilityCall)
+/// here after resolving and authenticating it. The default returns
+/// [`PluginError::NotSupported`] for plugins that do not serve capability
+/// calls; the plugin server additionally refuses calls for capabilities the
+/// plugin did not declare, so a binary never serves undeclared capabilities.
+#[async_trait]
+pub trait CapabilityProvider: ConfigurablePlugin + Send + Sync {
+    /// Executes one capability method call.
+    ///
+    /// `capability` is the requested reference (`gguf-runner@1`) and `method`
+    /// / `payload` follow that capability's published contract (e.g.
+    /// `generate` with `{ model, prompt, json_schema? }`). The response is a
+    /// method-defined JSON value, opaque to the host.
+    async fn call_capability(
+        &self,
+        capability: &CapabilityRef,
+        method: &str,
+        _payload: serde_json::Value,
+    ) -> Result<serde_json::Value, PluginError> {
+        Err(PluginError::not_supported(format!(
+            "capability call {capability}/{method}"
+        )))
     }
 }
 

@@ -3,7 +3,9 @@
 //! Plugins connect outbound to a single host-service socket. The first
 //! framed message selects a service and authenticates; subsequent messages
 //! use that service's own request/response types (for example `DbRequest`
-//! after [`HostServiceId::Db`]).
+//! after [`HostServiceId::Db`], or
+//! [`CapabilityServiceRequest`](crate::CapabilityServiceRequest) after
+//! [`HostServiceId::Capability`]).
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -19,7 +21,7 @@ pub enum HostServiceId {
     Db,
     /// Reserved: host-mediated asset provisioning (not yet implemented).
     Assets,
-    /// Reserved: capability mediation (not yet implemented).
+    /// Host-mediated capability calls (`ene-plugin-proto::capability_service`).
     Capability,
     /// Reserved: credential / secret retrieval (not yet implemented).
     Credential,

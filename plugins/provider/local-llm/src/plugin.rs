@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use ene_ai::EmbeddingKind;
 use ene_ai::traits::{EmbeddingProvider, LlmProvider};
 use ene_plugin::prelude::*;
+use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 use tokio_stream::StreamExt;
@@ -214,6 +215,90 @@ impl EmbedPlugin for LocalLlmPlugin {
             .await
             .map_err(|e| convert::map_embed_error(&e))?;
         Ok(vectors)
+    }
+}
+
+/// `gguf-runner@1` `generate` request: prompt plus optional JSON schema.
+#[derive(Deserialize)]
+struct GenerateRequest {
+    model: String,
+    prompt: String,
+    #[serde(default)]
+    json_schema: Option<Value>,
+}
+
+/// `gguf-runner@1` `embed` request.
+#[derive(Deserialize)]
+struct EmbedRequest {
+    model: String,
+    texts: Vec<String>,
+}
+
+/// `gguf-runner@1` `unload` request.
+#[derive(Deserialize)]
+struct UnloadRequest {
+    model: String,
+}
+
+#[async_trait]
+impl CapabilityProvider for LocalLlmPlugin {
+    /// Serves the published `gguf-runner@1` method contract by delegating to
+    /// the plugin's own chat / embedding paths, so mediated calls share the
+    /// same model registry, completion budget, and error mapping as
+    /// host-driven requests.
+    async fn call_capability(
+        &self,
+        capability: &CapabilityRef,
+        method: &str,
+        payload: Value,
+    ) -> Result<Value, PluginError> {
+        if capability.as_str() != "gguf-runner@1" {
+            return Err(PluginError::not_supported(format!(
+                "capability {capability}"
+            )));
+        }
+        match method {
+            "generate" => {
+                let request: GenerateRequest = serde_json::from_value(payload)
+                    .map_err(|e| PluginError::provider(format!("invalid generate request: {e}")))?;
+                let messages = vec![serde_json::json!({
+                    "role": "user",
+                    "parts": [{ "Text": { "text": request.prompt } }]
+                })];
+                let completion = LlmPlugin::chat_completion(
+                    self,
+                    Self::LLM_PROVIDER_KIND,
+                    serde_json::json!({}),
+                    request.model,
+                    None,
+                    messages,
+                    request.json_schema,
+                )
+                .await?;
+                Ok(serde_json::json!({ "text": completion.text }))
+            }
+            "embed" => {
+                let request: EmbedRequest = serde_json::from_value(payload)
+                    .map_err(|e| PluginError::provider(format!("invalid embed request: {e}")))?;
+                let vectors = EmbedPlugin::embed_batch(
+                    self,
+                    Self::LLM_PROVIDER_KIND,
+                    serde_json::json!({}),
+                    request.model,
+                    None,
+                    request.texts,
+                )
+                .await?;
+                Ok(serde_json::json!({ "embeddings": vectors }))
+            }
+            "unload" => {
+                let request: UnloadRequest = serde_json::from_value(payload)
+                    .map_err(|e| PluginError::provider(format!("invalid unload request: {e}")))?;
+                models::unload(&request.model);
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            _ => Err(PluginError::not_supported(format!("method {method}"))),
+        }
     }
 }
 

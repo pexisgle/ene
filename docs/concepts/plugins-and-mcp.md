@@ -262,8 +262,9 @@ declarations before registering any tools or providers:
   a provider, so consumers of its capabilities are disabled too (the gate is
   evaluated to a fixpoint).
 - **Self-resolution is allowed**: a plugin's `requires` may be satisfied by
-  its own `provides`. Whether a plugin may *call* its own capability through
-  mediation is a separate ACL decision.
+  its own `provides`, and mediation routes a self-call back to the caller's
+  own connection (full-duplex IPC, no deadlock) — the provider-side `provides`
+  check still applies.
 
 ### 4.4 The `gguf-runner@1` capability contract
 
@@ -278,8 +279,7 @@ requires: ["gguf-runner@^1"]
 
 The runner API is **non-streaming** by design; consumers that need token
 streaming should require `llm/chat@1` from the model provider directly.
-Mediation (a plugin calling `gguf-runner` through the host) lands together
-with the runner implementation; the capability-level contract is fixed here:
+The capability-level contract is fixed here:
 
 | Method | Request | Response |
 |---|---|---|
@@ -291,8 +291,8 @@ with the runner implementation; the capability-level contract is fixed here:
 `json_schema` (when present) constrains `generate` to structured output.
 `unload` releases a loaded model's resident memory (VRAM); it is the hook for
 future resource-residency management. These method names and payload shapes
-are the contract third parties build against; the wire encoding is defined
-with the mediation layer.
+are the contract third parties build against; the wire encoding is defined by
+the mediation layer below ([§4.5](#45-capability-call-mediation)).
 
 The built-in provider that serves `gguf-runner@1` is `ene-plugin-llama-cpp`
 (`plugins/provider/local-llm`), which also declares `llm/chat@1` and
@@ -300,7 +300,68 @@ The built-in provider that serves `gguf-runner@1` is `ene-plugin-llama-cpp`
 completion, and GGUF embeddings, exercised by the plugin crate's CPU contract
 tests against pinned GGUF fixtures.
 
-### 4.5 The `onnx-runner@1` capability contract
+### 4.5 Capability call mediation
+
+A consumer plugin calls a provider's capability through the host, never by
+opening its own socket to the provider — only the host's path keeps
+supervision, version negotiation, and admission in the loop. The call path is
+
+```
+consumer plugin ── host-service `capability` passenger ──> host mediator
+        ▲                                                     │ resolve (registry)
+        └────────────────── CapabilityCallResult ◀───────────┘
+        host mediator ── provider IPC (CapabilityCall) ──> provider plugin
+```
+
+**Wire encoding.** Both hops share one canonical body:
+
+- Consumer → host (`CapabilityServiceRequest::Call { call }`): a
+  `CapabilityCall` of `{ capability: "gguf-runner@1", method, payload }`,
+  where `method` / `payload` follow the capability's contract table and the
+  payload is opaque to the host.
+- Host → provider: `PluginIpcRequest::CapabilityCall { request_id, call }`
+  (the same body, multiplexed on the provider's connection).
+- Result: `CapabilityCallResult = Ok(JSON) | Err({ code, message })` with
+  stable snake_case codes: `forbidden` (caller did not declare the
+  capability), `no_provider` (unresolved after the startup gate), `invalid_request`,
+  `not_supported` (provider does not serve it, or its binary predates
+  capability calls), `provider`, `timeout`, `transport` (provider died /
+  connection lost), `internal`.
+
+**ACL.** The caller's identity is its host-service auth token (the same
+per-plugin token as the `db` passenger — a consumer cannot forge another
+plugin's identity). Each call is authorized against the *caller's own*
+declared `requires`: the requested capability's name and major must match one
+of them (hard **or** soft — both are declarations of intent), then that
+requirement is resolved through the post-gate registry. A plugin can
+therefore never call a capability it did not declare, and a provider disabled
+by the startup fixpoint never satisfies a mediated call.
+
+**Provider side.** A provider serves capabilities by implementing the
+`CapabilityProvider` trait (`call_capability(capability, method, payload)`)
+and wiring it into `PluginDispatch::with_capability_provider`. The plugin
+server only routes calls for capabilities the plugin declared in `provides`
+(a binary never serves undeclared capabilities, even if a host misroutes), and
+advertises `supports_capability_calls` in its handshake — the host refuses to
+mediate into a provider binary that predates the call message, returning
+`not_supported` instead of a connection-level decode failure.
+
+**Failure semantics.** The provider hop reuses the connection's per-request
+timeout (2 minutes by default), its reconnect-once-on-transport-failure, and
+its concurrency bound, so a provider crash surfaces as `transport` to the
+consumer while the supervisor restarts the provider; the consumer's session
+survives and subsequent calls retry. A first-time model load must fit the
+2-minute per-request timeout (loads usually do; a cold download of a large
+GGUF may not — the resulting `timeout` is retryable, and the provider keeps
+serving other calls in between). Calls are non-streaming (parity with the
+contract); consumers needing streams require `llm/chat@1` directly.
+
+**Shared residency.** `unload` operates on the provider's model residency,
+which the host's own requests (chat, embeddings) share. A consumer's `unload`
+can evict a model the host is currently using; the next host request simply
+reloads it (same cost as any cold load), so `unload` is safe but not free.
+
+### 4.6 The `onnx-runner@1` capability contract
 
 `onnx-runner@1` is the capability for **loading ONNX Runtime's dynamic
 library and running ONNX sessions** — the runtime that ONNX-using plugins
@@ -313,7 +374,7 @@ loads the dylib once at first use. The built-in providers that serve it are
 `ene-voice`'s shared `ort_init` (first caller's `ort_dylib_path` wins per
 process).
 
-### 4.6 The `g2p` capability contract
+### 4.7 The `g2p` capability contract
 
 `g2p/en@1` is the capability for **grapheme-to-phoneme conversion with the
 English rules** (the built-in rules in `ene-voice`'s `g2p` module). It is
@@ -321,11 +382,11 @@ served by `ene-plugin-onnx`. `g2p/ja@^1` is the Japanese counterpart: the
 onnx plugin declares it as a **soft requirement** (`g2p/ja@^1?`) — a
 third-party Japanese G2P provider may serve it, and the host resolves the
 declaration, but the built-in phonemization keeps working when none is
-present. Cross-plugin *invocation* of these capabilities lands with the
-capability mediation layer; the declaration contract is fixed here so
-providers can be built against it today.
+present. Cross-plugin invocation uses the capability mediation layer above;
+the declaration contract is fixed here so providers can be built against it
+today.
 
-### 4.7 The `whisper-runner@1` capability contract
+### 4.8 The `whisper-runner@1` capability contract
 
 `whisper-runner@1` is the capability for **running whisper.cpp transcription
 on raw PCM audio** — the STT runtime third-party consumers can share instead

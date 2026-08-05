@@ -46,7 +46,8 @@ async fn main() {
             None,
             None,
         )
-        .with_capability_declarations(LocalLlmPlugin::provides(), Vec::new()),
+        .with_capability_declarations(LocalLlmPlugin::provides(), Vec::new())
+        .with_capability_provider(std::sync::Arc::new(LocalLlmPlugin)),
     )
     .await
     {

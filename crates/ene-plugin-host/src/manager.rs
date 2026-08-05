@@ -1565,6 +1565,18 @@ impl PluginHostManager {
         &self.capability_registry
     }
 
+    /// Returns the connection for `name`, if that plugin started.
+    ///
+    /// The capability mediation layer resolves a provider name from the
+    /// capability registry and uses this accessor to reach its connection.
+    #[must_use]
+    pub fn connection(&self, name: &str) -> Option<Arc<IpcPluginConnection>> {
+        self.names
+            .iter()
+            .position(|candidate| candidate == name)
+            .map(|index| Arc::clone(&self.connections[index]))
+    }
+
     /// Registers the credential declarations parsed from `schema` for
     /// `plugin`, replacing any previous registration.
     ///

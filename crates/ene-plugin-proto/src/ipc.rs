@@ -8,6 +8,7 @@
 //! versions — see [`WireFormat::for_version`]).
 
 use crate::capabilities::PluginCapabilities;
+use crate::capability_service::{CapabilityCall, CapabilityCallResult};
 use crate::error::PluginError;
 use crate::sandbox::SandboxConfigData;
 use crate::tool_error::ToolError;
@@ -482,6 +483,17 @@ pub enum PluginIpcRequest {
         /// Text items to embed.
         items: Vec<String>,
     },
+    /// Mediated call to a capability this plugin provides.
+    ///
+    /// The host routes a consumer's capability call here after resolving and
+    /// authenticating it; the plugin responds with
+    /// [`PluginIpcResponse::CapabilityCallResult`].
+    CapabilityCall {
+        /// Unique request identifier for correlating the response.
+        request_id: String,
+        /// The capability call to execute.
+        call: CapabilityCall,
+    },
 }
 
 /// Plugin IPC response — plugin → host.
@@ -702,6 +714,13 @@ pub enum PluginIpcResponse {
         request_id: String,
         /// Embedding vectors, one per input item.
         embeddings: Vec<Vec<f32>>,
+    },
+    /// Result of a mediated [`PluginIpcRequest::CapabilityCall`].
+    CapabilityCallResult {
+        /// Unique request identifier correlating to the originating request.
+        request_id: String,
+        /// The provider's JSON result or a typed capability error.
+        result: CapabilityCallResult,
     },
 }
 

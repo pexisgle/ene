@@ -40,6 +40,8 @@
 
 /// Host-side registry of plugin capability declarations and resolution.
 pub mod capability_registry;
+/// Host mediation for plugin-to-plugin capability calls.
+pub mod capability_service;
 /// Per-plugin circuit breaker for consecutive-failure fail-fast.
 pub mod circuit_breaker;
 /// Plugin system configuration section.
@@ -85,6 +87,11 @@ pub mod wav;
 pub use capability_registry::{
     CapabilityDeclaration, CapabilityRegistry, PluginCapabilityDeclarations,
     evaluate_capability_gate,
+};
+/// Capability call mediation.
+pub use capability_service::{
+    CapabilityCallHandler, CapabilityMediator, ManagerCapabilityHandler,
+    ensure_capability_calls_supported, resolve_capability_provider,
 };
 /// Per-plugin circuit breaker.
 pub use circuit_breaker::{BreakerState, CircuitBreaker};

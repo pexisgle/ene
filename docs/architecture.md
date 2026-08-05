@@ -125,6 +125,13 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
   `ene-plugin-llama-cpp`) declares `llm/chat@1`, `embed@1`, and `gguf-runner@1`
   and serves chat streaming, completion, and GGUF embeddings over IPC.
 - **Host-service `db` passenger**: Stateful tools open the shared host-service socket via `ene-plugin-db` and perform prefix-isolated CRUD inside the host's `memory.db`. All plugins share this single socket, so namespace isolation rests on the per-plugin auth token alone (the per-plugin socket path layer is gone).
+- **Host-service `capability` passenger**: Consumer plugins call another
+  plugin's declared capabilities (e.g. `gguf-runner@1`) through the host: the
+  `ene-runtime` actor wires a capability mediator around the plugin host, the
+  acceptor authenticates the session by token, and the mediator authorizes
+  each call against the caller's declared `requires`, resolves the provider
+  from the capability registry, and forwards the call over the provider's IPC
+  connection (see `docs/concepts/plugins-and-mcp.md` §4.5).
 
 **Provider governance** has a single owner per concern: the plugin host is
 the one provider registry (LLM/embedding/TTS factories resolve through

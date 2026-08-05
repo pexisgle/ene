@@ -10,9 +10,10 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use ene_plugin_proto::{
-    CallContext, ConfigFieldError, ConfigOption, DeferredOutcome, DeferredStatus, IpcStream,
-    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError,
-    ToolResult, VersionRange, WireFormat, read_plugin_response, write_plugin_request,
+    CallContext, CapabilityCall, CapabilityCallError, CapabilityCallErrorCode, ConfigFieldError,
+    ConfigOption, DeferredOutcome, DeferredStatus, IpcStream, PluginCapabilities, PluginIpcRequest,
+    PluginIpcResponse, SandboxConfigData, ToolError, ToolResult, VersionRange, WireFormat,
+    read_plugin_response, write_plugin_request,
 };
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
@@ -20,13 +21,36 @@ use tokio::task::JoinHandle;
 
 use crate::error::PluginHostError;
 
+/// Maps a connection-level failure onto the capability-call vocabulary.
+///
+/// The connection reports both provider failures and request timeouts as
+/// `ExecutionFailed`; the timeout path's message is its only stable
+/// discriminator, so the timeout category is recognized from it.
+fn host_capability_error(e: &PluginHostError) -> CapabilityCallError {
+    let code = match e {
+        PluginHostError::TransportFailed { .. } | PluginHostError::Io(_) => {
+            CapabilityCallErrorCode::Transport
+        }
+        PluginHostError::ExecutionFailed { message }
+            if message.starts_with(TIMEOUT_MESSAGE_PREFIX) =>
+        {
+            CapabilityCallErrorCode::Timeout
+        }
+        PluginHostError::ExecutionFailed { .. } => CapabilityCallErrorCode::Provider,
+        PluginHostError::CircuitOpen { .. } | PluginHostError::Protocol(_) => {
+            CapabilityCallErrorCode::Provider
+        }
+        _ => CapabilityCallErrorCode::Internal,
+    };
+    CapabilityCallError::new(code, e.to_string())
+}
+
 /// Maximum number of connection retries with backoff.
 const CONNECT_MAX_RETRIES: u32 = 50;
 /// Delay between connection retry attempts.
 const CONNECT_DELAY: Duration = Duration::from_millis(50);
 /// Default per-call timeout (2 min — LLM calls can be slow).
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
-
 /// Timeout for one [`PluginIpcRequest::ProcessVadChunk`] round trip.
 ///
 /// VAD chunks are sent from the microphone capture thread (a cpal audio
@@ -35,6 +59,9 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 /// timeout. A healthy Silero step takes milliseconds; two seconds is
 /// generous for even a slow machine while bounding the freeze.
 const PROCESS_VAD_CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
+/// Message prefix shared by every connection-timeout error, so callers can
+/// classify `ExecutionFailed` as a timeout without matching ad-hoc strings.
+const TIMEOUT_MESSAGE_PREFIX: &str = "timed out after";
 /// Timeout for a `Ping` liveness probe.
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -190,6 +217,7 @@ fn response_request_id(resp: &PluginIpcResponse) -> Option<&str> {
         | PluginIpcResponse::StreamError { request_id, .. }
         | PluginIpcResponse::ChatCompletionResult { request_id, .. }
         | PluginIpcResponse::EmbedBatchResult { request_id, .. }
+        | PluginIpcResponse::CapabilityCallResult { request_id, .. }
         | PluginIpcResponse::SpeechResult { request_id, .. }
         | PluginIpcResponse::TranscriptionResult { request_id, .. }
         | PluginIpcResponse::VadChunkResult { request_id, .. } => Some(request_id.as_str()),
@@ -1098,6 +1126,36 @@ impl IpcPluginConnection {
         }
     }
 
+    /// Forwards a mediated capability call and awaits the provider's result.
+    ///
+    /// The provider's typed [`CapabilityCallError`] passes through unchanged;
+    /// connection-level failures are mapped onto the same stable vocabulary
+    /// (transport / timeout). The call inherits the connection's per-request
+    /// timeout and its reconnect-once-on-transport-failure behavior.
+    pub async fn call_capability(
+        &self,
+        call: &CapabilityCall,
+    ) -> Result<serde_json::Value, CapabilityCallError> {
+        let resp = self
+            .do_request(PluginIpcRequest::CapabilityCall {
+                request_id: String::new(),
+                call: call.clone(),
+            })
+            .await
+            .map_err(|e| host_capability_error(&e))?;
+        match resp {
+            PluginIpcResponse::CapabilityCallResult { result, .. } => result,
+            PluginIpcResponse::Error { message, .. } => Err(CapabilityCallError::new(
+                CapabilityCallErrorCode::Provider,
+                message,
+            )),
+            other => Err(CapabilityCallError::new(
+                CapabilityCallErrorCode::Internal,
+                format!("unexpected response to CapabilityCall: {other:?}"),
+            )),
+        }
+    }
+
     /// Sends a `SynthesizeSpeech` request and awaits the result.
     ///
     /// Returns the base64-encoded audio bytes and the audio format echoed by
@@ -1432,6 +1490,9 @@ impl IpcPluginConnection {
             | PluginIpcRequest::EmbedBatch {
                 request_id: rid, ..
             }
+            | PluginIpcRequest::CapabilityCall {
+                request_id: rid, ..
+            }
             | PluginIpcRequest::SynthesizeSpeech {
                 request_id: rid, ..
             }
@@ -1527,6 +1588,7 @@ impl IpcPluginConnection {
             | PluginIpcRequest::CreateChatStream { request_id, .. }
             | PluginIpcRequest::ChatCompletion { request_id, .. }
             | PluginIpcRequest::EmbedBatch { request_id, .. }
+            | PluginIpcRequest::CapabilityCall { request_id, .. }
             | PluginIpcRequest::SynthesizeSpeech { request_id, .. }
             | PluginIpcRequest::TranscribeAudio { request_id, .. }
             | PluginIpcRequest::ProcessVadChunk { request_id, .. }
@@ -1587,7 +1649,7 @@ impl IpcPluginConnection {
             .await
             .map_err(|_| {
                 PluginHostError::execution(format!(
-                    "timed out after {} ms waiting for a connection slot",
+                    "{TIMEOUT_MESSAGE_PREFIX} {} ms waiting for a connection slot",
                     timeout.as_millis()
                 ))
             })?
@@ -1667,7 +1729,7 @@ impl IpcPluginConnection {
             Err(_elapsed) => {
                 self.router.waiters.lock().remove(request_id);
                 Err(PluginHostError::execution(format!(
-                    "timed out after {} ms",
+                    "{TIMEOUT_MESSAGE_PREFIX} {} ms",
                     timeout.as_millis()
                 )))
             }

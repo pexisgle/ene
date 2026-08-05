@@ -539,14 +539,24 @@ impl EneHandle {
             None
         };
 
-        let (db_tokens, host_service_handle) =
-            actor::spawn_db_ipc_servers(&config, memory_store.as_ref())?;
+        // The capability mediator resolves providers through the shared host
+        // handle, so the handle exists (empty) before the host-service
+        // acceptor binds; calls landing during startup fail with a typed
+        // "host is not running" error and are retryable.
+        let mediator: Arc<dyn ene_plugin_proto::CapabilityServiceHandler> = Arc::new(
+            ene_plugin_host::CapabilityMediator::new(Arc::clone(&plugin_host_slot)),
+        );
+        let (db_tokens, host_service_handle) = actor::spawn_db_ipc_servers(
+            &config,
+            memory_store.as_ref(),
+            Some(Arc::clone(&mediator)),
+        )?;
 
         // Start the plugin host (discovers and launches v3 plugin binaries).
         // Non-fatal: on failure we log and continue with no plugin-provided
         // providers/tools, mirroring the tool host's empty-set fallback. The
         // host itself is the provider registry — nothing is copied out of it.
-        let mut plugin_host =
+        let mut started_host =
             match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
                 Ok(host) => {
                     tracing::info!(
@@ -575,7 +585,7 @@ impl EneHandle {
         // The task's `JoinHandle` is retained so it can be aborted during
         // plugin host shutdown rather than leaking past the host's lifetime.
         let mut health_bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
-        if let Some(host) = plugin_host.as_mut()
+        if let Some(host) = started_host.as_mut()
             && let Some(mut health_rx) = host.take_health_receiver()
         {
             let diag_tx = diag_tx.clone();
@@ -621,7 +631,7 @@ impl EneHandle {
         // Publish the host into the shared slot before any provider
         // resolution runs (the TTS bootstrap below queries it through the
         // live catalog); reconfiguration swaps the manager in place later.
-        *plugin_host_slot.lock().await = plugin_host;
+        *plugin_host_slot.lock().await = started_host;
 
         let registry = actor::build_tool_registry(plugin_host_slot.lock().await.as_ref())?;
         let tool_rag = match embedder.as_ref() {
