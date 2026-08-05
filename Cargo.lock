@@ -2458,6 +2458,7 @@ dependencies = [
  "dialoguer",
  "ene-ai",
  "ene-config",
+ "ene-connector",
  "ene-mind",
  "ene-plugin-host",
  "ene-rag",
@@ -2508,11 +2509,18 @@ dependencies = [
 name = "ene-connector"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
+ "hex",
+ "hmac",
+ "parking_lot",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.19",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2549,6 +2557,7 @@ dependencies = [
  "egui-winit",
  "ene-ai",
  "ene-config",
+ "ene-connector",
  "ene-mind",
  "ene-plugin-host",
  "ene-plugin-proto",
@@ -3143,6 +3152,7 @@ dependencies = [
  "chrono",
  "ene-ai",
  "ene-config",
+ "ene-connector",
  "ene-core",
  "ene-mind",
  "ene-plugin-host",

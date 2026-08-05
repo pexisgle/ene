@@ -1,0 +1,262 @@
+//! Structural secret scrubbing for connector boundaries.
+//!
+//! The primary guarantee is contractual — connectors must never place raw
+//! secrets in errors, status messages, or events. This module is the
+//! defense-in-depth layer that catches accidental leakage at the registry
+//! event, audit, and CLI boundaries, mirroring the host's schema-aware
+//! redaction for key names.
+
+use serde_json::Value;
+
+/// Well-known secret-bearing key names, matched case-insensitively as
+/// substrings — fail-safe by design: masking a non-secret key is harmless,
+/// while a single leaked API key is not.
+const SECRET_KEY_NAMES: &[&str] = &[
+    "api_key",
+    "api-key",
+    "apikey",
+    "token",
+    "access_token",
+    "secret",
+    "password",
+    "passwd",
+    "authorization",
+    "auth",
+    "credential",
+];
+
+/// Replacement value written over every redacted secret.
+const REDACTED: &str = "***";
+
+/// Returns `true` when `key` contains a well-known secret name.
+fn is_secret_key_name(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    SECRET_KEY_NAMES
+        .iter()
+        .any(|candidate| lower.contains(candidate))
+}
+
+/// Redacts values under secret-bearing keys in a JSON value, recursively.
+///
+/// Nested objects under a secret key are replaced wholesale so embedded
+/// values can never leak. Everything else is preserved.
+#[must_use]
+pub fn redact_json(value: &Value) -> Value {
+    match value {
+        Value::Object(obj) => {
+            let mut out = serde_json::Map::with_capacity(obj.len());
+            for (key, value) in obj {
+                if is_secret_key_name(key) {
+                    out.insert(key.clone(), Value::String(REDACTED.to_string()));
+                } else {
+                    out.insert(key.clone(), redact_json(value));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_json).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Scrubs common secret formats out of an arbitrary string (error text,
+/// log lines, event payloads).
+///
+/// Recognized formats: `Bearer <token>`, `key=value` / `key = value`, and
+/// JSON `"key": "value"` pairs, where the key matches a well-known secret
+/// name. The value is replaced with `***`; everything else is preserved
+/// byte-for-byte.
+#[must_use]
+pub fn scrub_secrets(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // `Bearer ` tokens (case-insensitive).
+        if bytes[i..].to_ascii_lowercase().starts_with(b"bearer ") {
+            let token_start = i + 7;
+            let token_end = match bytes[token_start..].iter().position(|b| !is_token_char(*b)) {
+                Some(p) if p > 0 => token_start + p,
+                Some(_) => {
+                    out.push_str(&input[i..token_start]);
+                    i = token_start;
+                    continue;
+                }
+                None => bytes.len(),
+            };
+            out.push_str(&input[i..token_start]);
+            out.push_str(REDACTED);
+            i = token_end;
+            continue;
+        }
+
+        // `"key": "value"` JSON pairs and bare `key=value` / `key = value`.
+        if let Some((key, value_start)) = key_value_at(bytes, i) {
+            if is_secret_key_name(&key) {
+                let (value_end, trailing) = value_span(input, value_start);
+                // A quoted value keeps its opening quote in the preserved
+                // prefix; the closing quote comes back via `trailing`.
+                let prefix_end = if bytes.get(value_start) == Some(&b'"') {
+                    value_start + 1
+                } else {
+                    value_start
+                };
+                out.push_str(&input[i..prefix_end]);
+                out.push_str(REDACTED);
+                out.push_str(trailing);
+                i = value_end;
+            } else {
+                // Preserve the key and separator, then keep scanning the
+                // value as ordinary text.
+                out.push_str(&input[i..value_start]);
+                i = value_start;
+            }
+            continue;
+        }
+        let ch = input[i..].chars().next().unwrap_or('\u{FFFD}');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Returns `true` for characters that may appear inside a bare token value.
+fn is_token_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'+' | b'/' | b'=')
+}
+
+/// Attempts to parse a key starting at `start`; returns the key and the
+/// index just past the separator (`=`, `:`, or `": "`).
+fn key_value_at(bytes: &[u8], start: usize) -> Option<(String, usize)> {
+    let rest = &bytes[start..];
+    let quoted = rest.first() == Some(&b'"');
+    if quoted {
+        let close = rest[1..].iter().position(|b| *b == b'"')? + 1;
+        let key = String::from_utf8_lossy(&rest[1..close]).into_owned();
+        let mut i = close + 1;
+        while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+            i += 1;
+        }
+        if rest.get(i) != Some(&b':') {
+            return None;
+        }
+        i += 1;
+        while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+            i += 1;
+        }
+        Some((key, start + i))
+    } else {
+        let key_end = rest
+            .iter()
+            .position(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')))
+            .unwrap_or(rest.len());
+        if key_end == 0 {
+            return None;
+        }
+        let key = String::from_utf8_lossy(&rest[..key_end]).into_owned();
+        let mut i = key_end;
+        while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+            i += 1;
+        }
+        if rest.get(i) != Some(&b'=') {
+            return None;
+        }
+        i += 1;
+        while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
+            i += 1;
+        }
+        Some((key, start + i))
+    }
+}
+
+/// Returns the span of a value starting at `value_start` plus the literal
+/// text to keep after the redaction (quotes and delimiters).
+fn value_span(input: &str, value_start: usize) -> (usize, &str) {
+    let bytes = input.as_bytes();
+    if bytes.get(value_start) == Some(&b'"') {
+        // Quoted value: redact the inner content and keep the closing quote.
+        match bytes[value_start + 1..].iter().position(|b| *b == b'"') {
+            Some(close) => (value_start + close + 2, "\""),
+            None => (bytes.len(), ""),
+        }
+    } else {
+        let end = bytes[value_start..]
+            .iter()
+            .position(|b| b.is_ascii_whitespace() || matches!(b, b',' | b'}' | b']' | b')' | b'"'))
+            .map_or(bytes.len(), |p| value_start + p);
+        (end, "")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_json_masks_secret_keys_recursively() {
+        let value = serde_json::json!({
+            "api_key": {"source": "inline", "inline": "sk-deep-secret"},
+            "base_url": "https://api.example.com",
+            "nested": {"password": "hunter2", "keep": 42},
+            "list": [{"token": "t1"}, {"keep": "k"}]
+        });
+        let redacted = redact_json(&value);
+        let text = serde_json::to_string(&redacted).unwrap();
+        assert!(!text.contains("sk-deep-secret"));
+        assert!(!text.contains("hunter2"));
+        assert!(!text.contains("t1"));
+        assert!(text.contains("https://api.example.com"));
+        assert!(text.contains("keep"));
+    }
+
+    #[test]
+    fn scrub_bearer_tokens() {
+        assert_eq!(
+            scrub_secrets("Authorization: Bearer abc.def-ghi"),
+            "Authorization: Bearer ***"
+        );
+        assert_eq!(scrub_secrets("auth: bearer AbCdEf"), "auth: bearer ***");
+        // A plain word that merely starts with "bearer" is not a token.
+        assert_eq!(scrub_secrets("bearer-bond"), "bearer-bond");
+    }
+
+    #[test]
+    fn scrub_key_value_pairs() {
+        assert_eq!(
+            scrub_secrets("connect failed: api_key=sk-12345, base_url=https://x"),
+            "connect failed: api_key=***, base_url=https://x"
+        );
+        assert_eq!(
+            scrub_secrets("token = hunter2 and password: p"),
+            "token = *** and password: p"
+        );
+    }
+
+    #[test]
+    fn scrub_json_pairs() {
+        assert_eq!(
+            scrub_secrets(r#"{"api_key":"sk-123","keep":"v"}"#),
+            r#"{"api_key":"***","keep":"v"}"#
+        );
+        assert_eq!(
+            scrub_secrets(r#"{"nested": {"access_token": "abc"}}"#),
+            r#"{"nested": {"access_token": "***"}}"#
+        );
+    }
+
+    #[test]
+    fn non_secret_text_is_preserved() {
+        let text = "connector github connected, 2 accounts, base https://api.example.com";
+        assert_eq!(scrub_secrets(text), text);
+    }
+
+    #[test]
+    fn redaction_of_embedded_secret_never_contains_the_value() {
+        let secret = "sk-super-secret-9f8e";
+        let scrubbed = scrub_secrets(&format!(
+            r#"error: {{"api_key": "{secret}", "message": "auth failed"}}"#
+        ));
+        assert!(!scrubbed.contains(secret));
+        assert!(scrubbed.contains("***"));
+    }
+}
