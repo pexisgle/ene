@@ -120,6 +120,7 @@ flowchart TD
 - **ケーパビリティ宣言**: `PluginCapabilities` により利用可能な `tools`, `llm_providers`, `stt_providers`, `tts_providers` を宣伝します。
 - **能力共有 (`provides` / `requires`)**: プラグインは他プラグインへ提供する能力 (`provides`) と必要とする能力 (`requires`) を宣言します。ホストは起動時に宣言を解決し、ハード要求が未充足のプラグインを無効化します（`docs/concepts/plugins-and-mcp.md` 参照）。ローカル GGUF プロバイダプラグイン (`plugins/provider/local-llm`、バイナリ `ene-plugin-llama-cpp`) は `llm/chat@1`・`embed@1`・`gguf-runner@1` を宣言し、チャットストリーミング・補完・GGUF 埋め込みを IPC 越しに提供します。
 - **ホストサービス `db` 乗客**: 状態を保持するツールは `ene-plugin-db` を介して共有ホストサービスソケットを開き、ホストの `memory.db` 内でプレフィックス隔離された CRUD を行います。全プラグインがこの単一ソケットを共有するため、ネームスペースの隔離はプラグインごとの認証トークンのみに依存します (プラグインごとのソケットパス層は廃止されました)。
+- **ホストサービス `capability` 乗客**: 消費者プラグインは他プラグインの宣言済み能力（例: `gguf-runner@1`）をホスト経由で呼び出します。`ene-runtime` アクターがプラグインホストを囲む能力仲介層を配線し、アクセプタがトークンでセッションを認証し、仲介層が各呼び出しを呼び出し元の `requires` 宣言に対して認可して、能力レジストリから提供者を解決し、提供者の IPC 接続へ転送します（`docs/concepts/plugins-and-mcp.md` §4.5 参照）。
 
 ---
 
