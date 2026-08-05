@@ -365,8 +365,8 @@ fn load_voice_embedding(
 ///
 /// This never performs network I/O: it is a synchronous, fail-fast
 /// constructor. Callers are responsible for ensuring the model files are
-/// already present (see [`super::prefetch_if_configured`], called from the
-/// runtime's async bootstrap path before providers are constructed).
+/// already present (the kokoro plugin calls
+/// [`super::download::ensure_kokoro_files_exist`] before constructing).
 ///
 /// [`EngineHandle::try_spawn`] (not [`EngineHandle::spawn`]) builds the first
 /// [`KokoroModel`] synchronously here rather than deferring that first

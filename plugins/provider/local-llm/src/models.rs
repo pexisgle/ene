@@ -38,6 +38,11 @@ type LoadGates = LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
 /// load of the same weights (double RAM/VRAM until one finishes).
 static CHAT_LOAD_GATES: LoadGates = LazyLock::new(|| Mutex::new(HashMap::new()));
 static EMBED_LOAD_GATES: LoadGates = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Per-profile unload epochs: `unload` bumps the profile's epoch so a load
+/// that started before the eviction cannot re-insert its model afterwards.
+type UnloadEpochs = LazyLock<Mutex<HashMap<String, u64>>>;
+static CHAT_UNLOAD_EPOCHS: UnloadEpochs = LazyLock::new(|| Mutex::new(HashMap::new()));
+static EMBED_UNLOAD_EPOCHS: UnloadEpochs = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Invalidates loaded models and in-flight admission gates after a live host
 /// configuration update. Existing request-held `Arc`s keep their engines
@@ -57,23 +62,51 @@ pub(crate) fn config_changed() {
     embed_models.clear();
     chat_gates.clear();
     embed_gates.clear();
+    CHAT_UNLOAD_EPOCHS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+    EMBED_UNLOAD_EPOCHS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+}
+
+/// Releases a profile's resident models (chat and embedding) and load gates.
+///
+/// In-flight requests hold their own `Arc` clones, so an engine stays alive
+/// until those requests finish; the next request reloads the profile.
+pub(crate) fn unload(model: &str) {
+    // Load gates are deliberately kept: an in-flight load holds its gate, and
+    // a concurrent caller must wait for it instead of starting a second load
+    // of the same weights (double RAM/VRAM).
+    evict_unloaded(&CHAT_UNLOAD_EPOCHS, &CHAT_MODELS, model);
+    evict_unloaded(&EMBED_UNLOAD_EPOCHS, &EMBED_MODELS, model);
 }
 
 /// Returns the chat model for `model`, loading it on first use.
 pub(crate) async fn chat_provider(model: &str) -> Result<Arc<LocalLlamaCppProvider>, PluginError> {
     let model_key = model.to_string();
-    load_once(model, &CHAT_LOAD_GATES, cached_chat_model, move || {
-        load_chat_model(model_key)
-    })
+    load_once(
+        model,
+        &CHAT_LOAD_GATES,
+        &CHAT_UNLOAD_EPOCHS,
+        cached_chat_model,
+        move |epoch| load_chat_model(model_key, epoch),
+    )
     .await
 }
 
 /// Returns the embedding model for `model`, loading it on first use.
 pub(crate) async fn embed_provider(model: &str) -> Result<Arc<GgufEmbeddingProvider>, PluginError> {
     let model_key = model.to_string();
-    load_once(model, &EMBED_LOAD_GATES, cached_embed_model, move || {
-        load_embed_model(model_key)
-    })
+    load_once(
+        model,
+        &EMBED_LOAD_GATES,
+        &EMBED_UNLOAD_EPOCHS,
+        cached_embed_model,
+        move |epoch| load_embed_model(model_key, epoch),
+    )
     .await
 }
 
@@ -87,12 +120,13 @@ pub(crate) async fn embed_provider(model: &str) -> Result<Arc<GgufEmbeddingProvi
 async fn load_once<T, F, Fut>(
     model: &str,
     gates: &LoadGates,
+    epochs: &UnloadEpochs,
     cached: impl Fn(&str) -> Option<Arc<T>>,
     load: F,
 ) -> Result<Arc<T>, PluginError>
 where
     T: Send + Sync + 'static,
-    F: FnOnce() -> Fut + Send + 'static,
+    F: FnOnce(u64) -> Fut + Send + 'static,
     Fut: Future<Output = Result<Arc<T>, PluginError>> + Send + 'static,
 {
     if let Some(provider) = cached(model) {
@@ -103,13 +137,43 @@ where
     if let Some(provider) = cached(model) {
         return Ok(provider);
     }
+    let epoch = unload_epoch(epochs, model);
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let _owner = guard;
-        drop(tx.send(load().await));
+        drop(tx.send(load(epoch).await));
     });
     rx.await
         .map_err(|_| PluginError::provider("model load task ended without a result"))?
+}
+
+/// Current unload epoch for `model`; `0` when never unloaded.
+fn unload_epoch(epochs: &UnloadEpochs, model: &str) -> u64 {
+    epochs
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(model)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn bump_unload_epoch(epochs: &UnloadEpochs, model: &str) {
+    *epochs
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(model.to_string())
+        .or_default() += 1;
+}
+
+/// Evicts one profile: removes its resident model and bumps its unload epoch
+/// so an in-flight load cannot re-insert. Load gates are not touched — see
+/// [`unload`].
+fn evict_unloaded<T>(epochs: &UnloadEpochs, cache: &Mutex<HashMap<String, Arc<T>>>, model: &str) {
+    cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(model);
+    bump_unload_epoch(epochs, model);
 }
 
 fn load_gate(
@@ -142,7 +206,10 @@ fn cached_embed_model(model: &str) -> Option<Arc<GgufEmbeddingProvider>> {
 
 /// Loads the chat model for `model` and inserts it into the cache. The
 /// caller must hold the model's load gate.
-async fn load_chat_model(model: String) -> Result<Arc<LocalLlamaCppProvider>, PluginError> {
+async fn load_chat_model(
+    model: String,
+    unload_epoch: u64,
+) -> Result<Arc<LocalLlamaCppProvider>, PluginError> {
     let generation = config::generation();
     let config = current_config()?;
     let profile = profile_for(&model)?;
@@ -161,12 +228,15 @@ async fn load_chat_model(model: String) -> Result<Arc<LocalLlamaCppProvider>, Pl
         |e| convert::map_llm_error(&e),
     )
     .await?;
-    Ok(insert_if_absent(&model, loaded, generation))
+    Ok(insert_if_absent(&model, loaded, generation, unload_epoch))
 }
 
 /// Loads the embedding model for `model` and inserts it into the cache. The
 /// caller must hold the model's load gate.
-async fn load_embed_model(model: String) -> Result<Arc<GgufEmbeddingProvider>, PluginError> {
+async fn load_embed_model(
+    model: String,
+    unload_epoch: u64,
+) -> Result<Arc<GgufEmbeddingProvider>, PluginError> {
     let generation = config::generation();
     let config = current_config()?;
     let profile = profile_for(&model)?;
@@ -182,7 +252,12 @@ async fn load_embed_model(model: String) -> Result<Arc<GgufEmbeddingProvider>, P
         |e| map_embed_load_error(&e),
     )
     .await?;
-    Ok(insert_embed_if_absent(&model, loaded, generation))
+    Ok(insert_embed_if_absent(
+        &model,
+        loaded,
+        generation,
+        unload_epoch,
+    ))
 }
 
 /// Resolves the GGUF path for a profile: validates `model_path` when set,
@@ -267,27 +342,48 @@ fn insert_if_absent(
     model: &str,
     provider: LocalLlamaCppProvider,
     generation: u64,
+    load_epoch: u64,
 ) -> Arc<LocalLlamaCppProvider> {
-    let mut guard = CHAT_MODELS.lock().unwrap_or_else(PoisonError::into_inner);
-    let provider = Arc::new(provider);
-    if config::generation() != generation {
-        return provider;
-    }
-    if let Some(existing) = guard.get(model) {
-        return Arc::clone(existing);
-    }
-    guard.insert(model.to_string(), Arc::clone(&provider));
-    provider
+    insert_if_unloaded(
+        &CHAT_UNLOAD_EPOCHS,
+        &CHAT_MODELS,
+        model,
+        Arc::new(provider),
+        generation,
+        load_epoch,
+    )
 }
 
 fn insert_embed_if_absent(
     model: &str,
     provider: GgufEmbeddingProvider,
     generation: u64,
+    load_epoch: u64,
 ) -> Arc<GgufEmbeddingProvider> {
-    let mut guard = EMBED_MODELS.lock().unwrap_or_else(PoisonError::into_inner);
-    let provider = Arc::new(provider);
-    if config::generation() != generation {
+    insert_if_unloaded(
+        &EMBED_UNLOAD_EPOCHS,
+        &EMBED_MODELS,
+        model,
+        Arc::new(provider),
+        generation,
+        load_epoch,
+    )
+}
+
+/// Inserts a freshly loaded provider unless the world moved on while it was
+/// loading: a config change (generation) or an `unload` (per-profile epoch)
+/// makes the load's result stale, so it is returned to its caller but never
+/// made resident. A model already serving live streams is never replaced.
+fn insert_if_unloaded<T>(
+    epochs: &UnloadEpochs,
+    cache: &Mutex<HashMap<String, Arc<T>>>,
+    model: &str,
+    provider: Arc<T>,
+    generation: u64,
+    load_epoch: u64,
+) -> Arc<T> {
+    let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if config::generation() != generation || load_epoch != unload_epoch(epochs, model) {
         return provider;
     }
     if let Some(existing) = guard.get(model) {
@@ -312,6 +408,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static TEST_GATES: LoadGates = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static TEST_EPOCHS: UnloadEpochs = LazyLock::new(|| Mutex::new(HashMap::new()));
     static TEST_CACHE: LazyLock<Mutex<HashMap<String, Arc<String>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -332,17 +429,21 @@ mod tests {
         for _ in 0..8 {
             let loads = Arc::clone(&loads);
             handles.push(tokio::spawn(async move {
-                load_once("model", &TEST_GATES, cached, move || {
+                let generation = config::generation();
+                load_once("model", &TEST_GATES, &TEST_EPOCHS, cached, move |epoch| {
                     let loads = Arc::clone(&loads);
                     async move {
                         loads.fetch_add(1, Ordering::SeqCst);
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         let provider = Arc::new("loaded".to_string());
-                        TEST_CACHE
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .insert("model".to_string(), Arc::clone(&provider));
-                        Ok(provider)
+                        Ok(insert_if_unloaded(
+                            &TEST_EPOCHS,
+                            &TEST_CACHE,
+                            "model",
+                            provider,
+                            generation,
+                            epoch,
+                        ))
                     }
                 })
                 .await
@@ -366,27 +467,150 @@ mod tests {
     async fn failed_load_releases_gate_for_retry() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_clone = Arc::clone(&attempts);
-        let err = load_once("failing", &TEST_GATES, cached, move || async move {
-            attempts_clone.fetch_add(1, Ordering::SeqCst);
-            Err(PluginError::provider("boom"))
-        })
+        let err = load_once(
+            "failing",
+            &TEST_GATES,
+            &TEST_EPOCHS,
+            cached,
+            move |_epoch| async move {
+                attempts_clone.fetch_add(1, Ordering::SeqCst);
+                Err(PluginError::provider("boom"))
+            },
+        )
         .await
         .expect_err("first load fails");
         assert!(err.to_string().contains("boom"));
 
         let attempts_clone = Arc::clone(&attempts);
-        let provider = load_once("failing", &TEST_GATES, cached, move || async move {
-            attempts_clone.fetch_add(1, Ordering::SeqCst);
-            let provider = Arc::new("loaded".to_string());
-            TEST_CACHE
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert("failing".to_string(), Arc::clone(&provider));
-            Ok(provider)
-        })
+        let generation = config::generation();
+        let provider = load_once(
+            "failing",
+            &TEST_GATES,
+            &TEST_EPOCHS,
+            cached,
+            move |epoch| async move {
+                attempts_clone.fetch_add(1, Ordering::SeqCst);
+                let provider = Arc::new("loaded".to_string());
+                Ok(insert_if_unloaded(
+                    &TEST_EPOCHS,
+                    &TEST_CACHE,
+                    "failing",
+                    provider,
+                    generation,
+                    epoch,
+                ))
+            },
+        )
         .await
         .expect("retry succeeds");
         assert_eq!(provider.as_str(), "loaded");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    /// `unload` during an in-flight load must neither start a second
+    /// concurrent load (the gate is retained) nor let the first load's result
+    /// become resident afterwards (the per-profile epoch suppresses the
+    /// insert); the next caller loads exactly once, sequentially.
+    #[tokio::test]
+    async fn unload_during_in_flight_load_evicts_and_defers_next_load() {
+        use std::sync::atomic::AtomicBool;
+
+        let loads = Arc::new(AtomicUsize::new(0));
+        let load_started = Arc::new(tokio::sync::Notify::new());
+        let first_done = Arc::new(AtomicBool::new(false));
+        let second_started = Arc::new(tokio::sync::Notify::new());
+        let generation = config::generation();
+
+        let loads_clone = Arc::clone(&loads);
+        let started = Arc::clone(&load_started);
+        let first_done_clone = Arc::clone(&first_done);
+        let first = tokio::spawn(async move {
+            load_once("racy", &TEST_GATES, &TEST_EPOCHS, cached, move |epoch| {
+                let loads = Arc::clone(&loads_clone);
+                let started = Arc::clone(&started);
+                let first_done = Arc::clone(&first_done_clone);
+                async move {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    started.notify_one();
+                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                    let provider = Arc::new("stale-load".to_string());
+                    first_done.store(true, Ordering::SeqCst);
+                    Ok(insert_if_unloaded(
+                        &TEST_EPOCHS,
+                        &TEST_CACHE,
+                        "racy",
+                        provider,
+                        generation,
+                        epoch,
+                    ))
+                }
+            })
+            .await
+            .expect("first load succeeds")
+        });
+
+        load_started.notified().await;
+        assert!(cached("racy").is_none(), "nothing resident before unload");
+
+        // The production eviction helper on the test maps (mirrors `unload`).
+        evict_unloaded(&TEST_EPOCHS, &TEST_CACHE, "racy");
+
+        let loads_clone = Arc::clone(&loads);
+        let first_done_clone = Arc::clone(&first_done);
+        let second_started_clone = Arc::clone(&second_started);
+        let second = tokio::spawn(async move {
+            load_once("racy", &TEST_GATES, &TEST_EPOCHS, cached, move |epoch| {
+                let loads = Arc::clone(&loads_clone);
+                let first_done = Arc::clone(&first_done_clone);
+                let second_started = Arc::clone(&second_started_clone);
+                async move {
+                    assert!(
+                        first_done.load(Ordering::SeqCst),
+                        "second load must wait for the in-flight load (gate retained)"
+                    );
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    second_started.notify_one();
+                    let provider = Arc::new("fresh-load".to_string());
+                    Ok(insert_if_unloaded(
+                        &TEST_EPOCHS,
+                        &TEST_CACHE,
+                        "racy",
+                        provider,
+                        generation,
+                        epoch,
+                    ))
+                }
+            })
+            .await
+            .expect("second load succeeds")
+        });
+
+        // The second load may only begin after the first completed.
+        tokio::time::timeout(std::time::Duration::from_secs(5), second_started.notified())
+            .await
+            .expect("second load must start after the gate is released");
+        assert!(
+            first_done.load(Ordering::SeqCst),
+            "second load started while the first was still in flight"
+        );
+
+        let stale = first.await.expect("first task joins");
+        let fresh = second.await.expect("second task joins");
+        assert_eq!(stale.as_str(), "stale-load");
+        assert_eq!(fresh.as_str(), "fresh-load");
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            2,
+            "exactly two sequential loads"
+        );
+        // The in-flight load must never become resident after `unload` — the
+        // resident entry (if the fresh load already inserted) is not it. (A
+        // concurrent host-config change from another test can also suppress
+        // the fresh insert, so residency of the fresh load is not asserted.)
+        let resident = cached("racy");
+        assert!(
+            resident.as_ref().is_none_or(|p| !Arc::ptr_eq(&stale, p)),
+            "the stale load must not re-insert after unload"
+        );
     }
 }

@@ -31,7 +31,6 @@ pub struct SettingsInputState {
     pub stt_provider: String,
     pub stt_model: String,
     pub stt_language: String,
-    pub stt_model_path: String,
 }
 
 impl SettingsInputState {
@@ -101,6 +100,5 @@ impl SettingsInputState {
         self.stt_provider.clone_from(&ai_cfg.stt.provider);
         self.stt_model.clone_from(&ai_cfg.stt.model);
         self.stt_language.clone_from(&ai_cfg.stt.language);
-        self.stt_model_path = ai_cfg.stt.model_path.clone().unwrap_or_default();
     }
 }

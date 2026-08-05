@@ -346,6 +346,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         registry,
         tool_rag,
         provider,
+        provider_host,
         event_tx,
         audio_tx,
         diag_tx,
@@ -1553,6 +1554,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                             classifier_timeout_secs,
                             &classifier_lang,
                             &classifier_expressions,
+                            provider_host.as_ref(),
                         )
                         .await
                         {

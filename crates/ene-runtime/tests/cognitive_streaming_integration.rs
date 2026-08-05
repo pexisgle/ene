@@ -26,6 +26,44 @@ use tokio_util::sync::CancellationToken;
 
 struct MockEmbedder;
 
+/// Stub host that serves no providers; this test's turn supplies its own
+/// provider and never triggers the classifier path.
+struct EmptyProviderHost;
+
+#[async_trait]
+impl ene_ai::ProviderHost for EmptyProviderHost {
+    async fn create_llm_provider(
+        &self,
+        kind: &str,
+        _config: &ene_config::EneConfig,
+        _task: &ene_ai::config::TaskRef,
+    ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
+        Err(LlmProviderError::Provider(format!(
+            "No LlmProviderFactory registered for provider kind: '{kind}'"
+        )))
+    }
+
+    async fn create_embedding_provider(
+        &self,
+        _kind: &str,
+        _config: &ene_config::EneConfig,
+    ) -> Result<Arc<dyn EmbeddingProvider>, ene_ai::EmbeddingError> {
+        Err(ene_ai::EmbeddingError::Init(
+            "stub host serves no embedding providers".to_string(),
+        ))
+    }
+
+    async fn create_tts_provider(
+        &self,
+        _kind: &str,
+        _config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+        Err(ene_ai::AudioProviderError::Provider(
+            "stub host serves no TTS providers".to_string(),
+        ))
+    }
+}
+
 #[async_trait]
 impl EmbeddingProvider for MockEmbedder {
     fn model_name(&self) -> &'static str {
@@ -137,6 +175,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         provider: Arc::new(MockLlm {
             response: "Hi there!".into(),
         }),
+        provider_host: Arc::new(EmptyProviderHost),
         event_tx,
         audio_tx: tokio::sync::mpsc::channel(8).0,
         diag_tx,

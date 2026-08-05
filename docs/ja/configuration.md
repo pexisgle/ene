@@ -611,7 +611,12 @@ llama-cpp プラグインの `acceleration` 値はバイナリのビルドと一
 バージョン 3 のファイルは読み込み時にバージョン 4 へマイグレーションされます。
 `context_size` / `dimensions` がミラー対象になる前に v3 へ到達した
 インストールにも同じミラーが再実行されて反映されます（既存の非空の
-プロファイル値は引き続き上書きされません）。
+プロファイル値は引き続き上書きされません）。バージョン 4 のファイルは
+読み込み時にバージョン 5 へマイグレーションされます。`ai.stt.model_path` は
+`plugins.list.whisper.config.model_path` へ、
+`ai.vad.{model,model_path,threshold}` は
+`plugins.list.onnx.config.{model,model_path,threshold}` へ移動します
+（これらの設定はプロバイダプラグインが所有します）。
 
 #### `plugins.list.<name>.profiles.<profile>` — プロファイル別設定 (#313)
 
@@ -765,11 +770,9 @@ ONNX モデルを自プロセス内で直接実行します。完全ローカル
 設定済みの既定ボイスをリクエスト単位で上書きします。
 
 ONNX モデルと `voices.bin` ボイス埋め込みは共有モデルキャッシュに取得されます
-（`ene_voice` のダウンロード/プリフェッチ経由。デスクトップの設定 → 音声画面
-からもダウンロードできます）。カスタムの `model_path` / `voices_path` は
-キャッシュ位置を上書きし、ファイルが無い場合はブートストラップが同じ
-パスにプリフェッチします（このプラグイン設定から解決）。既存ファイルが
-再ダウンロードされることはありません。
+（プラグイン自身が初回利用時に取得します。存在して妥当なファイルは
+再ダウンロードされません）。カスタムの `model_path` / `voices_path` は
+キャッシュ位置を上書きし、ファイルが無い場合は同じパスへ取得します。
 
 ```json
 {
@@ -806,7 +809,7 @@ ONNX モデルと `voices.bin` ボイス埋め込みは共有モデルキャッ�
 | `voice` | `""`（`voices.bin` の先頭ボイス `af_alloy`） | 既定ボイス。リクエスト単位の `ai.tts.voice` が優先されます。全 53 ボイス名はケーパビリティ一覧を参照。ボイスを切り替えるたびにモデルが再ロードされます。 |
 | `speed` | `1.0` | 発話速度倍率（0.5–2.0）。 |
 | `language` | 未設定（英語 G2P） | 書記素→音素変換の言語。`"ja"` で日本語のかなルール、それ以外は英語ルールを使用。 |
-| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き。プロセス起動時に固定されます（ONNX Runtime はプロセスごとに一度だけ初期化）。変更には再起動が必要です。プロセス内フォールバックはこのキーを優先し、次に従来の `plugins.list.onnx.config.ort_dylib_path` を参照します。 |
+| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き。プロセス起動時に固定されます（ONNX Runtime はプロセスごとに一度だけ初期化）。変更には再起動が必要です。共有スロットの `plugins.list.onnx.config.ort_dylib_path` にフォールバックします。 |
 
 各キーは環境変数で個別に上書きできます：
 `ENE_PLUGINS__LIST__KOKORO__CONFIG__<KEY>`
@@ -819,18 +822,101 @@ WAV を返し、ホスト側の音声パイプラインが float サンプルに
 `TtsChunk` に分割し、ストリーミング再生します
 （`formats = ["wav"]`）。
 
-なお、`ai.tts.model_path` / `ai.tts.model` は後述のプロセス内フォールバック
-でのみ有効です。プラグイン経由では `model_path` を自プラグインの設定から
-読み取ります。
+ローカル音声プロバイダ（TTS・STT・VAD）はすべてプラグインプロセスでのみ
+動作します。`ene-runtime` / `ene-desktop` はもう `ene-voice` に依存しません。
 
-**プロセス内フォールバック。** プラグインホストが起動時に利用できない場合や
-`kokoro` プラグインが無効な場合、ランタイム内蔵の `ene-voice` ファクトリが
-`ai.tts.provider = "kokoro"` をプロセス内で引き続き提供します（`ai.tts.model_path`
-/ `ai.tts.model` / `ai.tts.speed` と `profiles.kokoro.voices_path` を参照）。
-フォールバックが有効なのはプラグインが一度も登録されなかった場合のみです。
-プラグインファクトリが登録された後でプラグインが失敗すると、`kokoro` は
-次回の再起動まで利用できません（プロセス内ファクトリはセッション中に
-再登録されないため）。
+#### ローカル whisper.cpp STT プロバイダ（`plugins.list.whisper.config`）
+
+`whisper` プロバイダプラグイン（`plugins/provider/whisper`）は whisper.cpp を
+自プロセスで実行します。完全ローカルで API キーは不要です。
+`ai.stt.provider = "whisper"` で選択します。汎用の `ai.stt.language`
+（例：`"ja"`、`"en"`。空 = 自動検出）と `ai.stt.model`（パスフォールバック）は
+TTS アダプタが `ai.tts.voice` を転送するのと同様に、リクエスト単位で
+プラグインへ転送されます。
+
+```json
+{
+  "ai": {
+    "stt": {
+      "provider": "whisper",
+      "model": "ggml-base.bin",
+      "language": "ja"
+    }
+  },
+  "plugins": {
+    "list": {
+      "whisper": {
+        "enable": true,
+        "config": {
+          "model_path": "/data/ggml-base.bin"
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目:
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `model_path` | `ai.stt.model` → 共有モデルキャッシュ（`models/gguf/whisper.gguf`） | whisper.cpp GGUF モデルファイルのパス。旧 `ai.stt.model_path` は設定バージョン 5 でここへ移動しました。 |
+
+各キーは環境変数で個別に上書きできます：
+`ENE_PLUGINS__LIST__WHISPER__CONFIG__<KEY>`
+（例：`ENE_PLUGINS__LIST__WHISPER__CONFIG__MODEL_PATH`）。
+
+モデルは最初の文字起こし時に遅延ロードされ、プラグインプロセス内に常駐します。
+`model_path` か言語ヒントを変更すると再ロードされます。ホストはキャプチャした
+PCM を `TranscribeAudio` ラウンドトリップの前に WAV へエンコードするため
+（`formats = ["wav"]`）、プラグインに音声キャプチャコードは不要です。
+
+#### ローカル Silero VAD エンジン（`plugins.list.onnx.config`）
+
+`onnx` プロバイダプラグイン（`plugins/provider/onnx`）は Silero VAD ONNX
+エンジンを自プロセスで実行し、共有の `onnx-runner@1` / `g2p/en@1` 能力を
+宣言します。`ai.vad.provider = "silero"` で選択します（デスクトップの
+マイクキャプチャは VAD が `"none"` のとき既定でこれを使います）。
+
+```json
+{
+  "ai": {
+    "vad": {
+      "provider": "silero"
+    }
+  },
+  "plugins": {
+    "list": {
+      "onnx": {
+        "enable": true,
+        "config": {
+          "model_path": "/data/silero_vad.onnx",
+          "threshold": 0.5,
+          "ort_dylib_path": "/opt/onnxruntime/lib/libonnxruntime.so"
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目:
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `model` | `""` | Silero VAD モデル名。`model_path` 未設定時のパスフォールバックとして使われます。 |
+| `model_path` | `model` → 共有モデルキャッシュ（`models/gguf/silero_vad.onnx`） | Silero VAD ONNX モデルファイルのパス。旧 `ai.vad.model_path` は設定バージョン 5 でここへ移動しました。 |
+| `threshold` | `0.5` | 発話確率の閾値（0.0–1.0）。旧 `ai.vad.threshold` は設定バージョン 5 でここへ移動しました。デスクトップの設定 → 音声 / 機能画面のスライダーはこのキーを書き込みます。 |
+| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き（旧 `ai.ort_dylib_path` の移設先）。プロセス起動時に固定されます。 |
+
+各キーは環境変数で個別に上書きできます：
+`ENE_PLUGINS__LIST__ONNX__CONFIG__<KEY>`
+（例：`ENE_PLUGINS__LIST__ONNX__CONFIG__THRESHOLD`）。
+
+エンジンはキャプチャセッションの最初のチャンク処理時に遅延ロードされ、常駐
+します。VAD の状態（リカレントセル状態、発話エッジ追跡）はホスト生成の
+`session_id` をキーとしてプラグインプロセス側に保持され、`process_chunk` は
+32 ms フレームあたり IPC 往復 1 回です。
 
 #### OpenAI Speech API TTS プロバイダ（`plugins.list.openai-tts.config`）
 

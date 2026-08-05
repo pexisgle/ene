@@ -4,22 +4,11 @@
 //! rather than threaded through individual functions via scattered
 //! `#[cfg(feature = "local-tts")]`:
 //!
-//! - [`download`] — feature-independent model download and path
-//!   resolution. Compiles and can be called with `local-tts` disabled: the
-//!   runtime bootstrap prefetch path ([`prefetch_if_configured`]) never
-//!   enables `local-tts` (that feature only gates the ONNX Runtime native
-//!   dependency), so this layer must not depend on it.
+//! - [`download`] — feature-independent model download and path resolution.
+//!   Compiles and can be called with `local-tts` disabled (the kokoro plugin
+//!   calls it from its own process before loading the model).
 //! - [`provider`] — the `local-tts`-gated ONNX session and
-//!   [`ene_ai::TtsProvider`] implementation ([`provider::KokoroModel`],
-//!   [`provider::LocalTtsProviderFactory`]'s feature-enabled `build`).
-//!
-//! [`LocalTtsProviderFactory`] itself, and its registration with
-//! [`AudioProviderRegistry`], stay here rather than in either layer: the
-//! factory must register unconditionally (so the provider is discoverable
-//! and fails fast at `create_provider` time when `local-tts` is disabled),
-//! but its `build` implementation is feature-dependent.
-
-use ene_ai::{AudioProviderError, AudioProviderRegistry, TtsProvider, TtsProviderFactory};
+//!   [`ene_ai::TtsProvider`] implementation ([`provider::KokoroModel`]).
 
 /// Feature-independent download and path-resolution layer.
 pub mod download;
@@ -29,96 +18,12 @@ pub mod provider;
 
 pub use download::{
     default_kokoro_model_path, default_kokoro_voices_path, ensure_kokoro_files_exist,
-    prefetch_if_configured,
 };
 #[cfg(feature = "local-tts")]
 pub use provider::{KokoroError, KokoroModel};
 
 /// Provider name used in `ai.tts.provider` configuration.
 pub const PROVIDER_NAME: &str = "kokoro";
-
-/// Factory for the local Kokoro ONNX TTS provider.
-pub struct LocalTtsProviderFactory;
-
-#[cfg(feature = "local-tts")]
-impl LocalTtsProviderFactory {
-    fn build(config: &ene_config::EneConfig) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
-        let ai = config
-            .get_section::<ene_ai::AiConfig>()
-            .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
-        let resolved = ai.resolve_tts().ok_or_else(|| {
-            AudioProviderError::Init(
-                "TTS provider is disabled (ai.tts.provider = \"none\")".to_string(),
-            )
-        })?;
-        let model_path = download::resolve_model_path(&ai);
-        let voices_path = download::resolve_voices_path(config);
-        let voice_name = resolved.voice.clone().unwrap_or_default();
-        // The kokoro plugin's own config is the canonical source; the `onnx`
-        // slot is the legacy shared ORT home (still used by silero-vad) and
-        // kept as a fallback so existing configs keep working.
-        let ort_dylib_path = [
-            ene_ai::plugin_config::KOKORO_PLUGIN,
-            ene_ai::plugin_config::ONNX_PLUGIN,
-        ]
-        .into_iter()
-        .find_map(|plugin| {
-            ene_ai::plugin_config::plugin_config_blob(config, plugin)
-                .as_ref()
-                .and_then(|blob| blob.get("ort_dylib_path"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|p| !p.is_empty())
-                .map(str::to_string)
-        });
-        let engine = provider::open(
-            &model_path,
-            &voices_path,
-            &voice_name,
-            resolved.speed,
-            resolved.language.clone(),
-            ort_dylib_path.as_deref(),
-        )?;
-        Ok(Box::new(engine))
-    }
-}
-
-#[cfg(not(feature = "local-tts"))]
-impl LocalTtsProviderFactory {
-    fn build(_config: &ene_config::EneConfig) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
-        Err(AudioProviderError::Init(
-            "local TTS requested but ene-ai was built without the `local-tts` feature".to_string(),
-        ))
-    }
-}
-
-impl TtsProviderFactory for LocalTtsProviderFactory {
-    fn provider_name(&self) -> &str {
-        PROVIDER_NAME
-    }
-
-    fn create_provider(
-        &self,
-        config: &ene_config::EneConfig,
-    ) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
-        Self::build(config)
-    }
-}
-
-/// Register the local Kokoro TTS factory.
-///
-/// Called once from [`crate::register_providers`] during runtime bootstrap,
-/// rather than via a `#[ctor::ctor]` that would run before `main` (and before
-/// `tracing` is initialized). Registered unconditionally; the factory fails
-/// fast at `create_provider` time when the `local-tts` feature is disabled.
-pub(crate) fn register() {
-    AudioProviderRegistry::register_tts(std::sync::Arc::new(LocalTtsProviderFactory));
-    tracing::debug!(
-        component = "ene-voice",
-        provider = PROVIDER_NAME,
-        "registered local TTS provider factory"
-    );
-}
 
 /// Runs `ene_infer::conformance::run_all` against a test-only stand-in for
 /// [`provider::KokoroModel`]. See `local_stt.rs`'s `conformance_tests`

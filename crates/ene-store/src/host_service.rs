@@ -2,8 +2,9 @@
 //!
 //! Binds a single shared socket and routes authenticated
 //! [`HostServiceRequest::Open`](ene_plugin_proto::HostServiceRequest::Open)
-//! sessions to passenger handlers. Only the `db` service is implemented
-//! today; reserved service ids are rejected with
+//! sessions to passenger handlers. The `db` passenger is served here; the
+//! `capability` passenger is handed to a host-provided handler (the
+//! mediation layer). Unimplemented service ids are rejected with
 //! [`HostServiceErrorCode::UnknownService`].
 
 use std::collections::HashMap;
@@ -12,8 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use ene_plugin_db::{DbErrorCode, DbRequest, DbResponse};
 use ene_plugin_proto::{
-    HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId, HostServiceRequest,
-    HostServiceResponse, write_host_service_response,
+    CapabilityServiceHandler, HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId,
+    HostServiceRequest, HostServiceResponse, write_host_service_response,
 };
 use sea_orm::DatabaseConnection;
 use tokio::io::AsyncReadExt;
@@ -68,6 +69,9 @@ pub struct HostServiceServer {
     /// derived from this map so a shared socket cannot forge another
     /// plugin's namespace.
     db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
+    /// Optional handler for the `capability` passenger, supplied by the host
+    /// runtime's mediation layer. `None` keeps the service unimplemented.
+    capability: Option<Arc<dyn CapabilityServiceHandler>>,
     failed_opens: Arc<Mutex<OpenFailureTracker>>,
 }
 
@@ -82,8 +86,16 @@ impl HostServiceServer {
             socket_path,
             db,
             db_plugins: Arc::new(db_plugins),
+            capability: None,
             failed_opens: Arc::new(Mutex::new(OpenFailureTracker::default())),
         }
+    }
+
+    /// Registers the handler that serves `capability` passenger sessions.
+    #[must_use]
+    pub fn with_capability_handler(mut self, handler: Arc<dyn CapabilityServiceHandler>) -> Self {
+        self.capability = Some(handler);
+        self
     }
 
     /// Returns the socket path this server listens on.
@@ -137,10 +149,12 @@ impl HostServiceServer {
 
             let db = self.db.clone();
             let db_plugins = Arc::clone(&self.db_plugins);
+            let capability = self.capability.clone();
             let failed_opens = Arc::clone(&self.failed_opens);
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(stream, db, db_plugins, failed_opens).await
+                if let Err(e) =
+                    Self::handle_connection(stream, db, db_plugins, capability, failed_opens).await
                 {
                     error!(error = %e, "Host service connection error");
                 }
@@ -152,6 +166,7 @@ impl HostServiceServer {
         mut stream: ene_plugin_proto::transport::IpcStream,
         db: DatabaseConnection,
         db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
+        capability: Option<Arc<dyn CapabilityServiceHandler>>,
         failed_opens: Arc<Mutex<OpenFailureTracker>>,
     ) -> Result<(), DbServerError> {
         // Read the first frame manually so a legacy `DbRequest::Handshake`
@@ -166,7 +181,41 @@ impl HostServiceServer {
         if let Ok(HostServiceRequest::Open { service, token }) = serde_json::from_slice(&frame) {
             match service {
                 HostServiceId::Db => {}
-                HostServiceId::Assets | HostServiceId::Capability | HostServiceId::Credential => {
+                HostServiceId::Capability => {
+                    let Some(handler) = capability else {
+                        warn!(?service, "Host service Open for unimplemented service");
+                        write_host_service_response(
+                            &mut stream,
+                            &HostServiceResponse::Error {
+                                code: HostServiceErrorCode::UnknownService,
+                                message: format!("service {service:?} is not implemented"),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    };
+                    let Some(reg) = db_plugins.get(&token).cloned() else {
+                        Self::log_rejected_open(
+                            &failed_opens,
+                            "Host service Open rejected: unknown token",
+                        );
+                        write_host_service_response(
+                            &mut stream,
+                            &HostServiceResponse::Error {
+                                code: HostServiceErrorCode::AuthRejected,
+                                message: "Invalid auth token".to_string(),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    };
+                    write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await?;
+                    if let Err(e) = handler.serve(stream, reg.tool_name).await {
+                        error!(error = %e, "Capability service session error");
+                    }
+                    return Ok(());
+                }
+                HostServiceId::Assets | HostServiceId::Credential => {
                     warn!(?service, "Host service Open for unimplemented service");
                     write_host_service_response(
                         &mut stream,

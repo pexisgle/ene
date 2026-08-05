@@ -1,6 +1,6 @@
 # IPC プラグインシステムと MCP 連携
 
-本ドキュメントでは、Ene のプロセス外 IPC プラグインアーキテクチャ、Protocol v6 ワイヤー仕様、Model Context Protocol (MCP) サーバー連携、および組み込みツールプラグインについて解説します。
+本ドキュメントでは、Ene のプロセス外 IPC プラグインアーキテクチャ、Protocol v7 ワイヤー仕様、Model Context Protocol (MCP) サーバー連携、および組み込みツールプラグインについて解説します。
 
 ---
 
@@ -13,12 +13,14 @@ Ene ホストアプリケーション (ene-runtime)
   │
   └── PluginHostManager (ene-plugin-host)
         │
-        ├── IPC Protocol v6 (stdio 上の長さプレフィックス付きフレーム)
+        ├── IPC Protocol v7 (stdio 上の長さプレフィックス付きフレーム)
         │     ├── ene-plugin-anthropic (Anthropic LLM プロバイダプラグイン)
         │     ├── ene-plugin-openai    (OpenAI 互換プロバイダプラグイン)
         │     ├── ene-plugin-openai-tts (OpenAI Speech API TTS プロバイダプラグイン)
         │     ├── ene-plugin-llama-cpp (ローカル GGUF プロバイダプラグイン)
         │     ├── ene-plugin-kokoro     (Kokoro-TTS ONNX ローカル TTS プロバイダプラグイン)
+        │     ├── ene-plugin-onnx       (ローカル ONNX プロバイダプラグイン — Silero VAD)
+        │     ├── ene-plugin-whisper    (ローカル whisper.cpp STT プロバイダプラグイン)
         │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS プロバイダプラグイン)
         │     ├── ene-plugin-edge-tts  (Microsoft Edge Neural Voice TTS プロバイダプラグイン)
         │     ├── ene-plugin-elevenlabs (ElevenLabs TTS プロバイダプラグイン)
@@ -40,15 +42,15 @@ Ene ホストアプリケーション (ene-runtime)
 
 ---
 
-## 2. IPC Protocol v6 仕様
+## 2. IPC Protocol v7 仕様
 
-プラグインは `stdin`/`stdout` 上で **IPC Protocol v6** を使用して通信します：
+プラグインは `stdin`/`stdout` 上で **IPC Protocol v7** を使用して通信します：
 
 - **フレーミング**: すべてのパケットは 4 バイトのリトルエンディアン `u32` パケットサイズで始まり、ネゴシエーションされた `WireFormat` のペイロードが続きます。ハンドシェイクのやり取り（リクエストと ack）は常に UTF-8 JSON を使用し、両者がプロトコル v6 をネゴシエーションした場合、以降のすべてのフレームは MessagePack（`rmp-serde`、マップエンコード）になります。v5 以下でネゴシエーションしたピアは接続全体で従来どおりの JSON フレーミングのままであり、N-1 プラグインは v6 以前のワイヤーとバイト互換です。
-- **ハンドシェイクネゴシエーション**: ホストは `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`、すなわち単一の固定値ではなく `VersionRange { min: 5, max: 6 }` を送信します。プラグインは `VersionRange::negotiate` でその範囲と自身がサポートする範囲の共通部分を取り、両者に共通する最大バージョンを `HandshakeAck { version, capabilities: PluginCapabilities }` として返します。
+- **ハンドシェイクネゴシエーション**: ホストは `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`、すなわち単一の固定値ではなく `VersionRange { min: 6, max: 7 }` を送信します。プラグインは `VersionRange::negotiate` でその範囲と自身がサポートする範囲の共通部分を取り、両者に共通する最大バージョンを `HandshakeAck { version, capabilities: PluginCapabilities }` として返します。v7 は VAD 面（`vad_providers` 能力と `ProcessVadChunk` / `VadChunkResult` メッセージ）を追加します。ホストはネゴシエーションされたバージョンで VAD リクエストをゲートするため、v6 のプラグインバイナリが新バリアントを受け取ることはありません。
 - **ハンドシェイクタイムアウト**: ホストは `HandshakeAck` の待ち時間に上限を設けています（`plugins.handshake_timeout_ms`、既定 10 秒）。ソケットを accept しながら応答しないプラグインは、残りのプラグインの起動をブロックする代わりに `PluginHostError::HandshakeFailed` でハンドシェイクに失敗します。プラグイン作者はハンドシェイクに即応答し、重い初期化（モデル読み込み等）はその後へ遅延させる必要があります——`ene-plugin` の `run_plugin_server` を参照してください。
 - **リクエスト相関**: 非同期リクエストおよびレスポンスはすべて必須の `request_id` (`Uuid`) を保持します。
-- **ケーパビリティ**: プラグインはサポートする機能 (`tools`, `llm_providers`, `stt_providers`, `tts_providers`) を宣伝し、各プロバイダ仕様はさらに `concurrency: ConcurrencyHint` を宣言します ([§3](#3-プロバイダの並行度-concurrencyhint) 参照)。プラグイン間の能力共有は `provides` / `requires` で宣言します ([§4](#4-能力宣言-provides--requires) 参照)。
+- **ケーパビリティ**: プラグインはサポートする機能 (`tools`, `llm_providers`, `stt_providers`, `tts_providers`, `vad_providers`) を宣伝し、各プロバイダ仕様はさらに `concurrency: ConcurrencyHint` を宣言します ([§3](#3-プロバイダの並行度-concurrencyhint) 参照)。プラグイン間の能力共有は `provides` / `requires` で宣言します ([§4](#4-能力宣言-provides--requires) 参照)。
 
 ### バージョニングポリシー（N-1 後方互換）
 
@@ -101,9 +103,10 @@ fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
 TTS プロバイダプラグインも同じ規律に従います: `ene-plugin-host` の
 `IpcTtsProvider` / `IpcTtsProviderFactory` (`ipc_tts.rs` / `tts_factory.rs`) は
 `ene_ai::TtsProvider` / `TtsProviderFactory` を実装し、プラグインの
-`tts_providers` ケーパビリティを `TtsProviderSpec.kind`（例：`"voicevox"`。
-`ai.tts.provider` で選択）をキーとしてグローバルな
-`AudioProviderRegistry` に登録します。合成呼び出しは 1 回の
+`tts_providers` ケーパビリティをホストのプロバイダレジストリ
+（`PluginHostManager` が factory マップ上で `ene_ai::ProviderHost` を実装）
+をキー `TtsProviderSpec.kind`（例：`"voicevox"`。`ai.tts.provider` で選択）
+で解決します。合成呼び出しは 1 回の
 `SynthesizeSpeech` IPC ラウンドトリップで音声ファイル全体（WAV）を返し、
 ホスト側で PCM にデコードして `TtsChunk` に分割し、`TtsProvider::synthesize_stream`
 の契約を保ちます。さらに `voicevox` プラグインはマネージドモード
@@ -142,7 +145,28 @@ Kokoro-82M ONNX モデルを自プロセス内で直接実行します（`ene-vo
 エンジン経由）。API キー・外部エンジン・ローカルサーバーは不要です。モデル
 は最初の利用時に遅延ロードされ、24 kHz モノラル WAV を出力します。解決済み
 設定（モデル/ボイスパス・ボイス・速度・言語）が変わるとエンジンを再構築
-します。
+します。ONNX モデルと `voices.bin` は不足時に初回利用で共有モデルキャッシュへ
+ダウンロードされます（ランタイムの prefetch とデスクトップのダウンロード UI が
+廃止されたため、取得はプラグインが担います）。
+
+STT と VAD も同じアダプタパターンに従います。`whisper` プラグイン
+（`plugins/provider/whisper`）は whisper.cpp を自プロセスで実行します。
+`ene-plugin-host` の `IpcSttProvider` / `IpcSttProviderFactory`
+（`ipc_stt.rs` / `stt_factory.rs`）は `ene_ai::SttProvider` /
+`SttProviderFactory` を実装し、マイク PCM を WAV にエンコードして
+`TranscribeAudio` ラウンドトリップで送信します（TTS のデコードの鏡像）。
+`onnx` プラグイン（`plugins/provider/onnx`）は Silero VAD エンジンを
+v7 の `ProcessVadChunk` ラウンドトリップで提供します。`IpcVadEngine` /
+`IpcVadFactory`（`ipc_vad.rs`）は、キャプチャスレッドからの**同期**
+`ene_ai::VadEngine::process_chunk` 呼び出しを `Handle::block_on` で橋渡しします
+—— 32 ms フレームあたりローカル IPC 往復 1 回で、置き換えたプロセス内 ONNX
+推論と同程度です。VAD エンジンの状態はプラグインプロセス側に
+ホスト生成の `session_id` をキーとして保持され、`reset` で破棄されます。
+エンジンの drop 時にも最終 `reset` が送られるため、マイクのオン・オフを
+繰り返してもプラグイン側にセッションが漏れません。`VadProviderSpec` は
+エンジンの `frame_size` と `sample_rate`（既定 16 kHz）を保持し、各チャンクの
+往復は 2 秒タイムアウトで制限されるため、動かなくなったプラグインが既定の
+2 分タイムアウトまでオーディオコールバックを固めることはありません。
 
 `edge-tts` プラグイン（`plugins/provider/edge-tts`）は、同じ `TtsPlugin`
 契約を Microsoft の無料・キー不要な Edge 読み上げ WebSocket エンドポイント
@@ -229,7 +253,7 @@ requires: ["gguf-runner@^1", "g2p/ja@^1?"]
 - **ソフト要求が未充足** → プラグインは通常どおり起動し、警告のみ記録されます。フォールバックはプラグイン側の責務です。
 - **決定的な勝者**: 複数のプラグインが同じ能力を提供する場合、解決はプラグイン名の辞書順最小を選びます（`plugins.list` はマップのため設定順はタイブレーカーにできません）。明示的な提供者優先指定は将来の課題です。
 - **推移的**: 未充足で無効化されたプラグインは提供者として数えないため、その能力を要求する消費者も無効化されます（ゲートは fixpoint まで評価されます）。
-- **自己解決は許可**: プラグインの `requires` は自身の `provides` で充足できます。仲介経由で自身の能力を*呼べる*かどうかは別の ACL 判断です。
+- **自己解決は許可**: プラグインの `requires` は自身の `provides` で充足でき、仲介は自己呼び出しを呼び出し元自身の接続へルーティングします（全二重 IPC のためデッドロックはありません）。プロバイダ側の `provides` チェックは自己呼び出しにも適用されます。
 
 ### 4.4 `gguf-runner@1` 能力契約
 
@@ -239,7 +263,7 @@ requires: ["gguf-runner@^1", "g2p/ja@^1?"]
 requires: ["gguf-runner@^1"]
 ```
 
-runner API は設計上**非ストリーミング**です。トークンストリーミングが必要な消費者は、モデルプロバイダから直接 `llm/chat@1` を要求する設計にしてください。仲介（プラグインがホスト経由で `gguf-runner` を呼ぶ仕組み）は runner 実装とともに実装されますが、能力レベルの契約はここで固定します:
+runner API は設計上**非ストリーミング**です。トークンストリーミングが必要な消費者は、モデルプロバイダから直接 `llm/chat@1` を要求する設計にしてください。能力レベルの契約はここで固定します:
 
 | メソッド | リクエスト | レスポンス |
 |---|---|---|
@@ -247,13 +271,99 @@ runner API は設計上**非ストリーミング**です。トークンスト�
 | `embed` | `{ model, texts: [string] }` | `{ embeddings: [[number]] }` |
 | `unload` | `{ model }` | `{ ok: true }` |
 
-`model` は提供プラグインに設定されたモデルプロファイルを識別します。`json_schema`（指定時）は `generate` を構造化出力に制約します。`unload` はロード済みモデルの常駐メモリ（VRAM）を解放し、将来のリソース常駐管理のフックです。これらのメソッド名とペイロード形状が第三者実装の対象となる契約で、ワイヤエンコーディングは仲介層とともに定義されます。
+`model` は提供プラグインに設定されたモデルプロファイルを識別します。`json_schema`（指定時）は `generate` を構造化出力に制約します。`unload` はロード済みモデルの常駐メモリ（VRAM）を解放し、将来のリソース常駐管理のフックです。これらのメソッド名とペイロード形状が第三者実装の対象となる契約で、ワイヤエンコーディングは下記の仲介層（[§4.5](#45-能力呼び出しの仲介)）で定義されます。
 
 `gguf-runner@1` を提供する組み込みプロバイダは `ene-plugin-llama-cpp`
 (`plugins/provider/local-llm`) で、`llm/chat@1` と `embed@1` も宣言し、
 プロバイダ IPC 越しにチャットストリーミング・JSON スキーマ補完・GGUF
 埋め込みを提供します。プラグインクレートの CPU 契約テスト（固定 GGUF
 fixture 使用）で検証されます。
+
+### 4.5 能力呼び出しの仲介
+
+消費者プラグインは、プロバイダへの独自ソケットを張るのではなく、**必ずホスト経由で**プロバイダの能力を呼び出します——ホスト経由だけが監督・バージョン交渉・入場制御をループに保ちます。呼び出し経路は次のとおりです:
+
+```
+消費者プラグイン ── ホストサービス `capability` パッセンジャー ──> ホスト仲介層
+        ▲                                                          │ 解決（レジストリ）
+        └────────────────── CapabilityCallResult ◀────────────────┘
+        ホスト仲介層 ── プロバイダ IPC（CapabilityCall）──> プロバイダプラグイン
+```
+
+**ワイヤエンコーディング。** 両ホップは 1 つの正規ボディを共有します:
+
+- 消費者 → ホスト（`CapabilityServiceRequest::Call { call }`）:
+  `CapabilityCall` = `{ capability: "gguf-runner@1", method, payload }`。
+  `method` / `payload` は能力契約の表に従い、ペイロードはホストにとって不透明です。
+- ホスト → プロバイダ: `PluginIpcRequest::CapabilityCall { request_id, call }`
+  （同じボディをプロバイダ接続で多重化）。
+- 結果: `CapabilityCallResult = Ok(JSON) | Err({ code, message })`。安定した
+  snake_case コード: `forbidden`（呼び出し元が能力を宣言していない）、
+  `no_provider`（起動時ゲート後も未解決）、`invalid_request`、
+  `not_supported`（プロバイダが提供しない、または能力呼び出し以前のバイナリ）、
+  `provider`、`timeout`、`transport`（プロバイダ死亡・接続喪失）、`internal`。
+
+**ACL。** 呼び出し元の身元はホストサービスの認証トークンです（`db`
+パッセンジャーと同じプラグイン単位トークン——他プラグインの身元を偽造できません）。
+各呼び出しは*呼び出し元自身の* `requires` 宣言に対して認可されます:
+要求された能力の名前と major がそのいずれか（ハード **または** ソフト——どちらも
+意図の表明です）に一致し、その要求をゲート後のレジストリで解決します。
+したがって、宣言していない能力を呼ぶことはできず、起動時 fixpoint で無効化された
+プロバイダが仲介呼び出しを満たすこともありません。
+
+**プロバイダ側。** プロバイダは `CapabilityProvider` トレイト
+（`call_capability(capability, method, payload)`）を実装し、
+`PluginDispatch::with_capability_provider` で配線します。プラグインサーバーは
+`provides` に宣言した能力の呼び出しのみルーティングし（ホストが誤配信しても
+未宣言の能力は提供されない）、ハンドシェイクで `supports_capability_calls` を
+広告します——ホストは能力呼び出し以前のプロバイダバイナリへの仲介を拒否し、
+接続レベルのデコード失敗ではなく `not_supported` を返します。
+
+**失敗の意味論。** プロバイダホップは接続のリクエスト単位タイムアウト（デフォルト
+2 分）、トランスポート障害時の再接続+1 回再試行、同時実行制限を再利用します。
+プロバイダのクラッシュは消費者へ `transport` として伝わり、スーパーバイザが
+プロバイダを再起動します。消費者のセッションは生き残り、後続の呼び出しは再試行
+されます。初回のモデルロードは 2 分のリクエスト単位タイムアウト内に収まる必要が
+あります（通常は収まりますが、大きな GGUF のコールドダウンロードは収まらない
+可能性があります）。その場合の `timeout` は再試行可能で、その間もプロバイダは
+他の呼び出しを処理し続けます。呼び出しは非ストリーミングです（契約と同様）。
+ストリームが必要な消費者は `llm/chat@1` を直接要求してください。
+
+**常駐の共有。** `unload` はプロバイダのモデル常駐に作用しますが、その常駐は
+ホスト自身のリクエスト（チャット・埋め込み）と共有されています。消費者の
+`unload` はホストが現在使用中のモデルを追い出す可能性があります。次のホスト
+リクエストは単に再ロードするだけです（コールドロードと同じコスト）ので、
+`unload` は安全ですが無料ではありません。
+
+### 4.6 `onnx-runner@1` 能力契約
+
+`onnx-runner@1` は**ONNX Runtime の動的ライブラリをロードして ONNX セッションを
+実行する**能力です——ONNX を使うプラグインが、N 回の個別 dylib ロードの代わりに
+共有される単一の ONNX Runtime をホストが追跡し（将来は仲介し）られるよう宣言する
+ランタイムです。ONNX Runtime は `load-dynamic` のためビルド時のリンクは無く、
+各プラグインプロセスが初回利用時に dylib を 1 回ロードします。提供する組み込み
+プロバイダは `ene-plugin-onnx`（`plugins/provider/onnx`）と `ene-plugin-kokoro`
+（`plugins/provider/kokoro`）で、どちらも `ene-voice` の共有 `ort_init` 経由で
+自プロセスに dylib をロードします（プロセスごとに最初の呼び出し元の
+`ort_dylib_path` が優先されます）。
+
+### 4.7 `g2p` 能力契約
+
+`g2p/en@1` は**英語規則による書記素→音素変換**の能力です（`ene-voice` の `g2p`
+モジュールにある組み込み規則）。提供元は `ene-plugin-onnx` です。`g2p/ja@^1` は
+日本語版で、onnx プラグインは**ソフト要求**（`g2p/ja@^1?`）として宣言します——
+サードパーティの日本語 G2P プロバイダが提供でき、ホストは宣言を解決しますが、
+存在しない場合は組み込みの音素化が引き続き動作します。これらの能力のクロス
+プラグイン呼び出しは上記の能力仲介層を使用します。宣言契約は、プロバイダを
+今日から作れるようここで固定します。
+
+### 4.8 `whisper-runner@1` 能力契約
+
+`whisper-runner@1` は**生 PCM 音声に対する whisper.cpp 文字起こし**の能力です——
+サードパーティの消費者が自前の whisper.cpp ビルドを同梱する代わりに共有できる
+STT ランタイムです。提供元は `ene-plugin-whisper`（`plugins/provider/whisper`）で、
+プロバイダ IPC（`TranscribeAudio`、WAV 入力 → テキスト出力）でも
+`stt/whisper` を提供します。
 
 ---
 
@@ -280,9 +390,11 @@ fixture 使用）で検証されます。
 | `ene-plugin-elevenlabs` | Provider | ElevenLabs TTS プロバイダプラグイン（REST + WebSocket ストリーミング）— WAV（16-bit PCM）音声 | いいえ |
 | `ene-plugin-llama-cpp` | Provider | ローカル GGUF (llama.cpp) プロバイダプラグイン — チャットストリーミング・補完・GGUF 埋め込み | いいえ |
 | `ene-plugin-kokoro` | Provider | ローカル Kokoro-82M ONNX TTS プロバイダプラグイン — プロセス内 ONNX 推論による 24 kHz WAV | いいえ |
+| `ene-plugin-onnx` | Provider | ローカル ONNX プロバイダプラグイン — Silero VAD エンジン（`ai.vad.provider = "silero"`）、`onnx-runner@1` / `g2p/en@1` を宣言 | いいえ |
 | `ene-plugin-voicevox` | Provider | VOICEVOX / Aivis Speech TTS プロバイダプラグイン — 2 段階 `audio_query` → `synthesis` フローによる WAV 音声 | いいえ |
+| `ene-plugin-whisper` | Provider | ローカル whisper.cpp STT プロバイダプラグイン — プロセス内 whisper.cpp 推論による WAV 文字起こし、`whisper-runner@1` を宣言 | いいえ |
 
-上記 19 プラグインはすべてデフォルトの `plugins.list` に含まれており、
+上記 22 プラグインはすべてデフォルトの `plugins.list` に含まれており、
 新規インストール時に自動的に起動します。
 
 ### ファイルツールリファレンス (`filesystem.*`)

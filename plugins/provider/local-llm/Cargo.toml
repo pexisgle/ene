@@ -40,7 +40,10 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 [dev-dependencies]
 blake3 = { workspace = true }
 ene-infer = { workspace = true, features = ["test-util"] }
+ene-plugin-host = { workspace = true }
 ene-plugin-proto = { workspace = true }
+ene-store = { workspace = true }
+sea-orm = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 

@@ -820,6 +820,11 @@ the declared embedding dimensions from it. Version-3 files are migrated to
 version 4 on load: the same mirror runs again so installs that reached v3
 before `context_size` / `dimensions` joined the key set receive them without
 a hand edit (existing non-empty profile values are still never overwritten).
+Version-4 files are migrated to version 5 on load: `ai.stt.model_path` moves
+to `plugins.list.whisper.config.model_path`, and
+`ai.vad.{model,model_path,threshold}` move to
+`plugins.list.onnx.config.{model,model_path,threshold}` (the provider
+plugins now own them).
 
 #### `plugins.list.<name>.profiles.<profile>` — per-profile settings (#313)
 
@@ -973,11 +978,10 @@ engine. Select it with `ai.tts.provider = "kokoro"`; the generic
 `jf_alpha`) that overrides the configured default per request.
 
 The ONNX model and `voices.bin` embeddings are fetched into the shared
-models cache (`ene_voice`'s download/prefetch path; the desktop Settings →
-Voice page downloads them on demand). Custom `model_path` / `voices_path`
-values override the cache locations and are prefetched to those same paths
-when missing (bootstrap resolves them from this plugin config); files
-already present are never re-downloaded.
+models cache by the plugin itself on first use (files already present and
+valid are never re-downloaded). Custom `model_path` / `voices_path` values
+override the cache locations and are fetched to those same paths when
+missing.
 
 ```json
 {
@@ -1014,7 +1018,7 @@ Settings:
 | `voice` | `""` (first voice in `voices.bin`, `af_alloy`) | Default voice; a per-request `ai.tts.voice` overrides it. See the capability list for all 53 voice names. Alternating per-request voices reload the model on each switch. |
 | `speed` | `1.0` | Speech speed multiplier (0.5–2.0). |
 | `language` | unset (English G2P) | Grapheme-to-phoneme language: `"ja"` selects the Japanese kana rules, anything else the English rules. |
-| `ort_dylib_path` | unset (`ort` default resolution) | ONNX Runtime dynamic library path override. Fixed at process start: ONNX Runtime initializes once per process, so a change requires a restart. The in-process fallback honors this key first, then the legacy `plugins.list.onnx.config.ort_dylib_path`. |
+| `ort_dylib_path` | unset (`ort` default resolution) | ONNX Runtime dynamic library path override. Fixed at process start: ONNX Runtime initializes once per process, so a change requires a restart. Falls back to the shared `plugins.list.onnx.config.ort_dylib_path` slot. |
 
 Every key can be overridden per environment variable as
 `ENE_PLUGINS__LIST__KOKORO__CONFIG__<KEY>`
@@ -1027,18 +1031,101 @@ returns 24 kHz mono WAV, which the host-side audio pipeline decodes into
 float samples and slices into `TtsChunk`s for streaming playback
 (`formats = ["wav"]`).
 
-Note that `ai.tts.model_path` / `ai.tts.model` are honored only by the
-in-process fallback path (see below); the plugin path reads `model_path`
-from its own config.
+All local voice providers (TTS, STT, VAD) now run exclusively in plugin
+processes; `ene-runtime` / `ene-desktop` no longer depend on `ene-voice`.
 
-**In-process fallback.** If the plugin host is unavailable at startup or the
-`kokoro` plugin is disabled, the runtime's built-in `ene-voice` factory still
-serves `ai.tts.provider = "kokoro"` in-process (honoring `ai.tts.model_path`
-/ `ai.tts.model` / `ai.tts.speed` and the `profiles.kokoro.voices_path`
-slot). The fallback only applies while the plugin never registered: once the
-plugin factory registers, a later plugin failure leaves `kokoro` unavailable
-until the next restart, because the in-process factory is not re-registered
-mid-session.
+#### Local whisper.cpp STT provider (`plugins.list.whisper.config`)
+
+The `whisper` provider plugin (`plugins/provider/whisper`) runs whisper.cpp
+in its own process — fully local, no API key. Select it with
+`ai.stt.provider = "whisper"`; the generic `ai.stt.language` field (e.g.
+`"ja"`, `"en"`; empty = auto-detect) and `ai.stt.model` (used as a path
+fallback) are forwarded to the plugin per request, mirroring how the TTS
+adapter forwards `ai.tts.voice`.
+
+```json
+{
+  "ai": {
+    "stt": {
+      "provider": "whisper",
+      "model": "ggml-base.bin",
+      "language": "ja"
+    }
+  },
+  "plugins": {
+    "list": {
+      "whisper": {
+        "enable": true,
+        "config": {
+          "model_path": "/data/ggml-base.bin"
+        }
+      }
+    }
+  }
+}
+```
+
+Settings:
+
+| Key | Default | Description |
+|---|---|---|
+| `model_path` | `ai.stt.model` → shared models cache (`models/gguf/whisper.gguf`) | whisper.cpp GGUF model file path. The former `ai.stt.model_path` moved here in config version 5. |
+
+Every key can be overridden per environment variable as
+`ENE_PLUGINS__LIST__WHISPER__CONFIG__<KEY>`
+(e.g. `ENE_PLUGINS__LIST__WHISPER__CONFIG__MODEL_PATH`).
+
+The model loads lazily on the first transcription and stays resident in the
+plugin process; changing `model_path` or the language hint reloads it. The
+host encodes captured PCM into WAV before the `TranscribeAudio` round trip
+(`formats = ["wav"]`), so the plugin needs no audio capture code.
+
+#### Local Silero VAD engine (`plugins.list.onnx.config`)
+
+The `onnx` provider plugin (`plugins/provider/onnx`) runs the Silero VAD
+ONNX engine in its own process and declares the shared `onnx-runner@1` /
+`g2p/en@1` capabilities. Select it with `ai.vad.provider = "silero"`
+(the desktop's microphone capture defaults to it when VAD is `"none"`).
+
+```json
+{
+  "ai": {
+    "vad": {
+      "provider": "silero"
+    }
+  },
+  "plugins": {
+    "list": {
+      "onnx": {
+        "enable": true,
+        "config": {
+          "model_path": "/data/silero_vad.onnx",
+          "threshold": 0.5,
+          "ort_dylib_path": "/opt/onnxruntime/lib/libonnxruntime.so"
+        }
+      }
+    }
+  }
+}
+```
+
+Settings:
+
+| Key | Default | Description |
+|---|---|---|
+| `model` | `""` | Silero VAD model name; used as a path fallback when `model_path` is unset. |
+| `model_path` | `model` → shared models cache (`models/gguf/silero_vad.onnx`) | Silero VAD ONNX model file path. The former `ai.vad.model_path` moved here in config version 5. |
+| `threshold` | `0.5` | Speech probability threshold (0.0–1.0). The former `ai.vad.threshold` moved here in config version 5; the desktop Settings → Voice / Features sliders write this key. |
+| `ort_dylib_path` | unset (`ort` default resolution) | ONNX Runtime dynamic library path override (also the legacy home of the former `ai.ort_dylib_path`). Fixed at process start: ONNX Runtime initializes once per process. |
+
+Every key can be overridden per environment variable as
+`ENE_PLUGINS__LIST__ONNX__CONFIG__<KEY>`
+(e.g. `ENE_PLUGINS__LIST__ONNX__CONFIG__THRESHOLD`).
+
+The engine loads lazily on the first processed chunk of a capture session
+and stays resident; VAD state (recurrent cell state, speech edge tracking)
+lives in the plugin process per host-generated `session_id`, and each
+`process_chunk` is one IPC round trip per 32 ms frame.
 
 #### OpenAI Speech API TTS provider (`plugins.list.openai-tts.config`)
 

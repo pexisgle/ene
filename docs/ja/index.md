@@ -38,7 +38,7 @@ Ene ワークスペース
 │   ├── ene-core           (永続化非依存のドメイン語彙 & メモリポート)
 │   ├── ene-ai             (コア AI プロバイダトレイト、OpenAI、Anthropic アダプタ)
 │   ├── ene-infer          (ローカルモデルエンジン: ワーカースレッド、キュー、適合性試験)
-│   ├── ene-voice          (ローカル STT/TTS/VAD 音声パイプライン)
+│   ├── ene-voice          (ローカル STT/TTS/VAD エンジン。プロバイダプラグインが消費)
 │   ├── ene-rag            (RAG ポリシー: 記憶スコアリング/減衰、ツール選択)
 │   ├── ene-connector      (外部サービスの認証情報 & アイデンティティ権威)
 │   ├── ene-util           (純粋ユーティリティ: 切り詰め、HTML→Markdown)

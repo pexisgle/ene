@@ -1,11 +1,12 @@
 //! Memory forgetting lifecycle: status transitions and decay scoring.
 //!
 //! Decay scoring and thresholds live in `ene-rag` (the RAG policy layer); this
-//! module is `pub(crate)`, so nothing here is reachable from outside
-//! `ene-store`. [`active_decay_anchor`] is re-exported with `pub(crate) use` so
-//! store code keeps its `crate::forgetting::*` paths. The pure state-machine
-//! validators ([`validate_transition`] / [`validate_user_restore`]) stay here —
-//! they are lifecycle policy, not scoring policy.
+//! module is `pub(crate)`; [`active_decay_anchor`] is re-exported with
+//! `pub(crate) use` so store code keeps its `crate::forgetting::*` paths, and
+//! the pure state-machine validators ([`validate_transition`] /
+//! [`validate_user_restore`]) are re-exported from the crate root for
+//! lifecycle-policy consumers (journal/CLI UX gating). They are lifecycle
+//! policy, not scoring policy.
 
 use ene_core::MemoryStatus;
 

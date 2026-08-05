@@ -118,6 +118,15 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // `ai.tts.provider = "kokoro"` selects it.
     list.insert("kokoro".to_string(), PluginEntry::default());
 
+    // The local ONNX provider plugin (Silero VAD + onnx-runner / g2p
+    // capabilities) loads the ONNX model on first use; it is inert until
+    // `ai.vad.provider = "silero"` selects it.
+    list.insert("onnx".to_string(), PluginEntry::default());
+
+    // The local whisper.cpp STT provider plugin loads the GGUF model on
+    // first use; it is inert until `ai.stt.provider = "whisper"` selects it.
+    list.insert("whisper".to_string(), PluginEntry::default());
+
     // The Edge-TTS provider plugin talks to Microsoft's free, keyless Edge
     // Read Aloud WebSocket endpoint; it is inert until
     // `ai.tts.provider = "edge-tts"` selects it.
