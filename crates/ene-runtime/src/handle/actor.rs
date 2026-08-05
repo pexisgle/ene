@@ -26,14 +26,15 @@ use super::SharedActorState;
 use super::TurnGate;
 use super::command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
 use super::event::{
-    AudioChunk, EneEvent, EneStateSnapshot, EneStatus, LifecycleEvent, TerminalReason,
+    AudioChunk, EneEvent, EneStateSnapshot, EneStatus, LifecycleEvent, MemoryLedgerChange,
+    TerminalReason,
 };
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
 use crate::error::EneRuntimeError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::{RequestId, TurnId};
 use crate::vision::VisionPrepared;
-use ene_ai::{AiTaskKind, LlmProviderRegistry, create_task_chat_provider};
+use ene_ai::{AiTaskKind, ProviderHost, create_task_chat_provider};
 use ene_config::EneConfig;
 use ene_core::{ScheduleConfirmation, ScheduleRunStatus};
 use ene_mind::commitments::CommitmentLedger;
@@ -228,6 +229,11 @@ pub(super) struct TurnActor {
     /// Plugin-contributed tool registries, re-merged when the tool registry is
     /// rebuilt after a Features update.
     plugin_tool_registries: Vec<Arc<dyn ToolRegistry>>,
+    /// Live provider catalog: routes provider creation to the current plugin
+    /// host. Kept separate from [`Self::plugin_host`] so test stubs can
+    /// stand in for the host and so lazy resolvers (the embedding proxy)
+    /// share one seam.
+    provider_host: Arc<dyn ProviderHost>,
     /// Shared plugin host manager handle. Held by the actor so a Features
     /// update that changes the enabled plugin set can restart the host with
     /// the new configuration (E1). Shared with [`crate::EneHandle`] so shutdown
@@ -293,6 +299,7 @@ impl TurnActor {
         health_monitor: ene_ai::ProviderHealthMonitor,
         tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
         plugin_tool_registries: Vec<Arc<dyn ToolRegistry>>,
+        provider_host: Arc<dyn ProviderHost>,
         plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
         health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
         host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -376,6 +383,7 @@ impl TurnActor {
             task_caps,
             tts_provider,
             plugin_tool_registries,
+            provider_host,
             plugin_host,
             health_bridge_handle,
             host_service_handle,
@@ -584,6 +592,79 @@ impl TurnActor {
         self.workspace_sync_task = Some(task);
         self.workspace_cancel = Some(cancel);
         Ok(())
+    }
+
+    /// Re-embeds an edited memory's content in the background so vector
+    /// recall does not serve stale text.
+    ///
+    /// Best-effort: the in-place edit has already committed and lexical recall
+    /// is immediately correct, so embedding failures are logged, never
+    /// surfaced to the caller. The task captures the row's `updated_at` before
+    /// embedding and re-checks it right before writing; a newer edit (which
+    /// spawns its own task) bumps `updated_at`, so a slow older task skips its
+    /// write instead of overwriting the newer embedding.
+    async fn spawn_memory_reembed(&mut self, id: i64, edit: &ene_store::MemoryEdit) {
+        let Some(store) = self.concrete_store.clone() else {
+            return;
+        };
+        let Some(embedder) = self.session.memory.embedding_provider.clone() else {
+            return;
+        };
+        let Ok(Some(memory)) = store.get_typed_memory(id).await else {
+            return;
+        };
+        let expected_updated_at = memory.updated_at;
+        if !admit_task(
+            &mut self.bg_command_tasks,
+            self.task_caps.bg_command_cap,
+            "BgCommand",
+            Some("MemoryReembed".to_string()),
+            &self.diag_tx,
+        ) {
+            tracing::warn!(
+                component = "TurnActor",
+                memory_id = id,
+                "Memory re-embed rejected: background task capacity exhausted"
+            );
+            return;
+        }
+
+        let content = edit.content.clone();
+        self.bg_command_tasks.spawn(async move {
+            let model_name = embedder.model_name();
+            let Ok(embedding) =
+                ene_ai::embed(embedder.as_ref(), &content, ene_ai::EmbeddingKind::Summary).await
+            else {
+                tracing::warn!(
+                    component = "MemoryReembed",
+                    memory_id = id,
+                    "Failed to embed edited memory content"
+                );
+                return;
+            };
+            let Ok(Some(current)) = store.get_typed_memory(id).await else {
+                return;
+            };
+            if current.updated_at != expected_updated_at {
+                tracing::debug!(
+                    component = "MemoryReembed",
+                    memory_id = id,
+                    "Skipping stale re-embed; memory was edited again"
+                );
+                return;
+            }
+            if let Err(error) = store
+                .upsert_memory_embedding(id, model_name, "content", &embedding)
+                .await
+            {
+                tracing::warn!(
+                    component = "MemoryReembed",
+                    memory_id = id,
+                    error = %error,
+                    "Failed to re-embed edited memory content"
+                );
+            }
+        });
     }
 
     pub(super) async fn run(mut self) {
@@ -1142,8 +1223,11 @@ impl TurnActor {
         let cell = Arc::clone(&self.proactive_llm);
         let init_spawned = Arc::clone(&self.proactive_llm_init_spawned);
         let config = self.config.clone();
+        let provider_host = Arc::clone(&self.provider_host);
         self.bg_command_tasks.spawn(async move {
-            match crate::proactive_llm::build_proactive_llm_handles(&config).await {
+            match crate::proactive_llm::build_proactive_llm_handles(&config, provider_host.as_ref())
+                .await
+            {
                 Ok(handles) => {
                     tracing::info!(
                         component = "Proactive",
@@ -1998,10 +2082,12 @@ impl TurnActor {
     ///
     /// The previous provider instance (built at bootstrap) holds an IPC
     /// connection to the old host's plugin process, which `shutdown()` has
-    /// killed, so it must be replaced by a fresh instance from the registry.
-    /// Mirrors the bootstrap path's failure handling: an unbuildable
-    /// provider disables TTS with a warning rather than failing the turn.
-    fn rebuild_tts_provider(&mut self) {
+    /// killed, so it must be replaced by a fresh instance from the host
+    /// registry (falling back to the in-process `ene-voice` Kokoro factory
+    /// when the plugin host is gone). Mirrors the bootstrap path's failure
+    /// handling: an unbuildable provider disables TTS with a warning rather
+    /// than failing the turn.
+    async fn rebuild_tts_provider(&mut self) {
         let ai_config = match self.config.get_section::<ene_ai::AiConfig>() {
             Ok(config) => config,
             Err(e) => {
@@ -2018,7 +2104,13 @@ impl TurnActor {
             self.tts_provider = None;
             return;
         };
-        match ene_ai::AudioProviderRegistry::create_tts_provider(&resolved.provider, &self.config) {
+        match super::resolve_tts_provider(
+            self.provider_host.as_ref(),
+            &self.config,
+            &resolved.provider,
+        )
+        .await
+        {
             Ok(provider) => {
                 self.tts_provider = Some(Arc::from(provider));
                 tracing::info!(
@@ -2841,11 +2933,48 @@ impl TurnActor {
             } => {
                 self.registry = registry;
                 self.plugin_tool_registries = plugin_tool_registries;
-                self.rebuild_tts_provider();
+                self.rebuild_tts_provider().await;
                 true
             }
             EneCommand::RebuildTtsProvider => {
-                self.rebuild_tts_provider();
+                self.rebuild_tts_provider().await;
+                true
+            }
+            EneCommand::PluginProviderDisabled { plugin, factories } => {
+                let mut guard = self.plugin_host.lock().await;
+                let removal = guard
+                    .as_mut()
+                    .map_or_else(ene_plugin_host::ProviderFactoryRemoval::default, |host| {
+                        host.remove_provider_factories_if_match(&factories)
+                    });
+                drop(guard);
+                if removal.tts > 0 {
+                    self.rebuild_tts_provider().await;
+                }
+                tracing::info!(
+                    component = "TurnActor",
+                    plugin = %plugin,
+                    llm = removal.llm,
+                    embedding = removal.embedding,
+                    tts = removal.tts,
+                    "Evicted provider factories for permanently disabled plugin"
+                );
+                true
+            }
+            EneCommand::ProbeChatCandidates { reply } => {
+                self.probe_chat_candidates(reply);
+                true
+            }
+            EneCommand::CreateChatProvider { reply } => {
+                let result = create_task_chat_provider(
+                    &self.config,
+                    AiTaskKind::Chat,
+                    self.provider_host.as_ref(),
+                )
+                .await
+                .map(Arc::from)
+                .map_err(|e| e.to_string());
+                drop(reply.send(result));
                 true
             }
             EneCommand::PermissionDecision {
@@ -3495,6 +3624,72 @@ impl TurnActor {
                 drop(reply.send(result));
                 true
             }
+            EneCommand::EditMemory {
+                id,
+                edit,
+                turn,
+                reply,
+            } => {
+                let Some(store) = self.concrete_store.clone() else {
+                    drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
+                        message: "Memory store is not enabled".to_string(),
+                    })));
+                    return true;
+                };
+                let owner = Some(self.config.user_name.clone());
+                let result = match store.update_typed_memory(id, &edit, owner.as_deref()).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(crate::public_api::PublicApiError::NotFound {
+                        message: format!("memory {id} not found"),
+                    }),
+                    Err(error) => Err(crate::public_api::PublicApiError::from(error)),
+                };
+                if result.is_ok() {
+                    if let Some(cache) = &self.session.memory.recall_cache {
+                        cache.invalidate_character(self.session.card_name());
+                    }
+                    self.spawn_memory_reembed(id, &edit).await;
+                    drop(self.lifecycle_tx.send(LifecycleEvent::MemoryLedgerChanged {
+                        id,
+                        action: MemoryLedgerChange::Edited,
+                        turn,
+                    }));
+                }
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::SetMemorySalience {
+                id,
+                salience,
+                turn,
+                reply,
+            } => {
+                let Some(store) = self.concrete_store.clone() else {
+                    drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
+                        message: "Memory store is not enabled".to_string(),
+                    })));
+                    return true;
+                };
+                let result = match store.set_memory_salience(id, salience).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(crate::public_api::PublicApiError::NotFound {
+                        message: format!("memory {id} not found"),
+                    }),
+                    Err(error) => Err(crate::public_api::PublicApiError::from(error)),
+                };
+                if result.is_ok() {
+                    if let Some(cache) = &self.session.memory.recall_cache {
+                        cache.invalidate_character(self.session.card_name());
+                    }
+                    drop(self.lifecycle_tx.send(LifecycleEvent::MemoryLedgerChanged {
+                        id,
+                        action: MemoryLedgerChange::SalienceAdjusted,
+                        turn,
+                    }));
+                }
+                drop(reply.send(result));
+                true
+            }
             EneCommand::SetCcv3MemoryHash { hash, reply } => {
                 self.session.memory.ccv3_memory_hash = Some(hash);
                 // A oneshot send error is `Copy` here (it's just the unsent
@@ -3581,7 +3776,7 @@ impl TurnActor {
         // Create the provider before mutating history so a failed open leaves
         // the session unchanged.
         let provider = match if origin == crate::types::TurnOrigin::Proactive {
-            self.create_proactive_provider()
+            self.create_proactive_provider().await
         } else {
             self.create_provider().await
         } {
@@ -3693,6 +3888,7 @@ impl TurnActor {
         self.stream_session_rx = Some(session_rx);
 
         let concrete_store_for_stream = self.concrete_store.clone();
+        let provider_host = Arc::clone(&self.provider_host);
         let handle = tokio::spawn(async move {
             let panic_event_tx = event_tx.clone();
             let panic_terminal_emitted = Arc::clone(&terminal_emitted);
@@ -3708,6 +3904,7 @@ impl TurnActor {
                         registry,
                         tool_rag,
                         provider,
+                        provider_host,
                         event_tx,
                         audio_tx,
                         diag_tx,
@@ -3782,28 +3979,44 @@ impl TurnActor {
 
         // Fast path: failover disabled → use the configured chat task directly.
         if !ai_config.fallback.enabled {
-            return create_task_chat_provider(&self.config, AiTaskKind::Chat)
-                .map(Arc::from)
-                .map_err(EneRuntimeError::from);
+            return create_task_chat_provider(
+                &self.config,
+                AiTaskKind::Chat,
+                self.provider_host.as_ref(),
+            )
+            .await
+            .map(Arc::from)
+            .map_err(EneRuntimeError::from);
         }
 
         // Failover path: probe candidates in priority order and pick the first
         // healthy one. Probes send no user data.
         let candidates = ai_config.resolve_chat_candidates();
         if candidates.is_empty() {
-            return create_task_chat_provider(&self.config, AiTaskKind::Chat)
-                .map(Arc::from)
-                .map_err(EneRuntimeError::from);
+            return create_task_chat_provider(
+                &self.config,
+                AiTaskKind::Chat,
+                self.provider_host.as_ref(),
+            )
+            .await
+            .map(Arc::from)
+            .map_err(EneRuntimeError::from);
         }
 
         let timeout = std::time::Duration::from_millis(ai_config.fallback.health_check_timeout_ms);
-        let selection = ene_ai::select_healthy_chat(&candidates, &self.health_monitor, timeout)
-            .await
-            .ok_or_else(|| {
-                EneRuntimeError::from(ene_ai::LlmProviderError::Provider(
-                    "no chat provider candidates available".to_string(),
-                ))
-            })?;
+        let selection = ene_ai::select_healthy_chat(
+            &candidates,
+            &self.health_monitor,
+            self.provider_host.as_ref(),
+            &self.config,
+            timeout,
+        )
+        .await
+        .ok_or_else(|| {
+            EneRuntimeError::from(ene_ai::LlmProviderError::Provider(
+                "no chat provider candidates available".to_string(),
+            ))
+        })?;
 
         // Emit a health diagnostic for every probed candidate so the UI can
         // show per-provider status without polling.
@@ -3845,15 +4058,61 @@ impl TurnActor {
             ..ene_ai::TaskRef::default()
         };
         task.model = Some(candidate.model.clone());
-        let provider = ene_ai::create_chat_provider_for_task(&self.config, &task)
-            .map_err(EneRuntimeError::from)?;
+        let provider =
+            ene_ai::create_chat_provider_for_task(&self.config, &task, self.provider_host.as_ref())
+                .await
+                .map_err(EneRuntimeError::from)?;
         Ok(Arc::from(provider))
     }
 
-    fn create_proactive_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
-        create_task_chat_provider(&self.config, AiTaskKind::Proactive)
-            .map(Arc::from)
-            .map_err(EneRuntimeError::from)
+    async fn create_proactive_provider(
+        &self,
+    ) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
+        create_task_chat_provider(
+            &self.config,
+            AiTaskKind::Proactive,
+            self.provider_host.as_ref(),
+        )
+        .await
+        .map(Arc::from)
+        .map_err(EneRuntimeError::from)
+    }
+
+    /// Probe every chat failover candidate through the provider host.
+    ///
+    /// Runs in a background task so slow probes cannot stall the actor loop.
+    /// Probes are fresh and non-caching (the shared failover monitor is not
+    /// warmed). Used by the CLI `/doctor` fallback check.
+    fn probe_chat_candidates(&self, reply: oneshot::Sender<Vec<ene_ai::ProviderHealthReport>>) {
+        let ai_config = self
+            .config
+            .get_section::<ene_ai::AiConfig>()
+            .unwrap_or_default();
+        let candidates = ai_config.resolve_chat_candidates();
+        let timeout = std::time::Duration::from_millis(ai_config.fallback.health_check_timeout_ms);
+        let provider_host = Arc::clone(&self.provider_host);
+        let config = self.config.clone();
+        let diag_tx = self.diag_tx.clone();
+        tokio::spawn(async move {
+            // Fresh probes of every candidate: unlike failover selection,
+            // this must not stop at the first healthy provider, and it must
+            // not warm the turn-path cache.
+            let reports = if ai_config.fallback.enabled {
+                ene_ai::probe_chat_candidates(&candidates, provider_host.as_ref(), &config, timeout)
+                    .await
+            } else {
+                Vec::new()
+            };
+            for report in &reports {
+                drop(diag_tx.send(DiagnosticEvent::ProviderHealth {
+                    provider: report.provider.clone(),
+                    status: report.status.status_code().to_string(),
+                    latency_ms: report.latency_ms,
+                    detail: report.error.clone(),
+                }));
+            }
+            drop(reply.send(reports));
+        });
     }
 
     // ── Undo management ──
@@ -4359,19 +4618,6 @@ fn finish_vision_prep(
     })
 }
 
-/// Kinds that were served by the old host's factories but are no longer
-/// served by the new host (or there is no new host at all).
-fn stale_llm_factory_names<T>(
-    old_kinds: &[String],
-    new_factories: Option<&HashMap<String, T>>,
-) -> Vec<String> {
-    old_kinds
-        .iter()
-        .filter(|kind| new_factories.is_none_or(|factories| !factories.contains_key(*kind)))
-        .cloned()
-        .collect()
-}
-
 /// Background plugin host reconfiguration.
 ///
 /// Performs the heavy I/O (host shutdown, DB IPC spawn, host start, health
@@ -4389,41 +4635,12 @@ async fn reconfigure_plugin_host_bg(
     diag_tx: broadcast::Sender<DiagnosticEvent>,
     cmd_tx: mpsc::UnboundedSender<EneCommand>,
 ) {
-    /// Factory snapshots captured from a running plugin host, keyed by provider
-    /// kind, kept after a host restart so stale-removal cannot evict a
-    /// replacement installed by another runtime handle.
-    type ProviderFactorySnapshots = (
-        HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
-        HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
-        HashMap<String, Arc<dyn ene_ai::TtsProviderFactory>>,
-    );
-
-    // Stop the previous host (and its health bridge) first. Keep the factory
-    // handles so stale removal below cannot evict a replacement installed by
-    // another runtime handle.
-    let (old_llm_factories, old_embedding_factories, old_tts_factories): ProviderFactorySnapshots = {
+    // Stop the previous host (and its health bridge) first. Provider
+    // creation is served by whichever manager the shared slot holds, so the
+    // old host's factories vanish with the swap below — no global
+    // re-registration or stale-kind eviction is needed.
+    {
         let mut guard = plugin_host.lock().await;
-        let (llm_factories, embedding_factories, tts_factories) = guard.as_ref().map_or_else(
-            || (HashMap::new(), HashMap::new(), HashMap::new()),
-            |host| {
-                let llm_factories = host
-                    .llm_factories()
-                    .iter()
-                    .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
-                    .collect();
-                let embedding_factories = host
-                    .embedding_factories()
-                    .iter()
-                    .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
-                    .collect();
-                let tts_factories = host
-                    .tts_factories()
-                    .iter()
-                    .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
-                    .collect();
-                (llm_factories, embedding_factories, tts_factories)
-            },
-        );
         if let Some(mut host) = guard.take() {
             host.shutdown().await;
         }
@@ -4433,8 +4650,7 @@ async fn reconfigure_plugin_host_bg(
         if let Some(handle) = bridge.take() {
             handle.abort();
         }
-        (llm_factories, embedding_factories, tts_factories)
-    };
+    }
 
     // Abort the previous host-service accept loop before rebinding the shared
     // socket path, or the stale listener keeps serving an unlinked socket
@@ -4443,26 +4659,30 @@ async fn reconfigure_plugin_host_bg(
         handle.abort();
     }
 
-    let db_tokens = match spawn_db_ipc_servers(&config, memory_store.as_ref()) {
-        Ok((tokens, new_handle)) => {
-            *host_service_handle.lock().await = new_handle;
-            tokens
-        }
-        Err(e) => {
-            *host_service_handle.lock().await = None;
-            tracing::warn!(
-                component = "TurnActor",
-                error = %e,
-                "Failed to spawn host service during plugin reconfiguration; \
-                 continuing without plugin DB access"
-            );
-            HashMap::new()
-        }
-    };
+    // The capability mediator resolves providers through the live host, so
+    // it is wired before the host starts; calls landing during startup fail
+    // with a typed "host is not running" error and are retryable.
+    let mediator: Arc<dyn ene_plugin_proto::CapabilityServiceHandler> = Arc::new(
+        ene_plugin_host::CapabilityMediator::new(Arc::clone(&plugin_host)),
+    );
+    let db_tokens =
+        match spawn_db_ipc_servers(&config, memory_store.as_ref(), Some(Arc::clone(&mediator))) {
+            Ok((tokens, new_handle)) => {
+                *host_service_handle.lock().await = new_handle;
+                tokens
+            }
+            Err(e) => {
+                *host_service_handle.lock().await = None;
+                tracing::warn!(
+                    component = "TurnActor",
+                    error = %e,
+                    "Failed to spawn host service during plugin reconfiguration; \
+                     continuing without plugin DB access"
+                );
+                HashMap::new()
+            }
+        };
 
-    // Start the new host before removing old entries. A surviving provider
-    // kind remains available until its replacement is registered, and stale
-    // entries are removed only when the new host does not serve that kind.
     let mut new_host = match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
         Ok(host) => Some(host),
         Err(e) => {
@@ -4476,96 +4696,6 @@ async fn reconfigure_plugin_host_bg(
         }
     };
 
-    let old_llm_factory_names: Vec<String> = old_llm_factories.keys().cloned().collect();
-    let stale_llm_kinds = stale_llm_factory_names(
-        &old_llm_factory_names,
-        new_host
-            .as_ref()
-            .map(ene_plugin_host::PluginHostManager::llm_factories),
-    );
-    for kind in stale_llm_kinds {
-        if let Some(factory) = old_llm_factories.get(&kind)
-            && LlmProviderRegistry::deregister_if_matches(&kind, factory)
-        {
-            tracing::info!(
-                component = "TurnActor",
-                kind = %kind,
-                "Deregistered stale plugin-provided LLM provider factory during reconfiguration"
-            );
-        }
-    }
-
-    // Embedding factories follow the same stale-removal / re-registration
-    // discipline as LLM factories, so a restarted host cannot leave
-    // embeddings pointing at a dead plugin connection.
-    let old_embedding_kinds: Vec<String> = old_embedding_factories.keys().cloned().collect();
-    let stale_embedding_kinds = stale_llm_factory_names(
-        &old_embedding_kinds,
-        new_host
-            .as_ref()
-            .map(ene_plugin_host::PluginHostManager::embedding_factories),
-    );
-    for kind in stale_embedding_kinds {
-        if let Some(factory) = old_embedding_factories.get(&kind)
-            && ene_ai::EmbeddingProviderRegistry::deregister_if_matches(&kind, factory)
-        {
-            tracing::info!(
-                component = "TurnActor",
-                kind = %kind,
-                "Deregistered stale plugin-provided embedding provider factory during reconfiguration"
-            );
-        }
-    }
-
-    // TTS factories follow the same stale-removal / re-registration
-    // discipline, so a restarted host cannot leave the audio registry
-    // pointing at a dead plugin connection.
-    let old_tts_kinds: Vec<String> = old_tts_factories.keys().cloned().collect();
-    let stale_tts_kinds = stale_llm_factory_names(
-        &old_tts_kinds,
-        new_host
-            .as_ref()
-            .map(ene_plugin_host::PluginHostManager::tts_factories),
-    );
-    for kind in stale_tts_kinds {
-        if let Some(factory) = old_tts_factories.get(&kind)
-            && ene_ai::AudioProviderRegistry::deregister_tts_if_matches(&kind, factory)
-        {
-            tracing::info!(
-                component = "TurnActor",
-                kind = %kind,
-                "Deregistered stale plugin-provided TTS provider factory during reconfiguration"
-            );
-        }
-    }
-
-    if let Some(host) = new_host.as_ref() {
-        for (kind, factory) in host.llm_factories() {
-            tracing::info!(
-                component = "TurnActor",
-                kind = %kind,
-                "Re-registered plugin-provided LLM provider factory after Features update"
-            );
-            LlmProviderRegistry::register(Arc::clone(factory));
-        }
-        for (kind, factory) in host.embedding_factories() {
-            tracing::info!(
-                component = "TurnActor",
-                kind = %kind,
-                "Re-registered plugin-provided embedding provider factory after Features update"
-            );
-            ene_ai::EmbeddingProviderRegistry::register(Arc::clone(factory));
-        }
-        for (kind, factory) in host.tts_factories() {
-            tracing::info!(
-                component = "TurnActor",
-                kind = %kind,
-                "Re-registered plugin-provided TTS provider factory after Features update"
-            );
-            ene_ai::AudioProviderRegistry::register_tts(Arc::clone(factory));
-        }
-    }
-
     let mut bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
     if let Some(host) = new_host.as_mut()
         && let Some(mut health_rx) = host.take_health_receiver()
@@ -4578,14 +4708,25 @@ async fn reconfigure_plugin_host_bg(
         bridge_handle = Some(tokio::spawn(async move {
             while let Some(event) = health_rx.recv().await {
                 if let PluginHealthEvent::Disabled { plugin, .. } = &event {
-                    super::deregister_disabled_plugin_factories(plugin, &llm_factories_by_plugin);
-                    super::deregister_disabled_embedding_factories(
-                        plugin,
-                        &embedding_factories_by_plugin,
+                    drop(
+                        cmd_tx.send(EneCommand::PluginProviderDisabled {
+                            plugin: plugin.clone(),
+                            factories: ene_plugin_host::PluginFactoryHandles {
+                                llm: llm_factories_by_plugin
+                                    .get(plugin)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                embedding: embedding_factories_by_plugin
+                                    .get(plugin)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                tts: tts_factories_by_plugin
+                                    .get(plugin)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                            },
+                        }),
                     );
-                    if super::deregister_disabled_tts_factories(plugin, &tts_factories_by_plugin) {
-                        drop(cmd_tx.send(EneCommand::RebuildTtsProvider));
-                    }
                 }
                 emit_diag(&diag_tx, plugin_health_event_to_diag(event));
             }
@@ -4596,6 +4737,13 @@ async fn reconfigure_plugin_host_bg(
         .as_ref()
         .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
     let registry_count = registries.len();
+
+    // Publish the new host and bridge handle to the shared slots *before*
+    // notifying the actor: `PluginHostReconfigured` rebuilds the live TTS
+    // provider through the slot, so it must already observe the new host.
+    *plugin_host.lock().await = new_host;
+    *health_bridge_handle.lock().await = bridge_handle;
+
     match CompositeToolRegistry::try_new(registries.clone()) {
         Ok(composite) => {
             tracing::info!(
@@ -4620,11 +4768,6 @@ async fn reconfigure_plugin_host_bg(
             drop(cmd_tx.send(EneCommand::RebuildTtsProvider));
         }
     }
-
-    // Publish the new host and bridge handle to the shared slots so the
-    // handle's shutdown path tears down the live instances.
-    *plugin_host.lock().await = new_host;
-    *health_bridge_handle.lock().await = bridge_handle;
 }
 
 /// Runs a future to completion, catching any panic and surfacing it as a
@@ -5062,6 +5205,7 @@ pub(super) type DbIpcServers = (HashMap<String, String>, Option<tokio::task::Joi
 pub(super) fn spawn_db_ipc_servers(
     config: &EneConfig,
     memory_store: Option<&Arc<ene_store::MemoryStore>>,
+    capability_handler: Option<Arc<dyn ene_plugin_proto::CapabilityServiceHandler>>,
 ) -> Result<DbIpcServers, EneRuntimeError> {
     let mut db_tokens = HashMap::new();
     let Some(store) = memory_store else {
@@ -5165,7 +5309,10 @@ pub(super) fn spawn_db_ipc_servers(
         }
 
         let socket_path = host_service_socket_path();
-        let server = HostServiceServer::new(db, socket_path, db_plugins);
+        let mut server = HostServiceServer::new(db, socket_path, db_plugins);
+        if let Some(handler) = capability_handler {
+            server = server.with_capability_handler(handler);
+        }
 
         let handle = tokio::spawn(async move {
             if let Err(e) = server.run().await {
@@ -5319,6 +5466,7 @@ fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
 
 pub(super) fn init_embedding(
     config: &EneConfig,
+    provider_host: Arc<dyn ProviderHost>,
 ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
     use ene_ai::ResolvedEmbedding;
 
@@ -5347,6 +5495,7 @@ pub(super) fn init_embedding(
                 local.name,
                 dimensions,
                 Arc::new(config.clone()),
+                Arc::clone(&provider_host),
             )))
         }
         ResolvedEmbedding::Cloud {
@@ -5359,40 +5508,51 @@ pub(super) fn init_embedding(
             model,
             dimensions,
             Arc::new(config.clone()),
+            provider_host,
         ))),
     }
 }
 
-/// A cloud embedding provider that resolves its backend lazily from the
-/// global [`ene_ai::EmbeddingProviderRegistry`] on first use.
+/// An embedding provider that resolves its backend lazily from the provider
+/// host on first use.
 ///
 /// Bootstrap ordering forces this indirection: the plugin host (which
-/// registers plugin embedding factories) starts *after* the embedder is
+/// serves plugin embedding factories) starts *after* the embedder is
 /// created, because the host needs DB tokens that are derived from the
 /// memory store, which in turn needs the embedder's dimensions. Model and
 /// dimensions are config-derived, so the proxy answers those synchronously
-/// and only touches the registry when a real embedding is requested — by
-/// which time the host has started. Resolution is per-call, so a plugin host
-/// restart (with re-registered factories) is picked up automatically.
+/// and only touches the host when a real embedding is requested — by which
+/// time the host has started. Resolution is per-call, so a plugin host
+/// restart (with a swapped-in manager) is picked up automatically.
 struct PluginEmbeddingProxy {
     kind: String,
     model: String,
     dimensions: usize,
     config: Arc<EneConfig>,
+    provider_host: Arc<dyn ProviderHost>,
 }
 
 impl PluginEmbeddingProxy {
-    fn new(kind: String, model: String, dimensions: usize, config: Arc<EneConfig>) -> Self {
+    fn new(
+        kind: String,
+        model: String,
+        dimensions: usize,
+        config: Arc<EneConfig>,
+        provider_host: Arc<dyn ProviderHost>,
+    ) -> Self {
         Self {
             kind,
             model,
             dimensions,
             config,
+            provider_host,
         }
     }
 
-    fn resolve(&self) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
-        ene_ai::EmbeddingProviderRegistry::create_provider(&self.kind, &self.config)
+    async fn resolve(&self) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+        self.provider_host
+            .create_embedding_provider(&self.kind, &self.config)
+            .await
     }
 }
 
@@ -5402,7 +5562,7 @@ impl ene_ai::EmbeddingProvider for PluginEmbeddingProxy {
         &self,
         items: &[(&str, ene_ai::EmbeddingKind)],
     ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
-        self.resolve()?.embed_batch(items).await
+        self.resolve().await?.embed_batch(items).await
     }
 
     fn dimensions(&self) -> usize {
@@ -5532,45 +5692,6 @@ mod tests {
             detail.as_deref(),
             Some("unmet capability requirements: gguf-runner@^1")
         );
-    }
-
-    #[test]
-    fn stale_factory_diff_keeps_kinds_served_by_new_host() {
-        let old_kinds = vec!["openai".to_string(), "stale-plugin".to_string()];
-        let mut new_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
-            HashMap::new();
-        new_factories.insert("openai".to_string(), stub_llm_factory("openai"));
-
-        assert_eq!(
-            stale_llm_factory_names(&old_kinds, Some(&new_factories)),
-            vec!["stale-plugin"]
-        );
-        assert_eq!(
-            stale_llm_factory_names::<Arc<dyn ene_ai::LlmProviderFactory>>(&old_kinds, None),
-            old_kinds
-        );
-    }
-
-    /// A factory whose `create_provider` always fails, standing in for a
-    /// plugin-backed factory in tests that only exercise registry plumbing.
-    fn stub_llm_factory(kind: &'static str) -> Arc<dyn ene_ai::LlmProviderFactory> {
-        struct StubFactory {
-            kind: &'static str,
-        }
-        impl ene_ai::LlmProviderFactory for StubFactory {
-            fn provider_name(&self) -> &str {
-                self.kind
-            }
-
-            fn create_provider(
-                &self,
-                _config: &ene_config::EneConfig,
-                _task: &ene_ai::TaskRef,
-            ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::LlmProviderError> {
-                Err(ene_ai::LlmProviderError::Provider("stub".to_string()))
-            }
-        }
-        Arc::new(StubFactory { kind })
     }
 
     /// Regression test: a worker routed through `aux_task_tx` is

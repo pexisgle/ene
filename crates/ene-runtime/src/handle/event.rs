@@ -207,6 +207,21 @@ pub enum LifecycleEvent {
         /// Active turn context at mutation time, when any.
         turn: Option<TurnId>,
     },
+    /// A typed memory was edited or had its salience adjusted from the
+    /// interactive ledger.
+    ///
+    /// Audit event emitted from the actor after the mutation committed;
+    /// consumers refetch the ledger via
+    /// [`crate::query::ledger::MemoryLedgerHandle`] rather than trusting this
+    /// snapshot.
+    MemoryLedgerChanged {
+        /// Typed-memory row id.
+        id: i64,
+        /// Which ledger mutation was applied.
+        action: MemoryLedgerChange,
+        /// Active turn context at mutation time, when any.
+        turn: Option<TurnId>,
+    },
     /// A deferred (background) tool task has reached a terminal state.
     ///
     /// Emitted asynchronously after the originating turn has completed, once
@@ -231,6 +246,26 @@ pub enum LifecycleEvent {
         /// Connector whose state changed.
         id: ene_connector::ConnectorId,
     },
+}
+
+/// Ledger mutation kind carried by
+/// [`LifecycleEvent::MemoryLedgerChanged`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryLedgerChange {
+    /// In-place memory edit (title / content / kind / confidence).
+    Edited,
+    /// Salience (importance / Preference weight) adjustment.
+    SalienceAdjusted,
+}
+
+impl MemoryLedgerChange {
+    /// Returns the `snake_case` string representation for the public event mirror.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Edited => "edited",
+            Self::SalienceAdjusted => "salience_adjusted",
+        }
+    }
 }
 
 /// Reason a single run terminated.

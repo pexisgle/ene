@@ -543,6 +543,30 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 
 `parallel_tool_calls_max` は、1 つの LLM 応答に含まれる**副作用のない**ツール呼び出しを同時にいくつ実行するかの上限です。モデルが 1 ターンで複数のツール呼び出しを出力したとき、`ToolSpec` で `side_effects: ReadOnly` を宣言しているもの（かつバックグラウンド非対応のもの）を、この上限まで並列にディスパッチします。並列化は応答内の*すべて*の呼び出しが副作用のない場合にのみ適用されます。混合ラウンドでは、読み取り専用の呼び出しが同じ応答内の先行する書き込みを追い越してはならない（read-after-write）ため、厳密に元の順序で逐次実行されます。それ以外 — 副作用のあるツール、副作用を宣言していないツール、`system.search_tools` — は従来どおり逐次実行されます。結果は元の `tool_calls` の順序へ並べ戻されるため、権限/ユーザー入力のプロンプト、undo スタック、`ToolCallStart`/`ToolCallResult` イベント、`ToolResultSummary` の順序はすべて保たれます。`0` を設定すると並列化が完全に無効になり、以前の完全逐次動作に戻ります。分類はフェイルクローズドです。`ReadOnly` の副作用を宣言していないツールは決して並列化されません。
 
+#### `plugins.resource_classes` — クラス別 GPU 入場予算
+
+各 LLM プロバイダープラグインは、ハンドシェイクの capabilities で `resource_class`（`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"` — ここで使うのと同じ外部タグ JSON）により、自身のジョブが競合する物理リソースを申告します。ホストは**同じクラスを申告するすべてのプラグインで 1 つの入場予算を共有**するため、デバイス 0 にオフロードする 2 つのローカルモデルが別々のプラグインプロセスに由来する場合でも同時実行されません。permit はリクエストの間（ストリーム、または単発の completion）ホスト側で保持され、リクエスト終了・キャンセル・**配信プラグインのクラッシュ**のいずれでも自動的に解放されます — クラッシュしたプラグインが GPU スロットをリークすることはありません。
+
+`Gpu` クラスは既定でゲートされます: **デバイスごとに同時実行 1 ジョブ**、さらに最大 8 呼び出しまで待機し、それを超えると型付き `Busy` エラーで即時失敗します。`Cpu` / `Network` クラスはエントリで明示しない限りゲートされないため、クラウドプロバイダーの宣言済みプラグイン別並行度は変わりません。既定は `plugins.resource_classes` で上書きできます:
+
+```jsonc
+{
+  "plugins": {
+    "resource_classes": [
+      { "class": { "Gpu": { "device": 0 } }, "permits": 1, "queue_depth": 8 },
+      { "class": "Cpu", "permits": 8 }
+    ]
+  }
+}
+```
+
+- `class` — 予算を割り当てるクラス（ワイヤと同じ外部タグ形式）。
+- `permits` — このクラスの同時実行ジョブの上限。省略時はクラス既定（GPU デバイスは 1、`Cpu` は論理 CPU 数、`Network` は 4）。
+- `queue_depth` — permit を待てる追加呼び出し数。超えると `Busy` で即時失敗。省略時は 8。
+
+ローカル GGUF プロバイダー（`ene-plugin-llama-cpp`）は、`plugins.list.llama-cpp.config.acceleration` が `vulkan`/`cuda`（または GPU 対応ビルドでの `auto`）のとき `Gpu { device: 0 }`、それ以外は `Cpu` を申告します。申告はハンドシェイク時に固定されるため、`acceleration` のライブ変更は次回ホスト起動時に反映されます。なお、このクラス別ゲートが制御するのは*実行*並行度のみです。VRAM 常駐（2 つのプラグインが同じデバイスにモデルを載せ続けること）は別の、未解決の課題です。
+埋め込みリクエスト（`EmbedPlugin`）にはまだワイヤ上のクラス申告手段が無いため、**ホスト側ではゲートされません**。ローカル GGUF プラグインは、埋め込みに申告面が追加されるまでプロセスローカルのバックストップとしてプロセス内入場制御を維持します。
+
 `plugins.list.<name>.db_quota_mb` は、プラグインのテーブルが**共有 `memory.db`** 内で占有できる上限をメビバイト単位で設定します (#424)。ステートフルなプラグインはすべて 1 つの共有データベースへ書き込むため、上限がなければ 1 つの暴走（または悪意ある）プラグインがディスクを使い切ったり、`memory.db` を肥大化させて記憶システムのクエリ・バックアップ・整合性検査を劣化させたりするおそれがあります。ホストは各プラグインの使用量（宣言済みテーブル全体の全セルのバイト長合計）を測定し、上限に達するか超えるようなストレージを増やす書き込み（`Insert`/`Upsert`、`Batch` 内のものを含む）を拒否し、`QUOTA_EXCEEDED` エラーを返します。読み取りと削除は一切制限されないため、上限に達したプラグインでも常に空きを確保できます。既定値は `256` で、組み込みプラグインが近づけないほど十分に大きい一方、暴走プラグインが実際の被害を出す前に抑制できます。無制限のストレージが正当に必要なプラグインには、このフィールドを `null` に設定して強制を無効化できます。
 
 #### `plugins.list.<name>.config` — プラグイン所有の設定 (#313)
@@ -587,7 +611,12 @@ llama-cpp プラグインの `acceleration` 値はバイナリのビルドと一
 バージョン 3 のファイルは読み込み時にバージョン 4 へマイグレーションされます。
 `context_size` / `dimensions` がミラー対象になる前に v3 へ到達した
 インストールにも同じミラーが再実行されて反映されます（既存の非空の
-プロファイル値は引き続き上書きされません）。
+プロファイル値は引き続き上書きされません）。バージョン 4 のファイルは
+読み込み時にバージョン 5 へマイグレーションされます。`ai.stt.model_path` は
+`plugins.list.whisper.config.model_path` へ、
+`ai.vad.{model,model_path,threshold}` は
+`plugins.list.onnx.config.{model,model_path,threshold}` へ移動します
+（これらの設定はプロバイダプラグインが所有します）。
 
 #### `plugins.list.<name>.profiles.<profile>` — プロファイル別設定 (#313)
 
@@ -741,11 +770,9 @@ ONNX モデルを自プロセス内で直接実行します。完全ローカル
 設定済みの既定ボイスをリクエスト単位で上書きします。
 
 ONNX モデルと `voices.bin` ボイス埋め込みは共有モデルキャッシュに取得されます
-（`ene_voice` のダウンロード/プリフェッチ経由。デスクトップの設定 → 音声画面
-からもダウンロードできます）。カスタムの `model_path` / `voices_path` は
-キャッシュ位置を上書きし、ファイルが無い場合はブートストラップが同じ
-パスにプリフェッチします（このプラグイン設定から解決）。既存ファイルが
-再ダウンロードされることはありません。
+（プラグイン自身が初回利用時に取得します。存在して妥当なファイルは
+再ダウンロードされません）。カスタムの `model_path` / `voices_path` は
+キャッシュ位置を上書きし、ファイルが無い場合は同じパスへ取得します。
 
 ```json
 {
@@ -782,7 +809,7 @@ ONNX モデルと `voices.bin` ボイス埋め込みは共有モデルキャッ�
 | `voice` | `""`（`voices.bin` の先頭ボイス `af_alloy`） | 既定ボイス。リクエスト単位の `ai.tts.voice` が優先されます。全 53 ボイス名はケーパビリティ一覧を参照。ボイスを切り替えるたびにモデルが再ロードされます。 |
 | `speed` | `1.0` | 発話速度倍率（0.5–2.0）。 |
 | `language` | 未設定（英語 G2P） | 書記素→音素変換の言語。`"ja"` で日本語のかなルール、それ以外は英語ルールを使用。 |
-| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き。プロセス起動時に固定されます（ONNX Runtime はプロセスごとに一度だけ初期化）。変更には再起動が必要です。プロセス内フォールバックはこのキーを優先し、次に従来の `plugins.list.onnx.config.ort_dylib_path` を参照します。 |
+| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き。プロセス起動時に固定されます（ONNX Runtime はプロセスごとに一度だけ初期化）。変更には再起動が必要です。共有スロットの `plugins.list.onnx.config.ort_dylib_path` にフォールバックします。 |
 
 各キーは環境変数で個別に上書きできます：
 `ENE_PLUGINS__LIST__KOKORO__CONFIG__<KEY>`
@@ -795,18 +822,101 @@ WAV を返し、ホスト側の音声パイプラインが float サンプルに
 `TtsChunk` に分割し、ストリーミング再生します
 （`formats = ["wav"]`）。
 
-なお、`ai.tts.model_path` / `ai.tts.model` は後述のプロセス内フォールバック
-でのみ有効です。プラグイン経由では `model_path` を自プラグインの設定から
-読み取ります。
+ローカル音声プロバイダ（TTS・STT・VAD）はすべてプラグインプロセスでのみ
+動作します。`ene-runtime` / `ene-desktop` はもう `ene-voice` に依存しません。
 
-**プロセス内フォールバック。** プラグインホストが起動時に利用できない場合や
-`kokoro` プラグインが無効な場合、ランタイム内蔵の `ene-voice` ファクトリが
-`ai.tts.provider = "kokoro"` をプロセス内で引き続き提供します（`ai.tts.model_path`
-/ `ai.tts.model` / `ai.tts.speed` と `profiles.kokoro.voices_path` を参照）。
-フォールバックが有効なのはプラグインが一度も登録されなかった場合のみです。
-プラグインファクトリが登録された後でプラグインが失敗すると、`kokoro` は
-次回の再起動まで利用できません（プロセス内ファクトリはセッション中に
-再登録されないため）。
+#### ローカル whisper.cpp STT プロバイダ（`plugins.list.whisper.config`）
+
+`whisper` プロバイダプラグイン（`plugins/provider/whisper`）は whisper.cpp を
+自プロセスで実行します。完全ローカルで API キーは不要です。
+`ai.stt.provider = "whisper"` で選択します。汎用の `ai.stt.language`
+（例：`"ja"`、`"en"`。空 = 自動検出）と `ai.stt.model`（パスフォールバック）は
+TTS アダプタが `ai.tts.voice` を転送するのと同様に、リクエスト単位で
+プラグインへ転送されます。
+
+```json
+{
+  "ai": {
+    "stt": {
+      "provider": "whisper",
+      "model": "ggml-base.bin",
+      "language": "ja"
+    }
+  },
+  "plugins": {
+    "list": {
+      "whisper": {
+        "enable": true,
+        "config": {
+          "model_path": "/data/ggml-base.bin"
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目:
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `model_path` | `ai.stt.model` → 共有モデルキャッシュ（`models/gguf/whisper.gguf`） | whisper.cpp GGUF モデルファイルのパス。旧 `ai.stt.model_path` は設定バージョン 5 でここへ移動しました。 |
+
+各キーは環境変数で個別に上書きできます：
+`ENE_PLUGINS__LIST__WHISPER__CONFIG__<KEY>`
+（例：`ENE_PLUGINS__LIST__WHISPER__CONFIG__MODEL_PATH`）。
+
+モデルは最初の文字起こし時に遅延ロードされ、プラグインプロセス内に常駐します。
+`model_path` か言語ヒントを変更すると再ロードされます。ホストはキャプチャした
+PCM を `TranscribeAudio` ラウンドトリップの前に WAV へエンコードするため
+（`formats = ["wav"]`）、プラグインに音声キャプチャコードは不要です。
+
+#### ローカル Silero VAD エンジン（`plugins.list.onnx.config`）
+
+`onnx` プロバイダプラグイン（`plugins/provider/onnx`）は Silero VAD ONNX
+エンジンを自プロセスで実行し、共有の `onnx-runner@1` / `g2p/en@1` 能力を
+宣言します。`ai.vad.provider = "silero"` で選択します（デスクトップの
+マイクキャプチャは VAD が `"none"` のとき既定でこれを使います）。
+
+```json
+{
+  "ai": {
+    "vad": {
+      "provider": "silero"
+    }
+  },
+  "plugins": {
+    "list": {
+      "onnx": {
+        "enable": true,
+        "config": {
+          "model_path": "/data/silero_vad.onnx",
+          "threshold": 0.5,
+          "ort_dylib_path": "/opt/onnxruntime/lib/libonnxruntime.so"
+        }
+      }
+    }
+  }
+}
+```
+
+設定項目:
+
+| キー | 既定値 | 説明 |
+|---|---|---|
+| `model` | `""` | Silero VAD モデル名。`model_path` 未設定時のパスフォールバックとして使われます。 |
+| `model_path` | `model` → 共有モデルキャッシュ（`models/gguf/silero_vad.onnx`） | Silero VAD ONNX モデルファイルのパス。旧 `ai.vad.model_path` は設定バージョン 5 でここへ移動しました。 |
+| `threshold` | `0.5` | 発話確率の閾値（0.0–1.0）。旧 `ai.vad.threshold` は設定バージョン 5 でここへ移動しました。デスクトップの設定 → 音声 / 機能画面のスライダーはこのキーを書き込みます。 |
+| `ort_dylib_path` | 未設定（`ort` 既定解決） | ONNX Runtime 動的ライブラリのパス上書き（旧 `ai.ort_dylib_path` の移設先）。プロセス起動時に固定されます。 |
+
+各キーは環境変数で個別に上書きできます：
+`ENE_PLUGINS__LIST__ONNX__CONFIG__<KEY>`
+（例：`ENE_PLUGINS__LIST__ONNX__CONFIG__THRESHOLD`）。
+
+エンジンはキャプチャセッションの最初のチャンク処理時に遅延ロードされ、常駐
+します。VAD の状態（リカレントセル状態、発話エッジ追跡）はホスト生成の
+`session_id` をキーとしてプラグインプロセス側に保持され、`process_chunk` は
+32 ms フレームあたり IPC 往復 1 回です。
 
 #### OpenAI Speech API TTS プロバイダ（`plugins.list.openai-tts.config`）
 

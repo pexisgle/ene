@@ -12,22 +12,40 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use ene_plugin_proto::{
-    CapabilityRef, CapabilityRequirement, IpcListener, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION,
-    PluginCapabilities, PluginError, PluginIpcRequest, PluginIpcResponse, WireFormat, cleanup_path,
-    read_plugin_request, write_plugin_response,
+    CapabilityCallError, CapabilityCallErrorCode, CapabilityRef, CapabilityRequirement,
+    IpcListener, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
+    PluginIpcRequest, PluginIpcResponse, WireFormat, cleanup_path, read_plugin_request,
+    write_plugin_response,
 };
 use ene_plugin_proto::{DeferredOutcome, VersionRange};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin};
+use crate::plugin::{
+    CapabilityProvider, EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin, VadPlugin,
+};
 
 fn provider_error_message(error: &PluginError) -> String {
     error.provider_error_kind().map_or_else(
         || error.to_string(),
         |kind| format!("[ene-provider-error:{}] {}", kind.marker(), error),
     )
+}
+
+/// Maps a provider's [`PluginError`] to the stable capability-call error
+/// vocabulary shared with the host's mediation layer.
+fn capability_call_error(e: &PluginError) -> CapabilityCallError {
+    let code = match e {
+        PluginError::NotSupported(_) => CapabilityCallErrorCode::NotSupported,
+        PluginError::Timeout(_) => CapabilityCallErrorCode::Timeout,
+        PluginError::Transport(_) | PluginError::Io(_) => CapabilityCallErrorCode::Transport,
+        PluginError::Protocol(_) => CapabilityCallErrorCode::Internal,
+        PluginError::Provider(_) | PluginError::ProviderTyped { .. } | PluginError::Tool(_) => {
+            CapabilityCallErrorCode::Provider
+        }
+    };
+    CapabilityCallError::new(code, e.to_string())
 }
 
 /// How often an idle connection polls the tool plugin for deferred task
@@ -39,7 +57,7 @@ const DEFERRED_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 /// Dispatch table holding up to five focused trait implementations.
 ///
 /// A plugin struct implements any subset of [`ToolPlugin`], [`LlmPlugin`],
-/// [`EmbedPlugin`], [`TtsPlugin`], and [`SttPlugin`]; the server routes
+/// [`EmbedPlugin`], [`TtsPlugin`], [`SttPlugin`], and [`VadPlugin`]; the server routes
 /// incoming IPC requests to the corresponding trait object.
 pub struct PluginDispatch {
     /// Optional tool plugin implementation.
@@ -52,6 +70,10 @@ pub struct PluginDispatch {
     pub tts: Option<Arc<dyn TtsPlugin>>,
     /// Optional STT plugin implementation.
     pub stt: Option<Arc<dyn SttPlugin>>,
+    /// Optional VAD plugin implementation.
+    pub vad: Option<Arc<dyn VadPlugin>>,
+    /// Optional capability-call implementation (serves `provides` entries).
+    capability: Option<Arc<dyn CapabilityProvider>>,
     /// Capabilities this plugin provides to other plugins, declared via the
     /// `#[provider(provides = "...")]` attribute (see `ene-plugin-macros`).
     provides: Vec<CapabilityRef>,
@@ -75,9 +97,34 @@ impl PluginDispatch {
             embed,
             tts,
             stt,
+            vad: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
+    }
+
+    /// Attaches a VAD plugin implementation.
+    ///
+    /// VAD arrived after the five-positional-argument constructor, so it is
+    /// a builder step rather than a sixth parameter (which would force every
+    /// existing plugin binary's entry point to change).
+    #[must_use]
+    pub fn with_vad(mut self, vad: Arc<dyn VadPlugin>) -> Self {
+        self.vad = Some(vad);
+        self
+    }
+
+    /// Registers the implementation that serves the capabilities declared in
+    /// `provides` (via [`with_capability_declarations`](Self::with_capability_declarations)).
+    ///
+    /// The server only routes `CapabilityCall` requests whose capability
+    /// appears in the declared `provides` list, so a plugin binary never
+    /// serves undeclared capabilities even if a host misroutes a call.
+    #[must_use]
+    pub fn with_capability_provider(mut self, capability: Arc<dyn CapabilityProvider>) -> Self {
+        self.capability = Some(capability);
+        self
     }
 
     /// Sets the plugin-wide capability declarations sent in the handshake
@@ -142,6 +189,12 @@ impl PluginDispatch {
         if let Some(stt) = &self.stt {
             stt.set_config(config);
         }
+        if let Some(vad) = &self.vad {
+            vad.set_config(config);
+        }
+        if let Some(capability) = &self.capability {
+            capability.set_config(config);
+        }
     }
 
     /// Delivers the per-profile configuration blob to every registered trait
@@ -163,6 +216,12 @@ impl PluginDispatch {
         if let Some(stt) = &self.stt {
             stt.set_profiles(profiles);
         }
+        if let Some(vad) = &self.vad {
+            vad.set_profiles(profiles);
+        }
+        if let Some(capability) = &self.capability {
+            capability.set_profiles(profiles);
+        }
     }
 
     /// Returns the first non-`None` config schema among the registered trait
@@ -180,6 +239,8 @@ impl PluginDispatch {
             .or_else(|| self.embed.as_ref().and_then(|e| e.config_schema()))
             .or_else(|| self.tts.as_ref().and_then(|t| t.config_schema()))
             .or_else(|| self.stt.as_ref().and_then(|s| s.config_schema()))
+            .or_else(|| self.vad.as_ref().and_then(|v| v.config_schema()))
+            .or_else(|| self.capability.as_ref().and_then(|c| c.config_schema()))
     }
 
     /// Highest non-zero `config_version` among registered trait objects.
@@ -190,6 +251,8 @@ impl PluginDispatch {
             self.embed.as_ref().map(|e| e.config_version()),
             self.tts.as_ref().map(|t| t.config_version()),
             self.stt.as_ref().map(|s| s.config_version()),
+            self.vad.as_ref().map(|v| v.config_version()),
+            self.capability.as_ref().map(|c| c.config_version()),
         ]
         .into_iter()
         .flatten()
@@ -217,6 +280,14 @@ impl PluginDispatch {
                 .stt
                 .as_ref()
                 .is_some_and(|s| s.supports_list_config_options())
+            || self
+                .vad
+                .as_ref()
+                .is_some_and(|v| v.supports_list_config_options())
+            || self
+                .capability
+                .as_ref()
+                .is_some_and(|c| c.supports_list_config_options())
     }
 
     fn supports_validate_config(&self) -> bool {
@@ -239,6 +310,14 @@ impl PluginDispatch {
                 .stt
                 .as_ref()
                 .is_some_and(|s| s.supports_validate_config())
+            || self
+                .vad
+                .as_ref()
+                .is_some_and(|v| v.supports_validate_config())
+            || self
+                .capability
+                .as_ref()
+                .is_some_and(|c| c.supports_validate_config())
     }
 
     fn supports_migrate_config(&self) -> bool {
@@ -261,6 +340,14 @@ impl PluginDispatch {
                 .stt
                 .as_ref()
                 .is_some_and(|s| s.supports_migrate_config())
+            || self
+                .vad
+                .as_ref()
+                .is_some_and(|v| v.supports_migrate_config())
+            || self
+                .capability
+                .as_ref()
+                .is_some_and(|c| c.supports_migrate_config())
     }
 
     /// First trait object that advertises list-options support handles the path.
@@ -289,6 +376,16 @@ impl PluginDispatch {
             && stt.supports_list_config_options()
         {
             return stt.list_config_options(path);
+        }
+        if let Some(vad) = &self.vad
+            && vad.supports_list_config_options()
+        {
+            return vad.list_config_options(path);
+        }
+        if let Some(capability) = &self.capability
+            && capability.supports_list_config_options()
+        {
+            return capability.list_config_options(path);
         }
         Vec::new()
     }
@@ -322,6 +419,16 @@ impl PluginDispatch {
         {
             return stt.validate_config(value);
         }
+        if let Some(vad) = &self.vad
+            && vad.supports_validate_config()
+        {
+            return vad.validate_config(value);
+        }
+        if let Some(capability) = &self.capability
+            && capability.supports_validate_config()
+        {
+            return capability.validate_config(value);
+        }
         Vec::new()
     }
 
@@ -354,6 +461,16 @@ impl PluginDispatch {
             && stt.supports_migrate_config()
         {
             return stt.migrate_config(from_version, value);
+        }
+        if let Some(vad) = &self.vad
+            && vad.supports_migrate_config()
+        {
+            return vad.migrate_config(from_version, value);
+        }
+        if let Some(capability) = &self.capability
+            && capability.supports_migrate_config()
+        {
+            return capability.migrate_config(from_version, value);
         }
         Ok(value)
     }
@@ -736,6 +853,7 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             | PluginIpcRequest::EmbedBatch { .. }
             | PluginIpcRequest::SynthesizeSpeech { .. }
             | PluginIpcRequest::TranscribeAudio { .. }
+            | PluginIpcRequest::ProcessVadChunk { .. }
             | PluginIpcRequest::PollDeferred { .. }) => {
                 let dispatch = Arc::clone(dispatch);
                 let tx = tx.clone();
@@ -999,6 +1117,49 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 },
             }
         }
+        PluginIpcRequest::CapabilityCall { request_id, call } => {
+            let Ok(capability) = CapabilityRef::parse(call.capability.as_str()) else {
+                return PluginIpcResponse::CapabilityCallResult {
+                    request_id: request_id.clone(),
+                    result: Err(CapabilityCallError::new(
+                        CapabilityCallErrorCode::InvalidRequest,
+                        format!(
+                            "malformed capability reference: {}",
+                            call.capability.as_str()
+                        ),
+                    )),
+                };
+            };
+            if !dispatch
+                .provides
+                .iter()
+                .any(|provided| provided.as_str() == capability.as_str())
+            {
+                return PluginIpcResponse::CapabilityCallResult {
+                    request_id: request_id.clone(),
+                    result: Err(CapabilityCallError::new(
+                        CapabilityCallErrorCode::NotSupported,
+                        format!("capability {capability} is not provided by this plugin"),
+                    )),
+                };
+            }
+            let Some(provider) = &dispatch.capability else {
+                return PluginIpcResponse::CapabilityCallResult {
+                    request_id: request_id.clone(),
+                    result: Err(CapabilityCallError::new(
+                        CapabilityCallErrorCode::NotSupported,
+                        "no capability provider registered",
+                    )),
+                };
+            };
+            let result = provider
+                .call_capability(&capability, &call.method, call.payload.clone())
+                .await;
+            PluginIpcResponse::CapabilityCallResult {
+                request_id: request_id.clone(),
+                result: result.map_err(|e| capability_call_error(&e)),
+            }
+        }
         PluginIpcRequest::PollDeferred {
             request_id,
             task_id,
@@ -1198,9 +1359,44 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 )
                 .await
             {
-                Ok(text) => PluginIpcResponse::TranscriptionResult {
+                Ok(transcription) => PluginIpcResponse::TranscriptionResult {
                     request_id: request_id.clone(),
-                    text,
+                    text: transcription.text,
+                    language: transcription.language,
+                },
+                Err(e) => PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: e.to_string(),
+                },
+            }
+        }
+        PluginIpcRequest::ProcessVadChunk {
+            request_id,
+            provider_kind,
+            provider_config,
+            session_id,
+            pcm,
+            reset,
+        } => {
+            let Some(vad) = &dispatch.vad else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no VAD plugin registered".to_string(),
+                };
+            };
+            match vad
+                .process_chunk(
+                    provider_kind,
+                    provider_config.clone(),
+                    session_id.clone(),
+                    pcm.clone(),
+                    *reset,
+                )
+                .await
+            {
+                Ok(event) => PluginIpcResponse::VadChunkResult {
+                    request_id: request_id.clone(),
+                    event,
                 },
                 Err(e) => PluginIpcResponse::Error {
                     request_id: request_id.clone(),
@@ -1261,10 +1457,15 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
             .stt
             .as_ref()
             .map_or(Vec::new(), |s| s.stt_capabilities()),
+        vad_providers: dispatch
+            .vad
+            .as_ref()
+            .map_or(Vec::new(), |v| v.vad_capabilities()),
         supports_list_config_options: dispatch.supports_list_config_options(),
         supports_validate_config: dispatch.supports_validate_config(),
         supports_migrate_config: dispatch.supports_migrate_config(),
         config_version: dispatch.config_version(),
+        supports_capability_calls: dispatch.capability.is_some(),
         provides: dispatch.provides.clone(),
         requires: dispatch.requires.clone(),
     }
@@ -1407,13 +1608,14 @@ async fn run_chat_stream(
 mod tests {
     use super::*;
     use crate::plugin::{
-        ConfigurablePlugin, PluginCompletion, PluginStreamChunk, ToolPluginCapabilities,
+        ConfigurablePlugin, PluginCompletion, PluginStreamChunk, PluginTranscription,
+        ToolPluginCapabilities,
     };
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
     use ene_plugin_proto::{
-        ConcurrencyHint, DeferredStatus, LlmProviderSpec, SttProviderSpec, ToolSpec,
-        TtsProviderSpec, VersionRange,
+        ConcurrencyHint, DeferredStatus, LlmProviderSpec, ResourceClass, SttProviderSpec, ToolSpec,
+        TtsProviderSpec, VadEvent, VadProviderSpec, VersionRange,
     };
 
     /// A mock tool plugin for testing dispatch logic.
@@ -1519,11 +1721,75 @@ mod tests {
 
     impl ConfigurablePlugin for GatedToolPlugin {}
 
+    /// A VAD plugin whose `process_chunk` blocks until released, standing in
+    /// for a slow first-chunk model load.
+    struct GatedVadPlugin {
+        in_flight: std::sync::atomic::AtomicUsize,
+        released: std::sync::atomic::AtomicBool,
+        notify: tokio::sync::Notify,
+    }
+
+    impl GatedVadPlugin {
+        fn new() -> Self {
+            Self {
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                released: std::sync::atomic::AtomicBool::new(false),
+                notify: tokio::sync::Notify::new(),
+            }
+        }
+
+        async fn wait(&self) {
+            use std::sync::atomic::Ordering;
+            while !self.released.load(Ordering::Acquire) {
+                self.notify.notified().await;
+            }
+        }
+
+        fn release(&self) {
+            use std::sync::atomic::Ordering;
+            self.released.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+
+        fn in_flight(&self) -> usize {
+            self.in_flight.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    #[async_trait]
+    impl VadPlugin for GatedVadPlugin {
+        fn vad_capabilities(&self) -> Vec<VadProviderSpec> {
+            vec![VadProviderSpec {
+                kind: "mock_vad".into(),
+                frame_size: 512,
+                sample_rate: 16_000,
+                concurrency: ConcurrencyHint::default(),
+            }]
+        }
+
+        async fn process_chunk(
+            &self,
+            _kind: &str,
+            _config: serde_json::Value,
+            _session_id: String,
+            _pcm: Vec<f32>,
+            _reset: bool,
+        ) -> Result<VadEvent, PluginError> {
+            use std::sync::atomic::Ordering;
+            self.in_flight.fetch_add(1, Ordering::AcqRel);
+            self.wait().await;
+            self.in_flight.fetch_sub(1, Ordering::AcqRel);
+            Ok(VadEvent::Silence)
+        }
+    }
+
+    impl ConfigurablePlugin for GatedVadPlugin {}
+
     /// Waits (with a deadlock backstop) until `plugin.in_flight()` reaches
     /// `expected`.
-    async fn wait_for_in_flight(plugin: &GatedToolPlugin, expected: usize) {
+    async fn wait_for_in_flight(count: impl Fn() -> usize, expected: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while plugin.in_flight() < expected {
+        while count() < expected {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "timed out waiting for {expected} in-flight call(s)"
@@ -1545,6 +1811,7 @@ mod tests {
                 supports_vision: false,
                 concurrency: ConcurrencyHint::default(),
                 context_window: None,
+                resource_class: ResourceClass::Cpu,
             }]
         }
 
@@ -1603,6 +1870,7 @@ mod tests {
                 supports_vision: false,
                 concurrency: ConcurrencyHint::default(),
                 context_window: None,
+                resource_class: ResourceClass::Cpu,
             }]
         }
 
@@ -1677,12 +1945,47 @@ mod tests {
             _config: serde_json::Value,
             _audio_data: Vec<u8>,
             _format: String,
-        ) -> Result<String, PluginError> {
-            Ok("Mock transcription".into())
+        ) -> Result<PluginTranscription, PluginError> {
+            Ok(PluginTranscription {
+                text: "Mock transcription".into(),
+                language: None,
+            })
         }
     }
 
     impl ConfigurablePlugin for MockSttPlugin {}
+
+    /// A mock VAD plugin for testing dispatch logic.
+    struct MockVadPlugin;
+
+    #[async_trait]
+    impl VadPlugin for MockVadPlugin {
+        fn vad_capabilities(&self) -> Vec<VadProviderSpec> {
+            vec![VadProviderSpec {
+                kind: "mock_vad".into(),
+                frame_size: 512,
+                sample_rate: 16_000,
+                concurrency: ConcurrencyHint::default(),
+            }]
+        }
+
+        async fn process_chunk(
+            &self,
+            _kind: &str,
+            _config: serde_json::Value,
+            _session_id: String,
+            _pcm: Vec<f32>,
+            reset: bool,
+        ) -> Result<VadEvent, PluginError> {
+            if reset {
+                Ok(VadEvent::Silence)
+            } else {
+                Ok(VadEvent::SpeechStart)
+            }
+        }
+    }
+
+    impl ConfigurablePlugin for MockVadPlugin {}
 
     /// A mock embed plugin for testing dispatch logic.
     struct MockEmbedPlugin;
@@ -1710,6 +2013,8 @@ mod tests {
             embed: embed.then(|| Arc::new(MockEmbedPlugin) as Arc<dyn EmbedPlugin>),
             tts: None,
             stt: None,
+            vad: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1722,6 +2027,8 @@ mod tests {
             embed: None,
             tts: Some(Arc::new(MockTtsPlugin) as Arc<dyn TtsPlugin>),
             stt: None,
+            vad: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1734,6 +2041,22 @@ mod tests {
             embed: None,
             tts: None,
             stt: Some(Arc::new(MockSttPlugin) as Arc<dyn SttPlugin>),
+            vad: None,
+            capability: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
+        }
+    }
+
+    fn make_vad_dispatch() -> PluginDispatch {
+        PluginDispatch {
+            tool: None,
+            llm: None,
+            embed: None,
+            tts: None,
+            stt: None,
+            vad: Some(Arc::new(MockVadPlugin) as Arc<dyn VadPlugin>),
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1922,6 +2245,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -1955,6 +2280,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -1992,6 +2319,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -2037,6 +2366,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -2159,6 +2490,8 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -2616,6 +2949,7 @@ mod tests {
                 assert!(capabilities.llm_providers.is_empty());
                 assert!(capabilities.tts_providers.is_empty());
                 assert!(capabilities.stt_providers.is_empty());
+                assert!(capabilities.vad_providers.is_empty());
             }
             other => panic!("expected HandshakeAck, got {other:?}"),
         }
@@ -2674,9 +3008,14 @@ mod tests {
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
-            PluginIpcResponse::TranscriptionResult { request_id, text } => {
+            PluginIpcResponse::TranscriptionResult {
+                request_id,
+                text,
+                language,
+            } => {
                 assert_eq!(request_id, "req-stt-1");
                 assert_eq!(text, "Mock transcription");
+                assert_eq!(language, None);
             }
             other => panic!("expected TranscriptionResult, got {other:?}"),
         }
@@ -2691,6 +3030,63 @@ mod tests {
             provider_config: serde_json::json!({}),
             audio_base64: "AAAA".into(),
             format: "wav".into(),
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(resp, PluginIpcResponse::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_process_vad_chunk_ok() {
+        let dispatch = make_vad_dispatch();
+        let req = PluginIpcRequest::ProcessVadChunk {
+            request_id: "req-vad-1".into(),
+            provider_kind: "mock_vad".into(),
+            provider_config: serde_json::json!({}),
+            session_id: "session-1".into(),
+            pcm: vec![0.0; 512],
+            reset: false,
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        match resp {
+            PluginIpcResponse::VadChunkResult { request_id, event } => {
+                assert_eq!(request_id, "req-vad-1");
+                assert_eq!(event, VadEvent::SpeechStart);
+            }
+            other => panic!("expected VadChunkResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_process_vad_chunk_reset_forwards_flag() {
+        let dispatch = make_vad_dispatch();
+        let req = PluginIpcRequest::ProcessVadChunk {
+            request_id: "req-vad-2".into(),
+            provider_kind: "mock_vad".into(),
+            provider_config: serde_json::json!({}),
+            session_id: "session-1".into(),
+            pcm: Vec::new(),
+            reset: true,
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(
+            resp,
+            PluginIpcResponse::VadChunkResult {
+                event: VadEvent::Silence,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_process_vad_chunk_no_vad_returns_error() {
+        let dispatch = make_dispatch(false, false, false);
+        let req = PluginIpcRequest::ProcessVadChunk {
+            request_id: "req-vad-3".into(),
+            provider_kind: "mock_vad".into(),
+            provider_config: serde_json::json!({}),
+            session_id: "session-1".into(),
+            pcm: vec![0.0; 512],
+            reset: false,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
@@ -2924,7 +3320,7 @@ mod tests {
         }
 
         // Both calls must reach the plugin and be blocked at the same time.
-        wait_for_in_flight(&plugin, 2).await;
+        wait_for_in_flight(|| plugin.in_flight(), 2).await;
 
         plugin.release();
 
@@ -2995,7 +3391,7 @@ mod tests {
         .expect("write call");
 
         // Wait until the slow call is in flight, then ping.
-        wait_for_in_flight(&plugin, 1).await;
+        wait_for_in_flight(|| plugin.in_flight(), 1).await;
 
         write_plugin_request(
             &mut client,
@@ -3024,5 +3420,87 @@ mod tests {
         assert_eq!(plugin.in_flight(), 1, "slow call must still be blocked");
 
         plugin.release();
+    }
+
+    /// A `Ping` must be answered while a slow VAD chunk is still in flight:
+    /// the onnx plugin's first-chunk model load can take hundreds of
+    /// milliseconds, and an inline dispatch would stall the read loop past
+    /// the host's liveness probe timeout (5 s).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ping_answered_while_vad_chunk_in_flight() {
+        use std::sync::Arc as StdArc;
+
+        use ene_plugin_proto::{read_plugin_response, write_plugin_request};
+
+        let plugin = StdArc::new(GatedVadPlugin::new());
+        let dispatch = StdArc::new(
+            PluginDispatch::new(None, None, None, None, None)
+                .with_vad(StdArc::clone(&plugin) as StdArc<dyn VadPlugin>),
+        );
+        let shutdown = StdArc::new(tokio::sync::Notify::new());
+
+        let (client, server) = tokio::net::UnixStream::pair().expect("unix pair");
+        tokio::spawn(handle_connection(
+            StdArc::clone(&dispatch),
+            IpcStream::Unix(server),
+            StdArc::clone(&shutdown),
+        ));
+        let mut client = client;
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::ProcessVadChunk {
+                request_id: "slow-vad".into(),
+                provider_kind: "mock_vad".into(),
+                provider_config: serde_json::json!({}),
+                session_id: "s1".into(),
+                pcm: vec![0.0; 512],
+                reset: false,
+            },
+            WireFormat::Json,
+        )
+        .await
+        .expect("write vad chunk");
+
+        // Wait until the slow chunk is in flight, then ping.
+        wait_for_in_flight(|| plugin.in_flight(), 1).await;
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::Ping {
+                request_id: "p1".into(),
+            },
+            WireFormat::Json,
+        )
+        .await
+        .expect("write ping");
+
+        // The Pong must arrive while the chunk is still blocked.
+        let resp = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_plugin_response(&mut client, WireFormat::Json),
+        )
+        .await
+        .expect("no timeout")
+        .expect("read ok")
+        .expect("non-EOF");
+        assert!(
+            matches!(&resp, PluginIpcResponse::Pong { request_id } if request_id == "p1"),
+            "expected Pong while VAD chunk pending, got {resp:?}"
+        );
+        assert_eq!(plugin.in_flight(), 1, "VAD chunk must still be blocked");
+
+        plugin.release();
+        // The chunk's response follows once released.
+        let resp = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_plugin_response(&mut client, WireFormat::Json),
+        )
+        .await
+        .expect("no timeout")
+        .expect("read ok")
+        .expect("non-EOF");
+        assert!(matches!(resp, PluginIpcResponse::VadChunkResult { .. }));
     }
 }

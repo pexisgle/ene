@@ -337,6 +337,16 @@ pub struct UiState {
     pub memory_journal_recall_rows: Vec<MemoryJournalRecallRow>,
     pub memory_journal_pending_writes: usize,
     pub memory_journal_permanent_writes: usize,
+    pub memory_ledger_rows: Vec<crate::memory_ledger::MemoryLedgerRow>,
+    pub memory_ledger_commitments: Vec<ene_store::Commitment>,
+    pub memory_ledger_loaded: bool,
+    pub memory_ledger_query: String,
+    pub memory_ledger_kind_filter: Option<ene_store::MemoryKind>,
+    pub memory_ledger_status_filter: Option<ene_store::MemoryStatus>,
+    pub memory_ledger_created_within: crate::memory_ledger::CreatedWithinFilter,
+    pub memory_ledger_edit_draft: Option<MemoryLedgerDraft>,
+    pub memory_ledger_pending_delete: Option<i64>,
+    pub memory_ledger_message: Option<String>,
     /// Pending tool-permission approvals awaiting a user decision.
     /// Accumulated by the permission-center consumer system
     /// from `AiPermissionRequested` messages; a request is removed
@@ -579,7 +589,7 @@ pub struct MemoryJournalRow {
     pub id: i64,
     pub title: String,
     pub kind: String,
-    pub status: String,
+    pub status: ene_store::MemoryStatus,
     pub confidence: f32,
     pub salience: f32,
     pub last_accessed: Option<String>,
@@ -595,6 +605,21 @@ pub struct MemoryJournalRecallRow {
     pub title: String,
     pub reason: String,
     pub score_summary: String,
+}
+
+/// In-progress edit of a ledger memory row.
+#[derive(Clone, Debug)]
+pub struct MemoryLedgerDraft {
+    /// Typed-memory row id.
+    pub id: i64,
+    /// Edited title.
+    pub title: String,
+    /// Edited content.
+    pub content: String,
+    /// Edited kind (`snake_case` string).
+    pub kind: String,
+    /// Edited confidence.
+    pub confidence: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -830,6 +855,50 @@ impl CharacterSettings {
         let value = if trimmed.is_empty() { "null" } else { trimmed };
         self.with_config_mut(|c| {
             drop(c.set_path("plugins.list.kokoro.profiles.kokoro.voices_path", value));
+        });
+    }
+
+    /// Reads the whisper plugin's model path
+    /// (`plugins.list.whisper.config.model_path`). Empty when unset.
+    pub fn whisper_model_path(&self) -> String {
+        let value = self
+            .config()
+            .get_path("plugins.list.whisper.config.model_path");
+        value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_default()
+    }
+
+    /// Writes the whisper plugin's model path
+    /// (`plugins.list.whisper.config.model_path`). Passing an empty string
+    /// clears it (`null`).
+    pub fn set_whisper_model_path(&self, path: &str) {
+        let trimmed = path.trim();
+        let value = if trimmed.is_empty() { "null" } else { trimmed };
+        self.with_config_mut(|c| {
+            drop(c.set_path("plugins.list.whisper.config.model_path", value));
+        });
+    }
+
+    /// Reads the onnx plugin's VAD speech threshold
+    /// (`plugins.list.onnx.config.threshold`); defaults to 0.5.
+    pub fn vad_threshold(&self) -> f32 {
+        self.config()
+            .get_path("plugins.list.onnx.config.threshold")
+            .and_then(|v| v.as_f64())
+            .map_or(0.5, |v| v.clamp(0.0, 1.0) as f32)
+    }
+
+    /// Writes the onnx plugin's VAD speech threshold
+    /// (`plugins.list.onnx.config.threshold`).
+    pub fn set_vad_threshold(&self, threshold: f32) {
+        self.with_config_mut(|c| {
+            drop(c.set_path(
+                "plugins.list.onnx.config.threshold",
+                &format!("{}", threshold.clamp(0.0, 1.0)),
+            ));
         });
     }
 

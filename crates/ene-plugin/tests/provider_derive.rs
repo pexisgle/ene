@@ -1,5 +1,6 @@
 //! Integration tests for the provider capability derive macros:
-//! `#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]`.
+//! `#[derive(LlmPlugin)]` / `#[derive(TtsPlugin)]` / `#[derive(SttPlugin)]` /
+//! `#[derive(VadPlugin)]`.
 #![expect(
     clippy::expect_used,
     reason = "proc-macro integration tests use expect for spec assertions"
@@ -151,6 +152,48 @@ fn stt_provider_kind_const() {
     assert_eq!(TestSttProvider::STT_PROVIDER_KIND, "test-stt");
 }
 
+// ── VadPlugin ────────────────────────────────────────────────────────────
+
+#[derive(VadPlugin)]
+#[provider(
+    kind = "test-vad",
+    frame_size = 512,
+    sample_rate = 16000,
+    concurrency = 1,
+    queue_depth = 2
+)]
+pub struct TestVadProvider;
+
+impl ConfigurablePlugin for TestVadProvider {}
+
+impl VadPlugin for TestVadProvider {
+    fn vad_capabilities(&self) -> Vec<VadProviderSpec> {
+        vec![Self::vad_spec()]
+    }
+}
+
+#[test]
+fn vad_capabilities_match_attributes() {
+    let caps = TestVadProvider.vad_capabilities();
+    assert_eq!(caps.len(), 1);
+    let spec = caps.first().expect("one generated spec");
+    assert_eq!(spec.kind, "test-vad");
+    assert_eq!(spec.frame_size, 512);
+    assert_eq!(spec.sample_rate, 16_000);
+    assert_eq!(
+        spec.concurrency,
+        ConcurrencyHint {
+            max_in_flight: 1,
+            queue_depth: 2,
+        }
+    );
+}
+
+#[test]
+fn vad_provider_kind_const() {
+    assert_eq!(TestVadProvider::VAD_PROVIDER_KIND, "test-vad");
+}
+
 // ── Defaults ─────────────────────────────────────────────────────────────
 
 #[derive(LlmPlugin)]
@@ -173,6 +216,30 @@ fn omitted_flags_and_concurrency_take_defaults() {
     assert!(!spec.supports_vision);
     assert_eq!(spec.concurrency, ConcurrencyHint::default());
     assert_eq!(spec.context_window, None);
+    assert_eq!(spec.resource_class, ResourceClass::Cpu);
+}
+
+#[derive(LlmPlugin)]
+#[provider(
+    kind = "test-gpu",
+    models = "model-g",
+    resource_class = ::ene_plugin::ResourceClass::Gpu { device: 0 }
+)]
+pub struct GpuResourceClassProvider;
+
+impl ConfigurablePlugin for GpuResourceClassProvider {}
+
+impl LlmPlugin for GpuResourceClassProvider {
+    fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+        vec![Self::llm_spec()]
+    }
+}
+
+#[test]
+fn resource_class_attribute_flows_into_the_spec() {
+    let caps = GpuResourceClassProvider.llm_capabilities();
+    let spec = caps.first().expect("one generated spec");
+    assert_eq!(spec.resource_class, ResourceClass::Gpu { device: 0 });
 }
 
 #[derive(LlmPlugin)]

@@ -20,6 +20,44 @@ use std::sync::{Arc, Mutex};
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
 
+/// Stub host that serves no providers; proactive turns supply their own
+/// provider and never trigger the classifier path.
+struct EmptyProviderHost;
+
+#[async_trait]
+impl ene_ai::ProviderHost for EmptyProviderHost {
+    async fn create_llm_provider(
+        &self,
+        kind: &str,
+        _config: &ene_config::EneConfig,
+        _task: &ene_ai::config::TaskRef,
+    ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
+        Err(LlmProviderError::Provider(format!(
+            "No LlmProviderFactory registered for provider kind: '{kind}'"
+        )))
+    }
+
+    async fn create_embedding_provider(
+        &self,
+        _kind: &str,
+        _config: &ene_config::EneConfig,
+    ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+        Err(ene_ai::EmbeddingError::Init(
+            "stub host serves no embedding providers".to_string(),
+        ))
+    }
+
+    async fn create_tts_provider(
+        &self,
+        _kind: &str,
+        _config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+        Err(ene_ai::AudioProviderError::Provider(
+            "stub host serves no TTS providers".to_string(),
+        ))
+    }
+}
+
 struct EchoProvider {
     last_messages: Mutex<Vec<LlmMessage>>,
     response: String,
@@ -152,6 +190,7 @@ async fn proactive_stream_does_not_add_user_history() {
         registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
         tool_rag: None,
         provider,
+        provider_host: Arc::new(EmptyProviderHost),
         event_tx,
         audio_tx: tokio::sync::mpsc::channel(8).0,
         diag_tx,
@@ -242,6 +281,7 @@ async fn proactive_stream_attaches_screen_image_when_provided() {
         registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
         tool_rag: None,
         provider,
+        provider_host: Arc::new(EmptyProviderHost),
         event_tx,
         audio_tx: tokio::sync::mpsc::channel(8).0,
         diag_tx,
@@ -316,6 +356,7 @@ async fn proactive_stream_without_memory_store() {
         registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
         tool_rag: None,
         provider,
+        provider_host: Arc::new(EmptyProviderHost),
         event_tx,
         audio_tx: tokio::sync::mpsc::channel(8).0,
         diag_tx,
@@ -381,6 +422,7 @@ async fn proactive_stream_declines_on_leading_silent_token() {
         registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
         tool_rag: None,
         provider,
+        provider_host: Arc::new(EmptyProviderHost),
         event_tx: event_tx.clone(),
         audio_tx: tokio::sync::mpsc::channel(8).0,
         diag_tx,
@@ -471,6 +513,7 @@ async fn proactive_stream_speaks_when_text_precedes_silent_token() {
         registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
         tool_rag: None,
         provider,
+        provider_host: Arc::new(EmptyProviderHost),
         event_tx,
         audio_tx: tokio::sync::mpsc::channel(8).0,
         diag_tx,
@@ -540,6 +583,7 @@ async fn proactive_stream_ignores_silent_token_without_confirmation() {
         registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
         tool_rag: None,
         provider,
+        provider_host: Arc::new(EmptyProviderHost),
         event_tx,
         audio_tx: tokio::sync::mpsc::channel(8).0,
         diag_tx,

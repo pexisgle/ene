@@ -13,6 +13,7 @@ pub mod page_debug;
 pub mod page_features;
 pub mod page_graphics;
 pub mod page_memory;
+pub mod page_memory_ledger;
 pub mod page_permissions;
 pub mod page_sessions;
 pub mod page_voice;
@@ -44,6 +45,7 @@ pub enum PageKind {
     Features,
     Accessibility,
     Memory,
+    MemoryLedger,
     Permissions,
     Connectors,
     Sessions,
@@ -269,6 +271,7 @@ impl SettingsUi {
                 PageKind::Features,
                 PageKind::Accessibility,
                 PageKind::Memory,
+                PageKind::MemoryLedger,
                 PageKind::Permissions,
                 PageKind::Connectors,
                 PageKind::Sessions,
@@ -294,6 +297,9 @@ impl SettingsUi {
                         i18n_embed_fl::fl!(crate::i18n::loader(), "accessibility")
                     }
                     PageKind::Memory => i18n_embed_fl::fl!(crate::i18n::loader(), "memory"),
+                    PageKind::MemoryLedger => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "memory-ledger")
+                    }
                     PageKind::Permissions => {
                         i18n_embed_fl::fl!(crate::i18n::loader(), "permissions")
                     }
@@ -342,6 +348,7 @@ impl SettingsUi {
             PageKind::Features => page_features::render(ui, settings, ai, world),
             PageKind::Accessibility => page_accessibility::render(ui, settings),
             PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
+            PageKind::MemoryLedger => page_memory_ledger::render(ui, ai, world, ui_entity),
             PageKind::Permissions => page_permissions::render(ui, ai, world, ui_entity),
             PageKind::Connectors => page_connectors::render(ui, ai, world, ui_entity),
             PageKind::Sessions => page_sessions::render(ui, ai, world, ui_entity),

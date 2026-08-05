@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tokio_stream::{Stream, StreamExt};
 
 use crate::config::TaskRef;
@@ -238,116 +238,11 @@ pub trait LlmProviderFactory: Send + Sync {
     ) -> Result<Box<dyn LlmProvider>, LlmProviderError>;
 }
 
-/// Global registry of `LlmProviderFactory` implementations.
-pub struct LlmProviderRegistry {
-    factories: Mutex<HashMap<String, Arc<dyn LlmProviderFactory>>>,
-}
-
-impl LlmProviderRegistry {
-    fn global() -> &'static Self {
-        static REGISTRY: OnceLock<LlmProviderRegistry> = OnceLock::new();
-        REGISTRY.get_or_init(|| Self {
-            factories: Mutex::new(HashMap::new()),
-        })
-    }
-
-    /// Registers a new provider factory.
-    pub fn register(factory: Arc<dyn LlmProviderFactory>) {
-        let name = factory.provider_name().to_string();
-        if let Ok(mut guard) = Self::global().factories.lock() {
-            guard.insert(name, factory);
-        }
-    }
-
-    /// Removes a registered factory by provider name.
-    ///
-    /// Returns `true` when a factory was actually removed, `false` when no
-    /// factory was registered under `name`. Deregistration is what lets a
-    /// factory whose backing plugin has died or been unloaded be evicted, so
-    /// [`create_provider`](Self::create_provider) can no longer select a
-    /// stale entry that points at a dead process.
-    pub fn deregister(name: &str) -> bool {
-        let Ok(mut guard) = Self::global().factories.lock() else {
-            tracing::warn!(
-                component = "LlmProviderRegistry",
-                provider = %name,
-                "Cannot deregister provider factory because the registry lock is poisoned"
-            );
-            return false;
-        };
-        guard.remove(name).is_some()
-    }
-
-    /// Removes a factory only when `name` still points to `expected`.
-    ///
-    /// The identity check prevents one runtime handle from deregistering a
-    /// replacement factory installed by another handle during concurrent host
-    /// reconfiguration.
-    pub fn deregister_if_matches(name: &str, expected: &Arc<dyn LlmProviderFactory>) -> bool {
-        let Ok(mut guard) = Self::global().factories.lock() else {
-            tracing::warn!(
-                component = "LlmProviderRegistry",
-                provider = %name,
-                "Cannot conditionally deregister provider factory because the registry lock is poisoned"
-            );
-            return false;
-        };
-        if guard
-            .get(name)
-            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
-        {
-            guard.remove(name).is_some()
-        } else {
-            false
-        }
-    }
-
-    /// Snapshot of the currently registered provider names.
-    ///
-    /// Intended for diagnostics and tests; the registry is process-global, so
-    /// the set can change immediately after this returns.
-    #[must_use]
-    #[cfg(test)]
-    pub fn registered_names() -> Vec<String> {
-        if let Ok(guard) = Self::global().factories.lock() {
-            guard.keys().cloned().collect()
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// Tries to instantiate a provider by name using the registered factories.
-    ///
-    /// `task` is forwarded to the factory so the produced provider can honor
-    /// the task's `model` and `max_tokens` overrides (see
-    /// [`LlmProviderFactory::create_provider`]).
-    pub fn create_provider(
-        name: &str,
-        config: &ene_config::EneConfig,
-        task: &TaskRef,
-    ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
-        let factory = {
-            if let Ok(guard) = Self::global().factories.lock() {
-                guard.get(name).cloned()
-            } else {
-                None
-            }
-        };
-
-        match factory {
-            Some(f) => f.create_provider(config, task),
-            None => Err(LlmProviderError::Provider(format!(
-                "No LlmProviderFactory registered for provider name: '{name}'"
-            ))),
-        }
-    }
-}
-
 /// Factory that creates [`EmbeddingProvider`] instances for a provider kind.
 ///
 /// Plugin-provided embedding backends implement this on the host side
-/// (`ene-plugin-host`'s `IpcEmbeddingProviderFactory`) and register
-/// themselves in [`EmbeddingProviderRegistry`].
+/// (`ene-plugin-host`'s `IpcEmbeddingProviderFactory`); the plugin host
+/// registry looks factories up by provider kind.
 pub trait EmbeddingProviderFactory: Send + Sync {
     /// Provider kind this factory serves.
     fn provider_kind(&self) -> &str;
@@ -359,238 +254,35 @@ pub trait EmbeddingProviderFactory: Send + Sync {
     ) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError>;
 }
 
-/// Global registry of embedding provider factories, keyed by provider kind.
+/// Host-side provider factory lookup used by task routing and failover.
 ///
-/// Mirrors [`LlmProviderRegistry`]: the runtime registers plugin-provided
-/// embedding factories when the plugin host starts (and re-registers them on
-/// host reconfiguration), and embedding creation looks the factory up by the
-/// embedding task's provider kind.
-pub struct EmbeddingProviderRegistry {
-    factories: Mutex<HashMap<String, Arc<dyn EmbeddingProviderFactory>>>,
-}
-
-impl EmbeddingProviderRegistry {
-    fn global() -> &'static Self {
-        static REGISTRY: OnceLock<EmbeddingProviderRegistry> = OnceLock::new();
-        REGISTRY.get_or_init(|| Self {
-            factories: Mutex::new(HashMap::new()),
-        })
-    }
-
-    /// Registers a new embedding provider factory.
-    pub fn register(factory: Arc<dyn EmbeddingProviderFactory>) {
-        let kind = factory.provider_kind().to_string();
-        if let Ok(mut guard) = Self::global().factories.lock() {
-            guard.insert(kind, factory);
-        } else {
-            tracing::warn!(
-                component = "EmbeddingProviderRegistry",
-                provider = %kind,
-                "Cannot register embedding provider factory because the registry lock is poisoned"
-            );
-        }
-    }
-
-    /// Removes a registered factory by provider kind.
-    ///
-    /// Returns `true` when a factory was actually removed, `false` when no
-    /// factory was registered under `kind`. Deregistration is what lets a
-    /// factory whose backing plugin has died or been unloaded be evicted.
-    pub fn deregister(kind: &str) -> bool {
-        let Ok(mut guard) = Self::global().factories.lock() else {
-            tracing::warn!(
-                component = "EmbeddingProviderRegistry",
-                provider = %kind,
-                "Cannot deregister embedding provider factory because the registry lock is poisoned"
-            );
-            return false;
-        };
-        guard.remove(kind).is_some()
-    }
-
-    /// Removes a factory only when `kind` still points to `expected`.
-    ///
-    /// The identity check prevents one runtime handle from deregistering a
-    /// replacement factory installed by another handle during concurrent host
-    /// reconfiguration.
-    pub fn deregister_if_matches(kind: &str, expected: &Arc<dyn EmbeddingProviderFactory>) -> bool {
-        let Ok(mut guard) = Self::global().factories.lock() else {
-            tracing::warn!(
-                component = "EmbeddingProviderRegistry",
-                provider = %kind,
-                "Cannot conditionally deregister embedding provider factory because the registry lock is poisoned"
-            );
-            return false;
-        };
-        if guard
-            .get(kind)
-            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
-        {
-            guard.remove(kind).is_some()
-        } else {
-            false
-        }
-    }
-
-    /// Tries to instantiate an embedding provider by kind using the
-    /// registered factories.
-    pub fn create_provider(
+/// Implemented by the plugin host manager (the single provider registry:
+/// `ene-plugin-host`'s `PluginHostManager`), and by test stubs. Provider
+/// creation never consults a process-global registry anymore — callers hold
+/// the current host (or a stub) and query it directly.
+#[async_trait]
+pub trait ProviderHost: Send + Sync {
+    /// Creates an LLM provider for a canonical provider kind.
+    async fn create_llm_provider(
+        &self,
         kind: &str,
         config: &ene_config::EneConfig,
-    ) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError> {
-        let factory = {
-            if let Ok(guard) = Self::global().factories.lock() {
-                guard.get(kind).cloned()
-            } else {
-                None
-            }
-        };
+        task: &TaskRef,
+    ) -> Result<Box<dyn LlmProvider>, LlmProviderError>;
 
-        match factory {
-            Some(f) => f.create_embedding_provider(config),
-            None => Err(EmbeddingError::Init(format!(
-                "No embedding provider factory registered for provider kind: '{kind}'"
-            ))),
-        }
-    }
-}
+    /// Creates an embedding provider for a canonical provider kind.
+    async fn create_embedding_provider(
+        &self,
+        kind: &str,
+        config: &ene_config::EneConfig,
+    ) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError>;
 
-#[cfg(test)]
-mod registry_tests {
-    use super::*;
-
-    /// A factory whose `create_provider` always fails with a recognizable
-    /// error, so a lookup that resolves it can be told apart from the
-    /// "no factory registered" error path.
-    struct MarkerFactory {
-        name: &'static str,
-    }
-
-    impl LlmProviderFactory for MarkerFactory {
-        fn provider_name(&self) -> &str {
-            self.name
-        }
-
-        fn create_provider(
-            &self,
-            _config: &ene_config::EneConfig,
-            _task: &TaskRef,
-        ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
-            Err(LlmProviderError::LocalLlm("marker factory".to_string()))
-        }
-    }
-
-    fn config() -> ene_config::EneConfig {
-        ene_config::EneConfig::default()
-    }
-
-    fn task() -> TaskRef {
-        TaskRef::default()
-    }
-
-    /// Assert that `result` is an `Err` and return it. Used instead of
-    /// `expect_err` because the boxed provider type is not `Debug`.
-    fn unwrap_err(result: Result<Box<dyn LlmProvider>, LlmProviderError>) -> LlmProviderError {
-        match result {
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => e,
-        }
-    }
-
-    /// The registry is a process-global singleton shared across tests running
-    /// in the same process, so every test uses a distinct provider name to
-    /// avoid cross-test interference.
-    #[test]
-    fn register_then_deregister_makes_lookup_fail() {
-        const NAME: &str = "registry-test-ephemeral";
-        LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
-
-        let err = unwrap_err(LlmProviderRegistry::create_provider(
-            NAME,
-            &config(),
-            &task(),
-        ));
-        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
-
-        assert!(LlmProviderRegistry::deregister(NAME));
-        assert!(!LlmProviderRegistry::registered_names().contains(&NAME.to_string()));
-
-        let err = unwrap_err(LlmProviderRegistry::create_provider(
-            NAME,
-            &config(),
-            &task(),
-        ));
-        match err {
-            LlmProviderError::Provider(msg) => assert!(msg.contains(NAME)),
-            other => panic!("expected Provider error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn deregister_unknown_name_is_false() {
-        assert!(!LlmProviderRegistry::deregister(
-            "registry-test-never-registered"
-        ));
-    }
-
-    #[test]
-    fn conditional_deregister_preserves_a_replacement_factory() {
-        const NAME: &str = "registry-test-replacement";
-        let original: Arc<dyn LlmProviderFactory> = Arc::new(MarkerFactory { name: NAME });
-        let replacement: Arc<dyn LlmProviderFactory> = Arc::new(MarkerFactory { name: NAME });
-
-        LlmProviderRegistry::register(Arc::clone(&original));
-        LlmProviderRegistry::register(Arc::clone(&replacement));
-
-        assert!(!LlmProviderRegistry::deregister_if_matches(NAME, &original));
-        let err = unwrap_err(LlmProviderRegistry::create_provider(
-            NAME,
-            &config(),
-            &task(),
-        ));
-        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
-        assert!(LlmProviderRegistry::deregister(NAME));
-    }
-
-    #[test]
-    fn registry_lookup_uses_registered_name() {
-        const NAME: &str = "registry-test-named";
-        LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
-
-        let err = unwrap_err(LlmProviderRegistry::create_provider(
-            NAME,
-            &config(),
-            &task(),
-        ));
-        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
-        assert!(LlmProviderRegistry::deregister(NAME));
-    }
-
-    #[test]
-    fn deregister_is_idempotent() {
-        const NAME: &str = "registry-test-idempotent";
-        LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
-        assert!(LlmProviderRegistry::deregister(NAME));
-        assert!(!LlmProviderRegistry::deregister(NAME));
-    }
-
-    #[test]
-    fn reregister_after_deregister_restores_lookup() {
-        const NAME: &str = "registry-test-reregister";
-        LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
-        assert!(LlmProviderRegistry::deregister(NAME));
-
-        LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
-        let err = unwrap_err(LlmProviderRegistry::create_provider(
-            NAME,
-            &config(),
-            &task(),
-        ));
-        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
-
-        // Clean up so this name does not linger for other tests.
-        assert!(LlmProviderRegistry::deregister(NAME));
-    }
+    /// Creates a TTS provider for a provider kind.
+    async fn create_tts_provider(
+        &self,
+        kind: &str,
+        config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn TtsProvider>, AudioProviderError>;
 }
 
 #[cfg(test)]
@@ -872,12 +564,15 @@ pub trait VadFactory: Send + Sync {
     ) -> Result<Box<dyn VadEngine>, AudioProviderError>;
 }
 
-/// Global registry of audio provider factories (TTS, STT, VAD).
+/// Global registry of in-process audio provider factories (STT, VAD, and the
+/// legacy local TTS fallback).
 ///
-/// Uses the same `OnceLock` + `Mutex` pattern as
-/// [`LlmProviderRegistry`] with separate
-/// maps per modality. Locks use [`parking_lot::Mutex`] (poison-free, so no
-/// poisoning checks are required at the call sites).
+/// Plugin-provided TTS providers are registered and served by the plugin
+/// host; this registry only holds the in-process `ene-voice` factories
+/// (whisper, silero VAD, local Kokoro) until `ene-voice` is pluginized, at
+/// which point the registry is removed entirely. Uses a `OnceLock` +
+/// `parking_lot::Mutex` pattern with separate maps per modality (poison-free,
+/// so no poisoning checks are required at the call sites).
 pub struct AudioProviderRegistry {
     tts: parking_lot::Mutex<HashMap<String, Arc<dyn TtsProviderFactory>>>,
     stt: parking_lot::Mutex<HashMap<String, Arc<dyn SttProviderFactory>>>,
@@ -935,10 +630,38 @@ impl AudioProviderRegistry {
         Self::global().stt.lock().insert(name, factory);
     }
 
+    /// Removes an STT provider factory only when `name` still points to
+    /// `expected`, mirroring [`deregister_tts_if_matches`](Self::deregister_tts_if_matches).
+    pub fn deregister_stt_if_matches(name: &str, expected: &Arc<dyn SttProviderFactory>) -> bool {
+        let mut guard = Self::global().stt.lock();
+        if guard
+            .get(name)
+            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
+        {
+            guard.remove(name).is_some()
+        } else {
+            false
+        }
+    }
+
     /// Registers a VAD engine factory.
     pub fn register_vad(factory: Arc<dyn VadFactory>) {
         let name = factory.provider_name().to_string();
         Self::global().vad.lock().insert(name, factory);
+    }
+
+    /// Removes a VAD engine factory only when `name` still points to
+    /// `expected`, mirroring [`deregister_tts_if_matches`](Self::deregister_tts_if_matches).
+    pub fn deregister_vad_if_matches(name: &str, expected: &Arc<dyn VadFactory>) -> bool {
+        let mut guard = Self::global().vad.lock();
+        if guard
+            .get(name)
+            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
+        {
+            guard.remove(name).is_some()
+        } else {
+            false
+        }
     }
 
     /// Tries to instantiate a TTS provider by name using the registered factories.

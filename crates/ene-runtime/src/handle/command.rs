@@ -314,6 +314,39 @@ pub enum EneCommand {
         /// Reply channel.
         reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
     },
+    /// Edit a persisted typed memory in place (title / content / kind /
+    /// confidence).
+    ///
+    /// Executed against the memory store inside the actor so the edit is
+    /// serialized with turn execution and emitted as a
+    /// [`super::event::LifecycleEvent::MemoryLedgerChanged`] audit event. The
+    /// actor also refreshes the row's embeddings in the background so vector
+    /// recall does not serve stale text.
+    EditMemory {
+        /// Typed-memory row id.
+        id: i64,
+        /// New field values (validated before any write).
+        edit: ene_store::MemoryEdit,
+        /// Active turn context for the audit event (`None` outside a turn).
+        turn: Option<TurnId>,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
+    },
+    /// Set the salience (importance / Preference weight) of a typed memory.
+    ///
+    /// Executed against the memory store inside the actor so the adjustment
+    /// is serialized with turn execution and emitted as a
+    /// [`super::event::LifecycleEvent::MemoryLedgerChanged`] audit event.
+    SetMemorySalience {
+        /// Typed-memory row id.
+        id: i64,
+        /// New salience value (clamped into `0.0..=1.0` by the store).
+        salience: f32,
+        /// Active turn context for the audit event (`None` outside a turn).
+        turn: Option<TurnId>,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
+    },
     /// Invalidate the Tool RAG index, forcing re-embedding on next query.
     InvalidateToolIndex,
     /// Start a background workspace document index sync.
@@ -429,6 +462,40 @@ pub enum EneCommand {
     /// when the tool registry failed to rebuild (the reconfiguration path
     /// normally rebuilds TTS via [`Self::PluginHostReconfigured`]).
     RebuildTtsProvider,
+    /// Internal: a plugin was permanently disabled and its provider
+    /// factories must be evicted from the host registry.
+    ///
+    /// Sent by the plugin health bridges. The actor locks the shared plugin
+    /// host, evicts the plugin's LLM/embedding/TTS factories, and rebuilds
+    /// the live TTS provider when one of the evicted kinds was selected.
+    PluginProviderDisabled {
+        /// Name of the disabled plugin whose factories to evict.
+        plugin: String,
+        /// Factory handles the emitting host generation contributed,
+        /// captured by the health bridge. Eviction is identity-gated on
+        /// these, so a stale event cannot evict a replacement host's
+        /// factories.
+        factories: ene_plugin_host::PluginFactoryHandles,
+    },
+    /// Probe every chat failover candidate through the provider host and
+    /// return the resulting health reports.
+    ///
+    /// Runs in a background task so a slow probe cannot stall the actor
+    /// loop. Used by the CLI `/doctor` fallback check; the shared health
+    /// monitor is updated as a side effect.
+    ProbeChatCandidates {
+        /// Reply channel carrying one report per probed candidate.
+        reply: oneshot::Sender<Vec<ene_ai::ProviderHealthReport>>,
+    },
+    /// Build a chat provider for the configured chat task through the
+    /// provider host.
+    ///
+    /// Used by CLI commands that need a provider outside a turn (e.g. the
+    /// memory-write retry drain), where no `StreamContext` exists.
+    CreateChatProvider {
+        /// Reply channel carrying the provider or a string error.
+        reply: oneshot::Sender<Result<Arc<dyn ene_ai::LlmProvider>, String>>,
+    },
     /// Test-only: mutates `pending_permissions`, `permission_scopes`, and
     /// `undo_stack` — the three shared-state fields a panicking command can
     /// mutate — then panics, so the panic hits mid-command with in-flight

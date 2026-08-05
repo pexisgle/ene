@@ -118,6 +118,15 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // `ai.tts.provider = "kokoro"` selects it.
     list.insert("kokoro".to_string(), PluginEntry::default());
 
+    // The local ONNX provider plugin (Silero VAD + onnx-runner / g2p
+    // capabilities) loads the ONNX model on first use; it is inert until
+    // `ai.vad.provider = "silero"` selects it.
+    list.insert("onnx".to_string(), PluginEntry::default());
+
+    // The local whisper.cpp STT provider plugin loads the GGUF model on
+    // first use; it is inert until `ai.stt.provider = "whisper"` selects it.
+    list.insert("whisper".to_string(), PluginEntry::default());
+
     // The Edge-TTS provider plugin talks to Microsoft's free, keyless Edge
     // Read Aloud WebSocket endpoint; it is inert until
     // `ai.tts.provider = "edge-tts"` selects it.
@@ -299,6 +308,40 @@ fn warn_reserved_config_keys(plugin_name: &str, config: &serde_json::Value) {
     }
 }
 
+/// Admission budget override for one [`ResourceClass`](ene_plugin_proto::ResourceClass).
+///
+/// The `class` value uses the same externally tagged JSON form as the wire
+/// (`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`), so one vocabulary covers
+/// both the plugin declaration and the host configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ResourceClassBudget {
+    /// The class this entry budgets. `Gpu` classes are gated by default
+    /// (one concurrent job per device); `Cpu` / `Network` are only gated
+    /// when an entry names them.
+    pub class: ene_plugin_proto::ResourceClass,
+    /// Maximum concurrent in-flight jobs for this class. `None` uses the
+    /// class default: 1 for GPU devices, the logical CPU count for `Cpu`,
+    /// 4 for `Network`. The value is clamped to at least 1: a zero-permit
+    /// class would deadlock every request against it, which is a worse
+    /// failure mode than the clamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permits: Option<usize>,
+    /// How many additional callers may wait for a permit before requests
+    /// fail fast with `Busy`. `None` uses the default of 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_depth: Option<usize>,
+}
+
+impl Default for ResourceClassBudget {
+    fn default() -> Self {
+        Self {
+            class: ene_plugin_proto::ResourceClass::Cpu,
+            permits: None,
+            queue_depth: None,
+        }
+    }
+}
+
 // Register the `fs` sandbox tool schema from the host crate: the proto crate
 // is wire-ABI only and must not depend on `ene-config`, so the host crate
 // (which links both) takes over the registration.
@@ -410,6 +453,20 @@ ene_config::define_config!(
         pub mcp_allow_insecure_urls: bool = false,
         /// MCP servers to connect to.
         pub mcp_servers: Vec<crate::mcp_config::McpServerConfig> = Vec::new(),
+        /// Per-`ResourceClass` admission budgets for provider requests.
+        ///
+        /// Every plugin that declares the same class (e.g. two local LLM
+        /// plugins offloading to GPU device 0) shares the class's budget, so
+        /// the host never sends more concurrent GPU-bound requests than the
+        /// device can serve. `Gpu` classes are gated even without an entry
+        /// (one job per device, up to 8 callers waiting); add an entry to
+        /// raise the concurrency or widen the wait queue. `Cpu` and
+        /// `Network` classes are not gated unless an entry names them, so
+        /// cloud providers keep their declared per-plugin concurrency
+        /// untouched. Permits are held for the duration of a request (a
+        /// stream, or a single completion) and released automatically when
+        /// the request ends or the serving plugin crashes.
+        pub resource_classes: Vec<ResourceClassBudget> = Vec::new(),
     }
 );
 
@@ -536,5 +593,38 @@ mod tests {
         assert_eq!(blob.get("enable"), Some(&serde_json::json!(false)));
         assert_eq!(blob.get("checksum"), Some(&serde_json::json!("deadbeef")));
         assert_eq!(blob.get("api_key"), Some(&serde_json::json!("sk-test")));
+    }
+
+    /// `plugins.resource_classes` must round-trip through JSON with the same
+    /// externally tagged class form the wire uses, and default to empty when
+    /// absent.
+    #[test]
+    fn resource_classes_config_round_trips() {
+        let json = serde_json::json!({
+            "resource_classes": [
+                { "class": { "Gpu": { "device": 0 } }, "permits": 2, "queue_depth": 4 },
+                { "class": "Cpu", "permits": 8 }
+            ]
+        });
+        let config: PluginConfig = serde_json::from_value(json.clone()).expect("parses");
+        assert_eq!(config.resource_classes.len(), 2);
+        let gpu = &config.resource_classes[0];
+        assert_eq!(
+            gpu.class,
+            ene_plugin_proto::ResourceClass::Gpu { device: 0 }
+        );
+        assert_eq!(gpu.permits, Some(2));
+        assert_eq!(gpu.queue_depth, Some(4));
+        let cpu = &config.resource_classes[1];
+        assert_eq!(cpu.class, ene_plugin_proto::ResourceClass::Cpu);
+        assert_eq!(cpu.permits, Some(8));
+        assert_eq!(cpu.queue_depth, None);
+
+        let back = serde_json::to_value(&config).expect("serializes");
+        assert_eq!(back.get("resource_classes"), json.get("resource_classes"));
+
+        let empty: PluginConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults apply");
+        assert!(empty.resource_classes.is_empty());
     }
 }

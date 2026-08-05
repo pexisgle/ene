@@ -1,8 +1,9 @@
 //! TTS provider factory backed by a plugin IPC connection.
 //!
 //! [`IpcTtsProviderFactory`] implements [`ene_ai::TtsProviderFactory`] so
-//! that plugin-provided TTS providers integrate with the global
-//! [`AudioProviderRegistry`](ene_ai::AudioProviderRegistry), mirroring how
+//! that plugin-provided TTS providers resolve through the host's factory
+//! registry (the [`PluginHostManager`](crate::PluginHostManager) implements
+//! [`ene_ai::ProviderHost`] over its factory maps), mirroring how
 //! [`IpcLlmProviderFactory`](crate::factory::IpcLlmProviderFactory)
 //! integrates LLM providers. The factory is keyed by the plugin's
 //! `TtsProviderSpec.kind`, which is also the name users select via

@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use ene_ai::EmbeddingKind;
 use ene_ai::traits::{EmbeddingProvider, LlmProvider};
 use ene_plugin::prelude::*;
+use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 use tokio_stream::StreamExt;
@@ -90,7 +91,21 @@ impl ene_plugin::ConfigurablePlugin for LocalLlmPlugin {
 #[async_trait]
 impl LlmPlugin for LocalLlmPlugin {
     fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
-        vec![Self::llm_spec()]
+        // The class is derived from the acceleration config so the host can
+        // gate this provider against other GPU users; an unreadable config
+        // falls back to Cpu (requests will fail with a typed error anyway).
+        let mut spec = Self::llm_spec();
+        match config::resource_class() {
+            Ok(class) => spec.resource_class = class,
+            Err(e) => {
+                tracing::warn!(
+                    component = "LocalLlmPlugin",
+                    error = %e,
+                    "declaring Cpu resource class: acceleration config unreadable"
+                );
+            }
+        }
+        vec![spec]
     }
 
     async fn create_chat_stream(
@@ -217,6 +232,90 @@ impl EmbedPlugin for LocalLlmPlugin {
     }
 }
 
+/// `gguf-runner@1` `generate` request: prompt plus optional JSON schema.
+#[derive(Deserialize)]
+struct GenerateRequest {
+    model: String,
+    prompt: String,
+    #[serde(default)]
+    json_schema: Option<Value>,
+}
+
+/// `gguf-runner@1` `embed` request.
+#[derive(Deserialize)]
+struct EmbedRequest {
+    model: String,
+    texts: Vec<String>,
+}
+
+/// `gguf-runner@1` `unload` request.
+#[derive(Deserialize)]
+struct UnloadRequest {
+    model: String,
+}
+
+#[async_trait]
+impl CapabilityProvider for LocalLlmPlugin {
+    /// Serves the published `gguf-runner@1` method contract by delegating to
+    /// the plugin's own chat / embedding paths, so mediated calls share the
+    /// same model registry, completion budget, and error mapping as
+    /// host-driven requests.
+    async fn call_capability(
+        &self,
+        capability: &CapabilityRef,
+        method: &str,
+        payload: Value,
+    ) -> Result<Value, PluginError> {
+        if capability.as_str() != "gguf-runner@1" {
+            return Err(PluginError::not_supported(format!(
+                "capability {capability}"
+            )));
+        }
+        match method {
+            "generate" => {
+                let request: GenerateRequest = serde_json::from_value(payload)
+                    .map_err(|e| PluginError::provider(format!("invalid generate request: {e}")))?;
+                let messages = vec![serde_json::json!({
+                    "role": "user",
+                    "parts": [{ "Text": { "text": request.prompt } }]
+                })];
+                let completion = LlmPlugin::chat_completion(
+                    self,
+                    Self::LLM_PROVIDER_KIND,
+                    serde_json::json!({}),
+                    request.model,
+                    None,
+                    messages,
+                    request.json_schema,
+                )
+                .await?;
+                Ok(serde_json::json!({ "text": completion.text }))
+            }
+            "embed" => {
+                let request: EmbedRequest = serde_json::from_value(payload)
+                    .map_err(|e| PluginError::provider(format!("invalid embed request: {e}")))?;
+                let vectors = EmbedPlugin::embed_batch(
+                    self,
+                    Self::LLM_PROVIDER_KIND,
+                    serde_json::json!({}),
+                    request.model,
+                    None,
+                    request.texts,
+                )
+                .await?;
+                Ok(serde_json::json!({ "embeddings": vectors }))
+            }
+            "unload" => {
+                let request: UnloadRequest = serde_json::from_value(payload)
+                    .map_err(|e| PluginError::provider(format!("invalid unload request: {e}")))?;
+                models::unload(&request.model);
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            _ => Err(PluginError::not_supported(format!("method {method}"))),
+        }
+    }
+}
+
 fn ensure_kind(kind: &str) -> Result<(), PluginError> {
     if kind == LocalLlmPlugin::LLM_PROVIDER_KIND {
         Ok(())
@@ -235,7 +334,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use ene_plugin::{ConfigurablePlugin, PluginDispatch};
+    use ene_plugin::{ConfigurablePlugin, LlmPlugin, PluginDispatch};
     use ene_plugin_proto::{
         CapabilityRef, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION, PluginIpcRequest, PluginIpcResponse,
         VersionRange, WireFormat, cleanup_path, read_plugin_response, write_plugin_request,
@@ -435,6 +534,8 @@ mod tests {
 
     #[test]
     fn capabilities_advertise_local_kind_and_provides() {
+        use ene_plugin::ResourceClass;
+
         assert_eq!(super::LocalLlmPlugin::LLM_PROVIDER_KIND, "local");
         assert_eq!(
             super::LocalLlmPlugin::provides(),
@@ -444,5 +545,20 @@ mod tests {
                 CapabilityRef::parse("gguf-runner@1").expect("static capability"),
             ]
         );
+
+        // The resource class follows the delivered acceleration config.
+        super::config::set_config(&serde_json::json!({"acceleration": "vulkan"}));
+        let spec = super::LocalLlmPlugin.llm_capabilities();
+        assert_eq!(
+            spec.first().expect("one spec").resource_class,
+            ResourceClass::Gpu { device: 0 }
+        );
+        super::config::set_config(&serde_json::json!({"acceleration": "cpu"}));
+        let spec = super::LocalLlmPlugin.llm_capabilities();
+        assert_eq!(
+            spec.first().expect("one spec").resource_class,
+            ResourceClass::Cpu
+        );
+        super::config::set_config(&serde_json::json!({}));
     }
 }

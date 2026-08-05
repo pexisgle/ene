@@ -47,6 +47,13 @@ pub struct PluginCapabilities {
     #[serde(default)]
     pub stt_providers: Vec<SttProviderSpec>,
 
+    /// VAD engines served by this plugin.
+    ///
+    /// Absent on older binaries (`#[serde(default)]` → empty); the host then
+    /// registers no VAD factory for the plugin.
+    #[serde(default)]
+    pub vad_providers: Vec<VadProviderSpec>,
+
     /// Whether the plugin handles [`crate::PluginIpcRequest::ListConfigOptions`].
     ///
     /// Absent on older binaries (`#[serde(default)]` → `false`); the host
@@ -75,6 +82,17 @@ pub struct PluginCapabilities {
     /// [`supports_migrate_config`](Self::supports_migrate_config) is set.
     #[serde(default)]
     pub config_version: u32,
+
+    /// Whether the plugin handles [`crate::PluginIpcRequest::CapabilityCall`].
+    ///
+    /// Absent on older binaries (`#[serde(default)]` → `false`); the host
+    /// then refuses to mediate capability calls into this plugin — a binary
+    /// that predates the call message cannot decode it, and a clean typed
+    /// error beats a connection-level decode failure. A plugin must also
+    /// declare the capability in [`provides`](Self::provides) for the host to
+    /// route calls to it at all.
+    #[serde(default)]
+    pub supports_capability_calls: bool,
 
     /// Capabilities this plugin provides to other plugins, each written
     /// `name@major` (e.g. `gguf-runner@1`).
@@ -383,6 +401,15 @@ pub struct LlmProviderSpec {
     /// required).
     #[serde(default)]
     pub context_window: Option<u32>,
+
+    /// The physical resource this provider's jobs contend on, used by the
+    /// host's admission control to share one budget across every provider
+    /// that declares the same class (e.g. all GPU-offloaded local models on
+    /// device 0). Absent (or omitted by an older plugin binary) defaults to
+    /// [`ResourceClass::Cpu`] — the conservative "contends on CPU" reading —
+    /// so old specs keep negotiating without a protocol version bump.
+    #[serde(default)]
+    pub resource_class: ResourceClass,
 }
 
 /// Specification of a TTS provider (reserved for future use).
@@ -429,6 +456,48 @@ pub struct SttProviderSpec {
     /// docs for the rationale.
     #[serde(default)]
     pub concurrency: ConcurrencyHint,
+}
+
+/// Specification of a voice activity detection engine.
+///
+/// `frame_size` is the one piece of engine state the host must know
+/// synchronously: a host-side `VadEngine` adapter has to answer
+/// `frame_size()` without an IPC round trip, so it carries the value from
+/// this spec. `sample_rate` is the PCM rate chunks arrive at; the host's
+/// capture pipeline runs at 16 kHz today and reserves this field for
+/// negotiating other rates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VadProviderSpec {
+    /// Engine kind identifier (e.g. `"silero"`).
+    pub kind: String,
+
+    /// PCM samples per [`crate::PluginIpcRequest::ProcessVadChunk`] call.
+    #[serde(default)]
+    pub frame_size: u32,
+
+    /// PCM sample rate the engine expects (Hz).
+    ///
+    /// Absent (or omitted by an older binary) defaults to
+    /// [`DEFAULT_SAMPLE_RATE`] — 16 kHz, the rate every built-in VAD engine
+    /// and the desktop capture pipeline use.
+    #[serde(default = "default_vad_sample_rate")]
+    pub sample_rate: u32,
+
+    /// How many concurrent sessions this engine can safely serve.
+    ///
+    /// Absent (or omitted by an older plugin binary) defaults to
+    /// [`ConcurrencyHint::default`] — serial, shallow queue. See that type's
+    /// docs for the rationale.
+    #[serde(default)]
+    pub concurrency: ConcurrencyHint,
+}
+
+/// Default VAD sample rate: 16 kHz (Silero VAD's native rate, shared by the
+/// desktop capture pipeline).
+pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
+
+fn default_vad_sample_rate() -> u32 {
+    DEFAULT_SAMPLE_RATE
 }
 
 /// How many concurrent jobs a plugin-supplied provider (LLM, TTS, STT) can
@@ -489,10 +558,12 @@ mod tests {
         assert!(caps.llm_providers.is_empty());
         assert!(caps.tts_providers.is_empty());
         assert!(caps.stt_providers.is_empty());
+        assert!(caps.vad_providers.is_empty());
         assert!(!caps.supports_list_config_options);
         assert!(!caps.supports_validate_config);
         assert!(!caps.supports_migrate_config);
         assert_eq!(caps.config_version, 0);
+        assert!(!caps.supports_capability_calls);
         assert!(caps.provides.is_empty());
         assert!(caps.requires.is_empty());
     }
@@ -511,14 +582,17 @@ mod tests {
                     queue_depth: 8,
                 },
                 context_window: Some(200_000),
+                resource_class: ResourceClass::Gpu { device: 0 },
             }],
             embed_providers: vec!["openai".into()],
             tts_providers: vec![],
             stt_providers: vec![],
+            vad_providers: vec![],
             supports_list_config_options: true,
             supports_validate_config: true,
             supports_migrate_config: true,
             config_version: 2,
+            supports_capability_calls: true,
             provides: vec![
                 CapabilityRef::parse("llm/chat@1").unwrap(),
                 CapabilityRef::parse("embed@1").unwrap(),
@@ -539,6 +613,7 @@ mod tests {
         assert!(!caps.supports_validate_config);
         assert!(!caps.supports_migrate_config);
         assert_eq!(caps.config_version, 0);
+        assert!(!caps.supports_capability_calls);
         assert!(caps.provides.is_empty());
         assert!(caps.requires.is_empty());
     }
@@ -701,10 +776,31 @@ mod tests {
                 queue_depth: 8,
             },
             context_window: Some(200_000),
+            resource_class: ResourceClass::Gpu { device: 0 },
         };
         let json = serde_json::to_string(&spec).unwrap();
         let deser: LlmProviderSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(spec, deser);
+        assert!(
+            json.contains(r#"{"Gpu":{"device":0}}"#),
+            "externally tagged ResourceClass form must be load-bearing on the wire"
+        );
+    }
+
+    #[test]
+    fn llm_provider_spec_defaults_resource_class_to_cpu() {
+        // A spec produced by an older plugin binary omits `resource_class`
+        // entirely; it must parse as `Cpu` without a protocol version bump.
+        let json = r#"{
+            "kind": "anthropic",
+            "supported_models": [],
+            "supports_streaming": true,
+            "supports_vision": false,
+            "concurrency": {"max_in_flight": 1, "queue_depth": 2}
+        }"#;
+        let spec: LlmProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.resource_class, ResourceClass::Cpu);
+        assert_eq!(ResourceClass::default(), ResourceClass::Cpu);
     }
 
     #[test]
@@ -731,6 +827,30 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
         let deser: SttProviderSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(spec, deser);
+    }
+
+    #[test]
+    fn vad_provider_spec_serde_roundtrip() {
+        let spec = VadProviderSpec {
+            kind: "silero".into(),
+            frame_size: 512,
+            sample_rate: 16_000,
+            concurrency: ConcurrencyHint::default(),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let deser: VadProviderSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec, deser);
+    }
+
+    /// Load-bearing contract: an absent `frame_size` (as an old binary that
+    /// predates the field would send) deserializes to 0 rather than an
+    /// error, so the host can reject it explicitly.
+    #[test]
+    fn vad_provider_spec_missing_frame_size_defaults_to_zero() {
+        let json = r#"{"kind":"silero"}"#;
+        let spec: VadProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.frame_size, 0);
+        assert_eq!(spec.sample_rate, DEFAULT_SAMPLE_RATE);
     }
 
     /// Load-bearing contract: an unset `concurrency` field (as an old plugin
@@ -815,11 +935,11 @@ mod tests {
 /// concurrently at all) is an admission-layer decision, not part of this
 /// type.
 ///
-/// Wire note: not yet carried on any message. The externally tagged serde
-/// form (`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`) is the initial
-/// choice; re-confirm it when this type is first wired into a message (the
-/// follow-up host-side resource admission work) before it becomes load-bearing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Wire note: carried on `LlmProviderSpec.resource_class` in the externally
+/// tagged serde form (`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`), which
+/// the host's per-class admission budgets key on; the form is pinned by the
+/// serde tests below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum ResourceClass {
     /// A specific GPU device index, as used by `with_main_gpu(n)` /
     /// CUDA/Vulkan device selection. A real, meaningful identity: two
@@ -836,6 +956,14 @@ pub enum ResourceClass {
     /// HTTP/gRPC) that does not contend on host GPU/CPU capacity the same
     /// way.
     Network,
+}
+
+impl Default for ResourceClass {
+    /// The conservative default for an undeclared provider: CPU-bound
+    /// inference, which every provider can fall back to.
+    fn default() -> Self {
+        Self::Cpu
+    }
 }
 
 #[cfg(test)]

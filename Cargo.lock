@@ -2565,7 +2565,6 @@ dependencies = [
  "ene-runtime",
  "ene-store",
  "ene-util",
- "ene-voice",
  "ene-vrm",
  "fluent-bundle",
  "glam 0.33.2",
@@ -2927,13 +2926,16 @@ dependencies = [
  "ene-ai",
  "ene-config",
  "ene-connector",
+ "ene-plugin",
  "ene-plugin-proto",
+ "ene-store",
  "futures",
  "hex",
  "http",
  "parking_lot",
  "rmcp",
  "schemars",
+ "sea-orm",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2973,11 +2975,14 @@ dependencies = [
  "ene-config",
  "ene-infer",
  "ene-plugin",
+ "ene-plugin-host",
  "ene-plugin-proto",
+ "ene-store",
  "image",
  "llama-cpp-4",
  "once_cell",
  "regex",
+ "sea-orm",
  "serde",
  "serde_json",
  "tempfile",
@@ -2999,6 +3004,22 @@ dependencies = [
  "schemars",
  "serde_json",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "ene-plugin-onnx"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-ai",
+ "ene-config",
+ "ene-plugin",
+ "ene-voice",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3119,6 +3140,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-whisper"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-ai",
+ "ene-config",
+ "ene-plugin",
+ "ene-voice",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ene-rag"
 version = "0.1.0"
 dependencies = [
@@ -3159,7 +3196,6 @@ dependencies = [
  "ene-plugin-proto",
  "ene-rag",
  "ene-store",
- "ene-voice",
  "futures",
  "image",
  "once_cell",

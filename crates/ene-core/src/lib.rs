@@ -53,7 +53,7 @@ pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCo
 pub use key_fact::KeyFact;
 pub use memory::{
     AffectAnnotation, ContradictionKeyMatch, ForgettingPolicy, GatheredCandidate,
-    HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,
+    HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryEdit, MemoryItem,
     MemoryJournalListOptions, MemoryKind, MemoryOutcome, MemorySalience, MemoryScope,
     MemoryScoreBreakdown, MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem,
     OutcomeRatingSource, Query, ScoredMemory, TimeRange,

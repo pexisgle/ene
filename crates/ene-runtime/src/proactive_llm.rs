@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use ene_ai::config::AiConfig;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk, UserMessagePart};
-use ene_ai::traits::{LlmProvider, LlmProviderRegistry};
+use ene_ai::traits::{LlmProvider, ProviderHost};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,6 +104,7 @@ impl ProactiveLlmHandles {
 /// retries on a later tick.
 pub async fn build_proactive_llm_handles(
     config: &ene_config::EneConfig,
+    host: &dyn ProviderHost,
 ) -> Result<ProactiveLlmHandles, LlmProviderError> {
     let ai_config = config
         .get_section::<AiConfig>()
@@ -122,11 +123,10 @@ pub async fn build_proactive_llm_handles(
             );
             return Ok(disabled_handles());
         }
-        let provider: Arc<dyn LlmProvider> = match LlmProviderRegistry::create_provider(
-            ene_ai::LOCAL_PROVIDER,
-            config,
-            proactive,
-        ) {
+        let provider: Arc<dyn LlmProvider> = match host
+            .create_llm_provider(ene_ai::LOCAL_PROVIDER, config, proactive)
+            .await
+        {
             Ok(provider) => Arc::from(provider),
             Err(e) => {
                 tracing::warn!(
@@ -163,7 +163,7 @@ pub async fn build_proactive_llm_handles(
         });
     }
 
-    let cloud = build_cloud_decision_provider(config)?;
+    let cloud = build_cloud_decision_provider(config, host).await?;
     Ok(ProactiveLlmHandles {
         decision: cloud,
         decision_kind: DecisionProviderKind::Cloud,
@@ -202,8 +202,9 @@ async fn warm_up_local_provider(provider: &dyn LlmProvider) -> Result<(), LlmPro
     }
 }
 
-fn build_cloud_decision_provider(
+async fn build_cloud_decision_provider(
     config: &ene_config::EneConfig,
+    host: &dyn ProviderHost,
 ) -> Result<Arc<dyn LlmProvider>, LlmProviderError> {
     let ai_config = config.get_section::<AiConfig>().unwrap_or_default();
     let task = match ai_config.tasks.proactive.as_ref() {
@@ -225,7 +226,7 @@ fn build_cloud_decision_provider(
     let mut decision_task = task.clone();
     decision_task.max_tokens = Some(DECISION_MAX_TOKENS);
     decision_task.thinking_disabled = true;
-    let provider = ene_ai::create_chat_provider_for_task(config, &decision_task)?;
+    let provider = ene_ai::create_chat_provider_for_task(config, &decision_task, host).await?;
     Ok(Arc::from(provider))
 }
 
@@ -239,12 +240,7 @@ mod tests {
     use super::*;
     use ene_ai::LlmProviderFactory;
     use ene_ai::config::{LOCAL_PROVIDER, LocalModelDef, TaskRef};
-
-    /// Serializes tests that read or write the process-global
-    /// [`LlmProviderRegistry`]: several cases register a stub under the fixed
-    /// `"local"` kind, so parallel execution would make a registry-miss test
-    /// observe another test's stub (and vice versa).
-    static REGISTRY_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    use ene_ai::traits::ProviderHost;
 
     /// How a stub provider's `chat_completion` should fail.
     #[derive(Clone, Copy)]
@@ -316,23 +312,58 @@ mod tests {
         }
     }
 
-    /// Deregisters the stub factory on drop so the global registry is not
-    /// polluted across tests.
-    struct FactoryGuard {
-        kind: &'static str,
-        factory: Arc<dyn LlmProviderFactory>,
+    /// Stub host serving a fixed factory map, standing in for the plugin
+    /// host's registry.
+    struct StubHost {
+        factories: std::collections::HashMap<String, Arc<dyn LlmProviderFactory>>,
     }
 
-    impl Drop for FactoryGuard {
-        fn drop(&mut self) {
-            LlmProviderRegistry::deregister_if_matches(self.kind, &self.factory);
+    impl StubHost {
+        fn with_factory(kind: &'static str, failure: Option<StubFailure>) -> Self {
+            let factory: Arc<dyn LlmProviderFactory> = Arc::new(StubFactory { kind, failure });
+            Self {
+                factories: std::collections::HashMap::from([(kind.to_string(), factory)]),
+            }
         }
     }
 
-    fn register_stub(kind: &'static str, failure: Option<StubFailure>) -> FactoryGuard {
-        let factory: Arc<dyn LlmProviderFactory> = Arc::new(StubFactory { kind, failure });
-        LlmProviderRegistry::register(Arc::clone(&factory));
-        FactoryGuard { kind, factory }
+    #[async_trait]
+    impl ProviderHost for StubHost {
+        async fn create_llm_provider(
+            &self,
+            kind: &str,
+            config: &ene_config::EneConfig,
+            task: &TaskRef,
+        ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
+            self.factories
+                .get(kind)
+                .ok_or_else(|| {
+                    LlmProviderError::Provider(format!(
+                        "No LlmProviderFactory registered for provider kind: '{kind}'"
+                    ))
+                })?
+                .create_provider(config, task)
+        }
+
+        async fn create_embedding_provider(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+            Err(ene_ai::EmbeddingError::Init(
+                "stub host serves no embedding providers".to_string(),
+            ))
+        }
+
+        async fn create_tts_provider(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+            Err(ene_ai::AudioProviderError::Provider(
+                "stub host serves no TTS providers".to_string(),
+            ))
+        }
     }
 
     fn test_config() -> ene_config::EneConfig {
@@ -347,9 +378,8 @@ mod tests {
 
     #[tokio::test]
     async fn cloud_provider_returns_cloud_decision() {
-        let _registry_guard = REGISTRY_TESTS.lock().await;
-        let _guard = register_stub("openai", None);
-        let handles = build_proactive_llm_handles(&test_config())
+        let host = StubHost::with_factory("openai", None);
+        let handles = build_proactive_llm_handles(&test_config(), &host)
             .await
             .expect("build");
         assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
@@ -358,8 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn proactive_openai_task_drives_generation_model() {
-        let _registry_guard = REGISTRY_TESTS.lock().await;
-        let _guard = register_stub("openai", None);
+        let host = StubHost::with_factory("openai", None);
         let mut cfg = test_config();
         let mut ai = cfg.get_section::<AiConfig>().expect("ai config");
         ai.tasks.proactive = Some(TaskRef {
@@ -368,7 +397,9 @@ mod tests {
             ..TaskRef::default()
         });
         cfg.set_section(&ai).expect("ai config merges");
-        let handles = build_proactive_llm_handles(&cfg).await.expect("build");
+        let handles = build_proactive_llm_handles(&cfg, &host)
+            .await
+            .expect("build");
         assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
     }
 
@@ -395,7 +426,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_task_without_model_entry_fails_closed_to_disabled() {
-        let handles = build_proactive_llm_handles(&local_proactive_config(None))
+        let host = StubHost::with_factory(LOCAL_PROVIDER, None);
+        let handles = build_proactive_llm_handles(&local_proactive_config(None), &host)
             .await
             .expect("missing model entry fails closed to disabled");
         assert_eq!(handles.decision_kind, DecisionProviderKind::Disabled);
@@ -403,8 +435,10 @@ mod tests {
 
     #[tokio::test]
     async fn local_task_without_registered_factory_fails_closed_to_disabled() {
-        let _registry_guard = REGISTRY_TESTS.lock().await;
-        let handles = build_proactive_llm_handles(&local_proactive_config(Some("missing")))
+        let host = StubHost {
+            factories: std::collections::HashMap::new(),
+        };
+        let handles = build_proactive_llm_handles(&local_proactive_config(Some("missing")), &host)
             .await
             .expect("missing weights fail closed to disabled");
         assert_eq!(handles.decision_kind, DecisionProviderKind::Disabled);
@@ -412,9 +446,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_warm_up_success_returns_local_handles() {
-        let _registry_guard = REGISTRY_TESTS.lock().await;
-        let _guard = register_stub(LOCAL_PROVIDER, None);
-        let handles = build_proactive_llm_handles(&local_proactive_config(Some("missing")))
+        let host = StubHost::with_factory(LOCAL_PROVIDER, None);
+        let handles = build_proactive_llm_handles(&local_proactive_config(Some("missing")), &host)
             .await
             .expect("warm-up success");
         assert_eq!(handles.decision_kind, DecisionProviderKind::Local);
@@ -423,9 +456,9 @@ mod tests {
 
     #[tokio::test]
     async fn local_warm_up_transport_failure_is_retryable() {
-        let _registry_guard = REGISTRY_TESTS.lock().await;
-        let _guard = register_stub(LOCAL_PROVIDER, Some(StubFailure::Transport));
-        let Err(err) = build_proactive_llm_handles(&local_proactive_config(Some("missing"))).await
+        let host = StubHost::with_factory(LOCAL_PROVIDER, Some(StubFailure::Transport));
+        let Err(err) =
+            build_proactive_llm_handles(&local_proactive_config(Some("missing")), &host).await
         else {
             panic!("transport failure must surface as Err for retry")
         };
@@ -434,9 +467,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_warm_up_load_failure_fails_closed_to_disabled() {
-        let _registry_guard = REGISTRY_TESTS.lock().await;
-        let _guard = register_stub(LOCAL_PROVIDER, Some(StubFailure::Load));
-        let handles = build_proactive_llm_handles(&local_proactive_config(Some("missing")))
+        let host = StubHost::with_factory(LOCAL_PROVIDER, Some(StubFailure::Load));
+        let handles = build_proactive_llm_handles(&local_proactive_config(Some("missing")), &host)
             .await
             .expect("load failure fails closed to disabled");
         assert_eq!(handles.decision_kind, DecisionProviderKind::Disabled);

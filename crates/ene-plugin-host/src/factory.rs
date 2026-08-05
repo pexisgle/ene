@@ -1,8 +1,9 @@
 //! LLM provider factory backed by a plugin IPC connection.
 //!
 //! [`IpcLlmProviderFactory`] implements [`ene_ai::LlmProviderFactory`] so
-//! that plugin-provided LLM providers integrate with the global
-//! [`LlmProviderRegistry`](ene_ai::LlmProviderRegistry).
+//! that plugin-provided LLM providers resolve through the host's factory
+//! registry (the [`PluginHostManager`](crate::PluginHostManager) implements
+//! [`ene_ai::ProviderHost`] over its factory maps).
 //!
 //! ## API key trust gate
 //!
@@ -19,8 +20,9 @@ use std::sync::Arc;
 use ene_ai::error::LlmProviderError;
 use ene_ai::traits::{LlmProvider, LlmProviderFactory};
 use ene_ai::{AiProviderDef, TaskRef};
-use ene_plugin_proto::ConcurrencyHint;
+use ene_plugin_proto::{ConcurrencyHint, ResourceClass};
 
+use crate::admission::ResourceClassAdmission;
 use crate::config::PluginConfig;
 use crate::ipc_plugin::IpcPluginConnection;
 use crate::ipc_provider::{ConcurrencyLimiter, IpcLlmProvider};
@@ -49,6 +51,12 @@ pub struct IpcLlmProviderFactory {
     /// (`create_task_chat_provider`) — see `ipc_provider`'s module docs for
     /// why the limiter must outlive any single provider instance.
     limiter: Arc<ConcurrencyLimiter>,
+    /// The [`ResourceClass`] this provider kind declared during the
+    /// handshake, used for cross-plugin admission and diagnostics.
+    resource_class: ResourceClass,
+    /// Shared class admission limiter for `resource_class`, or `None` when
+    /// the class is not gated (Cpu/Network without a configured budget).
+    class_limiter: Option<Arc<ConcurrencyLimiter>>,
 }
 
 impl IpcLlmProviderFactory {
@@ -63,6 +71,10 @@ impl IpcLlmProviderFactory {
     /// provider kind during the handshake (or the safe serial default if it
     /// declared none); it is built into a single [`ConcurrencyLimiter`]
     /// shared by every provider instance this factory subsequently creates.
+    ///
+    /// `resource_class` is the class this provider kind declared during the
+    /// handshake; `class_admission` is the process-wide registry sharing one
+    /// budget per class across every plugin that declares it.
     pub fn new(
         kind: String,
         conn: Arc<IpcPluginConnection>,
@@ -70,6 +82,8 @@ impl IpcLlmProviderFactory {
         builtin: bool,
         context_window: Option<u32>,
         concurrency: ConcurrencyHint,
+        resource_class: ResourceClass,
+        class_admission: &ResourceClassAdmission,
     ) -> Self {
         Self {
             kind,
@@ -78,6 +92,8 @@ impl IpcLlmProviderFactory {
             builtin,
             context_window,
             limiter: Arc::new(ConcurrencyLimiter::new(concurrency)),
+            resource_class,
+            class_limiter: class_admission.limiter(resource_class),
         }
     }
 
@@ -149,6 +165,8 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
             retry_policy,
             self.context_window,
             Arc::clone(&self.limiter),
+            self.resource_class,
+            self.class_limiter.clone(),
         );
 
         Ok(Box::new(provider))

@@ -1,10 +1,17 @@
 # Local Voice Pipeline & VRM 3D Avatar Rendering
 
-This document explains Ene's local audio processing engine (`ene-voice`) and 3D avatar rendering system (`ene-vrm`).
+This document explains Ene's local voice pipeline (engine code in `ene-voice`, served to the app by the voice provider plugins) and 3D avatar rendering system (`ene-vrm`).
 
 ---
 
-## 1. Local Voice Pipeline (`ene-voice`)
+## 1. Local Voice Pipeline
+
+The engine implementations (whisper.cpp STT, Kokoro ONNX TTS, Silero VAD)
+live in `ene-voice` and run inside the voice provider plugin processes
+(`plugins/provider/whisper`, `plugins/provider/kokoro`,
+`plugins/provider/onnx`); the host bridges them to the app over the plugin
+IPC. The desktop only owns the audio device I/O (cpal capture / rodio
+playback).
 
 Ene provides an optional, fully local voice interaction pipeline:
 
