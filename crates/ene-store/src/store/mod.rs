@@ -791,15 +791,7 @@ impl MemoryStore {
                 return Err(error);
             }
         };
-        let scope = match candidate.kind {
-            crate::MemoryKind::UserProfile | crate::MemoryKind::Preference => {
-                crate::MemoryScope::User
-            }
-            crate::MemoryKind::Relationship | crate::MemoryKind::Reflection => {
-                crate::MemoryScope::Shared
-            }
-            _ => crate::MemoryScope::Character,
-        };
+        let scope = canonical_scope_for_kind(candidate.kind);
 
         let item = crate::NewMemoryItem {
             scope,
@@ -1106,4 +1098,18 @@ fn pending_candidate_scope(character_id: &str, user_id: Option<&str>) -> sea_orm
         );
     }
     condition
+}
+
+/// Canonical ownership scope for a memory kind.
+///
+/// Shared by candidate approval and typed-memory editing so a kind change can
+/// never leave a row with the scope of its previous kind.
+pub(crate) fn canonical_scope_for_kind(kind: crate::MemoryKind) -> crate::MemoryScope {
+    match kind {
+        crate::MemoryKind::UserProfile | crate::MemoryKind::Preference => crate::MemoryScope::User,
+        crate::MemoryKind::Relationship | crate::MemoryKind::Reflection => {
+            crate::MemoryScope::Shared
+        }
+        _ => crate::MemoryScope::Character,
+    }
 }

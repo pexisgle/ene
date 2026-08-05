@@ -45,7 +45,7 @@ pub use crate::query::candidates::PendingCandidateSummary;
 pub use command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
 pub use event::{
     AudioChunk, AudioStreamReceiver, EneEvent, EneEventReceiver, EneStateSnapshot, EneStatus,
-    LifecycleEvent, LifecycleReceiver, TerminalReason,
+    LifecycleEvent, LifecycleReceiver, MemoryLedgerChange, TerminalReason,
 };
 
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
@@ -354,6 +354,10 @@ pub struct EneHandle {
     /// mailbox; mutations route through it (see
     /// [`crate::query::candidates::MemoryCandidateHandle`]).
     candidates: crate::query::candidates::MemoryCandidateHandle,
+    /// Interactive memory/commitment ledger handle. Reads bypass the actor
+    /// mailbox; mutations route through it (see
+    /// [`crate::query::ledger::MemoryLedgerHandle`]).
+    ledger: crate::query::ledger::MemoryLedgerHandle,
     /// Screen-image vision summarization handle, bypasses the actor mailbox.
     vision: crate::vision::VisionHandle,
     /// Tool registry operations handle (list / search / call / invalidate).
@@ -401,6 +405,7 @@ impl Clone for EneHandle {
             host_service_handle: Arc::clone(&self.host_service_handle),
             sessions: self.sessions.clone(),
             candidates: self.candidates.clone(),
+            ledger: self.ledger.clone(),
             vision: self.vision.clone(),
             tools: self.tools.clone(),
             shutdown_guard: Arc::clone(&self.shutdown_guard),
@@ -750,6 +755,11 @@ impl EneHandle {
             Arc::clone(&cmd_tx),
             Arc::clone(&shared.card_name),
         );
+        let ledger = crate::query::ledger::MemoryLedgerHandle::new(
+            memory_store.clone(),
+            Arc::clone(&cmd_tx),
+            Arc::clone(&shared.card_name),
+        );
         let vision = crate::vision::VisionHandle::new(Arc::clone(&cmd_tx));
         let tools = crate::tools::ToolHandle::new(Arc::clone(&cmd_tx));
 
@@ -804,6 +814,7 @@ impl EneHandle {
             host_service_handle,
             sessions,
             candidates,
+            ledger,
             vision,
             tools,
             shutdown_guard,
@@ -949,6 +960,17 @@ impl EneHandle {
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     pub fn candidates(&self) -> crate::query::candidates::MemoryCandidateHandle {
         self.candidates.clone()
+    }
+
+    /// Interactive memory/commitment ledger handle (list / inspect / edit /
+    /// salience adjustment).
+    ///
+    /// Reads are mailbox-free; mutations route through the actor mailbox with
+    /// the active `TurnId` and emit `MemoryLedgerChanged` audit events.
+    ///
+    /// Cheap to call repeatedly; the returned handle is a small `Clone`.
+    pub fn memory_ledger(&self) -> crate::query::ledger::MemoryLedgerHandle {
+        self.ledger.clone()
     }
 
     /// Screen-image vision summarization handle, bypassing the

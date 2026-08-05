@@ -15,6 +15,7 @@
 - [スケジュール：永続的な時刻指定アクション](guide/schedules.md)
 - [キャラクターカードエディターガイド](guide/character-card-editor.md)
 - [ワークスペース RAG ガイド](guide/workspace-rag.md)
+- [記憶台帳：インタラクティブな記憶・コミットメント管理](guide/memory-ledger.md)
 
 # リファレンス
 
