@@ -90,7 +90,21 @@ impl ene_plugin::ConfigurablePlugin for LocalLlmPlugin {
 #[async_trait]
 impl LlmPlugin for LocalLlmPlugin {
     fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
-        vec![Self::llm_spec()]
+        // The class is derived from the acceleration config so the host can
+        // gate this provider against other GPU users; an unreadable config
+        // falls back to Cpu (requests will fail with a typed error anyway).
+        let mut spec = Self::llm_spec();
+        match config::resource_class() {
+            Ok(class) => spec.resource_class = class,
+            Err(e) => {
+                tracing::warn!(
+                    component = "LocalLlmPlugin",
+                    error = %e,
+                    "declaring Cpu resource class: acceleration config unreadable"
+                );
+            }
+        }
+        vec![spec]
     }
 
     async fn create_chat_stream(
@@ -235,7 +249,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use ene_plugin::{ConfigurablePlugin, PluginDispatch};
+    use ene_plugin::{ConfigurablePlugin, LlmPlugin, PluginDispatch};
     use ene_plugin_proto::{
         CapabilityRef, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION, PluginIpcRequest, PluginIpcResponse,
         VersionRange, WireFormat, cleanup_path, read_plugin_response, write_plugin_request,
@@ -435,6 +449,8 @@ mod tests {
 
     #[test]
     fn capabilities_advertise_local_kind_and_provides() {
+        use ene_plugin::ResourceClass;
+
         assert_eq!(super::LocalLlmPlugin::LLM_PROVIDER_KIND, "local");
         assert_eq!(
             super::LocalLlmPlugin::provides(),
@@ -444,5 +460,20 @@ mod tests {
                 CapabilityRef::parse("gguf-runner@1").expect("static capability"),
             ]
         );
+
+        // The resource class follows the delivered acceleration config.
+        super::config::set_config(&serde_json::json!({"acceleration": "vulkan"}));
+        let spec = super::LocalLlmPlugin.llm_capabilities();
+        assert_eq!(
+            spec.first().expect("one spec").resource_class,
+            ResourceClass::Gpu { device: 0 }
+        );
+        super::config::set_config(&serde_json::json!({"acceleration": "cpu"}));
+        let spec = super::LocalLlmPlugin.llm_capabilities();
+        assert_eq!(
+            spec.first().expect("one spec").resource_class,
+            ResourceClass::Cpu
+        );
+        super::config::set_config(&serde_json::json!({}));
     }
 }

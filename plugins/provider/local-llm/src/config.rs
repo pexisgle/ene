@@ -3,7 +3,7 @@
 use std::sync::{Mutex, OnceLock, PoisonError, atomic::AtomicU64};
 
 use ene_ai::config::ProactiveAcceleration;
-use ene_plugin::PluginError;
+use ene_plugin::{PluginError, ResourceClass};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -60,6 +60,37 @@ impl HostConfig {
             other => Err(PluginError::provider(format!(
                 "unknown acceleration backend: {other:?}"
             ))),
+        }
+    }
+}
+
+/// The [`ResourceClass`] this plugin's provider jobs contend on, derived from
+/// the configured acceleration preference and the compiled GPU backend.
+///
+/// The wire declaration is per provider kind, while the actual offload is
+/// per model profile (`gpu_layers`); this maps the configured *intent* and
+/// errs toward `Gpu` — a profile forced to CPU under a GPU acceleration
+/// over-declares safely, while under-declaring would bypass the host's
+/// per-class admission entirely.
+pub(crate) fn resource_class() -> Result<ResourceClass, PluginError> {
+    current_config()?
+        .acceleration()
+        .map(declared_resource_class)
+}
+
+/// Pure acceleration → class mapping (also used by tests).
+pub(crate) fn declared_resource_class(acceleration: ProactiveAcceleration) -> ResourceClass {
+    match acceleration {
+        ProactiveAcceleration::Cpu => ResourceClass::Cpu,
+        ProactiveAcceleration::Vulkan | ProactiveAcceleration::Cuda => {
+            ResourceClass::Gpu { device: 0 }
+        }
+        ProactiveAcceleration::Auto => {
+            if cfg!(feature = "vulkan") || cfg!(feature = "cuda") {
+                ResourceClass::Gpu { device: 0 }
+            } else {
+                ResourceClass::Cpu
+            }
         }
     }
 }
@@ -267,5 +298,54 @@ mod tests {
         }))
         .expect("config parses");
         assert!(bad.acceleration().is_err());
+    }
+
+    #[test]
+    fn declared_resource_class_matches_acceleration_and_build() {
+        use ene_plugin::ResourceClass;
+
+        assert_eq!(
+            declared_resource_class(ProactiveAcceleration::Cpu),
+            ResourceClass::Cpu
+        );
+        assert_eq!(
+            declared_resource_class(ProactiveAcceleration::Vulkan),
+            ResourceClass::Gpu { device: 0 }
+        );
+        assert_eq!(
+            declared_resource_class(ProactiveAcceleration::Cuda),
+            ResourceClass::Gpu { device: 0 }
+        );
+        // Auto mirrors the load-time backend selection: GPU when a backend
+        // is compiled in, CPU otherwise.
+        let expected = if cfg!(feature = "vulkan") || cfg!(feature = "cuda") {
+            ResourceClass::Gpu { device: 0 }
+        } else {
+            ResourceClass::Cpu
+        };
+        assert_eq!(
+            declared_resource_class(ProactiveAcceleration::Auto),
+            expected
+        );
+    }
+
+    #[test]
+    fn resource_class_reads_the_delivered_config() {
+        use ene_plugin::ResourceClass;
+
+        set_config(&serde_json::json!({"acceleration": "vulkan"}));
+        assert_eq!(
+            resource_class().expect("vulkan config maps to gpu"),
+            ResourceClass::Gpu { device: 0 }
+        );
+        set_config(&serde_json::json!({"acceleration": "cpu"}));
+        assert_eq!(
+            resource_class().expect("cpu config maps to cpu"),
+            ResourceClass::Cpu
+        );
+        // Unknown backend is a typed error, not a silent declaration.
+        set_config(&serde_json::json!({"acceleration": "metal"}));
+        assert!(resource_class().is_err());
+        set_config(&serde_json::json!({}));
     }
 }
