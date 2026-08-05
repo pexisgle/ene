@@ -11,6 +11,7 @@
 
 use ene_config::CharacterCardV3;
 use ene_runtime::{CancelError, EneConfig, EneEvent, EneHandle, RunError, TerminalReason, TurnId};
+use std::sync::Arc;
 
 fn test_card() -> CharacterCardV3 {
     let mut card = CharacterCardV3::default();
@@ -535,9 +536,10 @@ async fn set_character_updates_shared_sync_state() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_count_reflects_in_flight_turn() {
     let (config, _hanging) = hanging_provider_config().await;
-    let handle = EneHandle::open(config, test_card())
-        .await
-        .expect("open initializes handle");
+    let handle =
+        EneHandle::open_with_provider_host(config, test_card(), Arc::new(StubProviderHost))
+            .await
+            .expect("open initializes handle");
     assert_eq!(handle.turn_count(), 0);
 
     let turn = handle.run("hello").expect("run claims the gate");
@@ -640,6 +642,47 @@ async fn history_returns_actor_history() {
 /// started turn hangs on the per-request timeout instead of completing fast
 /// and releasing the single-flight gate on its own. The caller must hold the
 /// returned listener for as long as the turn should stay in flight.
+/// Stub host serving the hanging chat factory under its custom kind.
+struct StubProviderHost;
+
+#[async_trait::async_trait]
+impl ene_ai::ProviderHost for StubProviderHost {
+    async fn create_llm_provider(
+        &self,
+        kind: &str,
+        config: &ene_config::EneConfig,
+        task: &ene_ai::config::TaskRef,
+    ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::error::LlmProviderError> {
+        if kind == HangingFactory::KIND {
+            ene_ai::LlmProviderFactory::create_provider(&HangingFactory, config, task)
+        } else {
+            Err(ene_ai::error::LlmProviderError::Provider(format!(
+                "No LlmProviderFactory registered for provider kind: '{kind}'"
+            )))
+        }
+    }
+
+    async fn create_embedding_provider(
+        &self,
+        _kind: &str,
+        _config: &ene_config::EneConfig,
+    ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+        Err(ene_ai::EmbeddingError::Init(
+            "stub host serves no embedding providers".to_string(),
+        ))
+    }
+
+    async fn create_tts_provider(
+        &self,
+        _kind: &str,
+        _config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+        Err(ene_ai::AudioProviderError::Provider(
+            "stub host serves no TTS providers".to_string(),
+        ))
+    }
+}
+
 async fn hanging_provider_config() -> (EneConfig, tokio::net::TcpListener) {
     let hanging = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -655,7 +698,6 @@ async fn hanging_provider_config() -> (EneConfig, tokio::net::TcpListener) {
         provider.kind = HangingFactory::KIND.to_string();
     }
     drop(config.set_section(&ai));
-    ene_ai::LlmProviderRegistry::register(std::sync::Arc::new(HangingFactory));
     (config, hanging)
 }
 

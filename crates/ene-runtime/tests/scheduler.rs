@@ -18,7 +18,6 @@ use ene_runtime::{
 };
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio_stream::Stream;
 
@@ -113,18 +112,61 @@ impl EmbeddingProviderFactory for HangingEmbeddingFactory {
     }
 }
 
-fn register_hanging_providers() {
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        ene_ai::LlmProviderRegistry::register(Arc::new(HangingLlmFactory));
-        ene_ai::EmbeddingProviderRegistry::register(Arc::new(HangingEmbeddingFactory));
-    });
+/// Stub host standing in for the plugin registry: serves the hanging LLM
+/// factory under its custom kind and the hanging embedding factory under
+/// `openai`.
+struct StubProviderHost {
+    llm: std::collections::HashMap<String, Arc<dyn LlmProviderFactory>>,
+    embedding: std::collections::HashMap<String, Arc<dyn EmbeddingProviderFactory>>,
+}
+
+#[async_trait]
+impl ene_ai::ProviderHost for StubProviderHost {
+    async fn create_llm_provider(
+        &self,
+        kind: &str,
+        config: &EneConfig,
+        task: &ene_ai::config::TaskRef,
+    ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
+        self.llm
+            .get(kind)
+            .ok_or_else(|| {
+                LlmProviderError::Provider(format!(
+                    "No LlmProviderFactory registered for provider kind: '{kind}'"
+                ))
+            })?
+            .create_provider(config, task)
+    }
+
+    async fn create_embedding_provider(
+        &self,
+        kind: &str,
+        config: &EneConfig,
+    ) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError> {
+        self.embedding
+            .get(kind)
+            .ok_or_else(|| {
+                EmbeddingError::Init(format!(
+                    "No embedding provider factory registered for provider kind: '{kind}'"
+                ))
+            })?
+            .create_embedding_provider(config)
+    }
+
+    async fn create_tts_provider(
+        &self,
+        _kind: &str,
+        _config: &EneConfig,
+    ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+        Err(ene_ai::AudioProviderError::Provider(
+            "stub host serves no TTS providers".to_string(),
+        ))
+    }
 }
 
 /// Memory-enabled config whose chat and embedding providers hang forever,
-/// routed to in-process factories so no plugin host or network is needed.
-fn test_config_memory_on(db_path: Option<&str>) -> EneConfig {
-    register_hanging_providers();
+/// routed to stub-host factories so no plugin host or network is needed.
+fn test_config_memory_on(db_path: Option<&str>) -> (EneConfig, Arc<dyn ene_ai::ProviderHost>) {
     let mut config = EneConfig::default();
     let store = ene_store::StoreConfig {
         enabled: true,
@@ -171,7 +213,25 @@ fn test_config_memory_on(db_path: Option<&str>) -> EneConfig {
         ..ene_ai::config::TaskRef::default()
     };
     drop(config.set_section(&ai));
-    config
+    let host: Arc<dyn ene_ai::ProviderHost> = Arc::new(StubProviderHost {
+        llm: std::collections::HashMap::from([(
+            "scheduler-test-hanging".to_string(),
+            Arc::new(HangingLlmFactory) as Arc<dyn LlmProviderFactory>,
+        )]),
+        embedding: std::collections::HashMap::from([(
+            ene_ai::config::OPENAI_PROVIDER_KIND.to_string(),
+            Arc::new(HangingEmbeddingFactory) as Arc<dyn EmbeddingProviderFactory>,
+        )]),
+    });
+    (config, host)
+}
+
+/// Open a memory-enabled runtime against the hanging stub host.
+async fn open_memory_on(db_path: Option<&str>) -> EneHandle {
+    let (config, host) = test_config_memory_on(db_path);
+    EneHandle::open_with_provider_host(config, test_card(), host)
+        .await
+        .expect("open initializes handle")
 }
 
 fn one_shot_tool_schedule(confirm: bool) -> NewSchedule {
@@ -227,9 +287,7 @@ async fn wait_for_run_status(
 /// success run, and completes the one-shot schedule.
 #[tokio::test]
 async fn scheduled_tool_action_runs_and_records_success() {
-    let handle = EneHandle::open(test_config_memory_on(None), test_card())
-        .await
-        .expect("open initializes handle");
+    let handle = open_memory_on(None).await;
     let mut rx = handle.subscribe();
     let schedule = handle
         .add_schedule(one_shot_tool_schedule(false))
@@ -279,9 +337,7 @@ async fn scheduled_tool_action_runs_and_records_success() {
 /// scheduled turn; the conversation's single-flight gate stays untouched.
 #[tokio::test]
 async fn scheduled_fire_never_interrupts_conversation() {
-    let handle = EneHandle::open(test_config_memory_on(None), test_card())
-        .await
-        .expect("open initializes handle");
+    let handle = open_memory_on(None).await;
     let mut rx = handle.subscribe();
     let turn = handle.run("hello").expect("run claims the gate");
     let schedule = handle
@@ -327,9 +383,7 @@ async fn scheduled_fire_never_interrupts_conversation() {
 /// A denied confirmation records `denied` and never executes the action.
 #[tokio::test]
 async fn confirmation_deny_records_denied_run() {
-    let handle = EneHandle::open(test_config_memory_on(None), test_card())
-        .await
-        .expect("open initializes handle");
+    let handle = open_memory_on(None).await;
     let mut rx = handle.subscribe();
     let schedule = handle
         .add_schedule(one_shot_tool_schedule(true))
@@ -347,9 +401,7 @@ async fn confirmation_deny_records_denied_run() {
 /// An approved confirmation executes the action and records success.
 #[tokio::test]
 async fn confirmation_approve_executes_run() {
-    let handle = EneHandle::open(test_config_memory_on(None), test_card())
-        .await
-        .expect("open initializes handle");
+    let handle = open_memory_on(None).await;
     let mut rx = handle.subscribe();
     let schedule = handle
         .add_schedule(one_shot_tool_schedule(true))
@@ -393,9 +445,7 @@ async fn schedules_and_history_restore_after_restart() {
     let db_path = dir.path().join("scheduler.db");
     let db_str = db_path.to_str().expect("utf8 path").to_string();
 
-    let handle = EneHandle::open(test_config_memory_on(Some(&db_str)), test_card())
-        .await
-        .expect("open initializes handle");
+    let handle = open_memory_on(Some(&db_str)).await;
     let schedule = handle
         .add_schedule(one_shot_tool_schedule(false))
         .await
@@ -404,9 +454,7 @@ async fn schedules_and_history_restore_after_restart() {
     drop(handle.shutdown(Duration::from_secs(2)).await);
 
     // "Restart": reopen against the same database file.
-    let handle = EneHandle::open(test_config_memory_on(Some(&db_str)), test_card())
-        .await
-        .expect("reopen initializes handle");
+    let handle = open_memory_on(Some(&db_str)).await;
     let schedules = handle.list_schedules().await.expect("list schedules");
     let stored = schedules
         .iter()
