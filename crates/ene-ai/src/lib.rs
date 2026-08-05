@@ -96,10 +96,10 @@ pub use retry::RetryPolicy;
 pub use role::Role;
 pub use routing::{AiTaskKind, create_chat_provider_for_task, create_task_chat_provider};
 pub use traits::{
-    AudioProviderError, AudioProviderRegistry, EmbeddingError, EmbeddingKind, EmbeddingProvider,
-    EmbeddingProviderFactory, LlmProvider, LlmProviderFactory, ProviderHost, SttProvider,
-    SttProviderFactory, SttResult, TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent,
-    VadFactory, cosine_similarity, embed, embed_query,
+    AudioProviderError, EmbeddingError, EmbeddingKind, EmbeddingProvider, EmbeddingProviderFactory,
+    LlmProvider, LlmProviderFactory, ProviderHost, SttProvider, SttProviderFactory, SttResult,
+    TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent, VadFactory, cosine_similarity,
+    embed, embed_query,
 };
 
 /// Token usage accounting for LLM responses.

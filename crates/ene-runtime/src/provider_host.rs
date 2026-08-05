@@ -78,4 +78,32 @@ impl ene_ai::ProviderHost for LiveProviderCatalog {
         })?;
         ene_ai::ProviderHost::create_tts_provider(host, kind, config).await
     }
+
+    async fn create_stt_provider(
+        &self,
+        kind: &str,
+        config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn ene_ai::SttProvider>, ene_ai::AudioProviderError> {
+        let guard = self.slot.lock().await;
+        let host = guard.as_ref().ok_or_else(|| {
+            ene_ai::AudioProviderError::Provider(format!(
+                "plugin host is not running; cannot create STT provider kind '{kind}'"
+            ))
+        })?;
+        ene_ai::ProviderHost::create_stt_provider(host, kind, config).await
+    }
+
+    async fn create_vad_engine(
+        &self,
+        kind: &str,
+        config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn ene_ai::VadEngine>, ene_ai::AudioProviderError> {
+        let guard = self.slot.lock().await;
+        let host = guard.as_ref().ok_or_else(|| {
+            ene_ai::AudioProviderError::Provider(format!(
+                "plugin host is not running; cannot create VAD engine kind '{kind}'"
+            ))
+        })?;
+        ene_ai::ProviderHost::create_vad_engine(host, kind, config).await
+    }
 }

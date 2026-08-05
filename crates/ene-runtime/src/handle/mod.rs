@@ -57,9 +57,7 @@ use chrono::{DateTime, Utc};
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::{ConversationSession, SessionId};
-use ene_plugin_host::{
-    DisabledReason, PluginHealthEvent, SttFactoriesByPlugin, VadFactoriesByPlugin,
-};
+use ene_plugin_host::{DisabledReason, PluginHealthEvent};
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -617,14 +615,17 @@ impl EneHandle {
                                         .get(plugin)
                                         .cloned()
                                         .unwrap_or_default(),
+                                    stt: stt_factories_by_plugin
+                                        .get(plugin)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                    vad: vad_factories_by_plugin
+                                        .get(plugin)
+                                        .cloned()
+                                        .unwrap_or_default(),
                                 },
                             }),
                         );
-                        // STT/VAD providers are recreated per microphone
-                        // session, so deregistration alone is enough — the
-                        // next capture start fails fast with a clear error.
-                        deregister_disabled_stt_factories(plugin, &stt_factories_by_plugin);
-                        deregister_disabled_vad_factories(plugin, &vad_factories_by_plugin);
                     }
                     emit_diag(&diag_tx, plugin_health_event_to_diag(event));
                 }
@@ -693,7 +694,8 @@ impl EneHandle {
             let ai_config = config.get_section::<ene_ai::AiConfig>()?;
 
             if let Some(resolved) = ai_config.resolve_tts() {
-                match resolve_tts_provider(provider_host.as_ref(), &config, &resolved.provider)
+                match provider_host
+                    .create_tts_provider(&resolved.provider, &config)
                     .await
                 {
                     Ok(provider) => {
@@ -1294,6 +1296,46 @@ impl EneHandle {
             })
     }
 
+    /// Build an STT provider for `kind` through the live provider host.
+    ///
+    /// Used by the desktop microphone capture path, which needs the
+    /// provider outside a turn and outside the actor.
+    pub async fn create_stt_provider(
+        &self,
+        kind: &str,
+    ) -> Result<Box<dyn ene_ai::SttProvider>, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::CreateSttProvider {
+                kind: kind.to_string(),
+                reply: tx,
+            })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await
+            .map_err(|_| EneRuntimeError::ChannelClosed)?
+            .map_err(|e| EneRuntimeError::Ai(ene_ai::AiError::Audio(e)))
+    }
+
+    /// Build a VAD engine for `kind` through the live provider host.
+    ///
+    /// Used by the desktop microphone capture path, which needs the engine
+    /// outside a turn and outside the actor.
+    pub async fn create_vad_engine(
+        &self,
+        kind: &str,
+    ) -> Result<Box<dyn ene_ai::VadEngine>, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::CreateVadEngine {
+                kind: kind.to_string(),
+                reply: tx,
+            })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await
+            .map_err(|_| EneRuntimeError::ChannelClosed)?
+            .map_err(|e| EneRuntimeError::Ai(ene_ai::AiError::Audio(e)))
+    }
+
     /// List recent run history for one schedule, newest first.
     pub async fn list_schedule_runs(
         &self,
@@ -1495,56 +1537,6 @@ fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
         tool,
         status: status.to_string(),
         detail,
-    }
-}
-
-/// Resolve a TTS provider from the host registry.
-///
-/// Falls back to the in-process `ene-voice` Kokoro factory when the host
-/// cannot serve the kind (host down or the plugin absent), preserving the
-/// pre-plugin behavior. The fallback disappears once `ene-voice` is
-/// pluginized and this registry is removed.
-async fn resolve_tts_provider(
-    host: &dyn ene_ai::ProviderHost,
-    config: &EneConfig,
-    kind: &str,
-) -> Result<Box<dyn ene_ai::TtsProvider>, String> {
-    match host.create_tts_provider(kind, config).await {
-        Ok(provider) => Ok(provider),
-        Err(host_error) => ene_ai::AudioProviderRegistry::create_tts_provider(kind, config)
-            .map_err(|legacy_error| format!("host: {host_error}; legacy: {legacy_error}")),
-    }
-}
-
-/// Deregisters the STT factories a permanently-disabled plugin provided.
-fn deregister_disabled_stt_factories(plugin: &str, factories_by_plugin: &SttFactoriesByPlugin) {
-    if let Some(factories) = factories_by_plugin.get(plugin) {
-        for (kind, factory) in factories {
-            if ene_ai::AudioProviderRegistry::deregister_stt_if_matches(kind, factory) {
-                tracing::info!(
-                    component = "PluginHealthBridge",
-                    plugin = %plugin,
-                    kind = %kind,
-                    "Deregistered STT provider factory for permanently disabled plugin"
-                );
-            }
-        }
-    }
-}
-
-/// Deregisters the VAD factories a permanently-disabled plugin provided.
-fn deregister_disabled_vad_factories(plugin: &str, factories_by_plugin: &VadFactoriesByPlugin) {
-    if let Some(factories) = factories_by_plugin.get(plugin) {
-        for (kind, factory) in factories {
-            if ene_ai::AudioProviderRegistry::deregister_vad_if_matches(kind, factory) {
-                tracing::info!(
-                    component = "PluginHealthBridge",
-                    plugin = %plugin,
-                    kind = %kind,
-                    "Deregistered VAD engine factory for permanently disabled plugin"
-                );
-            }
-        }
     }
 }
 
@@ -1832,6 +1824,26 @@ mod tests {
         ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
             Err(ene_ai::AudioProviderError::Provider(
                 "stub host serves no TTS providers".to_string(),
+            ))
+        }
+
+        async fn create_stt_provider(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn ene_ai::SttProvider>, ene_ai::AudioProviderError> {
+            Err(ene_ai::AudioProviderError::Provider(
+                "stub host serves no STT providers".to_string(),
+            ))
+        }
+
+        async fn create_vad_engine(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn ene_ai::VadEngine>, ene_ai::AudioProviderError> {
+            Err(ene_ai::AudioProviderError::Provider(
+                "stub host serves no VAD engines".to_string(),
             ))
         }
     }

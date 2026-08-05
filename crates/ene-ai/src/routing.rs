@@ -77,7 +77,9 @@ mod tests {
     use super::*;
     use crate::config::{AiProviderDef, ApiKeyConfig};
     use crate::traits::{EmbeddingProvider, ProviderHost};
-    use crate::{AudioProviderError, EmbeddingError, LlmProviderError, TtsProvider};
+    use crate::{
+        AudioProviderError, EmbeddingError, LlmProviderError, SttProvider, TtsProvider, VadEngine,
+    };
     use async_trait::async_trait;
     use std::sync::Arc;
 
@@ -115,6 +117,26 @@ mod tests {
         ) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
             Err(AudioProviderError::Provider(
                 "stub host serves no TTS providers".to_string(),
+            ))
+        }
+
+        async fn create_stt_provider(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn SttProvider>, AudioProviderError> {
+            Err(AudioProviderError::Provider(
+                "stub host serves no STT providers".to_string(),
+            ))
+        }
+
+        async fn create_vad_engine(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn VadEngine>, AudioProviderError> {
+            Err(AudioProviderError::Provider(
+                "stub host serves no VAD engines".to_string(),
             ))
         }
     }

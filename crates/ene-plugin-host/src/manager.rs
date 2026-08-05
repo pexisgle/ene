@@ -639,13 +639,17 @@ pub struct ProviderFactoryRemoval {
     pub embedding: usize,
     /// Number of TTS factories removed.
     pub tts: usize,
+    /// Number of STT factories removed.
+    pub stt: usize,
+    /// Number of VAD factories removed.
+    pub vad: usize,
 }
 
 impl ProviderFactoryRemoval {
     /// Whether any factory was removed.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.llm == 0 && self.embedding == 0 && self.tts == 0
+        self.llm == 0 && self.embedding == 0 && self.tts == 0 && self.stt == 0 && self.vad == 0
     }
 }
 
@@ -663,6 +667,10 @@ pub struct PluginFactoryHandles {
     pub embedding: Vec<(String, EmbeddingFactoryHandle)>,
     /// TTS factory handles by provider kind.
     pub tts: Vec<(String, TtsFactoryHandle)>,
+    /// STT factory handles by provider kind.
+    pub stt: Vec<(String, SttFactoryHandle)>,
+    /// VAD factory handles by engine kind.
+    pub vad: Vec<(String, VadFactoryHandle)>,
 }
 
 /// Removes the factory for each kind whose stored `Arc` is the exact handle
@@ -735,6 +743,36 @@ impl ene_ai::ProviderHost for PluginHostManager {
                 ))
             })?
             .create_provider(config)
+    }
+
+    async fn create_stt_provider(
+        &self,
+        kind: &str,
+        config: &EneConfig,
+    ) -> Result<Box<dyn ene_ai::SttProvider>, ene_ai::AudioProviderError> {
+        self.stt_factories
+            .get(kind)
+            .ok_or_else(|| {
+                ene_ai::AudioProviderError::Provider(format!(
+                    "No SttProviderFactory registered for provider name: '{kind}'"
+                ))
+            })?
+            .create_provider(config)
+    }
+
+    async fn create_vad_engine(
+        &self,
+        kind: &str,
+        config: &EneConfig,
+    ) -> Result<Box<dyn ene_ai::VadEngine>, ene_ai::AudioProviderError> {
+        self.vad_factories
+            .get(kind)
+            .ok_or_else(|| {
+                ene_ai::AudioProviderError::Provider(format!(
+                    "No VadFactory registered for provider name: '{kind}'"
+                ))
+            })?
+            .create_engine(config)
     }
 }
 /// Orchestrates the lifecycle of all plugin processes and MCP connections.
@@ -1448,6 +1486,16 @@ impl PluginHostManager {
                 &mut self.tts_factories,
                 &mut self.tts_factory_plugins,
                 &handles.tts,
+            ),
+            stt: remove_matching_factories(
+                &mut self.stt_factories,
+                &mut self.stt_factory_plugins,
+                &handles.stt,
+            ),
+            vad: remove_matching_factories(
+                &mut self.vad_factories,
+                &mut self.vad_factory_plugins,
+                &handles.vad,
             ),
         }
     }
@@ -3418,6 +3466,36 @@ mod tests {
         }
     }
 
+    struct KindSttFactory(&'static str);
+
+    impl ene_ai::SttProviderFactory for KindSttFactory {
+        fn provider_name(&self) -> &str {
+            self.0
+        }
+
+        fn create_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn ene_ai::SttProvider>, ene_ai::AudioProviderError> {
+            Err(ene_ai::AudioProviderError::Provider("stub".to_string()))
+        }
+    }
+
+    struct KindVadFactory(&'static str);
+
+    impl ene_ai::VadFactory for KindVadFactory {
+        fn provider_name(&self) -> &str {
+            self.0
+        }
+
+        fn create_engine(
+            &self,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn ene_ai::VadEngine>, ene_ai::AudioProviderError> {
+            Err(ene_ai::AudioProviderError::Provider("stub".to_string()))
+        }
+    }
+
     #[test]
     fn remove_provider_factories_if_match_evicts_same_generation_handles() {
         let mut manager = PluginHostManager::test_instance();
@@ -3450,6 +3528,18 @@ mod tests {
         manager
             .tts_factory_plugins
             .insert("kokoro".to_string(), "openai-plugin".to_string());
+        manager
+            .stt_factories
+            .insert("whisper".to_string(), Arc::clone(&handles.stt[0].1));
+        manager
+            .stt_factory_plugins
+            .insert("whisper".to_string(), "openai-plugin".to_string());
+        manager
+            .vad_factories
+            .insert("silero".to_string(), Arc::clone(&handles.vad[0].1));
+        manager
+            .vad_factory_plugins
+            .insert("silero".to_string(), "openai-plugin".to_string());
 
         let removal = manager.remove_provider_factories_if_match(&handles);
         assert_eq!(
@@ -3458,12 +3548,16 @@ mod tests {
                 llm: 1,
                 embedding: 1,
                 tts: 1,
+                stt: 1,
+                vad: 1,
             }
         );
         assert!(!manager.llm_factories.contains_key("openai"));
         assert!(manager.llm_factories.contains_key("anthropic"));
         assert!(!manager.embedding_factories.contains_key("openai"));
         assert!(!manager.tts_factories.contains_key("kokoro"));
+        assert!(!manager.stt_factories.contains_key("whisper"));
+        assert!(!manager.vad_factories.contains_key("silero"));
         assert!(!manager.llm_factory_plugins.contains_key("openai"));
 
         assert!(
@@ -3501,6 +3595,8 @@ mod tests {
                 llm: 0,
                 embedding: 0,
                 tts: 0,
+                stt: 0,
+                vad: 0,
             }
         );
         assert!(
@@ -3522,6 +3618,14 @@ mod tests {
             tts: vec![(
                 "kokoro".to_string(),
                 Arc::new(KindTtsFactory("kokoro")) as TtsFactoryHandle,
+            )],
+            stt: vec![(
+                "whisper".to_string(),
+                Arc::new(KindSttFactory("whisper")) as SttFactoryHandle,
+            )],
+            vad: vec![(
+                "silero".to_string(),
+                Arc::new(KindVadFactory("silero")) as VadFactoryHandle,
             )],
         }
     }

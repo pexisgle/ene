@@ -364,6 +364,26 @@ mod tests {
                 "stub host serves no TTS providers".to_string(),
             ))
         }
+
+        async fn create_stt_provider(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn ene_ai::SttProvider>, ene_ai::AudioProviderError> {
+            Err(ene_ai::AudioProviderError::Provider(
+                "stub host serves no STT providers".to_string(),
+            ))
+        }
+
+        async fn create_vad_engine(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn ene_ai::VadEngine>, ene_ai::AudioProviderError> {
+            Err(ene_ai::AudioProviderError::Provider(
+                "stub host serves no VAD engines".to_string(),
+            ))
+        }
     }
 
     fn test_config() -> ene_config::EneConfig {

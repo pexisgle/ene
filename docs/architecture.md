@@ -141,9 +141,10 @@ reachability is probed *through* each provider plugin — the host sends a
 minimal chat ping and classifies the outcome — so the plugin's own endpoint
 knowledge drives the probe, with no host-side HTTP probing. Task→provider
 binding and failover policy stay in `ene-ai` (`resolve.rs`), which consults
-the host registry rather than owning one. The in-process STT/VAD providers
-(`ene-voice`) still register in `ene_ai::AudioProviderRegistry` until they
-are pluginized; that registry then disappears.
+the host registry rather than owning one. The former in-process
+`ene_ai::AudioProviderRegistry` is gone: all audio providers (TTS/STT/VAD)
+are plugin-provided and resolve through the plugin host, including the
+desktop microphone path, which asks the runtime for providers.
 
 ---
 

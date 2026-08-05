@@ -129,9 +129,11 @@ flowchart TD
 （ホストが最小の chat ping を送り結果を分類。ホスト側の HTTP プローブは
 廃止）。タスク→プロバイダ束縛とフェイルオーバー方針は `ene-ai`
 （`resolve.rs`）に残り、自前レジストリではなくホストのレジストリに
-問い合わせます。プロセス内の STT/VAD プロバイダ（`ene-voice`）は
-プラグイン化されるまで `ene_ai::AudioProviderRegistry` に登録されたまま
-となり、その後このレジストリは削除されます。
+問い合わせます。かつてプロセス内の STT/VAD プロバイダ（`ene-voice`）が
+登録されていた `ene_ai::AudioProviderRegistry` は削除済みです。音声
+プロバイダ（TTS/STT/VAD）はすべてプラグイン提供で、プラグインホスト
+経由で解決されます
+（デスクトップのマイク経路も runtime 経由でホストに問い合わせます）。
 
 ---
 

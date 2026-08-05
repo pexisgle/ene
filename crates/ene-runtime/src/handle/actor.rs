@@ -2104,12 +2104,10 @@ impl TurnActor {
             self.tts_provider = None;
             return;
         };
-        match super::resolve_tts_provider(
-            self.provider_host.as_ref(),
-            &self.config,
-            &resolved.provider,
-        )
-        .await
+        match self
+            .provider_host
+            .create_tts_provider(&resolved.provider, &self.config)
+            .await
         {
             Ok(provider) => {
                 self.tts_provider = Some(Arc::from(provider));
@@ -2957,6 +2955,8 @@ impl TurnActor {
                     llm = removal.llm,
                     embedding = removal.embedding,
                     tts = removal.tts,
+                    stt = removal.stt,
+                    vad = removal.vad,
                     "Evicted provider factories for permanently disabled plugin"
                 );
                 true
@@ -2974,6 +2974,22 @@ impl TurnActor {
                 .await
                 .map(Arc::from)
                 .map_err(|e| e.to_string());
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::CreateSttProvider { kind, reply } => {
+                let result = self
+                    .provider_host
+                    .create_stt_provider(&kind, &self.config)
+                    .await;
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::CreateVadEngine { kind, reply } => {
+                let result = self
+                    .provider_host
+                    .create_vad_engine(&kind, &self.config)
+                    .await;
                 drop(reply.send(result));
                 true
             }
@@ -4705,6 +4721,8 @@ async fn reconfigure_plugin_host_bg(
         let llm_factories_by_plugin = host.llm_factories_by_plugin();
         let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
         let tts_factories_by_plugin = host.tts_factories_by_plugin();
+        let stt_factories_by_plugin = host.stt_factories_by_plugin();
+        let vad_factories_by_plugin = host.vad_factories_by_plugin();
         bridge_handle = Some(tokio::spawn(async move {
             while let Some(event) = health_rx.recv().await {
                 if let PluginHealthEvent::Disabled { plugin, .. } = &event {
@@ -4721,6 +4739,14 @@ async fn reconfigure_plugin_host_bg(
                                     .cloned()
                                     .unwrap_or_default(),
                                 tts: tts_factories_by_plugin
+                                    .get(plugin)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                stt: stt_factories_by_plugin
+                                    .get(plugin)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                vad: vad_factories_by_plugin
                                     .get(plugin)
                                     .cloned()
                                     .unwrap_or_default(),
