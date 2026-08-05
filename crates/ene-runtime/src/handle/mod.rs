@@ -580,19 +580,43 @@ impl EneHandle {
         {
             let diag_tx = diag_tx.clone();
             let cmd_tx = Arc::clone(&cmd_tx);
+            let llm_factories_by_plugin = host.llm_factories_by_plugin();
+            let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
+            let tts_factories_by_plugin = host.tts_factories_by_plugin();
             health_bridge_handle = Some(tokio::spawn(async move {
                 while let Some(event) = health_rx.recv().await {
                     if let PluginHealthEvent::Disabled { plugin, .. } = &event {
-                        drop(cmd_tx.send(EneCommand::PluginProviderDisabled {
-                            plugin: plugin.clone(),
-                        }));
+                        drop(
+                            cmd_tx.send(EneCommand::PluginProviderDisabled {
+                                plugin: plugin.clone(),
+                                factories: ene_plugin_host::PluginFactoryHandles {
+                                    llm: llm_factories_by_plugin
+                                        .get(plugin)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                    embedding: embedding_factories_by_plugin
+                                        .get(plugin)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                    tts: tts_factories_by_plugin
+                                        .get(plugin)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                },
+                            }),
+                        );
                     }
                     emit_diag(&diag_tx, plugin_health_event_to_diag(event));
                 }
             }));
         }
 
-        let registry = actor::build_tool_registry(plugin_host.as_ref())?;
+        // Publish the host into the shared slot before any provider
+        // resolution runs (the TTS bootstrap below queries it through the
+        // live catalog); reconfiguration swaps the manager in place later.
+        *plugin_host_slot.lock().await = plugin_host;
+
+        let registry = actor::build_tool_registry(plugin_host_slot.lock().await.as_ref())?;
         let tool_rag = match embedder.as_ref() {
             Some(emb) => actor::init_tool_rag(&config, emb, memory_store.clone())?,
             None => None,
@@ -701,13 +725,14 @@ impl EneHandle {
 
         let turn_gate = Arc::new(TurnGate::new());
 
-        let plugin_tool_registries = plugin_host
+        let plugin_tool_registries = plugin_host_slot
+            .lock()
+            .await
             .as_ref()
             .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
 
         // Share the plugin host and its health-bridge task between the handle
         // (for shutdown) and the actor (for Features-update reconfiguration).
-        *plugin_host_slot.lock().await = plugin_host;
         let plugin_host = plugin_host_slot;
         let health_bridge_handle = Arc::new(tokio::sync::Mutex::new(health_bridge_handle));
         let host_service_handle = Arc::new(tokio::sync::Mutex::new(host_service_handle));
