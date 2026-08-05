@@ -10,7 +10,7 @@ publish.workspace = true
 [features]
 default = []
 # Exposes `conformance::run_all`, a generic regression battery that downstream
-# engine crates (ene-ai-local, ene-voice, ...) run against their own
+# engine crates (the local-llm plugin, ene-voice, ...) run against their own
 # `LocalModel` implementations. Kept behind a feature so the assertions/panics
 # it relies on to report failures never ship in the default build.
 test-util = []

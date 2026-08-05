@@ -573,6 +573,8 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 
 ホストはこのブロブを**そのまま**保存・配信します。ブロブ内のキーを解釈・書き換え・破棄することは決してありません（未知のキーもロード→セーブの往復で保持されます）。ブロブはハンドシェイク時に一度だけプラグインへ送信されます（`ConfigurablePlugin::set_config`）。プロバイダートレイト（LLM/embed/TTS/STT）を実装するプラグインも、ツールプラグインと同じ方法で受け取ります。単一キーの環境変数オーバーライドは `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>`（例：`ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY`）です。従来 `ai.*` にあったプロバイダー固有設定はここへ移動しました。たとえば `plugins.list.llama-cpp.config.{mmproj_url,mmproj_path,acceleration}`（旧 `ai.local_models.<name>.{mmproj_url,mmproj_path,acceleration}`）、`plugins.list.onnx.config.ort_dylib_path`（旧 `ai.ort_dylib_path`）、`plugins.list.kokoro.profiles.kokoro.voices_path`（旧 `ai.tts.voices_path`）。
 
+llama-cpp プラグインの `acceleration` 値はバイナリのビルドと一致している必要があります：リリース版の Linux パッケージは `vulkan` バックエンドをコンパイル済みで同梱しますが、CPU デフォルトのビルド（`--features vulkan` なしの `cargo build -p ene-plugin-llama-cpp`）は `"vulkan"` / `"cuda"` をロード時に型付きエラーで拒否します。`"auto"`（既定値）は常に動作します：コンパイル済みの GPU バックエンドがあればそれを選択し、なければ CPU にフォールバックします。
+
 バージョン 1 の `settings.json` は読み込み時に自動でマイグレーションされます。上記の移設対象キーは `plugins.list.*` の移動先へ移され（旧 `ai.*` の場所からは削除され）、その後にファイルが読み込まれて、マイグレーション後のドキュメントが永続化されます。対象キーを持たないファイルは論理的に変更されません。また、ネストした `config`/`profiles` 階層より前のレガシーなフラットなエントリレベルキー（`plugins.list.<name>.<key>`）も、起動時に配信される設定ブロブへ折り込まれます（明示的な `config` キーが優先）。この折り込みはディスク上のファイルを書き換えないため、リロードをまたいで安定しています。
 
 バージョン 2 のファイルは読み込み時にバージョン 3 へマイグレーションされます。各
@@ -628,6 +630,10 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 ダウンロードし（GGUF マジック検証付き）、プロファイルごとにロードしたモデルを
 ライブの config/profile 更新でキャッシュが無効化されるまで保持します。更新中の
 リクエストは旧モデルを使い、その後のリクエストは新しい設定でロードします。
+初回ダウンロードはプロアクティブ決定のウォームアップ予算（5 分）の中で
+実行されるため、それ以上かかるモデルはフェイルクローズします
+（プロアクティブはホスト再起動まで `Disabled`）。非常に大きなモデルは
+`model_path` であらかじめ取得済みのキャッシュを指定してください。
 `context_size` と `gpu_layers` はチャットの
 ロードのみに効きます — 埋め込みモデルは内部で独自にコンテキストとオフロード
 計画を設定し、ホスト側のルーティング窓は `ai.local_models.<name>.context_size`

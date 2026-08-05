@@ -2447,33 +2447,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-ai-local"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.0",
- "blake3",
- "ene-ai",
- "ene-config",
- "ene-infer",
- "ene-plugin-proto",
- "image",
- "llama-cpp-4",
- "once_cell",
- "parking_lot",
- "rand 0.10.2",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "ene-cli"
 version = "0.1.0"
 dependencies = [
@@ -2484,7 +2457,6 @@ dependencies = [
  "crossterm",
  "dialoguer",
  "ene-ai",
- "ene-ai-local",
  "ene-config",
  "ene-mind",
  "ene-plugin-host",
@@ -2576,7 +2548,6 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "ene-ai",
- "ene-ai-local",
  "ene-config",
  "ene-mind",
  "ene-plugin-host",
@@ -2987,15 +2958,24 @@ name = "ene-plugin-llama-cpp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.0",
  "blake3",
  "ene-ai",
- "ene-ai-local",
+ "ene-config",
+ "ene-infer",
  "ene-plugin",
  "ene-plugin-proto",
+ "image",
+ "llama-cpp-4",
+ "once_cell",
+ "regex",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3162,7 +3142,6 @@ dependencies = [
  "cargo-husky",
  "chrono",
  "ene-ai",
- "ene-ai-local",
  "ene-config",
  "ene-core",
  "ene-mind",

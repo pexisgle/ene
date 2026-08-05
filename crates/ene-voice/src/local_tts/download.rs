@@ -177,11 +177,10 @@ pub async fn ensure_kokoro_files_exist(
 /// `ai.tts.*` / the `kokoro` profile are used when the plugin config is
 /// absent.
 ///
-/// Intended to be called once from the runtime's async bootstrap path
-/// (mirrors `ene_ai_local::prefetch_configured_gguf`), before any TTS
-/// provider is constructed, so `provider::open` never needs to perform
-/// network I/O. A no-op when TTS is disabled or configured for a different
-/// provider (e.g. `"openai"`).
+/// Intended to be called once from the runtime's async bootstrap path,
+/// before any TTS provider is constructed, so `provider::open` never needs
+/// to perform network I/O. A no-op when TTS is disabled or configured for a
+/// different provider (e.g. `"openai"`).
 ///
 /// # Errors
 ///

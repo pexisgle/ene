@@ -3,13 +3,26 @@
 //! Local GGUF inference provider plugin for the ene unified plugin system.
 //!
 //! Serves chat streaming, non-streaming completion, and GGUF embeddings over
-//! the plugin IPC, backed by `ene-ai-local`'s llama.cpp providers. Capability
+//! the plugin IPC, backed by the plugin's llama.cpp engines. Capability
 //! declarations (`llm/chat@1`, `embed@1`, `gguf-runner@1`) and the config
 //! schema (`mmproj_url` / `mmproj_path` / `acceleration`) are established in
-//! an earlier slice; this slice implements the inference actions.
+//! an earlier slice; the inference core lives in the `embedding` / `gguf` /
+//! `llama_cpp` / `local_llm` modules.
+#![cfg_attr(
+    test,
+    expect(
+        clippy::expect_used,
+        clippy::panic,
+        reason = "unit tests in the inference modules use expect/panic for assertions"
+    )
+)]
 
 mod config;
 mod convert;
+mod embedding;
+mod gguf;
+mod llama_cpp;
+mod local_llm;
 mod models;
 mod plugin;
 

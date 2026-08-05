@@ -16,14 +16,14 @@ The documentation is organized into four clear sections:
 | **[Architecture](architecture.md)** | System Architects & Contributors | Workspace design, API v1 host contract, turn pipeline, IPC protocol v6. |
 | **[Configuration](configuration.md)** | Operators & Developers | Full settings reference (`ENE_*` env vars, config files, character cards). |
 | **[Concepts](concepts/turn-and-session.md)** | Developers | Deep-dives into turns, memory, voice/avatar, plugins, and MCP integration. |
-| **[Crates Reference](crates/runtime.md)** | Developers & Contributors | Public API and internal architecture of the 16 workspace crates. |
+| **[Crates Reference](crates/runtime.md)** | Developers & Contributors | Public API and internal architecture of the 17 workspace crates. |
 | **[Applications](apps/cli.md)** | End Users | Guides for using `ene-cli` and `ene-desktop`. |
 
 ---
 
 ## Workspace Map
 
-Ene is structured as a modular Cargo workspace composed of **16 crates**, **6 plugin binaries**, and **2 host applications**:
+Ene is structured as a modular Cargo workspace composed of **17 crates**, **18 plugin binaries**, and **2 host applications**:
 
 ```text
 Ene Workspace
@@ -35,8 +35,9 @@ Ene Workspace
 │   ├── ene-mind           (Cognitive engine: session, prompt, affect, proactive, memory writer)
 │   ├── ene-store          (SQLite + SeaORM + sqlite-vec memory & vector store)
 │   ├── ene-config         (Settings, character cards, schema definition)
+│   ├── ene-core           (Persistence-agnostic domain vocabulary & memory port)
 │   ├── ene-ai             (Core AI provider traits, OpenAI, Anthropic adapter)
-│   ├── ene-ai-local       (Local LLM inference via llama-cpp-4)
+│   ├── ene-infer          (Local-model engine: worker threads, queues, conformance)
 │   ├── ene-voice          (Local STT/TTS/VAD audio pipeline)
 │   ├── ene-rag            (RAG policy: memory scoring/decay, tool selection)
 │   ├── ene-connector      (External-service credential & identity authority)

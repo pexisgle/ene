@@ -105,8 +105,7 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
 
     // The local GGUF provider plugin needs no host environment and loads no
     // model until one is configured, so the default entry is a plain enabled
-    // process (equivalent to the always-built-in `ene-ai-local` crate it
-    // replaces).
+    // process.
     list.insert("llama-cpp".to_string(), PluginEntry::default());
 
     // The VOICEVOX-compatible TTS provider plugin talks to a local engine

@@ -133,7 +133,6 @@ zip = { version = "8", default-features = false }
 # ── Internal crates ──
 ene-connector = { path = "crates/ene-connector" }
 ene-ai = { path = "crates/ene-ai" }
-ene-ai-local = { path = "crates/ene-ai-local" }
 ene-config = { path = "crates/ene-config" }
 ene-core = { path = "crates/ene-core" }
 ene-infer = { path = "crates/ene-infer" }

@@ -8,8 +8,8 @@
 //! plugins (`plugins/provider/*`); this crate owns only the traits,
 //! configuration routing, health probing, retry policy, and model fetching.
 //!
-//! Local providers are in [`ene-ai-local`] (GGUF/llama.cpp) and
-//! [`ene-voice`] (STT/TTS/VAD).
+//! Local inference runs in the `ene-plugin-llama-cpp` provider plugin
+//! (GGUF/llama.cpp) and [`ene-voice`] (STT/TTS/VAD).
 #![warn(missing_docs)]
 #![expect(
     clippy::option_if_let_else,
@@ -43,7 +43,7 @@ pub mod health;
 /// Message and streaming chunk types (`LlmMessage`, `LlmResponseChunk`, etc.).
 pub mod message;
 /// Shared, safe model-file downloader (`ModelFetcher`) used by
-/// `ene-ai-local` (GGUF) and `ene-voice` (Kokoro ONNX / `voices.bin`):
+/// the local-llm plugin (GGUF) and `ene-voice` (Kokoro ONNX / `voices.bin`):
 /// in-flight coalescing, `.part` + atomic rename, RAII partial cleanup,
 /// HTTPS-only enforcement, pluggable post-download validation, and progress
 /// reporting.

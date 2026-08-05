@@ -87,7 +87,7 @@ on public items is the exception — it states the contract, not the mechanism.
 - `TODO:` states *what* and *under which condition*, never a ticket:
   `// TODO: drop the fallback once every plugin negotiates IPC v4`.
 - `// SAFETY:` is mandatory on every `unsafe` block and must name the invariant that makes it
-  sound (see `crates/ene-ai-local/src/local_llm/model.rs`).
+  sound (see `plugins/provider/local-llm/src/local_llm/model.rs`).
 - Commented-out code is deleted, not parked.
 - Comments and rustdoc are **English only**, regardless of the working language — the
   bilingual rule applies to `docs/` and i18n strings, not to source.

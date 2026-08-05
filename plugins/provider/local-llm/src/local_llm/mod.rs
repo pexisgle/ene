@@ -1,4 +1,4 @@
-//! In-process llama-cpp-4 provider for proactive decisions.
+//! llama-cpp-4 chat/vision provider for the local inference plugin.
 
 mod model;
 
@@ -7,18 +7,15 @@ use ene_ai::config::ProactiveAcceleration;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk};
 use ene_ai::traits::LlmProvider;
-use ene_ai::{
-    Capability, CapabilitySet, EngineDescriptor, ResourceRegistry, StreamingLocalLlmEngine,
-};
-use ene_infer::{EngineConfig, EngineError, EngineHandle};
+use ene_ai::{Capability, CapabilitySet, EngineDescriptor, StreamingLocalLlmEngine};
+use ene_infer::{EngineConfig, EngineHandle};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::Stream;
-use tokio_util::sync::CancellationToken;
 
 use crate::llama_cpp::{LoadSpec, resource_class_for};
-use model::{LlamaChatModel, LlamaCppRequest, LlamaCppResponse};
+use model::LlamaChatModel;
 
 /// Provider name / engine id, used in tracing and `EngineDescriptor::id`.
 const PROVIDER_NAME: &str = "llama-cpp-local";
@@ -64,34 +61,14 @@ pub struct LocalGgufLoadParams {
     pub request_timeout_seconds: u64,
 }
 
-/// Maps an [`ene_infer::EngineError`] to [`LlmProviderError`]. Since this
-/// model's own [`ene_infer::LocalModel::Error`] *is* [`LlmProviderError`]
-/// (see `model::LlamaChatModel`), `EngineError::Model` needs no further
-/// wrapping/stringifying — it already carries the right type.
-fn map_engine_error(err: EngineError<LlmProviderError>) -> LlmProviderError {
-    match err {
-        EngineError::Busy { queue_depth } => LlmProviderError::Busy { queue_depth },
-        EngineError::Timeout { .. } => LlmProviderError::Timeout,
-        EngineError::Cancelled => LlmProviderError::Cancelled,
-        EngineError::EngineDown { reason } => {
-            LlmProviderError::Provider(format!("engine down: {reason}"))
-        }
-        EngineError::Model(model_err) => model_err,
-    }
-}
-
-/// Local decision provider backed by an in-process llama.cpp model.
+/// Local chat/vision provider backed by an in-process llama.cpp model.
 ///
 /// Wraps a [`StreamingLocalLlmEngine`] (this crate's only consumer of
 /// `ene-ai`'s blanket `LlmProvider` adapters) for ordinary chat completion —
 /// real, token-by-token streaming for [`LlmProvider::create_chat_stream`],
-/// since [`LlamaChatModel`] implements [`ene_infer::StreamingLocalModel`] —
-/// plus a second call path — [`Self::summarize_rgb_with_cancel`] — that
-/// submits directly through [`StreamingLocalLlmEngine::handle`] for raw-RGB
-/// vision summarization, a request shape [`ene_ai::LlmChatRequest`] cannot
-/// express. Both paths run on the *same* worker/model instance and therefore
-/// naturally serialize against each other (one dedicated worker thread per
-/// [`ene_infer::EngineHandle`]).
+/// since [`LlamaChatModel`] implements [`ene_infer::StreamingLocalModel`].
+/// Message-based vision (image parts) rides the same path: the engine
+/// adapter gates image input on the measured `Capability::Vision`.
 pub struct LocalLlamaCppProvider {
     engine: StreamingLocalLlmEngine<LlamaChatModel>,
 }
@@ -162,73 +139,6 @@ impl LocalLlamaCppProvider {
             engine: StreamingLocalLlmEngine::new(handle, descriptor),
         })
     }
-
-    /// This engine's declared capabilities — the same
-    /// [`ene_ai::CapabilitySet`] the blanket `LlmProvider` adapter already
-    /// uses internally to gate vision input, so both call sites agree by
-    /// construction instead of duplicating the check.
-    #[must_use]
-    pub fn capabilities(&self) -> CapabilitySet {
-        self.engine.descriptor().capabilities
-    }
-
-    /// Summarize an RGB8 screen capture with the local vision model.
-    pub async fn summarize_rgb(
-        &self,
-        width: u32,
-        height: u32,
-        rgb: Vec<u8>,
-        system: &str,
-        user: &str,
-    ) -> Result<String, LlmProviderError> {
-        self.summarize_rgb_with_cancel(width, height, rgb, system, user, CancellationToken::new())
-            .await
-    }
-
-    /// Summarize an RGB8 screen capture, cooperatively cancellable via
-    /// `cancel`.
-    ///
-    /// Cancellation flows into [`ene_infer::JobContext::should_stop`] inside
-    /// the worker exactly like [`LlmProvider::chat_completion`]'s own
-    /// (fresh, non-cancellable) token — this is simply the one call path in
-    /// this crate that lets a caller supply its own token instead of one
-    /// scoped to a single call (see `crates/ene-runtime/src/vision.rs`,
-    /// which cancels an in-flight vision summary when a new user turn
-    /// starts).
-    pub async fn summarize_rgb_with_cancel(
-        &self,
-        width: u32,
-        height: u32,
-        rgb: Vec<u8>,
-        system: &str,
-        user: &str,
-        cancel: CancellationToken,
-    ) -> Result<String, LlmProviderError> {
-        if !self.capabilities().contains(Capability::Vision) {
-            return Err(LlmProviderError::LocalLlm(
-                "local model has no vision mmproj loaded".to_string(),
-            ));
-        }
-
-        let permit = ResourceRegistry::acquire(self.engine.descriptor().resource)
-            .await
-            .map_err(|e| {
-                LlmProviderError::LocalLlm(format!("resource admission semaphore closed: {e}"))
-            })?;
-        let request = LlamaCppRequest::Vision {
-            system: system.to_string(),
-            user: user.to_string(),
-            width,
-            height,
-            rgb,
-        };
-        let outcome = self.engine.handle().submit(request, cancel).await;
-        drop(permit);
-
-        outcome
-            .map(|r: LlamaCppResponse| r.text)
-            .map_err(map_engine_error)
-    }
 }
 
 #[async_trait]
@@ -286,7 +196,7 @@ mod tests {
     ///
     /// ```text
     /// ENE_SMOKE_GGUF=assets/models/gguf/gemma-4-E4B-it-Q4_0.gguf \
-    ///   cargo test -p ene-ai-local -- --ignored smoke_gguf_load_and_grammar --nocapture
+    ///   cargo test -p ene-plugin-llama-cpp -- --ignored smoke_gguf_load_and_grammar --nocapture
     /// ```
     #[tokio::test]
     #[ignore = "requires a local GGUF path via ENE_SMOKE_GGUF"]
@@ -351,7 +261,7 @@ mod tests {
     ///
     /// ```text
     /// ENE_SMOKE_GGUF=assets/models/gguf/gemma-4-E4B-it-Q4_0.gguf \
-    ///   cargo test -p ene-ai-local -- --ignored smoke_gguf_streaming --nocapture
+    ///   cargo test -p ene-plugin-llama-cpp -- --ignored smoke_gguf_streaming --nocapture
     /// ```
     #[tokio::test]
     #[ignore = "requires a local GGUF path via ENE_SMOKE_GGUF"]

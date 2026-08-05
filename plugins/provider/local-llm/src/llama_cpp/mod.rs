@@ -1,6 +1,6 @@
-//! Shared llama-cpp-4 adapter for local decision + embedding.
+//! Shared llama-cpp-4 adapter for local chat + embedding.
 //!
-//! Keeps low-level llama.cpp types inside `ene-ai-local`; callers use typed helpers only.
+//! Keeps low-level llama.cpp types inside this plugin; callers use typed helpers only.
 
 mod backend;
 mod embed;
@@ -10,7 +10,7 @@ mod load;
 
 pub(crate) use backend::with_backend;
 pub(crate) use embed::embed_text;
-pub(crate) use generate::{LlamaStreamChunk, generate_chat, generate_vision};
+pub(crate) use generate::{LlamaStreamChunk, generate_chat};
 pub(crate) use load::{LoadSpec, LoadedModel, resource_class_for};
 
 use ene_ai::error::LlmProviderError;

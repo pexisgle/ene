@@ -60,24 +60,6 @@ fn map_engine_error(err: EngineError<ene_ai::error::LlmProviderError>) -> EneEmb
 }
 
 impl GgufEmbeddingProvider {
-    /// Loads a GGUF embedding model from disk (CPU by default).
-    ///
-    /// * `model_name` — Human-readable model identifier
-    /// * `gguf_path` — Path to the GGUF weights file
-    /// * `quantization` — Quantization label (e.g. `"F16"`)
-    pub fn load(
-        model_name: &str,
-        gguf_path: &str,
-        quantization: &str,
-    ) -> Result<Self, EneEmbeddingError> {
-        Self::load_with_acceleration(
-            model_name,
-            gguf_path,
-            quantization,
-            ProactiveAcceleration::Cpu,
-        )
-    }
-
     /// Load with an explicit acceleration preference.
     ///
     /// # Errors

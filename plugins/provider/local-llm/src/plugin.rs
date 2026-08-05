@@ -2,10 +2,10 @@
 //!
 //! Implements [`ConfigurablePlugin`] (mmproj / acceleration config and
 //! per-model profiles), [`LlmPlugin`] (streaming and non-streaming chat on
-//! `ene-ai-local`'s [`LocalLlamaCppProvider`](ene_ai_local::LocalLlamaCppProvider),
+//! [`LocalLlamaCppProvider`](crate::local_llm::LocalLlamaCppProvider),
 //! including message-based vision when an mmproj is configured), and
 //! [`EmbedPlugin`] (GGUF embeddings on
-//! [`GgufEmbeddingProvider`](ene_ai_local::GgufEmbeddingProvider)). Models
+//! [`GgufEmbeddingProvider`](crate::embedding::GgufEmbeddingProvider)). Models
 //! load lazily per profile key and stay resident for the process lifetime.
 
 use async_trait::async_trait;

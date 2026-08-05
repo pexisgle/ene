@@ -49,6 +49,22 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+  # GPU backends are compile-only in CI (no GPU hardware): the workspace no
+  # longer enables llama.cpp's vulkan feature through ene-cli/ene-desktop, so
+  # this job keeps the GPU code paths compiling. The cuda feature has no
+  # compile coverage here — a CUDA toolkit is not installed on the runner —
+  # matching the pre-relocation setup where cuda was never built by CI either.
+  local-llm-gpu-compile:
+    name: Local LLM GPU compile (vulkan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-build-env
+      - name: Compile the local-llm plugin with the vulkan backend
+        run: cargo check -p ene-plugin-llama-cpp --features vulkan
+
   docs:
     name: Doc build
     runs-on: ubuntu-latest

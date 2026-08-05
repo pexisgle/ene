@@ -745,6 +745,13 @@ settings that previously lived in `ai.*` moved here — for example
 `plugins.list.kokoro.profiles.kokoro.voices_path`
 (was `ai.tts.voices_path`).
 
+The llama-cpp plugin's `acceleration` value must match the binary's build:
+the released Linux packages compile the `vulkan` backend in, while a
+CPU-default build (`cargo build -p ene-plugin-llama-cpp` without
+`--features vulkan`) rejects `"vulkan"` / `"cuda"` at load with a typed
+error. `"auto"` (the default) always works: it selects the compiled GPU
+backend when present and falls back to CPU otherwise.
+
 Version-1 `settings.json` files are migrated automatically on load: the
 relocated keys above are moved into their `plugins.list.*` destinations (and
 removed from their old `ai.*` locations) before the file is read, then the
@@ -810,16 +817,19 @@ omitted) plus the optional `dimensions` (declared embedding dimensionality;
 see below). The plugin downloads `url` weights into the model cache on first
 use (GGUF magic validated) and keeps one loaded model per profile until a live
 config/profile update invalidates that cache. Existing requests retain their
-model; subsequent requests load the new settings. `context_size` and
-`gpu_layers` size chat loads only — the
-embedding model sizes its own context and offload plan internally, and the
-host's routing window stays in `ai.local_models.<name>.context_size`. The
-v2→v3 migration mirrors `context_size`, so a profile that omits it loads the
-host-side value (16,384 when the host value is also the default); only
-manually written profiles that predate the mirror can drift — set their
-`context_size` to at least the host value to avoid a context overflow at
-generation time. Profile *selection* is plugin-owned; the values are
-delivered via `ConfigurablePlugin::set_profiles`.
+model; subsequent requests load the new settings. The first download runs
+inside the proactive decision warm-up's 5-minute budget; a model that takes
+longer to fetch fails closed (proactive stays `Disabled` until the host
+restarts), so point `model_path` at a pre-fetched cache for very large models.
+`context_size` and `gpu_layers` size chat loads only — the embedding model
+sizes its own context and offload plan internally, and the host's routing
+window stays in `ai.local_models.<name>.context_size`. The v2→v3 migration
+mirrors `context_size`, so a profile that omits it loads the host-side value
+(16,384 when the host value is also the default); only manually written
+profiles that predate the mirror can drift — set their `context_size` to at
+least the host value to avoid a context overflow at generation time. Profile
+*selection* is plugin-owned; the values are delivered via
+`ConfigurablePlugin::set_profiles`.
 
 `dimensions` is required on `ai.local_models.<name>` when the model backs
 `tasks.embedding` with `provider: "local"`: the host opens the memory-store
