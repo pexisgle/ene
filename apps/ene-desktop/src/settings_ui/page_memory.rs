@@ -4,7 +4,7 @@ use crate::memory_journal::{MemoryJournalAction, MemoryJournalPresenter};
 use crate::settings::{CommitmentFilter, MemoryPageMode};
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use ene_store::Commitment;
+use ene_store::{Commitment, MemoryStatus};
 use i18n_embed_fl::fl;
 use std::sync::Arc;
 
@@ -785,15 +785,22 @@ fn render_browse_rows(
                             format!(" [{pin_label}]")
                         }
                     ));
-                    ui.label(format!(
-                        "{}: {}  |  {}: {}  |  {}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-kind"),
-                        row.kind,
-                        fl!(crate::i18n::loader(), "memory-journal-status"),
-                        row.status,
-                        fl!(crate::i18n::loader(), "memory-journal-scope"),
-                        row.scope
-                    ));
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            status_color(row.status),
+                            format!("[{}]", status_label(row.status)),
+                        );
+                        ui.label(format!(
+                            "{}: {}  |  {}: {}",
+                            fl!(crate::i18n::loader(), "memory-journal-kind"),
+                            row.kind,
+                            fl!(crate::i18n::loader(), "memory-journal-scope"),
+                            row.scope
+                        ));
+                    });
+                    if let Some(hint) = lifecycle_hint(row) {
+                        ui.label(hint);
+                    }
                     ui.horizontal(|ui| {
                         ui.label(format!(
                             "{}: {:.2}  |",
@@ -830,6 +837,67 @@ fn render_browse_rows(
                 ui.add_space(4.0);
             }
         });
+}
+
+// ── Lifecycle badge helpers ─────────────────────────────────────────────────
+
+fn status_label(status: MemoryStatus) -> String {
+    match status {
+        MemoryStatus::Active => fl!(crate::i18n::loader(), "memory-journal-status-active"),
+        MemoryStatus::Faded => fl!(crate::i18n::loader(), "memory-journal-status-faded"),
+        MemoryStatus::Archived => fl!(crate::i18n::loader(), "memory-journal-status-archived"),
+        MemoryStatus::Disputed => fl!(crate::i18n::loader(), "memory-journal-status-disputed"),
+        MemoryStatus::Superseded => {
+            fl!(crate::i18n::loader(), "memory-journal-status-superseded")
+        }
+        MemoryStatus::UserDeleted => {
+            fl!(crate::i18n::loader(), "memory-journal-status-user_deleted")
+        }
+        _ => status.as_str().to_string(),
+    }
+}
+
+fn status_color(status: MemoryStatus) -> egui::Color32 {
+    match status {
+        MemoryStatus::Active => egui::Color32::GREEN,
+        MemoryStatus::Faded => egui::Color32::YELLOW,
+        MemoryStatus::Archived => egui::Color32::GRAY,
+        MemoryStatus::Disputed => egui::Color32::RED,
+        MemoryStatus::Superseded => egui::Color32::LIGHT_BLUE,
+        MemoryStatus::UserDeleted => egui::Color32::LIGHT_RED,
+        _ => egui::Color32::GRAY,
+    }
+}
+
+fn lifecycle_hint(row: &crate::settings::MemoryJournalRow) -> Option<String> {
+    if row.pinned && matches!(row.status, MemoryStatus::Active | MemoryStatus::Faded) {
+        return Some(fl!(crate::i18n::loader(), "memory-journal-next-pinned"));
+    }
+    if let Some(next) = MemoryJournalPresenter::next_natural_transition(row.status, row.pinned)
+        && let Some(threshold) = MemoryJournalPresenter::next_transition_threshold(next)
+    {
+        let hint = match next {
+            MemoryStatus::Faded => fl!(
+                crate::i18n::loader(),
+                "memory-journal-next-fade",
+                threshold = format!("{threshold:.2}")
+            ),
+            MemoryStatus::Archived => fl!(
+                crate::i18n::loader(),
+                "memory-journal-next-archive",
+                threshold = format!("{threshold:.2}")
+            ),
+            _ => return None,
+        };
+        return Some(hint);
+    }
+    if row
+        .available_actions
+        .contains(&MemoryJournalAction::Restore)
+    {
+        return Some(fl!(crate::i18n::loader(), "memory-journal-next-restore"));
+    }
+    None
 }
 
 // ── Recall rows ──────────────────────────────────────────────────────────────
@@ -1074,11 +1142,37 @@ fn set_action_message(
                 action,
                 fl!(crate::i18n::loader(), "memory-journal-action-no-change")
             ),
-            Err(error) => format!(
-                "{}: {} ({error})",
-                action,
-                fl!(crate::i18n::loader(), "memory-journal-action-error")
-            ),
+            Err(error) => match error_category_label(&error) {
+                Some(label) => format!("{action}: {label}"),
+                None => format!(
+                    "{}: {} ({error})",
+                    action,
+                    fl!(crate::i18n::loader(), "memory-journal-action-error")
+                ),
+            },
         });
+    }
+}
+
+fn error_category_label(error: &crate::ai_bridge::AiBridgeError) -> Option<String> {
+    use ene_runtime::PublicApiError;
+    match error {
+        crate::ai_bridge::AiBridgeError::Timeout(_) => {
+            Some(fl!(crate::i18n::loader(), "memory-journal-error-timeout"))
+        }
+        crate::ai_bridge::AiBridgeError::Api(PublicApiError::Invalid { .. }) => {
+            Some(fl!(crate::i18n::loader(), "memory-journal-error-invalid"))
+        }
+        crate::ai_bridge::AiBridgeError::Api(PublicApiError::Storage { .. }) => {
+            Some(fl!(crate::i18n::loader(), "memory-journal-error-storage"))
+        }
+        crate::ai_bridge::AiBridgeError::Api(PublicApiError::NotFound { .. }) => {
+            Some(fl!(crate::i18n::loader(), "memory-journal-error-not-found"))
+        }
+        crate::ai_bridge::AiBridgeError::Api(PublicApiError::ActorDead) => Some(fl!(
+            crate::i18n::loader(),
+            "memory-journal-error-actor-dead"
+        )),
+        _ => None,
     }
 }

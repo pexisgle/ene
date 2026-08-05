@@ -1,5 +1,6 @@
 //! Memory Journal presenter: browse rows, action gating, and recall debug mapping.
 
+use ene_rag::decay::{ARCHIVE_THRESHOLD, FADE_THRESHOLD};
 use ene_store::{MemoryItem, MemoryStatus};
 
 use crate::settings::{MemoryJournalRecallRow, MemoryJournalRow};
@@ -31,7 +32,7 @@ impl MemoryJournalPresenter {
             id: item.id.unwrap_or_default(),
             title: item.title.clone(),
             kind: item.kind.as_str().to_string(),
-            status: item.status.as_str().to_string(),
+            status: item.status,
             confidence: item.confidence.get(),
             salience: item.salience.get(),
             last_accessed: item.last_accessed_at.map(|ts| ts.to_rfc3339()),
@@ -54,32 +55,69 @@ impl MemoryJournalPresenter {
     /// Actions that should succeed for the given lifecycle state.
     pub fn available_actions(status: MemoryStatus, pinned: bool) -> Vec<MemoryJournalAction> {
         let mut actions = Vec::new();
-        if pinned {
-            actions.push(MemoryJournalAction::Unpin);
+        actions.push(if pinned {
+            MemoryJournalAction::Unpin
         } else {
-            actions.push(MemoryJournalAction::Pin);
+            MemoryJournalAction::Pin
+        });
+        for action in [
+            MemoryJournalAction::Archive,
+            MemoryJournalAction::Forget,
+            MemoryJournalAction::Dispute,
+            MemoryJournalAction::Restore,
+        ] {
+            if let Some(target) = action.target_status()
+                && Self::transition_allowed(status, target)
+            {
+                actions.push(action);
+            }
         }
-
-        match status {
-            MemoryStatus::Active => {
-                actions.push(MemoryJournalAction::Forget);
-                actions.push(MemoryJournalAction::Dispute);
-            }
-            MemoryStatus::Faded => {
-                actions.push(MemoryJournalAction::Archive);
-                actions.push(MemoryJournalAction::Dispute);
-                actions.push(MemoryJournalAction::Restore);
-            }
-            MemoryStatus::Archived
-            | MemoryStatus::UserDeleted
-            | MemoryStatus::Superseded
-            | MemoryStatus::Disputed => {
-                actions.push(MemoryJournalAction::Restore);
-            }
-            _ => {}
-        }
-
         actions
+    }
+
+    /// One-way lifecycle edges shared with the store's persistence policy.
+    const fn transition_allowed(from: MemoryStatus, to: MemoryStatus) -> bool {
+        matches!(
+            (from, to),
+            (
+                MemoryStatus::Active,
+                MemoryStatus::UserDeleted | MemoryStatus::Disputed
+            ) | (
+                MemoryStatus::Faded,
+                MemoryStatus::Archived | MemoryStatus::Disputed
+            ) | (
+                MemoryStatus::Faded
+                    | MemoryStatus::Archived
+                    | MemoryStatus::UserDeleted
+                    | MemoryStatus::Superseded
+                    | MemoryStatus::Disputed,
+                MemoryStatus::Active
+            )
+        )
+    }
+
+    /// Natural next status under decay, or `None` when decay does not apply
+    /// (pinned rows are exempt and non-Active/Faded statuses are terminal).
+    /// The decay score is bounded by `1.0` and decays to zero with age, so an
+    /// unpinned Active/Faded row reaches its threshold eventually.
+    pub fn next_natural_transition(status: MemoryStatus, pinned: bool) -> Option<MemoryStatus> {
+        if pinned {
+            return None;
+        }
+        match status {
+            MemoryStatus::Active => Some(MemoryStatus::Faded),
+            MemoryStatus::Faded => Some(MemoryStatus::Archived),
+            _ => None,
+        }
+    }
+
+    /// Decay-score threshold the natural next transition keys off, when any.
+    pub fn next_transition_threshold(target: MemoryStatus) -> Option<f32> {
+        match target {
+            MemoryStatus::Faded => Some(FADE_THRESHOLD),
+            MemoryStatus::Archived => Some(ARCHIVE_THRESHOLD),
+            _ => None,
+        }
     }
 
     /// Build a recall-debug row from pre-mapped display fields.
@@ -99,6 +137,17 @@ impl MemoryJournalPresenter {
 }
 
 impl MemoryJournalAction {
+    /// Store status this action transitions to; `None` for pin toggles.
+    pub const fn target_status(self) -> Option<MemoryStatus> {
+        match self {
+            Self::Pin | Self::Unpin => None,
+            Self::Archive => Some(MemoryStatus::Archived),
+            Self::Forget => Some(MemoryStatus::UserDeleted),
+            Self::Dispute => Some(MemoryStatus::Disputed),
+            Self::Restore => Some(MemoryStatus::Active),
+        }
+    }
+
     /// Fluent i18n key for this action label.
     pub const fn i18n_key(self) -> &'static str {
         match self {
@@ -115,6 +164,36 @@ impl MemoryJournalAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// User-facing actions per status, mirroring the store's one-way
+    /// lifecycle edges so gating cannot drift from persistence policy.
+    const POLICY_ACTIONS: &[(MemoryStatus, &[MemoryJournalAction])] = &[
+        (
+            MemoryStatus::Active,
+            &[MemoryJournalAction::Forget, MemoryJournalAction::Dispute],
+        ),
+        (
+            MemoryStatus::Faded,
+            &[
+                MemoryJournalAction::Archive,
+                MemoryJournalAction::Dispute,
+                MemoryJournalAction::Restore,
+            ],
+        ),
+        (MemoryStatus::Archived, &[MemoryJournalAction::Restore]),
+        (MemoryStatus::UserDeleted, &[MemoryJournalAction::Restore]),
+        (MemoryStatus::Superseded, &[MemoryJournalAction::Restore]),
+        (MemoryStatus::Disputed, &[MemoryJournalAction::Restore]),
+    ];
+
+    const ALL_STATUSES: &[MemoryStatus] = &[
+        MemoryStatus::Active,
+        MemoryStatus::Faded,
+        MemoryStatus::Archived,
+        MemoryStatus::UserDeleted,
+        MemoryStatus::Superseded,
+        MemoryStatus::Disputed,
+    ];
 
     #[test]
     fn active_row_allows_forget_not_archive() {
@@ -136,5 +215,113 @@ mod tests {
         let actions = MemoryJournalPresenter::available_actions(MemoryStatus::Active, true);
         assert!(actions.contains(&MemoryJournalAction::Unpin));
         assert!(!actions.contains(&MemoryJournalAction::Pin));
+    }
+
+    #[test]
+    fn gating_offers_exactly_the_policy_actions() {
+        for &(status, expected) in POLICY_ACTIONS {
+            let actions = MemoryJournalPresenter::available_actions(status, false);
+            for action in expected {
+                assert!(actions.contains(action), "{status:?} misses {action:?}");
+            }
+            let unexpected: Vec<_> = actions
+                .iter()
+                .filter(|a| {
+                    !expected.contains(a)
+                        && !matches!(a, MemoryJournalAction::Pin | MemoryJournalAction::Unpin)
+                })
+                .collect();
+            assert!(unexpected.is_empty(), "{status:?} offers {unexpected:?}");
+        }
+    }
+
+    #[test]
+    fn every_action_targets_a_policy_allowed_status() {
+        for &(status, expected) in POLICY_ACTIONS {
+            for action in expected {
+                let Some(target) = action.target_status() else {
+                    continue;
+                };
+                let allowed = matches!(
+                    (status, target),
+                    (
+                        MemoryStatus::Active,
+                        MemoryStatus::UserDeleted | MemoryStatus::Disputed
+                    ) | (
+                        MemoryStatus::Faded,
+                        MemoryStatus::Archived | MemoryStatus::Disputed
+                    ) | (
+                        MemoryStatus::Faded
+                            | MemoryStatus::Archived
+                            | MemoryStatus::UserDeleted
+                            | MemoryStatus::Superseded
+                            | MemoryStatus::Disputed,
+                        MemoryStatus::Active
+                    )
+                );
+                assert!(allowed, "{status:?} -> {target:?} not allowed");
+            }
+        }
+    }
+
+    #[test]
+    fn pin_toggles_never_map_to_a_status() {
+        for action in [MemoryJournalAction::Pin, MemoryJournalAction::Unpin] {
+            assert_eq!(action.target_status(), None);
+        }
+    }
+
+    #[test]
+    fn natural_transition_follows_status_and_pin() {
+        for &status in ALL_STATUSES {
+            assert_eq!(
+                MemoryJournalPresenter::next_natural_transition(status, true),
+                None,
+                "{status:?} pinned"
+            );
+        }
+        assert_eq!(
+            MemoryJournalPresenter::next_natural_transition(MemoryStatus::Active, false),
+            Some(MemoryStatus::Faded)
+        );
+        assert_eq!(
+            MemoryJournalPresenter::next_natural_transition(MemoryStatus::Faded, false),
+            Some(MemoryStatus::Archived)
+        );
+        for status in [
+            MemoryStatus::Archived,
+            MemoryStatus::UserDeleted,
+            MemoryStatus::Superseded,
+            MemoryStatus::Disputed,
+        ] {
+            assert_eq!(
+                MemoryJournalPresenter::next_natural_transition(status, false),
+                None,
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn transition_thresholds_match_rag_constants() {
+        assert_eq!(
+            MemoryJournalPresenter::next_transition_threshold(MemoryStatus::Faded),
+            Some(ene_rag::decay::FADE_THRESHOLD)
+        );
+        assert_eq!(
+            MemoryJournalPresenter::next_transition_threshold(MemoryStatus::Archived),
+            Some(ene_rag::decay::ARCHIVE_THRESHOLD)
+        );
+        for status in [
+            MemoryStatus::Active,
+            MemoryStatus::UserDeleted,
+            MemoryStatus::Superseded,
+            MemoryStatus::Disputed,
+        ] {
+            assert_eq!(
+                MemoryJournalPresenter::next_transition_threshold(status),
+                None
+            );
+        }
     }
 }
