@@ -55,6 +55,7 @@ mod look_at;
 #[cfg(target_os = "linux")]
 mod mask_gizmo;
 mod memory_journal;
+mod memory_ledger;
 mod panic_hook;
 mod physics;
 #[cfg(target_os = "linux")]

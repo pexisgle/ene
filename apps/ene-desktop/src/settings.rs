@@ -337,6 +337,16 @@ pub struct UiState {
     pub memory_journal_recall_rows: Vec<MemoryJournalRecallRow>,
     pub memory_journal_pending_writes: usize,
     pub memory_journal_permanent_writes: usize,
+    pub memory_ledger_rows: Vec<crate::memory_ledger::MemoryLedgerRow>,
+    pub memory_ledger_commitments: Vec<ene_store::Commitment>,
+    pub memory_ledger_loaded: bool,
+    pub memory_ledger_query: String,
+    pub memory_ledger_kind_filter: Option<ene_store::MemoryKind>,
+    pub memory_ledger_status_filter: Option<ene_store::MemoryStatus>,
+    pub memory_ledger_created_within: crate::memory_ledger::CreatedWithinFilter,
+    pub memory_ledger_edit_draft: Option<MemoryLedgerDraft>,
+    pub memory_ledger_pending_delete: Option<i64>,
+    pub memory_ledger_message: Option<String>,
     /// Pending tool-permission approvals awaiting a user decision.
     /// Accumulated by the permission-center consumer system
     /// from `AiPermissionRequested` messages; a request is removed
@@ -587,6 +597,21 @@ pub struct MemoryJournalRecallRow {
     pub title: String,
     pub reason: String,
     pub score_summary: String,
+}
+
+/// In-progress edit of a ledger memory row.
+#[derive(Clone, Debug)]
+pub struct MemoryLedgerDraft {
+    /// Typed-memory row id.
+    pub id: i64,
+    /// Edited title.
+    pub title: String,
+    /// Edited content.
+    pub content: String,
+    /// Edited kind (`snake_case` string).
+    pub kind: String,
+    /// Edited confidence.
+    pub confidence: f32,
 }
 
 #[derive(Clone, Debug, Default)]

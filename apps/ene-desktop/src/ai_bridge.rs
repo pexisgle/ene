@@ -36,6 +36,12 @@ pub struct MemoryJournalPayload {
     pub permanent_writes: usize,
 }
 
+/// Payload returned by [`AiBridge::refresh_memory_ledger`].
+pub struct MemoryLedgerPayload {
+    pub memories: Vec<ene_store::MemoryItem>,
+    pub commitments: Vec<ene_store::Commitment>,
+}
+
 /// Owns the actor handle. The runtime can also send user input
 /// back through [`AiBridge::run`] and [`AiBridge::cancel`].
 pub struct AiBridge {
@@ -416,6 +422,68 @@ impl AiBridge {
                 permanent_writes,
             })
         })?
+    }
+
+    /// Refresh the memory ledger payload (typed memories in every status +
+    /// commitments in every lifecycle state).
+    pub fn refresh_memory_ledger(
+        &self,
+        limit: usize,
+    ) -> Result<MemoryLedgerPayload, AiBridgeError> {
+        // Mailbox-free state reads; see `refresh_memory_journal`.
+        let character_id = self.handle.card_name();
+        let user_id = self.handle.config().user_name.clone();
+        let ledger = self.handle.memory_ledger();
+        self.block_on_timeout(async {
+            let options = ene_store::MemoryJournalListOptions {
+                character_id: &character_id,
+                user_id: Some(user_id.as_str()),
+                include_archived: true,
+                include_superseded: true,
+                include_user_deleted: true,
+                kind: None,
+                limit,
+                offset: 0,
+            };
+            let memories = ledger.list_memories(&options).await?;
+            let commitments = ledger
+                .list_commitments(Some(user_id.as_str()), None, limit)
+                .await?;
+            Ok(MemoryLedgerPayload {
+                memories,
+                commitments,
+            })
+        })?
+    }
+
+    /// Edit a persisted typed memory in place through the ledger handle.
+    pub fn edit_memory_blocking(
+        &self,
+        id: i64,
+        edit: ene_store::MemoryEdit,
+    ) -> Result<(), AiBridgeError> {
+        Ok(
+            self.block_on_timeout(self.handle.memory_ledger().edit_memory(
+                id,
+                edit,
+                self.handle.active_turn(),
+            ))??,
+        )
+    }
+
+    /// Adjust a typed memory's salience (importance / Preference weight).
+    pub fn set_memory_salience_blocking(
+        &self,
+        id: i64,
+        salience: f32,
+    ) -> Result<(), AiBridgeError> {
+        Ok(
+            self.block_on_timeout(self.handle.memory_ledger().set_memory_salience(
+                id,
+                salience,
+                self.handle.active_turn(),
+            ))??,
+        )
     }
 
     /// Run explainable recall search for the journal debug mode.
@@ -962,7 +1030,8 @@ async fn pump_events(
             Ok(
                 LifecycleEvent::StatusChanged { .. }
                 | LifecycleEvent::ToolBackgroundCompleted { .. }
-                | LifecycleEvent::CandidateChanged { .. },
+                | LifecycleEvent::CandidateChanged { .. }
+                | LifecycleEvent::MemoryLedgerChanged { .. },
             ) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!("[Ene] Dropped {n} lifecycle events (broadcast lag)");
