@@ -112,13 +112,16 @@ async fn run_provider_server(socket_path: PathBuf, capabilities: PluginCapabilit
             {
                 return;
             }
-            while let Ok(Some(request)) = read_plugin_request(&mut stream, WireFormat::Json).await {
+            // The handshake is always JSON; subsequent frames use the format
+            // selected by the negotiated protocol version.
+            let wire_format = WireFormat::for_version(negotiated);
+            while let Ok(Some(request)) = read_plugin_request(&mut stream, wire_format).await {
                 match request {
                     PluginIpcRequest::Ping { request_id } => {
                         if write_plugin_response(
                             &mut stream,
                             &PluginIpcResponse::Pong { request_id },
-                            WireFormat::Json,
+                            wire_format,
                         )
                         .await
                         .is_err()
@@ -148,7 +151,7 @@ async fn run_provider_server(socket_path: PathBuf, capabilities: PluginCapabilit
                         if write_plugin_response(
                             &mut stream,
                             &PluginIpcResponse::CapabilityCallResult { request_id, result },
-                            WireFormat::Json,
+                            wire_format,
                         )
                         .await
                         .is_err()
