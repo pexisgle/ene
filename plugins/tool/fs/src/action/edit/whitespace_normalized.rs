@@ -1,16 +1,12 @@
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
-static WHITESPACE_RE: OnceLock<regex::Regex> = OnceLock::new();
-
-fn whitespace_re() -> &'static regex::Regex {
-    WHITESPACE_RE.get_or_init(|| {
-        #[expect(
-            clippy::expect_used,
-            reason = "constant regex pattern compiled once at first use"
-        )]
-        regex::Regex::new(r"\s+").expect("invalid constant regex")
-    })
-}
+static WHITESPACE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    #[expect(
+        clippy::expect_used,
+        reason = "constant regex pattern compiled once at first use"
+    )]
+    regex::Regex::new(r"\s+").expect("invalid constant regex")
+});
 
 pub fn whitespace_normalized_replace(
     content: &str,
@@ -18,7 +14,7 @@ pub fn whitespace_normalized_replace(
     new: &str,
     replace_all: bool,
 ) -> Option<String> {
-    let normalize = |t: &str| -> String { whitespace_re().replace_all(t, " ").trim().to_string() };
+    let normalize = |t: &str| -> String { WHITESPACE_RE.replace_all(t, " ").trim().to_string() };
     let normalized_find = normalize(old);
 
     let lines: Vec<&str> = content.lines().collect();

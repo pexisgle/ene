@@ -1,6 +1,6 @@
 use ego_tree::NodeId;
 use scraper::{ElementRef, Html, Node, Selector};
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 const SKIP_TAGS: &[&str] = &[
     "script", "style", "noscript", "iframe", "svg", "nav", "header", "footer", "aside", "template",
@@ -109,11 +109,7 @@ fn strip_subtrees(tree: &mut ego_tree::Tree<Node>, root_id: NodeId, skip_tags: &
 }
 
 fn normalize_text(text: &str) -> String {
-    static RE_MULTISPACE: OnceLock<regex::Regex> = OnceLock::new();
-    static RE_TRAILING_WS: OnceLock<regex::Regex> = OnceLock::new();
-    static RE_EXCESSIVE_BLANKS: OnceLock<regex::Regex> = OnceLock::new();
-
-    let re_multispace = RE_MULTISPACE.get_or_init(|| {
+    static RE_MULTISPACE: LazyLock<regex::Regex> = LazyLock::new(|| {
         #[expect(
             clippy::expect_used,
             reason = "constant regex pattern compiled once at first use"
@@ -122,14 +118,14 @@ fn normalize_text(text: &str) -> String {
     });
     // Strip trailing whitespace before newlines without touching leading
     // indentation on the following line (preserves code-block structure).
-    let re_trailing_ws = RE_TRAILING_WS.get_or_init(|| {
+    static RE_TRAILING_WS: LazyLock<regex::Regex> = LazyLock::new(|| {
         #[expect(
             clippy::expect_used,
             reason = "constant regex pattern compiled once at first use"
         )]
         regex::Regex::new(r"[ \t]+\n").expect("invalid constant regex")
     });
-    let re_excessive_blanks = RE_EXCESSIVE_BLANKS.get_or_init(|| {
+    static RE_EXCESSIVE_BLANKS: LazyLock<regex::Regex> = LazyLock::new(|| {
         #[expect(
             clippy::expect_used,
             reason = "constant regex pattern compiled once at first use"
@@ -137,9 +133,9 @@ fn normalize_text(text: &str) -> String {
         regex::Regex::new(r"\n{3,}").expect("invalid constant regex")
     });
 
-    let step1 = re_multispace.replace_all(text, " ");
-    let step2 = re_trailing_ws.replace_all(&step1, "\n");
-    let step3 = re_excessive_blanks.replace_all(&step2, "\n\n");
+    let step1 = RE_MULTISPACE.replace_all(text, " ");
+    let step2 = RE_TRAILING_WS.replace_all(&step1, "\n");
+    let step3 = RE_EXCESSIVE_BLANKS.replace_all(&step2, "\n\n");
 
     step3.trim().to_string()
 }
