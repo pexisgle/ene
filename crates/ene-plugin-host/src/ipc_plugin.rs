@@ -62,6 +62,12 @@ pub enum SetConfigOutcome {
 /// that lack the variants are never addressed.
 const DYNAMIC_CONFIG_MIN_VERSION: u32 = 5;
 
+/// Protocol version at which [`PluginIpcRequest::ProcessVadChunk`] was
+/// introduced (IPC v7). Plugins that negotiated an older version do not know
+/// this message variant; sending it to them would fail to deserialize on
+/// their end.
+const PROCESS_VAD_CHUNK_MIN_VERSION: u32 = 7;
+
 /// Shared routing state for the single reader task.
 ///
 /// Every incoming [`PluginIpcResponse`] is dispatched here by the reader task
@@ -176,7 +182,8 @@ fn response_request_id(resp: &PluginIpcResponse) -> Option<&str> {
         | PluginIpcResponse::ChatCompletionResult { request_id, .. }
         | PluginIpcResponse::EmbedBatchResult { request_id, .. }
         | PluginIpcResponse::SpeechResult { request_id, .. }
-        | PluginIpcResponse::TranscriptionResult { request_id, .. } => Some(request_id.as_str()),
+        | PluginIpcResponse::TranscriptionResult { request_id, .. }
+        | PluginIpcResponse::VadChunkResult { request_id, .. } => Some(request_id.as_str()),
     }
 }
 
@@ -510,6 +517,17 @@ impl IpcPluginConnection {
     pub fn supports_migrate_config(&self) -> bool {
         self.negotiated_version() >= DYNAMIC_CONFIG_MIN_VERSION
             && self.capabilities().supports_migrate_config
+    }
+
+    /// Returns whether the peer can handle
+    /// [`PluginIpcRequest::ProcessVadChunk`].
+    ///
+    /// `ProcessVadChunk` was introduced in protocol v7, so only peers that
+    /// negotiated v7+ receive VAD requests. The host additionally only
+    /// registers a VAD factory when the handshake advertised
+    /// `vad_providers`, so a v7 peer without VAD never gets one.
+    pub fn supports_vad(&self) -> bool {
+        self.negotiated_version() >= PROCESS_VAD_CHUNK_MIN_VERSION
     }
 
     /// Sends a `ListTools` request and returns the actual tool specs.
@@ -1108,6 +1126,71 @@ impl IpcPluginConnection {
         }
     }
 
+    /// Sends a `TranscribeAudio` request and awaits the transcribed text.
+    ///
+    /// The caller encodes the audio into the wire payload; this layer only
+    /// correlates the response. The wire contract carries no language or
+    /// duration, so the host adapter derives what it can from the PCM it
+    /// encoded.
+    pub async fn transcribe_audio(
+        &self,
+        request_id: String,
+        provider_kind: String,
+        provider_config: serde_json::Value,
+        audio_base64: String,
+        format: String,
+    ) -> Result<String, PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::TranscribeAudio {
+                request_id,
+                provider_kind,
+                provider_config,
+                audio_base64,
+                format,
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::TranscriptionResult { text, .. } => Ok(text),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to TranscribeAudio: {other:?}"
+            ))),
+        }
+    }
+
+    /// Sends a `ProcessVadChunk` request and awaits the VAD event.
+    ///
+    /// Only callable after [`supports_vad`](Self::supports_vad) confirmed
+    /// the peer knows the message; the manager gates factory registration on
+    /// that check.
+    pub async fn process_vad_chunk(
+        &self,
+        request_id: String,
+        provider_kind: String,
+        provider_config: serde_json::Value,
+        session_id: String,
+        pcm: Vec<f32>,
+        reset: bool,
+    ) -> Result<ene_plugin_proto::VadEvent, PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::ProcessVadChunk {
+                request_id,
+                provider_kind,
+                provider_config,
+                session_id,
+                pcm,
+                reset,
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::VadChunkResult { event, .. } => Ok(event),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to ProcessVadChunk: {other:?}"
+            ))),
+        }
+    }
+
     /// Sends a graceful `Shutdown` request (best-effort; ignores errors).
     pub async fn shutdown(&self) {
         drop(self.send_request(&PluginIpcRequest::Shutdown).await);
@@ -1343,6 +1426,9 @@ impl IpcPluginConnection {
             | PluginIpcRequest::TranscribeAudio {
                 request_id: rid, ..
             }
+            | PluginIpcRequest::ProcessVadChunk {
+                request_id: rid, ..
+            }
             | PluginIpcRequest::SetConfig {
                 request_id: rid, ..
             }
@@ -1431,6 +1517,7 @@ impl IpcPluginConnection {
             | PluginIpcRequest::EmbedBatch { request_id, .. }
             | PluginIpcRequest::SynthesizeSpeech { request_id, .. }
             | PluginIpcRequest::TranscribeAudio { request_id, .. }
+            | PluginIpcRequest::ProcessVadChunk { request_id, .. }
             | PluginIpcRequest::SetConfig { request_id, .. }
             | PluginIpcRequest::ListConfigOptions { request_id, .. }
             | PluginIpcRequest::ValidateConfig { request_id, .. }
