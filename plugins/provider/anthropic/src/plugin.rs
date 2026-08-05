@@ -473,27 +473,23 @@ struct ToolCallState {
 
 /// Reads an Anthropic SSE stream and sends parsed chunks through the channel.
 ///
-/// Raw bytes are accumulated and decoded only up to complete UTF-8 character
-/// boundaries, so multi-byte characters split across network chunks are not
-/// corrupted. Processes `content_block_start` (`tool_use`),
-/// `content_block_delta` (`text_delta`, `input_json_delta`), and `error`
-/// events; content-block indices are remapped to dense tool-call indices.
-/// Other event types (`message_start`, `content_block_stop`, `message_delta`,
-/// `message_stop`) are acknowledged but produce no output chunks.
+/// Processes `content_block_start` (`tool_use`), `content_block_delta`
+/// (`text_delta`, `input_json_delta`), and `error` events; content-block
+/// indices are remapped to dense tool-call indices. Other event types
+/// (`message_start`, `content_block_stop`, `message_delta`, `message_stop`)
+/// are acknowledged but produce no output chunks.
 async fn stream_sse_response(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     tx: tokio::sync::mpsc::Sender<Result<PluginStreamChunk, PluginError>>,
 ) {
-    let mut raw_buf: Vec<u8> = Vec::new();
-    let mut line_buf = String::new();
-    let mut event_type = String::new();
-    let mut data_buf = String::new();
-    let mut tool_state = ToolCallState::default();
+    use eventsource_stream::Eventsource;
+    use tokio_stream::StreamExt as _;
 
-    loop {
-        let chunk = match response.chunk().await {
-            Ok(Some(chunk)) => chunk,
-            Ok(None) => break,
+    let mut tool_state = ToolCallState::default();
+    let mut events = response.bytes_stream().eventsource();
+    while let Some(event) = events.next().await {
+        let event = match event {
+            Ok(event) => event,
             Err(e) => {
                 drop(
                     tx.send(Err(PluginError::provider(format!(
@@ -504,51 +500,17 @@ async fn stream_sse_response(
                 return;
             }
         };
-
-        raw_buf.extend_from_slice(&chunk);
-
-        // Decode only complete UTF-8 characters; a multi-byte character split
-        // across chunks stays in `raw_buf` until the remaining bytes arrive
-        // instead of being replaced with U+FFFD by a lossy per-chunk decode.
-        let valid_len = match std::str::from_utf8(&raw_buf) {
-            Ok(_) => raw_buf.len(),
-            Err(e) => e.valid_up_to(),
-        };
-        let (valid, rest) = raw_buf.split_at(valid_len);
-        line_buf.push_str(&String::from_utf8_lossy(valid));
-        raw_buf = rest.to_vec();
-
-        while let Some(newline_pos) = line_buf.find('\n') {
-            let rest = line_buf.split_off(newline_pos.saturating_add(1));
-            let line = line_buf.trim_end_matches(['\r', '\n']).to_string();
-            line_buf = rest;
-
-            if line.is_empty() {
-                // Empty line marks the end of an SSE event.
-                if !data_buf.is_empty() {
-                    match process_sse_event(&event_type, &data_buf, &mut tool_state) {
-                        Some(Ok(chunk)) => {
-                            if tx.send(Ok(chunk)).await.is_err() {
-                                return;
-                            }
-                        }
-                        Some(Err(e)) => {
-                            drop(tx.send(Err(e)).await);
-                            return;
-                        }
-                        None => {}
-                    }
+        match process_sse_event(&event.event, &event.data, &mut tool_state) {
+            Some(Ok(chunk)) => {
+                if tx.send(Ok(chunk)).await.is_err() {
+                    return;
                 }
-                event_type.clear();
-                data_buf.clear();
-            } else if let Some(event) = line.strip_prefix("event:") {
-                event_type = event.trim().to_string();
-            } else if let Some(data) = line.strip_prefix("data:") {
-                if !data_buf.is_empty() {
-                    data_buf.push('\n');
-                }
-                data_buf.push_str(data.trim());
             }
+            Some(Err(e)) => {
+                drop(tx.send(Err(e)).await);
+                return;
+            }
+            None => {}
         }
     }
 }

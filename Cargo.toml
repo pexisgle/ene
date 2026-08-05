@@ -70,6 +70,7 @@ crossterm = "0.29"
 
 # ── Networking ──
 http = "1"
+eventsource-stream = "0.2"
 percent-encoding = "2"
 reqwest = { version = "0.13", default-features = false }
 scraper = "0.27"
