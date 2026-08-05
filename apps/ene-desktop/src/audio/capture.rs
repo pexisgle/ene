@@ -451,6 +451,22 @@ fn select_device_by_name(host: &cpal::Host, name: &str) -> Option<cpal::Device> 
         .map(|(_, d)| d)
 }
 
+/// Enumerate the names of all input devices the default host can see.
+///
+/// Used by the settings UI to offer a microphone picker. The list is a
+/// snapshot; devices may be added or removed between enumeration and capture.
+pub fn list_input_device_names() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devices| {
+            devices
+                .filter_map(|d| d.description().ok())
+                .map(|desc| desc.name().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Whether a given [`SampleFormat`] is one the capture path can decode.
 #[cfg(test)]
 const fn supported_format(format: SampleFormat) -> bool {

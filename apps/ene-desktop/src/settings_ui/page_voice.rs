@@ -1,6 +1,7 @@
 //! Voice settings page — Text-to-Speech (TTS), Speech-to-Text (STT), and Microphone/VAD configuration.
 
 use super::input::SettingsInputState;
+use super::widgets::editable_combo;
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
 use bevy_ecs::world::World;
@@ -24,6 +25,88 @@ const KOKORO_VOICE_PRESETS: &[(&str, &str)] = &[
     ("jf_gongitsune", "jf_gongitsune (日本語童話風)"),
 ];
 
+/// `OpenAI` Speech API voices advertised by the `openai-tts` plugin.
+const OPENAI_TTS_VOICES: &[&str] = &["alloy", "echo", "fable", "onyx", "nova", "shimmer"];
+/// `OpenAI` Speech API models advertised by the `openai-tts` plugin.
+const OPENAI_TTS_MODELS: &[&str] = &["tts-1", "tts-1-hd"];
+/// Language codes offered as one-click choices for TTS / STT; the free-form
+/// editor accepts any other BCP-47 code.
+const LANGUAGE_CHOICES: &[&str] = &["ja", "en", "zh", "ko", "fr", "de", "es", "it", "pt"];
+
+/// TTS voice presets for the selected provider, as (value, label) pairs.
+fn tts_voice_choices(provider: &str, current: &str) -> Vec<(String, String)> {
+    let presets: Vec<(String, String)> = match provider {
+        "kokoro" => KOKORO_VOICE_PRESETS
+            .iter()
+            .map(|(id, desc)| ((*id).to_string(), (*desc).to_string()))
+            .collect(),
+        "openai_tts" => OPENAI_TTS_VOICES
+            .iter()
+            .map(|v| ((*v).to_string(), (*v).to_string()))
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !current.is_empty() && !presets.iter().any(|(value, _)| value == current) {
+        let mut with_current = vec![(current.to_string(), current.to_string())];
+        with_current.extend(presets);
+        return with_current;
+    }
+    presets
+}
+
+/// TTS model presets for the selected provider, as (value, label) pairs.
+fn tts_model_choices(provider: &str, current: &str) -> Vec<(String, String)> {
+    let presets: Vec<(String, String)> = match provider {
+        "kokoro" => vec![(
+            "kokoro-v1_0.onnx".to_string(),
+            "kokoro-v1_0.onnx (local)".to_string(),
+        )],
+        "openai_tts" => OPENAI_TTS_MODELS
+            .iter()
+            .map(|m| ((*m).to_string(), (*m).to_string()))
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !current.is_empty() && !presets.iter().any(|(value, _)| value == current) {
+        let mut with_current = vec![(current.to_string(), current.to_string())];
+        with_current.extend(presets);
+        return with_current;
+    }
+    presets
+}
+
+fn language_choices(current: &str) -> Vec<(String, String)> {
+    let mut choices: Vec<(String, String)> = LANGUAGE_CHOICES
+        .iter()
+        .map(|code| ((*code).to_string(), (*code).to_string()))
+        .collect();
+    if !current.is_empty() && !choices.iter().any(|(value, _)| value == current) {
+        choices.insert(0, (current.to_string(), current.to_string()));
+    }
+    choices
+}
+
+/// Whisper GGUF model filenames offered as quick picks for the STT model
+/// field. The field is a path fallback per the whisper plugin contract, so
+/// the free-form editor remains the primary input.
+fn stt_model_choices(current: &str) -> Vec<(String, String)> {
+    let presets = [
+        "ggml-tiny.bin",
+        "ggml-base.bin",
+        "ggml-small.bin",
+        "ggml-medium.bin",
+        "ggml-large-v3-turbo.bin",
+    ];
+    let mut choices: Vec<(String, String)> = presets
+        .iter()
+        .map(|name| ((*name).to_string(), (*name).to_string()))
+        .collect();
+    if !current.is_empty() && !choices.iter().any(|(value, _)| value == current) {
+        choices.insert(0, (current.to_string(), current.to_string()));
+    }
+    choices
+}
+
 pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
@@ -31,6 +114,14 @@ pub fn render(
     input: &mut SettingsInputState,
     world: &mut World,
 ) {
+    if input.provider_catalog.is_none() {
+        input.provider_catalog = ai.provider_catalog_blocking().ok();
+    }
+    #[cfg(feature = "voice")]
+    if input.mic_devices.is_empty() {
+        input.mic_devices = crate::audio::capture::list_input_device_names();
+    }
+
     let mut ai_cfg = settings.config_section::<ene_ai::AiConfig>();
     let mut changed = false;
     let mut mic_device_changed = false;
@@ -74,11 +165,11 @@ pub fn render(
                     .on_hover_text("OpenAI TTS クラウド API を一括設定")
                     .clicked()
                 {
-                    ai_cfg.tts.provider = "openai".to_string();
+                    ai_cfg.tts.provider = "openai_tts".to_string();
                     ai_cfg.tts.model = "tts-1".to_string();
                     ai_cfg.tts.voice = "alloy".to_string();
                     ai_cfg.tts.language = "ja".to_string();
-                    input.tts_provider = "openai".to_string();
+                    input.tts_provider = "openai_tts".to_string();
                     input.tts_model = "tts-1".to_string();
                     input.tts_voice = "alloy".to_string();
                     input.tts_language = "ja".to_string();
@@ -107,31 +198,36 @@ pub fn render(
                 "audio-tts-provider"
             ));
 
-            let current_provider = ai_cfg.tts.provider.clone();
-            let mut provider_selected = current_provider.as_str();
+            let mut choices: Vec<(String, String)> = Vec::new();
+            choices.push((
+                "none".to_string(),
+                i18n_embed_fl::fl!(crate::i18n::loader(), "audio-provider-none"),
+            ));
+            if let Some(catalog) = input.provider_catalog.as_ref() {
+                choices.extend(catalog.tts.iter().map(|kind| (kind.clone(), kind.clone())));
+            }
+            if !input.tts_provider.is_empty()
+                && input.tts_provider != "none"
+                && !choices
+                    .iter()
+                    .any(|(value, _)| value == &input.tts_provider)
+            {
+                choices.insert(0, (input.tts_provider.clone(), input.tts_provider.clone()));
+            }
 
-            egui::ComboBox::from_id_salt("tts_provider_combo")
-                .selected_text(
-                    if provider_selected == "none" || provider_selected.is_empty() {
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "audio-provider-none")
-                    } else {
-                        provider_selected.to_string()
-                    },
-                )
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut provider_selected,
-                        "none",
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "audio-provider-none"),
-                    );
-                    ui.selectable_value(&mut provider_selected, "kokoro", "kokoro (Local ONNX)");
-                    ui.selectable_value(&mut provider_selected, "openai", "openai (Cloud API)");
-                });
-
-            if provider_selected != current_provider {
-                ai_cfg.tts.provider = provider_selected.to_string();
-                input.tts_provider = provider_selected.to_string();
-                changed = true;
+            let combo = editable_combo(
+                ui,
+                "tts_provider_combo",
+                &mut input.tts_provider,
+                &choices,
+                160.0,
+            );
+            if combo.selection_changed || combo.response.lost_focus() {
+                let provider = input.tts_provider.trim().to_string();
+                if provider != ai_cfg.tts.provider {
+                    ai_cfg.tts.provider.clone_from(&provider);
+                    changed = true;
+                }
             }
         });
 
@@ -140,33 +236,15 @@ pub fn render(
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-voice"));
 
-                    let mut selected_voice = input.tts_voice.clone();
-                    let current_label = KOKORO_VOICE_PRESETS
-                        .iter()
-                        .find(|(id, _)| *id == selected_voice)
-                        .map_or_else(|| selected_voice.as_str(), |(_, desc)| *desc);
-
-                    let response = egui::ComboBox::from_id_salt("tts_voice_combo")
-                        .selected_text(if current_label.is_empty() {
-                            "af_heart (女性・標準)"
-                        } else {
-                            current_label
-                        })
-                        .show_ui(ui, |ui| {
-                            for (id, desc) in KOKORO_VOICE_PRESETS {
-                                ui.selectable_value(&mut selected_voice, (*id).to_string(), *desc);
-                            }
-                        });
-
-                    if response.response.changed() && selected_voice != input.tts_voice {
-                        input.tts_voice.clone_from(&selected_voice);
-                        ai_cfg.tts.voice = selected_voice;
-                        changed = true;
-                    }
-
-                    let text_edit = ui
-                        .add(egui::TextEdit::singleline(&mut input.tts_voice).desired_width(120.0));
-                    if text_edit.changed() {
+                    let choices = tts_voice_choices(&ai_cfg.tts.provider, &input.tts_voice);
+                    let combo = editable_combo(
+                        ui,
+                        "tts_voice_combo",
+                        &mut input.tts_voice,
+                        &choices,
+                        120.0,
+                    );
+                    if combo.response.changed() || combo.selection_changed {
                         ai_cfg.tts.voice = input.tts_voice.trim().to_string();
                         changed = true;
                     }
@@ -189,10 +267,15 @@ pub fn render(
                         crate::i18n::loader(),
                         "audio-tts-language"
                     ));
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut input.tts_language).desired_width(80.0),
+                    let choices = language_choices(&input.tts_language);
+                    let combo = editable_combo(
+                        ui,
+                        "tts_language_combo",
+                        &mut input.tts_language,
+                        &choices,
+                        80.0,
                     );
-                    if response.changed() {
+                    if combo.response.changed() || combo.selection_changed {
                         ai_cfg.tts.language = input.tts_language.trim().to_string();
                         changed = true;
                     }
@@ -200,9 +283,15 @@ pub fn render(
 
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-model"));
-                    let response = ui
-                        .add(egui::TextEdit::singleline(&mut input.tts_model).desired_width(180.0));
-                    if response.changed() {
+                    let choices = tts_model_choices(&ai_cfg.tts.provider, &input.tts_model);
+                    let combo = editable_combo(
+                        ui,
+                        "tts_model_combo",
+                        &mut input.tts_model,
+                        &choices,
+                        180.0,
+                    );
+                    if combo.response.changed() || combo.selection_changed {
                         ai_cfg.tts.model = input.tts_model.trim().to_string();
                         changed = true;
                     }
@@ -213,10 +302,7 @@ pub fn render(
                         crate::i18n::loader(),
                         "audio-tts-model-path"
                     ));
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut input.tts_model_path).desired_width(220.0),
-                    );
-                    if response.changed() {
+                    if super::widgets::path_row(ui, &mut input.tts_model_path, 220.0) {
                         ai_cfg.tts.model_path = if input.tts_model_path.trim().is_empty() {
                             None
                         } else {
@@ -231,10 +317,7 @@ pub fn render(
                         crate::i18n::loader(),
                         "audio-tts-voices-path"
                     ));
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut input.tts_voices_path).desired_width(220.0),
-                    );
-                    if response.changed() {
+                    if super::widgets::path_row(ui, &mut input.tts_voices_path, 220.0) {
                         settings.set_kokoro_voices_path(&input.tts_voices_path);
                         changed = true;
                     }
@@ -256,40 +339,50 @@ pub fn render(
                 "audio-stt-provider"
             ));
 
-            let current_provider = ai_cfg.stt.provider.clone();
-            let mut provider_selected = current_provider.as_str();
+            let mut choices: Vec<(String, String)> = vec![(
+                "none".to_string(),
+                i18n_embed_fl::fl!(crate::i18n::loader(), "audio-provider-none"),
+            )];
+            if let Some(catalog) = input.provider_catalog.as_ref() {
+                choices.extend(catalog.stt.iter().map(|kind| (kind.clone(), kind.clone())));
+            }
+            if !input.stt_provider.is_empty()
+                && input.stt_provider != "none"
+                && !choices
+                    .iter()
+                    .any(|(value, _)| value == &input.stt_provider)
+            {
+                choices.insert(0, (input.stt_provider.clone(), input.stt_provider.clone()));
+            }
 
-            egui::ComboBox::from_id_salt("stt_provider_combo")
-                .selected_text(
-                    if provider_selected == "none" || provider_selected.is_empty() {
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "audio-provider-none")
-                    } else {
-                        provider_selected.to_string()
-                    },
-                )
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut provider_selected,
-                        "none",
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "audio-provider-none"),
-                    );
-                    ui.selectable_value(&mut provider_selected, "whisper", "whisper (Local)");
-                });
-
-            if provider_selected != current_provider {
-                ai_cfg.stt.provider = provider_selected.to_string();
-                input.stt_provider = provider_selected.to_string();
-                changed = true;
+            let combo = editable_combo(
+                ui,
+                "stt_provider_combo",
+                &mut input.stt_provider,
+                &choices,
+                160.0,
+            );
+            if combo.selection_changed || combo.response.lost_focus() {
+                let provider = input.stt_provider.trim().to_string();
+                if provider != ai_cfg.stt.provider {
+                    ai_cfg.stt.provider.clone_from(&provider);
+                    changed = true;
+                }
             }
         });
-
         if ai_cfg.stt.provider != "none" && !ai_cfg.stt.provider.is_empty() {
             ui.indent("stt_details", |ui| {
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio-stt-model"));
-                    let response = ui
-                        .add(egui::TextEdit::singleline(&mut input.stt_model).desired_width(180.0));
-                    if response.changed() {
+                    let choices = stt_model_choices(&input.stt_model);
+                    let combo = editable_combo(
+                        ui,
+                        "stt_model_combo",
+                        &mut input.stt_model,
+                        &choices,
+                        180.0,
+                    );
+                    if combo.response.changed() || combo.selection_changed {
                         ai_cfg.stt.model = input.stt_model.trim().to_string();
                         changed = true;
                     }
@@ -300,10 +393,15 @@ pub fn render(
                         crate::i18n::loader(),
                         "audio-stt-language"
                     ));
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut input.stt_language).desired_width(80.0),
+                    let choices = language_choices(&input.stt_language);
+                    let combo = editable_combo(
+                        ui,
+                        "stt_language_combo",
+                        &mut input.stt_language,
+                        &choices,
+                        80.0,
                     );
-                    if response.changed() {
+                    if combo.response.changed() || combo.selection_changed {
                         ai_cfg.stt.language = input.stt_language.trim().to_string();
                         changed = true;
                     }
@@ -315,9 +413,7 @@ pub fn render(
                         "audio-stt-model-path"
                     ));
                     let mut model_path = settings.whisper_model_path();
-                    let response =
-                        ui.add(egui::TextEdit::singleline(&mut model_path).desired_width(220.0));
-                    if response.changed() {
+                    if super::widgets::path_row(ui, &mut model_path, 220.0) {
                         settings.set_whisper_model_path(&model_path);
                         changed = true;
                     }
@@ -338,15 +434,39 @@ pub fn render(
                 crate::i18n::loader(),
                 "audio-mic-device"
             ));
+
             let mut device = settings.mic_device().unwrap_or_default();
+            let mut choices: Vec<(String, String)> = vec![(
+                String::new(),
+                i18n_embed_fl::fl!(crate::i18n::loader(), "audio-mic-default"),
+            )];
+            choices.extend(
+                input
+                    .mic_devices
+                    .iter()
+                    .map(|name| (name.clone(), name.clone())),
+            );
+            if !device.is_empty() && !choices.iter().any(|(value, _)| value == &device) {
+                choices.insert(0, (device.clone(), device.clone()));
+            }
+            let combo = editable_combo(ui, "mic_device_combo", &mut device, &choices, 200.0);
             if ui
-                .add(egui::TextEdit::singleline(&mut device).desired_width(200.0))
+                .button(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "audio-mic-refresh"
+                ))
                 .on_hover_text(i18n_embed_fl::fl!(
                     crate::i18n::loader(),
                     "audio-mic-default"
                 ))
-                .changed()
+                .clicked()
             {
+                #[cfg(feature = "voice")]
+                {
+                    input.mic_devices = crate::audio::capture::list_input_device_names();
+                }
+            }
+            if combo.response.changed() || combo.selection_changed {
                 settings.set_mic_device(if device.trim().is_empty() {
                     None
                 } else {

@@ -34,6 +34,7 @@ wgpu = "29"
 
 # ── Desktop / Platform ──
 global-hotkey = "0.8"
+rfd = "0.15"
 
 # ── Audio / DSP ──
 cpal = "0.18"
@@ -109,9 +110,11 @@ fluent-syntax = "0.12"
 htmd = "0.5"
 sys-locale = "0.3"
 unicode-normalization = "0.1"
+strsim = "0.11"
 
 # ── Utility ──
 blake3 = "1.8"
+bytesize = "2"
 flate2 = "1"
 meval = "0.2"
 secrecy = { version = "0.10", features = ["serde"] }

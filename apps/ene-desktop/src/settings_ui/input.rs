@@ -3,6 +3,8 @@
 //! `SettingsInputState` is owned by the [`SettingsUi`](super::SettingsUi) and
 //! `sync_from_settings` is called whenever the settings window
 //! transitions from hidden → visible.
+use std::collections::BTreeMap;
+
 use crate::settings::CharacterSettings;
 
 #[derive(Debug, Default)]
@@ -13,6 +15,7 @@ pub struct SettingsInputState {
     pub character_pos_y: String,
     pub character_pos_z: String,
     pub ai_user_name: String,
+    pub ai_chat_provider: String,
     pub ai_chat_model: String,
     pub ai_base_url: String,
     pub ai_api_key_source: String,
@@ -31,6 +34,18 @@ pub struct SettingsInputState {
     pub stt_provider: String,
     pub stt_model: String,
     pub stt_language: String,
+    /// Registered provider kinds snapshot from the plugin host, loaded
+    /// lazily by the AI / Voice pages on first render.
+    pub provider_catalog: Option<ene_runtime::ProviderCatalog>,
+    /// Enumerated input device names for the microphone picker. Filled by
+    /// the Voice page (and the Features audio section) when the window is
+    /// shown; empty without the `voice` feature.
+    pub mic_devices: Vec<String>,
+    /// Cached `/models` catalog per provider key, fetched on demand by the
+    /// AI page's refresh button.
+    pub model_catalog: BTreeMap<String, Vec<String>>,
+    /// Last `/models` fetch error message, if any.
+    pub model_fetch_error: Option<String>,
 }
 
 impl SettingsInputState {
@@ -60,6 +75,8 @@ impl SettingsInputState {
         self.character_pos_z = format!("{:+.2}", settings.character_state.character_position.z);
         self.ai_user_name.clone_from(&settings.config().user_name);
         let ai_cfg = settings.config_section::<ene_runtime::AiConfig>();
+        self.ai_chat_provider
+            .clone_from(&ai_cfg.tasks.chat.provider);
         self.ai_chat_model = ai_cfg.tasks.chat.model.clone().unwrap_or_default();
         if let Some(def) = ai_cfg.providers.get(&ai_cfg.tasks.chat.provider) {
             self.ai_base_url.clone_from(&def.base_url);

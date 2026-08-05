@@ -26,6 +26,8 @@ glam = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
+rfd = { workspace = true }
 egui = "0.35"
 egui-wgpu = "0.35"
 egui-winit = "0.35"

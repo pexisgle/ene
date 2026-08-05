@@ -133,11 +133,7 @@ fn render_import(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_en
     let mut do_import = false;
     ui.horizontal(|ui| {
         if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-            ui.add(
-                egui::TextEdit::singleline(&mut state.0.session_import_path)
-                    .desired_width(240.0)
-                    .hint_text(fl!(crate::i18n::loader(), "sessions-import-placeholder")),
-            );
+            super::widgets::path_row(ui, &mut state.0.session_import_path, 240.0);
         }
         if ui
             .button(fl!(crate::i18n::loader(), "sessions-import"))
