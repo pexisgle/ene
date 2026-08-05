@@ -352,6 +352,8 @@ pub struct EneHandle {
     host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Read-only session query handle, bypasses the actor mailbox.
     sessions: crate::query::sessions::SessionQueryHandle,
+    /// Connector framework handle (registry + lifecycle operations).
+    connectors: crate::connectors::ConnectorHandle,
     /// Pending memory-candidate approval handle. Reads bypass the actor
     /// mailbox; mutations route through it (see
     /// [`crate::query::candidates::MemoryCandidateHandle`]).
@@ -410,6 +412,7 @@ impl Clone for EneHandle {
             ledger: self.ledger.clone(),
             vision: self.vision.clone(),
             tools: self.tools.clone(),
+            connectors: self.connectors.clone(),
             shutdown_guard: Arc::clone(&self.shutdown_guard),
         }
     }
@@ -760,6 +763,15 @@ impl EneHandle {
         );
         let vision = crate::vision::VisionHandle::new(Arc::clone(&cmd_tx));
         let tools = crate::tools::ToolHandle::new(Arc::clone(&cmd_tx));
+        let connectors_registry = Arc::new(ene_connector::ConnectorRegistry::new());
+        connectors_registry.set_event_sink(Some(Arc::new({
+            let lifecycle_tx = lifecycle_tx.clone();
+            move |event| {
+                drop(lifecycle_tx.send(LifecycleEvent::ConnectorChanged {
+                    id: event.connector,
+                }));
+            }
+        })));
 
         let actor = actor::TurnActor::new(
             cmd_rx,
@@ -784,6 +796,7 @@ impl EneHandle {
             Arc::clone(&health_bridge_handle),
             Arc::clone(&host_service_handle),
             Arc::clone(&shared),
+            Arc::clone(&connectors_registry),
         );
         let join = tokio::spawn(actor.run());
 
@@ -795,6 +808,8 @@ impl EneHandle {
             health_bridge_handle: Arc::clone(&health_bridge_handle),
             host_service_handle: Arc::clone(&host_service_handle),
         });
+        let connectors =
+            crate::connectors::ConnectorHandle::new(connectors_registry, Arc::clone(&cmd_tx));
 
         Ok(Self {
             cmd_tx,
@@ -815,6 +830,7 @@ impl EneHandle {
             ledger,
             vision,
             tools,
+            connectors,
             shutdown_guard,
         })
     }
@@ -988,6 +1004,18 @@ impl EneHandle {
     /// registry is actor-owned state; see [`crate::tools`].
     pub fn tools(&self) -> crate::tools::ToolHandle {
         self.tools.clone()
+    }
+
+    /// Connector framework operations handle.
+    ///
+    /// Registration, cached status queries, and permission-status reads are
+    /// served directly from the shared registry; connectivity checks and
+    /// lifecycle operations cross the actor mailbox for permission
+    /// resolution and audit recording.
+    ///
+    /// Cheap to call repeatedly; the returned handle is a small `Clone`.
+    pub fn connectors(&self) -> crate::connectors::ConnectorHandle {
+        self.connectors.clone()
     }
 
     /// Workspace document index operations handle (sync / cancel / status /
@@ -2560,6 +2588,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::clone(&shared),
+            Arc::new(ene_connector::ConnectorRegistry::new()),
         );
         (actor, diag_rx, lifecycle_rx, gate, shared)
     }
@@ -2570,6 +2599,25 @@ mod tests {
     pub(super) fn build_bare_actor_with_store(
         store: Arc<ene_store::MemoryStore>,
         registry: Arc<dyn ene_plugin_host::ToolRegistry>,
+    ) -> (
+        actor::TurnActor,
+        broadcast::Receiver<EneEvent>,
+        Arc<TurnGate>,
+    ) {
+        let (actor, event_rx, gate) = build_bare_actor_with_store_and_connectors(
+            store,
+            registry,
+            Arc::new(ene_connector::ConnectorRegistry::new()),
+        );
+        (actor, event_rx, gate)
+    }
+
+    /// Like [`build_bare_actor_with_store`] with an injected connector
+    /// registry, for connector framework tests.
+    pub(super) fn build_bare_actor_with_store_and_connectors(
+        store: Arc<ene_store::MemoryStore>,
+        registry: Arc<dyn ene_plugin_host::ToolRegistry>,
+        connectors: Arc<ene_connector::ConnectorRegistry>,
     ) -> (
         actor::TurnActor,
         broadcast::Receiver<EneEvent>,
@@ -2615,6 +2663,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::clone(&shared),
+            connectors,
         );
         (actor, event_rx, gate)
     }
@@ -3511,5 +3560,229 @@ mod tests {
         );
 
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+    }
+
+    // ── Connector framework ──
+
+    /// In-memory mock connector exercising the runtime connector path.
+    struct MockConnector {
+        identity: ene_connector::ConnectorIdentity,
+    }
+
+    impl MockConnector {
+        fn new() -> Self {
+            Self {
+                identity: ene_connector::ConnectorIdentity::new(
+                    ene_connector::ConnectorId::try_new("mock.demo").unwrap(),
+                    "Mock Demo",
+                ),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ene_connector::Connector for MockConnector {
+        fn identity(&self) -> &ene_connector::ConnectorIdentity {
+            &self.identity
+        }
+
+        fn actions(&self) -> &'static [ene_connector::ConnectorAction] {
+            const ACTIONS: &[ene_connector::ConnectorAction] =
+                &[ene_connector::ConnectorAction::side_effecting(
+                    "ping",
+                    "Send a test ping",
+                )];
+            ACTIONS
+        }
+
+        async fn check_connectivity(
+            &self,
+        ) -> Result<ene_connector::HealthStatus, ene_connector::ConnectorError> {
+            Ok(ene_connector::HealthStatus {
+                healthy: true,
+                message: None,
+                checked_at: chrono::Utc::now(),
+            })
+        }
+
+        async fn connect(
+            &self,
+            _credential: &ene_connector::AccountCredentials,
+        ) -> Result<Vec<ene_connector::AuthenticatedAccount>, ene_connector::ConnectorError>
+        {
+            Ok(vec![ene_connector::AuthenticatedAccount::new(
+                "demo@example.com",
+                "demo@example.com",
+                ene_connector::AccountAuthKind::ApiKey,
+                vec!["read".to_string()],
+                chrono::Utc::now(),
+            )])
+        }
+
+        async fn disconnect(
+            &self,
+            _account: &ene_connector::AuthenticatedAccount,
+        ) -> Result<(), ene_connector::ConnectorError> {
+            Ok(())
+        }
+    }
+
+    /// A connector connect from the handle prompts through the permission
+    /// center; an allow-once decision retries the operation and succeeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connector_connect_prompts_through_permission_center() {
+        let mut config = test_config_memory_off();
+        let plugins = ene_plugin_host::PluginConfig {
+            permission_prompt_timeout_ms: 2_000,
+            ..Default::default()
+        };
+        config.set_section(&plugins).expect("plugin config merges");
+        let handle = EneHandle::open(config, test_card())
+            .await
+            .expect("open initializes handle");
+        let id = ene_connector::ConnectorId::try_new("mock.demo").unwrap();
+        handle
+            .connectors()
+            .register(Arc::new(MockConnector::new()))
+            .expect("register succeeds");
+        let mut event_rx = handle.subscribe();
+
+        let connector_handle = handle.connectors();
+        let credential = ene_connector::AccountCredentials::new(
+            "default",
+            ene_connector::CredentialStore::from_api_key("sk-test"),
+        );
+        let task_id = id.clone();
+        let task =
+            tokio::spawn(async move { connector_handle.connect(&task_id, credential).await });
+
+        let request_id = loop {
+            match event_rx.recv().await {
+                Ok(EneEvent::PermissionRequired {
+                    request_id,
+                    action,
+                    target,
+                    ..
+                }) => {
+                    assert_eq!(action, "connector.connect");
+                    assert_eq!(target, "connector:mock.demo");
+                    break request_id;
+                }
+                Ok(_) => {}
+                Err(
+                    tokio::sync::broadcast::error::RecvError::Lagged(_)
+                    | tokio::sync::broadcast::error::RecvError::Closed,
+                ) => {
+                    panic!("event bus closed");
+                }
+            }
+        };
+        handle
+            .decide_permission(request_id, PermissionDecision::AllowOnce)
+            .expect("decision accepted");
+
+        let accounts = task
+            .await
+            .expect("connect task completes")
+            .expect("allow-once approval unblocks connect");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "demo@example.com");
+
+        // An allow-once approval leaves no standing grant behind.
+        assert!(
+            handle
+                .connectors()
+                .permissions(&id)
+                .expect("permission status")
+                .is_empty()
+        );
+
+        // Allow-once is one-shot: a second connect outside any turn must
+        // prompt again instead of reusing the expired approval.
+        let connector_handle = handle.connectors();
+        let credential = ene_connector::AccountCredentials::new(
+            "default",
+            ene_connector::CredentialStore::from_api_key("sk-test"),
+        );
+        let task_id = id.clone();
+        let second =
+            tokio::spawn(async move { connector_handle.connect(&task_id, credential).await });
+        let request_id = loop {
+            match event_rx.recv().await {
+                Ok(EneEvent::PermissionRequired {
+                    request_id, action, ..
+                }) => {
+                    assert_eq!(action, "connector.connect");
+                    break request_id;
+                }
+                Ok(_) => {}
+                Err(
+                    tokio::sync::broadcast::error::RecvError::Lagged(_)
+                    | tokio::sync::broadcast::error::RecvError::Closed,
+                ) => {
+                    panic!("event bus closed");
+                }
+            }
+        };
+        handle
+            .decide_permission(request_id, PermissionDecision::AllowOnce)
+            .expect("second decision accepted");
+        second
+            .await
+            .expect("second connect task completes")
+            .expect("second allow-once approval unblocks connect");
+
+        drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+    }
+
+    /// Connector grants record audit rows through the same tool-permission
+    /// audit trail, with no argument payload.
+    #[tokio::test]
+    async fn connector_grant_records_audit_row() {
+        let store = Arc::new(
+            ene_store::MemoryStore::open_in_memory(4)
+                .await
+                .expect("in-memory store"),
+        );
+        let connectors = Arc::new(ene_connector::ConnectorRegistry::new());
+        connectors
+            .register(Arc::new(MockConnector::new()))
+            .expect("register succeeds");
+        let (mut actor, _event_rx, _gate) = build_bare_actor_with_store_and_connectors(
+            store.clone(),
+            Arc::new(EmptyRegistry),
+            connectors.clone(),
+        );
+        let id = ene_connector::ConnectorId::try_new("mock.demo").unwrap();
+        let (reply, rx) = oneshot::channel();
+        assert!(
+            actor
+                .handle_command(EneCommand::ConnectorGrant {
+                    id: id.clone(),
+                    action: "connector.connect".to_string(),
+                    target_pattern: "connector:mock.demo".to_string(),
+                    reply,
+                })
+                .await
+        );
+        rx.await.expect("grant reply").expect("grant succeeds");
+
+        // The audit insert is spawned fire-and-forget, so poll for the row.
+        let mut rows = Vec::new();
+        for _ in 0..20 {
+            rows = store
+                .list_audit_entries_by_tool("connector.mock.demo.grant", 10)
+                .await
+                .expect("audit rows");
+            if !rows.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "connector.connect");
+        assert_eq!(rows[0].target, "connector:mock.demo");
+        assert_eq!(rows[0].redacted_args, "{}");
+        assert!(rows[0].success);
     }
 }

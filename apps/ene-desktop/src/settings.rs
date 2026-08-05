@@ -356,6 +356,14 @@ pub struct UiState {
     /// Refreshed after every decision / revocation.
     pub permission_grants: Vec<ene_runtime::PermissionScope>,
     pub permission_message: Option<String>,
+    /// Cached connector summaries for the connectors settings page.
+    /// Refreshed when the page is first shown and on explicit refresh.
+    pub connector_summaries: Vec<ene_connector::ConnectorSummary>,
+    pub connectors_loaded: bool,
+    pub connector_selected: Option<ene_connector::ConnectorId>,
+    pub connector_grants: Vec<ene_connector::PermissionGrant>,
+    pub connector_status: Option<ene_connector::ConnectorStatus>,
+    pub connector_message: Option<String>,
     /// Cached session metadata rows for the sessions page.
     /// Lazy-loaded the first time the page is shown and refreshed
     /// after every archive / import action. Rendered directly from the

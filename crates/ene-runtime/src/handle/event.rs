@@ -236,6 +236,16 @@ pub enum LifecycleEvent {
         /// Terminal status of the background task.
         status: ene_plugin_proto::DeferredStatus,
     },
+    /// A connector's state changed (connected, disconnected, checked,
+    /// granted, revoked, or failed).
+    ///
+    /// Audit event emitted after the registry updated its cached status;
+    /// consumers refetch the connector list via
+    /// [`crate::EneHandle::connectors`] rather than trusting this snapshot.
+    ConnectorChanged {
+        /// Connector whose state changed.
+        id: ene_connector::ConnectorId,
+    },
 }
 
 /// Ledger mutation kind carried by

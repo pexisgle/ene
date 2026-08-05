@@ -118,6 +118,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 zeroize = { version = "1", default-features = false, features = ["zeroize_derive"] }
 directories = "6"
 hex = "0.4"
+hmac = "0.13"
 sha2 = "0.11"
 rand = "0.10"
 rayon = "1.12"

@@ -91,6 +91,12 @@ pub enum AiBridgeError {
     /// actor) failed.
     #[error(transparent)]
     Ai(#[from] ene_ai::AiError),
+    /// A connector framework operation failed.
+    #[error(transparent)]
+    Connector(#[from] ene_connector::ConnectorError),
+    /// A connector operation through the runtime handle failed.
+    #[error(transparent)]
+    ConnectorHandle(#[from] ene_runtime::ConnectorHandleError),
 }
 
 impl AiBridge {
@@ -277,6 +283,42 @@ impl AiBridge {
     /// removed.
     pub fn reset_all_permissions_blocking(&self) -> Result<usize, AiBridgeError> {
         Ok(self.block_on_timeout(self.handle.reset_all_permissions())??)
+    }
+
+    /// Lists the cached connector summaries (I/O-free).
+    pub fn list_connectors_blocking(&self) -> Vec<ene_connector::ConnectorSummary> {
+        self.handle.connectors().list()
+    }
+
+    /// Returns the cached status snapshot of one connector (I/O-free).
+    pub fn connector_status_blocking(
+        &self,
+        id: &ene_connector::ConnectorId,
+    ) -> Result<ene_connector::ConnectorStatus, AiBridgeError> {
+        self.handle
+            .connectors()
+            .status(id)
+            .map_err(AiBridgeError::from)
+    }
+
+    /// Lists the standing per-action grants of one connector (I/O-free).
+    pub fn connector_permissions_blocking(
+        &self,
+        id: &ene_connector::ConnectorId,
+    ) -> Result<Vec<ene_connector::PermissionGrant>, AiBridgeError> {
+        self.handle
+            .connectors()
+            .permissions(id)
+            .map_err(AiBridgeError::from)
+    }
+
+    /// Runs a connector connectivity check. Blocks the calling thread while
+    /// the actor answers.
+    pub fn check_connector_blocking(
+        &self,
+        id: &ene_connector::ConnectorId,
+    ) -> Result<ene_connector::HealthStatus, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.connectors().check(id))??)
     }
 
     /// Undo the most recent reversible tool operation. Blocks the
@@ -1013,6 +1055,7 @@ async fn pump_events(
                 LifecycleEvent::StatusChanged { .. }
                 | LifecycleEvent::ToolBackgroundCompleted { .. }
                 | LifecycleEvent::CandidateChanged { .. }
+                | LifecycleEvent::ConnectorChanged { .. }
                 | LifecycleEvent::MemoryLedgerChanged { .. },
             ) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

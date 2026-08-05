@@ -32,6 +32,7 @@
 - [ペルソナフォーマット（W++ / AliChat / YAML）](concepts/character-card-persona-formats.md)
 - [音声とアバター](concepts/voice-and-avatar.md)
 - [プラグインと MCP](concepts/plugins-and-mcp.md)
+- [コネクター](concepts/connectors.md)
 
 # クレート API リファレンス
 

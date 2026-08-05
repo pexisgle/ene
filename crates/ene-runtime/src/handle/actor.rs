@@ -130,6 +130,9 @@ pub(super) struct TurnActor {
     /// Receiver handed to the timer task when it is spawned.
     scheduler_notify_rx: Option<watch::Receiver<()>>,
     permission_scopes: Arc<Mutex<Vec<crate::streaming::PermissionScope>>>,
+    /// Connector framework registry shared with the handle; the actor
+    /// resolves permission prompts and records audit rows for lifecycle ops.
+    connectors: Arc<ene_connector::ConnectorRegistry>,
     undo_stack: Arc<Mutex<crate::undo::UndoStack>>,
     context: ene_mind::ContextManager,
     call_tool_tasks: tokio::task::JoinSet<()>,
@@ -301,6 +304,7 @@ impl TurnActor {
         health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
         host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
         shared_state: Arc<SharedActorState>,
+        connectors: Arc<ene_connector::ConnectorRegistry>,
     ) -> Self {
         let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
         let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
@@ -343,6 +347,7 @@ impl TurnActor {
             scheduler_notify,
             scheduler_notify_rx: Some(scheduler_notify_rx),
             permission_scopes: Arc::new(Mutex::new(Vec::new())),
+            connectors,
             undo_stack: Arc::new(Mutex::new(crate::undo::UndoStack::new(64))),
             context: ene_mind::ContextManager::default(),
             call_tool_tasks: tokio::task::JoinSet::new(),
@@ -2670,6 +2675,10 @@ impl TurnActor {
                 self.terminal_emitted = Arc::new(AtomicBool::new(false));
                 self.active_turn = Some(turn.clone());
                 self.active_origin = crate::types::TurnOrigin::User;
+                self.connectors.on_call_context(
+                    &self.session.memory.session_id.to_string(),
+                    Some(turn.as_str()),
+                );
                 drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Running,
                 }));
@@ -3022,6 +3031,8 @@ impl TurnActor {
                     self.registry
                         .revoke_pattern(&scope.action, &scope.target_pattern)
                         .await;
+                    self.connectors
+                        .revoke_pattern(&scope.action, &scope.target_pattern);
                 }
                 // A oneshot send error is `Copy` here (it's just the unsent
                 // `bool`), so `drop()` would itself trip
@@ -3044,6 +3055,8 @@ impl TurnActor {
                     self.registry
                         .revoke_pattern(&scope.action, &scope.target_pattern)
                         .await;
+                    self.connectors
+                        .revoke_pattern(&scope.action, &scope.target_pattern);
                 }
                 // A oneshot send error is `Copy` here (it's just the unsent
                 // `usize`), so `drop()` would itself trip
@@ -3054,6 +3067,60 @@ impl TurnActor {
                     reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
                 )]
                 let _ = reply.send(count);
+                true
+            }
+            EneCommand::ConnectorCheck { id, reply } => {
+                let connectors = Arc::clone(&self.connectors);
+                self.spawn_connector_operation(id.clone(), "check", reply, move || {
+                    let connectors = Arc::clone(&connectors);
+                    let id = id.clone();
+                    async move { connectors.check_connectivity(&id).await }
+                });
+                true
+            }
+            EneCommand::ConnectorConnect {
+                id,
+                credential,
+                reply,
+            } => {
+                let connectors = Arc::clone(&self.connectors);
+                let credential = Arc::new(credential);
+                self.spawn_connector_operation(id.clone(), "connect", reply, move || {
+                    let connectors = Arc::clone(&connectors);
+                    let id = id.clone();
+                    let credential = Arc::clone(&credential);
+                    async move { connectors.connect(&id, credential.as_ref()).await }
+                });
+                true
+            }
+            EneCommand::ConnectorDisconnect { id, account, reply } => {
+                let connectors = Arc::clone(&self.connectors);
+                self.spawn_connector_operation(id.clone(), "disconnect", reply, move || {
+                    let connectors = Arc::clone(&connectors);
+                    let id = id.clone();
+                    let account = account.clone();
+                    async move { connectors.disconnect(&id, &account).await }
+                });
+                true
+            }
+            EneCommand::ConnectorGrant {
+                id,
+                action,
+                target_pattern,
+                reply,
+            } => {
+                let result = self.connector_grant(&id, &action, &target_pattern);
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::ConnectorRevoke {
+                id,
+                action,
+                target_pattern,
+                reply,
+            } => {
+                let result = self.connector_revoke(&id, &action, &target_pattern);
+                drop(reply.send(result));
                 true
             }
             EneCommand::Undo { reply } => {
@@ -4074,6 +4141,98 @@ impl TurnActor {
                 error: e.to_string(),
             },
         }
+    }
+
+    // ── Connector framework ──
+
+    /// Spawns a connector lifecycle operation (check / connect / disconnect)
+    /// as a background task and replies when it resolves.
+    ///
+    /// The task — not the actor loop — awaits the permission decision:
+    /// `PermissionDecision` is delivered through the mailbox, so an inline
+    /// await would deadlock the loop (the same reason tool prompt
+    /// resolution runs in stream tasks).
+    fn spawn_connector_operation<T, F, Fut>(
+        &mut self,
+        id: ene_connector::ConnectorId,
+        op: &'static str,
+        reply: oneshot::Sender<Result<T, ene_connector::ConnectorError>>,
+        run: F,
+    ) where
+        T: Send + 'static,
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, ene_connector::ConnectorError>> + Send,
+    {
+        let connectors = Arc::clone(&self.connectors);
+        let event_tx = self.event_tx.clone();
+        let pending_permissions = self.pending_permissions.clone();
+        let permission_scopes = self.permission_scopes.clone();
+        let concrete_store = self.concrete_store.clone();
+        let session_id = self.session.memory.session_id.to_string();
+        let active_turn = self.active_turn.clone();
+        let prompt_timeout_ms = self
+            .config
+            .get_section::<ene_plugin_host::PluginConfig>()
+            .map_or(300_000, |cfg| cfg.permission_prompt_timeout_ms);
+        self.aux_tasks.spawn(async move {
+            let result = crate::connectors::run_connector_operation(
+                &connectors,
+                &id,
+                op,
+                &event_tx,
+                &pending_permissions,
+                &permission_scopes,
+                prompt_timeout_ms,
+                active_turn,
+                concrete_store,
+                session_id,
+                run,
+            )
+            .await;
+            drop(reply.send(result));
+        });
+    }
+
+    /// Records a per-action connector grant (explicit user command, audited).
+    fn connector_grant(
+        &self,
+        id: &ene_connector::ConnectorId,
+        action: &str,
+        target_pattern: &str,
+    ) -> Result<(), ene_connector::ConnectorError> {
+        let result = self.connectors.grant(id, action, target_pattern);
+        crate::connectors::record_connector_audit(
+            self.concrete_store.as_ref(),
+            &self.session.memory.session_id.to_string(),
+            self.active_turn.as_ref(),
+            &format!("connector.{id}.grant"),
+            action,
+            target_pattern,
+            ene_store::AuditDecision::NotRequired,
+            result.is_ok(),
+        );
+        result
+    }
+
+    /// Removes a per-action connector grant (explicit user command, audited).
+    fn connector_revoke(
+        &self,
+        id: &ene_connector::ConnectorId,
+        action: &str,
+        target_pattern: &str,
+    ) -> Result<bool, ene_connector::ConnectorError> {
+        let result = self.connectors.revoke(id, action, target_pattern);
+        crate::connectors::record_connector_audit(
+            self.concrete_store.as_ref(),
+            &self.session.memory.session_id.to_string(),
+            self.active_turn.as_ref(),
+            &format!("connector.{id}.revoke"),
+            action,
+            target_pattern,
+            ene_store::AuditDecision::NotRequired,
+            result.is_ok(),
+        );
+        result
     }
 
     // ── Split management ──

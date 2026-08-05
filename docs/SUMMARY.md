@@ -32,6 +32,7 @@
 - [Persona Formats (W++ / AliChat / YAML)](concepts/character-card-persona-formats.md)
 - [Voice & Avatar](concepts/voice-and-avatar.md)
 - [Plugins & MCP](concepts/plugins-and-mcp.md)
+- [Connectors](concepts/connectors.md)
 
 # Crates API Reference
 

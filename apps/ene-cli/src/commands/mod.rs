@@ -4,6 +4,7 @@ mod characters;
 mod clear;
 mod commitments;
 mod config;
+mod connectors;
 mod doctor;
 mod greeting;
 mod help;
@@ -71,6 +72,7 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &commitments::CommitmentsCommand as &dyn CliCommand,
     &session::SessionCommand as &dyn CliCommand,
     &permissions::PermissionsCommand as &dyn CliCommand,
+    &connectors::ConnectorCommand as &dyn CliCommand,
     &schedule::ScheduleCommand as &dyn CliCommand,
     &doctor::DoctorCommand as &dyn CliCommand,
     &greeting::GreetingCommand as &dyn CliCommand,
