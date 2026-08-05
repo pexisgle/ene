@@ -1,11 +1,13 @@
 //! Provider capability derive expansion: `#[derive(LlmPlugin)]`,
-//! `#[derive(TtsPlugin)]`, and `#[derive(SttPlugin)]` (entry points live in
-//! `lib.rs` — proc-macro functions must sit at the crate root).
+//! `#[derive(TtsPlugin)]`, `#[derive(SttPlugin)]`, and
+//! `#[derive(VadPlugin)]` (entry points live in `lib.rs` — proc-macro
+//! functions must sit at the crate root).
 //!
-//! All three derives read a single shared `#[provider(...)]` container
+//! All four derives read a single shared `#[provider(...)]` container
 //! attribute and expand to inherent items only — a per-trait static spec
 //! constructor (`llm_spec()` / `tts_spec()` / `stt_spec()`) and a per-trait
-//! kind const (`LLM_PROVIDER_KIND` / `TTS_PROVIDER_KIND` / `STT_PROVIDER_KIND`).
+//! kind const (`LLM_PROVIDER_KIND` / `TTS_PROVIDER_KIND` /
+//! `STT_PROVIDER_KIND` / `VAD_PROVIDER_KIND`).
 //!
 //! The `impl LlmPlugin` / `TtsPlugin` / `SttPlugin` block is written by the
 //! user (a one-line `*_capabilities()` returning `vec![Self::<trait>_spec()]`
@@ -44,6 +46,7 @@ pub(crate) enum ProviderKind {
     Llm,
     Tts,
     Stt,
+    Vad,
 }
 
 impl ProviderKind {
@@ -53,6 +56,7 @@ impl ProviderKind {
             Self::Llm => "LLM_PROVIDER_KIND",
             Self::Tts => "TTS_PROVIDER_KIND",
             Self::Stt => "STT_PROVIDER_KIND",
+            Self::Vad => "VAD_PROVIDER_KIND",
         }
     }
 
@@ -62,6 +66,7 @@ impl ProviderKind {
             Self::Llm => "llm_spec",
             Self::Tts => "tts_spec",
             Self::Stt => "stt_spec",
+            Self::Vad => "vad_spec",
         }
     }
 }
@@ -82,6 +87,8 @@ struct ProviderAttrs {
     max_in_flight: Option<u32>,
     queue_depth: Option<u32>,
     context_window: Option<u32>,
+    frame_size: Option<u32>,
+    sample_rate: Option<u32>,
     provides: Vec<String>,
     requires: Vec<String>,
 }
@@ -126,6 +133,10 @@ impl ProviderAttrs {
                     attrs.queue_depth = Some(parse_u32(&meta)?);
                 } else if meta.path.is_ident("context_window") {
                     attrs.context_window = Some(parse_u32(&meta)?);
+                } else if meta.path.is_ident("frame_size") {
+                    attrs.frame_size = Some(parse_u32(&meta)?);
+                } else if meta.path.is_ident("sample_rate") {
+                    attrs.sample_rate = Some(parse_u32(&meta)?);
                 } else if meta.path.is_ident("provides") {
                     let s: syn::LitStr = meta.value()?.parse()?;
                     attrs.provides = validate_capability_items(&s, "provides", |item| {
@@ -290,6 +301,29 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
                         kind: #kind_str.to_string(),
                         models: ::std::vec![#(#models.to_string()),*],
                         formats: ::std::vec![#(#formats.to_string()),*],
+                        concurrency: #concurrency,
+                    }
+                }
+            }
+        }
+        ProviderKind::Vad => {
+            let frame_size = attrs.frame_size.ok_or_else(|| {
+                syn::Error::new_spanned(
+                    ast,
+                    "VadPlugin requires `frame_size = N` in #[provider(...)] \
+                     (PCM samples per ProcessVadChunk call)",
+                )
+            })?;
+            // Must match `ene_plugin_proto::DEFAULT_SAMPLE_RATE` (16 kHz, the
+            // rate every built-in VAD engine and the capture pipeline use).
+            let sample_rate = attrs.sample_rate.unwrap_or(16_000);
+            let concurrency = concurrency_expr(attrs.max_in_flight, attrs.queue_depth);
+            quote! {
+                pub fn #spec_method() -> ::ene_plugin::VadProviderSpec {
+                    ::ene_plugin::VadProviderSpec {
+                        kind: #kind_str.to_string(),
+                        frame_size: #frame_size,
+                        sample_rate: #sample_rate,
                         concurrency: #concurrency,
                     }
                 }

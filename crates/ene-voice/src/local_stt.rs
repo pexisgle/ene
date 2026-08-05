@@ -1,9 +1,8 @@
-//! Local speech-to-text provider backed by `whisper.cpp` (`whisper-rs`).
+//! Whisper.cpp STT engine (`whisper-rs`), consumed by the `whisper` provider
+//! plugin.
 //!
-//! The heavy native dependency is gated behind the `local-stt` cargo feature.
-//! When the feature is disabled, [`LocalSttProviderFactory`] still registers
-//! but fails fast with [`AudioProviderError::Init`] so the crate (and the
-//! workspace) keeps compiling without the whisper.cpp toolchain.
+//! The heavy native dependency is gated behind the `local-stt` cargo feature;
+//! the plugin crate is what enables it.
 //!
 //! # Why `WhisperModel` owns its state exclusively
 //!
@@ -27,7 +26,7 @@ use std::sync::Arc;
 #[cfg(feature = "local-stt")]
 use std::time::Duration;
 
-use ene_ai::{AudioProviderError, AudioProviderRegistry, SttProvider, SttProviderFactory};
+use ene_ai::AudioProviderError;
 #[cfg(feature = "local-stt")]
 use ene_ai::{Capability, CapabilitySet, EngineDescriptor, LocalSttEngine, ResourceClass};
 #[cfg(feature = "local-stt")]
@@ -43,34 +42,6 @@ const WHISPER_SAMPLE_RATE: u32 = 16_000;
 /// Number of taps for the anti-aliasing FIR low-pass filter.
 #[cfg(feature = "local-stt")]
 const FIR_TAPS: usize = 16;
-
-/// Resolve the whisper GGUF model path from configuration.
-///
-/// Precedence: `SttConfig::model_path` when non-empty, then `SttConfig::model`
-/// when non-empty, then a default cache location. Environment overrides are
-/// handled by the config system (`ENE_AI__STT__MODEL_PATH`).
-#[cfg(feature = "local-stt")]
-fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
-    if let Some(path) = ai
-        .stt
-        .model_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
-        return std::path::PathBuf::from(path);
-    }
-    if !ai.stt.model.trim().is_empty() {
-        return std::path::PathBuf::from(ai.stt.model.trim());
-    }
-    ene_config::models_dir().join("gguf").join("whisper.gguf")
-}
-
-/// Resolve the optional language hint from configuration.
-#[cfg(feature = "local-stt")]
-fn resolve_language(ai: &ene_ai::AiConfig) -> Option<String> {
-    (!ai.stt.language.trim().is_empty()).then(|| ai.stt.language.clone())
-}
 
 /// Compute windowed-sinc FIR low-pass coefficients.
 ///
@@ -322,7 +293,7 @@ impl LocalModel for WhisperModel {
 /// first [`SttProvider::transcribe`] call). Once the handle is returned,
 /// per-job failures surface through [`SttProvider::transcribe`] instead.
 #[cfg(feature = "local-stt")]
-fn open(
+pub fn open(
     model_path: &std::path::Path,
     language: Option<String>,
 ) -> Result<LocalSttEngine<WhisperModel>, AudioProviderError> {
@@ -371,59 +342,6 @@ fn open(
         ResourceClass::Cpu,
     );
     Ok(LocalSttEngine::new(handle, descriptor))
-}
-
-/// Factory for the local whisper.cpp STT provider.
-pub struct LocalSttProviderFactory;
-
-#[cfg(feature = "local-stt")]
-impl LocalSttProviderFactory {
-    fn build(config: &ene_config::EneConfig) -> Result<Box<dyn SttProvider>, AudioProviderError> {
-        let ai = config
-            .get_section::<ene_ai::AiConfig>()
-            .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
-        let path = resolve_model_path(&ai);
-        let language = resolve_language(&ai);
-        let engine = open(&path, language)?;
-        Ok(Box::new(engine))
-    }
-}
-
-#[cfg(not(feature = "local-stt"))]
-impl LocalSttProviderFactory {
-    fn build(_config: &ene_config::EneConfig) -> Result<Box<dyn SttProvider>, AudioProviderError> {
-        Err(AudioProviderError::Init(
-            "local STT requested but ene-ai was built without the `local-stt` feature".to_string(),
-        ))
-    }
-}
-
-impl SttProviderFactory for LocalSttProviderFactory {
-    fn provider_name(&self) -> &str {
-        PROVIDER_NAME
-    }
-
-    fn create_provider(
-        &self,
-        config: &ene_config::EneConfig,
-    ) -> Result<Box<dyn SttProvider>, AudioProviderError> {
-        Self::build(config)
-    }
-}
-
-/// Register the local whisper STT factory.
-///
-/// Called once from [`crate::register_providers`] during runtime bootstrap,
-/// rather than via a `#[ctor::ctor]` that would run before `main` (and before
-/// `tracing` is initialized). Registered unconditionally; the factory fails
-/// fast at `create_provider` time when the `local-stt` feature is disabled.
-pub(crate) fn register() {
-    AudioProviderRegistry::register_stt(std::sync::Arc::new(LocalSttProviderFactory));
-    tracing::debug!(
-        component = "ene-voice",
-        provider = PROVIDER_NAME,
-        "registered local STT provider factory"
-    );
 }
 
 #[cfg(all(test, feature = "local-stt"))]

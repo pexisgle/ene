@@ -151,7 +151,13 @@ Plugin crates are **binary-only** — no `[lib]` target (see `plugins/tool/fs`,
 normally in a bin crate. Add `[lib]` only when an integration test under `tests/` or another
 workspace crate must link the logic directly.
 
-IPC starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v4, length-prefixed JSON). The
+One plugin per native runtime. `llama.cpp`, `whisper.cpp`, and ONNX Runtime each get their
+own plugin binary — never bundle two native runtimes into one. Their build characteristics
+differ sharply (ONNX Runtime is `load-dynamic` and needs no compilation; llama.cpp and
+whisper.cpp are cmake C++ builds that also cross-compile to mingw), so bundling forces every
+user of one onto the build cost of the other.
+
+IPC starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v7, length-prefixed frames). The
 host advertises a range via `VersionRange::host_supported()` and keeps N-1 compatibility, so
 `PLUGIN_IPC_MIN_SUPPORTED_VERSION = PLUGIN_IPC_PROTOCOL_VERSION - 1`. Prefer adding
 `#[serde(default)]` fields over bumping the version; gate behavior on newer messages via

@@ -1,6 +1,6 @@
 # IPC Plugin System & MCP Integration
 
-This document covers Ene's out-of-process IPC plugin architecture, Protocol v6 wire specs, Model Context Protocol (MCP) server integration, and built-in tool plugins.
+This document covers Ene's out-of-process IPC plugin architecture, Protocol v7 wire specs, Model Context Protocol (MCP) server integration, and built-in tool plugins.
 
 ---
 
@@ -13,12 +13,14 @@ Ene Host Application (ene-runtime)
   │
   └── PluginHostManager (ene-plugin-host)
         │
-        ├── IPC Protocol v6 (Length-prefixed frames over stdio)
+        ├── IPC Protocol v7 (Length-prefixed frames over stdio)
         │     ├── ene-plugin-anthropic (Anthropic LLM Provider Plugin)
         │     ├── ene-plugin-openai    (OpenAI-Compatible Provider Plugin)
         │     ├── ene-plugin-openai-tts (OpenAI Speech API TTS Provider Plugin)
         │     ├── ene-plugin-llama-cpp (Local GGUF Provider Plugin)
         │     ├── ene-plugin-kokoro     (Kokoro-TTS ONNX Local TTS Provider Plugin)
+        │     ├── ene-plugin-onnx       (Local ONNX Provider Plugin — Silero VAD)
+        │     ├── ene-plugin-whisper    (Local whisper.cpp STT Provider Plugin)
         │     ├── ene-plugin-voicevox  (VOICEVOX / Aivis Speech TTS Provider Plugin)
         │     ├── ene-plugin-edge-tts  (Microsoft Edge Neural Voice TTS Provider Plugin)
         │     ├── ene-plugin-elevenlabs (ElevenLabs TTS Provider Plugin)
@@ -42,13 +44,13 @@ Ene Host Application (ene-runtime)
 
 ## 2. IPC Protocol v6 Specification
 
-Plugins communicate over `stdin`/`stdout` using **IPC Protocol v6**:
+Plugins communicate over `stdin`/`stdout` using **IPC Protocol v7**:
 
 - **Framing**: Every packet begins with a 4-byte little-endian `u32` payload size followed by a payload in the negotiated `WireFormat`. The handshake exchange (request and ack) always uses UTF-8 JSON; once both sides negotiated protocol v6, every later frame is MessagePack (`rmp-serde`, map-encoded). Peers that negotiated v5 or lower keep the original JSON framing for the whole connection, so N-1 plugins are byte-compatible with the pre-v6 wire.
-- **Handshake Negotiation**: The host sends `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`, i.e. `VersionRange { min: 5, max: 6 }` — not a single pinned value. The plugin intersects that range with its own supported range via `VersionRange::negotiate` and responds with `HandshakeAck { version, capabilities: PluginCapabilities }`, where `version` is the highest version common to both sides.
+- **Handshake Negotiation**: The host sends `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`, i.e. `VersionRange { min: 6, max: 7 }` — not a single pinned value. The plugin intersects that range with its own supported range via `VersionRange::negotiate` and responds with `HandshakeAck { version, capabilities: PluginCapabilities }`, where `version` is the highest version common to both sides. v7 adds the VAD surface (`vad_providers` capability + `ProcessVadChunk` / `VadChunkResult` messages); the host gates VAD requests on the negotiated version, so v6 plugin binaries never receive the new variant.
 - **Handshake Timeout**: The host bounds how long it waits for the `HandshakeAck` (`plugins.handshake_timeout_ms`, default 10 s). A plugin that accepts the socket but never replies fails the handshake with `PluginHostError::HandshakeFailed` instead of blocking startup of the remaining plugins. Plugin authors must answer the handshake promptly and defer heavy initialization (model loading, etc.) until afterwards — see `run_plugin_server` in `ene-plugin`.
 - **Request Correlation**: All async requests and responses include a mandatory `request_id` (`Uuid`).
-- **Capabilities**: Plugins advertise supported capabilities (`tools`, `llm_providers`, `stt_providers`, `tts_providers`), each provider spec also declaring a `concurrency: ConcurrencyHint` (see [§3](#3-provider-concurrency-concurrencyhint)). Plugin-to-plugin capability sharing is declared via `provides` / `requires` (see [§4](#4-capability-declarations-provides--requires)).
+- **Capabilities**: Plugins advertise supported capabilities (`tools`, `llm_providers`, `stt_providers`, `tts_providers`, `vad_providers`), each provider spec also declaring a `concurrency: ConcurrencyHint` (see [§3](#3-provider-concurrency-concurrencyhint)). Plugin-to-plugin capability sharing is declared via `provides` / `requires` (see [§4](#4-capability-declarations-provides--requires)).
 
 ### Versioning policy (N-1 backward compatibility)
 
@@ -116,7 +118,29 @@ The `kokoro` plugin (`plugins/provider/kokoro`) runs the local Kokoro-82M
 ONNX model directly in its own process (via `ene-voice`'s ONNX engine) — no
 API key, engine, or local server involved. It loads the model lazily on
 first use, emits 24 kHz mono WAV, and rebuilds the engine when its resolved
-config (model/voices paths, voice, speed, language) changes.
+config (model/voices paths, voice, speed, language) changes. The ONNX model
+and `voices.bin` are downloaded into the shared models cache on first use
+when missing (the plugin owns acquisition since the runtime prefetch and
+desktop download UI were removed).
+
+STT and VAD follow the same adapter pattern. The `whisper` plugin
+(`plugins/provider/whisper`) runs whisper.cpp in its own process:
+`ene-plugin-host`'s `IpcSttProvider` / `IpcSttProviderFactory`
+(`ipc_stt.rs` / `stt_factory.rs`) implement `ene_ai::SttProvider` /
+`SttProviderFactory`, encode microphone PCM into WAV, and send it over the
+`TranscribeAudio` round trip (the mirror image of the TTS decode). The `onnx`
+plugin (`plugins/provider/onnx`) serves the Silero VAD engine over the
+v7 `ProcessVadChunk` round trip; `IpcVadEngine` / `IpcVadFactory`
+(`ipc_vad.rs`) bridge the *synchronous* `ene_ai::VadEngine::process_chunk`
+calls from the capture thread via `Handle::block_on` — one local IPC round
+trip per 32 ms frame, comparable to the in-process ONNX inference it
+replaced. VAD engine state lives in the plugin process, keyed by a
+host-generated `session_id`; `reset` discards it, and dropping the engine
+sends a final `reset` so repeated mic toggles do not leak sessions in the
+plugin. `VadProviderSpec` carries the engine's `frame_size` and `sample_rate`
+(16 kHz default), and each chunk round trip is bounded by a 2-second timeout
+so a wedged plugin cannot freeze the audio callback for the default
+two-minute request timeout.
 
 The `edge-tts` plugin (`plugins/provider/edge-tts`) implements the same
 `TtsPlugin` contract against Microsoft's free, keyless Edge Read Aloud
@@ -276,6 +300,39 @@ The built-in provider that serves `gguf-runner@1` is `ene-plugin-llama-cpp`
 completion, and GGUF embeddings, exercised by the plugin crate's CPU contract
 tests against pinned GGUF fixtures.
 
+### 4.5 The `onnx-runner@1` capability contract
+
+`onnx-runner@1` is the capability for **loading ONNX Runtime's dynamic
+library and running ONNX sessions** — the runtime that ONNX-using plugins
+declare so the host can track and (in future) mediate a single shared ONNX
+Runtime instead of N per-plugin dylib loads. ONNX Runtime is
+`load-dynamic`: nothing links against it at build time, each plugin process
+loads the dylib once at first use. The built-in providers that serve it are
+`ene-plugin-onnx` (`plugins/provider/onnx`) and `ene-plugin-kokoro`
+(`plugins/provider/kokoro`); both load the dylib in their own processes via
+`ene-voice`'s shared `ort_init` (first caller's `ort_dylib_path` wins per
+process).
+
+### 4.6 The `g2p` capability contract
+
+`g2p/en@1` is the capability for **grapheme-to-phoneme conversion with the
+English rules** (the built-in rules in `ene-voice`'s `g2p` module). It is
+served by `ene-plugin-onnx`. `g2p/ja@^1` is the Japanese counterpart: the
+onnx plugin declares it as a **soft requirement** (`g2p/ja@^1?`) — a
+third-party Japanese G2P provider may serve it, and the host resolves the
+declaration, but the built-in phonemization keeps working when none is
+present. Cross-plugin *invocation* of these capabilities lands with the
+capability mediation layer; the declaration contract is fixed here so
+providers can be built against it today.
+
+### 4.7 The `whisper-runner@1` capability contract
+
+`whisper-runner@1` is the capability for **running whisper.cpp transcription
+on raw PCM audio** — the STT runtime third-party consumers can share instead
+of bundling their own whisper.cpp build. It is served by `ene-plugin-whisper`
+(`plugins/provider/whisper`), which also serves `stt/whisper` over the
+provider IPC (`TranscribeAudio`, WAV in → text out).
+
 ---
 
 ## 5. Built-In Plugin Catalog
@@ -301,9 +358,11 @@ tests against pinned GGUF fixtures.
 | `ene-plugin-elevenlabs` | Provider | ElevenLabs TTS provider (REST + WebSocket streaming) — WAV (16-bit PCM) audio | No |
 | `ene-plugin-llama-cpp` | Provider | Local GGUF (llama.cpp) provider plugin — chat streaming, completion, and GGUF embeddings | No |
 | `ene-plugin-kokoro` | Provider | Local Kokoro-82M ONNX TTS provider — 24 kHz WAV via in-process ONNX inference | No |
+| `ene-plugin-onnx` | Provider | Local ONNX provider plugin — Silero VAD engine (`ai.vad.provider = "silero"`), declares `onnx-runner@1` / `g2p/en@1` | No |
 | `ene-plugin-voicevox` | Provider | VOICEVOX / Aivis Speech TTS provider — WAV audio via the 2-step `audio_query` → `synthesis` flow | No |
+| `ene-plugin-whisper` | Provider | Local whisper.cpp STT provider — WAV audio transcribed via in-process whisper.cpp inference, declares `whisper-runner@1` | No |
 
-All nineteen plugins above are included in the default `plugins.list` and start
+All twenty-two plugins above are included in the default `plugins.list` and start
 automatically on fresh installs.
 
 ### Filesystem tool reference (`filesystem.*`)

@@ -3,7 +3,7 @@
 //! Host-side plugin process management for the ene unified plugin system.
 //!
 //! This crate provides [`PluginHostManager`], which discovers, spawns, and
-//! supervises plugin binaries (protocol v6), routing their advertised
+//! supervises plugin binaries (protocol v7), routing their advertised
 //! capabilities into the host's tool and LLM provider registries. It also
 //! owns the [`ToolRegistry`] trait and [`CompositeToolRegistry`] that
 //! aggregate plugin-provided and MCP tools.
@@ -23,11 +23,13 @@
 //!   registry ([`PluginHostManager`] implements [`ene_ai::ProviderHost`]).
 //! - [`IpcTtsProvider`] / [`IpcTtsProviderFactory`] — the TTS counterparts,
 //!   integrating plugin-provided TTS providers with the host registry.
+//! - [`IpcSttProvider`] / [`IpcSttProviderFactory`] and [`IpcVadEngine`] /
+//!   [`IpcVadFactory`] — the STT / VAD counterparts over the same registry.
 //!
 //! ## Relationship to other crates
 //!
 //! - [`ene-plugin-proto`](ene_plugin_proto) — wire protocol definitions
-//!   (tool IPC v2 + plugin protocol v6), framing helpers, and transport layer.
+//!   (tool IPC v2 + plugin protocol v7), framing helpers, and transport layer.
 //! - [`ene-plugin`](ene_plugin) — plugin authoring facade (used by plugin
 //!   binaries, not by the host).
 //! - [`ene-ai`](ene_ai) — `LlmProvider` / `LlmProviderFactory` traits that
@@ -56,8 +58,12 @@ pub mod health;
 pub mod ipc_plugin;
 /// IPC-backed LLM provider bridging to `ene_ai::LlmProvider`.
 pub mod ipc_provider;
+/// IPC-backed STT provider bridging to `ene_ai::SttProvider`.
+pub mod ipc_stt;
 /// IPC-backed TTS provider bridging to `ene_ai::TtsProvider`.
 pub mod ipc_tts;
+/// IPC-backed VAD engine bridging to `ene_ai::VadEngine`.
+pub mod ipc_vad;
 /// Plugin host manager: process supervision and capability routing.
 pub mod manager;
 /// MCP server configuration types.
@@ -66,11 +72,13 @@ pub mod mcp_config;
 pub mod mcp_registry;
 /// Redaction of plugin configuration values at the host boundary.
 pub mod redact;
+/// STT provider factory backed by a plugin IPC connection.
+pub mod stt_factory;
 /// Tool registry trait, composite registry, and deferred call types.
 pub mod tool_registry;
 /// TTS provider factory backed by a plugin IPC connection.
 pub mod tts_factory;
-/// RIFF/WAVE decoder for plugin-delivered TTS audio.
+/// RIFF/WAVE encoder and decoder for plugin audio.
 pub mod wav;
 
 /// Capability registry and requirement gate.
@@ -98,13 +106,18 @@ pub use health::{DisabledReason, PluginHealthEvent};
 pub use ipc_plugin::{IpcPluginConnection, SetConfigOutcome};
 /// IPC-backed LLM provider.
 pub use ipc_provider::IpcLlmProvider;
+/// IPC-backed STT provider.
+pub use ipc_stt::IpcSttProvider;
 /// IPC-backed TTS provider.
 pub use ipc_tts::IpcTtsProvider;
+/// IPC-backed VAD engine and factory.
+pub use ipc_vad::{IpcVadEngine, IpcVadFactory};
 /// Plugin host manager.
 pub use manager::{
     EmbeddingFactoriesByPlugin, EmbeddingFactoryHandle, LlmFactoriesByPlugin, LlmFactoryHandle,
-    PluginFactoryHandles, PluginHostManager, ProviderFactoryRemoval, TtsFactoriesByPlugin,
-    TtsFactoryHandle,
+    PluginFactoryHandles, PluginHostManager, ProviderFactoryRemoval, SttFactoriesByPlugin,
+    SttFactoryHandle, TtsFactoriesByPlugin, TtsFactoryHandle, VadFactoriesByPlugin,
+    VadFactoryHandle,
 };
 /// MCP server configuration types.
 pub use mcp_config::{McpServerConfig, McpTransport};
@@ -112,6 +125,8 @@ pub use mcp_config::{McpServerConfig, McpTransport};
 pub use mcp_registry::McpToolRegistry;
 /// Config redaction helpers (see [`redact`]).
 pub use redact::{redact_config, redact_config_unschematized};
+/// STT provider factory for plugin-provided providers.
+pub use stt_factory::IpcSttProviderFactory;
 /// Tool registry trait, composite registry, and deferred call types.
 pub use tool_registry::{
     CompositeToolRegistry, DeferredCallResult, ToolRegistry, compute_tool_version_hash,

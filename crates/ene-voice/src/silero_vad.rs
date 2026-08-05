@@ -1,9 +1,7 @@
-//! Local voice activity detection engine backed by Silero VAD ONNX (`ort`).
+//! Silero VAD ONNX engine (`ort`), consumed by the `onnx` provider plugin.
 //!
-//! The heavy native dependency is gated behind the `silero-vad` cargo feature.
-//! When the feature is disabled, [`SileroVadFactory`] still registers but fails
-//! fast with [`AudioProviderError::Init`] so the crate (and the workspace)
-//! keeps compiling without the ONNX Runtime toolchain.
+//! The heavy native dependency is gated behind the `silero-vad` cargo
+//! feature; the plugin crate is what enables it.
 //!
 //! # Why `SileroVadEngine` is not an `ene_infer::LocalModel`
 //!
@@ -38,7 +36,7 @@
 //! doc comment is the note that it stopped being the exception.
 #[cfg(feature = "silero-vad")]
 use ene_ai::VadEvent;
-use ene_ai::{AudioProviderError, AudioProviderRegistry, VadEngine, VadFactory};
+use ene_ai::{AudioProviderError, VadEngine};
 
 /// Engine name used in `ai.vad.provider` configuration.
 pub const PROVIDER_NAME: &str = "silero";
@@ -60,30 +58,6 @@ const STATE_LEN: usize = 128;
 #[cfg(feature = "silero-vad")]
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
-/// Resolve the Silero VAD ONNX model path from configuration.
-///
-/// Precedence: `VadConfig::model_path` when non-empty, then `VadConfig::model`
-/// when non-empty, then a default cache location. Environment overrides are
-/// handled by the config system (`ENE_AI__VAD__MODEL_PATH`).
-#[cfg(feature = "silero-vad")]
-fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
-    if let Some(path) = ai
-        .vad
-        .model_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
-        return std::path::PathBuf::from(path);
-    }
-    if !ai.vad.model.trim().is_empty() {
-        return std::path::PathBuf::from(ai.vad.model.trim());
-    }
-    ene_config::models_dir()
-        .join("gguf")
-        .join("silero_vad.onnx")
-}
-
 /// Local Silero VAD voice activity detection engine.
 #[cfg(feature = "silero-vad")]
 pub struct SileroVadEngine {
@@ -104,8 +78,8 @@ impl SileroVadEngine {
     ///
     /// ONNX Runtime is initialized exactly once per process using
     /// `ort_dylib_path` when provided. The `threshold` is expected to already
-    /// be clamped to `[0.0, 1.0]` by the caller (see
-    /// [`AiConfig::resolve_vad`](crate::config::AiConfig::resolve_vad)).
+    /// be clamped to `[0.0, 1.0]` by the caller (the onnx plugin's config
+    /// validation).
     ///
     /// # Errors
     ///
@@ -267,71 +241,4 @@ impl VadEngine for SileroVadEngine {
     fn name(&self) -> &str {
         PROVIDER_NAME
     }
-}
-
-/// Factory for the local Silero VAD engine.
-pub struct SileroVadFactory;
-
-#[cfg(feature = "silero-vad")]
-impl SileroVadFactory {
-    fn build(config: &ene_config::EneConfig) -> Result<Box<dyn VadEngine>, AudioProviderError> {
-        let ai = config
-            .get_section::<ene_ai::AiConfig>()
-            .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
-        let resolved = ai.resolve_vad().ok_or_else(|| {
-            AudioProviderError::Init(
-                "VAD engine is disabled (ai.vad.provider = \"none\")".to_string(),
-            )
-        })?;
-        let path = resolve_model_path(&ai);
-        // #313: the ONNX Runtime dylib path moved from `AiConfig` to the ONNX
-        // plugin config (`plugins.list.onnx.config.ort_dylib_path`).
-        let ort_dylib_path =
-            ene_ai::plugin_config::plugin_config_blob(config, ene_ai::plugin_config::ONNX_PLUGIN)
-                .as_ref()
-                .and_then(|blob| blob.get("ort_dylib_path"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .filter(|p| !p.is_empty());
-        let engine = SileroVadEngine::open(&path, resolved.threshold, ort_dylib_path.as_deref())?;
-        Ok(Box::new(engine))
-    }
-}
-
-#[cfg(not(feature = "silero-vad"))]
-impl SileroVadFactory {
-    fn build(_config: &ene_config::EneConfig) -> Result<Box<dyn VadEngine>, AudioProviderError> {
-        Err(AudioProviderError::Init(
-            "Silero VAD requested but ene-ai was built without the `silero-vad` feature"
-                .to_string(),
-        ))
-    }
-}
-
-impl VadFactory for SileroVadFactory {
-    fn provider_name(&self) -> &str {
-        PROVIDER_NAME
-    }
-
-    fn create_engine(
-        &self,
-        config: &ene_config::EneConfig,
-    ) -> Result<Box<dyn VadEngine>, AudioProviderError> {
-        Self::build(config)
-    }
-}
-
-/// Register the local Silero VAD factory.
-///
-/// Called once from [`crate::register_providers`] during runtime bootstrap,
-/// rather than via a `#[ctor::ctor]` that would run before `main` (and before
-/// `tracing` is initialized). Registered unconditionally; the factory fails
-/// fast at `create_engine` time when the `silero-vad` feature is disabled.
-pub(crate) fn register() {
-    AudioProviderRegistry::register_vad(std::sync::Arc::new(SileroVadFactory));
-    tracing::debug!(
-        component = "ene-voice",
-        provider = PROVIDER_NAME,
-        "registered local VAD engine factory"
-    );
 }

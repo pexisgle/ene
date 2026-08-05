@@ -57,7 +57,9 @@ use chrono::{DateTime, Utc};
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::{ConversationSession, SessionId};
-use ene_plugin_host::{DisabledReason, PluginHealthEvent};
+use ene_plugin_host::{
+    DisabledReason, PluginHealthEvent, SttFactoriesByPlugin, VadFactoriesByPlugin,
+};
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -483,15 +485,6 @@ impl EneHandle {
         let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
         let (diag_tx, diag_rx) = broadcast::channel(256);
 
-        // Register the local whisper/kokoro/silero factories with
-        // `ene_ai::AudioProviderRegistry` before anything below (this
-        // function's own TTS provider resolution, or a later
-        // caller-initiated STT/VAD lookup such as the desktop app's mic
-        // toggle) can look one up by name. Doing it here, after `tracing`
-        // is up, makes registration observable (a `#[ctor::ctor]` would
-        // run before `main` and before `tracing` was initialized).
-        ene_voice::register_providers();
-
         let mind = config.get_section::<ene_mind::MindConfig>()?;
 
         // Startup validation: warn on mind-config timing relationships that
@@ -562,6 +555,8 @@ impl EneHandle {
                         llm_factories = host.llm_factories().len(),
                         embedding_factories = host.embedding_factories().len(),
                         tts_factories = host.tts_factories().len(),
+                        stt_factories = host.stt_factories().len(),
+                        vad_factories = host.vad_factories().len(),
                         "Plugin host started"
                     );
                     Some(host)
@@ -588,6 +583,8 @@ impl EneHandle {
             let llm_factories_by_plugin = host.llm_factories_by_plugin();
             let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
             let tts_factories_by_plugin = host.tts_factories_by_plugin();
+            let stt_factories_by_plugin = host.stt_factories_by_plugin();
+            let vad_factories_by_plugin = host.vad_factories_by_plugin();
             health_bridge_handle = Some(tokio::spawn(async move {
                 while let Some(event) = health_rx.recv().await {
                     if let PluginHealthEvent::Disabled { plugin, .. } = &event {
@@ -610,6 +607,11 @@ impl EneHandle {
                                 },
                             }),
                         );
+                        // STT/VAD providers are recreated per microphone
+                        // session, so deregistration alone is enough — the
+                        // next capture start fails fast with a clear error.
+                        deregister_disabled_stt_factories(plugin, &stt_factories_by_plugin);
+                        deregister_disabled_vad_factories(plugin, &vad_factories_by_plugin);
                     }
                     emit_diag(&diag_tx, plugin_health_event_to_diag(event));
                 }
@@ -676,20 +678,6 @@ impl EneHandle {
 
         let tts_provider = {
             let ai_config = config.get_section::<ene_ai::AiConfig>()?;
-
-            // Prefetch the configured local TTS model files before
-            // constructing the provider below, so `LocalTtsProvider::open`
-            // (ene-voice) never needs to perform network I/O itself — it
-            // only fails fast if a file is still missing. Mirrors the GGUF
-            // prefetch above. Non-fatal: on failure we log and let provider
-            // construction report a clear error.
-            if let Err(e) = ene_voice::prefetch_if_configured(&config).await {
-                tracing::warn!(
-                    component = "Bootstrap",
-                    error = %e,
-                    "Local TTS model prefetch failed; will report a clear error on provider construction"
-                );
-            }
 
             if let Some(resolved) = ai_config.resolve_tts() {
                 match resolve_tts_provider(provider_host.as_ref(), &config, &resolved.provider)
@@ -1487,6 +1475,38 @@ async fn resolve_tts_provider(
         Ok(provider) => Ok(provider),
         Err(host_error) => ene_ai::AudioProviderRegistry::create_tts_provider(kind, config)
             .map_err(|legacy_error| format!("host: {host_error}; legacy: {legacy_error}")),
+    }
+}
+
+/// Deregisters the STT factories a permanently-disabled plugin provided.
+fn deregister_disabled_stt_factories(plugin: &str, factories_by_plugin: &SttFactoriesByPlugin) {
+    if let Some(factories) = factories_by_plugin.get(plugin) {
+        for (kind, factory) in factories {
+            if ene_ai::AudioProviderRegistry::deregister_stt_if_matches(kind, factory) {
+                tracing::info!(
+                    component = "PluginHealthBridge",
+                    plugin = %plugin,
+                    kind = %kind,
+                    "Deregistered STT provider factory for permanently disabled plugin"
+                );
+            }
+        }
+    }
+}
+
+/// Deregisters the VAD factories a permanently-disabled plugin provided.
+fn deregister_disabled_vad_factories(plugin: &str, factories_by_plugin: &VadFactoriesByPlugin) {
+    if let Some(factories) = factories_by_plugin.get(plugin) {
+        for (kind, factory) in factories {
+            if ene_ai::AudioProviderRegistry::deregister_vad_if_matches(kind, factory) {
+                tracing::info!(
+                    component = "PluginHealthBridge",
+                    plugin = %plugin,
+                    kind = %kind,
+                    "Deregistered VAD engine factory for permanently disabled plugin"
+                );
+            }
+        }
     }
 }
 

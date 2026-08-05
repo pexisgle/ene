@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin};
+use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin, VadPlugin};
 
 fn provider_error_message(error: &PluginError) -> String {
     error.provider_error_kind().map_or_else(
@@ -39,7 +39,7 @@ const DEFERRED_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 /// Dispatch table holding up to five focused trait implementations.
 ///
 /// A plugin struct implements any subset of [`ToolPlugin`], [`LlmPlugin`],
-/// [`EmbedPlugin`], [`TtsPlugin`], and [`SttPlugin`]; the server routes
+/// [`EmbedPlugin`], [`TtsPlugin`], [`SttPlugin`], and [`VadPlugin`]; the server routes
 /// incoming IPC requests to the corresponding trait object.
 pub struct PluginDispatch {
     /// Optional tool plugin implementation.
@@ -52,6 +52,8 @@ pub struct PluginDispatch {
     pub tts: Option<Arc<dyn TtsPlugin>>,
     /// Optional STT plugin implementation.
     pub stt: Option<Arc<dyn SttPlugin>>,
+    /// Optional VAD plugin implementation.
+    pub vad: Option<Arc<dyn VadPlugin>>,
     /// Capabilities this plugin provides to other plugins, declared via the
     /// `#[provider(provides = "...")]` attribute (see `ene-plugin-macros`).
     provides: Vec<CapabilityRef>,
@@ -75,9 +77,21 @@ impl PluginDispatch {
             embed,
             tts,
             stt,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
+    }
+
+    /// Attaches a VAD plugin implementation.
+    ///
+    /// VAD arrived after the five-positional-argument constructor, so it is
+    /// a builder step rather than a sixth parameter (which would force every
+    /// existing plugin binary's entry point to change).
+    #[must_use]
+    pub fn with_vad(mut self, vad: Arc<dyn VadPlugin>) -> Self {
+        self.vad = Some(vad);
+        self
     }
 
     /// Sets the plugin-wide capability declarations sent in the handshake
@@ -736,6 +750,7 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             | PluginIpcRequest::EmbedBatch { .. }
             | PluginIpcRequest::SynthesizeSpeech { .. }
             | PluginIpcRequest::TranscribeAudio { .. }
+            | PluginIpcRequest::ProcessVadChunk { .. }
             | PluginIpcRequest::PollDeferred { .. }) => {
                 let dispatch = Arc::clone(dispatch);
                 let tx = tx.clone();
@@ -1198,9 +1213,44 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 )
                 .await
             {
-                Ok(text) => PluginIpcResponse::TranscriptionResult {
+                Ok(transcription) => PluginIpcResponse::TranscriptionResult {
                     request_id: request_id.clone(),
-                    text,
+                    text: transcription.text,
+                    language: transcription.language,
+                },
+                Err(e) => PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: e.to_string(),
+                },
+            }
+        }
+        PluginIpcRequest::ProcessVadChunk {
+            request_id,
+            provider_kind,
+            provider_config,
+            session_id,
+            pcm,
+            reset,
+        } => {
+            let Some(vad) = &dispatch.vad else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no VAD plugin registered".to_string(),
+                };
+            };
+            match vad
+                .process_chunk(
+                    provider_kind,
+                    provider_config.clone(),
+                    session_id.clone(),
+                    pcm.clone(),
+                    *reset,
+                )
+                .await
+            {
+                Ok(event) => PluginIpcResponse::VadChunkResult {
+                    request_id: request_id.clone(),
+                    event,
                 },
                 Err(e) => PluginIpcResponse::Error {
                     request_id: request_id.clone(),
@@ -1261,6 +1311,10 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
             .stt
             .as_ref()
             .map_or(Vec::new(), |s| s.stt_capabilities()),
+        vad_providers: dispatch
+            .vad
+            .as_ref()
+            .map_or(Vec::new(), |v| v.vad_capabilities()),
         supports_list_config_options: dispatch.supports_list_config_options(),
         supports_validate_config: dispatch.supports_validate_config(),
         supports_migrate_config: dispatch.supports_migrate_config(),
@@ -1407,13 +1461,14 @@ async fn run_chat_stream(
 mod tests {
     use super::*;
     use crate::plugin::{
-        ConfigurablePlugin, PluginCompletion, PluginStreamChunk, ToolPluginCapabilities,
+        ConfigurablePlugin, PluginCompletion, PluginStreamChunk, PluginTranscription,
+        ToolPluginCapabilities,
     };
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
     use ene_plugin_proto::{
         ConcurrencyHint, DeferredStatus, LlmProviderSpec, SttProviderSpec, ToolSpec,
-        TtsProviderSpec, VersionRange,
+        TtsProviderSpec, VadEvent, VadProviderSpec, VersionRange,
     };
 
     /// A mock tool plugin for testing dispatch logic.
@@ -1519,11 +1574,75 @@ mod tests {
 
     impl ConfigurablePlugin for GatedToolPlugin {}
 
+    /// A VAD plugin whose `process_chunk` blocks until released, standing in
+    /// for a slow first-chunk model load.
+    struct GatedVadPlugin {
+        in_flight: std::sync::atomic::AtomicUsize,
+        released: std::sync::atomic::AtomicBool,
+        notify: tokio::sync::Notify,
+    }
+
+    impl GatedVadPlugin {
+        fn new() -> Self {
+            Self {
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                released: std::sync::atomic::AtomicBool::new(false),
+                notify: tokio::sync::Notify::new(),
+            }
+        }
+
+        async fn wait(&self) {
+            use std::sync::atomic::Ordering;
+            while !self.released.load(Ordering::Acquire) {
+                self.notify.notified().await;
+            }
+        }
+
+        fn release(&self) {
+            use std::sync::atomic::Ordering;
+            self.released.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+
+        fn in_flight(&self) -> usize {
+            self.in_flight.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    #[async_trait]
+    impl VadPlugin for GatedVadPlugin {
+        fn vad_capabilities(&self) -> Vec<VadProviderSpec> {
+            vec![VadProviderSpec {
+                kind: "mock_vad".into(),
+                frame_size: 512,
+                sample_rate: 16_000,
+                concurrency: ConcurrencyHint::default(),
+            }]
+        }
+
+        async fn process_chunk(
+            &self,
+            _kind: &str,
+            _config: serde_json::Value,
+            _session_id: String,
+            _pcm: Vec<f32>,
+            _reset: bool,
+        ) -> Result<VadEvent, PluginError> {
+            use std::sync::atomic::Ordering;
+            self.in_flight.fetch_add(1, Ordering::AcqRel);
+            self.wait().await;
+            self.in_flight.fetch_sub(1, Ordering::AcqRel);
+            Ok(VadEvent::Silence)
+        }
+    }
+
+    impl ConfigurablePlugin for GatedVadPlugin {}
+
     /// Waits (with a deadlock backstop) until `plugin.in_flight()` reaches
     /// `expected`.
-    async fn wait_for_in_flight(plugin: &GatedToolPlugin, expected: usize) {
+    async fn wait_for_in_flight(count: impl Fn() -> usize, expected: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while plugin.in_flight() < expected {
+        while count() < expected {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "timed out waiting for {expected} in-flight call(s)"
@@ -1677,12 +1796,47 @@ mod tests {
             _config: serde_json::Value,
             _audio_data: Vec<u8>,
             _format: String,
-        ) -> Result<String, PluginError> {
-            Ok("Mock transcription".into())
+        ) -> Result<PluginTranscription, PluginError> {
+            Ok(PluginTranscription {
+                text: "Mock transcription".into(),
+                language: None,
+            })
         }
     }
 
     impl ConfigurablePlugin for MockSttPlugin {}
+
+    /// A mock VAD plugin for testing dispatch logic.
+    struct MockVadPlugin;
+
+    #[async_trait]
+    impl VadPlugin for MockVadPlugin {
+        fn vad_capabilities(&self) -> Vec<VadProviderSpec> {
+            vec![VadProviderSpec {
+                kind: "mock_vad".into(),
+                frame_size: 512,
+                sample_rate: 16_000,
+                concurrency: ConcurrencyHint::default(),
+            }]
+        }
+
+        async fn process_chunk(
+            &self,
+            _kind: &str,
+            _config: serde_json::Value,
+            _session_id: String,
+            _pcm: Vec<f32>,
+            reset: bool,
+        ) -> Result<VadEvent, PluginError> {
+            if reset {
+                Ok(VadEvent::Silence)
+            } else {
+                Ok(VadEvent::SpeechStart)
+            }
+        }
+    }
+
+    impl ConfigurablePlugin for MockVadPlugin {}
 
     /// A mock embed plugin for testing dispatch logic.
     struct MockEmbedPlugin;
@@ -1710,6 +1864,7 @@ mod tests {
             embed: embed.then(|| Arc::new(MockEmbedPlugin) as Arc<dyn EmbedPlugin>),
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1722,6 +1877,7 @@ mod tests {
             embed: None,
             tts: Some(Arc::new(MockTtsPlugin) as Arc<dyn TtsPlugin>),
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1734,6 +1890,20 @@ mod tests {
             embed: None,
             tts: None,
             stt: Some(Arc::new(MockSttPlugin) as Arc<dyn SttPlugin>),
+            vad: None,
+            provides: Vec::new(),
+            requires: Vec::new(),
+        }
+    }
+
+    fn make_vad_dispatch() -> PluginDispatch {
+        PluginDispatch {
+            tool: None,
+            llm: None,
+            embed: None,
+            tts: None,
+            stt: None,
+            vad: Some(Arc::new(MockVadPlugin) as Arc<dyn VadPlugin>),
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1922,6 +2092,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -1955,6 +2126,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -1992,6 +2164,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -2037,6 +2210,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -2159,6 +2333,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            vad: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -2616,6 +2791,7 @@ mod tests {
                 assert!(capabilities.llm_providers.is_empty());
                 assert!(capabilities.tts_providers.is_empty());
                 assert!(capabilities.stt_providers.is_empty());
+                assert!(capabilities.vad_providers.is_empty());
             }
             other => panic!("expected HandshakeAck, got {other:?}"),
         }
@@ -2674,9 +2850,14 @@ mod tests {
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
-            PluginIpcResponse::TranscriptionResult { request_id, text } => {
+            PluginIpcResponse::TranscriptionResult {
+                request_id,
+                text,
+                language,
+            } => {
                 assert_eq!(request_id, "req-stt-1");
                 assert_eq!(text, "Mock transcription");
+                assert_eq!(language, None);
             }
             other => panic!("expected TranscriptionResult, got {other:?}"),
         }
@@ -2691,6 +2872,63 @@ mod tests {
             provider_config: serde_json::json!({}),
             audio_base64: "AAAA".into(),
             format: "wav".into(),
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(resp, PluginIpcResponse::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_process_vad_chunk_ok() {
+        let dispatch = make_vad_dispatch();
+        let req = PluginIpcRequest::ProcessVadChunk {
+            request_id: "req-vad-1".into(),
+            provider_kind: "mock_vad".into(),
+            provider_config: serde_json::json!({}),
+            session_id: "session-1".into(),
+            pcm: vec![0.0; 512],
+            reset: false,
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        match resp {
+            PluginIpcResponse::VadChunkResult { request_id, event } => {
+                assert_eq!(request_id, "req-vad-1");
+                assert_eq!(event, VadEvent::SpeechStart);
+            }
+            other => panic!("expected VadChunkResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_process_vad_chunk_reset_forwards_flag() {
+        let dispatch = make_vad_dispatch();
+        let req = PluginIpcRequest::ProcessVadChunk {
+            request_id: "req-vad-2".into(),
+            provider_kind: "mock_vad".into(),
+            provider_config: serde_json::json!({}),
+            session_id: "session-1".into(),
+            pcm: Vec::new(),
+            reset: true,
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(
+            resp,
+            PluginIpcResponse::VadChunkResult {
+                event: VadEvent::Silence,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_process_vad_chunk_no_vad_returns_error() {
+        let dispatch = make_dispatch(false, false, false);
+        let req = PluginIpcRequest::ProcessVadChunk {
+            request_id: "req-vad-3".into(),
+            provider_kind: "mock_vad".into(),
+            provider_config: serde_json::json!({}),
+            session_id: "session-1".into(),
+            pcm: vec![0.0; 512],
+            reset: false,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
@@ -2924,7 +3162,7 @@ mod tests {
         }
 
         // Both calls must reach the plugin and be blocked at the same time.
-        wait_for_in_flight(&plugin, 2).await;
+        wait_for_in_flight(|| plugin.in_flight(), 2).await;
 
         plugin.release();
 
@@ -2995,7 +3233,7 @@ mod tests {
         .expect("write call");
 
         // Wait until the slow call is in flight, then ping.
-        wait_for_in_flight(&plugin, 1).await;
+        wait_for_in_flight(|| plugin.in_flight(), 1).await;
 
         write_plugin_request(
             &mut client,
@@ -3024,5 +3262,87 @@ mod tests {
         assert_eq!(plugin.in_flight(), 1, "slow call must still be blocked");
 
         plugin.release();
+    }
+
+    /// A `Ping` must be answered while a slow VAD chunk is still in flight:
+    /// the onnx plugin's first-chunk model load can take hundreds of
+    /// milliseconds, and an inline dispatch would stall the read loop past
+    /// the host's liveness probe timeout (5 s).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ping_answered_while_vad_chunk_in_flight() {
+        use std::sync::Arc as StdArc;
+
+        use ene_plugin_proto::{read_plugin_response, write_plugin_request};
+
+        let plugin = StdArc::new(GatedVadPlugin::new());
+        let dispatch = StdArc::new(
+            PluginDispatch::new(None, None, None, None, None)
+                .with_vad(StdArc::clone(&plugin) as StdArc<dyn VadPlugin>),
+        );
+        let shutdown = StdArc::new(tokio::sync::Notify::new());
+
+        let (client, server) = tokio::net::UnixStream::pair().expect("unix pair");
+        tokio::spawn(handle_connection(
+            StdArc::clone(&dispatch),
+            IpcStream::Unix(server),
+            StdArc::clone(&shutdown),
+        ));
+        let mut client = client;
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::ProcessVadChunk {
+                request_id: "slow-vad".into(),
+                provider_kind: "mock_vad".into(),
+                provider_config: serde_json::json!({}),
+                session_id: "s1".into(),
+                pcm: vec![0.0; 512],
+                reset: false,
+            },
+            WireFormat::Json,
+        )
+        .await
+        .expect("write vad chunk");
+
+        // Wait until the slow chunk is in flight, then ping.
+        wait_for_in_flight(|| plugin.in_flight(), 1).await;
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::Ping {
+                request_id: "p1".into(),
+            },
+            WireFormat::Json,
+        )
+        .await
+        .expect("write ping");
+
+        // The Pong must arrive while the chunk is still blocked.
+        let resp = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_plugin_response(&mut client, WireFormat::Json),
+        )
+        .await
+        .expect("no timeout")
+        .expect("read ok")
+        .expect("non-EOF");
+        assert!(
+            matches!(&resp, PluginIpcResponse::Pong { request_id } if request_id == "p1"),
+            "expected Pong while VAD chunk pending, got {resp:?}"
+        );
+        assert_eq!(plugin.in_flight(), 1, "VAD chunk must still be blocked");
+
+        plugin.release();
+        // The chunk's response follows once released.
+        let resp = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_plugin_response(&mut client, WireFormat::Json),
+        )
+        .await
+        .expect("no timeout")
+        .expect("read ok")
+        .expect("non-EOF");
+        assert!(matches!(resp, PluginIpcResponse::VadChunkResult { .. }));
     }
 }

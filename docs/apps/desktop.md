@@ -1,6 +1,6 @@
 # `ene-desktop` User Guide
 
-`ene-desktop` is the GUI desktop application featuring real-time 3D VRM avatar rendering (`ene-vrm`), local voice synthesis/recognition (`ene-voice`), and live emotion/performance expressions.
+`ene-desktop` is the GUI desktop application featuring real-time 3D VRM avatar rendering (`ene-vrm`), local voice synthesis/recognition (via the voice provider plugins), and live emotion/performance expressions.
 
 ---
 

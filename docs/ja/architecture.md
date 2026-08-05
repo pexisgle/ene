@@ -23,7 +23,6 @@
 flowchart TD
   Desktop[apps/ene-desktop] --> Runtime[crates/ene-runtime]
   Desktop --> Vrm[crates/ene-vrm]
-  Desktop --> Voice[crates/ene-voice]
   CLI[apps/ene-cli] --> Runtime
 
   Runtime --> Mind[crates/ene-mind]
@@ -144,10 +143,10 @@ flowchart TD
 | `ene-store` | SQLite / SeaORM エンティティ、マイグレーション、ベクトル検索 (`sqlite-vec`)、コミットメント台帳 |
 | `ene-core` | 永続化に依存しないドメイン語彙 (`AffectState`、typed-memory の種別/ステータス/クエリ、コミットメント台帳の型) および `MemoryPort` トレイト抽象 |
 | `ene-ai` | プロバイダトレイト、メッセージ/ストリーミング型、設定ルーティング、フェイルオーバー方針、リトライポリシー |
-| `ene-voice` | ローカル STT (Whisper)、TTS、VAD (Silero ONNX)、cpal オーディオ I/O |
+| `ene-voice` | ローカル STT (Whisper)、TTS、VAD (Silero ONNX) のエンジン実装。プロバイダプラグインが消費する |
 | `ene-connector` | 外部サービスの認証情報権威 (OAuth2/API キー保管、コネクタアイデンティティ、許可スコープ)。現時点で利用クレートなし — #412/#415 の MCP 認証情報ブリッジにより再導入予定 |
 | `ene-plugin-host` | プラグインプロセス監視、プロバイダレジストリ（ケーパビリティルーティング）、MCP サーバー発見、ヘルスチェック、サーキットブレーカー |
-| `ene-plugin-proto` | IPC Protocol v6 ワイヤーメッセージ、バージョン定義、フレーミング |
+| `ene-plugin-proto` | IPC Protocol v7 ワイヤーメッセージ、バージョン定義、フレーミング |
 | `ene-plugin` | プラグイン開発 SDK: `ToolPlugin`/`LlmPlugin` ファサード、`ToolAction`/`ActionSetProvider`、prelude |
 | `ene-plugin-db` | ステートフルプラグインの DB 操作用型付き IPC クライアント |
 | `ene-plugin-macros` | Proc-macro: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |

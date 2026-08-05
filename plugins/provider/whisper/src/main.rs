@@ -1,17 +1,14 @@
-//! # ene-plugin-kokoro
+//! # ene-plugin-whisper
 //!
-//! Local Kokoro-TTS (ONNX) provider plugin for the ene unified plugin
-//! system. Runs the Kokoro-82M ONNX model in-process via `ene-voice`'s
-//! ONNX engine and serves synthesis over the plugin IPC.
+//! Local whisper.cpp STT provider plugin: serves transcription over the
+//! plugin IPC and declares the `whisper-runner@1` capability for the host's
+//! capability registry.
 
 mod config;
 mod plugin;
 mod wav;
 
-#[cfg(test)]
-mod tests;
-
-use plugin::KokoroPlugin;
+use plugin::WhisperPlugin;
 
 #[tokio::main]
 async fn main() {
@@ -28,14 +25,18 @@ async fn main() {
             None,
             None,
             None,
-            Some(std::sync::Arc::new(KokoroPlugin::new())),
             None,
+            Some(std::sync::Arc::new(WhisperPlugin::new())),
         )
         .with_capability_declarations(plugin::provides(), Vec::new()),
     )
     .await
     {
-        tracing::error!(component = "ene-plugin-kokoro", error = %e, "Fatal error");
+        tracing::error!(
+            component = "ene-plugin-whisper",
+            error = %e,
+            "Fatal error"
+        );
         std::process::exit(1);
     }
 }

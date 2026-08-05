@@ -23,7 +23,6 @@
 flowchart TD
   Desktop[apps/ene-desktop] --> Runtime[crates/ene-runtime]
   Desktop --> Vrm[crates/ene-vrm]
-  Desktop --> Voice[crates/ene-voice]
   CLI[apps/ene-cli] --> Runtime
 
   Runtime --> Mind[crates/ene-mind]
@@ -150,10 +149,10 @@ are pluginized; that registry then disappears.
 | `ene-store` | SQLite / SeaORM database entities, migrations, vector recall (`sqlite-vec`), commitment ledger |
 | `ene-core` | Persistence-agnostic domain vocabulary (`AffectState`, typed-memory kinds/statuses/queries, commitment ledger types) and the `MemoryPort` trait abstraction |
 | `ene-ai` | Provider traits, message/streaming types, config routing, failover policy, retry policy |
-| `ene-voice` | Local STT (Whisper), TTS, VAD (Silero ONNX), cpal audio I/O |
+| `ene-voice` | Local STT (Whisper), TTS, VAD (Silero ONNX) engine implementations, consumed by provider plugins |
 | `ene-connector` | External-service credential authority (OAuth2/API-key storage, connector identity, permission scopes); no consumer yet — reintroduced by the MCP credential bridge under #412/#415 |
 | `ene-plugin-host` | Plugin process supervision, provider registry (capability routing), MCP server discovery, health checks, circuit breaker |
-| `ene-plugin-proto` | IPC Protocol v6 wire messages, versioning, framing, tool types |
+| `ene-plugin-proto` | IPC Protocol v7 wire messages, versioning, framing, tool types |
 | `ene-plugin` | Plugin authoring SDK: `ToolPlugin`/`LlmPlugin` facade, `ToolAction`/`ActionSetProvider`, prelude |
 | `ene-plugin-db` | Typed IPC client for stateful plugin database operations |
 | `ene-plugin-macros` | Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |

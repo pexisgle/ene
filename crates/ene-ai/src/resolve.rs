@@ -186,10 +186,6 @@ pub struct ResolvedStt {
 pub struct ResolvedVad {
     /// Engine name (e.g. `"silero"`, `"webrtc"`).
     pub provider: String,
-    /// Model name (provider-specific).
-    pub model: String,
-    /// Speech probability threshold, clamped to `[0.0, 1.0]`.
-    pub threshold: f32,
 }
 
 /// Resolved task reference: provider definition plus per-task overrides.
@@ -1000,18 +996,16 @@ impl AiConfig {
 
     /// Resolve VAD engine settings from [`AiConfig::vad`].
     ///
-    /// Returns `None` when the provider is `"none"` (VAD disabled). The
-    /// `threshold` is clamped to `[0.0, 1.0]` with a warning when adjusted.
+    /// Returns `None` when the provider is `"none"` (VAD disabled). Engine
+    /// tuning (threshold, model paths) lives in the provider plugin's own
+    /// config (`plugins.list.<name>.config`), not in `AiConfig`.
     #[must_use]
     pub fn resolve_vad(&self) -> Option<ResolvedVad> {
         if self.vad.provider == "none" {
             return None;
         }
-        let threshold = clamp_with_warn(self.vad.threshold, 0.0, 1.0, "ai.vad.threshold");
         Some(ResolvedVad {
             provider: self.vad.provider.clone(),
-            model: self.vad.model.clone(),
-            threshold,
         })
     }
 }
@@ -1489,14 +1483,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_vad_clamps_threshold() {
+    fn resolve_vad_maps_provider_only() {
         let mut cfg = AiConfig::default();
         cfg.vad.provider = "silero".to_string();
-        cfg.vad.threshold = 2.5;
 
         let resolved = cfg.resolve_vad().expect("vad enabled");
         assert_eq!(resolved.provider, "silero");
-        assert!((resolved.threshold - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
