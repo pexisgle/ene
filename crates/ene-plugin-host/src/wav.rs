@@ -1,11 +1,13 @@
-//! Minimal RIFF/WAVE decoder for plugin-delivered TTS audio.
+//! Minimal RIFF/WAVE encoder and decoder for plugin audio.
 //!
 //! The plugin IPC contract returns whole audio files (base64 `SpeechResult`
 //! payloads), while [`ene_ai::TtsProvider`] consumes PCM `f32` chunks, so the
-//! host adapter decodes the WAV bytes itself. Only the formats VOICEVOX /
-//! Aivis Speech engines emit are supported: PCM s16/s32 or IEEE float, one or
-//! two channels (stereo is downmixed to mono), any sample rate. Anything
-//! else is rejected as [`AudioProviderError::UnsupportedFormat`].
+//! host adapter decodes the WAV bytes itself; the STT direction inverts the
+//! same shape (f32 PCM → WAV) so microphone audio can ride the existing
+//! `TranscribeAudio` wire contract. Only the formats VOICEVOX / Aivis Speech
+//! engines emit are supported: PCM s16/s32 or IEEE float, one or two channels
+//! (stereo is downmixed to mono), any sample rate. Anything else is rejected
+//! as [`AudioProviderError::UnsupportedFormat`].
 
 use ene_ai::AudioProviderError;
 
@@ -25,6 +27,35 @@ pub struct DecodedWav {
     pub pcm: Vec<f32>,
     /// Sample rate in Hz.
     pub sample_rate: u32,
+}
+
+/// Encodes mono `f32` PCM into a 16-bit PCM RIFF/WAVE byte stream.
+///
+/// Used by the STT adapter to carry microphone audio over the plugin IPC
+/// (whose `TranscribeAudio` request takes a whole audio file, like the TTS
+/// direction). Samples are clamped to `[-1.0, 1.0]` before scaling.
+pub fn encode_wav(pcm: &[f32], sample_rate: u32) -> Vec<u8> {
+    const BYTES_PER_SAMPLE: u32 = 2;
+    let data_len = pcm.len() * BYTES_PER_SAMPLE as usize;
+    let mut out = Vec::with_capacity(44 + data_len);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36_u32 + data_len as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16_u32.to_le_bytes());
+    out.extend_from_slice(&WAVE_FORMAT_PCM.to_le_bytes());
+    out.extend_from_slice(&1_u16.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * BYTES_PER_SAMPLE).to_le_bytes());
+    out.extend_from_slice(&2_u16.to_le_bytes());
+    out.extend_from_slice(&16_u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data_len as u32).to_le_bytes());
+    for &sample in pcm {
+        let scaled = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+        out.extend_from_slice(&scaled.to_le_bytes());
+    }
+    out
 }
 
 /// Parses a RIFF/WAVE byte stream into mono PCM `f32` samples.
@@ -247,6 +278,29 @@ mod tests {
         assert!((decoded.pcm[1] - 0.5).abs() < 1e-4);
         assert!((decoded.pcm[2] + 0.5).abs() < 1e-4);
         assert!((decoded.pcm[3] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn encode_wav_roundtrips_through_decode() {
+        let pcm = vec![0.0, 0.5, -0.5, 1.0, -1.0];
+        let bytes = encode_wav(&pcm, 16_000);
+        let decoded = decode_wav(&bytes).expect("encoded wav decodes");
+        assert_eq!(decoded.sample_rate, 16_000);
+        assert_eq!(decoded.pcm.len(), pcm.len());
+        for (actual, expected) in decoded.pcm.iter().zip(&pcm) {
+            assert!(
+                (actual - expected).abs() < 1e-4,
+                "got {actual}, want {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_wav_clamps_out_of_range_samples() {
+        let bytes = encode_wav(&[2.0, -2.0], 16_000);
+        let decoded = decode_wav(&bytes).expect("encoded wav decodes");
+        assert!((decoded.pcm[0] - 1.0).abs() < 1e-4);
+        assert!((decoded.pcm[1] + 1.0).abs() < 1e-4);
     }
 
     #[test]

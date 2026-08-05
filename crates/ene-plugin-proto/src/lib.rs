@@ -21,7 +21,7 @@
 //! - [`IpcStream`] / [`IpcListener`] / [`cleanup_path`] — cross-platform
 //!   transport layer (UDS / Named Pipe).
 //!
-//! ### Plugin types (protocol v6)
+//! ### Plugin types (protocol v7)
 //!
 //! - [`PluginCapabilities`] — advertised during the handshake so the host can
 //!   route tool registrations and provider factories.
@@ -34,7 +34,7 @@
 //!   [`read_plugin_response`] / [`write_plugin_response`] — framing helpers
 //!   that reuse the same 4-byte little-endian length-prefixed pattern. The
 //!   handshake exchange always uses JSON; frames after the handshake use the
-//!   negotiated [`WireFormat`] (`MessagePack` for protocol v6, JSON below).
+//!   negotiated [`WireFormat`] (`MessagePack` for protocol v6+, JSON below).
 //! - [`PluginError`] — the plugin crate's error type.
 //!
 //! ## Crate boundaries
@@ -78,8 +78,9 @@ mod wire;
 
 /// Capability and provider spec types.
 pub use capabilities::{
-    CapabilityParseError, CapabilityRef, CapabilityRequirement, ConcurrencyHint, LlmProviderSpec,
-    PluginCapabilities, ResourceClass, SttProviderSpec, TtsProviderSpec,
+    CapabilityParseError, CapabilityRef, CapabilityRequirement, ConcurrencyHint,
+    DEFAULT_SAMPLE_RATE, LlmProviderSpec, PluginCapabilities, ResourceClass, SttProviderSpec,
+    TtsProviderSpec, VadProviderSpec,
 };
 /// Plugin error type.
 pub use error::{PluginError, ProviderErrorKind};
@@ -92,8 +93,8 @@ pub use host_service::{
 /// Plugin IPC message types, protocol version, and framing helpers.
 pub use ipc::{
     ConfigFieldError, ConfigOption, PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION,
-    PluginIpcRequest, PluginIpcResponse, VersionRange, read_plugin_request, read_plugin_response,
-    write_plugin_request, write_plugin_response,
+    PluginIpcRequest, PluginIpcResponse, VadEvent, VersionRange, read_plugin_request,
+    read_plugin_response, write_plugin_request, write_plugin_response,
 };
 /// Sandbox configuration data sent from the host.
 pub use sandbox::SandboxConfigData;

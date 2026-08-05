@@ -15,7 +15,10 @@ use ene_plugin_proto::{
     write_host_service_response,
 };
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
 
 pub struct MockDb {
     accounts: Vec<Row>,
@@ -231,10 +234,7 @@ pub async fn spawn_mock_db() -> (PathBuf, tokio::task::JoinHandle<()>) {
     let socket_path = std::env::temp_dir().join(format!(
         "ene-calendar-test-{}-{}.sock",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before epoch")
-            .as_nanos()
+        NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed)
     ));
     cleanup_path(&socket_path);
 

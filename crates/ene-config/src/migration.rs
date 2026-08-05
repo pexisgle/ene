@@ -50,7 +50,7 @@
 //!    from a `ctor` in the crate that owns the affected schema, or eagerly at
 //!    startup before the first [`load_config`](crate::load_config).
 //!
-//! Three real migrations ship today:
+//! Four real migrations ship today:
 //!
 //! - version 1 → 2 relocates provider-specific settings out of `ai.*` into
 //!   the `plugins.list.*` sections that now own them (see
@@ -61,7 +61,9 @@
 //!   `migrate_v2_to_v3`);
 //! - version 3 → 4 re-runs that mirror so installs that reached v3 before
 //!   `context_size` / `dimensions` became profile keys receive them too (see
-//!   `migrate_v3_to_v4`).
+//!   `migrate_v3_to_v4`);
+//! - version 4 → 5 relocates the voice engine paths and VAD tuning that the
+//!   provider plugins now own out of `ai.*` (see `migrate_v4_to_v5`).
 //!
 //! They are registered by a `ctor` in this crate because `ene-config` owns
 //! the settings document schema, and the steps must be in place wherever a
@@ -78,7 +80,7 @@ use std::sync::OnceLock;
 /// one whose `version` exceeds it is rejected (see
 /// [`EneConfigError::ConfigVersionTooNew`]). Bump this whenever you register a
 /// new migration step.
-pub const CURRENT_CONFIG_VERSION: u32 = 4;
+pub const CURRENT_CONFIG_VERSION: u32 = 5;
 
 /// The JSON key holding the schema version in `settings.json`.
 const VERSION_KEY: &str = "version";
@@ -90,6 +92,8 @@ const VERSION_KEY: &str = "version";
 /// the two to stay in sync.
 const LLAMA_CPP_PLUGIN: &str = "llama-cpp";
 const ONNX_PLUGIN: &str = "onnx";
+/// Plugin list key the v4→v5 migration relocates `ai.stt.model_path` into.
+const WHISPER_PLUGIN: &str = "whisper";
 const KOKORO_PLUGIN: &str = "kokoro";
 /// Default profile name under `plugins.list.kokoro.profiles` for the single
 /// Kokoro voice set shipped today.
@@ -483,6 +487,51 @@ fn move_voices_path(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
     )
 }
 
+/// Moves one `ai.<section>.<key>` value into
+/// `plugins.list.<plugin>.config.<key>`, removing it from `ai` afterwards.
+///
+/// A no-op when the old key is absent, `null`, or an empty string (the same
+/// "present" convention as the v1→v2 relocation).
+fn move_ai_key_to_plugin_config(
+    doc: &mut serde_json::Value,
+    from: &str,
+    plugin: &str,
+    key: &str,
+) -> Result<(), EneConfigError> {
+    let Some(value) = doc.pointer(from).filter(|v| has_value(v)).cloned() else {
+        return Ok(());
+    };
+    let parent_path = from.rsplit_once('/').map_or(from, |(parent, _)| parent);
+    if let Some(parent) = doc
+        .pointer_mut(parent_path)
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        parent.remove(key);
+    }
+    set_plugin_config_key(doc, plugin, key, value)
+}
+
+/// v4 → v5: relocates the remaining voice engine settings out of `ai.*`
+/// into the provider plugins that now own them.
+///
+/// - `ai.stt.model_path` → `plugins.list.whisper.config.model_path`
+/// - `ai.vad.model` / `model_path` / `threshold` →
+///   `plugins.list.onnx.config.{model,model_path,threshold}`
+///
+/// A no-op (still `Ok`) when there is nothing to move. Existing
+/// `plugins.list.*.config` values are left untouched unless the old document
+/// actually carries a corresponding value.
+pub(crate) fn migrate_v4_to_v5(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+    if doc.get("ai").is_none() {
+        return Ok(());
+    }
+    move_ai_key_to_plugin_config(doc, "/ai/stt/model_path", WHISPER_PLUGIN, "model_path")?;
+    move_ai_key_to_plugin_config(doc, "/ai/vad/model", ONNX_PLUGIN, "model")?;
+    move_ai_key_to_plugin_config(doc, "/ai/vad/model_path", ONNX_PLUGIN, "model_path")?;
+    move_ai_key_to_plugin_config(doc, "/ai/vad/threshold", ONNX_PLUGIN, "threshold")?;
+    Ok(())
+}
+
 /// v1 → v2: relocates provider-specific settings out of `ai.*` into the
 /// `plugins.list.*` sections that now own them.
 ///
@@ -590,7 +639,7 @@ pub(crate) fn migrate_v3_to_v4(doc: &mut serde_json::Value) -> Result<(), EneCon
     mirror_local_models_into_profiles(doc)
 }
 
-/// Registers the v1→v2, v2→v3, and v3→v4 steps at process start, wherever a
+/// Registers the v1→v2 … v4→v5 steps at process start, wherever a
 /// `settings.json` is loaded. `ene-config` owns these steps because the
 /// `version` field and the migration machinery live here, and the relocated
 /// keys are host document schema rather than the property of any single
@@ -621,6 +670,13 @@ const _: () = {
                 component = "Config",
                 error = %err,
                 "failed to register settings.json migration v3->v4"
+            );
+        }
+        if let Err(err) = register_migration(4, migrate_v4_to_v5) {
+            tracing::error!(
+                component = "Config",
+                error = %err,
+                "failed to register settings.json migration v4->v5"
             );
         }
     }
@@ -894,6 +950,79 @@ pub(crate) mod tests {
                 doc.pointer("/ai/local_models/gemma-4-e4b/url"),
                 Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf"))
             );
+        });
+    }
+
+    /// The v4→v5 step relocates the voice engine settings into the plugins
+    /// that now own them, and leaves the selection fields behind.
+    #[test]
+    fn v4_to_v5_moves_voice_engine_settings() {
+        with_test_version(5, || {
+            let mut doc = serde_json::json!({
+                "version": 4,
+                "ai": {
+                    "stt": {
+                        "provider": "whisper",
+                        "model": "small.gguf",
+                        "language": "ja",
+                        "model_path": "/data/whisper.gguf"
+                    },
+                    "vad": {
+                        "provider": "silero",
+                        "model": "silero_vad.onnx",
+                        "model_path": "/data/silero.onnx",
+                        "threshold": 0.7
+                    }
+                }
+            });
+            migrate_v4_to_v5(&mut doc).expect("v4->v5 migration succeeds");
+
+            assert_eq!(
+                doc.pointer("/plugins/list/whisper/config/model_path"),
+                Some(&serde_json::json!("/data/whisper.gguf"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/onnx/config/model"),
+                Some(&serde_json::json!("silero_vad.onnx"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/onnx/config/model_path"),
+                Some(&serde_json::json!("/data/silero.onnx"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/onnx/config/threshold"),
+                Some(&serde_json::json!(0.7))
+            );
+            assert!(doc.pointer("/ai/stt/model_path").is_none());
+            assert!(doc.pointer("/ai/vad/model").is_none());
+            assert!(doc.pointer("/ai/vad/model_path").is_none());
+            assert!(doc.pointer("/ai/vad/threshold").is_none());
+            // Selection fields stay in `ai.*`.
+            assert_eq!(
+                doc.pointer("/ai/stt/provider"),
+                Some(&serde_json::json!("whisper"))
+            );
+            assert_eq!(
+                doc.pointer("/ai/vad/provider"),
+                Some(&serde_json::json!("silero"))
+            );
+        });
+    }
+
+    /// Empty-string / `null` old values and absent sections are left alone.
+    #[test]
+    fn v4_to_v5_empty_values_are_not_moved() {
+        with_test_version(5, || {
+            let mut doc = serde_json::json!({
+                "version": 4,
+                "ai": {
+                    "stt": { "model_path": "" },
+                    "vad": { "threshold": null }
+                }
+            });
+            migrate_v4_to_v5(&mut doc).expect("v4->v5 migration succeeds");
+            assert!(doc.pointer("/plugins/list/whisper").is_none());
+            assert!(doc.pointer("/plugins/list/onnx").is_none());
         });
     }
 

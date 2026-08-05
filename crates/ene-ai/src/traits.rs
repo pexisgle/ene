@@ -935,10 +935,38 @@ impl AudioProviderRegistry {
         Self::global().stt.lock().insert(name, factory);
     }
 
+    /// Removes an STT provider factory only when `name` still points to
+    /// `expected`, mirroring [`deregister_tts_if_matches`](Self::deregister_tts_if_matches).
+    pub fn deregister_stt_if_matches(name: &str, expected: &Arc<dyn SttProviderFactory>) -> bool {
+        let mut guard = Self::global().stt.lock();
+        if guard
+            .get(name)
+            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
+        {
+            guard.remove(name).is_some()
+        } else {
+            false
+        }
+    }
+
     /// Registers a VAD engine factory.
     pub fn register_vad(factory: Arc<dyn VadFactory>) {
         let name = factory.provider_name().to_string();
         Self::global().vad.lock().insert(name, factory);
+    }
+
+    /// Removes a VAD engine factory only when `name` still points to
+    /// `expected`, mirroring [`deregister_tts_if_matches`](Self::deregister_tts_if_matches).
+    pub fn deregister_vad_if_matches(name: &str, expected: &Arc<dyn VadFactory>) -> bool {
+        let mut guard = Self::global().vad.lock();
+        if guard
+            .get(name)
+            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
+        {
+            guard.remove(name).is_some()
+        } else {
+            false
+        }
     }
 
     /// Tries to instantiate a TTS provider by name using the registered factories.

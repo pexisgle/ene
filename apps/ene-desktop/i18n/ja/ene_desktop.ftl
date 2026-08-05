@@ -483,13 +483,6 @@ audio-tts-presets = プリセット選択
 audio-preset-kokoro = Kokoro 82M (ローカル・推奨)
 audio-preset-openai = OpenAI TTS (クラウド)
 audio-preset-none = 無効
-audio-model-status = モデル状況
-audio-status-ready = 準備完了
-audio-status-missing = 未ダウンロード
-audio-download-button = モデルを自動ダウンロード
-audio-downloading = モデルファイルをダウンロード中...
-audio-download-success = モデルファイルのダウンロードが完了しました
-audio-download-error = ダウンロードに失敗しました: { $error }
 
 # Permission
 permission-requested = 権限が要求されました

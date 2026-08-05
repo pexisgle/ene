@@ -444,8 +444,6 @@ pub struct SttConfig {
     pub model: String,
     /// Language hint (e.g. `"ja"`, `"en"`; empty = auto-detect).
     pub language: String,
-    /// Explicit filesystem path to the STT model (used when non-empty).
-    pub model_path: Option<String>,
 }
 
 impl Default for SttConfig {
@@ -454,7 +452,6 @@ impl Default for SttConfig {
             provider: "none".to_string(),
             model: String::new(),
             language: String::new(),
-            model_path: None,
         }
     }
 }
@@ -466,21 +463,12 @@ impl Default for SttConfig {
 pub struct VadConfig {
     /// Engine name (`"none"` disables VAD).
     pub provider: String,
-    /// Model name (provider-specific).
-    pub model: String,
-    /// Speech probability threshold (0.0–1.0).
-    pub threshold: f32,
-    /// Explicit filesystem path to the VAD model (used when non-empty).
-    pub model_path: Option<String>,
 }
 
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
             provider: "none".to_string(),
-            model: String::new(),
-            threshold: 0.5,
-            model_path: None,
         }
     }
 }

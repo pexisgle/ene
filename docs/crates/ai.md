@@ -2,7 +2,7 @@
 
 > **Crates**: `ene-ai` (provider traits, message/streaming types, registries) | `plugins/provider/local-llm` (`ene-plugin-llama-cpp`, local GGUF inference via `llama-cpp-4`)
 
-`ene-ai` provides LLM chat-completion and text-embedding abstractions for Ene: the generic message/streaming types, the provider traits, and the global provider registries. Concrete cloud providers ship as plugin binaries (`plugins/provider/*`) and are bridged into the same traits by `ene-plugin-host`; local inference (GGUF/llama.cpp) lives in the `ene-plugin-llama-cpp` provider plugin, and local audio (STT/TTS/VAD) lives in the separate `ene-voice` crate.
+`ene-ai` provides LLM chat-completion and text-embedding abstractions for Ene: the generic message/streaming types, the provider traits, and the global provider registries. Concrete cloud providers ship as plugin binaries (`plugins/provider/*`) and are bridged into the same traits by `ene-plugin-host`; local inference (GGUF/llama.cpp) lives in the `ene-plugin-llama-cpp` provider plugin, and local audio (STT/TTS/VAD) lives in the `ene-plugin-whisper` / `ene-plugin-onnx` / `ene-plugin-kokoro` provider plugins (sharing engine code from the separate `ene-voice` crate).
 
 ---
 

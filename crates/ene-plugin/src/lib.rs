@@ -10,7 +10,7 @@
 //! ## Relationship to other crates
 //!
 //! - [`ene-plugin-proto`](ene_plugin_proto) — wire protocol definitions
-//!   (protocol v6), framing helpers, and transport layer.
+//!   (protocol v7), framing helpers, and transport layer.
 //! - `ene-plugin-host` — host-side process supervision and capability
 //!   routing (consumes plugins, does not author them).
 //!
@@ -60,7 +60,7 @@ pub use action::{ToolAction, ToolSpecArgs};
 pub use compat::ToolProviderPlugin;
 pub use plugin::{
     ConfigurablePlugin, EmbedPlugin, LlmPlugin, PluginCompletion, PluginStream, PluginStreamChunk,
-    SttPlugin, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
+    PluginTranscription, SttPlugin, ToolPlugin, ToolPluginCapabilities, TtsPlugin, VadPlugin,
 };
 pub use server::{PluginDispatch, run_plugin_server};
 pub use tool_provider::{ActionSetProvider, SingleActionProvider};
@@ -69,9 +69,9 @@ pub use tool_provider::{ActionSetProvider, SingleActionProvider};
 // to depend on `ene-plugin` for the full authoring surface.
 pub use ene_plugin_proto::{
     CapabilityParseError, CapabilityRef, CapabilityRequirement, ConcurrencyHint, ConfigFieldError,
-    ConfigOption, LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
-    PluginIpcRequest, PluginIpcResponse, ProviderErrorKind, SttProviderSpec, TokenUsage,
-    TtsProviderSpec, VersionRange,
+    ConfigOption, DEFAULT_SAMPLE_RATE, LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION,
+    PluginCapabilities, PluginError, PluginIpcRequest, PluginIpcResponse, ProviderErrorKind,
+    SttProviderSpec, TokenUsage, TtsProviderSpec, VadEvent, VadProviderSpec, VersionRange,
 };
 /// Cross-platform IPC transport (re-exported from `ene-plugin-proto`).
 pub use ene_plugin_proto::{IpcListener, IpcStream, cleanup_path};
@@ -165,15 +165,15 @@ pub mod prelude {
         };
 
         #[doc(no_inline)]
-        pub use ene_plugin_macros::{LlmPlugin, SttPlugin, TtsPlugin};
+        pub use ene_plugin_macros::{LlmPlugin, SttPlugin, TtsPlugin, VadPlugin};
 
         #[doc(no_inline)]
         pub use crate::{
             CapabilityRef, CapabilityRequirement, ConcurrencyHint, ConfigurablePlugin, EmbedPlugin,
             LlmPlugin, LlmProviderSpec, PluginCompletion, PluginDispatch, PluginError,
-            PluginStream, PluginStreamChunk, ProviderErrorKind, SttPlugin, SttProviderSpec,
-            TokenUsage, ToolPlugin, ToolPluginCapabilities, TtsPlugin, TtsProviderSpec,
-            run_plugin_server,
+            PluginStream, PluginStreamChunk, PluginTranscription, ProviderErrorKind, SttPlugin,
+            SttProviderSpec, TokenUsage, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
+            TtsProviderSpec, VadEvent, VadPlugin, VadProviderSpec, run_plugin_server,
         };
     }
 
