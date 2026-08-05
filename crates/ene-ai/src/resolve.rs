@@ -5,6 +5,12 @@ use crate::config::{
     kind_typo_suggestion,
 };
 use crate::error::LlmProviderError;
+use crate::message::{LlmMessage, UserMessagePart};
+use crate::traits::{LlmProvider, ProviderHost};
+use parking_lot::Mutex;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Fully resolved OpenAI-compatible chat settings for a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1026,9 +1032,382 @@ fn clamp_with_warn(value: f32, min: f32, max: f32, field: &str) -> f32 {
     clamped
 }
 
+// ── Provider health monitoring and failover ─────────────────────────────
+//
+// Upstream reachability is probed *through* the provider plugins (a minimal
+// chat ping), so the plugin exercises its own endpoint and reports the
+// outcome over IPC; the host classifies, caches, and routes on the results.
+// Process supervision (child liveness, restarts, circuit breaker) is a
+// separate concern owned by `ene-plugin-host`.
+
+/// Outcome of a single provider health probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderHealthStatus {
+    /// Provider responded successfully within the timeout.
+    Healthy,
+    /// Provider responded but with elevated latency (> 2× the median).
+    Degraded {
+        /// Measured round-trip latency.
+        latency_ms: u64,
+    },
+    /// Provider rejected the API key (HTTP 401/403).
+    AuthFailed,
+    /// Provider is rate-limiting (HTTP 429).
+    RateLimited,
+    /// Provider is unreachable (network error, DNS, TLS, timeout).
+    Unreachable,
+    /// Provider returned an unexpected HTTP status.
+    ServerError {
+        /// HTTP status code; `0` when the probe could not observe one
+        /// (chat-ping probes classify from typed provider errors instead).
+        status: u16,
+    },
+    /// Health has not been checked yet.
+    Unknown,
+}
+
+impl ProviderHealthStatus {
+    /// Whether the provider is usable for a chat request right now.
+    ///
+    /// `Unknown` returns `true` so unprobed providers can be used during
+    /// bootstrap without requiring an upfront health check.
+    #[must_use]
+    pub const fn is_available(&self) -> bool {
+        matches!(self, Self::Healthy | Self::Degraded { .. } | Self::Unknown)
+    }
+
+    /// Stable English status code for the diagnostics contract.
+    #[must_use]
+    pub const fn status_code(&self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded { .. } => "degraded",
+            Self::AuthFailed => "auth_failed",
+            Self::RateLimited => "rate_limited",
+            Self::Unreachable => "unreachable",
+            Self::ServerError { .. } => "server_error",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// A single health probe result for one provider.
+#[derive(Debug, Clone)]
+pub struct ProviderHealthReport {
+    /// Provider name (key in `ai.providers`).
+    pub provider: String,
+    /// Probe outcome.
+    pub status: ProviderHealthStatus,
+    /// Measured round-trip latency (0 if unreachable).
+    pub latency_ms: u64,
+    /// Human-readable error detail, if any.
+    pub error: Option<String>,
+    /// When the probe was performed.
+    pub checked_at: Instant,
+}
+
+/// Probe a provider with a minimal chat ping.
+///
+/// Sends **no** user data — only the literal `"ping"` message via
+/// [`LlmProvider::chat_completion`], mirroring the local-model warm-up
+/// pattern. The plugin exercises its real endpoint and maps transport
+/// outcomes onto typed [`LlmProviderError`] variants; this function
+/// classifies them into [`ProviderHealthStatus`].
+pub async fn probe_provider_health(
+    provider: &dyn LlmProvider,
+    provider_name: &str,
+    timeout: Duration,
+) -> ProviderHealthReport {
+    let start = Instant::now();
+    let messages = [LlmMessage::User {
+        parts: vec![UserMessagePart::Text {
+            text: "ping".to_string(),
+        }],
+    }];
+    let result = tokio::time::timeout(timeout, provider.chat_completion(&messages, None)).await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(Ok(_)) => ProviderHealthReport {
+            provider: provider_name.to_string(),
+            status: ProviderHealthStatus::Healthy,
+            latency_ms,
+            error: None,
+            checked_at: start,
+        },
+        Ok(Err(e)) => {
+            let status = match &e {
+                LlmProviderError::Auth(_) => ProviderHealthStatus::AuthFailed,
+                LlmProviderError::RateLimit(_) => ProviderHealthStatus::RateLimited,
+                LlmProviderError::Network(_) | LlmProviderError::Timeout => {
+                    ProviderHealthStatus::Unreachable
+                }
+                _ => ProviderHealthStatus::ServerError { status: 0 },
+            };
+            ProviderHealthReport {
+                provider: provider_name.to_string(),
+                status,
+                latency_ms,
+                error: Some(e.to_string()),
+                checked_at: start,
+            }
+        }
+        Err(_) => ProviderHealthReport {
+            provider: provider_name.to_string(),
+            status: ProviderHealthStatus::Unreachable,
+            latency_ms,
+            error: Some("health probe timed out".to_string()),
+            checked_at: start,
+        },
+    }
+}
+
+/// A recorded fallback event.
+#[derive(Debug, Clone)]
+pub struct FallbackRecord {
+    /// Provider that failed.
+    pub from: String,
+    /// Provider that was selected instead.
+    pub to: String,
+    /// Reason for the fallback.
+    pub reason: String,
+    /// When the fallback occurred.
+    pub at: Instant,
+}
+
+/// In-memory health monitor with TTL caching and fallback history.
+///
+/// Thread-safe via `Arc<Mutex<..>>`. The runtime actor holds one instance
+/// and shares it with the diagnostics facade for `/doctor` queries.
+#[derive(Clone)]
+pub struct ProviderHealthMonitor {
+    inner: Arc<Mutex<MonitorInner>>,
+}
+
+struct MonitorInner {
+    /// Cached health reports keyed by provider name.
+    reports: HashMap<String, ProviderHealthReport>,
+    /// How long a cached report is considered fresh.
+    ttl: Duration,
+    /// Recent fallback events (bounded ring buffer).
+    fallback_history: VecDeque<FallbackRecord>,
+    /// Maximum fallback records to retain.
+    max_history: usize,
+}
+
+impl std::fmt::Debug for ProviderHealthMonitor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.lock();
+        f.debug_struct("ProviderHealthMonitor")
+            .field("cached_providers", &inner.reports.len())
+            .field("fallback_count", &inner.fallback_history.len())
+            .finish()
+    }
+}
+
+impl ProviderHealthMonitor {
+    /// Create a new monitor with the given cache TTL and history capacity.
+    #[must_use]
+    pub fn new(ttl: Duration, max_history: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(MonitorInner {
+                reports: HashMap::new(),
+                ttl,
+                fallback_history: VecDeque::new(),
+                max_history,
+            })),
+        }
+    }
+
+    /// Record a health probe result, replacing any previous entry.
+    pub fn record(&self, report: ProviderHealthReport) {
+        let mut inner = self.inner.lock();
+        inner.reports.insert(report.provider.clone(), report);
+    }
+
+    /// Get the cached health status for a provider, if fresh.
+    ///
+    /// Returns `None` when no report exists or the cached report has expired.
+    pub fn get_fresh(&self, provider: &str) -> Option<ProviderHealthReport> {
+        let inner = self.inner.lock();
+        inner.reports.get(provider).and_then(|r| {
+            if r.checked_at.elapsed() < inner.ttl {
+                Some(r.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get the cached health status regardless of freshness.
+    pub fn get_any(&self, provider: &str) -> Option<ProviderHealthReport> {
+        let inner = self.inner.lock();
+        inner.reports.get(provider).cloned()
+    }
+
+    /// Record a fallback event.
+    pub fn record_fallback(&self, from: &str, to: &str, reason: &str) {
+        let mut inner = self.inner.lock();
+        if inner.fallback_history.len() >= inner.max_history {
+            inner.fallback_history.pop_front();
+        }
+        inner.fallback_history.push_back(FallbackRecord {
+            from: from.to_string(),
+            to: to.to_string(),
+            reason: reason.to_string(),
+            at: Instant::now(),
+        });
+    }
+
+    /// Snapshot of recent fallback events (newest last).
+    pub fn fallback_history(&self) -> Vec<FallbackRecord> {
+        let inner = self.inner.lock();
+        inner.fallback_history.iter().cloned().collect()
+    }
+
+    /// Snapshot of all cached health reports.
+    pub fn all_reports(&self) -> Vec<ProviderHealthReport> {
+        let inner = self.inner.lock();
+        inner.reports.values().cloned().collect()
+    }
+}
+
+impl Default for ProviderHealthMonitor {
+    fn default() -> Self {
+        Self::new(Duration::from_mins(1), 32)
+    }
+}
+
+/// Result of a failover selection.
+#[derive(Debug, Clone)]
+pub struct FailoverSelection {
+    /// The selected candidate.
+    pub candidate: ChatCandidate,
+    /// Providers that were tried and skipped before the selection, with reasons.
+    pub skipped: Vec<(String, String)>,
+    /// Whether a fallback occurred (selected is not the first candidate).
+    pub fell_back: bool,
+}
+
+/// Select the first healthy chat candidate in priority order.
+///
+/// Builds each candidate's provider through the host registry and probes it
+/// with a minimal chat ping (using the monitor's TTL cache to avoid
+/// redundant probes), returning the first one whose health status is
+/// [`ProviderHealthStatus::is_available`]. If a fallback occurs, the event is
+/// recorded in the monitor. Sends **no** user data during probes.
+///
+/// Returns `None` only when there are no candidates at all.
+pub async fn select_healthy_chat(
+    candidates: &[ChatCandidate],
+    monitor: &ProviderHealthMonitor,
+    host: &dyn ProviderHost,
+    config: &ene_config::EneConfig,
+    timeout: Duration,
+) -> Option<FailoverSelection> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut skipped = Vec::new();
+
+    for (index, candidate) in candidates.iter().enumerate() {
+        let report = if let Some(cached) = monitor.get_fresh(&candidate.provider) {
+            cached
+        } else {
+            let fresh = probe_candidate(candidate, host, config, timeout).await;
+            monitor.record(fresh.clone());
+            fresh
+        };
+
+        if report.status.is_available() {
+            let fell_back = index > 0;
+            if fell_back && let Some(primary) = candidates.first() {
+                let reason = skipped
+                    .iter()
+                    .map(|(p, r)| format!("{p}: {r}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                monitor.record_fallback(&primary.provider, &candidate.provider, &reason);
+            }
+            return Some(FailoverSelection {
+                candidate: candidate.clone(),
+                skipped,
+                fell_back,
+            });
+        }
+
+        let reason = report
+            .error
+            .clone()
+            .unwrap_or_else(|| format!("{:?}", report.status));
+        skipped.push((candidate.provider.clone(), reason));
+    }
+
+    // No candidate was healthy. Fall back to the first candidate anyway so
+    // the turn can attempt to proceed (the provider may recover mid-request),
+    // but record that every probe failed.
+    let primary = candidates.first()?;
+    let reason = skipped
+        .iter()
+        .map(|(p, r)| format!("{p}: {r}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    tracing::warn!(
+        component = "health",
+        reason = %reason,
+        "all providers unhealthy; using primary candidate anyway"
+    );
+    Some(FailoverSelection {
+        candidate: primary.clone(),
+        skipped,
+        fell_back: false,
+    })
+}
+
+/// Build and probe one chat candidate through the host registry.
+///
+/// A candidate whose provider cannot be created (plugin absent, host down)
+/// is reported unavailable rather than skipped silently, so the monitor
+/// carries a report for every candidate and the doctor can show it.
+async fn probe_candidate(
+    candidate: &ChatCandidate,
+    host: &dyn ProviderHost,
+    config: &ene_config::EneConfig,
+    timeout: Duration,
+) -> ProviderHealthReport {
+    let task = TaskRef {
+        provider: candidate.provider.clone(),
+        model: Some(candidate.model.clone()),
+        max_tokens: candidate.max_tokens,
+        ..TaskRef::default()
+    };
+    match host
+        .create_llm_provider(&candidate.kind, config, &task)
+        .await
+    {
+        Ok(provider) => {
+            probe_provider_health(provider.as_ref(), &candidate.provider, timeout).await
+        }
+        Err(e) => ProviderHealthReport {
+            provider: candidate.provider.clone(),
+            status: ProviderHealthStatus::Unreachable,
+            latency_ms: 0,
+            error: Some(format!("provider creation failed: {e}")),
+            checked_at: Instant::now(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::LlmResponseChunk;
+    use crate::traits::EmbeddingProvider;
+    use crate::{AudioProviderError, EmbeddingError, TtsProvider};
+    use async_trait::async_trait;
+    use std::pin::Pin;
+    use tokio_stream::Stream;
 
     #[test]
     fn resolve_tts_disabled_by_default() {
@@ -1402,5 +1781,406 @@ mod tests {
         let issues = validate_context_budgets(&cfg, 12_000);
         assert!(issues.iter().all(|i| i.task != "embedding"));
         assert_eq!(issues.len(), 2);
+    }
+
+    #[test]
+    fn health_status_availability() {
+        assert!(ProviderHealthStatus::Healthy.is_available());
+        assert!(ProviderHealthStatus::Degraded { latency_ms: 500 }.is_available());
+        assert!(ProviderHealthStatus::Unknown.is_available());
+        assert!(!ProviderHealthStatus::AuthFailed.is_available());
+        assert!(!ProviderHealthStatus::RateLimited.is_available());
+        assert!(!ProviderHealthStatus::Unreachable.is_available());
+        assert!(!ProviderHealthStatus::ServerError { status: 500 }.is_available());
+    }
+
+    #[test]
+    fn monitor_records_and_retrieves() {
+        let monitor = ProviderHealthMonitor::new(Duration::from_mins(1), 8);
+        let report = ProviderHealthReport {
+            provider: "default".to_string(),
+            status: ProviderHealthStatus::Healthy,
+            latency_ms: 42,
+            error: None,
+            checked_at: Instant::now(),
+        };
+        monitor.record(report.clone());
+        let fresh = monitor.get_fresh("default");
+        assert!(fresh.is_some());
+        assert_eq!(fresh.unwrap().latency_ms, 42);
+        assert!(monitor.get_fresh("nonexistent").is_none());
+    }
+
+    #[test]
+    fn monitor_fallback_history_bounded() {
+        let monitor = ProviderHealthMonitor::new(Duration::from_mins(1), 3);
+        for i in 0..5 {
+            monitor.record_fallback(&format!("p{i}"), "fallback", "test");
+        }
+        let history = monitor.fallback_history();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.first().map(|r| r.from.as_str()), Some("p2"));
+        assert_eq!(history.get(2).map(|r| r.from.as_str()), Some("p4"));
+    }
+
+    #[test]
+    fn monitor_expired_report_not_fresh() {
+        let monitor = ProviderHealthMonitor::new(Duration::from_millis(0), 8);
+        let checked_at = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        let report = ProviderHealthReport {
+            provider: "default".to_string(),
+            status: ProviderHealthStatus::Healthy,
+            latency_ms: 10,
+            error: None,
+            checked_at,
+        };
+        monitor.record(report);
+        assert!(monitor.get_fresh("default").is_none());
+        assert!(monitor.get_any("default").is_some());
+    }
+
+    /// Which typed error the failing probe stub should produce.
+    #[derive(Clone, Copy)]
+    enum StubFailure {
+        Auth,
+        RateLimit,
+        Network,
+        Timeout,
+        Server,
+    }
+
+    /// Stub provider whose `chat_completion` fails with a fixed error.
+    struct FailingProvider {
+        failure: StubFailure,
+    }
+
+    impl FailingProvider {
+        fn error(&self) -> LlmProviderError {
+            match self.failure {
+                StubFailure::Auth => LlmProviderError::Auth("bad key".to_string()),
+                StubFailure::RateLimit => LlmProviderError::RateLimit("slow down".to_string()),
+                StubFailure::Network => LlmProviderError::Network("refused".to_string()),
+                StubFailure::Timeout => LlmProviderError::Timeout,
+                StubFailure::Server => LlmProviderError::Provider("HTTP 500: boom".to_string()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for FailingProvider {
+        fn name(&self) -> &'static str {
+            "probe-stub"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+            LlmProviderError,
+        > {
+            Err(LlmProviderError::Provider(
+                "probe stub does not stream".to_string(),
+            ))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<crate::LlmCompletion, LlmProviderError> {
+            Err(self.error())
+        }
+    }
+
+    struct HealthyProvider;
+
+    #[async_trait]
+    impl LlmProvider for HealthyProvider {
+        fn name(&self) -> &'static str {
+            "probe-healthy"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+            LlmProviderError,
+        > {
+            Err(LlmProviderError::Provider(
+                "probe stub does not stream".to_string(),
+            ))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<crate::LlmCompletion, LlmProviderError> {
+            Ok(crate::LlmCompletion::text_only("pong".to_string()))
+        }
+    }
+
+    /// Boxes an `Arc<dyn LlmProvider>` so the stub host can hand out clones
+    /// of the same provider per kind.
+    struct ArcLlmProvider(Arc<dyn LlmProvider>);
+
+    #[async_trait]
+    impl LlmProvider for ArcLlmProvider {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+
+        async fn create_chat_stream(
+            &self,
+            messages: &[LlmMessage],
+            tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+            LlmProviderError,
+        > {
+            self.0.create_chat_stream(messages, tools).await
+        }
+
+        async fn chat_completion(
+            &self,
+            messages: &[LlmMessage],
+            json_schema: Option<serde_json::Value>,
+        ) -> Result<crate::LlmCompletion, LlmProviderError> {
+            self.0.chat_completion(messages, json_schema).await
+        }
+    }
+
+    /// Stub host serving a fixed set of providers by kind.
+    struct StubHost {
+        llm: HashMap<String, Arc<dyn LlmProvider>>,
+    }
+
+    #[async_trait]
+    impl ProviderHost for StubHost {
+        async fn create_llm_provider(
+            &self,
+            kind: &str,
+            _config: &ene_config::EneConfig,
+            _task: &TaskRef,
+        ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
+            self.llm.get(kind).map_or_else(
+                || {
+                    Err(LlmProviderError::Provider(format!(
+                        "No LlmProviderFactory registered for provider kind: '{kind}'"
+                    )))
+                },
+                |provider| {
+                    let provider: Box<dyn LlmProvider> =
+                        Box::new(ArcLlmProvider(Arc::clone(provider)));
+                    Ok(provider)
+                },
+            )
+        }
+
+        async fn create_embedding_provider(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError> {
+            Err(EmbeddingError::Init(
+                "stub host serves no embedding providers".to_string(),
+            ))
+        }
+
+        async fn create_tts_provider(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
+            Err(AudioProviderError::Provider(
+                "stub host serves no TTS providers".to_string(),
+            ))
+        }
+    }
+
+    fn candidate(provider: &str, kind: &str) -> ChatCandidate {
+        ChatCandidate {
+            provider: provider.to_string(),
+            kind: kind.to_string(),
+            base_url: "https://example.invalid/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model: "gpt-test".to_string(),
+            max_tokens: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_classifies_typed_provider_errors() {
+        let timeout = Duration::from_secs(1);
+        let healthy = probe_provider_health(&HealthyProvider, "healthy", timeout).await;
+        assert_eq!(healthy.status, ProviderHealthStatus::Healthy);
+
+        for (failure, expected) in [
+            (StubFailure::Auth, ProviderHealthStatus::AuthFailed),
+            (StubFailure::RateLimit, ProviderHealthStatus::RateLimited),
+            (StubFailure::Network, ProviderHealthStatus::Unreachable),
+            (StubFailure::Timeout, ProviderHealthStatus::Unreachable),
+            (
+                StubFailure::Server,
+                ProviderHealthStatus::ServerError { status: 0 },
+            ),
+        ] {
+            let provider = FailingProvider { failure };
+            let report = probe_provider_health(&provider, "failing", timeout).await;
+            assert_eq!(report.status, expected, "report: {report:?}");
+            assert!(report.error.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn select_healthy_chat_prefers_first_available_and_records_fallback() {
+        let host = StubHost {
+            llm: HashMap::from([
+                (
+                    "openai".to_string(),
+                    Arc::new(FailingProvider {
+                        failure: StubFailure::Auth,
+                    }) as Arc<dyn LlmProvider>,
+                ),
+                (
+                    "anthropic".to_string(),
+                    Arc::new(HealthyProvider) as Arc<dyn LlmProvider>,
+                ),
+            ]),
+        };
+        let monitor = ProviderHealthMonitor::new(Duration::from_mins(1), 8);
+        let candidates = [
+            candidate("primary", "openai"),
+            candidate("backup", "anthropic"),
+        ];
+        let selection = select_healthy_chat(
+            &candidates,
+            &monitor,
+            &host,
+            &ene_config::EneConfig::default(),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("selection");
+        assert!(selection.fell_back);
+        assert_eq!(selection.candidate.provider, "backup");
+        assert_eq!(selection.skipped.len(), 1);
+        assert_eq!(selection.skipped[0].0, "primary");
+        assert_eq!(monitor.fallback_history().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn select_healthy_chat_uses_cached_report_within_ttl() {
+        let host = StubHost {
+            llm: HashMap::from([(
+                "openai".to_string(),
+                Arc::new(HealthyProvider) as Arc<dyn LlmProvider>,
+            )]),
+        };
+        let monitor = ProviderHealthMonitor::new(Duration::from_mins(1), 8);
+        monitor.record(ProviderHealthReport {
+            provider: "primary".to_string(),
+            status: ProviderHealthStatus::AuthFailed,
+            latency_ms: 5,
+            error: Some("cached failure".to_string()),
+            checked_at: Instant::now(),
+        });
+        let candidates = [candidate("primary", "openai")];
+        let selection = select_healthy_chat(
+            &candidates,
+            &monitor,
+            &host,
+            &ene_config::EneConfig::default(),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("selection");
+        // The cached failure is fresh, so the healthy stub is never probed;
+        // the all-unhealthy fallback still returns the primary.
+        assert_eq!(selection.candidate.provider, "primary");
+        assert!(!selection.fell_back);
+    }
+
+    #[tokio::test]
+    async fn select_healthy_chat_all_unhealthy_uses_primary_anyway() {
+        let host = StubHost {
+            llm: HashMap::from([(
+                "openai".to_string(),
+                Arc::new(FailingProvider {
+                    failure: StubFailure::Network,
+                }) as Arc<dyn LlmProvider>,
+            )]),
+        };
+        let monitor = ProviderHealthMonitor::new(Duration::from_mins(1), 8);
+        let candidates = [
+            candidate("primary", "openai"),
+            candidate("backup", "openai"),
+        ];
+        let selection = select_healthy_chat(
+            &candidates,
+            &monitor,
+            &host,
+            &ene_config::EneConfig::default(),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("selection");
+        assert_eq!(selection.candidate.provider, "primary");
+        assert_eq!(selection.skipped.len(), 2);
+        assert!(!selection.fell_back);
+    }
+
+    #[tokio::test]
+    async fn select_healthy_chat_reports_uncreatable_candidate_as_unavailable() {
+        let host = StubHost {
+            llm: HashMap::new(),
+        };
+        let monitor = ProviderHealthMonitor::new(Duration::from_mins(1), 8);
+        let candidates = [candidate("primary", "not-a-plugin-kind")];
+        let selection = select_healthy_chat(
+            &candidates,
+            &monitor,
+            &host,
+            &ene_config::EneConfig::default(),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("selection");
+        assert_eq!(selection.candidate.provider, "primary");
+        let report = monitor.get_any("primary").expect("report recorded");
+        assert_eq!(report.status, ProviderHealthStatus::Unreachable);
+        assert!(
+            report
+                .error
+                .as_deref()
+                .is_some_and(|d| d.contains("provider creation failed")),
+            "detail: {:?}",
+            report.error
+        );
+    }
+
+    #[tokio::test]
+    async fn select_healthy_chat_returns_none_without_candidates() {
+        let host = StubHost {
+            llm: HashMap::new(),
+        };
+        let monitor = ProviderHealthMonitor::new(Duration::from_mins(1), 8);
+        assert!(
+            select_healthy_chat(
+                &[],
+                &monitor,
+                &host,
+                &ene_config::EneConfig::default(),
+                Duration::from_secs(1),
+            )
+            .await
+            .is_none()
+        );
     }
 }
