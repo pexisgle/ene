@@ -251,7 +251,7 @@ async fn run_checks(ctx: &mut AppContext) -> Vec<CheckResult> {
     };
 
     check_config(&mut results, &snapshot);
-    check_ai_provider(&mut results, &snapshot).await;
+    check_ai_provider(&mut results, diag, &snapshot).await;
     check_embedding(&mut results, &snapshot);
     check_store(&mut results, diag, &snapshot);
     check_tool_registry(&mut results, &tools).await;
@@ -278,7 +278,11 @@ fn check_config(results: &mut Vec<CheckResult>, snapshot: &EneStateSnapshot) {
     }
 }
 
-async fn check_ai_provider(results: &mut Vec<CheckResult>, snapshot: &EneStateSnapshot) {
+async fn check_ai_provider(
+    results: &mut Vec<CheckResult>,
+    diag: &EneDiagnostics,
+    snapshot: &EneStateSnapshot,
+) {
     let ai_config = snapshot
         .config
         .get_section::<AiConfig>()
@@ -329,10 +333,14 @@ async fn check_ai_provider(results: &mut Vec<CheckResult>, snapshot: &EneStateSn
         }
     }
 
-    check_provider_fallback(results, &ai_config).await;
+    check_provider_fallback(results, diag, &ai_config).await;
 }
 
-async fn check_provider_fallback(results: &mut Vec<CheckResult>, ai_config: &AiConfig) {
+async fn check_provider_fallback(
+    results: &mut Vec<CheckResult>,
+    diag: &EneDiagnostics,
+    ai_config: &AiConfig,
+) {
     let fallback = &ai_config.fallback;
     if !fallback.enabled {
         results.push(CheckResult::skipped(
@@ -357,16 +365,21 @@ async fn check_provider_fallback(results: &mut Vec<CheckResult>, ai_config: &AiC
         return;
     }
 
-    let timeout = std::time::Duration::from_millis(fallback.health_check_timeout_ms);
+    // Probe through the live provider host (chat ping per candidate), the
+    // same path the actor's failover selection uses.
+    let reports = diag.probe_chat_candidates().await;
+    let reports_by_provider: std::collections::HashMap<&str, &ene_ai::ProviderHealthReport> =
+        reports.iter().map(|r| (r.provider.as_str(), r)).collect();
     let mut healthy_count = 0;
     for candidate in &candidates {
-        let report = ene_ai::check_provider_health(
-            &candidate.provider,
-            &candidate.base_url,
-            &candidate.api_key,
-            timeout,
-        )
-        .await;
+        let Some(report) = reports_by_provider.get(candidate.provider.as_str()) else {
+            results.push(CheckResult::skipped(
+                CheckCategory::AiProvider,
+                &format!("health:{}", candidate.provider),
+                "Provider not probed by the runtime",
+            ));
+            continue;
+        };
         let status = report.status.status_code();
         if report.status.is_available() {
             healthy_count += 1;
@@ -382,7 +395,7 @@ async fn check_provider_fallback(results: &mut Vec<CheckResult>, ai_config: &AiC
                 ),
             ));
         } else {
-            let detail = report.error.unwrap_or_else(|| status.to_string());
+            let detail = report.error.clone().unwrap_or_else(|| status.to_string());
             results.push(CheckResult::error(
                 CheckCategory::AiProvider,
                 &format!("health:{}", candidate.provider),

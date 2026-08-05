@@ -54,7 +54,7 @@ impl CliCommand for MemoryCommand {
             "restore" => handle_restore(tail, memory).await,
             "status" => handle_status(memory, &snapshot).await,
             "pending" => handle_pending(memory, &snapshot).await,
-            "retry" => handle_retry(memory, &snapshot).await,
+            "retry" => handle_retry(ctx, memory, &snapshot).await,
             "approval" => handle_approval(tail, ctx).await,
             _ => Err(CliError::UsageError {
                 usage: self.usage().to_string(),
@@ -717,6 +717,7 @@ async fn handle_pending(
 }
 
 async fn handle_retry(
+    ctx: &AppContext,
     memory: &ene_runtime::MemoryHandle,
     snapshot: &ene_runtime::EneStateSnapshot,
 ) -> Result<CommandOutcome, CliError> {
@@ -738,7 +739,10 @@ async fn handle_retry(
         .config
         .get_section::<ene_mind::MindConfig>()
         .unwrap_or_default();
-    let llm = ene_ai::create_task_chat_provider(&snapshot.config, ene_ai::AiTaskKind::Chat)
+    let llm = ctx
+        .handle
+        .create_chat_provider()
+        .await
         .map_err(|e| CliError::ExecutionFailed(format!("Chat provider error: {e}")))?;
     memory
         .drain_pending_memory_writes(&mind, llm.as_ref(), scheduled.max(1))
