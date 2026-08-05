@@ -383,6 +383,15 @@ pub struct LlmProviderSpec {
     /// required).
     #[serde(default)]
     pub context_window: Option<u32>,
+
+    /// The physical resource this provider's jobs contend on, used by the
+    /// host's admission control to share one budget across every provider
+    /// that declares the same class (e.g. all GPU-offloaded local models on
+    /// device 0). Absent (or omitted by an older plugin binary) defaults to
+    /// [`ResourceClass::Cpu`] — the conservative "contends on CPU" reading —
+    /// so old specs keep negotiating without a protocol version bump.
+    #[serde(default)]
+    pub resource_class: ResourceClass,
 }
 
 /// Specification of a TTS provider (reserved for future use).
@@ -511,6 +520,7 @@ mod tests {
                     queue_depth: 8,
                 },
                 context_window: Some(200_000),
+                resource_class: ResourceClass::Gpu { device: 0 },
             }],
             embed_providers: vec!["openai".into()],
             tts_providers: vec![],
@@ -701,10 +711,31 @@ mod tests {
                 queue_depth: 8,
             },
             context_window: Some(200_000),
+            resource_class: ResourceClass::Gpu { device: 0 },
         };
         let json = serde_json::to_string(&spec).unwrap();
         let deser: LlmProviderSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(spec, deser);
+        assert!(
+            json.contains(r#"{"Gpu":{"device":0}}"#),
+            "externally tagged ResourceClass form must be load-bearing on the wire"
+        );
+    }
+
+    #[test]
+    fn llm_provider_spec_defaults_resource_class_to_cpu() {
+        // A spec produced by an older plugin binary omits `resource_class`
+        // entirely; it must parse as `Cpu` without a protocol version bump.
+        let json = r#"{
+            "kind": "anthropic",
+            "supported_models": [],
+            "supports_streaming": true,
+            "supports_vision": false,
+            "concurrency": {"max_in_flight": 1, "queue_depth": 2}
+        }"#;
+        let spec: LlmProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.resource_class, ResourceClass::Cpu);
+        assert_eq!(ResourceClass::default(), ResourceClass::Cpu);
     }
 
     #[test]
@@ -819,7 +850,7 @@ mod tests {
 /// form (`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`) is the initial
 /// choice; re-confirm it when this type is first wired into a message (the
 /// follow-up host-side resource admission work) before it becomes load-bearing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum ResourceClass {
     /// A specific GPU device index, as used by `with_main_gpu(n)` /
     /// CUDA/Vulkan device selection. A real, meaningful identity: two
@@ -836,6 +867,14 @@ pub enum ResourceClass {
     /// HTTP/gRPC) that does not contend on host GPU/CPU capacity the same
     /// way.
     Network,
+}
+
+impl Default for ResourceClass {
+    /// The conservative default for an undeclared provider: CPU-bound
+    /// inference, which every provider can fall back to.
+    fn default() -> Self {
+        Self::Cpu
+    }
 }
 
 #[cfg(test)]

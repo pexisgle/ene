@@ -173,6 +173,30 @@ fn omitted_flags_and_concurrency_take_defaults() {
     assert!(!spec.supports_vision);
     assert_eq!(spec.concurrency, ConcurrencyHint::default());
     assert_eq!(spec.context_window, None);
+    assert_eq!(spec.resource_class, ResourceClass::Cpu);
+}
+
+#[derive(LlmPlugin)]
+#[provider(
+    kind = "test-gpu",
+    models = "model-g",
+    resource_class = ::ene_plugin::ResourceClass::Gpu { device: 0 }
+)]
+pub struct GpuResourceClassProvider;
+
+impl ConfigurablePlugin for GpuResourceClassProvider {}
+
+impl LlmPlugin for GpuResourceClassProvider {
+    fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+        vec![Self::llm_spec()]
+    }
+}
+
+#[test]
+fn resource_class_attribute_flows_into_the_spec() {
+    let caps = GpuResourceClassProvider.llm_capabilities();
+    let spec = caps.first().expect("one generated spec");
+    assert_eq!(spec.resource_class, ResourceClass::Gpu { device: 0 });
 }
 
 #[derive(LlmPlugin)]

@@ -1412,7 +1412,7 @@ mod tests {
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
     use ene_plugin_proto::{
-        ConcurrencyHint, DeferredStatus, LlmProviderSpec, SttProviderSpec, ToolSpec,
+        ConcurrencyHint, DeferredStatus, LlmProviderSpec, ResourceClass, SttProviderSpec, ToolSpec,
         TtsProviderSpec, VersionRange,
     };
 
@@ -1545,6 +1545,7 @@ mod tests {
                 supports_vision: false,
                 concurrency: ConcurrencyHint::default(),
                 context_window: None,
+                resource_class: ResourceClass::Cpu,
             }]
         }
 
@@ -1603,6 +1604,7 @@ mod tests {
                 supports_vision: false,
                 concurrency: ConcurrencyHint::default(),
                 context_window: None,
+                resource_class: ResourceClass::Cpu,
             }]
         }
 
