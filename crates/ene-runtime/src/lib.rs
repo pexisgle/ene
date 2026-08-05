@@ -28,6 +28,8 @@
 
 /// Shared runtime bootstrap helpers (folded into [`EneHandle::open`]).
 pub mod bootstrap;
+pub mod connectors;
+pub use connectors::{ConnectorHandle, ConnectorHandleError};
 /// DB IPC request handler (re-exported from `ene-store`).
 #[cfg(any(unix, windows))]
 #[doc(no_inline)]

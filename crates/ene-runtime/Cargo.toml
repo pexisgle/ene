@@ -26,6 +26,7 @@ chrono = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
 ene-config = { workspace = true }
+ene-connector = { workspace = true }
 ene-core = { workspace = true }
 ene-store = { workspace = true }
 blake3 = { workspace = true }

@@ -24,6 +24,9 @@ use crate::types::{RequestId, TurnId};
 use crate::vision::VisionPrepared;
 use chrono::{DateTime, Utc};
 use ene_config::CharacterCardV3;
+use ene_connector::{
+    AccountCredentials, AuthenticatedAccount, ConnectorError, ConnectorId, HealthStatus,
+};
 use ene_mind::CompressionResult;
 use ene_plugin_proto::ToolSpec;
 use std::sync::Arc;
@@ -90,6 +93,53 @@ pub enum EneCommand {
     ResetAllPermissions {
         /// Reply channel carrying the number of revoked scopes.
         reply: oneshot::Sender<usize>,
+    },
+    /// Run a connector connectivity check (read-only, audited).
+    ConnectorCheck {
+        /// Connector to probe.
+        id: ConnectorId,
+        /// Reply channel carrying the check result.
+        reply: oneshot::Sender<Result<HealthStatus, ConnectorError>>,
+    },
+    /// Connect a connector (permission-gated, audited).
+    ConnectorConnect {
+        /// Connector to authenticate with.
+        id: ConnectorId,
+        /// Credential handled inside the protected store boundary.
+        credential: AccountCredentials,
+        /// Reply channel carrying the authenticated accounts.
+        reply: oneshot::Sender<Result<Vec<AuthenticatedAccount>, ConnectorError>>,
+    },
+    /// Disconnect one account of a connector (permission-gated, audited).
+    ConnectorDisconnect {
+        /// Connector owning the account.
+        id: ConnectorId,
+        /// Account id to disconnect.
+        account: String,
+        /// Reply channel carrying the outcome.
+        reply: oneshot::Sender<Result<(), ConnectorError>>,
+    },
+    /// Record a per-action connector grant (audited).
+    ConnectorGrant {
+        /// Connector owning the action.
+        id: ConnectorId,
+        /// Action being granted.
+        action: String,
+        /// Target prefix the grant covers.
+        target_pattern: String,
+        /// Reply channel carrying the outcome.
+        reply: oneshot::Sender<Result<(), ConnectorError>>,
+    },
+    /// Remove a per-action connector grant (audited).
+    ConnectorRevoke {
+        /// Connector owning the action.
+        id: ConnectorId,
+        /// Action being revoked.
+        action: String,
+        /// Target prefix being revoked.
+        target_pattern: String,
+        /// Reply channel reporting whether a grant was removed.
+        reply: oneshot::Sender<Result<bool, ConnectorError>>,
     },
     /// Undo the most recent reversible tool operation.
     Undo {

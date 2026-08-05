@@ -406,6 +406,11 @@ pub enum PublicLifecycleEvent {
         /// Terminal status string (`completed`, `failed`, `cancelled`, …).
         status: String,
     },
+    /// A connector's state changed.
+    ConnectorChanged {
+        /// Connector whose state changed.
+        id: String,
+    },
 }
 
 impl PublicChatEvent {
@@ -558,6 +563,9 @@ impl PublicLifecycleEvent {
                 task_id: task_id.clone(),
                 status: format!("{status:?}").to_ascii_lowercase(),
             },
+            LifecycleEvent::ConnectorChanged { id } => {
+                Self::ConnectorChanged { id: id.to_string() }
+            }
         }
     }
 }
