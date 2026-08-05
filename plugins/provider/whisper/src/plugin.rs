@@ -162,7 +162,7 @@ impl SttPlugin for WhisperPlugin {
         config: Value,
         audio_data: Vec<u8>,
         format: String,
-    ) -> Result<String, PluginError> {
+    ) -> Result<PluginTranscription, PluginError> {
         if kind != Self::STT_PROVIDER_KIND {
             return Err(PluginError::not_supported(format!("provider kind: {kind}")));
         }
@@ -198,7 +198,10 @@ impl SttPlugin for WhisperPlugin {
         provider
             .transcribe(&decoded.pcm, decoded.sample_rate)
             .await
-            .map(|result| result.text)
+            .map(|result| PluginTranscription {
+                text: result.text,
+                language: result.language,
+            })
             .map_err(|e| PluginError::provider(format!("whisper transcription failed: {e}")))
     }
 }
@@ -274,7 +277,8 @@ mod tests {
             )
             .await
             .expect("transcribe");
-        assert_eq!(text, "hello world");
+        assert_eq!(text.text, "hello world");
+        assert_eq!(text.language, None);
     }
 
     #[tokio::test]

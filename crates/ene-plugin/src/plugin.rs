@@ -69,6 +69,16 @@ impl From<String> for PluginCompletion {
 /// by a terminal `StreamEnd` or `StreamError`.
 pub type PluginStream = Pin<Box<dyn Stream<Item = Result<PluginStreamChunk, PluginError>> + Send>>;
 
+/// A completed speech-to-text transcription.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PluginTranscription {
+    /// Transcribed text.
+    pub text: String,
+    /// Detected language code (e.g. `"ja"`, `"en"`), when the plugin knows
+    /// it. The whisper plugin reports the language hint it transcribed with.
+    pub language: Option<String>,
+}
+
 /// Capabilities advertised by a tool plugin.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolPluginCapabilities {
@@ -378,7 +388,7 @@ pub trait SttPlugin: ConfigurablePlugin + Send + Sync {
         _config: serde_json::Value,
         _audio_data: Vec<u8>,
         _format: String,
-    ) -> Result<String, PluginError> {
+    ) -> Result<PluginTranscription, PluginError> {
         Err(PluginError::not_supported("transcribe"))
     }
 }

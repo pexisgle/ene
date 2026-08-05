@@ -412,13 +412,6 @@ audio-tts-presets = Quick Presets
 audio-preset-kokoro = Kokoro 82M (Local, Recommended)
 audio-preset-openai = OpenAI TTS (Cloud)
 audio-preset-none = Disabled
-audio-model-status = Model Status
-audio-status-ready = Ready
-audio-status-missing = Not Downloaded
-audio-download-button = Auto-Download Model Now
-audio-downloading = Downloading model files...
-audio-download-success = Model files downloaded successfully
-audio-download-error = Download failed: { $error }
 
 # Permission
 permission-requested = Permission Requested

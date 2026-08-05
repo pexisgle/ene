@@ -146,13 +146,13 @@ impl SttProvider for IpcSttProvider {
             .await;
         drop(permit);
 
-        let text = match outcome {
-            Ok(text) => text,
+        let (text, language) = match outcome {
+            Ok(result) => result,
             Err(e) => return Err(map_host_error(e)),
         };
         Ok(SttResult {
             text,
-            language: None,
+            language,
             duration_secs: (pcm.len() as f32) / (sample_rate.max(1) as f32),
         })
     }
@@ -214,6 +214,7 @@ mod tests {
                             PluginIpcResponse::TranscriptionResult {
                                 request_id,
                                 text: "hello world".into(),
+                                language: Some("en".into()),
                             }
                         }
                         other => PluginIpcResponse::Error {
@@ -263,7 +264,7 @@ mod tests {
         let pcm = vec![0.0_f32; 16_000];
         let result = provider.transcribe(&pcm, 16_000).await.expect("transcribe");
         assert_eq!(result.text, "hello world");
-        assert_eq!(result.language, None);
+        assert_eq!(result.language.as_deref(), Some("en"));
         assert!((result.duration_secs - 1.0).abs() < 1e-4);
         server.abort();
     }

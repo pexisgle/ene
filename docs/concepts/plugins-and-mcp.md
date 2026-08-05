@@ -133,7 +133,12 @@ v7 `ProcessVadChunk` round trip; `IpcVadEngine` / `IpcVadFactory`
 calls from the capture thread via `Handle::block_on` — one local IPC round
 trip per 32 ms frame, comparable to the in-process ONNX inference it
 replaced. VAD engine state lives in the plugin process, keyed by a
-host-generated `session_id`; `reset` discards it.
+host-generated `session_id`; `reset` discards it, and dropping the engine
+sends a final `reset` so repeated mic toggles do not leak sessions in the
+plugin. `VadProviderSpec` carries the engine's `frame_size` and `sample_rate`
+(16 kHz default), and each chunk round trip is bounded by a 2-second timeout
+so a wedged plugin cannot freeze the audio callback for the default
+two-minute request timeout.
 
 The `edge-tts` plugin (`plugins/provider/edge-tts`) implements the same
 `TtsPlugin` contract against Microsoft's free, keyless Edge Read Aloud

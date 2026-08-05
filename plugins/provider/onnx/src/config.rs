@@ -43,13 +43,27 @@ impl VadConfig {
     /// Parses the provider config blob delivered with each `ProcessVadChunk`
     /// request.
     ///
+    /// `threshold` is clamped to `[0.0, 1.0]` (with a warning when adjusted),
+    /// matching the clamping the former `ai.vad.threshold` resolve applied.
+    ///
     /// # Errors
     ///
     /// Returns a provider error when the blob is not a JSON object or a
     /// field has the wrong type.
     pub fn from_value(value: &Value) -> Result<Self, PluginError> {
-        serde_json::from_value(value.clone())
-            .map_err(|e| PluginError::provider(format!("invalid onnx provider config: {e}")))
+        let mut config: Self = serde_json::from_value(value.clone())
+            .map_err(|e| PluginError::provider(format!("invalid onnx provider config: {e}")))?;
+        let clamped = config.threshold.clamp(0.0, 1.0);
+        if (clamped - config.threshold).abs() > f32::EPSILON {
+            tracing::warn!(
+                component = "ene-plugin-onnx",
+                value = config.threshold,
+                clamped,
+                "VAD threshold out of range; clamping"
+            );
+            config.threshold = clamped;
+        }
+        Ok(config)
     }
 
     /// Resolves the ONNX model path with the same precedence the in-process
@@ -117,5 +131,14 @@ mod tests {
     fn from_value_rejects_wrong_types() {
         let err = VadConfig::from_value(&Value::String("nope".into())).expect_err("not an object");
         assert!(err.to_string().contains("invalid onnx provider config"));
+    }
+
+    #[test]
+    fn from_value_clamps_threshold() {
+        let config = VadConfig::from_value(&serde_json::json!({"threshold": 2.5})).expect("parses");
+        assert!((config.threshold - 1.0).abs() < f32::EPSILON);
+        let config =
+            VadConfig::from_value(&serde_json::json!({"threshold": -0.5})).expect("parses");
+        assert!(config.threshold.abs() < f32::EPSILON);
     }
 }

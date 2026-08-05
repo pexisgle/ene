@@ -134,6 +134,11 @@ v7 の `ProcessVadChunk` ラウンドトリップで提供します。`IpcVadEng
 —— 32 ms フレームあたりローカル IPC 往復 1 回で、置き換えたプロセス内 ONNX
 推論と同程度です。VAD エンジンの状態はプラグインプロセス側に
 ホスト生成の `session_id` をキーとして保持され、`reset` で破棄されます。
+エンジンの drop 時にも最終 `reset` が送られるため、マイクのオン・オフを
+繰り返してもプラグイン側にセッションが漏れません。`VadProviderSpec` は
+エンジンの `frame_size` と `sample_rate`（既定 16 kHz）を保持し、各チャンクの
+往復は 2 秒タイムアウトで制限されるため、動かなくなったプラグインが既定の
+2 分タイムアウトまでオーディオコールバックを固めることはありません。
 
 `edge-tts` プラグイン（`plugins/provider/edge-tts`）は、同じ `TtsPlugin`
 契約を Microsoft の無料・キー不要な Edge 読み上げ WebSocket エンドポイント

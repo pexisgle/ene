@@ -683,6 +683,10 @@ pub enum PluginIpcResponse {
         request_id: String,
         /// Transcribed text.
         text: String,
+        /// Detected language code (e.g. `"ja"`, `"en"`), when the plugin
+        /// knows it. Older plugins omit the field and deserialize to `None`.
+        #[serde(default)]
+        language: Option<String>,
     },
     /// Result of one [`PluginIpcRequest::ProcessVadChunk`] step.
     VadChunkResult {
@@ -1512,9 +1516,20 @@ mod tests {
         let resp = PluginIpcResponse::TranscriptionResult {
             request_id: "req-stt-1".into(),
             text: "Hello world".into(),
+            language: Some("en".into()),
         };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
+    }
+
+    #[test]
+    fn transcription_result_missing_language_defaults_to_none() {
+        let json = r#"{"TranscriptionResult":{"request_id":"r1","text":"hello"}}"#;
+        let resp: PluginIpcResponse = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            resp,
+            PluginIpcResponse::TranscriptionResult { language: None, .. }
+        ));
     }
 
     #[tokio::test]

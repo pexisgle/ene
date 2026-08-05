@@ -750,6 +750,7 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             | PluginIpcRequest::EmbedBatch { .. }
             | PluginIpcRequest::SynthesizeSpeech { .. }
             | PluginIpcRequest::TranscribeAudio { .. }
+            | PluginIpcRequest::ProcessVadChunk { .. }
             | PluginIpcRequest::PollDeferred { .. }) => {
                 let dispatch = Arc::clone(dispatch);
                 let tx = tx.clone();
@@ -1212,9 +1213,10 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 )
                 .await
             {
-                Ok(text) => PluginIpcResponse::TranscriptionResult {
+                Ok(transcription) => PluginIpcResponse::TranscriptionResult {
                     request_id: request_id.clone(),
-                    text,
+                    text: transcription.text,
+                    language: transcription.language,
                 },
                 Err(e) => PluginIpcResponse::Error {
                     request_id: request_id.clone(),
@@ -1459,7 +1461,8 @@ async fn run_chat_stream(
 mod tests {
     use super::*;
     use crate::plugin::{
-        ConfigurablePlugin, PluginCompletion, PluginStreamChunk, ToolPluginCapabilities,
+        ConfigurablePlugin, PluginCompletion, PluginStreamChunk, PluginTranscription,
+        ToolPluginCapabilities,
     };
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
@@ -1571,11 +1574,75 @@ mod tests {
 
     impl ConfigurablePlugin for GatedToolPlugin {}
 
+    /// A VAD plugin whose `process_chunk` blocks until released, standing in
+    /// for a slow first-chunk model load.
+    struct GatedVadPlugin {
+        in_flight: std::sync::atomic::AtomicUsize,
+        released: std::sync::atomic::AtomicBool,
+        notify: tokio::sync::Notify,
+    }
+
+    impl GatedVadPlugin {
+        fn new() -> Self {
+            Self {
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                released: std::sync::atomic::AtomicBool::new(false),
+                notify: tokio::sync::Notify::new(),
+            }
+        }
+
+        async fn wait(&self) {
+            use std::sync::atomic::Ordering;
+            while !self.released.load(Ordering::Acquire) {
+                self.notify.notified().await;
+            }
+        }
+
+        fn release(&self) {
+            use std::sync::atomic::Ordering;
+            self.released.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+
+        fn in_flight(&self) -> usize {
+            self.in_flight.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    #[async_trait]
+    impl VadPlugin for GatedVadPlugin {
+        fn vad_capabilities(&self) -> Vec<VadProviderSpec> {
+            vec![VadProviderSpec {
+                kind: "mock_vad".into(),
+                frame_size: 512,
+                sample_rate: 16_000,
+                concurrency: ConcurrencyHint::default(),
+            }]
+        }
+
+        async fn process_chunk(
+            &self,
+            _kind: &str,
+            _config: serde_json::Value,
+            _session_id: String,
+            _pcm: Vec<f32>,
+            _reset: bool,
+        ) -> Result<VadEvent, PluginError> {
+            use std::sync::atomic::Ordering;
+            self.in_flight.fetch_add(1, Ordering::AcqRel);
+            self.wait().await;
+            self.in_flight.fetch_sub(1, Ordering::AcqRel);
+            Ok(VadEvent::Silence)
+        }
+    }
+
+    impl ConfigurablePlugin for GatedVadPlugin {}
+
     /// Waits (with a deadlock backstop) until `plugin.in_flight()` reaches
     /// `expected`.
-    async fn wait_for_in_flight(plugin: &GatedToolPlugin, expected: usize) {
+    async fn wait_for_in_flight(count: impl Fn() -> usize, expected: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while plugin.in_flight() < expected {
+        while count() < expected {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "timed out waiting for {expected} in-flight call(s)"
@@ -1729,8 +1796,11 @@ mod tests {
             _config: serde_json::Value,
             _audio_data: Vec<u8>,
             _format: String,
-        ) -> Result<String, PluginError> {
-            Ok("Mock transcription".into())
+        ) -> Result<PluginTranscription, PluginError> {
+            Ok(PluginTranscription {
+                text: "Mock transcription".into(),
+                language: None,
+            })
         }
     }
 
@@ -1745,6 +1815,7 @@ mod tests {
             vec![VadProviderSpec {
                 kind: "mock_vad".into(),
                 frame_size: 512,
+                sample_rate: 16_000,
                 concurrency: ConcurrencyHint::default(),
             }]
         }
@@ -2779,9 +2850,14 @@ mod tests {
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
-            PluginIpcResponse::TranscriptionResult { request_id, text } => {
+            PluginIpcResponse::TranscriptionResult {
+                request_id,
+                text,
+                language,
+            } => {
                 assert_eq!(request_id, "req-stt-1");
                 assert_eq!(text, "Mock transcription");
+                assert_eq!(language, None);
             }
             other => panic!("expected TranscriptionResult, got {other:?}"),
         }
@@ -3086,7 +3162,7 @@ mod tests {
         }
 
         // Both calls must reach the plugin and be blocked at the same time.
-        wait_for_in_flight(&plugin, 2).await;
+        wait_for_in_flight(|| plugin.in_flight(), 2).await;
 
         plugin.release();
 
@@ -3157,7 +3233,7 @@ mod tests {
         .expect("write call");
 
         // Wait until the slow call is in flight, then ping.
-        wait_for_in_flight(&plugin, 1).await;
+        wait_for_in_flight(|| plugin.in_flight(), 1).await;
 
         write_plugin_request(
             &mut client,
@@ -3186,5 +3262,87 @@ mod tests {
         assert_eq!(plugin.in_flight(), 1, "slow call must still be blocked");
 
         plugin.release();
+    }
+
+    /// A `Ping` must be answered while a slow VAD chunk is still in flight:
+    /// the onnx plugin's first-chunk model load can take hundreds of
+    /// milliseconds, and an inline dispatch would stall the read loop past
+    /// the host's liveness probe timeout (5 s).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ping_answered_while_vad_chunk_in_flight() {
+        use std::sync::Arc as StdArc;
+
+        use ene_plugin_proto::{read_plugin_response, write_plugin_request};
+
+        let plugin = StdArc::new(GatedVadPlugin::new());
+        let dispatch = StdArc::new(
+            PluginDispatch::new(None, None, None, None, None)
+                .with_vad(StdArc::clone(&plugin) as StdArc<dyn VadPlugin>),
+        );
+        let shutdown = StdArc::new(tokio::sync::Notify::new());
+
+        let (client, server) = tokio::net::UnixStream::pair().expect("unix pair");
+        tokio::spawn(handle_connection(
+            StdArc::clone(&dispatch),
+            IpcStream::Unix(server),
+            StdArc::clone(&shutdown),
+        ));
+        let mut client = client;
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::ProcessVadChunk {
+                request_id: "slow-vad".into(),
+                provider_kind: "mock_vad".into(),
+                provider_config: serde_json::json!({}),
+                session_id: "s1".into(),
+                pcm: vec![0.0; 512],
+                reset: false,
+            },
+            WireFormat::Json,
+        )
+        .await
+        .expect("write vad chunk");
+
+        // Wait until the slow chunk is in flight, then ping.
+        wait_for_in_flight(|| plugin.in_flight(), 1).await;
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::Ping {
+                request_id: "p1".into(),
+            },
+            WireFormat::Json,
+        )
+        .await
+        .expect("write ping");
+
+        // The Pong must arrive while the chunk is still blocked.
+        let resp = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_plugin_response(&mut client, WireFormat::Json),
+        )
+        .await
+        .expect("no timeout")
+        .expect("read ok")
+        .expect("non-EOF");
+        assert!(
+            matches!(&resp, PluginIpcResponse::Pong { request_id } if request_id == "p1"),
+            "expected Pong while VAD chunk pending, got {resp:?}"
+        );
+        assert_eq!(plugin.in_flight(), 1, "VAD chunk must still be blocked");
+
+        plugin.release();
+        // The chunk's response follows once released.
+        let resp = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_plugin_response(&mut client, WireFormat::Json),
+        )
+        .await
+        .expect("no timeout")
+        .expect("read ok")
+        .expect("non-EOF");
+        assert!(matches!(resp, PluginIpcResponse::VadChunkResult { .. }));
     }
 }

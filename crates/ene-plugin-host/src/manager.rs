@@ -1105,42 +1105,42 @@ impl PluginHostManager {
                 stt_factory_plugins.insert(spec.kind.clone(), name.clone());
             }
 
-            // VAD needs protocol v7 (`ProcessVadChunk`); a peer that
-            // negotiated v6 cannot receive the request, so its factories are
-            // never registered even if the handshake advertised them.
-            if conn.supports_vad() {
-                for spec in &caps.vad_providers {
-                    if spec.frame_size == 0 {
-                        tracing::warn!(
-                            component = "PluginHostManager",
-                            plugin = %name,
-                            kind = %spec.kind,
-                            "VAD provider declared frame_size 0; skipping"
-                        );
-                        continue;
-                    }
-                    if vad_factories.contains_key(&spec.kind) {
-                        tracing::warn!(
-                            component = "PluginHostManager",
-                            plugin = %name,
-                            kind = %spec.kind,
-                            "Duplicate VAD provider kind; skipping"
-                        );
-                        continue;
-                    }
-                    let factory = IpcVadFactory::new(
-                        spec.kind.clone(),
-                        Arc::clone(conn),
-                        name.clone(),
-                        spec.frame_size as usize,
-                        tokio::runtime::Handle::current(),
+            for spec in &caps.vad_providers {
+                if !vad_spec_eligible(spec, conn.supports_vad()) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        kind = %spec.kind,
+                        frame_size = spec.frame_size,
+                        sample_rate = spec.sample_rate,
+                        negotiated_version = conn.negotiated_version(),
+                        "VAD provider spec ineligible (peer below v7 or invalid frame_size/sample_rate); skipping"
                     );
-                    vad_factories.insert(
-                        spec.kind.clone(),
-                        Arc::new(factory) as Arc<dyn ene_ai::VadFactory>,
-                    );
-                    vad_factory_plugins.insert(spec.kind.clone(), name.clone());
+                    continue;
                 }
+                if vad_factories.contains_key(&spec.kind) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        kind = %spec.kind,
+                        "Duplicate VAD provider kind; skipping"
+                    );
+                    continue;
+                }
+                let factory = IpcVadFactory::new(
+                    spec.kind.clone(),
+                    Arc::clone(conn),
+                    name.clone(),
+                    spec.frame_size as usize,
+                    spec.sample_rate,
+                    spec.concurrency,
+                    tokio::runtime::Handle::current(),
+                );
+                vad_factories.insert(
+                    spec.kind.clone(),
+                    Arc::new(factory) as Arc<dyn ene_ai::VadFactory>,
+                );
+                vad_factory_plugins.insert(spec.kind.clone(), name.clone());
             }
 
             supervised.push(Arc::clone(&started_plugin.plugin));
@@ -1809,6 +1809,16 @@ fn is_builtin_plugin(name: &str) -> bool {
     BUILTIN_PLUGIN_NAMES.contains(&name)
 }
 
+/// Returns whether a VAD provider spec may be registered as a factory.
+///
+/// Two gates: the peer must have negotiated protocol v7 (`ProcessVadChunk`
+/// did not exist before it, so a v6 peer would fail to deserialize the
+/// request), and the spec must carry a non-zero `frame_size` and
+/// `sample_rate` (the host cannot service a session it cannot frame).
+fn vad_spec_eligible(spec: &ene_plugin_proto::VadProviderSpec, supports_vad: bool) -> bool {
+    supports_vad && spec.frame_size != 0 && spec.sample_rate != 0
+}
+
 /// Finds the binary path for a plugin by name, searching builtin and user
 /// directories with both `ene-plugin-{name}` and `{name}` naming conventions.
 ///
@@ -2249,6 +2259,37 @@ mod tests {
         assert!(!is_builtin_plugin("evil"));
         assert!(!is_builtin_plugin("ene-plugin-evil"));
         assert!(!is_builtin_plugin(""));
+    }
+
+    #[test]
+    fn vad_spec_eligible_requires_v7_and_valid_frame_geometry() {
+        use ene_plugin_proto::VadProviderSpec;
+
+        let valid = VadProviderSpec {
+            kind: "silero".into(),
+            frame_size: 512,
+            sample_rate: 16_000,
+            concurrency: ene_plugin_proto::ConcurrencyHint::default(),
+        };
+        // A v6 peer that somehow advertised the spec must still be refused:
+        // no VAD factory may be registered for it.
+        assert!(!vad_spec_eligible(&valid, false));
+        assert!(vad_spec_eligible(&valid, true));
+
+        assert!(!vad_spec_eligible(
+            &VadProviderSpec {
+                frame_size: 0,
+                ..valid.clone()
+            },
+            true
+        ));
+        assert!(!vad_spec_eligible(
+            &VadProviderSpec {
+                sample_rate: 0,
+                ..valid
+            },
+            true
+        ));
     }
 
     #[test]

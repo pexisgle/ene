@@ -47,6 +47,7 @@ fn map_engine_error(e: &AudioProviderError) -> PluginError {
     kind = "silero",
     // Silero VAD v5 operates on 512-sample (32 ms) chunks at 16 kHz.
     frame_size = 512,
+    sample_rate = 16000,
     // One ONNX session runs one step at a time; the per-session capture loop
     // is inherently serial anyway.
     concurrency = 1,

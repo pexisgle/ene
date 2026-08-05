@@ -13,19 +13,31 @@
 //! VAD engine state (recurrent cell state, speech edge tracking) lives in
 //! the plugin process, keyed by a host-generated `session_id`. Each
 //! [`IpcVadEngine`] instance owns one id for its lifetime; `reset` clears
-//! the plugin-side state. Sessions are inherently serial (one capture loop
-//! per engine), so no [`ConcurrencyLimiter`](crate::ipc_provider::ConcurrencyLimiter)
-//! gates the calls — the plugin's own mutex serializes any concurrent
-//! sessions.
+//! the plugin-side state, and dropping the engine sends a final `reset` so
+//! repeated mic toggles do not leak ONNX sessions in the plugin process.
+//! The factory's [`ConcurrencyLimiter`](crate::ipc_provider::ConcurrencyLimiter)
+//! enforces the plugin's declared `ConcurrencyHint` across sessions (each
+//! chunk holds a permit for its round trip).
+//!
+//! ## Runtime requirements
+//!
+//! `process_chunk` runs `Handle::block_on` from the capture thread, which
+//! requires the captured runtime to make progress independently of that
+//! thread: use a multi-thread runtime (the desktop's runtime is). A
+//! current-thread runtime whose only driver is the blocked caller would
+//! deadlock; the factory captures `Handle::current()` at manager startup,
+//! so the requirement is on the host process, not per call.
 
 use std::sync::Arc;
 
 use ene_ai::AudioProviderError;
 use ene_ai::traits::VadEngine;
 use ene_ai::{VadEvent, VadFactory};
+use ene_plugin_proto::ConcurrencyHint;
 use ene_plugin_proto::VadEvent as WireVadEvent;
 
 use crate::ipc_plugin::IpcPluginConnection;
+use crate::ipc_provider::ConcurrencyLimiter;
 
 /// Generates unique session ids for the plugin-side engine state map.
 fn next_session_id() -> String {
@@ -56,8 +68,12 @@ pub struct IpcVadEngine {
     plugin_name: String,
     session_id: String,
     frame_size: usize,
+    sample_rate: u32,
     config_snapshot: serde_json::Value,
     handle: tokio::runtime::Handle,
+    /// Shared with every other engine instance the owning factory creates,
+    /// so the plugin's declared concurrency bound holds across sessions.
+    limiter: Arc<ConcurrencyLimiter>,
 }
 
 impl IpcVadEngine {
@@ -68,8 +84,10 @@ impl IpcVadEngine {
         conn: Arc<IpcPluginConnection>,
         plugin_name: String,
         frame_size: usize,
+        sample_rate: u32,
         config_snapshot: serde_json::Value,
         handle: tokio::runtime::Handle,
+        limiter: Arc<ConcurrencyLimiter>,
     ) -> Self {
         Self {
             kind,
@@ -77,9 +95,18 @@ impl IpcVadEngine {
             plugin_name,
             session_id: next_session_id(),
             frame_size,
+            sample_rate,
             config_snapshot,
             handle,
+            limiter,
         }
+    }
+
+    /// The PCM sample rate this engine's chunks arrive at (from the
+    /// plugin's `VadProviderSpec`).
+    #[must_use]
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 
     /// Returns the live plugin blob (or the creation-time snapshot).
@@ -90,17 +117,47 @@ impl IpcVadEngine {
 
     fn round_trip(&self, pcm: Vec<f32>, reset: bool) -> Result<VadEvent, AudioProviderError> {
         let conn = Arc::clone(&self.conn);
+        let limiter = Arc::clone(&self.limiter);
         let kind = self.kind.clone();
         let config = self.current_provider_config();
         let session_id = self.session_id.clone();
-        let outcome = self.handle.block_on(async move {
-            conn.process_vad_chunk(String::new(), kind, config, session_id, pcm, reset)
-                .await
+        let outcome: Result<WireVadEvent, AudioProviderError> = self.handle.block_on(async move {
+            let permit = limiter.acquire(&kind).await.map_err(|e| match e {
+                ene_ai::LlmProviderError::Busy { queue_depth } => {
+                    AudioProviderError::Busy { queue_depth }
+                }
+                other => AudioProviderError::Provider(other.to_string()),
+            })?;
+            let result = conn
+                .process_vad_chunk(String::new(), kind, config, session_id, pcm, reset)
+                .await;
+            drop(permit);
+            result.map_err(map_host_error)
         });
         match outcome {
             Ok(event) => Ok(map_event(event)),
-            Err(e) => Err(map_host_error(e)),
+            Err(e) => Err(e),
         }
+    }
+}
+
+impl Drop for IpcVadEngine {
+    fn drop(&mut self) {
+        // Best-effort teardown: tell the plugin to discard this session's
+        // engine state so repeated mic toggles do not leak ONNX sessions in
+        // the plugin process. Fire-and-forget on the captured runtime; if it
+        // is already shut down the spawn fails silently (the plugin is
+        // shutting down too).
+        let conn = Arc::clone(&self.conn);
+        let kind = self.kind.clone();
+        let config = self.current_provider_config();
+        let session_id = self.session_id.clone();
+        drop(self.handle.spawn(async move {
+            drop(
+                conn.process_vad_chunk(String::new(), kind, config, session_id, Vec::new(), true)
+                    .await,
+            );
+        }));
     }
 }
 
@@ -165,14 +222,19 @@ pub struct IpcVadFactory {
     conn: Arc<IpcPluginConnection>,
     plugin_name: String,
     frame_size: usize,
+    sample_rate: u32,
     handle: tokio::runtime::Handle,
+    /// Shared across every engine instance this factory creates, enforcing
+    /// the plugin's declared [`ConcurrencyHint`] across sessions.
+    limiter: Arc<ConcurrencyLimiter>,
 }
 
 impl IpcVadFactory {
     /// Creates a new factory for the given engine kind, sharing the plugin
     /// connection.
     ///
-    /// `frame_size` comes from the plugin's `VadProviderSpec`; `handle` is
+    /// `frame_size` and `sample_rate` come from the plugin's
+    /// `VadProviderSpec`; `concurrency` is its declared hint; `handle` is
     /// the runtime that owns the connection (captured at manager startup),
     /// used by each engine to bridge its synchronous `process_chunk` calls.
     #[must_use]
@@ -181,6 +243,8 @@ impl IpcVadFactory {
         conn: Arc<IpcPluginConnection>,
         plugin_name: String,
         frame_size: usize,
+        sample_rate: u32,
+        concurrency: ConcurrencyHint,
         handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
@@ -188,7 +252,9 @@ impl IpcVadFactory {
             conn,
             plugin_name,
             frame_size,
+            sample_rate,
             handle,
+            limiter: Arc::new(ConcurrencyLimiter::new(concurrency)),
         }
     }
 }
@@ -209,8 +275,10 @@ impl VadFactory for IpcVadFactory {
             Arc::clone(&self.conn),
             self.plugin_name.clone(),
             self.frame_size,
+            self.sample_rate,
             blob,
             self.handle.clone(),
+            Arc::clone(&self.limiter),
         )))
     }
 }
@@ -225,16 +293,22 @@ mod tests {
     use std::sync::Arc;
 
     use ene_plugin_proto::{
-        IpcListener, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest,
-        PluginIpcResponse, WireFormat, cleanup_path, read_plugin_request, write_plugin_response,
+        ConcurrencyHint, IpcListener, PluginCapabilities, PluginIpcRequest, PluginIpcResponse,
+        WireFormat, cleanup_path, read_plugin_request, write_plugin_response,
     };
     use tokio::sync::Mutex;
 
     use super::*;
 
-    /// A scripted fake VAD plugin: completes the handshake, then answers
-    /// `ProcessVadChunk` with `SpeechStart` (or `Silence` for resets).
-    async fn run_mock_vad_server(socket_path: PathBuf) {
+    /// A scripted fake VAD plugin: completes the handshake at `ack_version`,
+    /// then answers `ProcessVadChunk` with `SpeechStart` (or `Silence` for
+    /// resets). `received` records every `(session_id, reset)` pair so tests
+    /// can assert teardown behavior.
+    async fn run_mock_vad_server(
+        socket_path: PathBuf,
+        ack_version: u32,
+        received: Arc<Mutex<Vec<(String, bool)>>>,
+    ) {
         cleanup_path(&socket_path);
         let Ok(mut listener) = IpcListener::bind(&socket_path) else {
             return;
@@ -243,20 +317,21 @@ mod tests {
             let Ok(stream) = listener.accept().await else {
                 break;
             };
+            let received = Arc::clone(&received);
             tokio::spawn(async move {
                 let (mut read_half, write_half) = tokio::io::split(stream);
                 let writer = Arc::new(Mutex::new(write_half));
                 let mut format = WireFormat::Json;
                 while let Ok(Some(req)) = read_plugin_request(&mut read_half, format).await {
                     let resp_format = if matches!(&req, PluginIpcRequest::Handshake { .. }) {
-                        format = WireFormat::for_version(PLUGIN_IPC_PROTOCOL_VERSION);
+                        format = WireFormat::for_version(ack_version);
                         WireFormat::Json
                     } else {
                         format
                     };
                     let resp = match req {
                         PluginIpcRequest::Handshake { .. } => PluginIpcResponse::HandshakeAck {
-                            version: PLUGIN_IPC_PROTOCOL_VERSION,
+                            version: ack_version,
                             capabilities: PluginCapabilities {
                                 tools: 0,
                                 llm_providers: Vec::new(),
@@ -266,15 +341,21 @@ mod tests {
                             },
                         },
                         PluginIpcRequest::ProcessVadChunk {
-                            request_id, reset, ..
-                        } => PluginIpcResponse::VadChunkResult {
                             request_id,
-                            event: if reset {
-                                WireVadEvent::Silence
-                            } else {
-                                WireVadEvent::SpeechStart
-                            },
-                        },
+                            reset,
+                            session_id,
+                            ..
+                        } => {
+                            received.lock().await.push((session_id, reset));
+                            PluginIpcResponse::VadChunkResult {
+                                request_id,
+                                event: if reset {
+                                    WireVadEvent::Silence
+                                } else {
+                                    WireVadEvent::SpeechStart
+                                },
+                            }
+                        }
                         other => PluginIpcResponse::Error {
                             request_id: String::new(),
                             message: format!("unexpected request: {other:?}"),
@@ -287,13 +368,17 @@ mod tests {
         }
     }
 
-    // A multi-thread runtime so the OS thread's `block_on` can schedule the
-    // connection work while the test thread waits on the channel.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn process_chunk_roundtrips_event_and_reset() {
+    async fn spawn_engine(
+        ack_version: u32,
+        received: Arc<Mutex<Vec<(String, bool)>>>,
+    ) -> (IpcVadEngine, tokio::task::JoinHandle<()>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket_path = dir.path().join("vad.sock");
-        let server = tokio::spawn(run_mock_vad_server(socket_path.clone()));
+        let server = tokio::spawn(run_mock_vad_server(
+            socket_path.clone(),
+            ack_version,
+            received,
+        ));
         let conn = crate::ipc_plugin::IpcPluginConnection::connect(
             &socket_path,
             ene_plugin_proto::SandboxConfigData::default(),
@@ -304,17 +389,27 @@ mod tests {
         )
         .await
         .expect("connect to mock VAD plugin");
-        let factory = IpcVadFactory::new(
+        let engine = IpcVadEngine::new(
             "silero".into(),
             Arc::new(conn),
             "onnx".into(),
             512,
+            16_000,
+            serde_json::Value::Null,
             tokio::runtime::Handle::current(),
+            Arc::new(ConcurrencyLimiter::new(ConcurrencyHint::default())),
         );
-        let engine = factory
-            .create_engine(&ene_config::EneConfig::default())
-            .expect("create engine");
+        (engine, server, dir)
+    }
+
+    // A multi-thread runtime so the OS thread's `block_on` can schedule the
+    // connection work while the test thread waits on the channel.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn process_chunk_roundtrips_event_and_reset() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (engine, server, _dir) = spawn_engine(7, received).await;
         assert_eq!(engine.frame_size(), 512);
+        assert_eq!(engine.sample_rate(), 16_000);
         assert_eq!(engine.name(), "silero");
         // `process_chunk` blocks on the runtime handle, which tokio forbids
         // from a runtime thread (the production caller is the capture
@@ -330,6 +425,62 @@ mod tests {
             rx.recv().expect("process result").expect("process ok"),
             VadEvent::SpeechStart
         );
+        server.abort();
+    }
+
+    /// The negotiated-version gate: a v6 peer cannot receive `ProcessVadChunk`
+    /// (the variant did not exist before v7), so the connection must report
+    /// no VAD support even though the mock "advertises" it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn supports_vad_follows_negotiated_version() {
+        for (ack_version, expected) in [(6, false), (7, true)] {
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let dir = tempfile::tempdir().expect("tempdir");
+            let socket_path = dir.path().join(format!("vad-{ack_version}.sock"));
+            let server = tokio::spawn(run_mock_vad_server(
+                socket_path.clone(),
+                ack_version,
+                received,
+            ));
+            let conn = crate::ipc_plugin::IpcPluginConnection::connect(
+                &socket_path,
+                ene_plugin_proto::SandboxConfigData::default(),
+                None,
+                None,
+                std::time::Duration::from_secs(5),
+                4,
+            )
+            .await
+            .expect("connect to mock VAD plugin");
+            assert_eq!(conn.supports_vad(), expected);
+            server.abort();
+        }
+    }
+
+    /// Dropping the engine must send a session teardown (`reset`) so
+    /// repeated mic toggles do not leak ONNX sessions in the plugin process.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drop_sends_session_teardown() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (engine, server, _dir) = spawn_engine(7, Arc::clone(&received)).await;
+        let session_id = engine.session_id.clone();
+        drop(engine);
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let seen = received.lock().await.clone();
+            if seen
+                .iter()
+                .any(|(session, reset)| session == &session_id && *reset)
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for session teardown"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         server.abort();
     }
 

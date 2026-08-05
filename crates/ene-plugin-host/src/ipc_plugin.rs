@@ -26,6 +26,15 @@ const CONNECT_MAX_RETRIES: u32 = 50;
 const CONNECT_DELAY: Duration = Duration::from_millis(50);
 /// Default per-call timeout (2 min — LLM calls can be slow).
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
+
+/// Timeout for one [`PluginIpcRequest::ProcessVadChunk`] round trip.
+///
+/// VAD chunks are sent from the microphone capture thread (a cpal audio
+/// callback) at 32 ms cadence, so a wedged plugin must fail the chunk fast
+/// instead of freezing the callback for the default two-minute request
+/// timeout. A healthy Silero step takes milliseconds; two seconds is
+/// generous for even a slow machine while bounding the freeze.
+const PROCESS_VAD_CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
 /// Timeout for a `Ping` liveness probe.
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1139,7 +1148,7 @@ impl IpcPluginConnection {
         provider_config: serde_json::Value,
         audio_base64: String,
         format: String,
-    ) -> Result<String, PluginHostError> {
+    ) -> Result<(String, Option<String>), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::TranscribeAudio {
                 request_id,
@@ -1150,7 +1159,7 @@ impl IpcPluginConnection {
             })
             .await?;
         match resp {
-            PluginIpcResponse::TranscriptionResult { text, .. } => Ok(text),
+            PluginIpcResponse::TranscriptionResult { text, language, .. } => Ok((text, language)),
             PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to TranscribeAudio: {other:?}"
@@ -1173,14 +1182,17 @@ impl IpcPluginConnection {
         reset: bool,
     ) -> Result<ene_plugin_proto::VadEvent, PluginHostError> {
         let resp = self
-            .do_request(PluginIpcRequest::ProcessVadChunk {
-                request_id,
-                provider_kind,
-                provider_config,
-                session_id,
-                pcm,
-                reset,
-            })
+            .do_request_with_timeout(
+                PluginIpcRequest::ProcessVadChunk {
+                    request_id,
+                    provider_kind,
+                    provider_config,
+                    session_id,
+                    pcm,
+                    reset,
+                },
+                PROCESS_VAD_CHUNK_TIMEOUT,
+            )
             .await?;
         match resp {
             PluginIpcResponse::VadChunkResult { event, .. } => Ok(event),
@@ -1826,6 +1838,14 @@ mod tests {
                 provider_config: serde_json::Value::Null,
                 audio_base64: "AAAA".into(),
                 format: "wav".into(),
+            },
+            PluginIpcRequest::ProcessVadChunk {
+                request_id: String::new(),
+                provider_kind: "k".into(),
+                provider_config: serde_json::Value::Null,
+                session_id: "s".into(),
+                pcm: Vec::new(),
+                reset: false,
             },
             PluginIpcRequest::EmbedBatch {
                 request_id: String::new(),

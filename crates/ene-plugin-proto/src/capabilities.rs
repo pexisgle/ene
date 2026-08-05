@@ -443,7 +443,9 @@ pub struct SttProviderSpec {
 /// `frame_size` is the one piece of engine state the host must know
 /// synchronously: a host-side `VadEngine` adapter has to answer
 /// `frame_size()` without an IPC round trip, so it carries the value from
-/// this spec.
+/// this spec. `sample_rate` is the PCM rate chunks arrive at; the host's
+/// capture pipeline runs at 16 kHz today and reserves this field for
+/// negotiating other rates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VadProviderSpec {
     /// Engine kind identifier (e.g. `"silero"`).
@@ -453,6 +455,14 @@ pub struct VadProviderSpec {
     #[serde(default)]
     pub frame_size: u32,
 
+    /// PCM sample rate the engine expects (Hz).
+    ///
+    /// Absent (or omitted by an older binary) defaults to
+    /// [`DEFAULT_SAMPLE_RATE`] — 16 kHz, the rate every built-in VAD engine
+    /// and the desktop capture pipeline use.
+    #[serde(default = "default_vad_sample_rate")]
+    pub sample_rate: u32,
+
     /// How many concurrent sessions this engine can safely serve.
     ///
     /// Absent (or omitted by an older plugin binary) defaults to
@@ -460,6 +470,14 @@ pub struct VadProviderSpec {
     /// docs for the rationale.
     #[serde(default)]
     pub concurrency: ConcurrencyHint,
+}
+
+/// Default VAD sample rate: 16 kHz (Silero VAD's native rate, shared by the
+/// desktop capture pipeline).
+pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
+
+fn default_vad_sample_rate() -> u32 {
+    DEFAULT_SAMPLE_RATE
 }
 
 /// How many concurrent jobs a plugin-supplied provider (LLM, TTS, STT) can
@@ -771,6 +789,7 @@ mod tests {
         let spec = VadProviderSpec {
             kind: "silero".into(),
             frame_size: 512,
+            sample_rate: 16_000,
             concurrency: ConcurrencyHint::default(),
         };
         let json = serde_json::to_string(&spec).unwrap();
@@ -786,6 +805,7 @@ mod tests {
         let json = r#"{"kind":"silero"}"#;
         let spec: VadProviderSpec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.frame_size, 0);
+        assert_eq!(spec.sample_rate, DEFAULT_SAMPLE_RATE);
     }
 
     /// Load-bearing contract: an unset `concurrency` field (as an old plugin

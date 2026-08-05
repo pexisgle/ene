@@ -155,7 +155,13 @@ fn stt_provider_kind_const() {
 // ── VadPlugin ────────────────────────────────────────────────────────────
 
 #[derive(VadPlugin)]
-#[provider(kind = "test-vad", frame_size = 512, concurrency = 1, queue_depth = 2)]
+#[provider(
+    kind = "test-vad",
+    frame_size = 512,
+    sample_rate = 16000,
+    concurrency = 1,
+    queue_depth = 2
+)]
 pub struct TestVadProvider;
 
 impl ConfigurablePlugin for TestVadProvider {}
@@ -173,6 +179,7 @@ fn vad_capabilities_match_attributes() {
     let spec = caps.first().expect("one generated spec");
     assert_eq!(spec.kind, "test-vad");
     assert_eq!(spec.frame_size, 512);
+    assert_eq!(spec.sample_rate, 16_000);
     assert_eq!(
         spec.concurrency,
         ConcurrencyHint {

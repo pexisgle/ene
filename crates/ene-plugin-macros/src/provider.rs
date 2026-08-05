@@ -88,6 +88,7 @@ struct ProviderAttrs {
     queue_depth: Option<u32>,
     context_window: Option<u32>,
     frame_size: Option<u32>,
+    sample_rate: Option<u32>,
     provides: Vec<String>,
     requires: Vec<String>,
 }
@@ -134,6 +135,8 @@ impl ProviderAttrs {
                     attrs.context_window = Some(parse_u32(&meta)?);
                 } else if meta.path.is_ident("frame_size") {
                     attrs.frame_size = Some(parse_u32(&meta)?);
+                } else if meta.path.is_ident("sample_rate") {
+                    attrs.sample_rate = Some(parse_u32(&meta)?);
                 } else if meta.path.is_ident("provides") {
                     let s: syn::LitStr = meta.value()?.parse()?;
                     attrs.provides = validate_capability_items(&s, "provides", |item| {
@@ -311,12 +314,16 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
                      (PCM samples per ProcessVadChunk call)",
                 )
             })?;
+            // Must match `ene_plugin_proto::DEFAULT_SAMPLE_RATE` (16 kHz, the
+            // rate every built-in VAD engine and the capture pipeline use).
+            let sample_rate = attrs.sample_rate.unwrap_or(16_000);
             let concurrency = concurrency_expr(attrs.max_in_flight, attrs.queue_depth);
             quote! {
                 pub fn #spec_method() -> ::ene_plugin::VadProviderSpec {
                     ::ene_plugin::VadProviderSpec {
                         kind: #kind_str.to_string(),
                         frame_size: #frame_size,
+                        sample_rate: #sample_rate,
                         concurrency: #concurrency,
                     }
                 }

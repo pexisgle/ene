@@ -78,8 +78,9 @@ mod wire;
 
 /// Capability and provider spec types.
 pub use capabilities::{
-    CapabilityParseError, CapabilityRef, CapabilityRequirement, ConcurrencyHint, LlmProviderSpec,
-    PluginCapabilities, ResourceClass, SttProviderSpec, TtsProviderSpec, VadProviderSpec,
+    CapabilityParseError, CapabilityRef, CapabilityRequirement, ConcurrencyHint,
+    DEFAULT_SAMPLE_RATE, LlmProviderSpec, PluginCapabilities, ResourceClass, SttProviderSpec,
+    TtsProviderSpec, VadProviderSpec,
 };
 /// Plugin error type.
 pub use error::{PluginError, ProviderErrorKind};
