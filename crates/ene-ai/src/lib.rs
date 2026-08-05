@@ -4,9 +4,10 @@
 //!
 //! Defines generic message and streaming types (`LlmMessage`, `LlmResponseChunk`),
 //! provider traits (`LlmProvider`, `EmbeddingProvider`, `LlmProviderFactory`),
-//! and global provider registries. Concrete provider backends ship as
-//! plugins (`plugins/provider/*`); this crate owns only the traits,
-//! configuration routing, health probing, retry policy, and model fetching.
+//! and the host-facing [`ProviderHost`] lookup contract. Concrete provider
+//! backends ship as plugins (`plugins/provider/*`) and are registered in the
+//! plugin host; this crate owns only the traits, configuration routing,
+//! failover policy, retry policy, and model fetching.
 //!
 //! Local inference runs in the `ene-plugin-llama-cpp` provider plugin
 //! (GGUF/llama.cpp) and [`ene-voice`] (STT/TTS/VAD).
@@ -38,8 +39,6 @@ pub mod context_window;
 pub mod engine_adapter;
 /// Error types for the AI provider layer.
 pub mod error;
-/// Provider health monitoring and failover routing.
-pub mod health;
 /// Message and streaming chunk types (`LlmMessage`, `LlmResponseChunk`, etc.).
 pub mod message;
 /// Shared, safe model-file downloader (`ModelFetcher`) used by
@@ -78,10 +77,6 @@ pub use engine_adapter::{
     SttTranscribeRequest, TtsSynthesisRequest, TtsSynthesisResponse,
 };
 pub use error::{AiError, LlmProviderError};
-pub use health::{
-    FailoverSelection, FallbackRecord, HealthCheckError, ProviderHealthMonitor,
-    ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
-};
 pub use message::{
     LlmCompletion, LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart,
 };
@@ -90,19 +85,21 @@ pub use model_fetch::{
     SizeMultipleValidator, sanitize_basename, strip_url_path, validate_https_url,
 };
 pub use resolve::{
-    ChatCandidate, ContextBudgetIssue, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel,
-    ResolvedStt, ResolvedTaskRef, ResolvedTts, ResolvedVad, SettingsIssue, needs_onboarding,
-    resolve_base_url, validate_api_key, validate_context_budgets, validate_provider_kinds,
-    validate_settings, warn_on_context_budget_issues,
+    ChatCandidate, ContextBudgetIssue, FailoverSelection, FallbackRecord, ProviderHealthMonitor,
+    ProviderHealthReport, ProviderHealthStatus, ResolvedChat, ResolvedEmbedding,
+    ResolvedLocalModel, ResolvedStt, ResolvedTaskRef, ResolvedTts, ResolvedVad, SettingsIssue,
+    needs_onboarding, probe_provider_health, resolve_base_url, select_healthy_chat,
+    validate_api_key, validate_context_budgets, validate_provider_kinds, validate_settings,
+    warn_on_context_budget_issues,
 };
 pub use retry::RetryPolicy;
 pub use role::Role;
 pub use routing::{AiTaskKind, create_chat_provider_for_task, create_task_chat_provider};
 pub use traits::{
     AudioProviderError, AudioProviderRegistry, EmbeddingError, EmbeddingKind, EmbeddingProvider,
-    EmbeddingProviderFactory, EmbeddingProviderRegistry, LlmProvider, LlmProviderFactory,
-    LlmProviderRegistry, SttProvider, SttProviderFactory, SttResult, TtsChunk, TtsProvider,
-    TtsProviderFactory, VadEngine, VadEvent, VadFactory, cosine_similarity, embed, embed_query,
+    EmbeddingProviderFactory, LlmProvider, LlmProviderFactory, ProviderHost, SttProvider,
+    SttProviderFactory, SttResult, TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent,
+    VadFactory, cosine_similarity, embed, embed_query,
 };
 
 /// Token usage accounting for LLM responses.
