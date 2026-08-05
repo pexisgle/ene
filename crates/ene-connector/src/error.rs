@@ -152,7 +152,10 @@ impl ConnectorError {
             Self::RateLimited { retry_after } => Self::RateLimited { retry_after },
             Self::WebhookRejected(reason) => Self::WebhookRejected(scrub_secrets(&reason)),
             Self::NotFound(message) => Self::NotFound(scrub_secrets(&message)),
-            Self::Io(error) => Self::Io(error),
+            Self::Io(error) => Self::Io(std::io::Error::new(
+                error.kind(),
+                scrub_secrets(&error.to_string()),
+            )),
             Self::Internal(message) => Self::Internal(scrub_secrets(&message)),
         }
     }
@@ -161,5 +164,21 @@ impl ConnectorError {
 impl From<std::io::Error> for ConnectorError {
     fn from(e: std::io::Error) -> Self {
         Self::Io(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConnectorError;
+
+    #[test]
+    fn scrub_removes_secrets_from_io_errors() {
+        let error = ConnectorError::Io(std::io::Error::other(
+            "request failed: api_key=sk-io-secret",
+        ));
+        let scrubbed = error.scrub();
+
+        assert!(!scrubbed.to_string().contains("sk-io-secret"));
+        assert!(scrubbed.to_string().contains("api_key=***"));
     }
 }
