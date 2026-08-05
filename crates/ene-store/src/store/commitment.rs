@@ -111,7 +111,8 @@ impl MemoryStore {
     /// List commitments for a character in every lifecycle status.
     ///
     /// Optional status filter; ordered by `created_at` descending so the most
-    /// recent ledger entries surface first.
+    /// recent ledger entries surface first, with `id` descending as a
+    /// deterministic tie-breaker for same-timestamp inserts.
     pub async fn list_commitments(
         &self,
         character_id: &str,
@@ -133,6 +134,7 @@ impl MemoryStore {
 
         let models = query
             .order_by_desc(entities::commitments::Column::CreatedAt)
+            .order_by_desc(entities::commitments::Column::Id)
             .limit(limit as u64)
             .all(&self.db)
             .await?;

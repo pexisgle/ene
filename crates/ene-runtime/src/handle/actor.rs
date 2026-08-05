@@ -582,19 +582,26 @@ impl TurnActor {
         Ok(())
     }
 
-    /// Re-embeds an edited memory's title and content in the background so
-    /// vector recall and contradiction keying do not serve stale text.
+    /// Re-embeds an edited memory's content in the background so vector
+    /// recall does not serve stale text.
     ///
     /// Best-effort: the in-place edit has already committed and lexical recall
     /// is immediately correct, so embedding failures are logged, never
-    /// surfaced to the caller.
-    fn spawn_memory_reembed(&mut self, id: i64, edit: &ene_store::MemoryEdit) {
+    /// surfaced to the caller. The task captures the row's `updated_at` before
+    /// embedding and re-checks it right before writing; a newer edit (which
+    /// spawns its own task) bumps `updated_at`, so a slow older task skips its
+    /// write instead of overwriting the newer embedding.
+    async fn spawn_memory_reembed(&mut self, id: i64, edit: &ene_store::MemoryEdit) {
         let Some(store) = self.concrete_store.clone() else {
             return;
         };
         let Some(embedder) = self.session.memory.embedding_provider.clone() else {
             return;
         };
+        let Ok(Some(memory)) = store.get_typed_memory(id).await else {
+            return;
+        };
+        let expected_updated_at = memory.updated_at;
         if !admit_task(
             &mut self.bg_command_tasks,
             self.task_caps.bg_command_cap,
@@ -610,43 +617,39 @@ impl TurnActor {
             return;
         }
 
-        let title = edit.title.clone();
         let content = edit.content.clone();
         self.bg_command_tasks.spawn(async move {
             let model_name = embedder.model_name();
-            match ene_ai::embed_query(embedder.as_ref(), &content).await {
-                Ok(embedding) => {
-                    if let Err(error) = store
-                        .upsert_memory_embedding(id, model_name, "content", &embedding)
-                        .await
-                    {
-                        tracing::warn!(
-                            component = "MemoryReembed",
-                            memory_id = id,
-                            error = %error,
-                            "Failed to re-embed edited memory content"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        component = "MemoryReembed",
-                        memory_id = id,
-                        error = %error,
-                        "Failed to embed edited memory content"
-                    );
-                }
+            let Ok(embedding) =
+                ene_ai::embed(embedder.as_ref(), &content, ene_ai::EmbeddingKind::Summary).await
+            else {
+                tracing::warn!(
+                    component = "MemoryReembed",
+                    memory_id = id,
+                    "Failed to embed edited memory content"
+                );
+                return;
+            };
+            let Ok(Some(current)) = store.get_typed_memory(id).await else {
+                return;
+            };
+            if current.updated_at != expected_updated_at {
+                tracing::debug!(
+                    component = "MemoryReembed",
+                    memory_id = id,
+                    "Skipping stale re-embed; memory was edited again"
+                );
+                return;
             }
-            if let Ok(embedding) = ene_ai::embed_query(embedder.as_ref(), &title).await
-                && let Err(error) = store
-                    .upsert_memory_embedding(id, model_name, "title", &embedding)
-                    .await
+            if let Err(error) = store
+                .upsert_memory_embedding(id, model_name, "content", &embedding)
+                .await
             {
                 tracing::warn!(
                     component = "MemoryReembed",
                     memory_id = id,
                     error = %error,
-                    "Failed to re-embed edited memory title"
+                    "Failed to re-embed edited memory content"
                 );
             }
         });
@@ -3511,7 +3514,8 @@ impl TurnActor {
                     })));
                     return true;
                 };
-                let result = match store.update_typed_memory(id, &edit).await {
+                let owner = Some(self.config.user_name.clone());
+                let result = match store.update_typed_memory(id, &edit, owner.as_deref()).await {
                     Ok(true) => Ok(()),
                     Ok(false) => Err(crate::public_api::PublicApiError::NotFound {
                         message: format!("memory {id} not found"),
@@ -3522,7 +3526,7 @@ impl TurnActor {
                     if let Some(cache) = &self.session.memory.recall_cache {
                         cache.invalidate_character(self.session.card_name());
                     }
-                    self.spawn_memory_reembed(id, &edit);
+                    self.spawn_memory_reembed(id, &edit).await;
                     drop(self.lifecycle_tx.send(LifecycleEvent::MemoryLedgerChanged {
                         id,
                         action: MemoryLedgerChange::Edited,

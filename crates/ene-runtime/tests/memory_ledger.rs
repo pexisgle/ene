@@ -15,6 +15,18 @@ use ene_store::{
 };
 use std::sync::Arc;
 
+/// Removes the test's character directory on drop, so a panicked test cannot
+/// leave `assets/characters/<name>` behind.
+struct TestCharacterDir(&'static str);
+
+impl Drop for TestCharacterDir {
+    fn drop(&mut self) {
+        drop(std::fs::remove_dir_all(ene_config::paths::character_dir(
+            self.0,
+        )));
+    }
+}
+
 fn test_card() -> CharacterCardV3 {
     let mut card = CharacterCardV3::default();
     card.data.name = "LedgerTest".into();
@@ -78,6 +90,7 @@ async fn open_seeded_handle(character: &str) -> (EneHandle, Arc<MemoryStore>) {
 
 #[tokio::test]
 async fn ledger_lists_memories_and_commitments_across_statuses() {
+    let _cleanup = TestCharacterDir("LedgerListTest");
     let (handle, seeder) = open_seeded_handle("LedgerListTest").await;
 
     let memory_id = seeder
@@ -186,13 +199,11 @@ async fn ledger_lists_memories_and_commitments_across_statuses() {
     );
 
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
-    drop(std::fs::remove_dir_all(ene_config::paths::character_dir(
-        "LedgerListTest",
-    )));
 }
 
 #[tokio::test]
 async fn ledger_edit_and_salience_persist_and_emit_audit_events() {
+    let _cleanup = TestCharacterDir("LedgerEditTest");
     let (handle, seeder) = open_seeded_handle("LedgerEditTest").await;
 
     let memory_id = seeder
@@ -240,6 +251,10 @@ async fn ledger_edit_and_salience_persist_and_emit_audit_events() {
         MemoryScope::User,
         "Preference kind must carry the canonical User scope"
     );
+    assert_eq!(
+        edited.user_id, "User",
+        "User-scope rows must move to the editing user (config user_name)"
+    );
 
     let mut saw_edited = false;
     let mut saw_salience = false;
@@ -270,13 +285,11 @@ async fn ledger_edit_and_salience_persist_and_emit_audit_events() {
     );
 
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
-    drop(std::fs::remove_dir_all(ene_config::paths::character_dir(
-        "LedgerEditTest",
-    )));
 }
 
 #[tokio::test]
 async fn ledger_mutations_report_missing_rows_without_events() {
+    let _cleanup = TestCharacterDir("LedgerMissingTest");
     let (handle, seeder) = open_seeded_handle("LedgerMissingTest").await;
     drop(seeder);
 
@@ -312,7 +325,39 @@ async fn ledger_mutations_report_missing_rows_without_events() {
     );
 
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
-    drop(std::fs::remove_dir_all(ene_config::paths::character_dir(
-        "LedgerMissingTest",
-    )));
+}
+
+#[tokio::test]
+async fn ledger_invalid_edit_maps_to_invalid_error() {
+    let _cleanup = TestCharacterDir("LedgerInvalidTest");
+    let (handle, seeder) = open_seeded_handle("LedgerInvalidTest").await;
+    let memory_id = seeder
+        .insert_typed_memory(&test_memory(
+            "coffee",
+            MemoryKind::Preference,
+            MemoryStatus::Active,
+        ))
+        .await
+        .unwrap();
+    drop(seeder);
+
+    let ledger = handle.memory_ledger();
+    let result = ledger
+        .edit_memory(
+            memory_id,
+            MemoryEdit {
+                title: "   ".into(),
+                content: "content".into(),
+                kind: MemoryKind::Preference,
+                confidence: MemoryConfidence::new(0.5),
+            },
+            None,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(ene_runtime::PublicApiError::Invalid { .. })),
+        "blank-title edits must surface as Invalid, got {result:?}"
+    );
+
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }

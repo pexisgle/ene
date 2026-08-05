@@ -1268,6 +1268,7 @@ async fn update_typed_memory_applies_edit_and_recomputes_scope() {
                 kind: crate::MemoryKind::Preference,
                 confidence: crate::MemoryConfidence::new(0.95),
             },
+            Some("user1"),
         )
         .await
         .unwrap();
@@ -1282,6 +1283,10 @@ async fn update_typed_memory_applies_edit_and_recomputes_scope() {
         loaded.scope,
         crate::MemoryScope::User,
         "kind change must re-derive the canonical scope"
+    );
+    assert_eq!(
+        loaded.user_id, "user1",
+        "User-scope rows must move to the editing user, not stay global"
     );
     assert_eq!(
         loaded.status,
@@ -1307,6 +1312,7 @@ async fn update_typed_memory_validates_and_reports_missing_rows() {
                 kind: crate::MemoryKind::Semantic,
                 confidence: crate::MemoryConfidence::new(0.5),
             },
+            Some("user1"),
         )
         .await;
     assert!(matches!(
@@ -1324,9 +1330,39 @@ async fn update_typed_memory_validates_and_reports_missing_rows() {
                     kind: crate::MemoryKind::Semantic,
                     confidence: crate::MemoryConfidence::new(0.5),
                 },
+                Some("user1"),
             )
             .await
             .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn update_typed_memory_resets_owner_for_character_scope() {
+    let store = setup_store().await;
+    let id = store
+        .insert_typed_memory(&sample_typed_memory(crate::MemoryKind::Preference))
+        .await
+        .unwrap();
+    store
+        .update_typed_memory(
+            id,
+            &crate::MemoryEdit {
+                title: "global note".into(),
+                content: "character-owned now".into(),
+                kind: crate::MemoryKind::Episodic,
+                confidence: crate::MemoryConfidence::new(0.5),
+            },
+            Some("user1"),
+        )
+        .await
+        .unwrap();
+
+    let loaded = store.get_typed_memory(id).await.unwrap().unwrap();
+    assert_eq!(loaded.scope, crate::MemoryScope::Character);
+    assert_eq!(
+        loaded.user_id, "",
+        "Character-scope rows are global; a stale per-user owner must not linger"
     );
 }
 

@@ -1549,12 +1549,18 @@ impl MemoryStore {
     ///
     /// Updates the user-editable fields (title, content, kind, confidence) and
     /// recomputes the ownership scope from the edited kind via
-    /// [`super::canonical_scope_for_kind`]. Returns `Ok(false)` when no row
-    /// with `id` exists; validation failures reject the edit before any write.
+    /// [`super::canonical_scope_for_kind`]. The owner follows the scope:
+    /// character-scoped rows are global (`user_id = ""`) while user/shared
+    /// rows are owned by `owner_user_id` (empty when unknown), mirroring the
+    /// candidate-approval ownership rule so a kind change cannot make a
+    /// "User"-scope row visible to every user. Returns `Ok(false)` when no
+    /// row with `id` exists; validation failures reject the edit before any
+    /// write.
     pub async fn update_typed_memory(
         &self,
         id: i64,
         edit: &crate::MemoryEdit,
+        owner_user_id: Option<&str>,
     ) -> Result<bool, EneMemoryError> {
         if edit.title.trim().is_empty() {
             return Err(EneMemoryError::InvalidMemoryEdit(
@@ -1578,7 +1584,20 @@ impl MemoryStore {
 
         let now = Utc::now();
         let scope = super::canonical_scope_for_kind(edit.kind);
+        let user_id = match scope {
+            crate::MemoryScope::Character => String::new(),
+            crate::MemoryScope::User | crate::MemoryScope::Shared => {
+                owner_user_id.unwrap_or("").to_string()
+            }
+            // `MemoryScope` is non-exhaustive; unknown scopes keep the owner
+            // rather than becoming globally visible.
+            _ => owner_user_id.unwrap_or("").to_string(),
+        };
         let result = entities::typed_memories::Entity::update_many()
+            .col_expr(
+                entities::typed_memories::Column::UserId,
+                Expr::value(user_id),
+            )
             .col_expr(
                 entities::typed_memories::Column::Scope,
                 Expr::value(scope.as_str().to_string()),

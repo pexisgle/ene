@@ -102,7 +102,7 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
     });
 
     if do_refresh {
-        refresh_ledger(ai, world, ui_entity);
+        refresh_ledger(ai, world, ui_entity, None);
     }
 
     let snapshot = world
@@ -218,15 +218,7 @@ fn render_memory_table(
                         ui.label(label_from_key(MemoryLedgerPresenter::status_label_key(
                             row.status,
                         )));
-                        ui.vertical(|ui| {
-                            let weight_label = if row.kind == MemoryKind::Preference {
-                                fl!(crate::i18n::loader(), "memory-ledger-preference-weight")
-                            } else {
-                                fl!(crate::i18n::loader(), "memory-ledger-importance")
-                            };
-                            ui.label(format!("{weight_label}: {:.2}", row.salience));
-                            render_salience_slider(ui, row, pending);
-                        });
+                        render_salience_slider(ui, row, pending);
                         ui.horizontal(|ui| {
                             if ui
                                 .button(fl!(crate::i18n::loader(), "memory-ledger-action-edit"))
@@ -268,12 +260,18 @@ fn render_salience_slider(
     row: &crate::memory_ledger::MemoryLedgerRow,
     pending: &mut Vec<PendingLedgerAction>,
 ) {
+    let weight_label = if row.kind == MemoryKind::Preference {
+        fl!(crate::i18n::loader(), "memory-ledger-preference-weight")
+    } else {
+        fl!(crate::i18n::loader(), "memory-ledger-importance")
+    };
     let mut salience = row.salience;
     let response = ui.add_sized(
         [80.0, 20.0],
         egui::Slider::new(&mut salience, 0.0..=1.0).show_value(false),
     );
-    if response.drag_stopped() {
+    ui.label(format!("{weight_label}: {salience:.2}"));
+    if response.drag_stopped() && (salience - row.salience).abs() > f32::EPSILON {
         pending.push(PendingLedgerAction::Salience {
             id: row.id,
             salience,
@@ -359,6 +357,7 @@ fn apply_pending(
     pending: Vec<PendingLedgerAction>,
 ) {
     let mut changed = false;
+    let mut feedback = None;
     for action in pending {
         changed = true;
         match action {
@@ -370,94 +369,64 @@ fn apply_pending(
                     confidence: ene_store::MemoryConfidence::new(draft.confidence),
                 };
                 match ai.edit_memory_blocking(id, edit) {
-                    Ok(()) => set_message(
-                        world,
-                        ui_entity,
-                        fl!(crate::i18n::loader(), "memory-ledger-message-saved"),
-                    ),
-                    Err(error) => set_message(
-                        world,
-                        ui_entity,
-                        format!(
+                    Ok(()) => {
+                        feedback = Some(fl!(crate::i18n::loader(), "memory-ledger-message-saved"));
+                    }
+                    Err(error) => {
+                        feedback = Some(format!(
                             "{}: {error}",
                             fl!(crate::i18n::loader(), "memory-ledger-error")
-                        ),
-                    ),
+                        ));
+                    }
                 }
             }
             PendingLedgerAction::Salience { id, salience } => {
                 match ai.set_memory_salience_blocking(id, salience) {
-                    Ok(()) => set_message(
-                        world,
-                        ui_entity,
-                        fl!(crate::i18n::loader(), "memory-ledger-message-salience"),
-                    ),
-                    Err(error) => set_message(
-                        world,
-                        ui_entity,
-                        format!(
+                    Ok(()) => {
+                        feedback =
+                            Some(fl!(crate::i18n::loader(), "memory-ledger-message-salience"));
+                    }
+                    Err(error) => {
+                        feedback = Some(format!(
                             "{}: {error}",
                             fl!(crate::i18n::loader(), "memory-ledger-error")
-                        ),
-                    ),
+                        ));
+                    }
                 }
             }
             PendingLedgerAction::Forget { id } => {
                 match ai.execute_journal_action(id, MemoryJournalAction::Forget) {
-                    Ok(true) => set_message(
-                        world,
-                        ui_entity,
-                        fl!(crate::i18n::loader(), "memory-ledger-message-deleted"),
-                    ),
-                    Ok(false) => set_message(
-                        world,
-                        ui_entity,
-                        fl!(crate::i18n::loader(), "memory-ledger-error"),
-                    ),
-                    Err(error) => set_message(
-                        world,
-                        ui_entity,
-                        format!(
-                            "{}: {error}",
-                            fl!(crate::i18n::loader(), "memory-ledger-error")
-                        ),
-                    ),
+                    Ok(true) => {
+                        feedback =
+                            Some(fl!(crate::i18n::loader(), "memory-ledger-message-deleted"));
+                    }
+                    Ok(false) | Err(_) => {
+                        feedback = Some(fl!(crate::i18n::loader(), "memory-ledger-error"));
+                    }
                 }
             }
             PendingLedgerAction::CompleteCommitment { id } => match ai.complete_commitment(id) {
-                Ok(true) => set_message(
-                    world,
-                    ui_entity,
-                    fl!(
+                Ok(true) => {
+                    feedback = Some(fl!(
                         crate::i18n::loader(),
                         "memory-ledger-message-commitment-done"
-                    ),
-                ),
-                _ => set_message(
-                    world,
-                    ui_entity,
-                    fl!(crate::i18n::loader(), "memory-ledger-error"),
-                ),
+                    ));
+                }
+                _ => feedback = Some(fl!(crate::i18n::loader(), "memory-ledger-error")),
             },
             PendingLedgerAction::CancelCommitment { id } => match ai.cancel_commitment(id) {
-                Ok(true) => set_message(
-                    world,
-                    ui_entity,
-                    fl!(
+                Ok(true) => {
+                    feedback = Some(fl!(
                         crate::i18n::loader(),
                         "memory-ledger-message-commitment-cancelled"
-                    ),
-                ),
-                _ => set_message(
-                    world,
-                    ui_entity,
-                    fl!(crate::i18n::loader(), "memory-ledger-error"),
-                ),
+                    ));
+                }
+                _ => feedback = Some(fl!(crate::i18n::loader(), "memory-ledger-error")),
             },
         }
     }
     if changed {
-        refresh_ledger(ai, world, ui_entity);
+        refresh_ledger(ai, world, ui_entity, feedback);
     }
 }
 
@@ -530,7 +499,12 @@ fn render_edit_dialog(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
     }
 }
 
-fn refresh_ledger(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
+fn refresh_ledger(
+    ai: &Arc<AiBridge>,
+    world: &mut World,
+    ui_entity: Entity,
+    feedback: Option<String>,
+) {
     match ai.refresh_memory_ledger(200) {
         Ok(payload) => {
             if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
@@ -541,8 +515,10 @@ fn refresh_ledger(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
                     .collect();
                 state.0.memory_ledger_commitments = payload.commitments;
                 state.0.memory_ledger_loaded = true;
-                state.0.memory_ledger_message =
-                    Some(fl!(crate::i18n::loader(), "memory-ledger-refresh-ok"));
+                state.0.memory_ledger_message = Some(
+                    feedback
+                        .unwrap_or_else(|| fl!(crate::i18n::loader(), "memory-ledger-refresh-ok")),
+                );
             }
         }
         Err(error) => {
@@ -582,12 +558,6 @@ fn set_pending_delete(world: &mut World, ui_entity: Entity, id: i64) {
 fn clear_pending_delete(world: &mut World, ui_entity: Entity) {
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
         state.0.memory_ledger_pending_delete = None;
-    }
-}
-
-fn set_message(world: &mut World, ui_entity: Entity, message: String) {
-    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        state.0.memory_ledger_message = Some(message);
     }
 }
 

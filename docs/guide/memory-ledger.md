@@ -1,10 +1,12 @@
 # Memory Ledger: Interactive Memory & Commitment Management
 
 The Memory Ledger is a desktop settings page for inspecting and managing the
-companion's long-term memory and commitment ledger from a GUI. It shows every
-stored memory item — episodic, semantic, user profile, relationship,
-affective, commitment, preference, procedure, world state, and reflection —
-together with the companion's commitments in every lifecycle state.
+companion's long-term memory and commitment ledger from a GUI. It shows the
+most recent stored memories visible to the current user (up to 200 rows —
+episodic, semantic, user profile, relationship, affective, commitment,
+preference, procedure, world state, and reflection), together with the
+companion's commitments in every lifecycle state. Filters run client-side over
+that loaded window.
 
 Open **Settings → Memory Ledger** (the tab right after *Memory*).
 

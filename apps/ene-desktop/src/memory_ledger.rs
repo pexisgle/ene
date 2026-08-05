@@ -89,7 +89,7 @@ impl MemoryLedgerPresenter {
 
     /// Apply the ledger's text search and kind / status / created filters.
     ///
-    /// Search matches the lowercased title and content preview; the created
+    /// Search matches the lowercased title and full content; the created
     /// filter is anchored at `now`.
     pub fn filter_rows(
         rows: &[MemoryLedgerRow],
@@ -115,7 +115,7 @@ impl MemoryLedgerPresenter {
                     return false;
                 }
                 if !query.is_empty() {
-                    let haystack = format!("{} {}", row.title, row.content_preview).to_lowercase();
+                    let haystack = format!("{} {}", row.title, row.content).to_lowercase();
                     if !haystack.contains(&query) {
                         return false;
                     }

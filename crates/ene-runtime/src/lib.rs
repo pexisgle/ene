@@ -126,7 +126,7 @@ pub use workspace::{WorkspaceHandle, WorkspaceIndexer, WorkspaceStatusView};
 /// DTOs, and the unified [`public_api::PublicApiError`] category.
 pub use public_api::{
     API_VERSION, PublicApiError, PublicChatEvent, PublicExportedMessage, PublicLifecycleEvent,
-    PublicPerfCue, PublicSessionMeta, redact_text, redact_tool_arguments,
+    PublicMemoryLedgerChange, PublicPerfCue, PublicSessionMeta, redact_text, redact_tool_arguments,
     redact_tool_arguments_json,
 };
 
