@@ -483,24 +483,6 @@ impl AiBridge {
         })?
     }
 
-    /// Applies a memory lifecycle action.
-    #[expect(dead_code, reason = "retained for transitional callers")]
-    pub fn update_memory_status(
-        &self,
-        id: i64,
-        status: ene_store::MemoryStatus,
-    ) -> Result<bool, AiBridgeError> {
-        let memory = self.handle.diagnostics().memory().clone();
-        Ok(self.block_on_timeout(memory.set_memory_status(id, status))??)
-    }
-
-    /// Pins a memory row in the typed store.
-    #[expect(dead_code, reason = "replaced by execute_journal_action")]
-    pub fn pin_memory(&self, id: i64) -> Result<bool, AiBridgeError> {
-        let memory = self.handle.diagnostics().memory().clone();
-        Ok(self.block_on_timeout(memory.pin_typed_memory(id, true))??)
-    }
-
     // ── Pending candidate approval ──
 
     /// List pending memory candidates awaiting user approval.
