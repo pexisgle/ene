@@ -121,6 +121,18 @@ flowchart TD
 - **能力共有 (`provides` / `requires`)**: プラグインは他プラグインへ提供する能力 (`provides`) と必要とする能力 (`requires`) を宣言します。ホストは起動時に宣言を解決し、ハード要求が未充足のプラグインを無効化します（`docs/concepts/plugins-and-mcp.md` 参照）。ローカル GGUF プロバイダプラグイン (`plugins/provider/local-llm`、バイナリ `ene-plugin-llama-cpp`) は `llm/chat@1`・`embed@1`・`gguf-runner@1` を宣言し、チャットストリーミング・補完・GGUF 埋め込みを IPC 越しに提供します。
 - **ホストサービス `db` 乗客**: 状態を保持するツールは `ene-plugin-db` を介して共有ホストサービスソケットを開き、ホストの `memory.db` 内でプレフィックス隔離された CRUD を行います。全プラグインがこの単一ソケットを共有するため、ネームスペースの隔離はプラグインごとの認証トークンのみに依存します (プラグインごとのソケットパス層は廃止されました)。
 
+**プロバイダ統治** の所有者は関心事ごとに1つです: プラグインホストが唯一の
+プロバイダレジストリ（LLM/埋め込み/TTS の factory は
+`PluginHostManager`（`ene_ai::ProviderHost` 実装）経由で解決）であり、
+唯一のプロセス監督者（死活監視・再起動・サーキットブレーカー）でもあります。
+上流 API の到達性は各プロバイダプラグイン**経由**でプローブされます
+（ホストが最小の chat ping を送り結果を分類。ホスト側の HTTP プローブは
+廃止）。タスク→プロバイダ束縛とフェイルオーバー方針は `ene-ai`
+（`resolve.rs`）に残り、自前レジストリではなくホストのレジストリに
+問い合わせます。プロセス内の STT/VAD プロバイダ（`ene-voice`）は
+プラグイン化されるまで `ene_ai::AudioProviderRegistry` に登録されたまま
+となり、その後このレジストリは削除されます。
+
 ---
 
 ## 6. 各クレートの役割一覧
@@ -131,10 +143,10 @@ flowchart TD
 | `ene-mind` | セッション管理、プロンプトパッキング、感情 (PADモデル)、記憶想起、プロアクティブ発話、演出調停 |
 | `ene-store` | SQLite / SeaORM エンティティ、マイグレーション、ベクトル検索 (`sqlite-vec`)、コミットメント台帳 |
 | `ene-core` | 永続化に依存しないドメイン語彙 (`AffectState`、typed-memory の種別/ステータス/クエリ、コミットメント台帳の型) および `MemoryPort` トレイト抽象 |
-| `ene-ai` | プロバイダトレイトとレジストリ、メッセージ/ストリーミング型、設定ルーティング、ヘルスプローブ、リトライポリシー |
+| `ene-ai` | プロバイダトレイト、メッセージ/ストリーミング型、設定ルーティング、フェイルオーバー方針、リトライポリシー |
 | `ene-voice` | ローカル STT (Whisper)、TTS、VAD (Silero ONNX)、cpal オーディオ I/O |
 | `ene-connector` | 外部サービスの認証情報権威 (OAuth2/API キー保管、コネクタアイデンティティ、許可スコープ)。現時点で利用クレートなし — #412/#415 の MCP 認証情報ブリッジにより再導入予定 |
-| `ene-plugin-host` | プラグインプロセス監視、MCP サーバー発見、ヘルスチェック、サーキットブレーカー |
+| `ene-plugin-host` | プラグインプロセス監視、プロバイダレジストリ（ケーパビリティルーティング）、MCP サーバー発見、ヘルスチェック、サーキットブレーカー |
 | `ene-plugin-proto` | IPC Protocol v6 ワイヤーメッセージ、バージョン定義、フレーミング |
 | `ene-plugin` | プラグイン開発 SDK: `ToolPlugin`/`LlmPlugin` ファサード、`ToolAction`/`ActionSetProvider`、prelude |
 | `ene-plugin-db` | ステートフルプラグインの DB 操作用型付き IPC クライアント |

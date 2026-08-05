@@ -102,11 +102,13 @@ The field is `#[serde(default)]`, like every other field added to this wire prot
 TTS provider plugins follow the same discipline: `ene-plugin-host`'s
 `IpcTtsProvider` / `IpcTtsProviderFactory` (`ipc_tts.rs` / `tts_factory.rs`)
 implement `ene_ai::TtsProvider` / `TtsProviderFactory` so a plugin's
-`tts_providers` capability registers in the global `AudioProviderRegistry`,
-keyed by its `TtsProviderSpec.kind` (e.g. `"voicevox"`, selected with
-`ai.tts.provider`). A synthesize call is one `SynthesizeSpeech` IPC round-trip
-returning a whole audio file (WAV); the host decodes it to PCM and slices it
-into `TtsChunk`s, preserving the `TtsProvider::synthesize_stream` contract.
+`tts_providers` capability resolves through the host's provider registry
+(`PluginHostManager` implements `ene_ai::ProviderHost` over its factory
+maps), keyed by its `TtsProviderSpec.kind` (e.g. `"voicevox"`, selected with
+`ai.tts.provider`). A synthesize call is one `SynthesizeSpeech` IPC
+round-trip returning a whole audio file (WAV); the host decodes it to PCM and
+slices it into `TtsChunk`s, preserving the `TtsProvider::synthesize_stream`
+contract.
 The `voicevox` plugin additionally spawns and supervises a local
 VOICEVOX-compatible engine binary in managed mode (`auto_start: true`).
 
