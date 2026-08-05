@@ -1017,6 +1017,9 @@ mod tests {
 
     #[test]
     fn capabilities_advertise_openai_kind() {
+        // `llm_capabilities` reads the process-wide `PLUGIN_CONFIG` static,
+        // which config-mutating tests change under `TEST_SERIAL`.
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         let plugin = OpenAiPlugin;
         let caps = plugin.llm_capabilities();
         assert_eq!(caps.len(), 1);
