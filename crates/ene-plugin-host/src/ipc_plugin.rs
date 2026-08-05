@@ -31,7 +31,9 @@ fn host_capability_error(e: &PluginHostError) -> CapabilityCallError {
         PluginHostError::TransportFailed { .. } | PluginHostError::Io(_) => {
             CapabilityCallErrorCode::Transport
         }
-        PluginHostError::ExecutionFailed { message } if message.starts_with("timed out after") => {
+        PluginHostError::ExecutionFailed { message }
+            if message.starts_with(TIMEOUT_MESSAGE_PREFIX) =>
+        {
             CapabilityCallErrorCode::Timeout
         }
         PluginHostError::ExecutionFailed { .. } => CapabilityCallErrorCode::Provider,
@@ -49,6 +51,9 @@ const CONNECT_MAX_RETRIES: u32 = 50;
 const CONNECT_DELAY: Duration = Duration::from_millis(50);
 /// Default per-call timeout (2 min — LLM calls can be slow).
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
+/// Message prefix shared by every connection-timeout error, so callers can
+/// classify `ExecutionFailed` as a timeout without matching ad-hoc strings.
+const TIMEOUT_MESSAGE_PREFIX: &str = "timed out after";
 /// Timeout for a `Ping` liveness probe.
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1546,7 +1551,7 @@ impl IpcPluginConnection {
             .await
             .map_err(|_| {
                 PluginHostError::execution(format!(
-                    "timed out after {} ms waiting for a connection slot",
+                    "{TIMEOUT_MESSAGE_PREFIX} {} ms waiting for a connection slot",
                     timeout.as_millis()
                 ))
             })?
@@ -1626,7 +1631,7 @@ impl IpcPluginConnection {
             Err(_elapsed) => {
                 self.router.waiters.lock().remove(request_id);
                 Err(PluginHostError::execution(format!(
-                    "timed out after {} ms",
+                    "{TIMEOUT_MESSAGE_PREFIX} {} ms",
                     timeout.as_millis()
                 )))
             }
