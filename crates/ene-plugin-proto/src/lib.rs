@@ -79,7 +79,7 @@ mod wire;
 /// Capability and provider spec types.
 pub use capabilities::{
     CapabilityParseError, CapabilityRef, CapabilityRequirement, ConcurrencyHint, LlmProviderSpec,
-    PluginCapabilities, ResourceClass, SttProviderSpec, TtsProviderSpec,
+    PluginCapabilities, ResourceClass, SttProviderSpec, TtsProviderSpec, VadProviderSpec,
 };
 /// Plugin error type.
 pub use error::{PluginError, ProviderErrorKind};
@@ -92,8 +92,8 @@ pub use host_service::{
 /// Plugin IPC message types, protocol version, and framing helpers.
 pub use ipc::{
     ConfigFieldError, ConfigOption, PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION,
-    PluginIpcRequest, PluginIpcResponse, VersionRange, read_plugin_request, read_plugin_response,
-    write_plugin_request, write_plugin_response,
+    PluginIpcRequest, PluginIpcResponse, VadEvent, VersionRange, read_plugin_request,
+    read_plugin_response, write_plugin_request, write_plugin_response,
 };
 /// Sandbox configuration data sent from the host.
 pub use sandbox::SandboxConfigData;

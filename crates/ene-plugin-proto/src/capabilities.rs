@@ -47,6 +47,13 @@ pub struct PluginCapabilities {
     #[serde(default)]
     pub stt_providers: Vec<SttProviderSpec>,
 
+    /// VAD engines served by this plugin.
+    ///
+    /// Absent on older binaries (`#[serde(default)]` → empty); the host then
+    /// registers no VAD factory for the plugin.
+    #[serde(default)]
+    pub vad_providers: Vec<VadProviderSpec>,
+
     /// Whether the plugin handles [`crate::PluginIpcRequest::ListConfigOptions`].
     ///
     /// Absent on older binaries (`#[serde(default)]` → `false`); the host
@@ -431,6 +438,30 @@ pub struct SttProviderSpec {
     pub concurrency: ConcurrencyHint,
 }
 
+/// Specification of a voice activity detection engine.
+///
+/// `frame_size` is the one piece of engine state the host must know
+/// synchronously: a host-side `VadEngine` adapter has to answer
+/// `frame_size()` without an IPC round trip, so it carries the value from
+/// this spec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VadProviderSpec {
+    /// Engine kind identifier (e.g. `"silero"`).
+    pub kind: String,
+
+    /// PCM samples per [`crate::PluginIpcRequest::ProcessVadChunk`] call.
+    #[serde(default)]
+    pub frame_size: u32,
+
+    /// How many concurrent sessions this engine can safely serve.
+    ///
+    /// Absent (or omitted by an older plugin binary) defaults to
+    /// [`ConcurrencyHint::default`] — serial, shallow queue. See that type's
+    /// docs for the rationale.
+    #[serde(default)]
+    pub concurrency: ConcurrencyHint,
+}
+
 /// How many concurrent jobs a plugin-supplied provider (LLM, TTS, STT) can
 /// safely accept.
 ///
@@ -489,6 +520,7 @@ mod tests {
         assert!(caps.llm_providers.is_empty());
         assert!(caps.tts_providers.is_empty());
         assert!(caps.stt_providers.is_empty());
+        assert!(caps.vad_providers.is_empty());
         assert!(!caps.supports_list_config_options);
         assert!(!caps.supports_validate_config);
         assert!(!caps.supports_migrate_config);
@@ -515,6 +547,7 @@ mod tests {
             embed_providers: vec!["openai".into()],
             tts_providers: vec![],
             stt_providers: vec![],
+            vad_providers: vec![],
             supports_list_config_options: true,
             supports_validate_config: true,
             supports_migrate_config: true,
@@ -731,6 +764,28 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
         let deser: SttProviderSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(spec, deser);
+    }
+
+    #[test]
+    fn vad_provider_spec_serde_roundtrip() {
+        let spec = VadProviderSpec {
+            kind: "silero".into(),
+            frame_size: 512,
+            concurrency: ConcurrencyHint::default(),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let deser: VadProviderSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec, deser);
+    }
+
+    /// Load-bearing contract: an absent `frame_size` (as an old binary that
+    /// predates the field would send) deserializes to 0 rather than an
+    /// error, so the host can reject it explicitly.
+    #[test]
+    fn vad_provider_spec_missing_frame_size_defaults_to_zero() {
+        let json = r#"{"kind":"silero"}"#;
+        let spec: VadProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.frame_size, 0);
     }
 
     /// Load-bearing contract: an unset `concurrency` field (as an old plugin

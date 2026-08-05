@@ -1,10 +1,10 @@
-//! Plugin IPC wire protocol (protocol version 6).
+//! Plugin IPC wire protocol (protocol version 7).
 //!
 //! Extends the tool IPC (v2) with streaming LLM messages and a richer
 //! handshake that carries [`PluginCapabilities`]. The framing is identical:
 //! a 4-byte little-endian length prefix followed by a payload. The handshake
 //! exchange always uses JSON; every frame after the handshake uses the
-//! negotiated [`WireFormat`] (`MessagePack` for protocol v6, JSON for older
+//! negotiated [`WireFormat`] (`MessagePack` for protocol v6+, JSON for older
 //! versions — see [`WireFormat::for_version`]).
 
 use crate::capabilities::PluginCapabilities;
@@ -74,6 +74,13 @@ impl VersionRange {
 
 /// Plugin IPC protocol version.
 ///
+/// v7 adds:
+/// - `ProcessVadChunk` / `VadChunkResult` for out-of-process voice activity
+///   detection, and `PluginCapabilities.vad_providers` (`VadProviderSpec`).
+///   Hosts gate `ProcessVadChunk` on `negotiated_version >= 7` (see the
+///   `supports_vad()` gate in `ene-plugin-host`), so v6 plugin binaries never
+///   receive the new request variant.
+///
 /// v6 changes the wire format: after the JSON handshake exchange, every
 /// frame is `MessagePack` when both sides negotiated v6 (see
 /// [`WireFormat`]). Peers that negotiated v5 or lower keep the original
@@ -127,7 +134,7 @@ impl VersionRange {
 /// required field, or removing/renaming an enum variant. New fields should
 /// use `#[serde(default)]` so older/newer peers stay wire-compatible without
 /// a version bump.
-pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 6;
+pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 7;
 
 /// The oldest plugin IPC protocol version the host still accepts.
 ///
@@ -435,6 +442,29 @@ pub enum PluginIpcRequest {
         #[serde(default = "default_audio_format")]
         format: String,
     },
+    /// Process one fixed-size PCM chunk through a voice activity detection
+    /// engine.
+    ///
+    /// The plugin responds with [`PluginIpcResponse::VadChunkResult`].
+    /// Engine state is per `session_id`: the host's engine adapter generates
+    /// a unique id per `VadEngine` instance and keeps sending chunks for the
+    /// lifetime of that instance. `reset` (sent with an empty `pcm`) clears
+    /// the session's state, mirroring `VadEngine::reset`.
+    ProcessVadChunk {
+        /// Unique request identifier.
+        request_id: String,
+        /// Engine kind (e.g. `"silero"`).
+        provider_kind: String,
+        /// Provider-specific configuration JSON.
+        provider_config: serde_json::Value,
+        /// Opaque session identifier correlating chunks to one engine state.
+        session_id: String,
+        /// PCM samples to process; empty when `reset` is set.
+        pcm: Vec<f32>,
+        /// When set, discard the session's state instead of processing.
+        #[serde(default)]
+        reset: bool,
+    },
     /// Batch embedding request.
     ///
     /// The plugin responds with [`PluginIpcResponse::EmbedBatchResult`].
@@ -654,6 +684,14 @@ pub enum PluginIpcResponse {
         /// Transcribed text.
         text: String,
     },
+    /// Result of one [`PluginIpcRequest::ProcessVadChunk`] step.
+    VadChunkResult {
+        /// Request identifier correlating this response to the originating
+        /// [`PluginIpcRequest::ProcessVadChunk`].
+        request_id: String,
+        /// Voice activity event for the processed chunk.
+        event: VadEvent,
+    },
     /// Result of a batch embedding request.
     EmbedBatchResult {
         /// Request identifier.
@@ -661,6 +699,23 @@ pub enum PluginIpcResponse {
         /// Embedding vectors, one per input item.
         embeddings: Vec<Vec<f32>>,
     },
+}
+
+/// Voice activity event emitted by a VAD engine per processed chunk.
+///
+/// Mirrors the host-side `ene_ai::VadEvent` states one-to-one; the host
+/// adapter maps between the two so the wire stays a plain contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VadEvent {
+    /// Speech just started.
+    SpeechStart,
+    /// Speech is continuing.
+    SpeechContinue,
+    /// Speech just ended.
+    SpeechEnd,
+    /// No speech detected.
+    Silence,
 }
 
 /// Reads a [`PluginIpcRequest`] as a 4-byte LE length-prefixed payload in
@@ -1384,6 +1439,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_process_vad_chunk_roundtrip() {
+        let req = PluginIpcRequest::ProcessVadChunk {
+            request_id: "req-vad-1".into(),
+            provider_kind: "silero".into(),
+            provider_config: serde_json::json!({"threshold": 0.5}),
+            session_id: "session-1".into(),
+            pcm: vec![0.0; 512],
+            reset: false,
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn request_process_vad_chunk_omitted_reset_defaults_to_false() {
+        let json = r#"{"ProcessVadChunk":{"request_id":"r1","provider_kind":"silero","provider_config":{},"session_id":"s1","pcm":[0.0]}}"#;
+        let req: PluginIpcRequest = serde_json::from_str(json).unwrap();
+        let PluginIpcRequest::ProcessVadChunk { reset, .. } = req else {
+            panic!("expected ProcessVadChunk");
+        };
+        assert!(!reset);
+    }
+
+    #[tokio::test]
     async fn request_set_config_roundtrip() {
         let req = PluginIpcRequest::SetConfig {
             request_id: "req-cfg-1".into(),
@@ -1436,6 +1515,35 @@ mod tests {
         };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn response_vad_chunk_result_roundtrip() {
+        for event in [
+            VadEvent::SpeechStart,
+            VadEvent::SpeechContinue,
+            VadEvent::SpeechEnd,
+            VadEvent::Silence,
+        ] {
+            let resp = PluginIpcResponse::VadChunkResult {
+                request_id: "req-vad-1".into(),
+                event,
+            };
+            let got = send_recv_response(&resp).await;
+            assert_eq!(got, resp);
+        }
+    }
+
+    #[test]
+    fn vad_event_serde_uses_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&VadEvent::SpeechStart).unwrap(),
+            r#""speech_start""#
+        );
+        assert_eq!(
+            serde_json::from_str::<VadEvent>(r#""speech_end""#).unwrap(),
+            VadEvent::SpeechEnd
+        );
     }
 
     #[tokio::test]
@@ -1687,8 +1795,12 @@ mod tests {
     fn wire_format_maps_protocol_versions() {
         assert_eq!(WireFormat::for_version(0), WireFormat::Json);
         assert_eq!(
-            WireFormat::for_version(PLUGIN_IPC_MIN_SUPPORTED_VERSION),
+            WireFormat::for_version(WireFormat::MSGPACK_MIN_PROTOCOL_VERSION - 1),
             WireFormat::Json
+        );
+        assert_eq!(
+            WireFormat::for_version(WireFormat::MSGPACK_MIN_PROTOCOL_VERSION),
+            WireFormat::MsgPack
         );
         assert_eq!(
             WireFormat::for_version(PLUGIN_IPC_PROTOCOL_VERSION),
