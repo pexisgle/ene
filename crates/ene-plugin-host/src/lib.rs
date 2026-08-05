@@ -103,7 +103,8 @@ pub use ipc_tts::IpcTtsProvider;
 /// Plugin host manager.
 pub use manager::{
     EmbeddingFactoriesByPlugin, EmbeddingFactoryHandle, LlmFactoriesByPlugin, LlmFactoryHandle,
-    PluginHostManager, ProviderFactoryRemoval, TtsFactoriesByPlugin, TtsFactoryHandle,
+    PluginFactoryHandles, PluginHostManager, ProviderFactoryRemoval, TtsFactoriesByPlugin,
+    TtsFactoryHandle,
 };
 /// MCP server configuration types.
 pub use mcp_config::{McpServerConfig, McpTransport};

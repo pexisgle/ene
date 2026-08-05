@@ -634,22 +634,39 @@ impl ProviderFactoryRemoval {
     }
 }
 
-/// Removes every kind `factory_plugins` attributes to `plugin` from both the
-/// factory map and its owner map, returning how many kinds were removed.
-fn remove_factories_for_plugin<V>(
-    factories: &mut HashMap<String, V>,
+/// Provider factory handles one plugin contributed, captured by a health
+/// bridge from the host generation that emitted the `Disabled` event.
+///
+/// Eviction is gated on [`Arc::ptr_eq`] identity against these handles, so a
+/// stale event delivered after a reconfiguration swapped in a fresh host
+/// cannot evict the new host's live factories.
+#[derive(Clone, Default)]
+pub struct PluginFactoryHandles {
+    /// LLM factory handles by provider kind.
+    pub llm: Vec<(String, LlmFactoryHandle)>,
+    /// Embedding factory handles by provider kind.
+    pub embedding: Vec<(String, EmbeddingFactoryHandle)>,
+    /// TTS factory handles by provider kind.
+    pub tts: Vec<(String, TtsFactoryHandle)>,
+}
+
+/// Removes the factory for each kind whose stored `Arc` is the exact handle
+/// `expected` names, from both the factory map and its owner map.
+fn remove_matching_factories<X: ?Sized>(
+    factories: &mut HashMap<String, Arc<X>>,
     factory_plugins: &mut HashMap<String, String>,
-    plugin: &str,
+    expected: &[(String, Arc<X>)],
 ) -> usize {
-    let kinds: Vec<String> = factory_plugins
-        .iter()
-        .filter(|(_, owner)| owner.as_str() == plugin)
-        .map(|(kind, _)| kind.clone())
-        .collect();
-    let removed = kinds.len();
-    for kind in kinds {
-        factory_plugins.remove(&kind);
-        factories.remove(&kind);
+    let mut removed = 0;
+    for (kind, handle) in expected {
+        if factories
+            .get(kind)
+            .is_some_and(|stored| Arc::ptr_eq(stored, handle))
+        {
+            factory_plugins.remove(kind);
+            factories.remove(kind);
+            removed += 1;
+        }
     }
     removed
 }
@@ -1303,28 +1320,33 @@ impl PluginHostManager {
         &self.llm_factories
     }
 
-    /// Removes every provider factory contributed by `plugin`.
+    /// Removes the provider factories `handles` identifies.
     ///
     /// Called when a plugin is permanently disabled: without eviction, a
     /// lookup by kind would keep selecting a factory whose IPC connection
-    /// points at a dead process. Returns what was removed so callers can
-    /// rebuild long-lived provider instances (TTS) accordingly.
-    pub fn remove_provider_factories(&mut self, plugin: &str) -> ProviderFactoryRemoval {
+    /// points at a dead process. Removal is identity-gated on the handles a
+    /// health bridge captured from this host generation, so a stale event
+    /// cannot evict a replacement host's factories. Returns what was removed
+    /// so callers can rebuild long-lived provider instances (TTS) accordingly.
+    pub fn remove_provider_factories_if_match(
+        &mut self,
+        handles: &PluginFactoryHandles,
+    ) -> ProviderFactoryRemoval {
         ProviderFactoryRemoval {
-            llm: remove_factories_for_plugin(
+            llm: remove_matching_factories(
                 &mut self.llm_factories,
                 &mut self.llm_factory_plugins,
-                plugin,
+                &handles.llm,
             ),
-            embedding: remove_factories_for_plugin(
+            embedding: remove_matching_factories(
                 &mut self.embedding_factories,
                 &mut self.embedding_factory_plugins,
-                plugin,
+                &handles.embedding,
             ),
-            tts: remove_factories_for_plugin(
+            tts: remove_matching_factories(
                 &mut self.tts_factories,
                 &mut self.tts_factory_plugins,
-                plugin,
+                &handles.tts,
             ),
         }
     }
@@ -3193,36 +3215,39 @@ mod tests {
     }
 
     #[test]
-    fn remove_provider_factories_evicts_only_the_named_plugin() {
+    fn remove_provider_factories_if_match_evicts_same_generation_handles() {
         let mut manager = PluginHostManager::test_instance();
-        for (kind, plugin) in [
-            ("openai", "openai-plugin"),
-            ("anthropic", "anthropic-plugin"),
-        ] {
-            manager.llm_factories.insert(
-                kind.to_string(),
-                Arc::new(KindLlmFactory(kind)) as Arc<dyn ene_ai::LlmProviderFactory>,
-            );
-            manager
-                .llm_factory_plugins
-                .insert(kind.to_string(), plugin.to_string());
-        }
-        manager.embedding_factories.insert(
-            "openai".to_string(),
-            Arc::new(KindEmbeddingFactory("openai")) as Arc<dyn ene_ai::EmbeddingProviderFactory>,
+        // The handles a health bridge would capture: identical Arcs to the
+        // factories the manager stores.
+        let handles = plugin_factory_handles();
+        manager
+            .llm_factories
+            .insert("openai".to_string(), Arc::clone(&handles.llm[0].1));
+        manager
+            .llm_factory_plugins
+            .insert("openai".to_string(), "openai-plugin".to_string());
+        // A different plugin's kind must survive the eviction untouched.
+        manager.llm_factories.insert(
+            "anthropic".to_string(),
+            Arc::new(KindLlmFactory("anthropic")) as Arc<dyn ene_ai::LlmProviderFactory>,
         );
+        manager
+            .llm_factory_plugins
+            .insert("anthropic".to_string(), "anthropic-plugin".to_string());
+        manager
+            .embedding_factories
+            .insert("openai".to_string(), Arc::clone(&handles.embedding[0].1));
         manager
             .embedding_factory_plugins
             .insert("openai".to_string(), "openai-plugin".to_string());
-        manager.tts_factories.insert(
-            "kokoro".to_string(),
-            Arc::new(KindTtsFactory("kokoro")) as Arc<dyn ene_ai::TtsProviderFactory>,
-        );
+        manager
+            .tts_factories
+            .insert("kokoro".to_string(), Arc::clone(&handles.tts[0].1));
         manager
             .tts_factory_plugins
             .insert("kokoro".to_string(), "openai-plugin".to_string());
 
-        let removal = manager.remove_provider_factories("openai-plugin");
+        let removal = manager.remove_provider_factories_if_match(&handles);
         assert_eq!(
             removal,
             ProviderFactoryRemoval {
@@ -3239,8 +3264,61 @@ mod tests {
 
         assert!(
             manager
-                .remove_provider_factories("openai-plugin")
+                .remove_provider_factories_if_match(&handles)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn remove_provider_factories_if_match_ignores_stale_generation_handles() {
+        let mut manager = PluginHostManager::test_instance();
+        // The current host serves the kind with a fresh factory; the stale
+        // handles come from the host generation that emitted a Disabled
+        // event before a reconfiguration swapped this host in.
+        manager.llm_factories.insert(
+            "openai".to_string(),
+            Arc::new(KindLlmFactory("openai")) as Arc<dyn ene_ai::LlmProviderFactory>,
+        );
+        manager
+            .llm_factory_plugins
+            .insert("openai".to_string(), "openai-plugin".to_string());
+
+        let stale = PluginFactoryHandles {
+            llm: vec![(
+                "openai".to_string(),
+                Arc::new(KindLlmFactory("openai")) as LlmFactoryHandle,
+            )],
+            ..PluginFactoryHandles::default()
+        };
+        let removal = manager.remove_provider_factories_if_match(&stale);
+        assert_eq!(
+            removal,
+            ProviderFactoryRemoval {
+                llm: 0,
+                embedding: 0,
+                tts: 0,
+            }
+        );
+        assert!(
+            manager.llm_factories.contains_key("openai"),
+            "a stale event must not evict the replacement host's factory"
+        );
+    }
+
+    fn plugin_factory_handles() -> PluginFactoryHandles {
+        PluginFactoryHandles {
+            llm: vec![(
+                "openai".to_string(),
+                Arc::new(KindLlmFactory("openai")) as LlmFactoryHandle,
+            )],
+            embedding: vec![(
+                "openai".to_string(),
+                Arc::new(KindEmbeddingFactory("openai")) as EmbeddingFactoryHandle,
+            )],
+            tts: vec![(
+                "kokoro".to_string(),
+                Arc::new(KindTtsFactory("kokoro")) as TtsFactoryHandle,
+            )],
+        }
     }
 }

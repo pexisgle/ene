@@ -2857,12 +2857,12 @@ impl TurnActor {
                 self.rebuild_tts_provider().await;
                 true
             }
-            EneCommand::PluginProviderDisabled { plugin } => {
+            EneCommand::PluginProviderDisabled { plugin, factories } => {
                 let mut guard = self.plugin_host.lock().await;
                 let removal = guard
                     .as_mut()
                     .map_or_else(ene_plugin_host::ProviderFactoryRemoval::default, |host| {
-                        host.remove_provider_factories(&plugin)
+                        host.remove_provider_factories_if_match(&factories)
                     });
                 drop(guard);
                 if removal.tts > 0 {
@@ -3873,10 +3873,9 @@ impl TurnActor {
 
     /// Probe every chat failover candidate through the provider host.
     ///
-    /// Runs in a background task so slow probes cannot stall the actor loop,
-    /// and records into the shared health monitor so the next failover
-    /// selection observes the same reports. Used by the CLI `/doctor`
-    /// fallback check.
+    /// Runs in a background task so slow probes cannot stall the actor loop.
+    /// Probes are fresh and non-caching (the shared failover monitor is not
+    /// warmed). Used by the CLI `/doctor` fallback check.
     fn probe_chat_candidates(&self, reply: oneshot::Sender<Vec<ene_ai::ProviderHealthReport>>) {
         let ai_config = self
             .config
@@ -3886,20 +3885,17 @@ impl TurnActor {
         let timeout = std::time::Duration::from_millis(ai_config.fallback.health_check_timeout_ms);
         let provider_host = Arc::clone(&self.provider_host);
         let config = self.config.clone();
-        let health_monitor = self.health_monitor.clone();
         let diag_tx = self.diag_tx.clone();
         tokio::spawn(async move {
-            if ai_config.fallback.enabled {
-                ene_ai::select_healthy_chat(
-                    &candidates,
-                    &health_monitor,
-                    provider_host.as_ref(),
-                    &config,
-                    timeout,
-                )
-                .await;
-            }
-            let reports = health_monitor.all_reports();
+            // Fresh probes of every candidate: unlike failover selection,
+            // this must not stop at the first healthy provider, and it must
+            // not warm the turn-path cache.
+            let reports = if ai_config.fallback.enabled {
+                ene_ai::probe_chat_candidates(&candidates, provider_host.as_ref(), &config, timeout)
+                    .await
+            } else {
+                Vec::new()
+            };
             for report in &reports {
                 drop(diag_tx.send(DiagnosticEvent::ProviderHealth {
                     provider: report.provider.clone(),
@@ -4400,12 +4396,31 @@ async fn reconfigure_plugin_host_bg(
     {
         let diag_tx = diag_tx.clone();
         let cmd_tx = cmd_tx.clone();
+        let llm_factories_by_plugin = host.llm_factories_by_plugin();
+        let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
+        let tts_factories_by_plugin = host.tts_factories_by_plugin();
         bridge_handle = Some(tokio::spawn(async move {
             while let Some(event) = health_rx.recv().await {
                 if let PluginHealthEvent::Disabled { plugin, .. } = &event {
-                    drop(cmd_tx.send(EneCommand::PluginProviderDisabled {
-                        plugin: plugin.clone(),
-                    }));
+                    drop(
+                        cmd_tx.send(EneCommand::PluginProviderDisabled {
+                            plugin: plugin.clone(),
+                            factories: ene_plugin_host::PluginFactoryHandles {
+                                llm: llm_factories_by_plugin
+                                    .get(plugin)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                embedding: embedding_factories_by_plugin
+                                    .get(plugin)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                tts: tts_factories_by_plugin
+                                    .get(plugin)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                            },
+                        }),
+                    );
                 }
                 emit_diag(&diag_tx, plugin_health_event_to_diag(event));
             }
@@ -4416,6 +4431,13 @@ async fn reconfigure_plugin_host_bg(
         .as_ref()
         .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
     let registry_count = registries.len();
+
+    // Publish the new host and bridge handle to the shared slots *before*
+    // notifying the actor: `PluginHostReconfigured` rebuilds the live TTS
+    // provider through the slot, so it must already observe the new host.
+    *plugin_host.lock().await = new_host;
+    *health_bridge_handle.lock().await = bridge_handle;
+
     match CompositeToolRegistry::try_new(registries.clone()) {
         Ok(composite) => {
             tracing::info!(
@@ -4440,11 +4462,6 @@ async fn reconfigure_plugin_host_bg(
             drop(cmd_tx.send(EneCommand::RebuildTtsProvider));
         }
     }
-
-    // Publish the new host and bridge handle to the shared slots so the
-    // handle's shutdown path tears down the live instances.
-    *plugin_host.lock().await = new_host;
-    *health_bridge_handle.lock().await = bridge_handle;
 }
 
 /// Runs a future to completion, catching any panic and surfacing it as a

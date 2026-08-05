@@ -388,6 +388,11 @@ pub enum EneCommand {
     PluginProviderDisabled {
         /// Name of the disabled plugin whose factories to evict.
         plugin: String,
+        /// Factory handles the emitting host generation contributed,
+        /// captured by the health bridge. Eviction is identity-gated on
+        /// these, so a stale event cannot evict a replacement host's
+        /// factories.
+        factories: ene_plugin_host::PluginFactoryHandles,
     },
     /// Probe every chat failover candidate through the provider host and
     /// return the resulting health reports.

@@ -365,9 +365,20 @@ async fn check_provider_fallback(
         return;
     }
 
-    // Probe through the live provider host (chat ping per candidate), the
-    // same path the actor's failover selection uses.
-    let reports = diag.probe_chat_candidates().await;
+    // Probe through the live provider host (chat ping per candidate),
+    // probing every candidate rather than stopping at the first healthy one.
+    let reports = match diag.probe_chat_candidates().await {
+        Ok(reports) => reports,
+        Err(e) => {
+            results.push(CheckResult::error(
+                CheckCategory::AiProvider,
+                "fallback",
+                format!("Failed to probe chat candidates: {e}"),
+                Some("Restart the runtime"),
+            ));
+            return;
+        }
+    };
     let reports_by_provider: std::collections::HashMap<&str, &ene_ai::ProviderHealthReport> =
         reports.iter().map(|r| (r.provider.as_str(), r)).collect();
     let mut healthy_count = 0;

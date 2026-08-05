@@ -1399,6 +1399,25 @@ async fn probe_candidate(
     }
 }
 
+/// Probe every chat candidate through the host registry.
+///
+/// Unlike [`select_healthy_chat`], this never consults or updates a health
+/// monitor: every candidate is probed fresh, so on-demand diagnostics
+/// (CLI `/doctor`) reflect the current state without warming the turn-path
+/// cache, and backups are probed even when the primary is healthy.
+pub async fn probe_chat_candidates(
+    candidates: &[ChatCandidate],
+    host: &dyn ProviderHost,
+    config: &ene_config::EneConfig,
+    timeout: Duration,
+) -> Vec<ProviderHealthReport> {
+    let mut reports = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        reports.push(probe_candidate(candidate, host, config, timeout).await);
+    }
+    reports
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2182,5 +2201,37 @@ mod tests {
             .await
             .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn probe_chat_candidates_probes_every_candidate_fresh() {
+        let host = StubHost {
+            llm: HashMap::from([
+                (
+                    "openai".to_string(),
+                    Arc::new(HealthyProvider) as Arc<dyn LlmProvider>,
+                ),
+                (
+                    "anthropic".to_string(),
+                    Arc::new(FailingProvider {
+                        failure: StubFailure::Auth,
+                    }) as Arc<dyn LlmProvider>,
+                ),
+            ]),
+        };
+        let candidates = [
+            candidate("primary", "openai"),
+            candidate("backup", "anthropic"),
+        ];
+        let reports = probe_chat_candidates(
+            &candidates,
+            &host,
+            &ene_config::EneConfig::default(),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].status, ProviderHealthStatus::Healthy);
+        assert_eq!(reports[1].status, ProviderHealthStatus::AuthFailed);
     }
 }
