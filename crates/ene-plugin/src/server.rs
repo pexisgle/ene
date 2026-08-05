@@ -12,22 +12,38 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use ene_plugin_proto::{
-    CapabilityRef, CapabilityRequirement, IpcListener, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION,
-    PluginCapabilities, PluginError, PluginIpcRequest, PluginIpcResponse, WireFormat, cleanup_path,
-    read_plugin_request, write_plugin_response,
+    CapabilityCallError, CapabilityCallErrorCode, CapabilityRef, CapabilityRequirement,
+    IpcListener, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
+    PluginIpcRequest, PluginIpcResponse, WireFormat, cleanup_path, read_plugin_request,
+    write_plugin_response,
 };
 use ene_plugin_proto::{DeferredOutcome, VersionRange};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin};
+use crate::plugin::{CapabilityProvider, EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin};
 
 fn provider_error_message(error: &PluginError) -> String {
     error.provider_error_kind().map_or_else(
         || error.to_string(),
         |kind| format!("[ene-provider-error:{}] {}", kind.marker(), error),
     )
+}
+
+/// Maps a provider's [`PluginError`] to the stable capability-call error
+/// vocabulary shared with the host's mediation layer.
+fn capability_call_error(e: &PluginError) -> CapabilityCallError {
+    let code = match e {
+        PluginError::NotSupported(_) => CapabilityCallErrorCode::NotSupported,
+        PluginError::Timeout(_) => CapabilityCallErrorCode::Timeout,
+        PluginError::Transport(_) | PluginError::Io(_) => CapabilityCallErrorCode::Transport,
+        PluginError::Protocol(_) => CapabilityCallErrorCode::Internal,
+        PluginError::Provider(_) | PluginError::ProviderTyped { .. } | PluginError::Tool(_) => {
+            CapabilityCallErrorCode::Provider
+        }
+    };
+    CapabilityCallError::new(code, e.to_string())
 }
 
 /// How often an idle connection polls the tool plugin for deferred task
@@ -52,6 +68,8 @@ pub struct PluginDispatch {
     pub tts: Option<Arc<dyn TtsPlugin>>,
     /// Optional STT plugin implementation.
     pub stt: Option<Arc<dyn SttPlugin>>,
+    /// Optional capability-call implementation (serves `provides` entries).
+    capability: Option<Arc<dyn CapabilityProvider>>,
     /// Capabilities this plugin provides to other plugins, declared via the
     /// `#[provider(provides = "...")]` attribute (see `ene-plugin-macros`).
     provides: Vec<CapabilityRef>,
@@ -75,9 +93,22 @@ impl PluginDispatch {
             embed,
             tts,
             stt,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
+    }
+
+    /// Registers the implementation that serves the capabilities declared in
+    /// `provides` (via [`with_capability_declarations`](Self::with_capability_declarations)).
+    ///
+    /// The server only routes `CapabilityCall` requests whose capability
+    /// appears in the declared `provides` list, so a plugin binary never
+    /// serves undeclared capabilities even if a host misroutes a call.
+    #[must_use]
+    pub fn with_capability_provider(mut self, capability: Arc<dyn CapabilityProvider>) -> Self {
+        self.capability = Some(capability);
+        self
     }
 
     /// Sets the plugin-wide capability declarations sent in the handshake
@@ -999,6 +1030,49 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 },
             }
         }
+        PluginIpcRequest::CapabilityCall { request_id, call } => {
+            let Ok(capability) = CapabilityRef::parse(call.capability.as_str()) else {
+                return PluginIpcResponse::CapabilityCallResult {
+                    request_id: request_id.clone(),
+                    result: Err(CapabilityCallError::new(
+                        CapabilityCallErrorCode::InvalidRequest,
+                        format!(
+                            "malformed capability reference: {}",
+                            call.capability.as_str()
+                        ),
+                    )),
+                };
+            };
+            if !dispatch
+                .provides
+                .iter()
+                .any(|provided| provided.as_str() == capability.as_str())
+            {
+                return PluginIpcResponse::CapabilityCallResult {
+                    request_id: request_id.clone(),
+                    result: Err(CapabilityCallError::new(
+                        CapabilityCallErrorCode::NotSupported,
+                        format!("capability {capability} is not provided by this plugin"),
+                    )),
+                };
+            }
+            let Some(provider) = &dispatch.capability else {
+                return PluginIpcResponse::CapabilityCallResult {
+                    request_id: request_id.clone(),
+                    result: Err(CapabilityCallError::new(
+                        CapabilityCallErrorCode::NotSupported,
+                        "no capability provider registered",
+                    )),
+                };
+            };
+            let result = provider
+                .call_capability(&capability, &call.method, call.payload.clone())
+                .await;
+            PluginIpcResponse::CapabilityCallResult {
+                request_id: request_id.clone(),
+                result: result.map_err(|e| capability_call_error(&e)),
+            }
+        }
         PluginIpcRequest::PollDeferred {
             request_id,
             task_id,
@@ -1265,6 +1339,7 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
         supports_validate_config: dispatch.supports_validate_config(),
         supports_migrate_config: dispatch.supports_migrate_config(),
         config_version: dispatch.config_version(),
+        supports_capability_calls: dispatch.capability.is_some(),
         provides: dispatch.provides.clone(),
         requires: dispatch.requires.clone(),
     }
@@ -1710,6 +1785,7 @@ mod tests {
             embed: embed.then(|| Arc::new(MockEmbedPlugin) as Arc<dyn EmbedPlugin>),
             tts: None,
             stt: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1722,6 +1798,7 @@ mod tests {
             embed: None,
             tts: Some(Arc::new(MockTtsPlugin) as Arc<dyn TtsPlugin>),
             stt: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1734,6 +1811,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: Some(Arc::new(MockSttPlugin) as Arc<dyn SttPlugin>),
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }
@@ -1922,6 +2000,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -1955,6 +2034,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -1992,6 +2072,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -2037,6 +2118,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         };
@@ -2159,6 +2241,7 @@ mod tests {
             embed: None,
             tts: None,
             stt: None,
+            capability: None,
             provides: Vec::new(),
             requires: Vec::new(),
         }

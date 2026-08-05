@@ -47,6 +47,8 @@
 
 /// Unified tool action interface.
 pub mod action;
+/// Client for the host-service `capability` passenger.
+pub mod capability;
 /// Compatibility adapter for wrapping legacy [`ToolProvider`] as [`ToolPlugin`].
 pub mod compat;
 /// Plugin trait and streaming chunk types.
@@ -57,10 +59,11 @@ pub mod server;
 pub mod tool_provider;
 
 pub use action::{ToolAction, ToolSpecArgs};
+pub use capability::{CapabilityClient, CapabilityClientError};
 pub use compat::ToolProviderPlugin;
 pub use plugin::{
-    ConfigurablePlugin, EmbedPlugin, LlmPlugin, PluginCompletion, PluginStream, PluginStreamChunk,
-    SttPlugin, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
+    CapabilityProvider, ConfigurablePlugin, EmbedPlugin, LlmPlugin, PluginCompletion, PluginStream,
+    PluginStreamChunk, SttPlugin, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
 };
 pub use server::{PluginDispatch, run_plugin_server};
 pub use tool_provider::{ActionSetProvider, SingleActionProvider};
@@ -68,8 +71,9 @@ pub use tool_provider::{ActionSetProvider, SingleActionProvider};
 // Re-export key types from ene-plugin-proto so plugin authors only need
 // to depend on `ene-plugin` for the full authoring surface.
 pub use ene_plugin_proto::{
-    CapabilityParseError, CapabilityRef, CapabilityRequirement, ConcurrencyHint, ConfigFieldError,
-    ConfigOption, LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
+    CapabilityCall, CapabilityCallError, CapabilityCallErrorCode, CapabilityParseError,
+    CapabilityRef, CapabilityRequirement, ConcurrencyHint, ConfigFieldError, ConfigOption,
+    LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
     PluginIpcRequest, PluginIpcResponse, ProviderErrorKind, SttProviderSpec, TokenUsage,
     TtsProviderSpec, VersionRange,
 };
@@ -169,11 +173,11 @@ pub mod prelude {
 
         #[doc(no_inline)]
         pub use crate::{
-            CapabilityRef, CapabilityRequirement, ConcurrencyHint, ConfigurablePlugin, EmbedPlugin,
-            LlmPlugin, LlmProviderSpec, PluginCompletion, PluginDispatch, PluginError,
-            PluginStream, PluginStreamChunk, ProviderErrorKind, SttPlugin, SttProviderSpec,
-            TokenUsage, ToolPlugin, ToolPluginCapabilities, TtsPlugin, TtsProviderSpec,
-            run_plugin_server,
+            CapabilityProvider, CapabilityRef, CapabilityRequirement, ConcurrencyHint,
+            ConfigurablePlugin, EmbedPlugin, LlmPlugin, LlmProviderSpec, PluginCompletion,
+            PluginDispatch, PluginError, PluginStream, PluginStreamChunk, ProviderErrorKind,
+            SttPlugin, SttProviderSpec, TokenUsage, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
+            TtsProviderSpec, run_plugin_server,
         };
     }
 
