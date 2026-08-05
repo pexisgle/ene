@@ -614,6 +614,98 @@ pub type TtsFactoryHandle = Arc<dyn ene_ai::TtsProviderFactory>;
 /// TTS provider factories grouped by the plugin that provides them.
 pub type TtsFactoriesByPlugin = HashMap<String, Vec<(String, TtsFactoryHandle)>>;
 
+/// What [`PluginHostManager::remove_provider_factories`] evicted for one
+/// plugin, per modality.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderFactoryRemoval {
+    /// Number of LLM factories removed.
+    pub llm: usize,
+    /// Number of embedding factories removed.
+    pub embedding: usize,
+    /// Number of TTS factories removed.
+    pub tts: usize,
+}
+
+impl ProviderFactoryRemoval {
+    /// Whether any factory was removed.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.llm == 0 && self.embedding == 0 && self.tts == 0
+    }
+}
+
+/// Removes every kind `factory_plugins` attributes to `plugin` from both the
+/// factory map and its owner map, returning how many kinds were removed.
+fn remove_factories_for_plugin<V>(
+    factories: &mut HashMap<String, V>,
+    factory_plugins: &mut HashMap<String, String>,
+    plugin: &str,
+) -> usize {
+    let kinds: Vec<String> = factory_plugins
+        .iter()
+        .filter(|(_, owner)| owner.as_str() == plugin)
+        .map(|(kind, _)| kind.clone())
+        .collect();
+    let removed = kinds.len();
+    for kind in kinds {
+        factory_plugins.remove(&kind);
+        factories.remove(&kind);
+    }
+    removed
+}
+
+/// The plugin host is the single provider registry: provider creation
+/// resolves through its factory maps (which mirror the capability
+/// declarations), never through a process-global registry.
+#[async_trait]
+impl ene_ai::ProviderHost for PluginHostManager {
+    async fn create_llm_provider(
+        &self,
+        kind: &str,
+        config: &EneConfig,
+        task: &ene_ai::TaskRef,
+    ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::LlmProviderError> {
+        self.llm_factories
+            .get(kind)
+            .ok_or_else(|| {
+                ene_ai::LlmProviderError::Provider(format!(
+                    "No LlmProviderFactory registered for provider kind: '{kind}'"
+                ))
+            })?
+            .create_provider(config, task)
+    }
+
+    async fn create_embedding_provider(
+        &self,
+        kind: &str,
+        config: &EneConfig,
+    ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+        self.embedding_factories
+            .get(kind)
+            .ok_or_else(|| {
+                ene_ai::EmbeddingError::Init(format!(
+                    "No embedding provider factory registered for provider kind: '{kind}'"
+                ))
+            })?
+            .create_embedding_provider(config)
+    }
+
+    async fn create_tts_provider(
+        &self,
+        kind: &str,
+        config: &EneConfig,
+    ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+        self.tts_factories
+            .get(kind)
+            .ok_or_else(|| {
+                ene_ai::AudioProviderError::Provider(format!(
+                    "No TtsProviderFactory registered for provider name: '{kind}'"
+                ))
+            })?
+            .create_provider(config)
+    }
+}
+
 /// Orchestrates the lifecycle of all plugin processes and MCP connections.
 ///
 /// Starts only plugins explicitly listed in `plugins.list` with
@@ -1209,6 +1301,32 @@ impl PluginHostManager {
     /// provider kind.
     pub fn llm_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> {
         &self.llm_factories
+    }
+
+    /// Removes every provider factory contributed by `plugin`.
+    ///
+    /// Called when a plugin is permanently disabled: without eviction, a
+    /// lookup by kind would keep selecting a factory whose IPC connection
+    /// points at a dead process. Returns what was removed so callers can
+    /// rebuild long-lived provider instances (TTS) accordingly.
+    pub fn remove_provider_factories(&mut self, plugin: &str) -> ProviderFactoryRemoval {
+        ProviderFactoryRemoval {
+            llm: remove_factories_for_plugin(
+                &mut self.llm_factories,
+                &mut self.llm_factory_plugins,
+                plugin,
+            ),
+            embedding: remove_factories_for_plugin(
+                &mut self.embedding_factories,
+                &mut self.embedding_factory_plugins,
+                plugin,
+            ),
+            tts: remove_factories_for_plugin(
+                &mut self.tts_factories,
+                &mut self.tts_factory_plugins,
+                plugin,
+            ),
+        }
     }
 
     /// Returns the embedding provider factories contributed by plugins,
@@ -3025,5 +3143,104 @@ mod tests {
 
         task.abort();
         server.abort();
+    }
+
+    /// Kinds-only stub factories, so eviction tests can distinguish entries.
+    struct KindLlmFactory(&'static str);
+
+    impl ene_ai::LlmProviderFactory for KindLlmFactory {
+        fn provider_name(&self) -> &str {
+            self.0
+        }
+
+        fn create_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+            _task: &ene_ai::TaskRef,
+        ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider("stub".to_string()))
+        }
+    }
+
+    struct KindEmbeddingFactory(&'static str);
+
+    impl ene_ai::EmbeddingProviderFactory for KindEmbeddingFactory {
+        fn provider_kind(&self) -> &str {
+            self.0
+        }
+
+        fn create_embedding_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+            Err(ene_ai::EmbeddingError::Init("stub".to_string()))
+        }
+    }
+
+    struct KindTtsFactory(&'static str);
+
+    impl ene_ai::TtsProviderFactory for KindTtsFactory {
+        fn provider_name(&self) -> &str {
+            self.0
+        }
+
+        fn create_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+            Err(ene_ai::AudioProviderError::Provider("stub".to_string()))
+        }
+    }
+
+    #[test]
+    fn remove_provider_factories_evicts_only_the_named_plugin() {
+        let mut manager = PluginHostManager::test_instance();
+        for (kind, plugin) in [
+            ("openai", "openai-plugin"),
+            ("anthropic", "anthropic-plugin"),
+        ] {
+            manager.llm_factories.insert(
+                kind.to_string(),
+                Arc::new(KindLlmFactory(kind)) as Arc<dyn ene_ai::LlmProviderFactory>,
+            );
+            manager
+                .llm_factory_plugins
+                .insert(kind.to_string(), plugin.to_string());
+        }
+        manager.embedding_factories.insert(
+            "openai".to_string(),
+            Arc::new(KindEmbeddingFactory("openai")) as Arc<dyn ene_ai::EmbeddingProviderFactory>,
+        );
+        manager
+            .embedding_factory_plugins
+            .insert("openai".to_string(), "openai-plugin".to_string());
+        manager.tts_factories.insert(
+            "kokoro".to_string(),
+            Arc::new(KindTtsFactory("kokoro")) as Arc<dyn ene_ai::TtsProviderFactory>,
+        );
+        manager
+            .tts_factory_plugins
+            .insert("kokoro".to_string(), "openai-plugin".to_string());
+
+        let removal = manager.remove_provider_factories("openai-plugin");
+        assert_eq!(
+            removal,
+            ProviderFactoryRemoval {
+                llm: 1,
+                embedding: 1,
+                tts: 1,
+            }
+        );
+        assert!(!manager.llm_factories.contains_key("openai"));
+        assert!(manager.llm_factories.contains_key("anthropic"));
+        assert!(!manager.embedding_factories.contains_key("openai"));
+        assert!(!manager.tts_factories.contains_key("kokoro"));
+        assert!(!manager.llm_factory_plugins.contains_key("openai"));
+
+        assert!(
+            manager
+                .remove_provider_factories("openai-plugin")
+                .is_empty()
+        );
     }
 }
