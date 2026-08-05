@@ -1,15 +1,17 @@
-//! Minimal RIFF/WAVE encoder and decoder for plugin audio.
+//! WAV encode/decode for plugin audio, backed by the `hound` crate.
 //!
 //! The plugin IPC contract returns whole audio files (base64 `SpeechResult`
 //! payloads), while [`ene_ai::TtsProvider`] consumes PCM `f32` chunks, so the
 //! host adapter decodes the WAV bytes itself; the STT direction inverts the
 //! same shape (f32 PCM → WAV) so microphone audio can ride the existing
-//! `TranscribeAudio` wire contract. Only the formats VOICEVOX / Aivis Speech
-//! engines emit are supported: PCM s16/s32 or IEEE float, one or two channels
-//! (stereo is downmixed to mono), any sample rate. Anything else is rejected
-//! as [`AudioProviderError::UnsupportedFormat`].
+//! `TranscribeAudio` wire contract. The codec accepts the formats the built-in
+//! plugins emit (PCM s16/s32 or IEEE float, one or two channels; stereo is
+//! downmixed to mono) and rejects anything else as
+//! [`AudioProviderError::UnsupportedFormat`].
 
 use ene_ai::AudioProviderError;
+use hound::{SampleFormat, WavSpec, WavWriter};
+use std::io::Cursor;
 
 /// Cap on the WAV byte size `decode_wav` accepts. 24 kHz s16 mono audio is
 /// ~2.9 MB per minute, so 32 MiB covers very long utterances while bounding
@@ -34,28 +36,33 @@ pub struct DecodedWav {
 /// Used by the STT adapter to carry microphone audio over the plugin IPC
 /// (whose `TranscribeAudio` request takes a whole audio file, like the TTS
 /// direction). Samples are clamped to `[-1.0, 1.0]` before scaling.
-pub fn encode_wav(pcm: &[f32], sample_rate: u32) -> Vec<u8> {
-    const BYTES_PER_SAMPLE: u32 = 2;
-    let data_len = pcm.len() * BYTES_PER_SAMPLE as usize;
-    let mut out = Vec::with_capacity(44 + data_len);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36_u32 + data_len as u32).to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&16_u32.to_le_bytes());
-    out.extend_from_slice(&WAVE_FORMAT_PCM.to_le_bytes());
-    out.extend_from_slice(&1_u16.to_le_bytes());
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&(sample_rate * BYTES_PER_SAMPLE).to_le_bytes());
-    out.extend_from_slice(&2_u16.to_le_bytes());
-    out.extend_from_slice(&16_u16.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&(data_len as u32).to_le_bytes());
-    for &sample in pcm {
-        let scaled = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
-        out.extend_from_slice(&scaled.to_le_bytes());
+///
+/// # Errors
+///
+/// Returns [`AudioProviderError::Provider`] if the WAV header or a sample
+/// cannot be written (only possible with a corrupt in-memory writer).
+pub fn encode_wav(pcm: &[f32], sample_rate: u32) -> Result<Vec<u8>, AudioProviderError> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let mut out = Cursor::new(Vec::with_capacity(44 + pcm.len() * 2));
+    {
+        let mut writer = WavWriter::new(&mut out, spec)
+            .map_err(|e| AudioProviderError::Provider(format!("WAV header write failed: {e}")))?;
+        for &sample in pcm {
+            let scaled = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+            writer.write_sample(scaled).map_err(|e| {
+                AudioProviderError::Provider(format!("WAV sample write failed: {e}"))
+            })?;
+        }
+        writer
+            .finalize()
+            .map_err(|e| AudioProviderError::Provider(format!("WAV finalize failed: {e}")))?;
     }
-    out
+    Ok(out.into_inner())
 }
 
 /// Parses a RIFF/WAVE byte stream into mono PCM `f32` samples.
@@ -63,7 +70,9 @@ pub fn encode_wav(pcm: &[f32], sample_rate: u32) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns [`AudioProviderError::UnsupportedFormat`] when the bytes are not
-/// a well-formed WAV file in one of the supported encodings.
+/// a well-formed WAV file in one of the supported encodings, and
+/// [`AudioProviderError::PayloadTooLarge`] when the payload exceeds
+/// [`MAX_WAV_BYTES`].
 pub fn decode_wav(bytes: &[u8]) -> Result<DecodedWav, AudioProviderError> {
     if bytes.len() > MAX_WAV_BYTES {
         return Err(AudioProviderError::PayloadTooLarge {
@@ -71,152 +80,81 @@ pub fn decode_wav(bytes: &[u8]) -> Result<DecodedWav, AudioProviderError> {
             actual: bytes.len(),
         });
     }
-    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err(AudioProviderError::UnsupportedFormat(
-            "not a RIFF/WAVE stream".to_string(),
-        ));
-    }
 
-    let mut fmt: Option<FmtChunk> = None;
-    let mut data: Option<&[u8]> = None;
-    let mut offset = 12usize;
-    while offset + 8 <= bytes.len() {
-        let chunk_id = &bytes[offset..offset + 4];
-        let chunk_size = u32_at(bytes, offset + 4)? as usize;
-        let chunk_data = offset + 8;
-        let chunk_end = chunk_data.checked_add(chunk_size).ok_or_else(|| {
-            AudioProviderError::UnsupportedFormat("WAV chunk size overflow".to_string())
-        })?;
-        if chunk_end > bytes.len() {
-            return Err(AudioProviderError::UnsupportedFormat(
-                "truncated WAV chunk".to_string(),
-            ));
-        }
-        match chunk_id {
-            b"fmt " if fmt.is_none() => {
-                fmt = Some(parse_fmt_chunk(&bytes[chunk_data..chunk_end])?);
-            }
-            b"data" if data.is_none() => {
-                data = Some(&bytes[chunk_data..chunk_end]);
-            }
-            _ => {}
-        }
-        offset = chunk_end + (chunk_size & 1);
-    }
-
-    let fmt = fmt.ok_or_else(|| {
-        AudioProviderError::UnsupportedFormat("WAV stream has no fmt chunk".to_string())
-    })?;
-    let data = data.ok_or_else(|| {
-        AudioProviderError::UnsupportedFormat("WAV stream has no data chunk".to_string())
-    })?;
-    if fmt.sample_rate == 0 {
+    let reader = hound::WavReader::new(Cursor::new(bytes))
+        .map_err(|e| AudioProviderError::UnsupportedFormat(format!("invalid WAV header: {e}")))?;
+    let spec = reader.spec();
+    if spec.sample_rate == 0 {
         return Err(AudioProviderError::UnsupportedFormat(
             "WAV sample rate is zero".to_string(),
         ));
     }
+    if !matches!(spec.channels, 1 | 2) {
+        return Err(AudioProviderError::UnsupportedFormat(format!(
+            "unsupported WAV channel count: {}",
+            spec.channels
+        )));
+    }
+
+    let samples: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
+        (SampleFormat::Int, 16) => reader
+            .into_samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| map_decode_error(&e))?
+            .into_iter()
+            .map(|s| f32::from(s) / f32::from(i16::MAX))
+            .collect(),
+        (SampleFormat::Int, 32) => reader
+            .into_samples::<i32>()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| map_decode_error(&e))?
+            .into_iter()
+            .map(|s| s as f32 / i32::MAX as f32)
+            .collect(),
+        (SampleFormat::Float, 32) => reader
+            .into_samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| map_decode_error(&e))?,
+        _ => {
+            return Err(AudioProviderError::UnsupportedFormat(format!(
+                "unsupported WAV encoding: {} at {} bits",
+                format_tag(spec.sample_format),
+                spec.bits_per_sample
+            )));
+        }
+    };
+
+    let pcm = if spec.channels == 2 {
+        samples
+            .chunks_exact(2)
+            .map(|pair| (pair[0] + pair[1]) * 0.5)
+            .collect()
+    } else {
+        samples
+    };
 
     Ok(DecodedWav {
-        pcm: decode_samples(data, fmt)?,
-        sample_rate: fmt.sample_rate,
+        pcm,
+        sample_rate: spec.sample_rate,
     })
 }
 
-#[derive(Debug, Clone, Copy)]
-struct FmtChunk {
-    encoding: u16,
-    channels: u16,
-    sample_rate: u32,
-    bits_per_sample: u16,
+fn format_tag(format: SampleFormat) -> &'static str {
+    match format {
+        SampleFormat::Int => "PCM",
+        SampleFormat::Float => "IEEE float",
+    }
 }
 
-/// PCM encoding tags from the WAV `fmt` chunk.
-const WAVE_FORMAT_PCM: u16 = 1;
-const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
-
-fn parse_fmt_chunk(bytes: &[u8]) -> Result<FmtChunk, AudioProviderError> {
-    if bytes.len() < 16 {
-        return Err(AudioProviderError::UnsupportedFormat(
-            "truncated WAV fmt chunk".to_string(),
-        ));
-    }
-    let fmt = FmtChunk {
-        encoding: u16_at(bytes, 0),
-        channels: u16_at(bytes, 2),
-        sample_rate: u32_at(bytes, 4)?,
-        bits_per_sample: u16_at(bytes, 14),
-    };
-    match fmt.encoding {
-        WAVE_FORMAT_PCM if matches!(fmt.bits_per_sample, 16 | 32) => {}
-        WAVE_FORMAT_IEEE_FLOAT if fmt.bits_per_sample == 32 => {}
-        _ => {
-            return Err(AudioProviderError::UnsupportedFormat(format!(
-                "unsupported WAV encoding: format {} at {} bits",
-                fmt.encoding, fmt.bits_per_sample
-            )));
-        }
-    }
-    if !matches!(fmt.channels, 1 | 2) {
-        return Err(AudioProviderError::UnsupportedFormat(format!(
-            "unsupported WAV channel count: {}",
-            fmt.channels
-        )));
-    }
-    Ok(fmt)
-}
-
-fn decode_samples(data: &[u8], fmt: FmtChunk) -> Result<Vec<f32>, AudioProviderError> {
-    let bytes_per_sample = usize::from(fmt.bits_per_sample / 8);
-    let frame_size = bytes_per_sample * usize::from(fmt.channels);
-    if frame_size == 0 {
-        return Err(AudioProviderError::UnsupportedFormat(
-            "invalid WAV sample width".to_string(),
-        ));
-    }
-    let frames = data.len() / frame_size;
-    let mut pcm = Vec::with_capacity(frames);
-    for frame in data.chunks_exact(frame_size) {
-        let mut mixed = 0.0f32;
-        for channel in 0..usize::from(fmt.channels) {
-            let sample = &frame[channel * bytes_per_sample..(channel + 1) * bytes_per_sample];
-            mixed += match (fmt.encoding, fmt.bits_per_sample) {
-                (WAVE_FORMAT_PCM, 16) => {
-                    f32::from(i16::from_le_bytes([sample[0], sample[1]])) / f32::from(i16::MAX)
-                }
-                (WAVE_FORMAT_PCM, 32) => {
-                    i32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]) as f32
-                        / i32::MAX as f32
-                }
-                (WAVE_FORMAT_IEEE_FLOAT, 32) => {
-                    f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]])
-                }
-                _ => unreachable!("encoding validated by parse_fmt_chunk"),
-            };
-        }
-        pcm.push(mixed / f32::from(fmt.channels));
-    }
-    Ok(pcm)
-}
-
-fn u16_at(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, AudioProviderError> {
-    let end = offset
-        .checked_add(4)
-        .ok_or_else(|| AudioProviderError::UnsupportedFormat("WAV offset overflow".to_string()))?;
-    let slice = bytes
-        .get(offset..end)
-        .ok_or_else(|| AudioProviderError::UnsupportedFormat("truncated WAV header".to_string()))?;
-    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+fn map_decode_error(e: &hound::Error) -> AudioProviderError {
+    AudioProviderError::UnsupportedFormat(format!("invalid WAV data: {e}"))
 }
 
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
     clippy::panic,
-    reason = "unit tests use expect/unwrap for concise assertions"
+    reason = "unit tests use expect for concise assertions"
 )]
 mod tests {
     use super::*;
@@ -262,6 +200,9 @@ mod tests {
         bytes
     }
 
+    const WAVE_FORMAT_PCM: u16 = 1;
+    const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
+
     #[test]
     fn decodes_mono_s16_pcm() {
         let wav = build_wav(
@@ -283,7 +224,7 @@ mod tests {
     #[test]
     fn encode_wav_roundtrips_through_decode() {
         let pcm = vec![0.0, 0.5, -0.5, 1.0, -1.0];
-        let bytes = encode_wav(&pcm, 16_000);
+        let bytes = encode_wav(&pcm, 16_000).expect("valid encode");
         let decoded = decode_wav(&bytes).expect("encoded wav decodes");
         assert_eq!(decoded.sample_rate, 16_000);
         assert_eq!(decoded.pcm.len(), pcm.len());
@@ -297,7 +238,7 @@ mod tests {
 
     #[test]
     fn encode_wav_clamps_out_of_range_samples() {
-        let bytes = encode_wav(&[2.0, -2.0], 16_000);
+        let bytes = encode_wav(&[2.0, -2.0], 16_000).expect("valid encode");
         let decoded = decode_wav(&bytes).expect("encoded wav decodes");
         assert!((decoded.pcm[0] - 1.0).abs() < 1e-4);
         assert!((decoded.pcm[1] + 1.0).abs() < 1e-4);

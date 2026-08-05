@@ -2792,6 +2792,7 @@ dependencies = [
  "ene-plugin",
  "futures",
  "hex",
+ "hound",
  "http",
  "nanomp3",
  "rustls",
@@ -2815,6 +2816,7 @@ dependencies = [
  "chrono",
  "ene-plugin",
  "futures",
+ "hound",
  "http",
  "percent-encoding",
  "rand 0.10.2",
@@ -2931,6 +2933,7 @@ dependencies = [
  "ene-store",
  "futures",
  "hex",
+ "hound",
  "http",
  "parking_lot",
  "rmcp",
@@ -2956,6 +2959,7 @@ dependencies = [
  "ene-ai",
  "ene-plugin",
  "ene-voice",
+ "hound",
  "serde",
  "serde_json",
  "tokio",
@@ -3044,6 +3048,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ene-plugin",
+ "hound",
  "rand 0.10.2",
  "reqwest",
  "serde",
@@ -3111,6 +3116,7 @@ dependencies = [
  "async-trait",
  "ene-plugin",
  "futures",
+ "hound",
  "reqwest",
  "serde",
  "serde_json",
@@ -3148,6 +3154,7 @@ dependencies = [
  "ene-config",
  "ene-plugin",
  "ene-voice",
+ "hound",
  "serde",
  "serde_json",
  "tokio",
@@ -4463,6 +4470,12 @@ checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
 
 [[package]]
 name = "htmd"

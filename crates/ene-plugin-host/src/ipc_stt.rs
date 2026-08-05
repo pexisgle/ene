@@ -131,7 +131,7 @@ impl SttProvider for IpcSttProvider {
                 other => AudioProviderError::Provider(other.to_string()),
             })?;
 
-        let wav_bytes = wav::encode_wav(pcm, sample_rate);
+        let wav_bytes = wav::encode_wav(pcm, sample_rate)?;
         let audio_base64 =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, wav_bytes);
         let outcome = self
