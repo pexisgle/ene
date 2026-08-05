@@ -103,9 +103,10 @@ fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
 TTS プロバイダプラグインも同じ規律に従います: `ene-plugin-host` の
 `IpcTtsProvider` / `IpcTtsProviderFactory` (`ipc_tts.rs` / `tts_factory.rs`) は
 `ene_ai::TtsProvider` / `TtsProviderFactory` を実装し、プラグインの
-`tts_providers` ケーパビリティを `TtsProviderSpec.kind`（例：`"voicevox"`。
-`ai.tts.provider` で選択）をキーとしてグローバルな
-`AudioProviderRegistry` に登録します。合成呼び出しは 1 回の
+`tts_providers` ケーパビリティをホストのプロバイダレジストリ
+（`PluginHostManager` が factory マップ上で `ene_ai::ProviderHost` を実装）
+をキー `TtsProviderSpec.kind`（例：`"voicevox"`。`ai.tts.provider` で選択）
+で解決します。合成呼び出しは 1 回の
 `SynthesizeSpeech` IPC ラウンドトリップで音声ファイル全体（WAV）を返し、
 ホスト側で PCM にデコードして `TtsChunk` に分割し、`TtsProvider::synthesize_stream`
 の契約を保ちます。さらに `voicevox` プラグインはマネージドモード

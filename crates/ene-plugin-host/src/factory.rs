@@ -1,8 +1,9 @@
 //! LLM provider factory backed by a plugin IPC connection.
 //!
 //! [`IpcLlmProviderFactory`] implements [`ene_ai::LlmProviderFactory`] so
-//! that plugin-provided LLM providers integrate with the global
-//! [`LlmProviderRegistry`](ene_ai::LlmProviderRegistry).
+//! that plugin-provided LLM providers resolve through the host's factory
+//! registry (the [`PluginHostManager`](crate::PluginHostManager) implements
+//! [`ene_ai::ProviderHost`] over its factory maps).
 //!
 //! ## API key trust gate
 //!

@@ -26,6 +26,44 @@ use std::time::{Duration, Instant};
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
 
+/// Stub host that serves no providers; the turn supplies its own provider
+/// and never triggers the classifier path.
+struct EmptyProviderHost;
+
+#[async_trait]
+impl ene_ai::ProviderHost for EmptyProviderHost {
+    async fn create_llm_provider(
+        &self,
+        kind: &str,
+        _config: &ene_config::EneConfig,
+        _task: &ene_ai::config::TaskRef,
+    ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
+        Err(LlmProviderError::Provider(format!(
+            "No LlmProviderFactory registered for provider kind: '{kind}'"
+        )))
+    }
+
+    async fn create_embedding_provider(
+        &self,
+        _kind: &str,
+        _config: &ene_config::EneConfig,
+    ) -> Result<Arc<dyn EmbeddingProvider>, ene_ai::EmbeddingError> {
+        Err(ene_ai::EmbeddingError::Init(
+            "stub host serves no embedding providers".to_string(),
+        ))
+    }
+
+    async fn create_tts_provider(
+        &self,
+        _kind: &str,
+        _config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+        Err(ene_ai::AudioProviderError::Provider(
+            "stub host serves no TTS providers".to_string(),
+        ))
+    }
+}
+
 struct MockEmbedder;
 
 #[async_trait]
@@ -134,6 +172,7 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
         embedder: Some(Arc::new(MockEmbedder)),
         registry: Arc::new(EmptyRegistry) as Arc<dyn ToolRegistry>,
         tool_rag: None,
+        provider_host: Arc::new(EmptyProviderHost),
         provider: Arc::new(SlowExtractionLlm {
             extraction_delay: Duration::from_secs(2),
         }),

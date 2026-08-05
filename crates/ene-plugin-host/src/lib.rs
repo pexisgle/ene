@@ -19,11 +19,10 @@
 //! - [`IpcLlmProvider`] — bridges the plugin IPC streaming protocol to the
 //!   [`ene_ai::LlmProvider`] trait.
 //! - [`IpcLlmProviderFactory`] — implements [`ene_ai::LlmProviderFactory`]
-//!   so plugin-provided LLM providers integrate with the global
-//!   [`LlmProviderRegistry`](ene_ai::LlmProviderRegistry).
+//!   so plugin-provided LLM providers resolve through the host's factory
+//!   registry ([`PluginHostManager`] implements [`ene_ai::ProviderHost`]).
 //! - [`IpcTtsProvider`] / [`IpcTtsProviderFactory`] — the TTS counterparts,
-//!   integrating plugin-provided TTS providers with
-//!   [`AudioProviderRegistry`](ene_ai::AudioProviderRegistry).
+//!   integrating plugin-provided TTS providers with the host registry.
 //! - [`IpcSttProvider`] / [`IpcSttProviderFactory`] and [`IpcVadEngine`] /
 //!   [`IpcVadFactory`] — the STT / VAD counterparts over the same registry.
 //!
@@ -116,8 +115,9 @@ pub use ipc_vad::{IpcVadEngine, IpcVadFactory};
 /// Plugin host manager.
 pub use manager::{
     EmbeddingFactoriesByPlugin, EmbeddingFactoryHandle, LlmFactoriesByPlugin, LlmFactoryHandle,
-    PluginHostManager, SttFactoriesByPlugin, SttFactoryHandle, TtsFactoriesByPlugin,
-    TtsFactoryHandle, VadFactoriesByPlugin, VadFactoryHandle,
+    PluginFactoryHandles, PluginHostManager, ProviderFactoryRemoval, SttFactoriesByPlugin,
+    SttFactoryHandle, TtsFactoriesByPlugin, TtsFactoryHandle, VadFactoriesByPlugin,
+    VadFactoryHandle,
 };
 /// MCP server configuration types.
 pub use mcp_config::{McpServerConfig, McpTransport};
