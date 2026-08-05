@@ -776,7 +776,7 @@ mod concurrency_limiter_tests {
             max_in_flight: 1,
             queue_depth: 1,
         }));
-        let _permit = limiter.acquire("test").await.unwrap();
+        let permit = limiter.acquire("test").await.unwrap();
 
         // The only wait slot is now occupied by a blocked caller.
         let waiter = tokio::spawn({
@@ -787,7 +787,7 @@ mod concurrency_limiter_tests {
 
         // Cancelling the waiter must free the slot it reserved.
         waiter.abort();
-        let _ = waiter.await;
+        assert!(waiter.await.is_err(), "aborted waiter join must fail");
 
         // A fresh caller can reserve the slot again (with the leaked counter
         // this would fail Busy immediately).
@@ -801,7 +801,7 @@ mod concurrency_limiter_tests {
             "second caller must be admitted to the freed wait slot"
         );
 
-        drop(_permit);
+        drop(permit);
         assert!(
             second.await.unwrap().is_ok(),
             "queued caller must succeed once the permit is released"

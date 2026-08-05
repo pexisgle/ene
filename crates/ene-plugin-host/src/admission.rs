@@ -34,7 +34,9 @@ const DEFAULT_CLASS_QUEUE_DEPTH: usize = 8;
 fn default_permits(class: ResourceClass) -> usize {
     match class {
         ResourceClass::Gpu { .. } => 1,
-        ResourceClass::Cpu => std::thread::available_parallelism().map_or(1, |n| n.get()),
+        ResourceClass::Cpu => {
+            std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+        }
         ResourceClass::Network => 4,
     }
 }
@@ -73,14 +75,12 @@ impl ResourceClassAdmission {
 
     /// The shared limiter for `class`, or `None` when the class is not gated.
     pub(crate) fn limiter(&self, class: ResourceClass) -> Option<Arc<ConcurrencyLimiter>> {
-        let (permits, queue_depth) = match self.budgets.get(&class) {
-            Some(&budget) => budget,
-            None => {
-                if !gated_by_default(class) {
-                    return None;
-                }
-                (default_permits(class), DEFAULT_CLASS_QUEUE_DEPTH)
-            }
+        let (permits, queue_depth) = if let Some(&budget) = self.budgets.get(&class) {
+            budget
+        } else if gated_by_default(class) {
+            (default_permits(class), DEFAULT_CLASS_QUEUE_DEPTH)
+        } else {
+            return None;
         };
         let mut limiters = self.limiters.lock();
         if let Some(limiter) = limiters.get(&class) {
@@ -99,7 +99,6 @@ impl ResourceClassAdmission {
 #[expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic,
     reason = "unit tests use unwrap/expect/panic for concise assertions"
 )]
 mod tests {
@@ -118,7 +117,7 @@ mod tests {
     #[test]
     fn default_permits_match_the_documented_values() {
         assert_eq!(default_permits(ResourceClass::Gpu { device: 0 }), 1);
-        let cpu = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let cpu = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         assert_eq!(default_permits(ResourceClass::Cpu), cpu);
         assert_eq!(default_permits(ResourceClass::Network), 4);
     }
@@ -144,7 +143,7 @@ mod tests {
         let admission = ResourceClassAdmission::new(&[]);
         let class = ResourceClass::Gpu { device: 302 };
         let limiter = admission.limiter(class).expect("gpu class is gated");
-        let _permit = limiter.acquire("test").await.expect("first permit");
+        let permit = limiter.acquire("test").await.expect("first permit");
 
         // The default queue depth admits waiters rather than failing fast.
         let waiter = tokio::spawn({
@@ -157,7 +156,7 @@ mod tests {
             "second job must wait on the single GPU permit"
         );
 
-        drop(_permit);
+        drop(permit);
         assert!(
             waiter.await.unwrap().is_ok(),
             "queued job must run once the permit is released"

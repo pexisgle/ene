@@ -82,7 +82,7 @@ impl IpcLlmProviderFactory {
         context_window: Option<u32>,
         concurrency: ConcurrencyHint,
         resource_class: ResourceClass,
-        class_admission: Arc<ResourceClassAdmission>,
+        class_admission: &ResourceClassAdmission,
     ) -> Self {
         Self {
             kind,

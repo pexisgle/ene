@@ -1006,7 +1006,7 @@ impl PluginHostManager {
                     spec.context_window,
                     spec.concurrency,
                     spec.resource_class,
-                    Arc::clone(&class_admission),
+                    &class_admission,
                 );
                 llm_factories.insert(
                     spec.kind.clone(),
