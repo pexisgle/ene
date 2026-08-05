@@ -79,6 +79,12 @@ impl CapabilityClient {
     /// `requires`, resolves the provider, and forwards the call; the returned
     /// error carries the stable capability-call code (forbidden / no provider
     /// / provider failure / timeout / transport).
+    ///
+    /// Like the `db` passenger client, the session has no client-side
+    /// deadline: the host bounds the provider hop with the connection's
+    /// per-request timeout (2 minutes by default), but a stalled host is only
+    /// noticed when it answers. Consumers that need a hard bound should wrap
+    /// the call in their own timeout.
     pub async fn call(
         &mut self,
         call: &CapabilityCall,
