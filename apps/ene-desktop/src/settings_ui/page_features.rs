@@ -683,7 +683,7 @@ fn render_audio(
 ) {
     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio"));
 
-    let mut ai_cfg = settings.config_section::<ene_ai::AiConfig>();
+    let ai_cfg = settings.config_section::<ene_ai::AiConfig>();
     let mut changed = false;
     let mut mic_device_changed = false;
 
@@ -716,12 +716,12 @@ fn render_audio(
             crate::i18n::loader(),
             "audio-vad-threshold"
         ));
-        let mut threshold = ai_cfg.vad.threshold;
+        let mut threshold = settings.vad_threshold();
         if ui
             .add(egui::Slider::new(&mut threshold, 0.0..=1.0))
             .changed()
         {
-            ai_cfg.vad.threshold = threshold;
+            settings.set_vad_threshold(threshold);
             changed = true;
         }
     });

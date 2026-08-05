@@ -23,7 +23,6 @@
 flowchart TD
   Desktop[apps/ene-desktop] --> Runtime[crates/ene-runtime]
   Desktop --> Vrm[crates/ene-vrm]
-  Desktop --> Voice[crates/ene-voice]
   CLI[apps/ene-cli] --> Runtime
 
   Runtime --> Mind[crates/ene-mind]
@@ -134,6 +133,18 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
   from the capability registry, and forwards the call over the provider's IPC
   connection (see `docs/concepts/plugins-and-mcp.md` §4.5).
 
+**Provider governance** has a single owner per concern: the plugin host is
+the one provider registry (LLM/embedding/TTS factories resolve through
+`PluginHostManager`, which implements `ene_ai::ProviderHost`) and the one
+process supervisor (liveness, restarts, circuit breaker). Upstream API
+reachability is probed *through* each provider plugin — the host sends a
+minimal chat ping and classifies the outcome — so the plugin's own endpoint
+knowledge drives the probe, with no host-side HTTP probing. Task→provider
+binding and failover policy stay in `ene-ai` (`resolve.rs`), which consults
+the host registry rather than owning one. The in-process STT/VAD providers
+(`ene-voice`) still register in `ene_ai::AudioProviderRegistry` until they
+are pluginized; that registry then disappears.
+
 ---
 
 ## 6. Summary of Crate Roles
@@ -144,11 +155,11 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-mind` | Session manager, prompt packing, affect (PAD model), memory recall, proactive speech, performance arbitration |
 | `ene-store` | SQLite / SeaORM database entities, migrations, vector recall (`sqlite-vec`), commitment ledger |
 | `ene-core` | Persistence-agnostic domain vocabulary (`AffectState`, typed-memory kinds/statuses/queries, commitment ledger types) and the `MemoryPort` trait abstraction |
-| `ene-ai` | Provider traits and registries, message/streaming types, config routing, health probing, retry policy |
-| `ene-voice` | Local STT (Whisper), TTS, VAD (Silero ONNX), cpal audio I/O |
+| `ene-ai` | Provider traits, message/streaming types, config routing, failover policy, retry policy |
+| `ene-voice` | Local STT (Whisper), TTS, VAD (Silero ONNX) engine implementations, consumed by provider plugins |
 | `ene-connector` | External-service credential authority (OAuth2/API-key storage, connector identity, permission scopes); no consumer yet — reintroduced by the MCP credential bridge under #412/#415 |
-| `ene-plugin-host` | Plugin process supervision, MCP server discovery, health checks, circuit breaker |
-| `ene-plugin-proto` | IPC Protocol v6 wire messages, versioning, framing, tool types |
+| `ene-plugin-host` | Plugin process supervision, provider registry (capability routing), MCP server discovery, health checks, circuit breaker |
+| `ene-plugin-proto` | IPC Protocol v7 wire messages, versioning, framing, tool types |
 | `ene-plugin` | Plugin authoring SDK: `ToolPlugin`/`LlmPlugin` facade, `ToolAction`/`ActionSetProvider`, prelude |
 | `ene-plugin-db` | Typed IPC client for stateful plugin database operations |
 | `ene-plugin-macros` | Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |

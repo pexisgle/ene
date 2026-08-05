@@ -9,11 +9,11 @@
 //!
 //! # Where the document comes from
 //!
-//! Readers fall into two groups. Factory-built providers receive the full
+//! Readers fall into two groups. The plugin-host adapters receive the full
 //! `EneConfig` at construction and read their plugin settings from that
-//! document via [`plugin_config_blob`] / [`plugin_profile_blob`] — e.g.
-//! `ene-voice`'s `LocalTtsProviderFactory` and `SileroVadFactory` source
-//! `ort_dylib_path` and the Kokoro `voices_path` from the active document.
+//! document via [`plugin_config_blob`] / [`plugin_profile_blob`] — e.g. the
+//! host's `IpcTtsProvider` / `IpcSttProvider` / `IpcVadEngine` re-read the
+//! blob on every call so `plugins.list.<name>.config` edits apply live.
 //! Paths that only hold the `AiConfig` section (or none at all) fall back to
 //! the global config singleton ([`ene_config::get_global_config`]) via
 //! [`global_plugin_config_blob`] / [`global_plugin_profile_blob`] /
@@ -37,6 +37,8 @@ pub const LLAMA_CPP_PLUGIN: &str = "llama-cpp";
 pub const ONNX_PLUGIN: &str = "onnx";
 /// Plugin list key for the Kokoro TTS plugin.
 pub const KOKORO_PLUGIN: &str = "kokoro";
+/// Plugin list key for the whisper.cpp STT plugin.
+pub const WHISPER_PLUGIN: &str = "whisper";
 /// Default profile name under `plugins.list.kokoro.profiles` for the single
 /// Kokoro voice set shipped today.
 pub const KOKORO_DEFAULT_PROFILE: &str = "kokoro";

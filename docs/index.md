@@ -38,7 +38,7 @@ Ene Workspace
 │   ├── ene-core           (Persistence-agnostic domain vocabulary & memory port)
 │   ├── ene-ai             (Core AI provider traits, OpenAI, Anthropic adapter)
 │   ├── ene-infer          (Local-model engine: worker threads, queues, conformance)
-│   ├── ene-voice          (Local STT/TTS/VAD audio pipeline)
+│   ├── ene-voice          (Local STT/TTS/VAD engines, consumed by provider plugins)
 │   ├── ene-rag            (RAG policy: memory scoring/decay, tool selection)
 │   ├── ene-connector      (External-service credential & identity authority)
 │   ├── ene-util           (Pure utilities: truncation, HTML-to-Markdown)

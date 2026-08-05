@@ -2556,7 +2556,6 @@ dependencies = [
  "ene-runtime",
  "ene-store",
  "ene-util",
- "ene-voice",
  "ene-vrm",
  "fluent-bundle",
  "glam 0.33.2",
@@ -2999,6 +2998,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-onnx"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-ai",
+ "ene-config",
+ "ene-plugin",
+ "ene-voice",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ene-plugin-openai"
 version = "0.1.0"
 dependencies = [
@@ -3116,6 +3131,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-whisper"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-ai",
+ "ene-config",
+ "ene-plugin",
+ "ene-voice",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ene-rag"
 version = "0.1.0"
 dependencies = [
@@ -3155,7 +3186,6 @@ dependencies = [
  "ene-plugin-proto",
  "ene-rag",
  "ene-store",
- "ene-voice",
  "futures",
  "image",
  "once_cell",

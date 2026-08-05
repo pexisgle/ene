@@ -45,7 +45,7 @@ pub use crate::query::candidates::PendingCandidateSummary;
 pub use command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
 pub use event::{
     AudioChunk, AudioStreamReceiver, EneEvent, EneEventReceiver, EneStateSnapshot, EneStatus,
-    LifecycleEvent, LifecycleReceiver, TerminalReason,
+    LifecycleEvent, LifecycleReceiver, MemoryLedgerChange, TerminalReason,
 };
 
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
@@ -54,17 +54,15 @@ use crate::public_api::PublicApiError;
 use crate::streaming::{PermissionDecision, UserInputResponse};
 use crate::types::{CancelError, RequestId, RunError, TurnId};
 use chrono::{DateTime, Utc};
-use ene_ai::LlmProviderRegistry;
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::{ConversationSession, SessionId};
 use ene_plugin_host::{
-    DisabledReason, EmbeddingFactoriesByPlugin, LlmFactoriesByPlugin, PluginHealthEvent,
-    TtsFactoriesByPlugin,
+    DisabledReason, PluginHealthEvent, SttFactoriesByPlugin, VadFactoriesByPlugin,
 };
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
 /// Bounded capacity for the dedicated audio (PCM) channel.
 ///
@@ -358,6 +356,10 @@ pub struct EneHandle {
     /// mailbox; mutations route through it (see
     /// [`crate::query::candidates::MemoryCandidateHandle`]).
     candidates: crate::query::candidates::MemoryCandidateHandle,
+    /// Interactive memory/commitment ledger handle. Reads bypass the actor
+    /// mailbox; mutations route through it (see
+    /// [`crate::query::ledger::MemoryLedgerHandle`]).
+    ledger: crate::query::ledger::MemoryLedgerHandle,
     /// Screen-image vision summarization handle, bypasses the actor mailbox.
     vision: crate::vision::VisionHandle,
     /// Tool registry operations handle (list / search / call / invalidate).
@@ -405,6 +407,7 @@ impl Clone for EneHandle {
             host_service_handle: Arc::clone(&self.host_service_handle),
             sessions: self.sessions.clone(),
             candidates: self.candidates.clone(),
+            ledger: self.ledger.clone(),
             vision: self.vision.clone(),
             tools: self.tools.clone(),
             shutdown_guard: Arc::clone(&self.shutdown_guard),
@@ -415,11 +418,39 @@ impl Clone for EneHandle {
 impl EneHandle {
     /// Open a ready runtime handle.
     ///
-    /// Initializes the LLM provider registry, embedding provider, memory store
-    /// (when enabled), tool registry, mind session with `card`, and character
-    /// memory warmup **before** returning `Ok`. Config file I/O stays in the
-    /// host / `ene-config` — pass an already-loaded config and card.
+    /// Initializes the embedding provider, memory store (when enabled), tool
+    /// registry, mind session with `card`, and character memory warmup
+    /// **before** returning `Ok`. Provider creation resolves through the
+    /// plugin host's registry. Config file I/O stays in the host /
+    /// `ene-config` — pass an already-loaded config and card.
     pub async fn open(config: EneConfig, card: CharacterCardV3) -> Result<Self, EneRuntimeError> {
+        let plugin_host_slot: crate::provider_host::PluginHostSlot = Arc::new(Mutex::new(None));
+        let provider_host: Arc<dyn ene_ai::ProviderHost> = Arc::new(
+            crate::provider_host::LiveProviderCatalog::new(Arc::clone(&plugin_host_slot)),
+        );
+        Self::open_inner(config, card, provider_host, plugin_host_slot).await
+    }
+
+    /// Open a ready runtime handle with an injected provider host.
+    ///
+    /// Provider creation (LLM/embedding/TTS) routes through `provider_host`
+    /// instead of the live plugin host. Used by tests that stand in for the
+    /// plugin registry with stub factories; the plugin host is still started
+    /// (for tools) unless the config disables it.
+    pub async fn open_with_provider_host(
+        config: EneConfig,
+        card: CharacterCardV3,
+        provider_host: Arc<dyn ene_ai::ProviderHost>,
+    ) -> Result<Self, EneRuntimeError> {
+        Self::open_inner(config, card, provider_host, Arc::new(Mutex::new(None))).await
+    }
+
+    async fn open_inner(
+        config: EneConfig,
+        card: CharacterCardV3,
+        provider_host: Arc<dyn ene_ai::ProviderHost>,
+        plugin_host_slot: crate::provider_host::PluginHostSlot,
+    ) -> Result<Self, EneRuntimeError> {
         // The command mailbox is deliberately an *unbounded* `mpsc`.
         //
         // Stage 8 bounded the five background `JoinSet`s (admission control),
@@ -454,15 +485,6 @@ impl EneHandle {
         let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
         let (diag_tx, diag_rx) = broadcast::channel(256);
 
-        // Register the local whisper/kokoro/silero factories with
-        // `ene_ai::AudioProviderRegistry` before anything below (this
-        // function's own TTS provider resolution, or a later
-        // caller-initiated STT/VAD lookup such as the desktop app's mic
-        // toggle) can look one up by name. Doing it here, after `tracing`
-        // is up, makes registration observable (a `#[ctor::ctor]` would
-        // run before `main` and before `tracing` was initialized).
-        ene_voice::register_providers();
-
         let mind = config.get_section::<ene_mind::MindConfig>()?;
 
         // Startup validation: warn on mind-config timing relationships that
@@ -489,7 +511,7 @@ impl EneHandle {
 
         // Fail-closed: memory / tool-RAG features require a working embedder.
         let embedder = if needs_embedder {
-            Some(actor::init_embedding(&config)?)
+            Some(actor::init_embedding(&config, Arc::clone(&provider_host))?)
         } else {
             None
         };
@@ -521,11 +543,8 @@ impl EneHandle {
         // handle, so the handle exists (empty) before the host-service
         // acceptor binds; calls landing during startup fail with a typed
         // "host is not running" error and are retryable.
-        let plugin_host = Arc::new(tokio::sync::Mutex::new(
-            None::<ene_plugin_host::PluginHostManager>,
-        ));
         let mediator: Arc<dyn ene_plugin_proto::CapabilityServiceHandler> = Arc::new(
-            ene_plugin_host::CapabilityMediator::new(Arc::clone(&plugin_host)),
+            ene_plugin_host::CapabilityMediator::new(Arc::clone(&plugin_host_slot)),
         );
         let (db_tokens, host_service_handle) = actor::spawn_db_ipc_servers(
             &config,
@@ -535,39 +554,19 @@ impl EneHandle {
 
         // Start the plugin host (discovers and launches v3 plugin binaries).
         // Non-fatal: on failure we log and continue with no plugin-provided
-        // providers/tools, mirroring the tool host's empty-set fallback.
+        // providers/tools, mirroring the tool host's empty-set fallback. The
+        // host itself is the provider registry — nothing is copied out of it.
         let mut started_host =
             match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
                 Ok(host) => {
-                    for (kind, factory) in host.llm_factories() {
-                        tracing::info!(
-                            component = "Bootstrap",
-                            kind = %kind,
-                            "Registered plugin-provided LLM provider factory"
-                        );
-                        LlmProviderRegistry::register(Arc::clone(factory));
-                    }
-                    for (kind, factory) in host.embedding_factories() {
-                        tracing::info!(
-                            component = "Bootstrap",
-                            kind = %kind,
-                            "Registered plugin-provided embedding provider factory"
-                        );
-                        ene_ai::EmbeddingProviderRegistry::register(Arc::clone(factory));
-                    }
-                    for (kind, factory) in host.tts_factories() {
-                        tracing::info!(
-                            component = "Bootstrap",
-                            kind = %kind,
-                            "Registered plugin-provided TTS provider factory"
-                        );
-                        ene_ai::AudioProviderRegistry::register_tts(Arc::clone(factory));
-                    }
                     tracing::info!(
                         component = "Bootstrap",
                         tool_registries = host.tool_registries().len(),
                         llm_factories = host.llm_factories().len(),
+                        embedding_factories = host.embedding_factories().len(),
                         tts_factories = host.tts_factories().len(),
+                        stt_factories = host.stt_factories().len(),
+                        vad_factories = host.vad_factories().len(),
                         "Plugin host started"
                     );
                     Some(host)
@@ -594,24 +593,47 @@ impl EneHandle {
             let llm_factories_by_plugin = host.llm_factories_by_plugin();
             let embedding_factories_by_plugin = host.embedding_factories_by_plugin();
             let tts_factories_by_plugin = host.tts_factories_by_plugin();
+            let stt_factories_by_plugin = host.stt_factories_by_plugin();
+            let vad_factories_by_plugin = host.vad_factories_by_plugin();
             health_bridge_handle = Some(tokio::spawn(async move {
                 while let Some(event) = health_rx.recv().await {
                     if let PluginHealthEvent::Disabled { plugin, .. } = &event {
-                        deregister_disabled_plugin_factories(plugin, &llm_factories_by_plugin);
-                        deregister_disabled_embedding_factories(
-                            plugin,
-                            &embedding_factories_by_plugin,
+                        drop(
+                            cmd_tx.send(EneCommand::PluginProviderDisabled {
+                                plugin: plugin.clone(),
+                                factories: ene_plugin_host::PluginFactoryHandles {
+                                    llm: llm_factories_by_plugin
+                                        .get(plugin)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                    embedding: embedding_factories_by_plugin
+                                        .get(plugin)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                    tts: tts_factories_by_plugin
+                                        .get(plugin)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                },
+                            }),
                         );
-                        if deregister_disabled_tts_factories(plugin, &tts_factories_by_plugin) {
-                            drop(cmd_tx.send(EneCommand::RebuildTtsProvider));
-                        }
+                        // STT/VAD providers are recreated per microphone
+                        // session, so deregistration alone is enough — the
+                        // next capture start fails fast with a clear error.
+                        deregister_disabled_stt_factories(plugin, &stt_factories_by_plugin);
+                        deregister_disabled_vad_factories(plugin, &vad_factories_by_plugin);
                     }
                     emit_diag(&diag_tx, plugin_health_event_to_diag(event));
                 }
             }));
         }
 
-        let registry = actor::build_tool_registry(started_host.as_ref())?;
+        // Publish the host into the shared slot before any provider
+        // resolution runs (the TTS bootstrap below queries it through the
+        // live catalog); reconfiguration swaps the manager in place later.
+        *plugin_host_slot.lock().await = started_host;
+
+        let registry = actor::build_tool_registry(plugin_host_slot.lock().await.as_ref())?;
         let tool_rag = match embedder.as_ref() {
             Some(emb) => actor::init_tool_rag(&config, emb, memory_store.clone())?,
             None => None,
@@ -667,25 +689,10 @@ impl EneHandle {
         let tts_provider = {
             let ai_config = config.get_section::<ene_ai::AiConfig>()?;
 
-            // Prefetch the configured local TTS model files before
-            // constructing the provider below, so `LocalTtsProvider::open`
-            // (ene-voice) never needs to perform network I/O itself — it
-            // only fails fast if a file is still missing. Mirrors the GGUF
-            // prefetch above. Non-fatal: on failure we log and let provider
-            // construction report a clear error.
-            if let Err(e) = ene_voice::prefetch_if_configured(&config).await {
-                tracing::warn!(
-                    component = "Bootstrap",
-                    error = %e,
-                    "Local TTS model prefetch failed; will report a clear error on provider construction"
-                );
-            }
-
             if let Some(resolved) = ai_config.resolve_tts() {
-                match ene_ai::AudioProviderRegistry::create_tts_provider(
-                    &resolved.provider,
-                    &config,
-                ) {
+                match resolve_tts_provider(provider_host.as_ref(), &config, &resolved.provider)
+                    .await
+                {
                     Ok(provider) => {
                         tracing::info!(
                             component = "Bootstrap",
@@ -721,13 +728,15 @@ impl EneHandle {
 
         let turn_gate = Arc::new(TurnGate::new());
 
-        let plugin_tool_registries = started_host
+        let plugin_tool_registries = plugin_host_slot
+            .lock()
+            .await
             .as_ref()
             .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
 
         // Share the plugin host and its health-bridge task between the handle
         // (for shutdown) and the actor (for Features-update reconfiguration).
-        *plugin_host.lock().await = started_host.take();
+        let plugin_host = plugin_host_slot;
         let health_bridge_handle = Arc::new(tokio::sync::Mutex::new(health_bridge_handle));
         let host_service_handle = Arc::new(tokio::sync::Mutex::new(host_service_handle));
 
@@ -740,6 +749,11 @@ impl EneHandle {
 
         let sessions = crate::query::sessions::SessionQueryHandle::new(memory_store.clone());
         let candidates = crate::query::candidates::MemoryCandidateHandle::new(
+            memory_store.clone(),
+            Arc::clone(&cmd_tx),
+            Arc::clone(&shared.card_name),
+        );
+        let ledger = crate::query::ledger::MemoryLedgerHandle::new(
             memory_store.clone(),
             Arc::clone(&cmd_tx),
             Arc::clone(&shared.card_name),
@@ -765,6 +779,7 @@ impl EneHandle {
             health_monitor,
             tts_provider,
             plugin_tool_registries,
+            provider_host,
             Arc::clone(&plugin_host),
             Arc::clone(&health_bridge_handle),
             Arc::clone(&host_service_handle),
@@ -797,6 +812,7 @@ impl EneHandle {
             host_service_handle,
             sessions,
             candidates,
+            ledger,
             vision,
             tools,
             shutdown_guard,
@@ -942,6 +958,17 @@ impl EneHandle {
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     pub fn candidates(&self) -> crate::query::candidates::MemoryCandidateHandle {
         self.candidates.clone()
+    }
+
+    /// Interactive memory/commitment ledger handle (list / inspect / edit /
+    /// salience adjustment).
+    ///
+    /// Reads are mailbox-free; mutations route through the actor mailbox with
+    /// the active `TurnId` and emit `MemoryLedgerChanged` audit events.
+    ///
+    /// Cheap to call repeatedly; the returned handle is a small `Clone`.
+    pub fn memory_ledger(&self) -> crate::query::ledger::MemoryLedgerHandle {
+        self.ledger.clone()
     }
 
     /// Screen-image vision summarization handle, bypassing the
@@ -1218,6 +1245,27 @@ impl EneHandle {
         rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
+    /// Build a chat provider for the configured chat task.
+    ///
+    /// Routes through the live provider host, so the returned provider
+    /// matches what a real turn would use. Used by CLI commands that need a
+    /// provider outside a turn (e.g. the memory-write retry drain).
+    pub async fn create_chat_provider(
+        &self,
+    ) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::CreateChatProvider { reply: tx })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await
+            .map_err(|_| EneRuntimeError::ChannelClosed)?
+            .map_err(|message| {
+                EneRuntimeError::Ai(ene_ai::AiError::Llm(ene_ai::LlmProviderError::Provider(
+                    message,
+                )))
+            })
+    }
+
     /// List recent run history for one schedule, newest first.
     pub async fn list_schedule_runs(
         &self,
@@ -1422,64 +1470,54 @@ fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
     }
 }
 
-fn deregister_disabled_plugin_factories(plugin: &str, factories_by_plugin: &LlmFactoriesByPlugin) {
-    if let Some(factories) = factories_by_plugin.get(plugin) {
-        for (kind, factory) in factories {
-            if LlmProviderRegistry::deregister_if_matches(kind, factory) {
-                tracing::info!(
-                    component = "PluginHealthBridge",
-                    plugin = %plugin,
-                    kind = %kind,
-                    "Deregistered LLM provider factory for permanently disabled plugin"
-                );
-            }
-        }
-    }
-}
-
-fn deregister_disabled_embedding_factories(
-    plugin: &str,
-    factories_by_plugin: &EmbeddingFactoriesByPlugin,
-) {
-    if let Some(factories) = factories_by_plugin.get(plugin) {
-        for (kind, factory) in factories {
-            if ene_ai::EmbeddingProviderRegistry::deregister_if_matches(kind, factory) {
-                tracing::info!(
-                    component = "PluginHealthBridge",
-                    plugin = %plugin,
-                    kind = %kind,
-                    "Deregistered embedding provider factory for permanently disabled plugin"
-                );
-            }
-        }
-    }
-}
-
-/// Deregisters the TTS factories a permanently-disabled plugin provided.
+/// Resolve a TTS provider from the host registry.
 ///
-/// Returns `true` when at least one factory was removed, so the health
-/// bridge can notify the actor to rebuild its live TTS provider (unlike
-/// LLM/embedding providers, the long-lived `TtsProvider` keeps a now-dead
-/// IPC connection otherwise).
-fn deregister_disabled_tts_factories(
-    plugin: &str,
-    factories_by_plugin: &TtsFactoriesByPlugin,
-) -> bool {
-    let mut removed = false;
+/// Falls back to the in-process `ene-voice` Kokoro factory when the host
+/// cannot serve the kind (host down or the plugin absent), preserving the
+/// pre-plugin behavior. The fallback disappears once `ene-voice` is
+/// pluginized and this registry is removed.
+async fn resolve_tts_provider(
+    host: &dyn ene_ai::ProviderHost,
+    config: &EneConfig,
+    kind: &str,
+) -> Result<Box<dyn ene_ai::TtsProvider>, String> {
+    match host.create_tts_provider(kind, config).await {
+        Ok(provider) => Ok(provider),
+        Err(host_error) => ene_ai::AudioProviderRegistry::create_tts_provider(kind, config)
+            .map_err(|legacy_error| format!("host: {host_error}; legacy: {legacy_error}")),
+    }
+}
+
+/// Deregisters the STT factories a permanently-disabled plugin provided.
+fn deregister_disabled_stt_factories(plugin: &str, factories_by_plugin: &SttFactoriesByPlugin) {
     if let Some(factories) = factories_by_plugin.get(plugin) {
         for (kind, factory) in factories {
-            if ene_ai::AudioProviderRegistry::deregister_tts_if_matches(kind, factory) {
-                removed = true;
+            if ene_ai::AudioProviderRegistry::deregister_stt_if_matches(kind, factory) {
                 tracing::info!(
                     component = "PluginHealthBridge",
                     plugin = %plugin,
                     kind = %kind,
-                    "Deregistered TTS provider factory for permanently disabled plugin"
+                    "Deregistered STT provider factory for permanently disabled plugin"
                 );
             }
         }
     }
-    removed
+}
+
+/// Deregisters the VAD factories a permanently-disabled plugin provided.
+fn deregister_disabled_vad_factories(plugin: &str, factories_by_plugin: &VadFactoriesByPlugin) {
+    if let Some(factories) = factories_by_plugin.get(plugin) {
+        for (kind, factory) in factories {
+            if ene_ai::AudioProviderRegistry::deregister_vad_if_matches(kind, factory) {
+                tracing::info!(
+                    component = "PluginHealthBridge",
+                    plugin = %plugin,
+                    kind = %kind,
+                    "Deregistered VAD engine factory for permanently disabled plugin"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1694,7 +1732,7 @@ mod tests {
         let mut card = test_card();
         card.data.name = "Ene".into();
         card.data.first_mes = "Hello!".into();
-        let handle = EneHandle::open(config, card)
+        let handle = EneHandle::open_with_provider_host(config, card, hanging_provider_host())
             .await
             .expect("open initializes handle");
 
@@ -1718,6 +1756,71 @@ mod tests {
     /// completing fast and releasing the single-flight gate on its own. The
     /// caller must hold the returned listener for as long as the turn should
     /// stay in flight.
+    /// Stub host standing in for the plugin registry in tests: serves the
+    /// hanging LLM factory under its custom kind and the hanging embedding
+    /// factory under `openai`.
+    struct StubProviderHost {
+        llm: std::collections::HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
+        embedding: std::collections::HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ene_ai::ProviderHost for StubProviderHost {
+        async fn create_llm_provider(
+            &self,
+            kind: &str,
+            config: &ene_config::EneConfig,
+            task: &ene_ai::config::TaskRef,
+        ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::LlmProviderError> {
+            self.llm
+                .get(kind)
+                .ok_or_else(|| {
+                    ene_ai::LlmProviderError::Provider(format!(
+                        "No LlmProviderFactory registered for provider kind: '{kind}'"
+                    ))
+                })?
+                .create_provider(config, task)
+        }
+
+        async fn create_embedding_provider(
+            &self,
+            kind: &str,
+            config: &ene_config::EneConfig,
+        ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+            self.embedding
+                .get(kind)
+                .ok_or_else(|| {
+                    ene_ai::EmbeddingError::Init(format!(
+                        "No embedding provider factory registered for provider kind: '{kind}'"
+                    ))
+                })?
+                .create_embedding_provider(config)
+        }
+
+        async fn create_tts_provider(
+            &self,
+            _kind: &str,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+            Err(ene_ai::AudioProviderError::Provider(
+                "stub host serves no TTS providers".to_string(),
+            ))
+        }
+    }
+
+    fn hanging_provider_host() -> Arc<dyn ene_ai::ProviderHost> {
+        Arc::new(StubProviderHost {
+            llm: std::collections::HashMap::from([(
+                HangingLlmFactory::KIND.to_string(),
+                Arc::new(HangingLlmFactory) as Arc<dyn ene_ai::LlmProviderFactory>,
+            )]),
+            embedding: std::collections::HashMap::from([(
+                ene_ai::config::OPENAI_PROVIDER_KIND.to_string(),
+                Arc::new(HangingEmbeddingFactory) as Arc<dyn ene_ai::EmbeddingProviderFactory>,
+            )]),
+        })
+    }
+
     async fn test_config_hanging_provider() -> (EneConfig, tokio::net::TcpListener) {
         let hanging = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1764,8 +1867,6 @@ mod tests {
             ..ene_ai::config::TaskRef::default()
         };
         drop(config.set_section(&ai));
-        ene_ai::LlmProviderRegistry::register(Arc::new(HangingLlmFactory));
-        ene_ai::EmbeddingProviderRegistry::register(Arc::new(HangingEmbeddingFactory));
         (config, hanging)
     }
 
@@ -1877,9 +1978,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn active_turn_reflects_single_flight_gate() {
         let (config, _hanging) = test_config_hanging_provider().await;
-        let handle = EneHandle::open(config, test_card())
-            .await
-            .expect("open initializes handle");
+        let handle =
+            EneHandle::open_with_provider_host(config, test_card(), hanging_provider_host())
+                .await
+                .expect("open initializes handle");
 
         assert!(
             handle.active_turn().is_none(),
@@ -1920,9 +2022,10 @@ mod tests {
         // the hanging provider means the turn cannot complete and release the
         // gate on its own while the lag recovery runs.
         let (config, _hanging) = test_config_hanging_provider().await;
-        let handle = EneHandle::open(config, test_card())
-            .await
-            .expect("open initializes handle");
+        let handle =
+            EneHandle::open_with_provider_host(config, test_card(), hanging_provider_host())
+                .await
+                .expect("open initializes handle");
 
         let mut event_rx = handle.subscribe();
         let mut diag_rx = handle.diagnostics().subscribe();
@@ -2450,6 +2553,9 @@ mod tests {
             health_monitor,
             None,
             Vec::new(),
+            Arc::new(crate::provider_host::LiveProviderCatalog::new(Arc::new(
+                tokio::sync::Mutex::new(None),
+            ))),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -2502,6 +2608,9 @@ mod tests {
             health_monitor,
             None,
             Vec::new(),
+            Arc::new(crate::provider_host::LiveProviderCatalog::new(Arc::new(
+                tokio::sync::Mutex::new(None),
+            ))),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),

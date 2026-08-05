@@ -47,6 +47,13 @@ pub struct PluginCapabilities {
     #[serde(default)]
     pub stt_providers: Vec<SttProviderSpec>,
 
+    /// VAD engines served by this plugin.
+    ///
+    /// Absent on older binaries (`#[serde(default)]` → empty); the host then
+    /// registers no VAD factory for the plugin.
+    #[serde(default)]
+    pub vad_providers: Vec<VadProviderSpec>,
+
     /// Whether the plugin handles [`crate::PluginIpcRequest::ListConfigOptions`].
     ///
     /// Absent on older binaries (`#[serde(default)]` → `false`); the host
@@ -442,6 +449,48 @@ pub struct SttProviderSpec {
     pub concurrency: ConcurrencyHint,
 }
 
+/// Specification of a voice activity detection engine.
+///
+/// `frame_size` is the one piece of engine state the host must know
+/// synchronously: a host-side `VadEngine` adapter has to answer
+/// `frame_size()` without an IPC round trip, so it carries the value from
+/// this spec. `sample_rate` is the PCM rate chunks arrive at; the host's
+/// capture pipeline runs at 16 kHz today and reserves this field for
+/// negotiating other rates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VadProviderSpec {
+    /// Engine kind identifier (e.g. `"silero"`).
+    pub kind: String,
+
+    /// PCM samples per [`crate::PluginIpcRequest::ProcessVadChunk`] call.
+    #[serde(default)]
+    pub frame_size: u32,
+
+    /// PCM sample rate the engine expects (Hz).
+    ///
+    /// Absent (or omitted by an older binary) defaults to
+    /// [`DEFAULT_SAMPLE_RATE`] — 16 kHz, the rate every built-in VAD engine
+    /// and the desktop capture pipeline use.
+    #[serde(default = "default_vad_sample_rate")]
+    pub sample_rate: u32,
+
+    /// How many concurrent sessions this engine can safely serve.
+    ///
+    /// Absent (or omitted by an older plugin binary) defaults to
+    /// [`ConcurrencyHint::default`] — serial, shallow queue. See that type's
+    /// docs for the rationale.
+    #[serde(default)]
+    pub concurrency: ConcurrencyHint,
+}
+
+/// Default VAD sample rate: 16 kHz (Silero VAD's native rate, shared by the
+/// desktop capture pipeline).
+pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
+
+fn default_vad_sample_rate() -> u32 {
+    DEFAULT_SAMPLE_RATE
+}
+
 /// How many concurrent jobs a plugin-supplied provider (LLM, TTS, STT) can
 /// safely accept.
 ///
@@ -500,6 +549,7 @@ mod tests {
         assert!(caps.llm_providers.is_empty());
         assert!(caps.tts_providers.is_empty());
         assert!(caps.stt_providers.is_empty());
+        assert!(caps.vad_providers.is_empty());
         assert!(!caps.supports_list_config_options);
         assert!(!caps.supports_validate_config);
         assert!(!caps.supports_migrate_config);
@@ -527,6 +577,7 @@ mod tests {
             embed_providers: vec!["openai".into()],
             tts_providers: vec![],
             stt_providers: vec![],
+            vad_providers: vec![],
             supports_list_config_options: true,
             supports_validate_config: true,
             supports_migrate_config: true,
@@ -745,6 +796,30 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
         let deser: SttProviderSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(spec, deser);
+    }
+
+    #[test]
+    fn vad_provider_spec_serde_roundtrip() {
+        let spec = VadProviderSpec {
+            kind: "silero".into(),
+            frame_size: 512,
+            sample_rate: 16_000,
+            concurrency: ConcurrencyHint::default(),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let deser: VadProviderSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec, deser);
+    }
+
+    /// Load-bearing contract: an absent `frame_size` (as an old binary that
+    /// predates the field would send) deserializes to 0 rather than an
+    /// error, so the host can reject it explicitly.
+    #[test]
+    fn vad_provider_spec_missing_frame_size_defaults_to_zero() {
+        let json = r#"{"kind":"silero"}"#;
+        let spec: VadProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.frame_size, 0);
+        assert_eq!(spec.sample_rate, DEFAULT_SAMPLE_RATE);
     }
 
     /// Load-bearing contract: an unset `concurrency` field (as an old plugin

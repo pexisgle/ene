@@ -54,6 +54,7 @@ pub mod handle;
 pub mod message_builder;
 mod proactive;
 mod proactive_llm;
+mod provider_host;
 /// Stable public API v1 facade: version, JSON event mirrors, redaction.
 pub mod public_api;
 /// Read-only session and pending-candidate query handles that bypass the
@@ -98,12 +99,14 @@ pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 pub use handle::{
     AudioChunk, AudioStreamReceiver, DeferredToolTask, EneEvent, EneEventReceiver, EneHandle,
     EneStateSnapshot, EneStatus, FeatureSettingsUpdate, LifecycleEvent, LifecycleReceiver,
-    ShutdownTimeout, TerminalReason,
+    MemoryLedgerChange, ShutdownTimeout, TerminalReason,
 };
 
 // ── Read-only query / vision handles ──
 /// Pending memory-candidate approval handle and its summary DTO.
 pub use query::candidates::{MemoryCandidateHandle, PendingCandidateEdit, PendingCandidateSummary};
+/// Interactive memory/commitment ledger handle.
+pub use query::ledger::MemoryLedgerHandle;
 /// Read-only session query handle (list / export / import / search / archive).
 pub use query::sessions::SessionQueryHandle;
 /// Screen-image vision summarization handle.
@@ -124,7 +127,7 @@ pub use workspace::{WorkspaceHandle, WorkspaceIndexer, WorkspaceStatusView};
 /// DTOs, and the unified [`public_api::PublicApiError`] category.
 pub use public_api::{
     API_VERSION, PublicApiError, PublicChatEvent, PublicExportedMessage, PublicLifecycleEvent,
-    PublicPerfCue, PublicSessionMeta, redact_text, redact_tool_arguments,
+    PublicMemoryLedgerChange, PublicPerfCue, PublicSessionMeta, redact_text, redact_tool_arguments,
     redact_tool_arguments_json,
 };
 

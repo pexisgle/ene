@@ -23,13 +23,16 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    if let Err(e) = ene_plugin::run_plugin_server(ene_plugin::PluginDispatch::new(
-        None,
-        None,
-        None,
-        Some(std::sync::Arc::new(KokoroPlugin::new())),
-        None,
-    ))
+    if let Err(e) = ene_plugin::run_plugin_server(
+        ene_plugin::PluginDispatch::new(
+            None,
+            None,
+            None,
+            Some(std::sync::Arc::new(KokoroPlugin::new())),
+            None,
+        )
+        .with_capability_declarations(plugin::provides(), Vec::new()),
+    )
     .await
     {
         tracing::error!(component = "ene-plugin-kokoro", error = %e, "Fatal error");

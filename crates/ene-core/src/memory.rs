@@ -617,6 +617,24 @@ pub struct NewMemoryItem {
     pub commitment_id: Option<i64>,
 }
 
+/// User-editable fields of a persisted typed memory.
+///
+/// Editing is in-place (the row keeps its id, status, salience, and history);
+/// the store recomputes [`MemoryScope`] from the edited kind using the same
+/// canonical mapping as candidate approval, so a kind change cannot leave a
+/// stale scope behind.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryEdit {
+    /// Short title or label.
+    pub title: String,
+    /// Full memory content.
+    pub content: String,
+    /// Memory kind.
+    pub kind: MemoryKind,
+    /// Confidence score.
+    pub confidence: MemoryConfidence,
+}
+
 /// Recall source that surfaced a memory candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

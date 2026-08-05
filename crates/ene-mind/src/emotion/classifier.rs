@@ -53,6 +53,7 @@ pub async fn classify_for_config(
     timeout_secs: u64,
     lang: &str,
     available_expressions: &[String],
+    provider_host: &dyn ene_ai::ProviderHost,
 ) -> Result<AffectProposal, CognitionError> {
     let config = config.clone();
     let model_override = model_override
@@ -66,42 +67,48 @@ pub async fn classify_for_config(
 
     classify_with_resilient_fallback(
         move |attempt_cap| {
-            let cap = attempt_cap.or(if configured_max_tokens > 0 {
-                Some(configured_max_tokens)
-            } else {
-                None
-            });
-            let ai_cfg = config.get_section::<ene_ai::AiConfig>().map_err(|e| {
-                ClassifierError::Config(format!("Failed to parse AI config: {e}"))
-            })?;
-            // Route the classifier task (falling back to the chat task)
-            // through the plugin-backed provider registry, honoring the
-            // model override and the token cap like the previous
-            // resolved-settings path did.
-            let mut task = ai_cfg
-                .tasks
-                .classifier
-                .clone()
-                .unwrap_or_else(|| ai_cfg.tasks.chat.clone());
-            if let Some(override_model) = model_override.as_deref() {
-                task.model = Some(override_model.to_string());
+            let config = config.clone();
+            let model_override = model_override.clone();
+            async move {
+                let cap = attempt_cap.or(if configured_max_tokens > 0 {
+                    Some(configured_max_tokens)
+                } else {
+                    None
+                });
+                let ai_cfg = config.get_section::<ene_ai::AiConfig>().map_err(|e| {
+                    ClassifierError::Config(format!("Failed to parse AI config: {e}"))
+                })?;
+                // Route the classifier task (falling back to the chat task)
+                // through the plugin-backed provider registry, honoring the
+                // model override and the token cap like the previous
+                // resolved-settings path did.
+                let mut task = ai_cfg
+                    .tasks
+                    .classifier
+                    .clone()
+                    .unwrap_or_else(|| ai_cfg.tasks.chat.clone());
+                if let Some(override_model) = model_override.as_deref() {
+                    task.model = Some(override_model.to_string());
+                }
+                if task.model.as_deref().is_none_or(|m| m.trim().is_empty()) {
+                    return Err(ClassifierError::Config(
+                        "affect classifier requires a model (set ai.tasks.classifier.model or ai.tasks.chat.model)"
+                            .to_string(),
+                    ));
+                }
+                if let Some(max) = cap {
+                    task.max_tokens = Some(max);
+                }
+                // A provider that cannot be constructed (unknown provider,
+                // plugin not loaded) is a configuration problem, not a
+                // transport failure: classify it as `Config` so the resilient
+                // fallback does not burn retries on it.
+                let provider =
+                    ene_ai::create_chat_provider_for_task(&config, &task, provider_host)
+                        .await
+                        .map_err(|e| ClassifierError::Config(e.to_string()))?;
+                Ok(provider)
             }
-            if task.model.as_deref().is_none_or(|m| m.trim().is_empty()) {
-                return Err(ClassifierError::Config(
-                    "affect classifier requires a model (set ai.tasks.classifier.model or ai.tasks.chat.model)"
-                        .to_string(),
-                ));
-            }
-            if let Some(max) = cap {
-                task.max_tokens = Some(max);
-            }
-            // A provider that cannot be constructed (unknown provider,
-            // plugin not loaded) is a configuration problem, not a
-            // transport failure: classify it as `Config` so the resilient
-            // fallback does not burn retries on it.
-            let provider = ene_ai::create_chat_provider_for_task(&config, &task)
-                .map_err(|e| ClassifierError::Config(e.to_string()))?;
-            Ok(provider)
         },
         &current_affect,
         &conversation,
@@ -174,7 +181,7 @@ fn proposal_json_schema(available_expressions: &[String]) -> serde_json::Value {
     })
 }
 
-async fn classify_with_resilient_fallback<F>(
+async fn classify_with_resilient_fallback<F, Fut>(
     mut provider_factory: F,
     current_affect: &str,
     conversation: &str,
@@ -183,7 +190,8 @@ async fn classify_with_resilient_fallback<F>(
     available_expressions: &[String],
 ) -> Result<AffectProposal, ClassifierError>
 where
-    F: FnMut(Option<u32>) -> Result<Box<dyn LlmProvider>, ClassifierError>,
+    F: FnMut(Option<u32>) -> Fut,
+    Fut: std::future::Future<Output = Result<Box<dyn LlmProvider>, ClassifierError>>,
 {
     let json_schema = proposal_json_schema(available_expressions);
     let attempts: [(ClassifierTransport, Option<u32>); 2] = [
@@ -197,7 +205,7 @@ where
     let mut last_error = ClassifierError::TimedOut(timeout_secs);
 
     for (attempt_idx, (transport, max_tokens)) in attempts.into_iter().enumerate() {
-        let provider = match provider_factory(max_tokens) {
+        let provider = match provider_factory(max_tokens).await {
             Ok(provider) => provider,
             // Configuration errors fail fast: retrying a different transport with the same
             // broken config cannot succeed, and would only add backoff delay.

@@ -12,7 +12,6 @@ default = []
 local-stt = ["dep:whisper-rs"]
 local-tts = ["dep:ort"]
 silero-vad = ["dep:ort"]
-voice = ["local-stt", "local-tts", "silero-vad"]
 
 [dependencies]
 ene-ai = { workspace = true }

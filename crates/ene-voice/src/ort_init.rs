@@ -33,7 +33,7 @@ static ORT_DYLIB_PATH: OnceLock<Option<String>> = OnceLock::new();
 ///
 /// Returns [`AudioProviderError::Init`] if the dylib fails to load. The first
 /// error is cached and returned on every subsequent call.
-pub(crate) fn ensure_ort_init(dylib_path: Option<&str>) -> Result<(), AudioProviderError> {
+pub fn ensure_ort_init(dylib_path: Option<&str>) -> Result<(), AudioProviderError> {
     let normalized = dylib_path
         .map(str::trim)
         .filter(|p| !p.is_empty())

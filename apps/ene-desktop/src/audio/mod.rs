@@ -310,7 +310,8 @@ pub fn toggle_mic_capture(
         .resolve_stt()
         .ok_or_else(|| "STT is disabled (set ai.stt.provider)".to_string())?;
     let vad_provider = if ai_cfg.vad.provider == "none" {
-        ene_voice::silero_vad::PROVIDER_NAME.to_string()
+        // Capture always needs a VAD engine; Silero is the bundled default.
+        "silero".to_string()
     } else {
         ai_cfg.vad.provider.clone()
     };

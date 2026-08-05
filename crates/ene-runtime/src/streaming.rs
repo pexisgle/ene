@@ -542,6 +542,8 @@ pub struct StreamContext {
     pub registry: Arc<dyn ene_plugin_host::ToolRegistry>,
     pub tool_rag: Option<Arc<ToolRag>>,
     pub provider: Arc<dyn ene_ai::LlmProvider>,
+    /// Live provider catalog for post-turn classifier provider creation.
+    pub provider_host: Arc<dyn ene_ai::ProviderHost>,
     pub event_tx: broadcast::Sender<EneEvent>,
     /// Audio channel sender for TTS PCM chunks. Bounded `mpsc`,
     /// separate from `event_tx` so heavyweight audio payloads never share a

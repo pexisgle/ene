@@ -6,7 +6,8 @@
 //! `ene_store::MemoryKind`-style import paths keep working unchanged.
 
 pub use ene_core::{
-    AffectAnnotation, HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,
-    MemoryJournalListOptions, MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown,
-    MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query, ScoredMemory, TimeRange,
+    AffectAnnotation, HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryEdit,
+    MemoryItem, MemoryJournalListOptions, MemoryKind, MemorySalience, MemoryScope,
+    MemoryScoreBreakdown, MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query,
+    ScoredMemory, TimeRange,
 };

@@ -55,7 +55,7 @@
 //! actor-control, diagnostics, and tool-handle methods likewise report a dead
 //! actor as [`PublicApiError::ActorDead`] rather than a dedicated error type.
 
-use crate::handle::{EneEvent, EneStatus, LifecycleEvent, TerminalReason};
+use crate::handle::{EneEvent, EneStatus, LifecycleEvent, MemoryLedgerChange, TerminalReason};
 use crate::types::TurnOrigin;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -230,6 +230,7 @@ impl From<ene_store::EneMemoryError> for PublicApiError {
             E::InvalidEmbedding(_)
             | E::InvalidTransition { .. }
             | E::InvalidPendingCandidateEdit(_)
+            | E::InvalidMemoryEdit(_)
             | E::UnsupportedFormatVersion(_)
             | E::SerializationError(_) => Self::Invalid { message },
             // `Other` is a free-text catch-all inside `ene_store` itself; the
@@ -397,6 +398,15 @@ pub enum PublicLifecycleEvent {
         /// Active turn context at mutation time, when any.
         turn: Option<String>,
     },
+    /// A typed memory was edited or had its salience adjusted.
+    MemoryLedgerChanged {
+        /// Typed-memory row id.
+        id: i64,
+        /// Mutation kind.
+        action: PublicMemoryLedgerChange,
+        /// Active turn context at mutation time, when any.
+        turn: Option<String>,
+    },
     /// A deferred background tool task reached a terminal state.
     ToolBackgroundCompleted {
         /// Tool name.
@@ -406,6 +416,26 @@ pub enum PublicLifecycleEvent {
         /// Terminal status string (`completed`, `failed`, `cancelled`, …).
         status: String,
     },
+}
+
+/// Stable JSON mirror of [`MemoryLedgerChange`] for
+/// [`PublicLifecycleEvent::MemoryLedgerChanged`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicMemoryLedgerChange {
+    /// In-place memory edit (title / content / kind / confidence).
+    Edited,
+    /// Salience (importance / Preference weight) adjustment.
+    SalienceAdjusted,
+}
+
+impl From<MemoryLedgerChange> for PublicMemoryLedgerChange {
+    fn from(action: MemoryLedgerChange) -> Self {
+        match action {
+            MemoryLedgerChange::Edited => Self::Edited,
+            MemoryLedgerChange::SalienceAdjusted => Self::SalienceAdjusted,
+        }
+    }
 }
 
 impl PublicChatEvent {
@@ -547,6 +577,11 @@ impl PublicLifecycleEvent {
             LifecycleEvent::CandidateChanged { id, status, turn } => Self::CandidateChanged {
                 id: *id,
                 status: status.as_str().to_string(),
+                turn: turn.as_ref().map(ToString::to_string),
+            },
+            LifecycleEvent::MemoryLedgerChanged { id, action, turn } => Self::MemoryLedgerChanged {
+                id: *id,
+                action: PublicMemoryLedgerChange::from(*action),
                 turn: turn.as_ref().map(ToString::to_string),
             },
             LifecycleEvent::ToolBackgroundCompleted {
@@ -846,5 +881,24 @@ mod tests {
         assert_eq!(value["type"], "tool_background_completed");
         assert_eq!(value["tool_name"], "background.sleep");
         assert_eq!(value["task_id"], "task-456");
+    }
+
+    #[test]
+    fn memory_ledger_changed_maps_to_dedicated_event() {
+        let event = LifecycleEvent::MemoryLedgerChanged {
+            id: 42,
+            action: crate::MemoryLedgerChange::SalienceAdjusted,
+            turn: Some(TurnId::from("turn-9")),
+        };
+        let public = PublicLifecycleEvent::from_lifecycle_event(&event);
+        let PublicLifecycleEvent::MemoryLedgerChanged { id, action, turn } = &public else {
+            panic!("expected MemoryLedgerChanged");
+        };
+        assert_eq!(*id, 42);
+        assert_eq!(*action, PublicMemoryLedgerChange::SalienceAdjusted);
+        assert_eq!(turn.as_deref(), Some("turn-9"));
+        let value = serde_json::to_value(&public).expect("serializable");
+        assert_eq!(value["type"], "memory_ledger_changed");
+        assert_eq!(value["action"], "salience_adjusted");
     }
 }

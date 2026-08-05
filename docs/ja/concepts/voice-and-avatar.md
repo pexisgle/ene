@@ -1,10 +1,17 @@
 # ローカル音声パイプラインと VRM 3D アバター描画
 
-本ドキュメントでは、Ene のローカル音声処理エンジン (`ene-voice`) および 3D アバター描画システム (`ene-vrm`) について解説します。
+本ドキュメントでは、Ene のローカル音声パイプライン（エンジンコードは `ene-voice`、アプリへの提供は音声プロバイダプラグイン経由）および 3D アバター描画システム (`ene-vrm`) について解説します。
 
 ---
 
-## 1. ローカル音声パイプライン (`ene-voice`)
+## 1. ローカル音声パイプライン
+
+エンジン実装（whisper.cpp STT・Kokoro ONNX TTS・Silero VAD）は `ene-voice`
+にあり、音声プロバイダプラグインのプロセス内
+（`plugins/provider/whisper`・`plugins/provider/kokoro`・
+`plugins/provider/onnx`）で動作します。ホストはプラグイン IPC 越しにそれらを
+アプリへ橋渡しします。デスクトップが持つのは音声デバイス I/O（cpal キャプチャ /
+rodio 再生）だけです。
 
 Ene はオプションで完全ローカルな音声対話パイプラインを提供します：
 

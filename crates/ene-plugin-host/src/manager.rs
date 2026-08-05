@@ -3,10 +3,10 @@
 //! [`PluginHostManager`] starts only plugins explicitly listed in
 //! `plugins.list` with `enable: true` (opt-in discovery). Each plugin is
 //! spawned with a hardened environment (`env_clear()` + whitelist), performs
-//! the v3 handshake, and routes advertised capabilities (tools, LLM
-//! providers) into the appropriate host registries. It also connects to
-//! configured MCP servers and exposes their tools alongside plugin-provided
-//! tools.
+//! the versioned IPC handshake, and routes advertised capabilities (tools,
+//! LLM providers, audio providers) into the appropriate host registries. It
+//! also connects to configured MCP servers and exposes their tools alongside
+//! plugin-provided tools.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -30,8 +30,10 @@ use crate::error::PluginHostError;
 use crate::factory::IpcLlmProviderFactory;
 use crate::health::PluginHealthEvent;
 use crate::ipc_plugin::IpcPluginConnection;
+use crate::ipc_vad::IpcVadFactory;
 use crate::mcp_config::McpTransport;
 use crate::mcp_registry::{McpToolRegistry, redacted_endpoint};
+use crate::stt_factory::IpcSttProviderFactory;
 use crate::tool_registry::{DeferredCallResult, ToolRegistry};
 use crate::tts_factory::IpcTtsProviderFactory;
 use ene_connector::declaration::{CredentialDeclaration, ScopeDecision};
@@ -614,17 +616,139 @@ pub type TtsFactoryHandle = Arc<dyn ene_ai::TtsProviderFactory>;
 /// TTS provider factories grouped by the plugin that provides them.
 pub type TtsFactoriesByPlugin = HashMap<String, Vec<(String, TtsFactoryHandle)>>;
 
+/// A handle to a plugin-provided STT factory.
+pub type SttFactoryHandle = Arc<dyn ene_ai::SttProviderFactory>;
+
+/// STT provider factories grouped by the plugin that provides them.
+pub type SttFactoriesByPlugin = HashMap<String, Vec<(String, SttFactoryHandle)>>;
+
+/// A handle to a plugin-provided VAD factory.
+pub type VadFactoryHandle = Arc<dyn ene_ai::VadFactory>;
+
+/// VAD engine factories grouped by the plugin that provides them.
+pub type VadFactoriesByPlugin = HashMap<String, Vec<(String, VadFactoryHandle)>>;
+
+/// What [`PluginHostManager::remove_provider_factories`] evicted for one
+/// plugin, per modality.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderFactoryRemoval {
+    /// Number of LLM factories removed.
+    pub llm: usize,
+    /// Number of embedding factories removed.
+    pub embedding: usize,
+    /// Number of TTS factories removed.
+    pub tts: usize,
+}
+
+impl ProviderFactoryRemoval {
+    /// Whether any factory was removed.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.llm == 0 && self.embedding == 0 && self.tts == 0
+    }
+}
+
+/// Provider factory handles one plugin contributed, captured by a health
+/// bridge from the host generation that emitted the `Disabled` event.
+///
+/// Eviction is gated on [`Arc::ptr_eq`] identity against these handles, so a
+/// stale event delivered after a reconfiguration swapped in a fresh host
+/// cannot evict the new host's live factories.
+#[derive(Clone, Default)]
+pub struct PluginFactoryHandles {
+    /// LLM factory handles by provider kind.
+    pub llm: Vec<(String, LlmFactoryHandle)>,
+    /// Embedding factory handles by provider kind.
+    pub embedding: Vec<(String, EmbeddingFactoryHandle)>,
+    /// TTS factory handles by provider kind.
+    pub tts: Vec<(String, TtsFactoryHandle)>,
+}
+
+/// Removes the factory for each kind whose stored `Arc` is the exact handle
+/// `expected` names, from both the factory map and its owner map.
+fn remove_matching_factories<X: ?Sized>(
+    factories: &mut HashMap<String, Arc<X>>,
+    factory_plugins: &mut HashMap<String, String>,
+    expected: &[(String, Arc<X>)],
+) -> usize {
+    let mut removed = 0;
+    for (kind, handle) in expected {
+        if factories
+            .get(kind)
+            .is_some_and(|stored| Arc::ptr_eq(stored, handle))
+        {
+            factory_plugins.remove(kind);
+            factories.remove(kind);
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// The plugin host is the single provider registry: provider creation
+/// resolves through its factory maps (which mirror the capability
+/// declarations), never through a process-global registry.
+#[async_trait]
+impl ene_ai::ProviderHost for PluginHostManager {
+    async fn create_llm_provider(
+        &self,
+        kind: &str,
+        config: &EneConfig,
+        task: &ene_ai::TaskRef,
+    ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::LlmProviderError> {
+        self.llm_factories
+            .get(kind)
+            .ok_or_else(|| {
+                ene_ai::LlmProviderError::Provider(format!(
+                    "No LlmProviderFactory registered for provider kind: '{kind}'"
+                ))
+            })?
+            .create_provider(config, task)
+    }
+
+    async fn create_embedding_provider(
+        &self,
+        kind: &str,
+        config: &EneConfig,
+    ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+        self.embedding_factories
+            .get(kind)
+            .ok_or_else(|| {
+                ene_ai::EmbeddingError::Init(format!(
+                    "No embedding provider factory registered for provider kind: '{kind}'"
+                ))
+            })?
+            .create_embedding_provider(config)
+    }
+
+    async fn create_tts_provider(
+        &self,
+        kind: &str,
+        config: &EneConfig,
+    ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+        self.tts_factories
+            .get(kind)
+            .ok_or_else(|| {
+                ene_ai::AudioProviderError::Provider(format!(
+                    "No TtsProviderFactory registered for provider name: '{kind}'"
+                ))
+            })?
+            .create_provider(config)
+    }
+}
 /// Orchestrates the lifecycle of all plugin processes and MCP connections.
 ///
 /// Starts only plugins explicitly listed in `plugins.list` with
 /// `enable: true` (opt-in discovery). Binaries found on disk that are
 /// not listed emit a warning suggesting the user add them. Each plugin
 /// is spawned with a hardened environment (`env_clear()` + whitelist),
-/// performs the v3 handshake, and routes capabilities:
+/// performs the versioned IPC handshake, and routes capabilities:
 ///
 /// - `capabilities.tools` (count) → wrapped in a [`ToolRegistry`] adapter (specs fetched via `ListTools`)
 /// - `capabilities.llm_providers` → registered as [`IpcLlmProviderFactory`] entries
 /// - `capabilities.tts_providers` → registered as [`IpcTtsProviderFactory`] entries
+/// - `capabilities.stt_providers` / `vad_providers` → registered as
+///   [`IpcSttProviderFactory`] / [`IpcVadFactory`] entries
 ///
 /// Additionally connects to any MCP servers declared in `plugins.mcp_servers`
 /// and includes their tools in [`tool_registries`](Self::tool_registries).
@@ -644,6 +768,10 @@ pub struct PluginHostManager {
     embedding_factory_plugins: HashMap<String, String>,
     tts_factories: HashMap<String, Arc<dyn ene_ai::TtsProviderFactory>>,
     tts_factory_plugins: HashMap<String, String>,
+    stt_factories: HashMap<String, Arc<dyn ene_ai::SttProviderFactory>>,
+    stt_factory_plugins: HashMap<String, String>,
+    vad_factories: HashMap<String, Arc<dyn ene_ai::VadFactory>>,
+    vad_factory_plugins: HashMap<String, String>,
     /// Credential declarations parsed from each plugin's `x-ene-credentials`
     /// schema block at startup. Populated by [`start`](Self::start) alongside
     /// connection registration; consumed by the credential service for
@@ -722,6 +850,10 @@ impl PluginHostManager {
                 embedding_factory_plugins: HashMap::new(),
                 tts_factories: HashMap::new(),
                 tts_factory_plugins: HashMap::new(),
+                stt_factories: HashMap::new(),
+                stt_factory_plugins: HashMap::new(),
+                vad_factories: HashMap::new(),
+                vad_factory_plugins: HashMap::new(),
                 credential_registry: CredentialRegistry::new(),
                 capability_registry: CapabilityRegistry::new(),
                 health_tasks: Vec::new(),
@@ -745,6 +877,11 @@ impl PluginHostManager {
         let mut tts_factories: HashMap<String, Arc<dyn ene_ai::TtsProviderFactory>> =
             HashMap::new();
         let mut tts_factory_plugins: HashMap<String, String> = HashMap::new();
+        let mut stt_factories: HashMap<String, Arc<dyn ene_ai::SttProviderFactory>> =
+            HashMap::new();
+        let mut stt_factory_plugins: HashMap<String, String> = HashMap::new();
+        let mut vad_factories: HashMap<String, Arc<dyn ene_ai::VadFactory>> = HashMap::new();
+        let mut vad_factory_plugins: HashMap<String, String> = HashMap::new();
         // (plugin name, fetched schema) pairs; the schemas are registered after
         // `Self` exists so the registration step is a `&self` method that unit
         // tests can drive without a plugin process.
@@ -1053,6 +1190,67 @@ impl PluginHostManager {
                 tts_factory_plugins.insert(spec.kind.clone(), name.clone());
             }
 
+            for spec in &caps.stt_providers {
+                if stt_factories.contains_key(&spec.kind) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        kind = %spec.kind,
+                        "Duplicate STT provider kind; skipping"
+                    );
+                    continue;
+                }
+                let factory = IpcSttProviderFactory::new(
+                    spec.kind.clone(),
+                    Arc::clone(conn),
+                    name.clone(),
+                    spec.concurrency,
+                );
+                stt_factories.insert(
+                    spec.kind.clone(),
+                    Arc::new(factory) as Arc<dyn ene_ai::SttProviderFactory>,
+                );
+                stt_factory_plugins.insert(spec.kind.clone(), name.clone());
+            }
+
+            for spec in &caps.vad_providers {
+                if !vad_spec_eligible(spec, conn.supports_vad()) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        kind = %spec.kind,
+                        frame_size = spec.frame_size,
+                        sample_rate = spec.sample_rate,
+                        negotiated_version = conn.negotiated_version(),
+                        "VAD provider spec ineligible (peer below v7 or invalid frame_size/sample_rate); skipping"
+                    );
+                    continue;
+                }
+                if vad_factories.contains_key(&spec.kind) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        kind = %spec.kind,
+                        "Duplicate VAD provider kind; skipping"
+                    );
+                    continue;
+                }
+                let factory = IpcVadFactory::new(
+                    spec.kind.clone(),
+                    Arc::clone(conn),
+                    name.clone(),
+                    spec.frame_size as usize,
+                    spec.sample_rate,
+                    spec.concurrency,
+                    tokio::runtime::Handle::current(),
+                );
+                vad_factories.insert(
+                    spec.kind.clone(),
+                    Arc::new(factory) as Arc<dyn ene_ai::VadFactory>,
+                );
+                vad_factory_plugins.insert(spec.kind.clone(), name.clone());
+            }
+
             supervised.push(Arc::clone(&started_plugin.plugin));
             connections.push(Arc::clone(conn));
             names.push(name.clone());
@@ -1188,6 +1386,10 @@ impl PluginHostManager {
             embedding_factory_plugins,
             tts_factories,
             tts_factory_plugins,
+            stt_factories,
+            stt_factory_plugins,
+            vad_factories,
+            vad_factory_plugins,
             credential_registry: CredentialRegistry::new(),
             capability_registry,
             health_tasks,
@@ -1209,6 +1411,37 @@ impl PluginHostManager {
     /// provider kind.
     pub fn llm_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> {
         &self.llm_factories
+    }
+
+    /// Removes the provider factories `handles` identifies.
+    ///
+    /// Called when a plugin is permanently disabled: without eviction, a
+    /// lookup by kind would keep selecting a factory whose IPC connection
+    /// points at a dead process. Removal is identity-gated on the handles a
+    /// health bridge captured from this host generation, so a stale event
+    /// cannot evict a replacement host's factories. Returns what was removed
+    /// so callers can rebuild long-lived provider instances (TTS) accordingly.
+    pub fn remove_provider_factories_if_match(
+        &mut self,
+        handles: &PluginFactoryHandles,
+    ) -> ProviderFactoryRemoval {
+        ProviderFactoryRemoval {
+            llm: remove_matching_factories(
+                &mut self.llm_factories,
+                &mut self.llm_factory_plugins,
+                &handles.llm,
+            ),
+            embedding: remove_matching_factories(
+                &mut self.embedding_factories,
+                &mut self.embedding_factory_plugins,
+                &handles.embedding,
+            ),
+            tts: remove_matching_factories(
+                &mut self.tts_factories,
+                &mut self.tts_factory_plugins,
+                &handles.tts,
+            ),
+        }
     }
 
     /// Returns the embedding provider factories contributed by plugins,
@@ -1246,6 +1479,48 @@ impl PluginHostManager {
         let mut grouped = TtsFactoriesByPlugin::new();
         for (kind, factory) in &self.tts_factories {
             if let Some(plugin) = self.tts_factory_plugins.get(kind) {
+                grouped
+                    .entry(plugin.clone())
+                    .or_default()
+                    .push((kind.clone(), Arc::clone(factory)));
+            }
+        }
+        grouped
+    }
+
+    /// Returns the STT provider factories contributed by plugins, keyed by
+    /// provider kind.
+    pub fn stt_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::SttProviderFactory>> {
+        &self.stt_factories
+    }
+
+    /// Returns the STT factories grouped by the plugin that provides them,
+    /// mirroring [`tts_factories_by_plugin`](Self::tts_factories_by_plugin).
+    pub fn stt_factories_by_plugin(&self) -> SttFactoriesByPlugin {
+        let mut grouped = SttFactoriesByPlugin::new();
+        for (kind, factory) in &self.stt_factories {
+            if let Some(plugin) = self.stt_factory_plugins.get(kind) {
+                grouped
+                    .entry(plugin.clone())
+                    .or_default()
+                    .push((kind.clone(), Arc::clone(factory)));
+            }
+        }
+        grouped
+    }
+
+    /// Returns the VAD engine factories contributed by plugins, keyed by
+    /// engine kind.
+    pub fn vad_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::VadFactory>> {
+        &self.vad_factories
+    }
+
+    /// Returns the VAD factories grouped by the plugin that provides them,
+    /// mirroring [`tts_factories_by_plugin`](Self::tts_factories_by_plugin).
+    pub fn vad_factories_by_plugin(&self) -> VadFactoriesByPlugin {
+        let mut grouped = VadFactoriesByPlugin::new();
+        for (kind, factory) in &self.vad_factories {
+            if let Some(plugin) = self.vad_factory_plugins.get(kind) {
                 grouped
                     .entry(plugin.clone())
                     .or_default()
@@ -1534,6 +1809,10 @@ impl PluginHostManager {
             embedding_factory_plugins: HashMap::new(),
             tts_factories: HashMap::new(),
             tts_factory_plugins: HashMap::new(),
+            stt_factories: HashMap::new(),
+            stt_factory_plugins: HashMap::new(),
+            vad_factories: HashMap::new(),
+            vad_factory_plugins: HashMap::new(),
             credential_registry: CredentialRegistry::new(),
             capability_registry: CapabilityRegistry::new(),
             health_tasks: Vec::new(),
@@ -1661,12 +1940,14 @@ pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] = &[
     "homeassistant",
     "kokoro",
     "llama-cpp",
+    "onnx",
     "openai",
     "openai-tts",
     "random",
     "utility",
     "voicevox",
     "web",
+    "whisper",
 ];
 
 /// Returns `true` when the plugin is one of the trusted built-ins that ship
@@ -1677,6 +1958,16 @@ pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] = &[
 /// than probing the filesystem (see that constant's docs for why).
 fn is_builtin_plugin(name: &str) -> bool {
     BUILTIN_PLUGIN_NAMES.contains(&name)
+}
+
+/// Returns whether a VAD provider spec may be registered as a factory.
+///
+/// Two gates: the peer must have negotiated protocol v7 (`ProcessVadChunk`
+/// did not exist before it, so a v6 peer would fail to deserialize the
+/// request), and the spec must carry a non-zero `frame_size` and
+/// `sample_rate` (the host cannot service a session it cannot frame).
+fn vad_spec_eligible(spec: &ene_plugin_proto::VadProviderSpec, supports_vad: bool) -> bool {
+    supports_vad && spec.frame_size != 0 && spec.sample_rate != 0
 }
 
 /// Finds the binary path for a plugin by name, searching builtin and user
@@ -2102,12 +2393,14 @@ mod tests {
                 "homeassistant",
                 "kokoro",
                 "llama-cpp",
+                "onnx",
                 "openai",
                 "openai-tts",
                 "random",
                 "utility",
                 "voicevox",
-                "web"
+                "web",
+                "whisper"
             ]
         );
 
@@ -2117,6 +2410,37 @@ mod tests {
         assert!(!is_builtin_plugin("evil"));
         assert!(!is_builtin_plugin("ene-plugin-evil"));
         assert!(!is_builtin_plugin(""));
+    }
+
+    #[test]
+    fn vad_spec_eligible_requires_v7_and_valid_frame_geometry() {
+        use ene_plugin_proto::VadProviderSpec;
+
+        let valid = VadProviderSpec {
+            kind: "silero".into(),
+            frame_size: 512,
+            sample_rate: 16_000,
+            concurrency: ene_plugin_proto::ConcurrencyHint::default(),
+        };
+        // A v6 peer that somehow advertised the spec must still be refused:
+        // no VAD factory may be registered for it.
+        assert!(!vad_spec_eligible(&valid, false));
+        assert!(vad_spec_eligible(&valid, true));
+
+        assert!(!vad_spec_eligible(
+            &VadProviderSpec {
+                frame_size: 0,
+                ..valid.clone()
+            },
+            true
+        ));
+        assert!(!vad_spec_eligible(
+            &VadProviderSpec {
+                sample_rate: 0,
+                ..valid
+            },
+            true
+        ));
     }
 
     #[test]
@@ -3037,5 +3361,160 @@ mod tests {
 
         task.abort();
         server.abort();
+    }
+
+    /// Kinds-only stub factories, so eviction tests can distinguish entries.
+    struct KindLlmFactory(&'static str);
+
+    impl ene_ai::LlmProviderFactory for KindLlmFactory {
+        fn provider_name(&self) -> &str {
+            self.0
+        }
+
+        fn create_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+            _task: &ene_ai::TaskRef,
+        ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider("stub".to_string()))
+        }
+    }
+
+    struct KindEmbeddingFactory(&'static str);
+
+    impl ene_ai::EmbeddingProviderFactory for KindEmbeddingFactory {
+        fn provider_kind(&self) -> &str {
+            self.0
+        }
+
+        fn create_embedding_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+            Err(ene_ai::EmbeddingError::Init("stub".to_string()))
+        }
+    }
+
+    struct KindTtsFactory(&'static str);
+
+    impl ene_ai::TtsProviderFactory for KindTtsFactory {
+        fn provider_name(&self) -> &str {
+            self.0
+        }
+
+        fn create_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn ene_ai::TtsProvider>, ene_ai::AudioProviderError> {
+            Err(ene_ai::AudioProviderError::Provider("stub".to_string()))
+        }
+    }
+
+    #[test]
+    fn remove_provider_factories_if_match_evicts_same_generation_handles() {
+        let mut manager = PluginHostManager::test_instance();
+        // The handles a health bridge would capture: identical Arcs to the
+        // factories the manager stores.
+        let handles = plugin_factory_handles();
+        manager
+            .llm_factories
+            .insert("openai".to_string(), Arc::clone(&handles.llm[0].1));
+        manager
+            .llm_factory_plugins
+            .insert("openai".to_string(), "openai-plugin".to_string());
+        // A different plugin's kind must survive the eviction untouched.
+        manager.llm_factories.insert(
+            "anthropic".to_string(),
+            Arc::new(KindLlmFactory("anthropic")) as Arc<dyn ene_ai::LlmProviderFactory>,
+        );
+        manager
+            .llm_factory_plugins
+            .insert("anthropic".to_string(), "anthropic-plugin".to_string());
+        manager
+            .embedding_factories
+            .insert("openai".to_string(), Arc::clone(&handles.embedding[0].1));
+        manager
+            .embedding_factory_plugins
+            .insert("openai".to_string(), "openai-plugin".to_string());
+        manager
+            .tts_factories
+            .insert("kokoro".to_string(), Arc::clone(&handles.tts[0].1));
+        manager
+            .tts_factory_plugins
+            .insert("kokoro".to_string(), "openai-plugin".to_string());
+
+        let removal = manager.remove_provider_factories_if_match(&handles);
+        assert_eq!(
+            removal,
+            ProviderFactoryRemoval {
+                llm: 1,
+                embedding: 1,
+                tts: 1,
+            }
+        );
+        assert!(!manager.llm_factories.contains_key("openai"));
+        assert!(manager.llm_factories.contains_key("anthropic"));
+        assert!(!manager.embedding_factories.contains_key("openai"));
+        assert!(!manager.tts_factories.contains_key("kokoro"));
+        assert!(!manager.llm_factory_plugins.contains_key("openai"));
+
+        assert!(
+            manager
+                .remove_provider_factories_if_match(&handles)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn remove_provider_factories_if_match_ignores_stale_generation_handles() {
+        let mut manager = PluginHostManager::test_instance();
+        // The current host serves the kind with a fresh factory; the stale
+        // handles come from the host generation that emitted a Disabled
+        // event before a reconfiguration swapped this host in.
+        manager.llm_factories.insert(
+            "openai".to_string(),
+            Arc::new(KindLlmFactory("openai")) as Arc<dyn ene_ai::LlmProviderFactory>,
+        );
+        manager
+            .llm_factory_plugins
+            .insert("openai".to_string(), "openai-plugin".to_string());
+
+        let stale = PluginFactoryHandles {
+            llm: vec![(
+                "openai".to_string(),
+                Arc::new(KindLlmFactory("openai")) as LlmFactoryHandle,
+            )],
+            ..PluginFactoryHandles::default()
+        };
+        let removal = manager.remove_provider_factories_if_match(&stale);
+        assert_eq!(
+            removal,
+            ProviderFactoryRemoval {
+                llm: 0,
+                embedding: 0,
+                tts: 0,
+            }
+        );
+        assert!(
+            manager.llm_factories.contains_key("openai"),
+            "a stale event must not evict the replacement host's factory"
+        );
+    }
+
+    fn plugin_factory_handles() -> PluginFactoryHandles {
+        PluginFactoryHandles {
+            llm: vec![(
+                "openai".to_string(),
+                Arc::new(KindLlmFactory("openai")) as LlmFactoryHandle,
+            )],
+            embedding: vec![(
+                "openai".to_string(),
+                Arc::new(KindEmbeddingFactory("openai")) as EmbeddingFactoryHandle,
+            )],
+            tts: vec![(
+                "kokoro".to_string(),
+                Arc::new(KindTtsFactory("kokoro")) as TtsFactoryHandle,
+            )],
+        }
     }
 }
