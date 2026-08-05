@@ -324,8 +324,16 @@ mediate into a provider binary that predates the call message, returning
 timeout (2 minutes by default), its reconnect-once-on-transport-failure, and
 its concurrency bound, so a provider crash surfaces as `transport` to the
 consumer while the supervisor restarts the provider; the consumer's session
-survives and subsequent calls retry. Calls are non-streaming (parity with the
+survives and subsequent calls retry. A first-time model load must fit the
+2-minute per-request timeout (loads usually do; a cold download of a large
+GGUF may not — the resulting `timeout` is retryable, and the provider keeps
+serving other calls in between). Calls are non-streaming (parity with the
 contract); consumers needing streams require `llm/chat@1` directly.
+
+**Shared residency.** `unload` operates on the provider's model residency,
+which the host's own requests (chat, embeddings) share. A consumer's `unload`
+can evict a model the host is currently using; the next host request simply
+reloads it (same cost as any cold load), so `unload` is safe but not free.
 
 ---
 
