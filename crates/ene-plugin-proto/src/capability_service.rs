@@ -35,8 +35,13 @@ pub struct CapabilityCall {
 ///
 /// The same codes appear on both hops (provider IPC response and host-service
 /// response), so a consumer sees the provider's failure class unchanged.
+///
+/// The wire vocabulary is stable and documented, but the Rust enum is
+/// `#[non_exhaustive]` so adding a code later never breaks exhaustive matches
+/// in consumer builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CapabilityCallErrorCode {
     /// The calling plugin did not declare a matching `requires` entry.
     Forbidden,
