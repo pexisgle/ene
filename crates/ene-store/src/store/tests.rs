@@ -1227,6 +1227,123 @@ async fn typed_memory_crud() {
     assert!(!store.bump_typed_memory_access(999_999).await.unwrap());
 }
 
+fn sample_typed_memory(kind: crate::MemoryKind) -> crate::NewMemoryItem {
+    crate::NewMemoryItem {
+        scope: crate::MemoryScope::Character,
+        character_id: "ene".into(),
+        user_id: String::new(),
+        kind,
+        title: "Original title".into(),
+        content: "Original content".into(),
+        source: crate::MemorySource::Conversation,
+        source_ref: None,
+        confidence: crate::MemoryConfidence::new(0.8),
+        salience: crate::MemorySalience::new(0.5),
+        affect: crate::AffectAnnotation::default(),
+        relationship_impact: 0.0,
+        valid_from: None,
+        valid_until: None,
+        status: crate::MemoryStatus::Active,
+        supersedes_id: None,
+        pinned: false,
+        created_at: None,
+        commitment_id: None,
+    }
+}
+
+#[tokio::test]
+async fn update_typed_memory_applies_edit_and_recomputes_scope() {
+    let store = setup_store().await;
+    let id = store
+        .insert_typed_memory(&sample_typed_memory(crate::MemoryKind::Episodic))
+        .await
+        .unwrap();
+
+    let edited = store
+        .update_typed_memory(
+            id,
+            &crate::MemoryEdit {
+                title: "Edited title".into(),
+                content: "Edited content".into(),
+                kind: crate::MemoryKind::Preference,
+                confidence: crate::MemoryConfidence::new(0.95),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(edited);
+
+    let loaded = store.get_typed_memory(id).await.unwrap().unwrap();
+    assert_eq!(loaded.title, "Edited title");
+    assert_eq!(loaded.content, "Edited content");
+    assert_eq!(loaded.kind, crate::MemoryKind::Preference);
+    assert!((loaded.confidence.get() - 0.95).abs() < f32::EPSILON);
+    assert_eq!(
+        loaded.scope,
+        crate::MemoryScope::User,
+        "kind change must re-derive the canonical scope"
+    );
+    assert_eq!(loaded.status, crate::MemoryStatus::Active, "status untouched");
+}
+
+#[tokio::test]
+async fn update_typed_memory_validates_and_reports_missing_rows() {
+    let store = setup_store().await;
+    let id = store
+        .insert_typed_memory(&sample_typed_memory(crate::MemoryKind::Semantic))
+        .await
+        .unwrap();
+
+    let blank_title = store
+        .update_typed_memory(
+            id,
+            &crate::MemoryEdit {
+                title: "   ".into(),
+                content: "content".into(),
+                kind: crate::MemoryKind::Semantic,
+                confidence: crate::MemoryConfidence::new(0.5),
+            },
+        )
+        .await;
+    assert!(matches!(
+        blank_title,
+        Err(EneMemoryError::InvalidMemoryEdit(_))
+    ));
+
+    assert!(
+        !store
+            .update_typed_memory(
+                999_999,
+                &crate::MemoryEdit {
+                    title: "title".into(),
+                    content: "content".into(),
+                    kind: crate::MemoryKind::Semantic,
+                    confidence: crate::MemoryConfidence::new(0.5),
+                },
+            )
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn set_memory_salience_clamps_and_reports_missing_rows() {
+    let store = setup_store().await;
+    let id = store
+        .insert_typed_memory(&sample_typed_memory(crate::MemoryKind::Preference))
+        .await
+        .unwrap();
+
+    assert!(store.set_memory_salience(id, 1.5).await.unwrap());
+    let loaded = store.get_typed_memory(id).await.unwrap().unwrap();
+    assert!(
+        (loaded.salience.get() - 1.0).abs() < f32::EPSILON,
+        "out-of-range value must clamp"
+    );
+
+    assert!(!store.set_memory_salience(999_999, 0.3).await.unwrap());
+}
+
 #[tokio::test]
 async fn recent_tool_failures_lists_recallable_reflections_only() {
     let store = setup_store().await;
@@ -1463,6 +1580,73 @@ async fn commitment_crud_and_lifecycle() {
         .await
         .unwrap();
     assert!(active_after.is_empty());
+}
+
+#[tokio::test]
+async fn list_commitments_covers_all_statuses_with_filters() {
+    let store = setup_store().await;
+    let active = store
+        .insert_commitment(&crate::NewCommitment {
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            title: "active task".into(),
+            description: String::new(),
+            status: crate::CommitmentStatus::Active,
+            due_at: None,
+            due_label: None,
+        })
+        .await
+        .unwrap();
+    let done = store
+        .insert_commitment(&crate::NewCommitment {
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            title: "finished task".into(),
+            description: String::new(),
+            status: crate::CommitmentStatus::Done,
+            due_at: None,
+            due_label: None,
+        })
+        .await
+        .unwrap();
+    store
+        .insert_commitment(&crate::NewCommitment {
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            title: "cancelled task".into(),
+            description: String::new(),
+            status: crate::CommitmentStatus::Cancelled,
+            due_at: None,
+            due_label: None,
+        })
+        .await
+        .unwrap();
+
+    let all = store
+        .list_commitments("ene", Some("user1"), None, 10)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 3, "every lifecycle status must be listable");
+    assert_eq!(
+        all.first().unwrap().status,
+        crate::CommitmentStatus::Cancelled,
+        "newest first"
+    );
+    assert_eq!(all.get(1).unwrap().id, Some(done));
+    assert_eq!(all.get(2).unwrap().id, Some(active));
+
+    let done_only = store
+        .list_commitments("ene", Some("user1"), Some(crate::CommitmentStatus::Done), 10)
+        .await
+        .unwrap();
+    assert_eq!(done_only.len(), 1);
+    assert_eq!(done_only[0].status, crate::CommitmentStatus::Done);
+
+    let other_user = store
+        .list_commitments("ene", Some("someone-else"), None, 10)
+        .await
+        .unwrap();
+    assert!(other_user.is_empty());
 }
 
 #[tokio::test]

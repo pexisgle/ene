@@ -1545,6 +1545,88 @@ impl MemoryStore {
         Ok(true)
     }
 
+    /// Apply a user edit to a persisted typed memory in place.
+    ///
+    /// Updates the user-editable fields (title, content, kind, confidence) and
+    /// recomputes the ownership scope from the edited kind via
+    /// [`super::canonical_scope_for_kind`]. Returns `Ok(false)` when no row
+    /// with `id` exists; validation failures reject the edit before any write.
+    pub async fn update_typed_memory(
+        &self,
+        id: i64,
+        edit: &crate::MemoryEdit,
+    ) -> Result<bool, EneMemoryError> {
+        if edit.title.trim().is_empty() {
+            return Err(EneMemoryError::InvalidMemoryEdit(
+                "title must not be empty".to_string(),
+            ));
+        }
+        if edit.content.trim().is_empty() {
+            return Err(EneMemoryError::InvalidMemoryEdit(
+                "content must not be empty".to_string(),
+            ));
+        }
+        let confidence = edit.confidence.get();
+        if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+            return Err(EneMemoryError::InvalidMemoryEdit(format!(
+                "confidence must be within 0.0..=1.0, got {confidence}"
+            )));
+        }
+
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let now = Utc::now();
+        let scope = super::canonical_scope_for_kind(edit.kind);
+        let result = entities::typed_memories::Entity::update_many()
+            .col_expr(
+                entities::typed_memories::Column::Scope,
+                Expr::value(scope.as_str().to_string()),
+            )
+            .col_expr(
+                entities::typed_memories::Column::Kind,
+                Expr::value(edit.kind.as_str().to_string()),
+            )
+            .col_expr(
+                entities::typed_memories::Column::Title,
+                Expr::value(edit.title.clone()),
+            )
+            .col_expr(
+                entities::typed_memories::Column::Content,
+                Expr::value(edit.content.clone()),
+            )
+            .col_expr(
+                entities::typed_memories::Column::Confidence,
+                Expr::value(confidence),
+            )
+            .col_expr(entities::typed_memories::Column::UpdatedAt, Expr::value(now))
+            .filter(entities::typed_memories::Column::Id.eq(id))
+            .exec(&self.db)
+            .await?;
+        Ok(result.rows_affected > 0)
+    }
+
+    /// Set the salience (importance weight) of a typed memory.
+    ///
+    /// The value is clamped into `0.0..=1.0` via [`crate::MemorySalience::new`];
+    /// returns `Ok(false)` when no row with `id` exists.
+    pub async fn set_memory_salience(&self, id: i64, salience: f32) -> Result<bool, EneMemoryError> {
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let now = Utc::now();
+        let result = entities::typed_memories::Entity::update_many()
+            .col_expr(
+                entities::typed_memories::Column::Salience,
+                Expr::value(crate::MemorySalience::new(salience).get()),
+            )
+            .col_expr(entities::typed_memories::Column::UpdatedAt, Expr::value(now))
+            .filter(entities::typed_memories::Column::Id.eq(id))
+            .exec(&self.db)
+            .await?;
+        Ok(result.rows_affected > 0)
+    }
+
     /// List typed memories eligible for natural decay processing.
     pub async fn list_memories_for_decay(
         &self,

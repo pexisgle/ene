@@ -397,6 +397,15 @@ pub enum PublicLifecycleEvent {
         /// Active turn context at mutation time, when any.
         turn: Option<String>,
     },
+    /// A typed memory was edited or had its salience adjusted.
+    MemoryLedgerChanged {
+        /// Typed-memory row id.
+        id: i64,
+        /// Mutation kind (`edited` / `salience_adjusted`).
+        action: String,
+        /// Active turn context at mutation time, when any.
+        turn: Option<String>,
+    },
     /// A deferred background tool task reached a terminal state.
     ToolBackgroundCompleted {
         /// Tool name.
@@ -549,6 +558,13 @@ impl PublicLifecycleEvent {
                 status: status.as_str().to_string(),
                 turn: turn.as_ref().map(ToString::to_string),
             },
+            LifecycleEvent::MemoryLedgerChanged { id, action, turn } => {
+                Self::MemoryLedgerChanged {
+                    id: *id,
+                    action: action.as_str().to_string(),
+                    turn: turn.as_ref().map(ToString::to_string),
+                }
+            }
             LifecycleEvent::ToolBackgroundCompleted {
                 tool_name,
                 task_id,
@@ -846,5 +862,28 @@ mod tests {
         assert_eq!(value["type"], "tool_background_completed");
         assert_eq!(value["tool_name"], "background.sleep");
         assert_eq!(value["task_id"], "task-456");
+    }
+
+    #[test]
+    fn memory_ledger_changed_maps_to_dedicated_event() {
+        let event = LifecycleEvent::MemoryLedgerChanged {
+            id: 42,
+            action: crate::MemoryLedgerChange::SalienceAdjusted,
+            turn: Some(TurnId::from("turn-9")),
+        };
+        let public = PublicLifecycleEvent::from_lifecycle_event(&event);
+        let PublicLifecycleEvent::MemoryLedgerChanged {
+            id,
+            action,
+            turn,
+        } = &public
+        else {
+            panic!("expected MemoryLedgerChanged");
+        };
+        assert_eq!(*id, 42);
+        assert_eq!(action.as_str(), "salience_adjusted");
+        assert_eq!(turn.as_deref(), Some("turn-9"));
+        let value = serde_json::to_value(&public).expect("serializable");
+        assert_eq!(value["type"], "memory_ledger_changed");
     }
 }

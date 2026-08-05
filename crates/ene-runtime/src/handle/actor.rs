@@ -26,7 +26,8 @@ use super::SharedActorState;
 use super::TurnGate;
 use super::command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
 use super::event::{
-    AudioChunk, EneEvent, EneStateSnapshot, EneStatus, LifecycleEvent, TerminalReason,
+    AudioChunk, EneEvent, EneStateSnapshot, EneStatus, LifecycleEvent, MemoryLedgerChange,
+    TerminalReason,
 };
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
 use crate::error::EneRuntimeError;
@@ -579,6 +580,76 @@ impl TurnActor {
         self.workspace_sync_task = Some(task);
         self.workspace_cancel = Some(cancel);
         Ok(())
+    }
+
+    /// Re-embeds an edited memory's title and content in the background so
+    /// vector recall and contradiction keying do not serve stale text.
+    ///
+    /// Best-effort: the in-place edit has already committed and lexical recall
+    /// is immediately correct, so embedding failures are logged, never
+    /// surfaced to the caller.
+    fn spawn_memory_reembed(&mut self, id: i64, edit: &ene_store::MemoryEdit) {
+        let Some(store) = self.concrete_store.clone() else {
+            return;
+        };
+        let Some(embedder) = self.session.memory.embedding_provider.clone() else {
+            return;
+        };
+        if !admit_task(
+            &mut self.bg_command_tasks,
+            self.task_caps.bg_command_cap,
+            "BgCommand",
+            Some("MemoryReembed".to_string()),
+            &self.diag_tx,
+        ) {
+            tracing::warn!(
+                component = "TurnActor",
+                memory_id = id,
+                "Memory re-embed rejected: background task capacity exhausted"
+            );
+            return;
+        }
+
+        let title = edit.title.clone();
+        let content = edit.content.clone();
+        self.bg_command_tasks.spawn(async move {
+            let model_name = embedder.model_name();
+            match ene_ai::embed_query(embedder.as_ref(), &content).await {
+                Ok(embedding) => {
+                    if let Err(error) = store
+                        .upsert_memory_embedding(id, model_name, "content", &embedding)
+                        .await
+                    {
+                        tracing::warn!(
+                            component = "MemoryReembed",
+                            memory_id = id,
+                            error = %error,
+                            "Failed to re-embed edited memory content"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        component = "MemoryReembed",
+                        memory_id = id,
+                        error = %error,
+                        "Failed to embed edited memory content"
+                    );
+                }
+            }
+            if let Ok(embedding) = ene_ai::embed_query(embedder.as_ref(), &title).await
+                && let Err(error) = store
+                    .upsert_memory_embedding(id, model_name, "title", &embedding)
+                    .await
+            {
+                tracing::warn!(
+                    component = "MemoryReembed",
+                    memory_id = id,
+                    error = %error,
+                    "Failed to re-embed edited memory title"
+                );
+            }
+        });
     }
 
     pub(super) async fn run(mut self) {
@@ -3422,6 +3493,71 @@ impl TurnActor {
                     drop(self.lifecycle_tx.send(LifecycleEvent::CandidateChanged {
                         id,
                         status: ene_store::PendingCandidateStatus::Pending,
+                        turn,
+                    }));
+                }
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::EditMemory {
+                id,
+                edit,
+                turn,
+                reply,
+            } => {
+                let Some(store) = self.concrete_store.clone() else {
+                    drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
+                        message: "Memory store is not enabled".to_string(),
+                    })));
+                    return true;
+                };
+                let result = match store.update_typed_memory(id, &edit).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(crate::public_api::PublicApiError::NotFound {
+                        message: format!("memory {id} not found"),
+                    }),
+                    Err(error) => Err(crate::public_api::PublicApiError::from(error)),
+                };
+                if result.is_ok() {
+                    if let Some(cache) = &self.session.memory.recall_cache {
+                        cache.invalidate_character(self.session.card_name());
+                    }
+                    self.spawn_memory_reembed(id, &edit);
+                    drop(self.lifecycle_tx.send(LifecycleEvent::MemoryLedgerChanged {
+                        id,
+                        action: MemoryLedgerChange::Edited,
+                        turn,
+                    }));
+                }
+                drop(reply.send(result));
+                true
+            }
+            EneCommand::SetMemorySalience {
+                id,
+                salience,
+                turn,
+                reply,
+            } => {
+                let Some(store) = self.concrete_store.clone() else {
+                    drop(reply.send(Err(crate::public_api::PublicApiError::Internal {
+                        message: "Memory store is not enabled".to_string(),
+                    })));
+                    return true;
+                };
+                let result = match store.set_memory_salience(id, salience).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(crate::public_api::PublicApiError::NotFound {
+                        message: format!("memory {id} not found"),
+                    }),
+                    Err(error) => Err(crate::public_api::PublicApiError::from(error)),
+                };
+                if result.is_ok() {
+                    if let Some(cache) = &self.session.memory.recall_cache {
+                        cache.invalidate_character(self.session.card_name());
+                    }
+                    drop(self.lifecycle_tx.send(LifecycleEvent::MemoryLedgerChanged {
+                        id,
+                        action: MemoryLedgerChange::SalienceAdjusted,
                         turn,
                     }));
                 }
