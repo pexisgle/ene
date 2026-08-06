@@ -1,53 +1,70 @@
-# `ene-desktop` User Guide
+# Desktop user guide
 
-`ene-desktop` is the GUI desktop application featuring real-time 3D VRM avatar rendering (`ene-vrm`), local voice synthesis/recognition (via the voice provider plugins), and live emotion/performance expressions.
+`ene-desktop` is the GUI application: a 3D VRM avatar, a chat pane, voice
+input/output, an overlay/caption system, a system tray, and full settings
+UI.
 
----
-
-## Launching Desktop
-
-```bash
-# Run Desktop application
-cargo run -p ene-desktop
+```sh
+cargo run -p ene-desktop [vrm-path] [vrma-path]
 ```
 
----
+The two positional arguments override the character's VRM model and a
+default VRMA motion clip.
 
-## Key Features
+## Main window
 
-- **VRM 3D Avatar Window**: Renders VRM 1.0 models using `wgpu` hardware acceleration.
-- **Lip-Sync & Expression Animation**: Receives `Performance` events from `ene-mind` to animate facial blendshapes (Happy, Angry, Surprised) and visemes (A, I, U, E, O).
-- **Local Voice Pipeline**: Supports real-time microphone input via Silero VAD / Whisper STT and speech synthesis output.
-- **Always-on-Top / Transparent Window**: Optional desktop overlay mode for a natural companion experience.
-- **Character Card Editor**: Visual `CCv3` editing (identity, personality, scenario, greetings, memory instructions, lorebook, motion catalog) with schema/asset validation, atomic saves with backup, and discard confirmation. See the [Character Card Editor Guide](../guide/character-card-editor.md).
-- **Memory Ledger**: Interactive table of stored memories and commitments with search/filter by kind/status/date, salience (Preference weight) adjustment, in-place memory editing, sensitive-memory deletion, and commitment complete/cancel controls. See the [Memory Ledger Guide](../guide/memory-ledger.md).
+- **3D avatar** — the loaded VRM character with expressions, motions,
+  look-at tracking, spring bones, and scene physics (you can drag the
+  model).
+- **Chat pane** — conversation with the character; permission prompts and
+  tool questions appear inline.
+- **Caption overlay** — character speech is captioned on screen
+  (`desktop.caption_enabled`).
+- **Spotlight** — a global overlay for quick access (`desktop.spotlight_enabled`).
 
----
+## Voice
 
-## Spotlight Quick Launcher (Alt+Space)
+With the `voice` feature (default), the app captures the microphone
+(`desktop.mic_device`), transcribes with the configured STT provider,
+streams replies through TTS, and drives the avatar's lip-sync from the
+audio. Settings → Voice selects providers, models, voices, and speed.
 
-Press `Alt+Space` (`Option+Space` on macOS-style layouts) from any application to open the Spotlight command palette: a translucent, always-on-top input bar that works without focusing the avatar window.
+## System tray & hotkeys
 
-- **Open Settings** — jumps to the AI settings page.
-- **Open Chat** — opens the dedicated chat window.
-- **Toggle Microphone** — starts/stops voice capture.
-- **Toggle Caption Overlay** — shows/hides the floating caption window.
-- **Free text** — when no command matches, pressing Enter sends the text to Ene through the same path as the chat input.
+- The tray menu shows character status and lets you open the chat/settings
+  or quit.
+- A global hotkey opens the chat/spotlight overlay.
 
-The palette is controlled from **Settings → Accessibility**: `Enable Spotlight (Alt+Space)` registers/unregisters the global shortcut (while it is off, Alt+Space passes through to the OS again), and `Enable floating caption overlay` controls whether the caption window can be shown.
+## Settings pages
 
-### Platform limits
+| Page | What it edits |
+|---|---|
+| AI | Providers, task models, retry/fallback, TTS/STT/VAD |
+| Character | Default expression/motion, look-at strength, position, scale |
+| Character editor | Edit the active card's fields (see [Character editor](../guides/character-editor.md)) |
+| Memory | Browse/search/pending/commitments tabs |
+| Memory ledger | Full typed-memory review: edit, pin, approve, reject |
+| Permissions | Standing tool-permission grants, revoke/reset |
+| Connectors | External-service accounts (see [Connectors](../concepts/connectors.md)) |
+| Sessions | List, archive, export sessions |
+| Voice | STT/TTS/VAD selection and voice tuning |
+| Graphics | Quality preset |
+| Features | Feature toggles (spotlight, captions, proactive, …) |
+| Accessibility | UI accessibility options |
+| Debug | Diagnostics and pipeline detail |
 
-- **Wayland**: the `global-hotkey` crate has no Wayland backend, so the shortcut is registered as a global hotkey only on X11 and Windows. On Wayland the palette still opens with `Alt+Space` while Ene has focus (in-window fallback).
-- **Windows**: `Alt+Space` is the OS window-menu shortcut; while the global registration is active, Ene consumes it system-wide.
+## Platform notes
 
----
+- **Linux** (X11/Wayland) is the supported platform; the app uses
+  layer-shell overlays on Wayland where available.
+- **Windows** is cross-compiled from Linux (mingw toolchain in the flake);
+  there is no native Windows dev shell.
+- **Headless CI** runs with software Vulkan (lavapipe):
+  `DISPLAY=:1 WGPU_BACKEND=vulkan`.
+- Building without audio: `cargo build -p ene-desktop --no-default-features`
+  (voice modules become inert stubs).
 
-## Floating Caption Overlay
+## Data locations
 
-The floating caption overlay is a separate, translucent subtitle window that renders the assistant's streamed speech in real time with a typewriter effect. Open it from Spotlight (`Toggle Caption Overlay`); Settings → Accessibility only enables the capability. Its position and pin state are remembered across restarts.
-
-- **Drag** — grab the title bar to move it anywhere on screen; the position is remembered.
-- **Pin / Unpin** — keeps the window above other applications (unavailable on Wayland, which has no window-level support).
-- **Performance cues** — the latest cue name (e.g. `happy`) is shown as a small tag while speech is streaming.
-- **Close** — the ✕ button hides the overlay; the caption feed keeps running until the next turn.
+Settings, characters, models, and the database live in the assets/app-data
+directory — see [Configuration](../configuration.md).

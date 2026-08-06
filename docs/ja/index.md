@@ -1,69 +1,64 @@
 # Ene ドキュメント
 
-**Ene** は Rust 2024 で実装されたローカル AI キャラクター基盤です。LLM との会話、リッチなツールプラグイン、長期記憶想起、ローカル音声処理、デスクトップ上での VRM アバターアニメーションを提供します。
+Ene は Rust で書かれた**ローカル AI キャラクタープラットフォーム**です。
+アイデンティティ・長期記憶・感情・ツールを持ち、デスクトップでは音声付きの
+3D アバターとともにキャラクターとチャットできます。
 
-[English Documentation](../index.md)
+Ene の設計はひとつの考えに基づいています。**LLM は「発話の生成器」であり、
+性格や記憶の置き場所ではない**、という考えです。専用の認知エンジン
+（`ene-mind`）がモデルが見るプロンプトを組み立て、何を記憶するかを決め、
+キャラクターの動きや話し方を制御します。モデル自体は差し替え可能な部品で、
+クラウドでも完全ローカルでも動作します。
 
----
+## Ene でできること
 
-## ドキュメントの構成
+- **キャラクターとチャット** — キャラクターは「キャラクターカード」
+  （コミュニティ規格 V3）で定義します。性格・シナリオ・例示会話・
+  lorebook・表情やモーションなどの Ene 拡張を含みます。
+- **記憶する** — 会話から型付きメモリ（事実・好み・出来事・約束など）を
+  抽出し、毎ターン関連するものを想起し、時間とともに自然に忘れます。
+  メモリ台帳で内容を確認・編集できます。
+- **ツールを使う** — ファイル操作・Web 検索・計算・カレンダー・ブラウザ
+  操作・Home Assistant・Git などが分離された子プロセスとして動作します。
+  副作用のある操作は承認が必要です。
+- **MCP サーバーに接続** — Model Context Protocol サーバーを追加し、
+  キャラクターのツールとして公開できます。
+- **話す** — 音声認識（Whisper）、音声合成（ローカルは Kokoro、クラウド
+  音声も可）、音声区間検出をプロバイダープラグインとして追加できます。
+- **生きたアバター** — デスクトップアプリが VRM 1.0 モデルを描画し、
+  表情・モーション・リップシンク・視線追従・spring bone・ビート同期を
+  行います。
+- **自ら動く** — プロアクティブ発話・永続スケジュール・約束の管理により、
+  キャラクターが自発的に話しかけたり、タイマーでタスクを実行したりします。
 
-ドキュメントは以下のわかりやすいセクションに整理されています：
+## 対象読者とおすすめの読み始め
 
-| セクション | 対象者 | 概要 |
-|---|---|---|
-| **[スタートアップ](getting-started.md)** | ユーザー・開発者 | インストール、依存関係、ビルド、CLI / Desktop アプリの起動方法。 |
-| **[アーキテクチャ](architecture.md)** | 開発者・アーキテクト | ワークスペース設計、API v1 ホスト契約、ターンパイプライン、IPC Protocol v6。 |
-| **[設定リファレンス](configuration.md)** | 運用者・開発者 | 全設定項目 (`ENE_*` 環境変数、設定ファイル、キャラクターカード)。 |
-| **[主要概念](concepts/turn-and-session.md)** | 開発者 | ターン、記憶、音声/アバター、プラグイン、MCP連携の解説。 |
-| **[クレートリファレンス](crates/runtime.md)** | 開発者 | ワークスペース内全 17 クレートの公開 API と設計。 |
-| **[アプリケーション](apps/cli.md)** | エンドユーザー | `ene-cli` および `ene-desktop` の使用方法。 |
+| 読者 | 最初に読むページ |
+|---|---|
+| Ene を動かしたいエンドユーザー | [クイックスタート](quickstart.md) |
+| キャラクターや設定を調整する人 | [設定](configuration.md) → [コンセプト](concepts/architecture.md) |
+| ツールを追加したい開発者 | [ツールを書く](guides/tools/write-a-tool.md) |
+| ホスト API と連携したい開発者 | [API v1 リファレンス](reference/architecture/api-v1.md) |
+| このリポジトリへのコントリビューター | [アーキテクチャ](concepts/architecture.md) → [クレートリファレンス](reference/crates.md) |
 
----
+## ドキュメントマップ
 
-## ワークスペース構成図
+| セクション | 内容 |
+|---|---|
+| [クイックスタート](quickstart.md) | ビルド・設定・CLI/デスクトップの起動 |
+| [設定](configuration.md) | `settings.json`・環境変数・ファイル配置 |
+| [コンセプト](concepts/architecture.md) | Ene の仕組み: アーキテクチャ・カード・記憶・ターン・プラグイン・音声 |
+| [アプリ](apps/cli.md) | CLI / デスクトップの使い方ガイド |
+| [ガイド](guides/character-editor.md) | キャラクター編集・メモリ・スケジュール・ツールなどの手順書 |
+| [リファレンス](reference/crates.md) | 契約・プロトコル・API の正確な技術リファレンス |
 
-Ene は **17 のライブラリクレート**、**18 のプラグインバイナリ**、**2 つのホストアプリケーション** からなるモジュール式 Cargo ワークスペースです：
+英語版は [English documentation](../index.md) にあります。`docs/` 配下の
+各ページには `docs/ja/` に対応する日本語ページがあります。
 
-```
-Ene ワークスペース
-├── ホストアプリ
-│   ├── ene-cli            (CLI REPL アプリケーション)
-│   └── ene-desktop        (3D VRM アバター・音声機能付き GUI デスクトップアプリ)
-├── コアエンジン
-│   ├── ene-runtime        (アクターベースのホストファサード & ターン実行エンジン)
-│   ├── ene-mind           (認知エンジン: セッション、プロンプト、感情、プロアクティブ、記憶書込)
-│   ├── ene-store          (SQLite + SeaORM + sqlite-vec 記憶・ベクトルストア)
-│   ├── ene-config         (設定読み込み、キャラクターカード、スキーマ定義)
-│   ├── ene-core           (永続化非依存のドメイン語彙 & メモリポート)
-│   ├── ene-ai             (コア AI プロバイダトレイト、OpenAI、Anthropic アダプタ)
-│   ├── ene-infer          (ローカルモデルエンジン: ワーカースレッド、キュー、適合性試験)
-│   ├── ene-voice          (ローカル STT/TTS/VAD エンジン。プロバイダプラグインが消費)
-│   ├── ene-rag            (RAG ポリシー: 記憶スコアリング/減衰、ツール選択)
-│   ├── ene-connector      (外部サービスの認証情報 & アイデンティティ権威)
-│   ├── ene-util           (純粋ユーティリティ: 切り詰め、HTML→Markdown)
-│   └── ene-vrm            (3D VRM 1.0 ローダー & wgpu レンダラー)
-├── プラグインシステム
-│   ├── ene-plugin-proto   (IPC ワイヤープロトコル v6 定義)
-│   ├── ene-plugin         (プラグイン開発 SDK & アダプタファサード)
-│   ├── ene-plugin-host    (プラグインプロセス管理 & スーパーバイザ)
-│   ├── ene-plugin-db      (プラグイン用ホストサービス `db` クライアント)
-│   └── ene-plugin-macros  (プラグイン用 Proc-macro)
-└── プロセス外プラグイン
-    ├── plugins/provider/* (プロバイダプラグイン: anthropic, edge-tts, elevenlabs, kokoro, local-llm, openai, openai-tts, voicevox)
-    └── plugins/tool/*     (ツールプラグイン: app, browser, calc, calendar, fs, geo, git, random, utility, web)
-```
+## 正誤の基準
 
----
+このドキュメントはリポジトリの**実コード**に照らして保守されています。
+ページとコードが矛盾する場合はコードが正です。矛盾を見つけたら報告してください。
 
-## ナビゲーションリンク
-
-- [セットアップと起動](getting-started.md)
-- [システムアーキテクチャと設計](architecture.md)
-- [設定リファレンス](configuration.md)
-- [ターンとセッション](concepts/turn-and-session.md)
-- [記憶と想起](concepts/memory-system.md)
-- [音声とアバター](concepts/voice-and-avatar.md)
-- [プラグインと MCP システム](concepts/plugins-and-mcp.md)
-- [CLI 使用ガイド](apps/cli.md)
-- [Desktop 使用ガイド](apps/desktop.md)
+- リポジトリ: <https://github.com/pexisgle/ene>
+- Rust API ドキュメント: `cargo doc --workspace --no-deps`

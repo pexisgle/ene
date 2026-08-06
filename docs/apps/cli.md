@@ -1,83 +1,143 @@
-# `ene-cli` User Guide
+# CLI user guide
 
-`ene-cli` is the command-line REPL interface for chatting with Ene, inspecting memory, managing sessions, and testing tool plugins.
+`ene-cli` is the terminal client: an interactive REPL for chatting with
+characters, plus non-interactive subcommands for scripts and CI.
 
----
-
-## Launching the CLI
-
-```bash
-# Run with default settings
-cargo run -p ene-cli
-
-# Run with custom character card
-cargo run -p ene-cli -- --character assets/cards/ene.json
-
-# Run with verbose tracing logs enabled
-RUST_LOG=info cargo run -p ene-cli
+```sh
+cargo run -p ene-cli -- <flags> [subcommand]
 ```
 
----
+## Global flags
 
-## REPL Slash Commands
-
-Inside the `ene-cli` interactive prompt, type `/` to access commands:
-
-| Command | Description |
+| Flag | Meaning |
 |---|---|
-| `/help` | Display list of available REPL slash commands |
-| `/prompt` | Preview the exact message list sent to the AI (rendered directly from `build_messages`) |
-| `/memory list` | Display active session recalled memory facts |
-| `/memory clear` | Purge or reset active session memories |
-| `/tool list` | List registered IPC tool plugins & active MCP servers |
-| `/tool call <name> <json>` | Execute a tool action directly from REPL |
-| `/characters` | List characters discovered under `assets/characters/` |
-| `/import <path>` | Import a character card (PNG or CHARX) into `assets/characters/` |
-| `/session list` | List active & past sessions in SQLite |
-| `/session split` | Force an immediate session boundary split |
-| `/quit` or `/exit` | Safely shutdown `ene-runtime` and exit |
+| `--config <path>` | Load a different `settings.json` |
+| `--character <name>` | Override the configured character |
+| `--lang <en\|ja>` | Override the UI language |
 
----
+With no subcommand, the REPL starts.
+
+## The REPL
+
+Type a message to talk to the character. Slash commands:
+
+| Command | Usage | Purpose |
+|---|---|---|
+| `/help` | `/help` | List all commands |
+| `/quit`, `/exit` | | Leave the REPL |
+| `/clear` | `/clear` | Clear the screen |
+| `/affect` | `/affect <show\|reset>` | Inspect/reset the character's PAD affect state |
+| `/prompt` | `/prompt` | Show the composed prompt packet for the last turn (debug) |
+| `/card` | `/card <name>` | Switch character card |
+| `/characters` | `/characters` | List discovered characters |
+| `/import` | `/import <path>` | Import a PNG/CHARX character card |
+| `/config` | `/config [set <dotted.key> <value>]` | Show or mutate settings at runtime |
+| `/history` | `/history` | Show conversation history |
+| `/undo` | `/undo` | Undo the last state-changing operation |
+| `/tool` | `/tool <list\|search\|help\|call>` | Inspect and call tools directly |
+| `/memory` | `/memory <list\|inspect\|search\|why\|pin\|archive\|forget\|dispute\|restore\|status\|pending\|retry\|approval>` | Manage typed memories |
+| `/commitments` | `/commitments <list\|done <id>>` | Manage the commitment ledger |
+| `/session` | `/session <info\|split\|summaries\|list\|export\|import\|search\|archive\|unarchive>` | Manage sessions |
+| `/permissions` | `/permissions <list\|revoke\|reset>` | Manage standing permission grants |
+| `/connector` | `/connector <list\|status\|check\|connect\|disconnect\|grant\|revoke\|permissions>` | Manage external-service connectors |
+| `/schedule` | `/schedule <list\|add\|history\|delete\|pause\|resume>` | Manage persistent schedules |
+| `/doctor` | `/doctor` | Run environment health checks |
+| `/greeting` | `/greeting [<index>\|none]` | Switch the greeting message |
+| `/store` | `/store <backup\|list-backups\|restore\|integrity>` | Database backup/restore/integrity |
+| `/workspace` | `/workspace <sync\|cancel\|status\|search <query>>` | Workspace RAG index management |
 
 ## Non-interactive subcommands
 
-### `ene characters list`
+These run one operation and exit. Most accept `--json` for machine-readable
+output.
 
-Lists the characters discovered under `assets/characters/` (the same rule the
-desktop uses: a folder counts as a character when it contains
-`character.json`).
+### `ene run`
 
-```bash
-# Human-readable
-ene characters list
+Run a single prompt and stream the response, then exit:
 
-# Machine-readable JSON (name, folder, card/vrm/motion paths, default motion)
-ene characters list --json
+```sh
+ene run "What's the weather?"
+ene run --jsonl "Tell me a story"     # one JSON event object per line
+ene run --json "Hello"                # single JSON summary
+ene run --timeout 60 --yes "Delete /tmp/scratch"   # auto-approve tools, cap runtime
 ```
 
-### `ene characters import <path>`
+`--yes` auto-approves side-effecting tool operations (intended for
+scripted, trusted environments). Without it, a permission-gated tool fails
+the run instead of prompting. The prompt can also be read from stdin when
+no prompt argument is given.
 
-Imports a character card into `assets/characters/`. PNG cards (Chub.ai /
-JanitorAI style, `ccv3` or legacy `chara` text chunk) and CHARX archives
-(zip with `card.json` at the root) are accepted; the card is materialized as
-a `characters/{card name}/` folder, so the desktop discovers it on the next
-scan. Imports refuse to overwrite an existing folder.
+The `--jsonl` stream uses the API v1 event schema
+([`PublicChatEvent`](../reference/architecture/api-v1.md)).
 
-```bash
-# Import a PNG or CHARX card
-ene characters import path/to/card.png
-ene characters import path/to/card.charx
+### `ene tool`
 
-# Machine-readable result (name, folder, card_path)
-ene characters import path/to/card.png --json
+```sh
+ene tool list
+ene tool search "calendar"
+ene tool help fs.write
+ene tool call fs.read '{"path": "Cargo.toml"}'
 ```
 
-The same operation is available in the REPL as `/import <path>`. Cards with
-remote (`http(s)://`) asset URIs import without downloading those assets; the
-URIs are validated and kept on the card.
+### `ene session`
 
----
+```sh
+ene session list
+ene session list --archived
+ene session export <id>        # versioned, redacted JSON bundle
+ene session import <path>
+ene session search "query"
+ene session archive <id>
+```
 
-## Proactive (spontaneous) speech
+### `ene characters`
 
-When `mind.proactive.enabled = true`, Ene can speak spontaneously even while you are not typing. The REPL keeps a continuous subscription to the chat event bus, so proactive utterances are rendered above the prompt while the REPL is idle — the same behavior as the desktop app. If a proactive turn starts while you are in the middle of typing, the in-progress line is cancelled (its text is discarded) and the prompt resumes once the utterance finishes.
+```sh
+ene characters list                # name, card path, assets
+ene characters import <card.png|card.charx>
+```
+
+### `ene memory`
+
+Query the typed-memory store:
+
+```sh
+ene memory list [--kind <KIND>]
+ene memory inspect <id>
+ene memory search "camping trip"
+```
+
+Full management (pin, archive, forget, dispute, restore, approval queue)
+is available in the REPL via `/memory`.
+
+### `ene doctor`
+
+Environment health check: config validity, provider reachability, store
+integrity, plugin state. Exit code reflects the result — useful for CI.
+
+### `ene store`
+
+```sh
+ene store backup
+ene store list-backups
+ene store restore <path> --yes      # --yes confirms the destructive restore
+ene store integrity
+```
+
+## Examples
+
+```sh
+# Chat with a different character non-interactively
+ene --character "Mira" run "Good morning"
+
+# Scripted: summarize the latest session into a file
+ene session list --json | jq '.[0].id' | xargs ene session export
+
+# Health gate for a cron job
+ene doctor --json
+```
+
+## Localization
+
+The CLI UI is localized (`en-US`, `ja`); `--lang` overrides the system
+locale. Slash-command names and the JSONL event schema stay English.

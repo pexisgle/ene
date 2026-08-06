@@ -238,6 +238,6 @@ lto = true
 codegen-units = 1
 # `panic = "abort"` is deliberately omitted: ene-runtime's actor relies on
 # catch_unwind isolation (crates/ene-runtime/src/handle/actor.rs, and
-# docs/architecture.md "Fault tolerance"). Do not add it.
+# docs/concepts/architecture.md "Process model and fault tolerance"). Do not add it.
 strip = true
 overflow-checks = true

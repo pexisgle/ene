@@ -32,7 +32,7 @@ Then implement your actions in `src/action.rs`, wire lifecycle hooks in
    `crates/ene-plugin-host/src/config.rs` for a built-in).
 2. Build and run the app, then verify with `/tool list`.
 
-Full guidance: `docs/guide/tools/write-a-tool.md` (en/ja) and the
+Full guidance: `docs/guides/tools/write-a-tool.md` (en/ja) and the
 reference `docs/reference/tools/sdk.md` (en/ja). For stateful tools with
 DB IPC, permission gates, and integration tests, see the
 `plugins/tool/counter` sample.
