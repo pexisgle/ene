@@ -3,8 +3,7 @@
 //! Microsoft service is never contacted.
 #![expect(
     clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "unit tests use expect/unwrap for concise assertions"
+    reason = "unit tests use expect for concise assertions"
 )]
 
 use std::future::Future;
@@ -128,12 +127,15 @@ async fn multi_chunk_synthesis_round_trips_wav() {
 
     assert_eq!(&wav[..4], b"RIFF");
     assert_eq!(&wav[8..12], b"WAVE");
-    assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 24_000);
     let expected_pcm = decode_mp3(FIXTURE).expect("fixture decodes").pcm.len() * 2;
-    assert_eq!(
-        u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize,
-        expected_pcm * 4
-    );
+    let reader = hound::WavReader::new(std::io::Cursor::new(&wav)).expect("valid wav");
+    let spec = reader.spec();
+    assert_eq!(spec.sample_rate, 24_000);
+    assert_eq!(spec.channels, 1);
+    assert_eq!(spec.bits_per_sample, 32);
+    assert_eq!(spec.sample_format, hound::SampleFormat::Float);
+    let sample_count = reader.into_samples::<f32>().count();
+    assert_eq!(sample_count, expected_pcm);
 }
 
 #[tokio::test]

@@ -204,22 +204,26 @@ fn http_response(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
 }
 
 /// A valid mono s16 24 kHz WAV whose PCM bytes are a constant pattern.
+#[expect(
+    clippy::expect_used,
+    reason = "test fixture builds a fixed in-memory WAV; the writer cannot fail"
+)]
 fn wav_fixture() -> Vec<u8> {
-    const DATA_LEN: u32 = 480;
-    let mut bytes = Vec::with_capacity(44 + DATA_LEN as usize);
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + DATA_LEN).to_le_bytes());
-    bytes.extend_from_slice(b"WAVE");
-    bytes.extend_from_slice(b"fmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&24_000u32.to_le_bytes());
-    bytes.extend_from_slice(&48_000u32.to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&DATA_LEN.to_le_bytes());
-    bytes.resize(bytes.len() + DATA_LEN as usize, 0x5A);
-    bytes
+    use hound::{SampleFormat, WavSpec, WavWriter};
+    use std::io::Cursor;
+
+    const DATA_LEN: usize = 480;
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: 24_000,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let mut out = Cursor::new(Vec::with_capacity(44 + DATA_LEN));
+    let mut writer = WavWriter::new(&mut out, spec).expect("valid spec");
+    for _ in 0..DATA_LEN / 2 {
+        writer.write_sample(0x5A5Au16 as i16).expect("write sample");
+    }
+    writer.finalize().expect("finalize");
+    out.into_inner()
 }

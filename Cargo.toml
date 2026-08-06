@@ -37,6 +37,7 @@ global-hotkey = "0.8"
 
 # ── Audio / DSP ──
 cpal = "0.18"
+hound = "3"
 nanomp3 = "0.1.1"
 rodio = { version = "0.22", default-features = false }
 rustfft = "6"

@@ -1,39 +1,47 @@
-//! Minimal RIFF/WAVE encoder for plugin-delivered TTS audio.
+//! WAV wrapping for plugin-delivered TTS audio, backed by `hound`.
 //!
 //! The host-side TTS adapter decodes plugin audio as WAV (`ene-plugin-host`
 //! `wav::decode_wav`), so the raw PCM stream from the API is wrapped in a
 //! header here instead of sent headerless.
 
 use ene_plugin::PluginError;
+use hound::{SampleFormat, WavSpec, WavWriter};
+use std::io::Cursor;
 
-/// Canonical 16-bit mono PCM WAV header size.
-const WAV_HEADER_LEN: usize = 44;
-
-/// Wraps raw 16-bit mono PCM in a RIFF/WAVE container.
+/// Wraps raw 16-bit mono PCM (little-endian, interleaved for stereo) in a
+/// RIFF/WAVE container.
 ///
 /// `pcm.len()` must fit in `u32`; the client caps payloads at
 /// [`crate::client::MAX_PCM_BYTES`], far below that bound.
 #[must_use = "the wrapped WAV result must be handled"]
 pub fn wrap_pcm(pcm: &[u8], sample_rate: u32) -> Result<Vec<u8>, PluginError> {
     let data_len = pcm.len() as u32;
-    let byte_rate = sample_rate.checked_mul(2).ok_or_else(|| {
+    sample_rate.checked_mul(2).ok_or_else(|| {
         PluginError::provider("sample rate is too large for a 16-bit WAV byte-rate field")
     })?;
-    let mut wav = Vec::with_capacity(WAV_HEADER_LEN + pcm.len());
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    wav.extend_from_slice(pcm);
+
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let mut out = Cursor::new(Vec::with_capacity(44 + pcm.len()));
+    {
+        let mut writer = WavWriter::new(&mut out, spec)
+            .map_err(|e| PluginError::provider(format!("WAV header write failed: {e}")))?;
+        for pair in pcm.chunks_exact(2) {
+            let sample = i16::from_le_bytes([pair[0], pair[1]]);
+            writer
+                .write_sample(sample)
+                .map_err(|e| PluginError::provider(format!("WAV sample write failed: {e}")))?;
+        }
+        writer
+            .finalize()
+            .map_err(|e| PluginError::provider(format!("WAV finalize failed: {e}")))?;
+    }
+    let wav = out.into_inner();
+    debug_assert_eq!(wav.len(), 44 + data_len as usize);
     Ok(wav)
 }
 
@@ -44,31 +52,23 @@ pub fn wrap_pcm(pcm: &[u8], sample_rate: u32) -> Result<Vec<u8>, PluginError> {
 )]
 mod tests {
     use super::*;
+    use hound::SampleFormat;
 
     #[test]
     fn wraps_pcm_with_canonical_header() {
         let pcm = vec![0u8, 1, 2, 3];
         let wav = wrap_pcm(&pcm, 24_000).expect("valid sample rate");
-        assert_eq!(wav.len(), WAV_HEADER_LEN + pcm.len());
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
-        assert_eq!(u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]), 36 + 4);
-        assert_eq!(u16::from_le_bytes([wav[20], wav[21]]), 1);
-        assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1);
-        assert_eq!(
-            u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]),
-            24_000
-        );
-        assert_eq!(
-            u32::from_le_bytes([wav[28], wav[29], wav[30], wav[31]]),
-            48_000
-        );
-        assert_eq!(u16::from_le_bytes([wav[32], wav[33]]), 2);
-        assert_eq!(u16::from_le_bytes([wav[34], wav[35]]), 16);
-        assert_eq!(
-            u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]),
-            pcm.len() as u32
-        );
-        assert_eq!(&wav[WAV_HEADER_LEN..], pcm.as_slice());
+        assert_eq!(wav.len(), 44 + pcm.len());
+        let reader = hound::WavReader::new(Cursor::new(&wav)).expect("valid wav");
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.sample_rate, 24_000);
+        assert_eq!(spec.bits_per_sample, 16);
+        assert_eq!(spec.sample_format, SampleFormat::Int);
+        let samples: Vec<i16> = reader
+            .into_samples::<i16>()
+            .collect::<Result<_, _>>()
+            .expect("samples read");
+        assert_eq!(samples, vec![256, 770]);
     }
 }
