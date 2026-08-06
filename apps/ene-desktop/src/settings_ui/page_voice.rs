@@ -455,10 +455,6 @@ pub fn render(
                     crate::i18n::loader(),
                     "audio-mic-refresh"
                 ))
-                .on_hover_text(i18n_embed_fl::fl!(
-                    crate::i18n::loader(),
-                    "audio-mic-default"
-                ))
                 .clicked()
             {
                 #[cfg(feature = "voice")]
