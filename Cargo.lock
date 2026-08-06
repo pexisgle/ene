@@ -3065,6 +3065,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-llama-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "ene-ai",
+ "ene-config",
+ "ene-plugin",
+ "ene-plugin-proto",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ene-plugin-macros"
 version = "0.1.0"
 dependencies = [
