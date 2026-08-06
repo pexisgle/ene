@@ -32,6 +32,7 @@
 # リファレンス
 
 - [クレートリファレンス](reference/crates.md)
+- [クレートインターフェース](reference/interfaces/overview.md)
 - [認知ランタイム](reference/architecture/cognitive-runtime.md)
 - [API v1 契約](reference/architecture/api-v1.md)
 - [プラグイン IPC プロトコル](reference/plugin-ipc.md)

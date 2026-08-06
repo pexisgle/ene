@@ -32,6 +32,7 @@
 # Reference
 
 - [Crate reference](reference/crates.md)
+- [Crate interfaces](reference/interfaces/overview.md)
 - [Cognitive runtime](reference/architecture/cognitive-runtime.md)
 - [API v1 contract](reference/architecture/api-v1.md)
 - [Plugin IPC protocol](reference/plugin-ipc.md)
