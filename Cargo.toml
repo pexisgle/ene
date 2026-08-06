@@ -34,9 +34,11 @@ wgpu = "29"
 
 # ── Desktop / Platform ──
 global-hotkey = "0.8"
+rfd = "0.15"
 
 # ── Audio / DSP ──
 cpal = "0.18"
+hound = "3"
 nanomp3 = "0.1.1"
 rodio = { version = "0.22", default-features = false }
 rustfft = "6"
@@ -70,6 +72,7 @@ crossterm = "0.29"
 
 # ── Networking ──
 http = "1"
+eventsource-stream = "0.2"
 percent-encoding = "2"
 reqwest = { version = "0.13", default-features = false }
 scraper = "0.27"
@@ -109,9 +112,11 @@ fluent-syntax = "0.12"
 htmd = "0.5"
 sys-locale = "0.3"
 unicode-normalization = "0.1"
+strsim = "0.11"
 
 # ── Utility ──
 blake3 = "1.8"
+bytesize = "2"
 flate2 = "1"
 meval = "0.2"
 secrecy = { version = "0.10", features = ["serde"] }
@@ -123,6 +128,8 @@ sha2 = "0.11"
 rand = "0.10"
 rayon = "1.12"
 regex = "1"
+# ── Parsing / Matching ──
+globset = "0.4"
 tempfile = "3"
 
 # ── Dev Tooling ──

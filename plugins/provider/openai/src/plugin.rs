@@ -502,37 +502,23 @@ async fn stream_sse_response(
     name_mapping: HashMap<String, String>,
     tx: tokio::sync::mpsc::Sender<Result<PluginStreamChunk, PluginError>>,
 ) {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio_util::io::StreamReader;
+    use eventsource_stream::Eventsource;
 
-    let bytes_stream = response
-        .bytes_stream()
-        .map(|res| res.map_err(std::io::Error::other));
-    let reader = StreamReader::new(bytes_stream);
-    let mut lines = BufReader::new(reader).lines();
-
-    loop {
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
+    let mut events = response.bytes_stream().eventsource();
+    while let Some(event) = events.next().await {
+        let event = match event {
+            Ok(event) => event,
             Err(e) => {
                 drop(
                     tx.send(Err(PluginError::provider(format!(
-                        "read stream line failed: {e}"
+                        "read stream failed: {e}"
                     ))))
                     .await,
                 );
                 return;
             }
         };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Some(payload) = trimmed.strip_prefix("data: ") else {
-            continue;
-        };
-        let payload = payload.trim();
+        let payload = event.data.trim();
         if payload == "[DONE]" {
             break;
         }

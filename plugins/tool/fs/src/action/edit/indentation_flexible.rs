@@ -1,16 +1,12 @@
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
-static INDENT_RE: OnceLock<regex::Regex> = OnceLock::new();
-
-fn indent_re() -> &'static regex::Regex {
-    INDENT_RE.get_or_init(|| {
-        #[expect(
-            clippy::expect_used,
-            reason = "constant regex pattern compiled once at first use"
-        )]
-        regex::Regex::new(r"^(\s*)").expect("invalid constant regex")
-    })
-}
+static INDENT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    #[expect(
+        clippy::expect_used,
+        reason = "constant regex pattern compiled once at first use"
+    )]
+    regex::Regex::new(r"^(\s*)").expect("invalid constant regex")
+});
 
 pub fn indentation_flexible_replace(
     content: &str,
@@ -31,7 +27,7 @@ pub fn indentation_flexible_replace(
         let min_indent = non_empty
             .iter()
             .map(|l| {
-                indent_re()
+                INDENT_RE
                     .captures(l)
                     .and_then(|c| c.get(1))
                     .map_or(0, |m| m.len())

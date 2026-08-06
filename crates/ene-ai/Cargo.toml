@@ -11,6 +11,8 @@ publish.workspace = true
 crate-type = ["lib"]
 
 [dependencies]
+strsim = { workspace = true }
+bytesize = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "rt", "fs"] }
 parking_lot = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }

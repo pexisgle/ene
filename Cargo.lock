@@ -454,6 +454,28 @@ dependencies = [
 
 [[package]]
 name = "ashpd"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f3f79755c74fd155000314eb349864caa787c6592eace6c6882dad873d9c39"
+dependencies = [
+ "async-fs",
+ "async-net",
+ "enumflags2",
+ "futures-channel",
+ "futures-util",
+ "rand 0.9.5",
+ "raw-window-handle",
+ "serde",
+ "serde_repr",
+ "url",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "zbus",
+]
+
+[[package]]
+name = "ashpd"
 version = "0.13.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb8421aaa9644a5faf26735f258b669b15f063313ef8f8e2bdb28912a1a6f111"
@@ -508,6 +530,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-fs"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8034a681df4aed8b8edbd7fbe472401ecf009251c8b40556b304567052e294c5"
+dependencies = [
+ "async-lock",
+ "blocking",
+ "futures-lite",
+]
+
+[[package]]
 name = "async-io"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -534,6 +567,17 @@ dependencies = [
  "event-listener",
  "event-listener-strategy",
  "pin-project-lite",
+]
+
+[[package]]
+name = "async-net"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b948000fad4873c1c9339d60f2623323a0cfd3816e5181033c6a5cb68b2accf7"
+dependencies = [
+ "async-io",
+ "blocking",
+ "futures-lite",
 ]
 
 [[package]]
@@ -1070,6 +1114,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f7dc094d718f2e1c1559ad110e27eeaae14a5465d3d56dd6dbd793079fbd530"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1143,6 +1197,12 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "bytesize"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7354288c522e7e980fafd2075d63d1285794c3a6a16cdd492f189ea406e5f18b"
 
 [[package]]
 name = "cairo-rs"
@@ -2430,6 +2490,7 @@ name = "ene-ai"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytesize",
  "ene-config",
  "ene-infer",
  "ene-plugin-proto",
@@ -2438,6 +2499,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "strsim",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -2468,6 +2530,7 @@ dependencies = [
  "futures-core",
  "i18n-embed",
  "i18n-embed-fl",
+ "iana-time-zone",
  "parking_lot",
  "rust-embed",
  "serde",
@@ -2543,12 +2606,13 @@ name = "ene-desktop"
 version = "0.1.0"
 dependencies = [
  "active-win-pos-rs",
- "ashpd",
+ "ashpd 0.13.13",
  "bevy_app",
  "bevy_ecs",
  "bitflags 2.13.1",
  "bytemuck",
  "chrono",
+ "chrono-tz",
  "cpal",
  "crossbeam-channel",
  "device_query",
@@ -2577,9 +2641,10 @@ dependencies = [
  "parking_lot",
  "pipewire",
  "png",
- "pollster",
+ "pollster 1.0.1",
  "rapier3d",
  "regex",
+ "rfd",
  "rodio",
  "rust-embed",
  "rustfft",
@@ -2667,6 +2732,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ene-plugin",
+ "eventsource-stream",
  "reqwest",
  "serde_json",
  "tokio",
@@ -2681,7 +2747,7 @@ version = "0.1.0"
 dependencies = [
  "active-win-pos-rs",
  "arboard",
- "ashpd",
+ "ashpd 0.13.13",
  "async-trait",
  "base64 0.23.0",
  "ene-plugin",
@@ -2792,6 +2858,7 @@ dependencies = [
  "ene-plugin",
  "futures",
  "hex",
+ "hound",
  "http",
  "nanomp3",
  "rustls",
@@ -2815,6 +2882,7 @@ dependencies = [
  "chrono",
  "ene-plugin",
  "futures",
+ "hound",
  "http",
  "percent-encoding",
  "rand 0.10.2",
@@ -2931,6 +2999,7 @@ dependencies = [
  "ene-store",
  "futures",
  "hex",
+ "hound",
  "http",
  "parking_lot",
  "rmcp",
@@ -2956,6 +3025,7 @@ dependencies = [
  "ene-ai",
  "ene-plugin",
  "ene-voice",
+ "hound",
  "serde",
  "serde_json",
  "tokio",
@@ -2995,6 +3065,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-llama-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "ene-ai",
+ "ene-config",
+ "ene-plugin",
+ "ene-plugin-proto",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ene-plugin-macros"
 version = "0.1.0"
 dependencies = [
@@ -3028,12 +3118,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ene-plugin",
+ "eventsource-stream",
  "rand 0.10.2",
  "reqwest",
  "serde_json",
  "tokio",
  "tokio-stream",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3044,6 +3134,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ene-plugin",
+ "hound",
  "rand 0.10.2",
  "reqwest",
  "serde",
@@ -3111,6 +3202,7 @@ dependencies = [
  "async-trait",
  "ene-plugin",
  "futures",
+ "hound",
  "reqwest",
  "serde",
  "serde_json",
@@ -3148,6 +3240,7 @@ dependencies = [
  "ene-config",
  "ene-plugin",
  "ene-voice",
+ "hound",
  "serde",
  "serde_json",
  "tokio",
@@ -3167,8 +3260,8 @@ dependencies = [
  "ene-config",
  "ene-core",
  "ene-plugin-proto",
+ "globset",
  "parking_lot",
- "regex",
  "schemars",
  "serde",
  "serde_json",
@@ -3419,6 +3512,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "eventsource-stream"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74fef4569247a5f429d9156b9d0a2599914385dd189c539334c625d8099d90ab"
+dependencies = [
+ "futures-core",
+ "nom 7.1.3",
  "pin-project-lite",
 ]
 
@@ -4122,6 +4226,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "globset"
+version = "0.4.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e47d37d2ae4464254884b60ab7071be2b876a9c35b696bd018ddcc76847309cd"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4463,6 +4580,12 @@ checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
 
 [[package]]
 name = "htmd"
@@ -7094,6 +7217,12 @@ dependencies = [
 
 [[package]]
 name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
+
+[[package]]
+name = "pollster"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc6355899e1c9462875b6757c79f3caa011a1fdae12bbb1a2e72dd1f234f8336"
@@ -7764,6 +7893,30 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+]
+
+[[package]]
+name = "rfd"
+version = "0.15.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef2bee61e6cffa4635c72d7d81a84294e28f0930db0ddcb0f66d10244674ebed"
+dependencies = [
+ "ashpd 0.11.1",
+ "block2 0.6.2",
+ "dispatch2",
+ "js-sys",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "pollster 0.4.0",
+ "raw-window-handle",
+ "urlencoding",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9974,7 +10127,14 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "utf-8"
@@ -11648,6 +11808,7 @@ dependencies = [
  "endi",
  "enumflags2",
  "serde",
+ "url",
  "winnow 1.0.4",
  "zvariant_derive",
  "zvariant_utils",

@@ -653,6 +653,89 @@ pub async fn validate_api_key(base_url: &str, api_key: &str) -> Result<(), crate
     }))
 }
 
+/// Fetches the model catalog for an OpenAI-compatible provider.
+///
+/// Performs a `GET {base_url}/models` request with a short timeout and returns
+/// the `id` strings from the `data` array. The parsing step is a pure function
+/// ([`parse_model_ids`]) so malformed responses surface as typed errors without
+/// blocking a UI thread on the network call itself.
+pub async fn fetch_model_ids(
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, crate::error::AiError> {
+    if api_key.trim().is_empty() {
+        return Err(crate::error::AiError::MissingApiKey(
+            "resolved API key is empty; set the provider api_key or the configured env var"
+                .to_string(),
+        ));
+    }
+
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| {
+            crate::error::AiError::Llm(LlmProviderError::Provider(format!(
+                "model list HTTP client init failed: {e}"
+            )))
+        })?;
+
+    let response = client
+        .get(url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|e| {
+            crate::error::AiError::Llm(LlmProviderError::Network(format!(
+                "model list request failed: {e}"
+            )))
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let raw = response.text().await.unwrap_or_default();
+        let snippet: String = raw.chars().take(200).collect();
+        return Err(crate::error::AiError::Llm(match status.as_u16() {
+            401 | 403 => LlmProviderError::Auth(format!("API key rejected: {snippet}")),
+            429 => LlmProviderError::RateLimit(snippet),
+            _ => LlmProviderError::Provider(format!("model list HTTP {status}: {snippet}")),
+        }));
+    }
+
+    let body = response.text().await.map_err(|e| {
+        crate::error::AiError::Llm(LlmProviderError::Provider(format!(
+            "model list body read failed: {e}"
+        )))
+    })?;
+    parse_model_ids(&body)
+}
+
+/// Extracts model `id` strings from an OpenAI-compatible `/models` response.
+///
+/// The response shape is `{"data": [{"id": "..."}, ...]}`. Non-string or
+/// missing `id` entries are skipped; a missing or non-array `data` field is an
+/// error so callers can fall back to a static catalog.
+pub fn parse_model_ids(body: &str) -> Result<Vec<String>, crate::error::AiError> {
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|e| {
+        crate::error::AiError::Llm(LlmProviderError::Provider(format!(
+            "model list is not valid JSON: {e}"
+        )))
+    })?;
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            crate::error::AiError::Llm(LlmProviderError::Provider(
+                "model list response has no data array".to_string(),
+            ))
+        })?;
+    Ok(data
+        .iter()
+        .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect())
+}
+
 impl AiConfig {
     /// Whether `name` is the reserved local provider.
     #[must_use]
@@ -2245,5 +2328,39 @@ mod tests {
         assert_eq!(reports.len(), 2);
         assert_eq!(reports[0].status, ProviderHealthStatus::Healthy);
         assert_eq!(reports[1].status, ProviderHealthStatus::AuthFailed);
+    }
+
+    #[test]
+    fn parse_model_ids_extracts_ids_in_order() {
+        let body = r#"{"object":"list","data":[{"id":"gpt-4o"},{"id":"text-embedding-3-small"},{"id":"gpt-4o-mini"}]}"#;
+        let ids = parse_model_ids(body).expect("valid response parses");
+        assert_eq!(ids, vec!["gpt-4o", "text-embedding-3-small", "gpt-4o-mini"]);
+    }
+
+    #[test]
+    fn parse_model_ids_skips_entries_without_string_id() {
+        let body = r#"{"data":[{"id":"gpt-4o"},{"id":42},{"name":"no-id"},{"id":null}]}"#;
+        let ids = parse_model_ids(body).expect("valid response parses");
+        assert_eq!(ids, vec!["gpt-4o"]);
+    }
+
+    #[test]
+    fn parse_model_ids_accepts_empty_data() {
+        let body = r#"{"data":[]}"#;
+        let ids = parse_model_ids(body).expect("empty data parses");
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn parse_model_ids_rejects_missing_data_array() {
+        let body = r#"{"object":"error","message":"boom"}"#;
+        let err = parse_model_ids(body).expect_err("missing data is an error");
+        assert!(err.to_string().contains("no data array"));
+    }
+
+    #[test]
+    fn parse_model_ids_rejects_invalid_json() {
+        let err = parse_model_ids("not json").expect_err("invalid JSON is an error");
+        assert!(err.to_string().contains("not valid JSON"));
     }
 }

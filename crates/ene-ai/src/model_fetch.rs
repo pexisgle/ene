@@ -114,13 +114,7 @@ impl ProgressState {
 }
 
 fn format_size(bytes: u64) -> String {
-    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
-    const MB: f64 = 1024.0 * 1024.0;
-    if bytes as f64 >= GB {
-        format!("{:.1} GB", bytes as f64 / GB)
-    } else {
-        format!("{:.1} MB", bytes as f64 / MB)
-    }
+    bytesize::ByteSize::b(bytes).to_string()
 }
 
 fn progress_bar(pct: f64) -> String {

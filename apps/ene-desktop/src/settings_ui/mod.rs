@@ -261,7 +261,7 @@ impl SettingsUi {
             self.current_page = page;
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for page in [
                 PageKind::Character,
                 PageKind::CharacterEditor,
@@ -317,45 +317,50 @@ impl SettingsUi {
             }
         });
         ui.separator();
-        match self.current_page {
-            PageKind::Character => page_character::render(
-                ui,
-                settings,
-                &mut self.animation,
-                ai,
-                &mut self.input,
-                &mut self.emotion_queue,
-                now_secs,
-                world,
-                ui_entity,
-            ),
-            PageKind::CharacterEditor => {
-                page_character_editor::render(ui, settings, ai, world, ui_entity);
-            }
-            PageKind::Graphics => {
-                page_graphics::render(ui, settings, &mut self.animation, ai, world, ui_entity);
-            }
-            PageKind::Ai => page_ai::render(
-                ui,
-                settings,
-                &mut self.animation,
-                ai,
-                &mut self.input,
-                world,
-                ui_entity,
-            ),
-            PageKind::Voice => page_voice::render(ui, settings, ai, &mut self.input, world),
-            PageKind::Features => page_features::render(ui, settings, ai, world),
-            PageKind::Accessibility => page_accessibility::render(ui, settings),
-            PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
-            PageKind::MemoryLedger => page_memory_ledger::render(ui, ai, world, ui_entity),
-            PageKind::Permissions => page_permissions::render(ui, ai, world, ui_entity),
-            PageKind::Connectors => page_connectors::render(ui, ai, world, ui_entity),
-            PageKind::Sessions => page_sessions::render(ui, ai, world, ui_entity),
-            PageKind::Debug => {
-                page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);
-            }
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("settings_page_scroll")
+            .auto_shrink([false; 2])
+            .show(ui, |ui| match self.current_page {
+                PageKind::Character => page_character::render(
+                    ui,
+                    settings,
+                    &mut self.animation,
+                    ai,
+                    &mut self.input,
+                    &mut self.emotion_queue,
+                    now_secs,
+                    world,
+                    ui_entity,
+                ),
+                PageKind::CharacterEditor => {
+                    page_character_editor::render(ui, settings, ai, world, ui_entity);
+                }
+                PageKind::Graphics => {
+                    page_graphics::render(ui, settings, &mut self.animation, ai, world, ui_entity);
+                }
+                PageKind::Ai => page_ai::render(
+                    ui,
+                    settings,
+                    &mut self.animation,
+                    ai,
+                    &mut self.input,
+                    world,
+                    ui_entity,
+                ),
+                PageKind::Voice => page_voice::render(ui, settings, ai, &mut self.input, world),
+                PageKind::Features => {
+                    page_features::render(ui, settings, ai, &mut self.input, world);
+                }
+                PageKind::Accessibility => page_accessibility::render(ui, settings),
+                PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
+                PageKind::MemoryLedger => page_memory_ledger::render(ui, ai, world, ui_entity),
+                PageKind::Permissions => page_permissions::render(ui, ai, world, ui_entity),
+                PageKind::Connectors => page_connectors::render(ui, ai, world, ui_entity),
+                PageKind::Sessions => page_sessions::render(ui, ai, world, ui_entity),
+                PageKind::Debug => {
+                    page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);
+                }
+            });
 
         // Rendered last so it floats above every page: a close, app exit,
         // reload, or character switch with unsaved card edits must confirm

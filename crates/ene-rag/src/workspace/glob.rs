@@ -1,66 +1,47 @@
-//! Glob matching for ignore rules.
+//! Glob matching for ignore rules, backed by `globset`.
 //!
 //! Supports `*` (within a path segment), `?` (single char within a segment),
 //! and `**` (across segments). A pattern without `/` matches the basename
 //! only (e.g. `*.gguf`); a trailing `/**` also matches the directory itself
 //! (e.g. `target/**` matches `target` and everything under it).
 
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+
 /// Whether `path` (relative to a scan root, `/`-separated) matches `pattern`.
 pub fn glob_matches(pattern: &str, path: &str) -> bool {
-    let Some(re) = glob_regex(pattern) else {
-        return false;
-    };
-    re.is_match(path)
+    build_matcher(pattern).is_some_and(|matcher| matcher.is_match(path))
 }
 
-fn glob_regex(pattern: &str) -> Option<regex::Regex> {
-    let mut pattern = pattern.trim();
+fn build_matcher(pattern: &str) -> Option<GlobSet> {
+    let pattern = pattern.trim();
     if pattern.is_empty() {
         return None;
     }
 
-    let mut out = String::with_capacity(pattern.len() * 2);
-    out.push('^');
-
-    let has_slash = pattern.contains('/');
-    if !has_slash {
-        // Basename patterns match any segment.
-        out.push_str("(?:.*/)?");
-    } else if let Some(rest) = pattern.strip_prefix("**/") {
-        // Leading `**/` is optional so `**/.env` matches at the root too.
-        out.push_str("(?:.*/)?");
-        pattern = rest;
-    }
-
-    let mut chars = pattern.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '*' => {
-                if chars.peek() == Some(&'*') {
-                    chars.next();
-                    // `**` crosses segments.
-                    out.push_str(".*");
-                } else {
-                    out.push_str("[^/]*");
-                }
-            }
-            '?' => out.push_str("[^/]"),
-            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            other => out.push(other),
-        }
-    }
-
+    let mut builder = GlobSetBuilder::new();
+    // Basename patterns match any segment; globset needs an explicit `**/`
+    // prefix to express that.
+    let normalized = if pattern.contains('/') {
+        pattern.to_string()
+    } else {
+        format!("**/{pattern}")
+    };
+    builder.add(build_glob(&normalized)?);
     // A trailing `/**` matches the directory itself as well as its contents.
-    if out.ends_with("/.*") {
-        out.truncate(out.len() - 3);
-        out.push_str("(?:/.*)?");
+    if let Some(prefix) = normalized.strip_suffix("/**")
+        && !prefix.is_empty()
+    {
+        builder.add(build_glob(prefix)?);
     }
-    out.push('$');
+    builder.build().ok()
+}
 
-    regex::Regex::new(&out).ok()
+fn build_glob(pattern: &str) -> Option<globset::Glob> {
+    GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .backslash_escape(false)
+        .build()
+        .ok()
 }
 
 #[cfg(test)]

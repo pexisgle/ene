@@ -31,11 +31,11 @@ tool = [
 ]
 
 [dependencies]
+globset = { workspace = true }
 ene-core = { workspace = true }
 ene-config = { workspace = true }
 chrono = { workspace = true }
 ctor = { workspace = true }
-regex = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 unicode-normalization = { workspace = true }

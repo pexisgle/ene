@@ -88,9 +88,9 @@ pub use resolve::{
     ChatCandidate, ContextBudgetIssue, FailoverSelection, FallbackRecord, ProviderHealthMonitor,
     ProviderHealthReport, ProviderHealthStatus, ResolvedChat, ResolvedEmbedding,
     ResolvedLocalModel, ResolvedStt, ResolvedTaskRef, ResolvedTts, ResolvedVad, SettingsIssue,
-    needs_onboarding, probe_chat_candidates, probe_provider_health, resolve_base_url,
-    select_healthy_chat, validate_api_key, validate_context_budgets, validate_provider_kinds,
-    validate_settings, warn_on_context_budget_issues,
+    fetch_model_ids, needs_onboarding, probe_chat_candidates, probe_provider_health,
+    resolve_base_url, select_healthy_chat, validate_api_key, validate_context_budgets,
+    validate_provider_kinds, validate_settings, warn_on_context_budget_issues,
 };
 pub use retry::RetryPolicy;
 pub use role::Role;

@@ -101,7 +101,7 @@ pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 pub use handle::{
     AudioChunk, AudioStreamReceiver, DeferredToolTask, EneEvent, EneEventReceiver, EneHandle,
     EneStateSnapshot, EneStatus, FeatureSettingsUpdate, LifecycleEvent, LifecycleReceiver,
-    MemoryLedgerChange, ShutdownTimeout, TerminalReason,
+    MemoryLedgerChange, ProviderCatalog, ShutdownTimeout, TerminalReason,
 };
 
 // ── Read-only query / vision handles ──

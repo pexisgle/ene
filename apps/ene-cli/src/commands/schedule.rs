@@ -241,12 +241,16 @@ async fn add(ctx: &mut AppContext, arg: &str) -> Result<CommandOutcome, CliError
     Ok(CommandOutcome::Continue)
 }
 
+fn default_timezone() -> String {
+    iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string())
+}
+
 fn parse_add(name: String, mut arg: &str) -> Result<NewSchedule, CliError> {
     let mut kind: Option<ScheduleKind> = None;
     let mut start_at = None;
     let mut interval_secs = None;
     let mut cron_expr = None;
-    let mut timezone = "UTC".to_string();
+    let mut timezone = default_timezone();
     let mut tool: Option<String> = None;
     let mut tool_args = serde_json::Value::Null;
     let mut prompt: Option<String> = None;
@@ -412,6 +416,13 @@ mod tests {
             ScheduleAction::Tool { .. } => false,
         };
         assert!(unquoted_ok, "expected a prompt action");
+    }
+
+    #[test]
+    fn omitted_tz_defaults_to_system_timezone() {
+        let new = parse("--kind cron --cron \"0 9 * * *\" --prompt ping");
+        assert_eq!(new.timezone, default_timezone());
+        assert!(!new.timezone.is_empty());
     }
 
     #[test]

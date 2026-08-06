@@ -108,6 +108,18 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // process.
     list.insert("llama-cpp".to_string(), PluginEntry::default());
 
+    // The llama-server sidecar provider plugin (experimental successor to the
+    // in-process llama-cpp backend) stays disabled by default: it is inert
+    // until the sidecar binary is installed and the entry is enabled, so
+    // shipping it costs nothing but keeps the switch-over path ready.
+    list.insert(
+        "llama-server".to_string(),
+        PluginEntry {
+            enable: false,
+            ..PluginEntry::default()
+        },
+    );
+
     // The VOICEVOX-compatible TTS provider plugin talks to a local engine
     // over plain HTTP (no credentials); it is inert until
     // `ai.tts.provider = "voicevox"` selects it.
