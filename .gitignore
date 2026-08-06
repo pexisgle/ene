@@ -16,6 +16,9 @@ assets/models/
 **/memory.db*
 **/undo.db**
 **/todo.db*
+
+# Pre-migration settings backups (created automatically by ene-config)
+settings.json.v*.bak
 .env
 
 # Generated settings schemas

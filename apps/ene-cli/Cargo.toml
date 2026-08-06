@@ -28,6 +28,7 @@ dialoguer = "0.12"
 console = "0.16.3"
 crossterm = { workspace = true }
 futures-core = "0.3"
+iana-time-zone = { workspace = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

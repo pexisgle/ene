@@ -110,28 +110,7 @@ fn resolve_local_wall_time(
     now: DateTime<Utc>,
 ) -> Option<(NaiveDateTime, String)> {
     if config.timezone.trim().is_empty() {
-        // Resolve the system timezone once and convert the caller's instant
-        // in it, so the offset honours the injected clock instead of the
-        // wall-clock moment the evaluation happens to run at.
-        let Some(tz_name) = system_timezone_name() else {
-            tracing::warn!(
-                component = "Proactive",
-                "System timezone unavailable; quiet hours treated as inactive"
-            );
-            return None;
-        };
-        let Ok(tz) = Tz::from_str(&tz_name) else {
-            tracing::warn!(
-                component = "Proactive",
-                timezone = %tz_name,
-                "Resolved system timezone is not a known IANA zone; quiet hours treated as inactive"
-            );
-            return None;
-        };
-        return Some((
-            tz.from_utc_datetime(&now.naive_utc()).naive_local(),
-            "local".to_string(),
-        ));
+        return Some(system_local_wall_time(now));
     }
     let timezone = config.timezone.trim();
     let Ok(tz) = Tz::from_str(timezone) else {
@@ -146,6 +125,31 @@ fn resolve_local_wall_time(
         tz.from_utc_datetime(&now.naive_utc()).naive_local(),
         timezone.to_string(),
     ))
+}
+
+/// Local wall time in the system timezone.
+///
+/// Prefers the OS-reported IANA name; when it is missing or not a known
+/// zone, falls back to the OS local offset so quiet hours still evaluate.
+fn system_local_wall_time(now: DateTime<Utc>) -> (NaiveDateTime, String) {
+    if let Some(tz_name) = system_timezone_name()
+        && let Ok(tz) = Tz::from_str(&tz_name)
+    {
+        return (
+            tz.from_utc_datetime(&now.naive_utc()).naive_local(),
+            "local".to_string(),
+        );
+    }
+    tracing::debug!(
+        component = "Proactive",
+        "System IANA timezone unavailable; using the system local offset"
+    );
+    (
+        chrono::Local
+            .from_utc_datetime(&now.naive_utc())
+            .naive_local(),
+        "local".to_string(),
+    )
 }
 
 fn system_timezone_name() -> Option<String> {
@@ -307,6 +311,24 @@ mod tests {
         assert_eq!(eval.local_date, expected.format("%Y-%m-%d").to_string());
         assert_eq!(eval.local_time, expected.format("%H:%M").to_string());
         assert_eq!(eval.weekday, weekday_name(expected.weekday()));
+    }
+
+    #[test]
+    fn empty_timezone_falls_back_to_the_os_local_offset() {
+        let now = utc(2026, 8, 3, 13, 0);
+        let (local, timezone) = system_local_wall_time(now);
+        assert_eq!(timezone, "local");
+        assert_eq!(
+            local,
+            chrono::Local
+                .from_utc_datetime(&now.naive_utc())
+                .naive_local()
+        );
+
+        let mut cfg = config();
+        cfg.timezone.clear();
+        let eval = evaluate_quiet_hours(&cfg, now);
+        assert!(eval.timezone_valid, "empty timezone must stay valid");
     }
 
     #[test]
