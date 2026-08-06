@@ -4,6 +4,8 @@ This page is the authoritative map of every crate, app, and plugin binary
 in the workspace, with the dependency rules that keep the architecture
 intact. For how the pieces work together, see
 [Architecture](../concepts/architecture.md).
+For the **public interface of each crate** (modules, types, traits, and
+refactoring seams), see [Crate interfaces](interfaces/overview.md).
 
 ## Applications
 
