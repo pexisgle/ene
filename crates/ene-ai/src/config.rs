@@ -173,7 +173,7 @@ pub fn kind_typo_suggestion(kind: &str) -> Option<&'static str> {
     }
     let mut best: Option<(&'static str, usize)> = None;
     for &candidate in BUILTIN_PROVIDER_KINDS {
-        let distance = levenshtein(kind, candidate);
+        let distance = strsim::levenshtein(kind, candidate);
         let is_better = best.is_none_or(|(_, best_distance)| distance < best_distance);
         if distance <= typo_tolerance(kind, candidate) && is_better {
             best = Some((candidate, distance));
@@ -188,43 +188,6 @@ pub fn kind_typo_suggestion(kind: &str) -> Option<&'static str> {
 fn typo_tolerance(kind: &str, candidate: &str) -> usize {
     let max_len = kind.len().max(candidate.len());
     if max_len <= 8 { 1 } else { 2 }
-}
-
-/// Classic character-based Levenshtein edit distance.
-///
-/// Only ever called on short provider-kind strings, so the quadratic DP cost
-/// is negligible. Indexing and integer arithmetic are bounds-safe by
-/// construction (indices derive from the row/column lengths).
-#[expect(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "bounded Levenshtein DP: indices derive from row/column lengths and counts stay within small kind strings"
-)]
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
-    let a_len = a_chars.len();
-    let b_len = b_chars.len();
-    if a_len == 0 {
-        return b_len;
-    }
-    if b_len == 0 {
-        return a_len;
-    }
-    let mut prev: Vec<usize> = (0..=b_len).collect();
-    let mut curr = vec![0_usize; b_len + 1];
-    for i in 1..=a_len {
-        curr[0] = i;
-        for j in 1..=b_len {
-            let cost = usize::from(a_chars[i - 1] != b_chars[j - 1]);
-            let deletion = prev[j] + 1;
-            let insertion = curr[j - 1] + 1;
-            let substitution = prev[j - 1] + cost;
-            curr[j] = deletion.min(insertion).min(substitution);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[b_len]
 }
 
 /// Named local GGUF model entry under [`AiConfig::local_models`].
@@ -798,10 +761,10 @@ mod tests {
 
     #[test]
     fn levenshtein_basic_distances() {
-        assert_eq!(levenshtein("", ""), 0);
-        assert_eq!(levenshtein("", "abc"), 3);
-        assert_eq!(levenshtein("abc", ""), 3);
-        assert_eq!(levenshtein("kitten", "sitting"), 3);
-        assert_eq!(levenshtein("anthropic", "anthroic"), 1);
+        assert_eq!(strsim::levenshtein("", ""), 0);
+        assert_eq!(strsim::levenshtein("", "abc"), 3);
+        assert_eq!(strsim::levenshtein("abc", ""), 3);
+        assert_eq!(strsim::levenshtein("kitten", "sitting"), 3);
+        assert_eq!(strsim::levenshtein("anthropic", "anthroic"), 1);
     }
 }

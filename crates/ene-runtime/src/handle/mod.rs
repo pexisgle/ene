@@ -293,6 +293,25 @@ impl SharedActorState {
     }
 }
 
+/// Registered provider kinds snapshot from the plugin host.
+///
+/// Lists the factory keys per modality so consumers (e.g. the desktop
+/// settings UI) can enumerate selectable providers without hardcoding plugin
+/// kinds. Empty vectors mean the host has not started or registered nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderCatalog {
+    /// Registered LLM provider kinds (plugin factory keys).
+    pub llm: Vec<String>,
+    /// Registered embedding provider kinds (plugin factory keys).
+    pub embedding: Vec<String>,
+    /// Registered TTS provider kinds (plugin factory keys).
+    pub tts: Vec<String>,
+    /// Registered STT provider kinds (plugin factory keys).
+    pub stt: Vec<String>,
+    /// Registered VAD engine kinds (plugin factory keys).
+    pub vad: Vec<String>,
+}
+
 /// Thread-safe handle to the ready actor.
 ///
 /// Constructed only via [`EneHandle::open`], which initializes provider, store,
@@ -1336,6 +1355,25 @@ impl EneHandle {
             .map_err(|e| EneRuntimeError::Ai(ene_ai::AiError::Audio(e)))
     }
 
+    /// Snapshot the provider kinds currently registered by the plugin host.
+    ///
+    /// Returns an empty catalog when the host has not started or no plugins
+    /// registered factories; callers (e.g. the desktop settings UI) use this
+    /// to enumerate selection choices without hardcoding plugin kinds.
+    pub async fn provider_catalog(&self) -> ProviderCatalog {
+        let guard = self.plugin_host.lock().await;
+        let Some(host) = guard.as_ref() else {
+            return ProviderCatalog::default();
+        };
+        ProviderCatalog {
+            llm: host.llm_factories().keys().cloned().collect(),
+            embedding: host.embedding_factories().keys().cloned().collect(),
+            tts: host.tts_factories().keys().cloned().collect(),
+            stt: host.stt_factories().keys().cloned().collect(),
+            vad: host.vad_factories().keys().cloned().collect(),
+        }
+    }
+
     /// List recent run history for one schedule, newest first.
     pub async fn list_schedule_runs(
         &self,
@@ -1685,6 +1723,15 @@ mod tests {
             "Expected RecvError::Lagged for diagnostics channel overflow, got {res:?}"
         );
 
+        drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test]
+    async fn provider_catalog_is_empty_without_plugin_host() {
+        let handle = EneHandle::open(test_config_memory_off(), test_card())
+            .await
+            .expect("open initializes handle");
+        assert_eq!(handle.provider_catalog().await, ProviderCatalog::default());
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 

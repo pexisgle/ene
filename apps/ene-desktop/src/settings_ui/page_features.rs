@@ -5,6 +5,8 @@
 
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
+use crate::settings_ui::input::SettingsInputState;
+use crate::settings_ui::widgets::editable_combo;
 use bevy_ecs::world::World;
 use ene_mind::WindowTitleLevel;
 use ene_plugin_host::PluginConfig;
@@ -31,6 +33,7 @@ pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
     ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
     world: &mut World,
 ) {
     ui.vertical(|ui| {
@@ -41,7 +44,7 @@ pub fn render(
         ui.separator();
         render_tools(ui, settings, ai);
         ui.separator();
-        render_audio(ui, settings, ai, world);
+        render_audio(ui, settings, ai, input, world);
     });
 }
 
@@ -234,10 +237,27 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                     "quiet-hours-timezone"
                 ));
                 let mut timezone = mind.proactive.quiet_hours.timezone.clone();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut timezone).desired_width(180.0))
-                    .changed()
-                {
+                let mut choices: Vec<(String, String)> = vec![(
+                    String::new(),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-timezone-system"),
+                )];
+                let mut zones: Vec<String> = chrono_tz::TZ_VARIANTS
+                    .iter()
+                    .map(|zone| zone.name().to_string())
+                    .collect();
+                zones.sort();
+                choices.extend(zones.into_iter().map(|name| (name.clone(), name.clone())));
+                if !timezone.is_empty() && !choices.iter().any(|(value, _)| value == &timezone) {
+                    choices.insert(0, (timezone.clone(), timezone.clone()));
+                }
+                let combo = editable_combo(
+                    ui,
+                    "quiet_hours_timezone_combo",
+                    &mut timezone,
+                    &choices,
+                    180.0,
+                );
+                if combo.response.changed() || combo.selection_changed {
                     mind.proactive.quiet_hours.timezone = timezone.trim().to_string();
                     persist_mind(settings, ai, &mind);
                 }
@@ -679,9 +699,15 @@ fn render_audio(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
     ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
     world: &mut World,
 ) {
     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio"));
+
+    #[cfg(feature = "voice")]
+    if input.mic_devices.is_empty() {
+        input.mic_devices = crate::audio::capture::list_input_device_names();
+    }
 
     let ai_cfg = settings.config_section::<ene_ai::AiConfig>();
     let mut changed = false;
@@ -694,14 +720,39 @@ fn render_audio(
             "audio-mic-device"
         ));
         let mut device = settings.mic_device().unwrap_or_default();
+        let mut choices: Vec<(String, String)> = vec![(
+            String::new(),
+            i18n_embed_fl::fl!(crate::i18n::loader(), "audio-mic-default"),
+        )];
+        choices.extend(
+            input
+                .mic_devices
+                .iter()
+                .map(|name| (name.clone(), name.clone())),
+        );
+        if !device.is_empty() && !choices.iter().any(|(value, _)| value == &device) {
+            choices.insert(0, (device.clone(), device.clone()));
+        }
+        let combo = editable_combo(
+            ui,
+            "features_mic_device_combo",
+            &mut device,
+            &choices,
+            200.0,
+        );
         if ui
-            .add(egui::TextEdit::singleline(&mut device).desired_width(200.0))
-            .on_hover_text(i18n_embed_fl::fl!(
+            .button(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
-                "audio-mic-default"
+                "audio-mic-refresh"
             ))
-            .changed()
+            .clicked()
         {
+            #[cfg(feature = "voice")]
+            {
+                input.mic_devices = crate::audio::capture::list_input_device_names();
+            }
+        }
+        if combo.response.changed() || combo.selection_changed {
             settings.set_mic_device(if device.trim().is_empty() {
                 None
             } else {

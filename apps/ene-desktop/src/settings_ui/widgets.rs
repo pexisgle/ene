@@ -876,6 +876,78 @@ pub fn format_quality_label(lang: crate::settings::Language, quality: GraphicsQu
     graphics_quality_label(lang, quality)
 }
 
+/// Outcome of [`editable_combo`]: the text-editor response plus whether the
+/// value was changed by picking a choice from the popup (as opposed to
+/// typing into the free-form editor).
+pub(crate) struct EditableComboResponse {
+    pub response: egui::Response,
+    pub selection_changed: bool,
+}
+
+/// Render a combo box of known choices next to a free-form single-line
+/// editor, both bound to the same `value` buffer.
+///
+/// The caller persists the buffer into settings; choices are value/label
+/// pairs so a display name can differ from the stored string. Selection from
+/// the popup is reported via [`EditableComboResponse::selection_changed`] so
+/// rows that only want to commit on Enter / focus-loss for typed values can
+/// distinguish the two paths.
+pub(crate) fn editable_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    value: &mut String,
+    choices: &[(String, String)],
+    text_width: f32,
+) -> EditableComboResponse {
+    let mut selection_changed = false;
+    let selected_label = choices
+        .iter()
+        .find(|(choice, _)| choice == value)
+        .map_or_else(|| value.as_str(), |(_, label)| label.as_str());
+
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(if selected_label.is_empty() {
+            "—"
+        } else {
+            selected_label
+        })
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for (choice, label) in choices {
+                if ui.selectable_label(choice == value, label).clicked() {
+                    value.clone_from(choice);
+                    selection_changed = true;
+                }
+            }
+        });
+
+    let response = ui.add(egui::TextEdit::singleline(value).desired_width(text_width));
+    EditableComboResponse {
+        response,
+        selection_changed,
+    }
+}
+
+/// Render a single-line path editor with a native file-picker button.
+///
+/// Returns `true` when either control changed `path`. The browse button
+/// opens the platform file dialog and replaces the buffer with the chosen
+/// path; the text editor remains usable for manual entry.
+pub(crate) fn path_row(ui: &mut egui::Ui, path: &mut String, text_width: f32) -> bool {
+    let mut changed = ui
+        .add(egui::TextEdit::singleline(path).desired_width(text_width))
+        .changed();
+    if ui
+        .button(i18n_embed_fl::fl!(crate::i18n::loader(), "settings-browse"))
+        .clicked()
+        && let Some(picked) = rfd::FileDialog::new().pick_file()
+    {
+        path.clone_from(&picked.display().to_string());
+        changed = true;
+    }
+    changed
+}
+
 /// Push the per-character default expression into the
 /// `EmotionQueue` if both a non-`None` expression and a queue
 /// handle are available. Centralising this branch keeps the

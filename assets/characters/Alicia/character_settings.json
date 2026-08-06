@@ -7,5 +7,6 @@
   "model_scale": 0.64999986,
   "look_at_strength": 1.0,
   "default_motion": "VRMA_03",
-  "default_expression": "neutral"
+  "default_expression": "neutral",
+  "language": ""
 }

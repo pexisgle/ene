@@ -4,6 +4,7 @@
 //! and proactive speech policy live on the Features tab.
 
 use super::input::SettingsInputState;
+use super::widgets::editable_combo;
 use crate::ai_bridge::AiBridge;
 use crate::character_state::AnimationControl;
 use crate::settings::CharacterSettings;
@@ -13,6 +14,26 @@ use ene_ai::{AiConfig, AiProviderDef, LOCAL_PROVIDER, LocalModelDef};
 use std::sync::Arc;
 
 const DEFAULT_LOCAL_EMBED_MODEL: &str = "jina-v5-small";
+/// Static chat-model fallback when the provider's `/models` endpoint is
+/// unreachable or not configured yet. The free-form editor always accepts
+/// any other model name.
+const CHAT_MODEL_FALLBACK: &[&str] = &[
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-5",
+    "gpt-5-mini",
+];
+/// Static embedding-model fallback for cloud providers (same fallback
+/// rationale as [`CHAT_MODEL_FALLBACK`]).
+const EMBEDDING_MODEL_FALLBACK: &[&str] = &[
+    "text-embedding-3-small",
+    "text-embedding-3-large",
+    "text-embedding-ada-002",
+];
+/// Common embedding vector sizes offered as one-click choices.
+const EMBEDDING_DIMENSION_CHOICES: &[&str] = &["512", "768", "1024", "1536", "3072"];
 
 fn first_openai_compatible_provider(ai: &AiConfig) -> Option<String> {
     ai.providers
@@ -55,6 +76,101 @@ fn set_embedding_cloud(ai: &mut AiConfig) {
     ai.tasks.embedding.dimensions = Some(1536);
 }
 
+/// Provider keys as (value, label) choices, OpenAI-compatible entries first.
+fn provider_choices(ai: &AiConfig) -> Vec<(String, String)> {
+    let mut compatible = Vec::new();
+    let mut others = Vec::new();
+    for (name, def) in &ai.providers {
+        let label = if def.is_openai_compatible() {
+            name.clone()
+        } else {
+            format!("{name} ({})", def.kind)
+        };
+        if def.is_openai_compatible() {
+            compatible.push((name.clone(), label));
+        } else {
+            others.push((name.clone(), label));
+        }
+    }
+    compatible.append(&mut others);
+    compatible
+}
+
+/// Chat model candidates for the current chat provider.
+///
+/// Local providers list registered GGUF models; cloud providers use the
+/// cached `/models` catalog (when fetched) plus the static fallback. The
+/// currently configured model is always included so an out-of-catalog value
+/// stays selectable and visible.
+fn chat_model_choices(ai: &AiConfig, input: &SettingsInputState) -> Vec<(String, String)> {
+    let mut choices = Vec::new();
+    if ai.tasks.chat.provider == LOCAL_PROVIDER {
+        choices.extend(
+            ai.local_models
+                .keys()
+                .map(|name| (name.clone(), name.clone())),
+        );
+    } else {
+        if let Some(models) = input.model_catalog.get(&ai.tasks.chat.provider) {
+            choices.extend(models.iter().map(|m| (m.clone(), m.clone())));
+        }
+        choices.extend(
+            CHAT_MODEL_FALLBACK
+                .iter()
+                .map(|m| ((*m).to_string(), (*m).to_string())),
+        );
+    }
+    if let Some(current) = ai.tasks.chat.model.as_deref()
+        && !choices.iter().any(|(value, _)| value == current)
+    {
+        choices.insert(0, (current.to_string(), current.to_string()));
+    }
+    choices
+}
+
+/// Embedding model candidates for the current embedding provider.
+fn embedding_model_choices(ai: &AiConfig, input: &SettingsInputState) -> Vec<(String, String)> {
+    let mut choices = Vec::new();
+    if AiConfig::is_local_provider(&ai.tasks.embedding.provider) {
+        choices.extend(
+            ai.local_models
+                .keys()
+                .map(|name| (name.clone(), name.clone())),
+        );
+    } else {
+        if let Some(models) = input.model_catalog.get(&ai.tasks.embedding.provider) {
+            choices.extend(models.iter().map(|m| (m.clone(), m.clone())));
+        }
+        choices.extend(
+            EMBEDDING_MODEL_FALLBACK
+                .iter()
+                .map(|m| ((*m).to_string(), (*m).to_string())),
+        );
+    }
+    if let Some(current) = ai.tasks.embedding.model.as_deref()
+        && !choices.iter().any(|(value, _)| value == current)
+    {
+        choices.insert(0, (current.to_string(), current.to_string()));
+    }
+    choices
+}
+
+/// Re-sync the editable provider buffers to the currently selected chat
+/// provider's definition after a provider switch.
+fn sync_provider_buffers(input: &mut SettingsInputState, ai: &AiConfig) {
+    if let Some(def) = ai.providers.get(&ai.tasks.chat.provider) {
+        input.ai_base_url.clone_from(&def.base_url);
+        input.ai_api_key_source.clone_from(&def.api_key.source);
+        input.ai_api_key.clone_from(&def.api_key.inline);
+        input.ai_api_key_env.clone_from(&def.api_key.env);
+    } else {
+        input.ai_base_url.clear();
+        input.ai_api_key_source = "env".to_string();
+        input.ai_api_key.clear();
+        input.ai_api_key_env = "OPENAI_API_KEY".to_string();
+    }
+}
+
 pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
@@ -93,16 +209,88 @@ pub fn render(
         ui.label("Chat");
 
         ui.horizontal(|ui| {
-            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "model"));
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut input.ai_chat_model).desired_width(f32::INFINITY),
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "provider"));
+            let mut choices = provider_choices(&ai_cfg);
+            if !choices
+                .iter()
+                .any(|(value, _)| value == &input.ai_chat_provider)
+            {
+                choices.insert(
+                    0,
+                    (
+                        input.ai_chat_provider.clone(),
+                        input.ai_chat_provider.clone(),
+                    ),
+                );
+            }
+            let combo = editable_combo(
+                ui,
+                "chat_provider_combo",
+                &mut input.ai_chat_provider,
+                &choices,
+                200.0,
             );
-            if response.changed() {
+            if combo.selection_changed || combo.response.lost_focus() {
+                let new_provider = input.ai_chat_provider.trim().to_string();
+                if !new_provider.is_empty() && new_provider != ai_cfg.tasks.chat.provider {
+                    ai_cfg.tasks.chat.provider.clone_from(&new_provider);
+                    if !ai_cfg.providers.contains_key(&new_provider) {
+                        ai_cfg
+                            .providers
+                            .insert(new_provider.clone(), AiProviderDef::default());
+                    }
+                    sync_provider_buffers(input, &ai_cfg);
+                    settings.set_config_section(&ai_cfg);
+                    settings.mark_dirty();
+                }
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "model"));
+            let choices = chat_model_choices(&ai_cfg, input);
+            let combo = editable_combo(
+                ui,
+                "chat_model_combo",
+                &mut input.ai_chat_model,
+                &choices,
+                220.0,
+            );
+            if ui
+                .button(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "model-list-refresh"
+                ))
+                .on_hover_text(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "model-list-refresh-hint"
+                ))
+                .clicked()
+            {
+                input.model_fetch_error = None;
+                match ai_cfg.resolve_chat() {
+                    Ok(resolved) => {
+                        match ai.list_models_blocking(&resolved.base_url, &resolved.api_key) {
+                            Ok(models) => {
+                                input
+                                    .model_catalog
+                                    .insert(ai_cfg.tasks.chat.provider.clone(), models);
+                            }
+                            Err(e) => input.model_fetch_error = Some(e.to_string()),
+                        }
+                    }
+                    Err(e) => input.model_fetch_error = Some(e.to_string()),
+                }
+            }
+            if combo.response.changed() || combo.selection_changed {
                 ai_cfg.tasks.chat.model = Some(input.ai_chat_model.trim().to_string());
                 settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
+        if let Some(error) = input.model_fetch_error.as_deref() {
+            ui.weak(error);
+        }
 
         ui.horizontal(|ui| {
             ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "base-url"));
@@ -299,11 +487,15 @@ pub fn render(
 
         ui.horizontal(|ui| {
             ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "model"));
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut input.ai_embedding_model)
-                    .desired_width(f32::INFINITY),
+            let choices = embedding_model_choices(&ai_cfg, input);
+            let combo = editable_combo(
+                ui,
+                "embedding_model_combo",
+                &mut input.ai_embedding_model,
+                &choices,
+                220.0,
             );
-            if response.changed() {
+            if combo.response.changed() || combo.selection_changed {
                 ai_cfg.tasks.embedding.model = Some(input.ai_embedding_model.trim().to_string());
                 settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
@@ -318,11 +510,18 @@ pub fn render(
                     egui::Label::new(i18n_embed_fl::fl!(crate::i18n::loader(), "auto-from-model")),
                 );
             } else {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut input.ai_embedding_dimensions)
-                        .desired_width(100.0),
+                let choices = EMBEDDING_DIMENSION_CHOICES
+                    .iter()
+                    .map(|d| ((*d).to_string(), (*d).to_string()))
+                    .collect::<Vec<_>>();
+                let combo = editable_combo(
+                    ui,
+                    "embedding_dimensions_combo",
+                    &mut input.ai_embedding_dimensions,
+                    &choices,
+                    100.0,
                 );
-                if response.changed()
+                if (combo.response.changed() || combo.selection_changed)
                     && let Ok(dims) = input.ai_embedding_dimensions.parse::<usize>()
                 {
                     ai_cfg.tasks.embedding.dimensions = Some(dims);

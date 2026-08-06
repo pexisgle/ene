@@ -447,6 +447,20 @@ impl AiBridge {
         Ok(self.block_on_timeout(ene_ai::validate_api_key(base_url, api_key))??)
     }
 
+    /// Snapshot the provider kinds registered by the plugin host.
+    pub fn provider_catalog_blocking(&self) -> Result<ene_runtime::ProviderCatalog, AiBridgeError> {
+        self.block_on_timeout(self.handle.provider_catalog())
+    }
+
+    /// Run [`ene_ai::fetch_model_ids`] on the bridge runtime.
+    pub fn list_models_blocking(
+        &self,
+        base_url: &str,
+        api_key: &str,
+    ) -> Result<Vec<String>, AiBridgeError> {
+        Ok(self.block_on_timeout(ene_ai::fetch_model_ids(base_url, api_key))??)
+    }
+
     /// Refresh memory journal payload (typed memories + affect + commitments).
     pub fn refresh_memory_journal(
         &self,
