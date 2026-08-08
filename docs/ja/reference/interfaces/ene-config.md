@@ -2,25 +2,20 @@
 
 ## 役割
 
-設定の一元管理・スキーマ生成・キャラクターカード・パス解決。各クレートの
-設定セクションはここでマクロにより*定義*されますが、*所有*は定義元
-クレートです。
+設定の一元管理・スキーマ生成・パス解決。各クレートの設定セクションは
+ここでマクロにより*定義*されますが、*所有*は定義元クレートです。
+キャラクターカードコンテナは [`ene-card`](ene-card.md) にあります。
 
 ## 公開モジュール
 
 | モジュール | 内容 |
 |---|---|
 | `config` | `EneConfig`・ローダー（`load_config`・`load_full_config`・`get_global_config`）・`ConfigStore`・`register_config_schema`・`write_schemas`・`HasConfigKey`・`ConfigTarget` |
-| `character_card` | `CharacterCardV3`・`CharacterCardData`・`EneExtension`・`Lorebook`/`LorebookEntry`・`UserPersona`・表情/感情/話し方/関係型・CBS マクロ展開（`expand_cbs_macros*`・`MacroContext`・`session_pick_seed`） |
-| `card_import` | `import_character_file`・`ImportedCharacter`（PNG/CHARX → フォルダ） |
-| `character_assets` | `ResolvedAssetUri`・`resolve_asset_uri`・`EneAssetKind`・`decode_data_payload`・`DEFAULT_VRM_PATH` |
-| `characters` | `discover_characters`・`load_character_card(_localized)`・`export_character_card`・`resolve_character_path`・`CharacterEntry` |
-| `character_config` | `CharacterConfig`・`MotionCatalog`・`MotionEntry`・`MotionLayer` |
-| `locale` | `LocalizedCharacterFields` とフィールド別ローカライズ型・マージロジック |
 | `migration` | `CURRENT_CONFIG_VERSION`・`apply_migrations`・`register_migration`・`MigrationFn` |
 | `paths` | `assets_dir`・`app_data_dir`・`config_file_path`・`models_dir`・ソケットディレクトリ・`IS_DEV_BUILD` |
 | `prompts` / `patterns` | `PromptLibrary`・`PatternLibrary`・`SUPPORTED_LANGUAGES`・`resolve_system_language`・`substitute` |
 | `resources` / `store` | `ensure_resource_dirs`・`ConfigStore`（ダーティ追跡・自動保存） |
+| `user_persona` | `UserPersona`（`{{user_persona}}` CBS マクロが展開する構造化ペルソナ） |
 | `error` | `ConfigError`・`EneConfigError` |
 
 ## 主要マクロ
@@ -48,6 +43,6 @@
   安全）。設定面を再構成するときはこの挙動を保ってください。
 - `assets/schema/` の生成 JSON スキーマはビルド生成物（gitignore 済み）。
   手編集しないでください。
-- キャラクターカードは外部仕様（CCv3）が制約する共有フォーマットです。
-  `CharacterCardData` の形状は仕様 + Ene 独自の拡張名前空間
-  `extensions.ene` に従います。
+- `UserPersona` は設定レベルの型（`EneConfig.user_persona`）であり、カード
+  コンテナ型ではありません。ここに残り、それを消費する CBS マクロ機構は
+  `ene-card` にあります。

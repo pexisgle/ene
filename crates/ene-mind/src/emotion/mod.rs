@@ -219,7 +219,7 @@ mod tests {
                 state: &mut state,
                 elapsed_since_update: Duration::from_mins(1),
                 recent_turn_count: 4,
-                baseline: ene_config::AffectBaseline::default(),
+                baseline: ene_card::AffectBaseline::default(),
                 classifier_proposal: None,
                 classifier_min_confidence: 0.5,
             };
@@ -257,7 +257,7 @@ mod tests {
             state: &mut state,
             elapsed_since_update: Duration::ZERO,
             recent_turn_count: 2,
-            baseline: ene_config::AffectBaseline::default(),
+            baseline: ene_card::AffectBaseline::default(),
             classifier_proposal: Some(proposal),
             classifier_min_confidence: 0.5,
         };

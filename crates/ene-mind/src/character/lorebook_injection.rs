@@ -12,7 +12,7 @@
     reason = "mind pipeline indexes into bounds-checked turn/selection buffers"
 )]
 
-use ene_config::{CharacterCardV3, LorebookEntry, expand_cbs_macros};
+use ene_card::{CharacterCardV3, LorebookEntry, expand_cbs_macros};
 use ene_core::MemorySource;
 
 use crate::lifecycle::HistoryEntry;
@@ -321,7 +321,7 @@ fn entry_previously_matched(
 /// appended (spec: recursive matching holds regardless of the override).
 fn select_recursive<'a>(
     selected: &mut Vec<SelectedEntry<'a>>,
-    book: &'a ene_config::Lorebook,
+    book: &'a ene_card::Lorebook,
     ctx: &ScanContext<'_>,
     char_name: &str,
     user_name: &str,
@@ -529,7 +529,7 @@ pub fn is_lorebook_memory_row(source: MemorySource, source_ref: Option<&str>) ->
 mod tests {
     use super::*;
     use ene_ai::Role;
-    use ene_config::Lorebook;
+    use ene_card::Lorebook;
 
     fn entry(keys: &[&str], content: &str, constant: bool, insertion_order: i32) -> LorebookEntry {
         LorebookEntry {

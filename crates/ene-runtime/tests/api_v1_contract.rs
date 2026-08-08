@@ -9,7 +9,7 @@
     reason = "contract tests use unwrap/expect, fixed indices, and panic on invariant violations"
 )]
 
-use ene_config::CharacterCardV3;
+use ene_card::CharacterCardV3;
 use ene_runtime::{CancelError, EneConfig, EneEvent, EneHandle, RunError, TerminalReason, TurnId};
 use std::sync::Arc;
 

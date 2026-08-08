@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use ene_config::{CharacterCardV3, ExpressionAffect, ResolvedExpression, resolve_expressions};
+use ene_card::{CharacterCardV3, ExpressionAffect, ResolvedExpression, resolve_expressions};
 use ene_mind::{
     EmotionConfig, ExpressionInput, ExpressionSource, OutputArbiter,
     output::{affect_to_expression, normalize_expression},

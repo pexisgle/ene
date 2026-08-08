@@ -1,4 +1,5 @@
 use chrono::{DateTime, Datelike, Local};
+use ene_config::UserPersona;
 use indexmap::IndexMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -307,72 +308,6 @@ pub struct LorebookEntry {
     /// build does not model.
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
-}
-
-/// Structured user persona for roleplay context.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(crate = "crate::serde")]
-#[schemars(crate = "crate::schemars")]
-pub struct UserPersona {
-    /// User's display name.
-    pub name: String,
-    /// Physical description of the user.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Relationship to the character.
-    #[serde(default)]
-    pub relationship: Option<String>,
-    /// Preferred pronouns.
-    #[serde(default)]
-    pub pronouns: Option<String>,
-    /// Custom notes/additional context about the user.
-    #[serde(default)]
-    pub notes: Option<String>,
-}
-
-impl Default for UserPersona {
-    fn default() -> Self {
-        Self {
-            name: String::from("User"),
-            description: None,
-            relationship: None,
-            pronouns: None,
-            notes: None,
-        }
-    }
-}
-
-impl UserPersona {
-    /// Render the persona as labeled lines, each prefixed with `line_prefix`.
-    ///
-    /// Single canonical field rendering shared by CBS `{{user_persona}}` macro
-    /// expansion (empty prefix) and prompt-budget injection (`"- "` bullets) so
-    /// the two never diverge. Empty optional fields are omitted.
-    #[must_use]
-    pub fn render_lines(&self, line_prefix: &str) -> String {
-        let mut parts = vec![format!("{line_prefix}Name: {}", self.name)];
-        if let Some(ref desc) = self.description
-            && !desc.trim().is_empty()
-        {
-            parts.push(format!("{line_prefix}Description: {desc}"));
-        }
-        if let Some(ref rel) = self.relationship
-            && !rel.trim().is_empty()
-        {
-            parts.push(format!("{line_prefix}Relationship: {rel}"));
-        }
-        if let Some(ref pron) = self.pronouns
-            && !pron.trim().is_empty()
-        {
-            parts.push(format!("{line_prefix}Pronouns: {pron}"));
-        }
-        if let Some(ref notes) = self.notes
-            && !notes.trim().is_empty()
-        {
-            parts.push(format!("{line_prefix}Notes: {notes}"));
-        }
-        parts.join("\n")
-    }
 }
 
 const fn default_enabled() -> bool {
@@ -1314,26 +1249,6 @@ mod tests {
         assert_eq!(out, "Ene greets Alice.");
     }
 
-    #[test]
-    fn render_lines_omits_empty_optional_fields() {
-        let p = UserPersona {
-            name: "Bob".to_string(),
-            description: Some("  ".to_string()),
-            relationship: None,
-            pronouns: Some("he/him".to_string()),
-            notes: None,
-        };
-        let out = p.render_lines("");
-        assert_eq!(out, "Name: Bob\nPronouns: he/him");
-    }
-
-    #[test]
-    fn render_lines_applies_prefix_consistently() {
-        let out = persona().render_lines("- ");
-        assert!(out.contains("- Name: Alice"));
-        assert!(out.contains("- Notes: Prefers concise answers"));
-    }
-
     /// `Extensions.extra` is an `IndexMap`, so serialising the same card twice
     /// yields byte-identical output; a `HashMap` reseeds per process and would
     /// make the two saves differ.
@@ -1846,7 +1761,7 @@ mod tests {
 
     #[test]
     fn generated_character_schema_includes_roleplay_definitions() {
-        let schema = crate::config::generate_character_card_schema_json()
+        let schema = crate::card_io::generate_character_card_schema_json()
             .expect("schema generation succeeds");
         for key in [
             "ng_expressions",

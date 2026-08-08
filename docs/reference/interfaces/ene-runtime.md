@@ -44,7 +44,7 @@ RAG, connectors, schedules, and undo.
 ## Dependencies
 
 - Depends on: `ene-mind`, `ene-store`, `ene-ai`, `ene-rag` (with `tool`),
-  `ene-plugin-host`, `ene-config`, `ene-connector`, `ene-core`.
+  `ene-plugin-host`, `ene-config`, `ene-card`, `ene-connector`, `ene-core`.
 - Used by: `ene-cli`, `ene-desktop`, external embedders.
 
 ## Refactoring notes

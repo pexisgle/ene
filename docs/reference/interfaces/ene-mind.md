@@ -35,7 +35,7 @@ lifecycle DTOs.
 
 ## Dependencies
 
-- Depends on: `ene-core`, `ene-config`, `ene-ai`, `ene-rag`, `ene-util`.
+- Depends on: `ene-core`, `ene-config`, `ene-card`, `ene-ai`, `ene-rag`, `ene-util`.
 - Used by: `ene-runtime`, `ene-cli`, `ene-desktop`.
 - Explicitly **not** depended on (production): `ene-runtime`,
   `ene-plugin-host`, `ene-store` (dev-dependency only).

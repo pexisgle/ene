@@ -35,12 +35,12 @@ pub enum AppEvent {
     PerformanceCue(String),
     /// Motion cue with layer routing information.
     ///
-    /// `layer` carries the canonical [`ene_config::MotionLayer`] from the
+    /// `layer` carries the canonical [`ene_card::MotionLayer`] from the
     /// performance cue; the consumer converts it to the rendering-side
     /// `ene_vrm::MotionLayer` at the boundary.
     MotionCue {
         name: String,
-        layer: ene_config::MotionLayer,
+        layer: ene_card::MotionLayer,
         priority: u8,
         duration: f32,
     },

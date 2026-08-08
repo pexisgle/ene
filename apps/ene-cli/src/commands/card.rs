@@ -27,7 +27,7 @@ impl CliCommand for CardCommand {
 
         let name = arg.to_string();
         let card =
-            ene_config::load_character_card_localized(&name, &crate::i18n::active_language_code())
+            ene_card::load_character_card_localized(&name, &crate::i18n::active_language_code())
                 .map_err(|e| CliError::ExecutionFailed(format!("Failed to load card: {e}")))?;
         ctx.handle
             .set_character(card)

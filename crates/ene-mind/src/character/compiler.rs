@@ -10,10 +10,11 @@
     reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
 )]
 use chrono::{DateTime, Local, Timelike};
-use ene_config::{
+use ene_card::{
     CharacterCardV3, MacroContext, PolitenessLevel, SceneBehavior, SpeechLength, TimePeriod,
-    UserPersona, expand_cbs_macros_ctx,
+    expand_cbs_macros_ctx,
 };
+use ene_config::UserPersona;
 
 use super::kernel::IdentityKernel;
 use super::persona::PersonaFormatParser;
@@ -84,7 +85,7 @@ impl CharacterCompiler {
     /// `pick_seed`, when provided, makes `{{pick}}` resolve to a stable choice
     /// for the lifetime of the chat instead of re-rolling on every per-turn
     /// recompilation. Derive it with
-    /// [`ene_config::session_pick_seed`] from a session-scoped key.
+    /// [`ene_card::session_pick_seed`] from a session-scoped key.
     ///
     /// `available_window` is the number of prompt tokens the model's context
     /// window leaves for this turn (after the response reserve and safety
@@ -303,7 +304,7 @@ fn optional_expanded(raw: &str, ctx: MacroContext<'_>) -> Option<String> {
 }
 
 /// Default speech-style phrasing for cards without an
-/// [`ene_config::SpeechStyleDefinition`].
+/// [`ene_card::SpeechStyleDefinition`].
 ///
 /// The English wording is the legacy default; the Japanese wording keeps a
 /// Japanese character prompt free of English instructions. `ja` is selected by
@@ -340,7 +341,7 @@ const fn politeness_phrase(politeness: PolitenessLevel, ja: bool) -> &'static st
 }
 
 /// Renders the Identity Kernel's `Speech style` line from the card's
-/// [`ene_config::SpeechStyleDefinition`].
+/// [`ene_card::SpeechStyleDefinition`].
 ///
 /// Cards without a definition (or with an empty one) get the concise default.
 /// Labels and the default follow `lang`; values keep the card author's language.
@@ -539,7 +540,7 @@ fn truncate_preserving_core(head_lines: &[String], hard_line: &str, max_tokens: 
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use ene_config::{
+    use ene_card::{
         CharacterCardV3, EneExtension, PolitenessLevel, SpeechLength, SpeechStyleDefinition,
     };
     use std::fs;
@@ -1043,7 +1044,7 @@ mod tests {
         card.data.name = "Ene".into();
         card.data.personality = "Hair color: {{pick:red,blue,green,gold,silver}}.".into();
 
-        let seed = Some(ene_config::session_pick_seed("ene:session-1"));
+        let seed = Some(ene_card::session_pick_seed("ene:session-1"));
         let first = CharacterCompiler::compile_with_context(
             &card,
             "User",
@@ -1196,22 +1197,22 @@ mod tests {
         card.data.name = "Ene".into();
         card.data.extensions.ene = Some(EneExtension {
             relationship_stages: Some(vec![
-                ene_config::RelationshipStage {
+                ene_card::RelationshipStage {
                     threshold: -0.5,
                     label: "stranger".into(),
                     tone: "keep a formal distance".into(),
                 },
-                ene_config::RelationshipStage {
+                ene_card::RelationshipStage {
                     threshold: 0.3,
                     label: "close friend".into(),
                     tone: "speak with easy warmth".into(),
                 },
             ]),
-            time_periods: Some(vec![ene_config::TimePeriodBehavior {
-                period: ene_config::TimePeriod::Night,
+            time_periods: Some(vec![ene_card::TimePeriodBehavior {
+                period: ene_card::TimePeriod::Night,
                 behavior: "speak softly".into(),
             }]),
-            scene_behaviors: Some(vec![ene_config::SceneBehavior {
+            scene_behaviors: Some(vec![ene_card::SceneBehavior {
                 name: "working".into(),
                 keywords: vec!["work".into(), "作業".into()],
                 behavior: "keep replies short".into(),
@@ -1426,16 +1427,16 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.extensions.ene = Some(EneExtension {
-            relationship_stages: Some(vec![ene_config::RelationshipStage {
+            relationship_stages: Some(vec![ene_card::RelationshipStage {
                 threshold: 0.0,
                 label: String::new(),
                 tone: "   ".into(),
             }]),
-            time_periods: Some(vec![ene_config::TimePeriodBehavior {
-                period: ene_config::TimePeriod::Night,
+            time_periods: Some(vec![ene_card::TimePeriodBehavior {
+                period: ene_card::TimePeriod::Night,
                 behavior: String::new(),
             }]),
-            scene_behaviors: Some(vec![ene_config::SceneBehavior {
+            scene_behaviors: Some(vec![ene_card::SceneBehavior {
                 name: "working".into(),
                 keywords: vec!["work".into()],
                 behavior: "  ".into(),

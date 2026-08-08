@@ -47,7 +47,8 @@ Two design rules explain almost everything else:
 | Crate | Job | Must not depend on |
 |---|---|---|
 | `ene-core` | Persistence-agnostic domain vocabulary (memory types, affect state, commitments, schedules) and the `MemoryPort` trait | anything internal |
-| `ene-config` | Settings loading/schema, character cards, paths, prompt packs | — |
+| `ene-config` | Settings loading/schema, paths, prompt packs | — |
+| `ene-card` | Character card containers (V3), PNG/CHARX import, per-character settings | `ene-config` |
 | `ene-mind` | Cognitive engine: prompt composition, recall planning, memory writing, emotion, proactive speech, sessions | `ene-runtime`, `ene-plugin-host`, `ene-store` (production) |
 | `ene-store` | The **sole** owner of SQLite/SeaORM: schema, migrations, vector search, backups | `ene-ai`, `ene-mind`, `ene-runtime` |
 | `ene-ai` | LLM/embedding/STT/TTS/VAD provider traits, task routing, retry, context-window math | — |

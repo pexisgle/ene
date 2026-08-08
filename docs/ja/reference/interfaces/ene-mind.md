@@ -34,7 +34,7 @@
 
 ## 依存関係
 
-- 依存: `ene-core`・`ene-config`・`ene-ai`・`ene-rag`・`ene-util`。
+- 依存: `ene-core`・`ene-config`・`ene-card`・`ene-ai`・`ene-rag`・`ene-util`。
 - 利用: `ene-runtime`・`ene-cli`・`ene-desktop`。
 - 明示的に**依存しない**（本番）: `ene-runtime`・`ene-plugin-host`・
   `ene-store`（dev-dependency のみ）。

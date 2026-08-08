@@ -167,7 +167,7 @@ pub use ene_store::StoreConfig;
 pub use ene_ai::Role;
 /// Character card type (re-exported from `ene-config`).
 #[doc(no_inline)]
-pub use ene_config::CharacterCardV3;
+pub use ene_card::CharacterCardV3;
 /// Character card name (re-exported from `ene-mind`).
 #[doc(no_inline)]
 pub use ene_mind::CardName;

@@ -2509,6 +2509,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-card"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.0",
+ "blake3",
+ "chrono",
+ "ene-config",
+ "flate2",
+ "indexmap",
+ "parking_lot",
+ "rand 0.10.2",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "url",
+ "zip",
+]
+
+[[package]]
 name = "ene-cli"
 version = "0.1.0"
 dependencies = [
@@ -2519,6 +2540,7 @@ dependencies = [
  "crossterm",
  "dialoguer",
  "ene-ai",
+ "ene-card",
  "ene-config",
  "ene-connector",
  "ene-mind",
@@ -2546,16 +2568,11 @@ dependencies = [
 name = "ene-config"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.0",
- "blake3",
- "chrono",
  "ctor",
  "directories",
  "figment",
- "flate2",
  "indexmap",
  "parking_lot",
- "rand 0.10.2",
  "regex",
  "schemars",
  "serde",
@@ -2564,8 +2581,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tracing",
- "url",
- "zip",
 ]
 
 [[package]]
@@ -2620,6 +2635,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "ene-ai",
+ "ene-card",
  "ene-config",
  "ene-connector",
  "ene-mind",
@@ -2685,6 +2701,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "ene-ai",
+ "ene-card",
  "ene-config",
  "ene-core",
  "ene-plugin-proto",
@@ -3281,6 +3298,7 @@ dependencies = [
  "cargo-husky",
  "chrono",
  "ene-ai",
+ "ene-card",
  "ene-config",
  "ene-connector",
  "ene-core",

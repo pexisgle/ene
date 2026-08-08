@@ -1,6 +1,6 @@
 //! Expression resolution: affect mapping, LLM hints, hysteresis.
 
-use ene_config::{ExpressionAffect, ResolvedExpression};
+use ene_card::{ExpressionAffect, ResolvedExpression};
 use ene_core::AffectState;
 
 use super::types::{ExpressionDecision, ExpressionInput, ExpressionSource};
@@ -216,7 +216,7 @@ fn fallback_name(available: &[String]) -> String {
 )]
 mod tests {
     use super::*;
-    use ene_config::{CharacterCardV3, ExpressionAffect, ResolvedExpression, resolve_expressions};
+    use ene_card::{CharacterCardV3, ExpressionAffect, ResolvedExpression, resolve_expressions};
     use ene_core::AffectState;
 
     /// The production built-in defaults (via the real merge), so tests cannot

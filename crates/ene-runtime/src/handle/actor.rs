@@ -4303,7 +4303,7 @@ impl TurnActor {
 
         let user_name = self.config.user_name.clone();
         let expanded =
-            ene_config::expand_cbs_macros(&text, card.data.get_character_name(), &user_name);
+            ene_card::expand_cbs_macros(&text, card.data.get_character_name(), &user_name);
         self.session.apply_greeting(&expanded, index);
         if let Some(store) = &self.concrete_store {
             ene_store::MemoryStore::spawn_insert_log(

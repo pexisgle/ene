@@ -17,7 +17,7 @@
               and panic on invariant violations"
 )]
 
-use ene_config::CharacterCardV3;
+use ene_card::CharacterCardV3;
 use ene_runtime::{AudioChunk, EneConfig, EneHandle, TurnId, TurnOrigin};
 use tokio::sync::{broadcast, mpsc};
 

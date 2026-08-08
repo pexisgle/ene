@@ -44,7 +44,7 @@
 ## 依存関係
 
 - 依存: `ene-mind`・`ene-store`・`ene-ai`・`ene-rag`（`tool` 付き）・
-  `ene-plugin-host`・`ene-config`・`ene-connector`・`ene-core`。
+  `ene-plugin-host`・`ene-config`・`ene-card`・`ene-connector`・`ene-core`。
 - 利用: `ene-cli`・`ene-desktop`・外部組み込みアプリ。
 
 ## リファクタリングの注目点

@@ -17,22 +17,10 @@
 )]
 extern crate self as ene_config;
 
-/// Character card containers (PNG chunks, CHARX) and importing.
-pub mod card_import;
-/// App-specific asset types and URI resolution for card `assets`.
-pub mod character_assets;
-/// V3-format character card models with CBS macro expansion.
-pub mod character_card;
-/// Per-character configuration (position, motion, expressions).
-pub mod character_config;
-/// Character card enumeration and name-to-path resolution.
-pub mod characters;
 /// Configuration loading, schema generation, and the global config registry.
 pub mod config;
 /// Configuration-related error types.
 pub mod error;
-/// Localized card diffs (`character.{lang}.json`) and merge logic.
-pub mod locale;
 /// Config-version migration for `settings.json`.
 pub mod migration;
 /// Platform-aware directory and file path resolution.
@@ -45,40 +33,16 @@ pub mod prompts;
 pub mod resources;
 /// Centralized config store with dirty tracking for auto-save.
 pub mod store;
-
-pub use character_assets::{
-    DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH, EneAssetKind, ResolvedAssetUri, decode_data_payload,
-    resolve_asset_uri,
-};
-pub use character_card::{
-    AffectBaseline, CharacterAsset, CharacterCardData, CharacterCardV3, EneExtension,
-    ExpressionAffect, ExpressionDefinition, LabeledStyleExample, Lorebook, LorebookEntry,
-    MacroContext, PolitenessLevel, RelationshipStage, ResolvedExpression, SceneBehavior,
-    SpeechLength, SpeechStyleDefinition, TimePeriod, TimePeriodBehavior, UserPersona,
-    expand_cbs_macros, expand_cbs_macros_ctx, expand_cbs_macros_with, resolve_expressions,
-    session_pick_seed,
-};
-
-pub use card_import::{ImportedCharacter, import_character_file};
-pub use character_config::{CharacterConfig, MotionCatalog, MotionEntry, MotionLayer};
-pub use characters::{
-    CharacterEntry, discover_characters, export_character_card, load_character_card,
-    load_character_card_localized, resolve_character_path,
-};
+/// Structured user persona used by the `{{user_persona}}` CBS macro.
+pub mod user_persona;
 pub use config::{
-    ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_character_schema_json,
-    generate_schema_json, get_global_config, get_global_section, load_config, load_config_from,
-    load_full_config, load_full_config_from, register_config_schema, register_runtime_schema,
-    register_tool_schema, save_character_card, save_full_config, update_global_config,
-    update_section, write_schemas,
+    ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_schema_json,
+    get_global_config, get_global_section, load_config, load_config_from, load_full_config,
+    load_full_config_from, register_config_schema, register_runtime_schema, register_tool_schema,
+    save_full_config, update_global_config, update_section, write_schemas,
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;
-pub use locale::{
-    LocalizedCharacterFields, LocalizedEneRoleplay, LocalizedLorebook, LocalizedLorebookEntry,
-    LocalizedRelationshipStage, LocalizedSceneBehavior, LocalizedSpeechStyle,
-    LocalizedStyleExample, LocalizedTimePeriodBehavior,
-};
 pub use migration::{CURRENT_CONFIG_VERSION, MigrationFn, apply_migrations, register_migration};
 pub use paths::{
     IS_DEV_BUILD, app_data_dir, assets_dir, builtin_plugins_dir, builtin_tools_dir,
@@ -93,6 +57,7 @@ pub use prompts::{
 };
 pub use resources::ensure_resource_dirs;
 pub use store::ConfigStore;
+pub use user_persona::UserPersona;
 
 pub use ctor::ctor;
 // The `ctor` proc-macro emits `<crate_path>::__support::ctor_parse!`, so the

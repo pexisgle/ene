@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ene_card::{CharacterConfig, Lorebook, MotionCatalog};
 use ene_config::serde::{Deserialize, Serialize};
-use ene_config::{CharacterConfig, Lorebook, MotionCatalog};
 use glam::Vec3;
 use parking_lot::RwLock;
 
@@ -172,7 +172,7 @@ pub use GraphicsSection as GraphicsSettings;
 // ── Defaults & cycle choices ──
 
 pub const DEFAULT_CHARACTER_NAME: &str = "Alicia";
-pub use ene_config::{DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH};
+pub use ene_card::{DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH};
 #[expect(
     dead_code,
     reason = "legacy window constants retained for transitional callers"
@@ -248,7 +248,7 @@ pub fn read_cli_paths() -> (String, String) {
 
 // ── Discovered character entries ──
 
-pub type CharacterEntry = ene_config::CharacterEntry;
+pub type CharacterEntry = ene_card::CharacterEntry;
 
 // ── Runtime state shapes (not persisted as JSON) ──
 
@@ -657,6 +657,7 @@ pub struct CharacterSettings {
     pub characters: Vec<CharacterEntry>,
     pub character_state: CharacterState,
     pub store: Arc<RwLock<ene_config::ConfigStore>>,
+    pub character_store: ene_card::CharacterConfigStore,
 }
 
 impl std::fmt::Debug for CharacterSettings {
@@ -673,7 +674,7 @@ impl CharacterSettings {
     /// Build the initial settings: discover characters on disk,
     /// load the persisted JSON, clamp runtime values.
     pub fn discover(assets_dir: &Path, default_vrm: &str) -> Self {
-        let mut characters = ene_config::discover_characters(assets_dir);
+        let mut characters = ene_card::discover_characters(assets_dir);
         if characters.is_empty() {
             characters.push(CharacterEntry {
                 name: DEFAULT_CHARACTER_NAME.to_string(),
@@ -722,6 +723,7 @@ impl CharacterSettings {
             store: Arc::new(RwLock::new(ene_config::ConfigStore::from_config(
                 initial_config,
             ))),
+            character_store: ene_card::CharacterConfigStore::default(),
         };
         settings.load_from_file();
         settings
@@ -968,7 +970,10 @@ impl CharacterSettings {
         self.sync_character_state_to_store();
         let char_name = self.current_entry().map(|e| e.name.clone());
         let store = self.store.read();
-        if let Err(e) = store.flush(char_name.as_deref()) {
+        if let Err(e) = store.flush() {
+            tracing::warn!("[Config] Failed to save per-character settings: {e}");
+        }
+        if let Err(e) = self.character_store.flush(char_name.as_deref()) {
             tracing::warn!("[Config] Failed to save per-character settings: {e}");
         }
     }
@@ -977,10 +982,8 @@ impl CharacterSettings {
         let Some(char_name) = self.current_entry().map(|e| e.name.clone()) else {
             return;
         };
-        let store = self.store.read();
-        store.load_character_config(&char_name);
-        let per = store.character_config();
-        drop(store);
+        self.character_store.load_character_config(&char_name);
+        let per = self.character_store.character_config();
 
         self.character_state.character_position = Vec3::new(
             per.character_position[0],
@@ -1034,7 +1037,10 @@ impl CharacterSettings {
         self.sync_character_state_to_store();
         let char_name = self.current_entry().map(|e| e.name.clone());
         let store = self.store.read();
-        if let Err(e) = store.flush(char_name.as_deref()) {
+        if let Err(e) = store.flush() {
+            tracing::warn!("[Config] Failed to save config: {e}");
+        }
+        if let Err(e) = self.character_store.flush(char_name.as_deref()) {
             tracing::warn!("[Config] Failed to save config: {e}");
         }
     }
@@ -1051,7 +1057,10 @@ impl CharacterSettings {
         self.sync_character_state_to_store();
         let char_name = self.current_entry().map(|e| e.name.clone());
         let store = self.store.read();
-        if let Err(e) = store.flush_if_dirty(char_name.as_deref()) {
+        if let Err(e) = store.flush_if_dirty() {
+            tracing::warn!("[Config] Failed to flush dirty config: {e}");
+        }
+        if let Err(e) = self.character_store.flush_if_dirty(char_name.as_deref()) {
             tracing::warn!("[Config] Failed to flush dirty config: {e}");
         }
     }
@@ -1062,13 +1071,12 @@ impl CharacterSettings {
         let Some(entry) = self.current_entry() else {
             return;
         };
-        let store = self.store.read();
         let default_motion_name = entry
             .motion_names
             .get(self.character_state.selected_motion)
             .cloned()
             .unwrap_or_default();
-        let existing = store.character_config();
+        let existing = self.character_store.character_config();
         let char_config = CharacterConfig {
             character_position: [
                 self.character_state.character_position.x,
@@ -1089,7 +1097,7 @@ impl CharacterSettings {
             language: existing.language,
             extra: existing.extra,
         };
-        store.set_character_config(char_config);
+        self.character_store.set_character_config(char_config);
     }
 
     pub fn load_from_file(&mut self) {
@@ -1103,11 +1111,12 @@ impl CharacterSettings {
         };
 
         *self.store.write() = ene_config::ConfigStore::from_config(full.clone());
+        self.character_store = ene_card::CharacterConfigStore::default();
 
         // Resolve `full.character` (a card name or full path) to
         // a card path on disk. An unset character keeps the default
         // selection instead of resolving to a hardcoded fallback.
-        if let Ok(card_path) = ene_config::resolve_character_path(&full.character)
+        if let Ok(card_path) = ene_card::resolve_character_path(&full.character)
             && let Some(parent) = card_path.parent()
             && let Some(name_os) = parent.file_name()
         {
@@ -1160,6 +1169,7 @@ mod tests {
             store: Arc::new(RwLock::new(ene_config::ConfigStore::from_config(
                 ene_config::EneConfig::default(),
             ))),
+            character_store: ene_card::CharacterConfigStore::default(),
         }
     }
 

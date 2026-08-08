@@ -158,7 +158,7 @@ pub fn character_settings_path(character_name: &str) -> PathBuf {
 }
 
 /// `character_settings_path` for an explicit base assets directory.
-pub(crate) fn character_settings_path_in(base: &Path, character_name: &str) -> PathBuf {
+pub fn character_settings_path_in(base: &Path, character_name: &str) -> PathBuf {
     character_dir_in(base, character_name).join("character_settings.json")
 }
 
@@ -169,6 +169,6 @@ pub fn character_dir(character_name: &str) -> PathBuf {
 }
 
 /// `character_dir` for an explicit base assets directory.
-pub(crate) fn character_dir_in(base: &Path, character_name: &str) -> PathBuf {
+pub fn character_dir_in(base: &Path, character_name: &str) -> PathBuf {
     base.join("characters").join(character_name)
 }

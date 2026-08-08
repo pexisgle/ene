@@ -56,7 +56,7 @@ async fn insert_memory(store: &MemoryStore, kind: MemoryKind, title: &str, conte
 
 fn turn_ctx<'a>(
     config: &'a MindConfig,
-    card: &'a ene_config::CharacterCardV3,
+    card: &'a ene_card::CharacterCardV3,
     store: &'a MemoryStore,
     proactive_topic: Option<&'a str>,
 ) -> TurnContext<'a> {
@@ -135,7 +135,7 @@ async fn before_proactive_turn_recalls_memories_matching_the_topic() {
     )
     .await;
 
-    let card = ene_config::CharacterCardV3::default();
+    let card = ene_card::CharacterCardV3::default();
     let ctx = turn_ctx(
         &config,
         &card,
@@ -168,7 +168,7 @@ async fn before_proactive_turn_skips_recall_when_memory_source_disabled() {
     )
     .await;
 
-    let card = ene_config::CharacterCardV3::default();
+    let card = ene_card::CharacterCardV3::default();
     let ctx = turn_ctx(
         &config,
         &card,
@@ -197,7 +197,7 @@ async fn before_proactive_turn_skips_recall_without_a_topic_hint() {
     )
     .await;
 
-    let card = ene_config::CharacterCardV3::default();
+    let card = ene_card::CharacterCardV3::default();
     let ctx = turn_ctx(&config, &card, &store, None);
     let pre = CognitionEngine::new()
         .before_proactive_turn(ctx)

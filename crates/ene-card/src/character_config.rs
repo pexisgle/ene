@@ -1,5 +1,5 @@
-use crate::error::EneConfigError;
-use crate::{ConfigTarget, HasConfigKey};
+use ene_config::EneConfigError;
+use ene_config::{ConfigTarget, HasConfigKey};
 use indexmap::IndexMap;
 
 /// Motion body layer classification.
@@ -91,7 +91,7 @@ pub struct CharacterConfig {
     pub default_expression: String,
     /// Language code override for this character's card (e.g. `"ja"`).
     /// Empty (the default) inherits the app language; the value is
-    /// canonicalized through [`crate::resolve_language_alias`] when the
+    /// canonicalized through [`ene_config::resolve_language_alias`] when the
     /// card is loaded.
     pub language: String,
 
@@ -158,25 +158,27 @@ impl CharacterConfig {
 
     /// Serialise and merge a sub-section into the `extra` map using the type's associated path.
     ///
-    /// Serialisation goes through [`section_to_value`](crate::config::section_to_value)
+    /// Serialisation goes through [`section_to_value`](ene_config::config::section_to_value)
     /// to avoid the f32→f64 widening artefact.
     ///
     /// Only the section's *declared* fields are written; unknown sub-keys
     /// already present beneath the section path are preserved.
     ///
-    /// Reuses [`merge_section`](crate::config::merge_section) and
-    /// [`set_nested`](crate::config::set_nested) for direct map mutation
+    /// Reuses [`merge_section`](ene_config::config::merge_section) and
+    /// [`set_nested`](ene_config::config::set_nested) for direct map mutation
     /// instead of rebuilding the entire map from a JSON `Value`.
     pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError>
     where
         T: serde::Serialize + HasConfigKey,
     {
         debug_assert_eq!(T::TARGET, ConfigTarget::Character);
-        let val = crate::config::section_to_value(section)?;
+        let val = ene_config::config::section_to_value(section)?;
         let path = T::path();
-        let merged =
-            crate::config::merge_section(crate::config::read_at_path(&self.extra, path), &val);
-        crate::config::set_nested(&mut self.extra, path, merged)?;
+        let merged = ene_config::config::merge_section(
+            ene_config::config::read_at_path(&self.extra, path),
+            &val,
+        );
+        ene_config::config::set_nested(&mut self.extra, path, merged)?;
         Ok(())
     }
 }
@@ -185,7 +187,7 @@ impl CharacterConfig {
 mod tests {
     use super::CharacterConfig;
     use super::MotionLayer;
-    use crate::{ConfigTarget, HasConfigKey};
+    use ene_config::{ConfigTarget, HasConfigKey};
 
     #[test]
     fn motion_layer_label_round_trips() {

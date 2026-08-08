@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use ene_config::AffectBaseline;
+use ene_card::AffectBaseline;
 use ene_mind::{AffectProposal, EmotionConfig, EmotionEngine, TurnAffectInput};
 use ene_store::AffectState;
 

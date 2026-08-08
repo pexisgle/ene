@@ -113,7 +113,7 @@ async fn compose(
     recalled: Vec<RecalledMemory>,
     packing_budget: usize,
 ) -> ComposedPrompt {
-    let card = ene_config::CharacterCardV3::default();
+    let card = ene_card::CharacterCardV3::default();
     let pre = PreTurnOutput {
         recall_plan: RecallPlan {
             current_topic: "test".into(),

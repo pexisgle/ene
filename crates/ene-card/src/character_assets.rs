@@ -11,7 +11,7 @@ use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use url::Url;
 
 use crate::CharacterAsset;
-use crate::error::EneConfigError;
+use ene_config::EneConfigError;
 
 /// Default VRM shipped with the app; `ccdefault:` for `x_vrm` resolves here.
 pub const DEFAULT_VRM_PATH: &str = "characters/Alicia/AliciaSolid.vrm";

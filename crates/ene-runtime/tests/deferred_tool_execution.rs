@@ -18,7 +18,8 @@ use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
     LlmResponseChunk, LlmToolCallChunk,
 };
-use ene_config::{CharacterCardV3, EneConfig};
+use ene_card::CharacterCardV3;
+use ene_config::EneConfig;
 use ene_plugin_host::{DeferredCallResult, PluginHostError, ToolRegistry};
 use ene_plugin_proto::ToolResult;
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};

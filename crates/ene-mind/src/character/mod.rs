@@ -33,7 +33,8 @@ pub use sync::{CharacterMemorySyncReport, compute_card_memory_hash, sync_charact
 use std::sync::Arc;
 
 use ene_ai::EmbeddingProvider;
-use ene_config::{CharacterCardV3, UserPersona};
+use ene_card::CharacterCardV3;
+use ene_config::UserPersona;
 use ene_core::MemoryPort;
 
 use crate::config::CharacterMemoryConfig;
@@ -55,7 +56,7 @@ impl CharacterProcessor {
     ///
     /// `pick_seed`, when provided, keeps `{{pick}}` stable for the lifetime of
     /// the chat instead of re-rolling on each per-turn recompilation;
-    /// derive it with [`ene_config::session_pick_seed`].
+    /// derive it with [`ene_card::session_pick_seed`].
     ///
     /// `language` localises the speech-style line derived for the kernel.
     ///

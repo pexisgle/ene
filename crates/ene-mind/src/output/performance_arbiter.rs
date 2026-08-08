@@ -7,7 +7,7 @@
 
 use crate::output::arbiter::affect_to_expression;
 use crate::output::{CueSource, MotionLayer, PerfKind, PerformanceCue};
-use ene_config::ResolvedExpression;
+use ene_card::ResolvedExpression;
 use ene_core::AffectState;
 
 /// Tracks a single cue slot with priority semantics.
@@ -233,7 +233,7 @@ mod tests {
         reason = "tests index into fixed-size fixture vectors and use explicit Default for fixture clarity"
     )]
     use super::*;
-    use ene_config::{CharacterCardV3, resolve_expressions};
+    use ene_card::{CharacterCardV3, resolve_expressions};
 
     fn expr_cue(name: &str) -> PerformanceCue {
         PerformanceCue::expression(name)

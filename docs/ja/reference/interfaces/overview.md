@@ -72,6 +72,7 @@ external         ene-connector, ene-vrm
 |---|---|
 | `ene-core` | [ene-core](ene-core.md) |
 | `ene-config` | [ene-config](ene-config.md) |
+| `ene-card` | [ene-card](ene-card.md) |
 | `ene-mind` | [ene-mind](ene-mind.md) |
 | `ene-store` | [ene-store](ene-store.md) |
 | `ene-ai` | [ene-ai](ene-ai.md) |

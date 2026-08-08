@@ -12,9 +12,13 @@ use zip::ZipArchive;
 use crate::CharacterAsset;
 use crate::CharacterCardV3;
 use crate::character_assets::{ResolvedAssetUri, decode_data_payload, resolve_asset_uri};
-use crate::error::EneConfigError;
 use crate::locale::{LocalizedCharacterFields, merge_localized_fields, strip_locales};
-use crate::paths;
+use ene_config::EneConfigError;
+use ene_config::paths;
+
+fn charx_error(e: impl std::fmt::Display) -> EneConfigError {
+    EneConfigError::CharxError(e.to_string())
+}
 
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 const MAX_PNG_CHUNKS: usize = 4_096;
@@ -100,7 +104,7 @@ pub(crate) fn load_card_from_path_localized(
     code: &str,
 ) -> Result<CharacterCardV3, EneConfigError> {
     let bytes = read_card_file(path)?;
-    let code = crate::resolve_language_alias(code);
+    let code = ene_config::resolve_language_alias(code);
     let mut card = load_card_from_bytes_localized(&bytes, &code)?;
     if !is_container(&bytes)
         && path
@@ -131,7 +135,7 @@ pub(crate) fn load_card_from_bytes_localized(
     bytes: &[u8],
     code: &str,
 ) -> Result<CharacterCardV3, EneConfigError> {
-    let code = crate::resolve_language_alias(code);
+    let code = ene_config::resolve_language_alias(code);
     let mut card = parse_card_bytes(bytes, Some(&code))?;
     strip_locales(&mut card);
     Ok(card)
@@ -180,7 +184,7 @@ fn is_container(bytes: &[u8]) -> bool {
 
 /// Layers the embedded `extensions.ene.locales` diff for `code` over `card`.
 ///
-/// Locale keys are canonicalized with [`crate::resolve_language_alias`], so
+/// Locale keys are canonicalized with [`ene_config::resolve_language_alias`], so
 /// a producer embedding `ja-JP` is read as `ja`.
 fn merge_embedded_locale(card: &mut CharacterCardV3, code: &str) {
     let diff = card
@@ -192,7 +196,7 @@ fn merge_embedded_locale(card: &mut CharacterCardV3, code: &str) {
         .and_then(|locales| {
             locales
                 .iter()
-                .find(|(key, _)| crate::resolve_language_alias(key) == code)
+                .find(|(key, _)| ene_config::resolve_language_alias(key) == code)
                 .map(|(_, diff)| diff.clone())
         });
     if let Some(diff) = diff {
@@ -418,16 +422,13 @@ fn charx_card_json_localized(
     bytes: &[u8],
     code: Option<&str>,
 ) -> Result<(serde_json::Value, Option<LocalizedCharacterFields>), EneConfigError> {
-    let mut archive =
-        ZipArchive::new(std::io::Cursor::new(bytes)).map_err(EneConfigError::CharxError)?;
+    let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).map_err(charx_error)?;
     let diff_name = code.map(|code| format!("character.{code}.json"));
     let mut card: Option<serde_json::Value> = None;
     let mut diff: Option<LocalizedCharacterFields> = None;
     for index in 0..archive.len() {
         let name = {
-            let file = archive
-                .by_index_raw(index)
-                .map_err(EneConfigError::CharxError)?;
+            let file = archive.by_index_raw(index).map_err(charx_error)?;
             file.name().to_string()
         };
         let is_diff_entry = diff_name
@@ -440,17 +441,13 @@ fn charx_card_json_localized(
         // probe goes through `by_index_raw` and the read below re-opens
         // with `by_index`.
         let is_encrypted = {
-            let file = archive
-                .by_index_raw(index)
-                .map_err(EneConfigError::CharxError)?;
+            let file = archive.by_index_raw(index).map_err(charx_error)?;
             file.encrypted()
         };
         if is_encrypted {
             return Err(EneConfigError::CharxEncrypted(name));
         }
-        let mut file = archive
-            .by_index(index)
-            .map_err(EneConfigError::CharxError)?;
+        let mut file = archive.by_index(index).map_err(charx_error)?;
         let size = file.size();
         if size > MAX_CHARX_ENTRY_BYTES {
             if name == "card.json" {
@@ -466,7 +463,7 @@ fn charx_card_json_localized(
         file.by_ref()
             .take(size + 1)
             .read_to_end(&mut content)
-            .map_err(|e| EneConfigError::CharxError(zip::result::ZipError::Io(e)))?;
+            .map_err(charx_error)?;
         if content.len() as u64 > size {
             if name == "card.json" {
                 return Err(EneConfigError::CharxTooLarge(name));
@@ -576,13 +573,10 @@ fn import_charx(
     let staging = staging_dir(assets_dir, &folder);
     let outcome = (|| -> Result<ImportedCharacter, EneConfigError> {
         std::fs::create_dir_all(&staging).map_err(EneConfigError::IoError)?;
-        let mut archive =
-            ZipArchive::new(std::io::Cursor::new(bytes)).map_err(EneConfigError::CharxError)?;
+        let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).map_err(charx_error)?;
         validate_charx_entries(&mut archive)?;
         for index in 0..archive.len() {
-            let mut file = archive
-                .by_index(index)
-                .map_err(EneConfigError::CharxError)?;
+            let mut file = archive.by_index(index).map_err(charx_error)?;
             let name = file.name().to_string();
             if file.is_dir() {
                 continue;
@@ -592,7 +586,7 @@ fn import_charx(
             file.by_ref()
                 .take(size + 1)
                 .read_to_end(&mut content)
-                .map_err(|e| EneConfigError::CharxError(zip::result::ZipError::Io(e)))?;
+                .map_err(charx_error)?;
             if content.len() as u64 > size {
                 return Err(EneConfigError::CharxTooLarge(name));
             }
@@ -636,7 +630,7 @@ fn split_embedded_locales(
         return Ok(());
     };
     for (key, fields) in locales {
-        let code = crate::resolve_language_alias(&key);
+        let code = ene_config::resolve_language_alias(&key);
         let path = card_dir.join(format!("character.{code}.json"));
         match std::fs::read_to_string(&path) {
             Ok(content) if serde_json::from_str::<LocalizedCharacterFields>(&content).is_ok() => {
@@ -670,9 +664,7 @@ fn validate_charx_entries(
 ) -> Result<(), EneConfigError> {
     let mut total = 0u64;
     for index in 0..archive.len() {
-        let file = archive
-            .by_index_raw(index)
-            .map_err(EneConfigError::CharxError)?;
+        let file = archive.by_index_raw(index).map_err(charx_error)?;
         let name = file.name().to_string();
         validate_zip_entry_name(&name)?;
         if file.is_dir() {

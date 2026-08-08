@@ -12,7 +12,8 @@ use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
     LlmResponseChunk,
 };
-use ene_config::{CharacterCardV3, EneConfig};
+use ene_card::CharacterCardV3;
+use ene_config::EneConfig;
 use ene_mind::MindConfig;
 use ene_plugin_host::{PluginHostError, ToolRegistry};
 use ene_plugin_proto::ToolResult;

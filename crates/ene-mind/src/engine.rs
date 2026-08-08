@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use ene_config::{CharacterCardV3, PromptLibrary};
+use ene_card::CharacterCardV3;
+use ene_config::PromptLibrary;
 use ene_core::{MemoryPort, WorkspaceChunkHit, WorkspaceSearchQuery};
 use tracing::Instrument;
 
@@ -521,7 +522,7 @@ impl CognitionEngine {
         // Seed `{{pick}}` from the character+session so a trait chosen once
         // (hair colour, hometown, …) stays fixed across per-turn kernel
         // recompilations instead of re-rolling every turn.
-        let pick_seed = Some(ene_config::session_pick_seed(&format!(
+        let pick_seed = Some(ene_card::session_pick_seed(&format!(
             "{}:{}",
             ctx.character_id, ctx.session_id
         )));
@@ -982,7 +983,7 @@ impl CognitionEngine {
         previous_expression: &str,
         elapsed_since_change: Option<Duration>,
     ) -> (crate::output::ExpressionDecision, ene_core::AffectState) {
-        use ene_config::resolve_expressions;
+        use ene_card::resolve_expressions;
 
         let expressions = resolve_expressions(card);
         let irritation_spike = affect.irritation >= 0.6;
@@ -1216,9 +1217,9 @@ mod turn_id_tests {
     fn ng_contract_appends_to_post_history_phi() {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
-        card.data.extensions.ene = Some(ene_config::EneExtension {
+        card.data.extensions.ene = Some(ene_card::EneExtension {
             ng_expressions: Some(vec!["死ね".into(), "バカ".into()]),
-            ..ene_config::EneExtension::default()
+            ..ene_card::EneExtension::default()
         });
 
         let contract =
@@ -1240,9 +1241,9 @@ mod turn_id_tests {
         let phi_only = build_output_contract(&card, Some("PHI block"), "en").expect("phi kept");
         assert_eq!(phi_only, "PHI block");
 
-        card.data.extensions.ene = Some(ene_config::EneExtension {
+        card.data.extensions.ene = Some(ene_card::EneExtension {
             ng_expressions: Some(vec!["   ".into(), String::new()]),
-            ..ene_config::EneExtension::default()
+            ..ene_card::EneExtension::default()
         });
         assert_eq!(
             build_output_contract(&card, None, "en"),
@@ -1301,7 +1302,7 @@ mod turn_id_tests {
         use crate::character::{StyleExample, StyleIntent};
         use crate::lifecycle::{ComposePrefetch, PreTurnOutput};
         use crate::recall::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
-        use ene_config::CharacterCardV3;
+        use ene_card::CharacterCardV3;
         use ene_core::AffectState;
 
         let engine = CognitionEngine::new();
@@ -1381,7 +1382,7 @@ mod turn_id_tests {
     async fn compose_prompt_packet_never_includes_creator_notes() {
         use crate::lifecycle::PreTurnOutput;
         use crate::recall::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
-        use ene_config::CharacterCardV3;
+        use ene_card::CharacterCardV3;
         use ene_core::AffectState;
 
         let engine = CognitionEngine::new();

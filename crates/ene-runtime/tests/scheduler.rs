@@ -11,7 +11,8 @@ use ene_ai::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, EmbeddingProviderFactory, LlmCompletion,
     LlmMessage, LlmProvider, LlmProviderError, LlmProviderFactory, LlmResponseChunk,
 };
-use ene_config::{CharacterCardV3, EneConfig};
+use ene_card::CharacterCardV3;
+use ene_config::EneConfig;
 use ene_runtime::{
     EneEvent, EneEventReceiver, EneHandle, NewSchedule, PermissionDecision, ScheduleAction,
     ScheduleConfirmation, ScheduleKind, ScheduleRunStatus, TerminalReason, TurnOrigin,

@@ -5,7 +5,7 @@
 //! intentionally absent until an explicit `perform` API exists.
 
 use super::types::ExpressionSource;
-pub use ene_config::MotionLayer;
+pub use ene_card::MotionLayer;
 
 /// Origin of a [`PerformanceCue`] batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

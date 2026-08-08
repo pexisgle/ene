@@ -14,6 +14,7 @@ pub async fn init(opts: &InitOptions) -> Result<EneHandle, EneRuntimeError> {
 
     // Write JSON schemas once at startup rather than on every config load.
     ene_config::write_schemas(ene_config::assets_dir());
+    ene_card::write_character_schemas(ene_config::assets_dir());
 
     let mut config = match &opts.config_path {
         Some(path) => load_config_from_path(path)?,
@@ -23,7 +24,7 @@ pub async fn init(opts: &InitOptions) -> Result<EneHandle, EneRuntimeError> {
         config.character = character.clone();
     }
 
-    let card = ene_config::load_character_card_localized(
+    let card = ene_card::load_character_card_localized(
         &config.character,
         &crate::i18n::active_language_code(),
     )?;
