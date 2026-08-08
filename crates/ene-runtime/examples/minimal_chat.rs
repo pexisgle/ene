@@ -15,7 +15,8 @@
     reason = "example binary prints turn/session output to the terminal by design"
 )]
 
-use ene_config::{load_character_card, load_config};
+use ene_card::load_character_card;
+use ene_config::load_config;
 use ene_runtime::{
     CueSource, EneEvent, EneHandle, LifecycleEvent, MultiAnswer, PermissionDecision,
     TerminalReason, UserInputResponse,

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use ene_config::AffectBaseline;
+use ene_card::AffectBaseline;
 use ene_core::AffectState;
 
 /// Optional LLM affect classifier proposal.

@@ -18,12 +18,12 @@ use serde::Serialize;
 use crate::CharacterCardV3;
 use crate::CharacterConfig;
 use crate::card_import::{load_card_from_path, load_card_from_path_localized};
+use crate::card_io::save_character_card;
 use crate::character_assets::{
     DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH, EneAssetKind, ResolvedAssetUri, resolve_asset_uri,
 };
-use crate::error::EneConfigError;
-use crate::paths;
-use crate::{resolve_language_alias, save_character_card};
+use ene_config::paths;
+use ene_config::{EneConfigError, resolve_language_alias};
 
 /// Maximum recursion depth for the legacy extension-scan fallback.
 const MAX_SCAN_DEPTH: usize = 16;
@@ -164,7 +164,7 @@ pub fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
 /// - [`EneConfigError::UnsafeCharacterPath`] for paths with `..` traversal
 ///   components.
 pub fn resolve_character_path(name: &str) -> Result<PathBuf, EneConfigError> {
-    resolve_character_path_in(crate::paths::assets_dir(), name)
+    resolve_character_path_in(ene_config::paths::assets_dir(), name)
 }
 
 /// `resolve_character_path` for an explicit base assets directory.

@@ -12,7 +12,7 @@ use crate::settings::{
 };
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use ene_config::{
+use ene_card::{
     CharacterCardV3, DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH, EneAssetKind, ResolvedAssetUri,
     resolve_asset_uri,
 };
@@ -302,7 +302,7 @@ fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
 /// card) starts from a default. Validation runs before any write; `Error`
 /// findings abort the save. The pre-save card is copied to `<name>.bak` once,
 /// then the write goes through the atomic temp-file-and-rename
-/// ([`ene_config::save_character_card`]) so a crash mid-write can never leave
+/// ([`ene_card::save_character_card`]) so a crash mid-write can never leave
 /// a truncated card behind.
 fn save_character_card(path: &str, assets_dir: &str, world: &mut World, ui_entity: Entity) {
     let Some(snapshot) = world
@@ -346,7 +346,7 @@ fn save_character_card(path: &str, assets_dir: &str, world: &mut World, ui_entit
         );
         return;
     }
-    if let Err(error) = ene_config::save_character_card(path, &card) {
+    if let Err(error) = ene_card::save_character_card(path, &card) {
         set_editor_errors(
             world,
             ui_entity,
@@ -1056,6 +1056,7 @@ mod tests {
             store: Arc::new(RwLock::new(ene_config::ConfigStore::from_config(
                 ene_config::EneConfig::default(),
             ))),
+            character_store: ene_card::CharacterConfigStore::default(),
         }
     }
 
@@ -1131,7 +1132,7 @@ mod tests {
             "a new default card may warn (empty greeting) but must save, got {issues:?}"
         );
         let on_disk = std::fs::read_to_string(&path).expect("read card");
-        let card: ene_config::CharacterCardV3 = serde_json::from_str(&on_disk).expect("valid JSON");
+        let card: ene_card::CharacterCardV3 = serde_json::from_str(&on_disk).expect("valid JSON");
         assert_eq!(card.data.name, "Brand New");
     }
 
@@ -1219,8 +1220,8 @@ mod tests {
         {
             let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
             state.0.character_editor_alternate_greetings = vec![String::new()];
-            let mut book = ene_config::Lorebook::default();
-            book.entries.push(ene_config::LorebookEntry {
+            let mut book = ene_card::Lorebook::default();
+            book.entries.push(ene_card::LorebookEntry {
                 keys: Vec::new(),
                 content: String::new(),
                 enabled: true,
@@ -1384,8 +1385,8 @@ mod tests {
         let (mut world, entity) = editor_world("Ene");
         {
             let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
-            let mut catalog = ene_config::MotionCatalog::default();
-            catalog.motions.push(ene_config::MotionEntry {
+            let mut catalog = ene_card::MotionCatalog::default();
+            catalog.motions.push(ene_card::MotionEntry {
                 name: "Sneaky".to_string(),
                 path: "../evil.vrma".to_string(),
                 layer: None,
@@ -1468,7 +1469,7 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .motions
-                .push(ene_config::MotionEntry {
+                .push(ene_card::MotionEntry {
                     name: "Wave".to_string(),
                     path: "motions/wave.vrma".to_string(),
                     layer: None,
@@ -1483,7 +1484,7 @@ mod tests {
             "save must succeed silently"
         );
         let on_disk = std::fs::read_to_string(&path).expect("read card");
-        let parsed: ene_config::CharacterCardV3 = serde_json::from_str(&on_disk).expect("parse");
+        let parsed: ene_card::CharacterCardV3 = serde_json::from_str(&on_disk).expect("parse");
         let book = parsed.data.character_book.expect("lorebook kept");
         assert_eq!(book.name.as_deref(), Some("World"));
         assert_eq!(
@@ -1518,7 +1519,7 @@ mod tests {
         assert_eq!(catalog.motions.len(), 2);
         assert_eq!(
             catalog.motions[0].layer,
-            Some(ene_config::MotionLayer::Lower),
+            Some(ene_card::MotionLayer::Lower),
             "unexposed layer must survive"
         );
         assert_eq!(catalog.motions[1].name, "Wave");
@@ -1704,8 +1705,8 @@ mod tests {
         let (mut world, entity) = editor_world("Ene");
         {
             let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
-            let mut catalog = ene_config::MotionCatalog::default();
-            catalog.motions.push(ene_config::MotionEntry {
+            let mut catalog = ene_card::MotionCatalog::default();
+            catalog.motions.push(ene_card::MotionEntry {
                 name: "Absolute".to_string(),
                 path: "/etc/evil.vrma".to_string(),
                 layer: None,
@@ -1879,8 +1880,8 @@ mod tests {
         let (mut world, entity) = editor_world("Ene");
         {
             let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
-            let mut book = ene_config::Lorebook::default();
-            book.entries.push(ene_config::LorebookEntry {
+            let mut book = ene_card::Lorebook::default();
+            book.entries.push(ene_card::LorebookEntry {
                 keys: vec!["lab".to_string()],
                 content: "cold".to_string(),
                 enabled: true,
@@ -1921,8 +1922,8 @@ mod tests {
         let (mut world, entity) = editor_world("Ene");
         {
             let mut state = world.get_mut::<UiStateComponent>(entity).unwrap();
-            let mut book = ene_config::Lorebook::default();
-            book.entries.push(ene_config::LorebookEntry {
+            let mut book = ene_card::Lorebook::default();
+            book.entries.push(ene_card::LorebookEntry {
                 keys: vec!["(".to_string()],
                 content: "cold".to_string(),
                 enabled: true,

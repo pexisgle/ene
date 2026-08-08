@@ -5,7 +5,7 @@
 //! is injected into the prompt. Behavior follows
 //! <https://github.com/kwaroran/character-card-spec-v3> (`SPEC_V3.md`, "Decorators").
 
-use ene_config::LorebookEntry;
+use ene_card::LorebookEntry;
 
 use super::lorebook::stable_entry_id;
 
@@ -533,7 +533,7 @@ pub fn entry_decorators_accept(
 )]
 mod tests {
     use super::*;
-    use ene_config::LorebookEntry;
+    use ene_card::LorebookEntry;
 
     fn sample_entry() -> LorebookEntry {
         LorebookEntry {

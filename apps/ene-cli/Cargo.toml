@@ -13,6 +13,7 @@ ene-runtime = { workspace = true }
 ene-connector = { workspace = true }
 ene-mind = { workspace = true }
 ene-config = { workspace = true }
+ene-card = { workspace = true }
 ene-store = { workspace = true }
 ene-rag = { workspace = true }
 ene-plugin-host = { workspace = true }

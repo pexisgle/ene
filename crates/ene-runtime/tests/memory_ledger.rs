@@ -6,7 +6,7 @@
     reason = "integration tests use unwrap/expect for concise assertions"
 )]
 
-use ene_config::CharacterCardV3;
+use ene_card::CharacterCardV3;
 use ene_runtime::{EneConfig, EneHandle, LifecycleEvent, MemoryLedgerChange};
 use ene_store::{
     AffectAnnotation, CommitmentStatus, MemoryConfidence, MemoryEdit, MemoryJournalListOptions,

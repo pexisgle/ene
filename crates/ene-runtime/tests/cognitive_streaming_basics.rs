@@ -13,7 +13,8 @@ use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
     LlmResponseChunk, embed_query,
 };
-use ene_config::{CharacterCardV3, PromptLibrary, expand_cbs_macros};
+use ene_card::{CharacterCardV3, expand_cbs_macros};
+use ene_config::PromptLibrary;
 use ene_mind::{CognitionEngine, HistoryEntry, MindConfig, TurnContext};
 use ene_runtime::message_builder::{build_cognitive_output_contract, build_expression_phi};
 use ene_store::{

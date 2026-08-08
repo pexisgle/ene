@@ -8,7 +8,8 @@
 
 use async_trait::async_trait;
 use ene_ai::{LlmCompletion, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk, Role};
-use ene_config::{CharacterCardV3, EneConfig};
+use ene_card::CharacterCardV3;
+use ene_config::EneConfig;
 use ene_mind::MindConfig;
 use ene_plugin_proto::ToolResult;
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};

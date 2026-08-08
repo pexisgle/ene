@@ -2,7 +2,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use ene_config::{CharacterCardV3, LorebookEntry, expand_cbs_macros};
+use ene_card::{CharacterCardV3, LorebookEntry, expand_cbs_macros};
 use ene_core::{
     AffectAnnotation, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope, MemorySource,
     MemoryStatus, NewMemoryItem,
@@ -287,7 +287,7 @@ pub fn entry_keys_match_with_cache(
 
 /// Precompile regex patterns for enabled lorebook entries.
 pub fn compile_lorebook_regex_cache(
-    book: &ene_config::Lorebook,
+    book: &ene_card::Lorebook,
 ) -> std::collections::HashMap<String, regex::Regex> {
     use std::collections::HashMap;
 
@@ -372,7 +372,7 @@ pub fn build_lorebook_scan_text(
 )]
 mod tests {
     use super::*;
-    use ene_config::Lorebook;
+    use ene_card::Lorebook;
 
     fn sample_entry(keys: &[&str], content: &str, constant: bool) -> LorebookEntry {
         LorebookEntry {

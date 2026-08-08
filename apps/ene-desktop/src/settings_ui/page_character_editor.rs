@@ -13,7 +13,7 @@ use crate::component::ui::UiStateComponent;
 use crate::settings::{CharacterSettings, EditorSeverity};
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use ene_config::{LorebookEntry, MotionCatalog, MotionEntry, MotionLayer};
+use ene_card::{LorebookEntry, MotionCatalog, MotionEntry, MotionLayer};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -534,9 +534,9 @@ fn lorebook_editor(ui: &mut egui::Ui, world: &mut World, ui_entity: Entity) {
             ))
             .clicked()
         {
-            state.character_editor_lorebook = Some(ene_config::Lorebook {
+            state.character_editor_lorebook = Some(ene_card::Lorebook {
                 entries: vec![new_lorebook_entry(0)],
-                ..ene_config::Lorebook::default()
+                ..ene_card::Lorebook::default()
             });
             changed = true;
         }

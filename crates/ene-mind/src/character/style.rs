@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ene_ai::EmbeddingProvider;
-use ene_config::{CharacterCardV3, expand_cbs_macros};
+use ene_card::{CharacterCardV3, expand_cbs_macros};
 use ene_core::{
     AffectAnnotation, MemoryConfidence, MemoryKind, MemoryPort, MemoryPortError, MemoryScope,
     MemorySource, MemoryStatus, NewMemoryItem,
@@ -213,7 +213,7 @@ impl StyleExampleSelector {
 }
 
 /// The card's labeled style examples; `None` when absent or empty.
-fn labeled_examples(card: &CharacterCardV3) -> Option<Vec<ene_config::LabeledStyleExample>> {
+fn labeled_examples(card: &CharacterCardV3) -> Option<Vec<ene_card::LabeledStyleExample>> {
     card.data
         .get_ene_extension()
         .and_then(|ext| ext.style_examples)
@@ -227,7 +227,7 @@ fn labeled_examples(card: &CharacterCardV3) -> Option<Vec<ene_config::LabeledSty
 /// substring of the user's input. No match falls back to the first
 /// `max_examples` examples, mirroring the flat-example fallback.
 fn select_labeled(
-    examples: &[ene_config::LabeledStyleExample],
+    examples: &[ene_card::LabeledStyleExample],
     char_name: &str,
     user_name: &str,
     user_input: &str,
@@ -259,7 +259,7 @@ fn select_labeled(
     matched
 }
 
-fn canonical_intent(example: &ene_config::LabeledStyleExample) -> Option<StyleIntent> {
+fn canonical_intent(example: &ene_card::LabeledStyleExample) -> Option<StyleIntent> {
     example
         .intent
         .as_deref()
@@ -477,28 +477,28 @@ mod tests {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
         card.data.mes_example = "<START>\n{{user}}: Hi\n{{char}}: Flat greeting".into();
-        card.data.extensions.ene = Some(ene_config::EneExtension {
+        card.data.extensions.ene = Some(ene_card::EneExtension {
             style_examples: Some(vec![
-                ene_config::LabeledStyleExample {
+                ene_card::LabeledStyleExample {
                     id: "g-1".into(),
                     intent: Some("greeting".into()),
                     label: "greeting".into(),
                     text: "{{char}} greets {{user}}".into(),
                 },
-                ene_config::LabeledStyleExample {
+                ene_card::LabeledStyleExample {
                     id: "a-1".into(),
                     intent: Some("comforting".into()),
                     label: "angry".into(),
                     text: "Labeled angry reply".into(),
                 },
-                ene_config::LabeledStyleExample {
+                ene_card::LabeledStyleExample {
                     id: "f-1".into(),
                     intent: None,
                     label: "first meeting".into(),
                     text: "Labeled first-meeting reply".into(),
                 },
             ]),
-            ..ene_config::EneExtension::default()
+            ..ene_card::EneExtension::default()
         });
         card
     }
@@ -574,14 +574,14 @@ mod tests {
     fn empty_label_never_matches_input() {
         let mut card = CharacterCardV3::default();
         card.data.name = "Ene".into();
-        card.data.extensions.ene = Some(ene_config::EneExtension {
-            style_examples: Some(vec![ene_config::LabeledStyleExample {
+        card.data.extensions.ene = Some(ene_card::EneExtension {
+            style_examples: Some(vec![ene_card::LabeledStyleExample {
                 id: "e-1".into(),
                 intent: None,
                 label: String::new(),
                 text: "Empty label".into(),
             }]),
-            ..ene_config::EneExtension::default()
+            ..ene_card::EneExtension::default()
         });
         let selected = select_labeled(
             &labeled_examples(&card).expect("labeled examples present"),

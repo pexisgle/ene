@@ -23,7 +23,7 @@ use crate::streaming::{PermissionDecision, UserInputResponse};
 use crate::types::{RequestId, TurnId};
 use crate::vision::VisionPrepared;
 use chrono::{DateTime, Utc};
-use ene_config::CharacterCardV3;
+use ene_card::CharacterCardV3;
 use ene_connector::{
     AccountCredentials, AuthenticatedAccount, ConnectorError, ConnectorId, HealthStatus,
 };

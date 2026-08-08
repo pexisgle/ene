@@ -652,7 +652,7 @@ fn characters_command(
 ) -> Result<i32, OutputError> {
     match action {
         CharactersAction::List => {
-            let characters = ene_config::discover_characters(ene_config::assets_dir());
+            let characters = ene_card::discover_characters(ene_config::assets_dir());
             if json {
                 output::print_json(&characters)?;
             } else {
@@ -661,7 +661,7 @@ fn characters_command(
             Ok(EXIT_OK)
         }
         CharactersAction::Import { path } => {
-            let imported = ene_config::import_character_file(path).map_err(|e| {
+            let imported = ene_card::import_character_file(path).map_err(|e| {
                 OutputError::new(ErrorCode::Runtime, format!("import character card: {e}"))
             })?;
             if json {
@@ -677,7 +677,7 @@ fn characters_command(
     }
 }
 
-fn print_character_list(characters: &[ene_config::CharacterEntry]) {
+fn print_character_list(characters: &[ene_card::CharacterEntry]) {
     if characters.is_empty() {
         println!("No characters found under assets/characters/.");
         return;

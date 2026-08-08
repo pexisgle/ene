@@ -13,7 +13,7 @@ use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
     LlmResponseChunk, UserMessagePart, embed_query,
 };
-use ene_config::CharacterCardV3;
+use ene_card::CharacterCardV3;
 use ene_mind::{CognitionEngine, ContextConfig, HistoryEntry, MindConfig, TurnContext};
 use ene_store::{
     AffectAnnotation, CommitmentStatus, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope,

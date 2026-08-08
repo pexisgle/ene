@@ -1,5 +1,6 @@
 use ene_ai::{LlmMessage, Role, UserMessagePart};
-use ene_config::{CharacterCardV3, PromptLibrary, expand_cbs_macros, resolve_expressions};
+use ene_card::{CharacterCardV3, expand_cbs_macros, resolve_expressions};
+use ene_config::PromptLibrary;
 
 /// Input parameters for [`build_messages`].
 #[derive(Debug, Clone)]
@@ -296,7 +297,7 @@ pub fn build_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_config::{CharacterCardData, CharacterCardV3};
+    use ene_card::{CharacterCardData, CharacterCardV3};
 
     fn test_card(
         system_prompt: &str,

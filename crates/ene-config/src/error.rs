@@ -59,7 +59,7 @@ pub enum EneConfigError {
     CardFileTooLarge(u64),
     /// A CHARX archive could not be read (corrupt or unsupported zip).
     #[error("CHARX archive error: {0}")]
-    CharxError(#[from] zip::result::ZipError),
+    CharxError(String),
     /// A CHARX archive has no `card.json` at its root.
     #[error("CHARX archive is missing card.json")]
     CharxMissingCard,

@@ -1,0 +1,33 @@
+[package]
+name = "ene-card"
+version.workspace = true
+edition.workspace = true
+description = "Character card containers (V3, PNG/CHARX import), per-character config, and localized card diffs for the ene AI character platform"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+ene-config = { path = "../ene-config" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+base64 = { workspace = true, features = ["alloc"] }
+zip = { workspace = true, features = ["deflate"] }
+flate2 = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+indexmap = { workspace = true }
+url = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

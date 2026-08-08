@@ -21,6 +21,7 @@ parking_lot = { workspace = true }
 indexmap = { workspace = true }
 
 ene-config = { workspace = true }
+ene-card = { workspace = true }
 ene-core = { workspace = true }
 ene-ai = { workspace = true }
 ene-util = { workspace = true }

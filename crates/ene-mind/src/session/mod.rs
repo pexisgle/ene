@@ -37,9 +37,9 @@ pub mod types;
 /// Role enum for conversation history.
 #[doc(no_inline)]
 pub use ene_ai::Role;
-/// Character-card types re-exported from `ene-config`.
+/// Character-card types re-exported from `ene-card`.
 #[doc(no_inline)]
-pub use ene_config::{
+pub use ene_card::{
     CharacterAsset, CharacterCardData, CharacterCardV3, ExpressionDefinition, ResolvedExpression,
     expand_cbs_macros, resolve_expressions,
 };

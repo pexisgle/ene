@@ -34,6 +34,7 @@ pub fn first_launch_setup() -> Result<FirstLaunchPaths, AppStateError> {
 
     // Write JSON schemas once at startup rather than on every config load.
     ene_config::write_schemas(&assets_dir);
+    ene_card::write_character_schemas(&assets_dir);
 
     let (default_vrm, default_vrma) = crate::settings::read_cli_paths();
     Ok(FirstLaunchPaths {

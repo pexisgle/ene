@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use ene_ai::{EmbeddingKind, EmbeddingProvider};
-use ene_config::{CharacterCardV3, Lorebook, LorebookEntry};
+use ene_card::{CharacterCardV3, Lorebook, LorebookEntry};
 use ene_mind::character::{
     CharacterProcessor, LorebookIndexer, StyleExampleSelector, build_lorebook_injection,
     sync_character_memories,

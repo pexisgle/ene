@@ -333,7 +333,7 @@ fn motion_command_routes_typed_layer_to_vrm() {
     // A `Lower` motion should land on the VRM lower layer (and loop).
     world.write_message(MotionCommand {
         name: "idle".into(),
-        layer: ene_config::MotionLayer::Lower,
+        layer: ene_card::MotionLayer::Lower,
         priority: 3,
         duration: 0.0,
     });
@@ -342,7 +342,7 @@ fn motion_command_routes_typed_layer_to_vrm() {
     schedule.run(&mut world);
 
     // Cancel the upper layer: the lower motion must survive, proving the
-    // typed `ene_config::MotionLayer::Lower` mapped to `ene_vrm::Lower`.
+    // typed `ene_card::MotionLayer::Lower` mapped to `ene_vrm::Lower`.
     world
         .resource_mut::<MotionLayerState>()
         .cancel_motion(ene_vrm::MotionLayer::Upper);

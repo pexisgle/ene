@@ -18,11 +18,12 @@ refactoring seams), see [Crate interfaces](interfaces/overview.md).
 
 | Crate | Role | Key dependencies (internal) |
 |---|---|---|
-| `ene-runtime` | Actor-based host facade: `EneHandle`, turn orchestration, 3-channel event bus, tools/schedules/undo/workspace handles, API v1 mirrors | mind, store, ai, plugin-host, rag, config, connector, core |
-| `ene-mind` | Cognitive engine: prompt packets, recall, memory writing/arbiter, emotion, proactive, sessions, commitments, summarizer | core, config, ai, rag, util |
+| `ene-runtime` | Actor-based host facade: `EneHandle`, turn orchestration, 3-channel event bus, tools/schedules/undo/workspace handles, API v1 mirrors | mind, store, ai, plugin-host, rag, config, card, connector, core |
+| `ene-mind` | Cognitive engine: prompt packets, recall, memory writing/arbiter, emotion, proactive, sessions, commitments, summarizer | core, config, card, ai, rag, util |
 | `ene-store` | Sole SQLite/SeaORM owner: schema, migrations, sqlite-vec search, backups, audit, DB IPC server (`db` host-service passenger) | config, core, rag, plugin-db, plugin-proto |
 | `ene-core` | Persistence-agnostic domain vocabulary + `MemoryPort`/`EmbeddingStorePort`/`WorkspaceDocumentPort` traits | (nothing internal) |
-| `ene-config` | Settings load/save/schema, character cards (V3), import containers, paths, prompts/patterns, `define_config!` macro | (nothing internal) |
+| `ene-card` | Character card containers (V3), PNG/CHARX import/export, per-character config, localized card diffs | config |
+| `ene-config` | Settings load/save/schema, paths, prompts/patterns, `define_config!` macro | (nothing internal) |
 | `ene-ai` | LLM/embedding/STT/TTS/VAD traits, task routing, retry, context-window math, model fetching | config, infer, plugin-proto |
 | `ene-infer` | Single-threaded local-model framework (`LocalModel`, `EngineHandle`): worker thread, bounded queue, cooperative cancellation, panic recovery | (nothing internal) |
 | `ene-rag` | RAG policy: hybrid scoring, decay, workspace chunking; feature `tool` adds tool-selection pipeline (needs ene-ai) | core, config |
@@ -44,6 +45,8 @@ ene-store   ↛ ene-ai, ene-mind, ene-runtime    (persistence stays pure)
 ene-mind    ↛ ene-runtime, ene-plugin-host     (production code);
               calls persistence only via ene_core::MemoryPort
 ene-rag     ↛ ene-store, ene-mind              (policy layer; no cycles possible)
+ene-card    → ene-config                       (error/paths/language aliases only;
+                                                never the reverse edge)
 ene-plugin-proto ↛ business logic              (wire ABI only)
 ene-vrm     ↛ ene-mind, ene-runtime, ene-store (renderer is standalone)
 ```

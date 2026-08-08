@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ene_ai::{EmbeddingProvider, LlmMessage, LlmProvider, Role};
-use ene_config::CharacterCardV3;
+use ene_card::CharacterCardV3;
 use ene_core::{ActiveCommitmentPrompt, AffectState, MemoryPort, WorkspaceDocumentPort};
 
 use crate::character::StyleExample;

@@ -34,6 +34,7 @@
 - [クレートリファレンス](reference/crates.md)
 - [クレートインターフェース](reference/interfaces/overview.md)
   - [ene-core](reference/interfaces/ene-core.md)
+  - [ene-card](reference/interfaces/ene-card.md)
   - [ene-config](reference/interfaces/ene-config.md)
   - [ene-mind](reference/interfaces/ene-mind.md)
   - [ene-store](reference/interfaces/ene-store.md)

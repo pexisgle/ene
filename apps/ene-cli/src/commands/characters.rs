@@ -20,7 +20,7 @@ impl CliCommand for CharactersCommand {
     }
 
     async fn execute(&self, _arg: &str, _ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
-        let characters = ene_config::discover_characters(ene_config::assets_dir());
+        let characters = ene_card::discover_characters(ene_config::assets_dir());
         if characters.is_empty() {
             println!("No characters found under assets/characters/.");
             return Ok(CommandOutcome::Continue);

@@ -54,7 +54,7 @@ use crate::public_api::PublicApiError;
 use crate::streaming::{PermissionDecision, UserInputResponse};
 use crate::types::{CancelError, RequestId, RunError, TurnId};
 use chrono::{DateTime, Utc};
-use ene_config::CharacterCardV3;
+use ene_card::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::{ConversationSession, SessionId};
 use ene_plugin_host::{DisabledReason, PluginHealthEvent};
@@ -1056,7 +1056,7 @@ impl EneHandle {
     /// [`EneHandle::candidates`] in sync.
     pub async fn set_character(
         &self,
-        card: ene_config::CharacterCardV3,
+        card: ene_card::CharacterCardV3,
     ) -> Result<(), EneRuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx

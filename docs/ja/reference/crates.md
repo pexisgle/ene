@@ -18,11 +18,12 @@
 
 | クレート | 役割 | 主な内部依存 |
 |---|---|---|
-| `ene-runtime` | アクターベースのホストファサード: `EneHandle`・ターン制御・3 チャネルイベントバス・ツール/スケジュール/undo/ワークスペースハンドル・API v1 ミラー | mind, store, ai, plugin-host, rag, config, connector, core |
-| `ene-mind` | 認知エンジン: プロンプトパケット・想起・メモリ書き込み/仲裁・感情・プロアクティブ・セッション・約束・要約 | core, config, ai, rag, util |
+| `ene-runtime` | アクターベースのホストファサード: `EneHandle`・ターン制御・3 チャネルイベントバス・ツール/スケジュール/undo/ワークスペースハンドル・API v1 ミラー | mind, store, ai, plugin-host, rag, config, card, connector, core |
+| `ene-mind` | 認知エンジン: プロンプトパケット・想起・メモリ書き込み/仲裁・感情・プロアクティブ・セッション・約束・要約 | core, config, card, ai, rag, util |
 | `ene-store` | SQLite/SeaORM の唯一の所有者: スキーマ・マイグレーション・sqlite-vec 検索・バックアップ・監査・DB IPC サーバー（`db` ホストサービス） | config, core, rag, plugin-db, plugin-proto |
 | `ene-core` | 永続化非依存のドメイン語彙 + `MemoryPort`/`EmbeddingStorePort`/`WorkspaceDocumentPort` トレイト | （内部なし） |
-| `ene-config` | 設定の読み書き・スキーマ・キャラクターカード（V3）・インポートコンテナ・パス・プロンプト/パターン・`define_config!` マクロ | （内部なし） |
+| `ene-card` | キャラクターカードコンテナ（V3）・PNG/CHARX インポート/エクスポート・キャラクター別設定・ローカライズ済みカード差分 | config |
+| `ene-config` | 設定の読み書き・スキーマ・パス・プロンプト/パターン・`define_config!` マクロ | （内部なし） |
 | `ene-ai` | LLM/埋め込み/STT/TTS/VAD トレイト・タスクルーティング・リトライ・コンテキスト窓計算・モデル取得 | config, infer, plugin-proto |
 | `ene-infer` | シングルスレッドローカルモデルフレームワーク（`LocalModel`・`EngineHandle`）: ワーカースレッド・有界キュー・協調キャンセル・パニック回復 | （内部なし） |
 | `ene-rag` | RAG ポリシー: ハイブリッドスコアリング・減衰・ワークスペースチャンク化。`tool` フィーチャーでツール選択パイプライン（ene-ai が必要） | core, config |
@@ -44,6 +45,8 @@ ene-store   ↛ ene-ai, ene-mind, ene-runtime    （永続化は純粋のまま�
 ene-mind    ↛ ene-runtime, ene-plugin-host     （本番コード）;
               永続化は ene_core::MemoryPort 経由のみ
 ene-rag     ↛ ene-store, ene-mind              （ポリシー層。循環は構造的に不可能）
+ene-card    → ene-config                       （エラー/パス/言語エイリアスのみ。
+                                                逆方向の辺は作らない）
 ene-plugin-proto ↛ ビジネスロジック             （ワイヤ ABI のみ）
 ene-vrm     ↛ ene-mind, ene-runtime, ene-store （レンダラーは独立）
 ```

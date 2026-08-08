@@ -220,17 +220,17 @@ pub fn apply_expression_commands_system(
     }
 }
 
-/// Converts the canonical [`ene_config::MotionLayer`] (carried on performance
+/// Converts the canonical [`ene_card::MotionLayer`] (carried on performance
 /// cues and cancel scopes) into the rendering-side [`ene_vrm::MotionLayer`].
 ///
 /// `ene-vrm` is rendering-only and cannot depend on `ene-config`, and the
 /// orphan rule blocks a cross-crate `From` impl, so the desktop bridges the
 /// two mirrors here by matching variants directly.
-fn to_vrm_layer(layer: ene_config::MotionLayer) -> ene_vrm::MotionLayer {
+fn to_vrm_layer(layer: ene_card::MotionLayer) -> ene_vrm::MotionLayer {
     match layer {
-        ene_config::MotionLayer::Upper => ene_vrm::MotionLayer::Upper,
-        ene_config::MotionLayer::Lower => ene_vrm::MotionLayer::Lower,
-        ene_config::MotionLayer::Full => ene_vrm::MotionLayer::Full,
+        ene_card::MotionLayer::Upper => ene_vrm::MotionLayer::Upper,
+        ene_card::MotionLayer::Lower => ene_vrm::MotionLayer::Lower,
+        ene_card::MotionLayer::Full => ene_vrm::MotionLayer::Full,
     }
 }
 
@@ -257,8 +257,8 @@ pub fn apply_cancel_system(
             scope if scope.starts_with("motion:") => {
                 let label = scope.strip_prefix("motion:").unwrap_or_default();
                 // Unknown layer labels fall back to `Full` (preempts everything).
-                let layer = ene_config::MotionLayer::from_label(label)
-                    .unwrap_or(ene_config::MotionLayer::Full);
+                let layer =
+                    ene_card::MotionLayer::from_label(label).unwrap_or(ene_card::MotionLayer::Full);
                 state.cancel_motion(to_vrm_layer(layer));
             }
             _ => {
@@ -274,7 +274,7 @@ pub fn apply_cancel_system(
 
 /// Feeds [`MotionCommand`] messages into the [`MotionLayerState`].
 ///
-/// Converts the canonical [`ene_config::MotionLayer`] carried on the command
+/// Converts the canonical [`ene_card::MotionLayer`] carried on the command
 /// into the rendering-side [`ene_vrm::MotionLayer`] via [`to_vrm_layer`] — no
 /// string round-trip.
 pub fn apply_motion_commands_system(

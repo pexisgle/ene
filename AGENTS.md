@@ -101,6 +101,9 @@ Violating these is the most common way to break this repo:
   the tool host**.
 - `ene-store` alone owns SQLite/SeaORM connections, schema, migrations, and raw DB access. It
   must not depend on ai/mind. Plugin binaries reach state through `ene-plugin-db` over IPC.
+- `ene-card` owns character card containers (V3, PNG/CHARX import) and per-character config.
+  It depends only on `ene-config` (error/paths/language aliases); `ene-config` must never
+  depend on it, or the `zip` dependency leaks back into the settings core.
 - `ene-plugin-proto` is wire ABI only. `ene-plugin` is the authoring facade,
   `ene-plugin-host` owns process/registry orchestration, `ene-vrm` is rendering-only.
   Never move business or DB logic into ABI crates.

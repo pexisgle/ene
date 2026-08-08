@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ene_ai::{EmbeddingKind, EmbeddingProvider};
-use ene_config::CharacterCardV3;
+use ene_card::CharacterCardV3;
 use ene_core::{MemoryItem, MemoryPort, NewMemoryItem};
 
 use crate::config::CharacterMemoryConfig;
@@ -218,7 +218,7 @@ mod tests {
     use std::sync::Arc;
 
     use ene_ai::{EmbeddingKind, EmbeddingProvider};
-    use ene_config::CharacterCardV3;
+    use ene_card::CharacterCardV3;
     use ene_store::MemoryStore;
 
     use super::*;

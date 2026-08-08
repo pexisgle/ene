@@ -356,7 +356,7 @@ impl AiBridge {
     }
 
     /// The currently loaded character card, if any. Mailbox-free.
-    pub fn character_card(&self) -> Option<std::sync::Arc<ene_config::CharacterCardV3>> {
+    pub fn character_card(&self) -> Option<std::sync::Arc<ene_card::CharacterCardV3>> {
         self.handle.character_card()
     }
 
@@ -844,7 +844,7 @@ async fn pump_events(
                 for cue in cues {
                     match cue.kind {
                         ene_mind::PerfKind::Motion => {
-                            let layer = cue.motion_layer.unwrap_or(ene_config::MotionLayer::Full);
+                            let layer = cue.motion_layer.unwrap_or(ene_card::MotionLayer::Full);
                             let priority = cue_source_to_u8(source);
                             drop(event_tx.send(AppEvent::MotionCue {
                                 name: cue.name,

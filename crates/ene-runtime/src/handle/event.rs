@@ -305,7 +305,7 @@ pub enum TerminalReason {
 #[derive(Clone)]
 pub struct EneStateSnapshot {
     /// The loaded character card, if any.
-    pub character_card: Option<ene_config::CharacterCardV3>,
+    pub character_card: Option<ene_card::CharacterCardV3>,
     /// Conversation history (`ene_mind::HistoryEntry`).
     pub history: Vec<ene_mind::HistoryEntry>,
     /// A copy of the current configuration.

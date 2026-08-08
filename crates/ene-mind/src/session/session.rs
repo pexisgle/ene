@@ -8,7 +8,7 @@ use super::types::SessionId;
 use chrono::{DateTime, Utc};
 use ene_ai::EmbeddingProvider;
 use ene_ai::Role;
-use ene_config::{CharacterCardV3, ResolvedExpression, resolve_expressions};
+use ene_card::{CharacterCardV3, ResolvedExpression, resolve_expressions};
 
 use crate::lifecycle::HistoryEntry;
 use ene_core::MemoryPort;

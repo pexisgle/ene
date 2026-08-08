@@ -25,7 +25,7 @@ impl CliCommand for ImportCommand {
                 usage: self.usage().to_string(),
             });
         }
-        let imported = ene_config::import_character_file(std::path::Path::new(path))
+        let imported = ene_card::import_character_file(std::path::Path::new(path))
             .map_err(|e| CliError::ExecutionFailed(format!("Failed to import card: {e}")))?;
         println!(
             "Imported character '{}' to {}",

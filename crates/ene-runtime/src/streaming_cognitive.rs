@@ -1,5 +1,6 @@
 use ene_ai::LlmToolCallChunk;
-use ene_config::{PromptLibrary, resolve_expressions};
+use ene_card::resolve_expressions;
+use ene_config::PromptLibrary;
 use ene_mind::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use ene_mind::{
     CognitionEngine, ComposePrefetch, HistoryEntry, MindConfig, OwnedPostTurnInput, OwnedTurnInput,
@@ -175,7 +176,7 @@ struct TtsSentence {
 )]
 fn build_turn_context<'a>(
     mind: &'a MindConfig,
-    card: &'a ene_config::CharacterCardV3,
+    card: &'a ene_card::CharacterCardV3,
     card_name: &'a str,
     user_name: &'a str,
     session_id: &'a str,

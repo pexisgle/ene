@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use ene_config::ResolvedExpression;
+use ene_card::ResolvedExpression;
 use ene_core::AffectState;
 
 /// Source of the resolved expression decision.
