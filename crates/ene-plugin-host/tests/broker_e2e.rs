@@ -325,9 +325,8 @@ async fn file_broker_serves_granted_absolute_paths_and_denies_others() {
             quota_bytes: None,
         },
     )]);
-    let server =
-        ene_store::host_service::HostServiceServer::new(db, socket.clone(), db_plugins)
-            .with_broker_handler(hub);
+    let server = ene_store::host_service::HostServiceServer::new(db, socket.clone(), db_plugins)
+        .with_broker_handler(hub);
     let server = tokio::spawn(async move {
         if let Err(e) = server.run().await {
             panic!("host service server failed: {e}");
