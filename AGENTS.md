@@ -2,6 +2,12 @@
 
 This file provides guidance to opencode and Claude Code when working with code in this repository.
 
+## Release status
+
+This app is **unreleased** and has no external consumers, so backward compatibility is not a
+constraint. Don't preserve config schemas, IPC/plugin protocols, persisted data, or CLI surfaces
+for compatibility's sake; prefer clean changes over legacy shims.
+
 ## Build environment
 
 Native deps (Vulkan, ALSA, OpenSSL, libclang, mold) come from the checked-in Nix flake.
