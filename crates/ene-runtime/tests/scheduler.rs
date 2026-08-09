@@ -29,8 +29,12 @@ use tokio_stream::Stream;
 /// scheduler timer task, so a schedule armed 150ms ahead is already due.
 const FIRE_ADVANCE: Duration = Duration::from_millis(200);
 /// Bounded poll budget: the tests give up after this many real-time
-/// iterations, so a stalled actor fails fast instead of hanging.
-const WAIT_STEPS: usize = 400;
+/// iterations, so a stalled actor fails fast instead of hanging. The
+/// budget is deliberately generous (12 s of real time): the full
+/// `cargo test` matrix runs scheduler tests in parallel with the rest of
+/// the workspace on shared CI runners, and a run that only completes
+/// slowly must not flake.
+const WAIT_STEPS: usize = 1200;
 /// Real-time poll interval between scheduler wake-ups; the step budget
 /// above bounds the wall-clock cost even on a loaded CI runner.
 const WAIT_POLL: Duration = Duration::from_millis(10);
