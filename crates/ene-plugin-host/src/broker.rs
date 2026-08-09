@@ -318,9 +318,11 @@ impl BrokerHub {
                 self.file_write(plugin, state, &path, &data, create, truncate)
                     .await
             }
-            BrokerRequest::FileDelete { path } => self.file_delete(plugin, state, &path).await,
-            BrokerRequest::FileCreateDir { path } => {
-                self.file_create_dir(plugin, state, &path).await
+            BrokerRequest::FileDelete { path, recursive } => {
+                self.file_delete(plugin, state, &path, recursive).await
+            }
+            BrokerRequest::FileCreateDir { path, recursive } => {
+                self.file_create_dir(plugin, state, &path, recursive).await
             }
             BrokerRequest::FileList { path } => self.file_list(plugin, state, &path).await,
             BrokerRequest::FileStat { path } => self.file_stat(plugin, state, &path).await,
@@ -540,6 +542,27 @@ fn service_of(request: &BrokerRequest) -> &'static str {
 
 // ── File broker ─────────────────────────────────────────────────────────
 
+/// Resolves a file-broker path to a canonical target inside a grant.
+///
+/// Slot-relative paths (`workspace/notes.txt`) resolve through the named
+/// grant; absolute paths are matched against grants by canonical
+/// containment (the fs plugin keeps its tool contract of absolute paths).
+fn resolve_file_target(
+    state: &PluginState,
+    path: &str,
+    need_write: bool,
+) -> Result<PathBuf, BrokerError> {
+    if Path::new(path).is_absolute() {
+        crate::manifest::resolve_grant_abs(&state.fs_grants, Path::new(path), need_write)
+            .map_err(|e| BrokerError::denied(e.to_string()))
+    } else {
+        let (grant, target) = resolve_grant_path(&state.fs_grants, path, need_write)
+            .map_err(|e| BrokerError::denied(e.to_string()))?;
+        canonical_within(&grant.path, &target)
+            .ok_or_else(|| BrokerError::denied("path escapes the granted directory"))
+    }
+}
+
 impl BrokerHub {
     async fn file_read(
         &self,
@@ -548,10 +571,7 @@ impl BrokerHub {
         path: &str,
         max_bytes: Option<u64>,
     ) -> Result<BrokerResponse, BrokerError> {
-        let (grant, target) = resolve_grant_path(&state.fs_grants, path, false)
-            .map_err(|e| BrokerError::denied(e.to_string()))?;
-        let canonical = canonical_within(&grant.path, &target)
-            .ok_or_else(|| BrokerError::denied("path escapes the granted directory"))?;
+        let canonical = resolve_file_target(state, path, false)?;
         self.approve(
             plugin,
             state,
@@ -592,10 +612,7 @@ impl BrokerHub {
         create: bool,
         truncate: bool,
     ) -> Result<BrokerResponse, BrokerError> {
-        let (grant, target) = resolve_grant_path(&state.fs_grants, path, true)
-            .map_err(|e| BrokerError::denied(e.to_string()))?;
-        let canonical = canonical_within(&grant.path, &target)
-            .ok_or_else(|| BrokerError::denied("path escapes the granted directory"))?;
+        let canonical = resolve_file_target(state, path, true)?;
         let exists = canonical.exists();
         if !exists && !create {
             return Err(BrokerError::new(
@@ -634,11 +651,9 @@ impl BrokerHub {
         plugin: &str,
         state: &PluginState,
         path: &str,
+        recursive: bool,
     ) -> Result<BrokerResponse, BrokerError> {
-        let (grant, target) = resolve_grant_path(&state.fs_grants, path, true)
-            .map_err(|e| BrokerError::denied(e.to_string()))?;
-        let canonical = canonical_within(&grant.path, &target)
-            .ok_or_else(|| BrokerError::denied("path escapes the granted directory"))?;
+        let canonical = resolve_file_target(state, path, true)?;
         self.approve(
             plugin,
             state,
@@ -646,8 +661,12 @@ impl BrokerHub {
             &canonical.to_string_lossy(),
         )
         .await?;
-        std::fs::remove_file(&canonical)
-            .map_err(|e| BrokerError::new(BrokerErrorCode::NotFound, e.to_string()))?;
+        let result = if recursive {
+            std::fs::remove_dir_all(&canonical)
+        } else {
+            std::fs::remove_file(&canonical)
+        };
+        result.map_err(|e| BrokerError::new(BrokerErrorCode::NotFound, e.to_string()))?;
         Ok(BrokerResponse::FileDeleteOk)
     }
 
@@ -656,11 +675,9 @@ impl BrokerHub {
         plugin: &str,
         state: &PluginState,
         path: &str,
+        recursive: bool,
     ) -> Result<BrokerResponse, BrokerError> {
-        let (grant, target) = resolve_grant_path(&state.fs_grants, path, true)
-            .map_err(|e| BrokerError::denied(e.to_string()))?;
-        let canonical = canonical_within(&grant.path, &target)
-            .ok_or_else(|| BrokerError::denied("path escapes the granted directory"))?;
+        let canonical = resolve_file_target(state, path, true)?;
         self.approve(
             plugin,
             state,
@@ -668,8 +685,12 @@ impl BrokerHub {
             &canonical.to_string_lossy(),
         )
         .await?;
-        std::fs::create_dir_all(&canonical)
-            .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
+        let result = if recursive {
+            std::fs::create_dir_all(&canonical)
+        } else {
+            std::fs::create_dir(&canonical)
+        };
+        result.map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
         Ok(BrokerResponse::FileCreateDirOk)
     }
 
@@ -679,10 +700,7 @@ impl BrokerHub {
         state: &PluginState,
         path: &str,
     ) -> Result<BrokerResponse, BrokerError> {
-        let (grant, target) = resolve_grant_path(&state.fs_grants, path, false)
-            .map_err(|e| BrokerError::denied(e.to_string()))?;
-        let canonical = canonical_within(&grant.path, &target)
-            .ok_or_else(|| BrokerError::denied("path escapes the granted directory"))?;
+        let canonical = resolve_file_target(state, path, false)?;
         self.approve(
             plugin,
             state,
@@ -696,17 +714,20 @@ impl BrokerHub {
         for entry in read_dir {
             let entry =
                 entry.map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
-            let metadata = entry
-                .metadata()
+            // `file_type` does not follow symlinks: a symlinked directory
+            // must not be reported as a directory, otherwise plugin-side
+            // recursive walks would follow it out of the grant.
+            let file_type = entry
+                .file_type()
                 .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
+            let entry_metadata = entry.metadata().ok();
             entries.push(FileEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 path: entry.path().to_string_lossy().into_owned(),
-                is_dir: metadata.is_dir(),
-                size: metadata.len(),
-                modified_ms: metadata
-                    .modified()
-                    .ok()
+                is_dir: file_type.is_dir(),
+                size: entry_metadata.as_ref().map_or(0, std::fs::Metadata::len),
+                modified_ms: entry_metadata
+                    .and_then(|m| m.modified().ok())
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map_or(0, |d| d.as_millis().try_into().unwrap_or(u64::MAX)),
             });
@@ -721,10 +742,7 @@ impl BrokerHub {
         state: &PluginState,
         path: &str,
     ) -> Result<BrokerResponse, BrokerError> {
-        let (grant, target) = resolve_grant_path(&state.fs_grants, path, false)
-            .map_err(|e| BrokerError::denied(e.to_string()))?;
-        let canonical = canonical_within(&grant.path, &target)
-            .ok_or_else(|| BrokerError::denied("path escapes the granted directory"))?;
+        let canonical = resolve_file_target(state, path, false)?;
         self.approve(
             plugin,
             state,
@@ -759,14 +777,8 @@ impl BrokerHub {
         from: &str,
         to: &str,
     ) -> Result<BrokerResponse, BrokerError> {
-        let (grant, source) = resolve_grant_path(&state.fs_grants, from, true)
-            .map_err(|e| BrokerError::denied(e.to_string()))?;
-        let source = canonical_within(&grant.path, &source)
-            .ok_or_else(|| BrokerError::denied("source escapes the granted directory"))?;
-        let (_grant, target) = resolve_grant_path(&state.fs_grants, to, true)
-            .map_err(|e| BrokerError::denied(e.to_string()))?;
-        let target = canonical_within(&grant.path, &target)
-            .ok_or_else(|| BrokerError::denied("target escapes the granted directory"))?;
+        let source = resolve_file_target(state, from, true)?;
+        let target = resolve_file_target(state, to, true)?;
         self.approve(
             plugin,
             state,

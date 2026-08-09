@@ -1,4 +1,5 @@
 use crate::undo::UndoManager;
+use crate::utils::broker::FileBroker;
 use crate::utils::permission::{DestructiveAction, PermissionGate};
 use ene_plugin_proto::ToolError;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,9 @@ pub struct SandboxConfig {
     pub max_shell_output_lines: usize,
     pub db_socket: Option<PathBuf>,
     pub db_auth_token: Option<String>,
+    /// Host-mediated file/process broker (protocol v8). `None` in tests that
+    /// exercise parsing logic with the local transport.
+    pub broker: Option<Arc<FileBroker>>,
     /// Cache of pre-compiled `blocked_commands` regexes. The struct
     /// is `Clone`d, so the cache is held in an `Arc` to keep the
     /// cached regexes shared across clones. Not part of the
@@ -61,6 +65,7 @@ impl Default for SandboxConfig {
             max_shell_output_lines: 2000,
             db_socket: None,
             db_auth_token: None,
+            broker: Some(FileBroker::new()),
             compiled_blocklist: std::sync::Arc::new(std::sync::OnceLock::new()),
             allowed_patterns: std::sync::Arc::new(std::sync::RwLock::new(
                 std::collections::HashSet::new(),
@@ -70,6 +75,13 @@ impl Default for SandboxConfig {
 }
 
 impl SandboxConfig {
+    /// The host-mediated broker for file/process operations.
+    pub fn broker(&self) -> Result<Arc<FileBroker>, ToolError> {
+        self.broker
+            .clone()
+            .ok_or_else(|| ToolError::execution_failed("file broker is not configured".to_string()))
+    }
+
     pub fn resolve_and_check(
         &self,
         path: &Path,
@@ -247,7 +259,12 @@ impl From<ene_plugin_proto::SandboxConfigData> for SandboxConfig {
             max_shell_output_bytes: data.max_shell_output_bytes,
             max_shell_output_lines: data.max_shell_output_lines,
             db_socket: data.db_socket.map(PathBuf::from),
-            db_auth_token: data.db_auth_token,
+            db_auth_token: data.db_auth_token.clone(),
+            broker: {
+                let broker = FileBroker::new();
+                broker.configure(data.broker_socket.as_deref(), data.db_auth_token.as_deref());
+                Some(broker)
+            },
             compiled_blocklist: std::sync::Arc::new(std::sync::OnceLock::new()),
             allowed_patterns: std::sync::Arc::new(std::sync::RwLock::new(
                 std::collections::HashSet::new(),
@@ -489,6 +506,7 @@ impl Sandbox {
 
         let mut logs: Vec<String> = Vec::new();
         let mut apply_error: Option<ToolError> = None;
+        let broker = self.config.broker()?;
         for op in &entry.operations {
             match op {
                 crate::undo::UndoOperation::RestoreFile {
@@ -496,7 +514,7 @@ impl Sandbox {
                     original_content,
                 } => {
                     let result = if let Some(content) = original_content {
-                        match tokio::fs::write(path, content).await {
+                        match broker.write(path, content.clone(), true, true).await {
                             Ok(()) => {
                                 logs.push(format!("Restored: {path}"));
                                 Ok(())
@@ -506,7 +524,7 @@ impl Sandbox {
                             ))),
                         }
                     } else {
-                        match tokio::fs::remove_file(path).await {
+                        match broker.delete(path, false).await {
                             Ok(()) => {
                                 logs.push(format!("Removed (was not tracked): {path}"));
                                 Ok(())
@@ -522,7 +540,7 @@ impl Sandbox {
                     }
                 }
                 crate::undo::UndoOperation::DeleteCreatedFile { path } => {
-                    match tokio::fs::remove_file(path).await {
+                    match broker.delete(path, false).await {
                         Ok(()) => logs.push(format!("Deleted: {path}")),
                         Err(e) => {
                             apply_error = Some(ToolError::execution_failed(format!(

@@ -5,15 +5,17 @@ use std::path::Path;
 
 pub async fn delete(path: &Path, recursive: bool, sandbox: &Sandbox) -> Result<String, ToolError> {
     let resolved = sandbox.config().resolve_and_check(path, true)?;
+    let broker = sandbox.config().broker()?;
+    let resolved_str = resolved.to_string_lossy().into_owned();
 
-    if !resolved.exists() {
+    let Some(meta) = broker.stat(&resolved_str).await? else {
         return Err(ToolError::execution_failed(format!(
             "Path not found: {}",
             resolved.display()
         )));
-    }
+    };
 
-    let is_dir = resolved.is_dir();
+    let is_dir = meta.is_dir;
 
     if is_dir && !recursive {
         return Err(ToolError::execution_failed(format!(
@@ -23,7 +25,8 @@ pub async fn delete(path: &Path, recursive: bool, sandbox: &Sandbox) -> Result<S
     }
 
     if is_dir {
-        tokio::fs::remove_dir_all(&resolved)
+        broker
+            .delete(&resolved_str, true)
             .await
             .map_err(|e| ToolError::execution_failed(format!("Failed to delete directory: {e}")))?;
 
@@ -31,9 +34,17 @@ pub async fn delete(path: &Path, recursive: bool, sandbox: &Sandbox) -> Result<S
 
         Ok(format!("Deleted directory: {}", resolved.display()))
     } else {
-        let original = tokio::fs::read(&resolved).await.ok();
+        let original = broker
+            .read(
+                &resolved_str,
+                u64::try_from(sandbox.config().max_read_bytes).unwrap_or(u64::MAX),
+            )
+            .await
+            .ok()
+            .map(|outcome| outcome.data);
 
-        tokio::fs::remove_file(&resolved)
+        broker
+            .delete(&resolved_str, false)
             .await
             .map_err(|e| ToolError::execution_failed(format!("Failed to delete file: {e}")))?;
 

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 ene-plugin = { workspace = true }
+ene-plugin-broker = { workspace = true }
 ene-plugin-db = { workspace = true }
 ene-plugin-proto = { workspace = true }
 ene-util = { workspace = true }
@@ -28,9 +29,13 @@ glob = "0.3"
 strsim = "0.11"
 dashmap = { workspace = true }
 uuid = { workspace = true }
+parking_lot = { workspace = true }
 chrono = { workspace = true }
 flate2 = { version = "1", features = ["rust_backend"] }
 thiserror = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }

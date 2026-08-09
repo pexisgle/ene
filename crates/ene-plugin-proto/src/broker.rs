@@ -126,11 +126,18 @@ pub enum BrokerRequest {
     FileDelete {
         /// Path relative to the approved slot.
         path: String,
+        /// Delete directories recursively (equivalent to `remove_dir_all`)
+        /// instead of removing a single file.
+        #[serde(default)]
+        recursive: bool,
     },
     /// Creates a directory through an approved writable slot.
     FileCreateDir {
         /// Path relative to the approved slot.
         path: String,
+        /// Create missing parent directories (`create_dir_all`).
+        #[serde(default)]
+        recursive: bool,
     },
     /// Lists a directory through an approved readable slot.
     FileList {

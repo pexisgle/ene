@@ -74,6 +74,7 @@ pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, 
         ));
     }
 
+    let broker = sandbox.config().broker()?;
     let mut validated = Vec::new();
     for op in &operations {
         match op {
@@ -81,16 +82,23 @@ pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, 
                 path, old_content, ..
             } => {
                 let resolved = sandbox.check_writable(Path::new(path))?;
-                if !resolved.exists() {
+                let resolved_str = resolved.to_string_lossy().into_owned();
+                if broker.stat(&resolved_str).await?.is_none() {
                     return Err(ToolError::execution_failed(format!(
                         "Patch verification failed: File to update does not exist: {path}"
                     )));
                 }
-                let current = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
-                    ToolError::execution_failed(format!(
-                        "Patch verification failed: Cannot read {path}: {e}"
-                    ))
-                })?;
+                let current = broker
+                    .read_text(
+                        &resolved_str,
+                        u64::try_from(sandbox.config().max_write_bytes).unwrap_or(u64::MAX),
+                    )
+                    .await
+                    .map_err(|e| {
+                        ToolError::execution_failed(format!(
+                            "Patch verification failed: Cannot read {path}: {e}"
+                        ))
+                    })?;
                 if !current.contains(old_content) {
                     return Err(ToolError::execution_failed(format!(
                         "Patch verification failed: old_content not found in {path}. The file may have changed."
@@ -104,7 +112,8 @@ pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, 
             }
             PatchOperation::Delete { path } => {
                 let resolved = sandbox.check_writable(Path::new(path))?;
-                if !resolved.exists() {
+                let resolved_str = resolved.to_string_lossy().into_owned();
+                if broker.stat(&resolved_str).await?.is_none() {
                     return Err(ToolError::execution_failed(format!(
                         "Patch verification failed: File to delete does not exist: {path}"
                     )));
@@ -124,14 +133,23 @@ pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, 
                 new_content,
                 ..
             } => {
-                let original = tokio::fs::read(&resolved).await.ok();
-                let current = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
-                    ToolError::execution_failed(format!(
-                        "Cannot read {}: {}",
-                        resolved.display(),
-                        e
-                    ))
-                })?;
+                let resolved_str = resolved.to_string_lossy().into_owned();
+                let read_max = u64::try_from(sandbox.config().max_write_bytes).unwrap_or(u64::MAX);
+                let original = broker
+                    .read(&resolved_str, read_max)
+                    .await
+                    .ok()
+                    .map(|o| o.data);
+                let current = broker
+                    .read_text(&resolved_str, read_max)
+                    .await
+                    .map_err(|e| {
+                        ToolError::execution_failed(format!(
+                            "Cannot read {}: {}",
+                            resolved.display(),
+                            e
+                        ))
+                    })?;
 
                 let first = current.find(&old_content);
                 let last = current.rfind(&old_content);
@@ -150,13 +168,16 @@ pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, 
 
                 let updated =
                     current[..pos].to_string() + &new_content + &current[pos + old_content.len()..];
-                tokio::fs::write(&resolved, updated).await.map_err(|e| {
-                    ToolError::execution_failed(format!(
-                        "Cannot write {}: {}",
-                        resolved.display(),
-                        e
-                    ))
-                })?;
+                broker
+                    .write(&resolved_str, updated.into_bytes(), false, true)
+                    .await
+                    .map_err(|e| {
+                        ToolError::execution_failed(format!(
+                            "Cannot write {}: {}",
+                            resolved.display(),
+                            e
+                        ))
+                    })?;
 
                 undo_ops.push(UndoEntry::restore_file(
                     resolved.display().to_string(),
@@ -165,18 +186,25 @@ pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, 
                 summary.push(format!("M {}", resolved.display()));
             }
             PatchOperation::Add { content, .. } => {
+                let resolved_str = resolved.to_string_lossy().into_owned();
                 if let Some(parent) = resolved.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                        ToolError::execution_failed(format!("Cannot create directory: {e}"))
-                    })?;
+                    broker
+                        .create_dir(&parent.to_string_lossy(), true)
+                        .await
+                        .map_err(|e| {
+                            ToolError::execution_failed(format!("Cannot create directory: {e}"))
+                        })?;
                 }
-                tokio::fs::write(&resolved, &content).await.map_err(|e| {
-                    ToolError::execution_failed(format!(
-                        "Cannot write {}: {}",
-                        resolved.display(),
-                        e
-                    ))
-                })?;
+                broker
+                    .write(&resolved_str, content.as_bytes().to_vec(), true, true)
+                    .await
+                    .map_err(|e| {
+                        ToolError::execution_failed(format!(
+                            "Cannot write {}: {}",
+                            resolved.display(),
+                            e
+                        ))
+                    })?;
 
                 undo_ops.push(UndoEntry::delete_created_file(
                     resolved.display().to_string(),
@@ -184,29 +212,30 @@ pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, 
                 summary.push(format!("A {}", resolved.display()));
             }
             PatchOperation::Delete { .. } => {
-                let original = if resolved.is_file() {
-                    tokio::fs::read(&resolved).await.ok()
+                let resolved_str = resolved.to_string_lossy().into_owned();
+                let read_max = u64::try_from(sandbox.config().max_read_bytes).unwrap_or(u64::MAX);
+                let original = if broker
+                    .stat(&resolved_str)
+                    .await?
+                    .is_some_and(|meta| !meta.is_dir)
+                {
+                    broker
+                        .read(&resolved_str, read_max)
+                        .await
+                        .ok()
+                        .map(|o| o.data)
                 } else {
                     None
                 };
 
-                if resolved.is_dir() {
-                    tokio::fs::remove_dir_all(&resolved).await.map_err(|e| {
-                        ToolError::execution_failed(format!(
-                            "Cannot delete {}: {}",
-                            resolved.display(),
-                            e
-                        ))
-                    })?;
-                } else {
-                    tokio::fs::remove_file(&resolved).await.map_err(|e| {
-                        ToolError::execution_failed(format!(
-                            "Cannot delete {}: {}",
-                            resolved.display(),
-                            e
-                        ))
-                    })?;
-                }
+                let is_dir = broker.stat(&resolved_str).await?.is_some_and(|m| m.is_dir);
+                broker.delete(&resolved_str, is_dir).await.map_err(|e| {
+                    ToolError::execution_failed(format!(
+                        "Cannot delete {}: {}",
+                        resolved.display(),
+                        e
+                    ))
+                })?;
 
                 undo_ops.push(UndoEntry::restore_file(
                     resolved.display().to_string(),

@@ -210,6 +210,57 @@ pub fn canonical_within(root: &Path, candidate: &Path) -> Option<PathBuf> {
     canonical.starts_with(&root).then_some(canonical)
 }
 
+/// Canonicalizes `path`, falling back to the nearest existing ancestor when
+/// the final components do not exist yet (write targets). Symlinks in the
+/// existing prefix are resolved; trailing components are appended verbatim.
+#[must_use]
+pub fn canonicalize_or_nearest(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(canonical) = current.canonicalize() {
+            let mut result = canonical;
+            for component in tail.iter().rev() {
+                result.push(component);
+            }
+            return result;
+        }
+        let Some(name) = current.file_name().map(std::ffi::OsStr::to_os_string) else {
+            return path.to_path_buf();
+        };
+        tail.push(name);
+        if !current.pop() {
+            return path.to_path_buf();
+        }
+    }
+}
+
+/// Resolves an absolute path against a plugin's grants.
+///
+/// The canonicalized target (or its nearest existing ancestor for
+/// not-yet-created write targets) must lie inside a grant whose access
+/// includes the requested operation. Symlink escapes are rejected by the
+/// canonicalization itself.
+pub fn resolve_grant_abs(
+    grants: &[FsGrant],
+    path: &Path,
+    need_write: bool,
+) -> Result<PathBuf, ManifestError> {
+    let canonical = canonicalize_or_nearest(path);
+    let access = if need_write { "write" } else { "read" };
+    let grant = grants.iter().find(|grant| {
+        canonical.starts_with(&grant.path) && if need_write { grant.write } else { grant.read }
+    });
+    let Some(_grant) = grant else {
+        return Err(ManifestError::MissingGrant {
+            plugin: "?".to_string(),
+            slot: path.to_string_lossy().into_owned(),
+            access,
+        });
+    };
+    Ok(canonical)
+}
+
 /// The manifest for a built-in plugin, shipped inside the host binary.
 ///
 /// These are trusted by construction (no signature needed). Third-party
@@ -649,5 +700,68 @@ mod tests {
         };
         let verified = store.verify(&signed, "myfs").expect("verify");
         assert_eq!(verified.publisher, "acme");
+    }
+
+    #[test]
+    fn resolve_grant_abs_matches_by_canonical_containment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("granted");
+        std::fs::create_dir_all(root.join("sub")).expect("mkdir");
+        std::fs::write(root.join("sub").join("notes.txt"), b"x").expect("write");
+
+        let grants = vec![FsGrant {
+            slot: "workspace".into(),
+            path: root.canonicalize().expect("canonical"),
+            read: true,
+            write: true,
+        }];
+        let inside = resolve_grant_abs(&grants, &root.join("sub").join("notes.txt"), false)
+            .expect("inside grant");
+        assert!(inside.ends_with("notes.txt"));
+        // A not-yet-created write target resolves through its existing
+        // ancestor (create flow).
+        let new_target = resolve_grant_abs(
+            &grants,
+            &root.join("sub").join("new").join("file.txt"),
+            true,
+        )
+        .expect("write target inside grant");
+        assert!(new_target.ends_with("file.txt"));
+        // Outside the grant: rejected for both read and write.
+        let outside = dir.path().join("other").join("secret.txt");
+        std::fs::create_dir_all(outside.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&outside, b"secret").expect("write");
+        assert!(resolve_grant_abs(&grants, &outside, false).is_err());
+        assert!(resolve_grant_abs(&grants, &outside, true).is_err());
+        // Read-only grant rejects writes.
+        let read_only = vec![FsGrant {
+            slot: "workspace".into(),
+            path: root.canonicalize().expect("canonical"),
+            read: true,
+            write: false,
+        }];
+        assert!(resolve_grant_abs(&read_only, &root.join("sub"), true).is_err());
+        assert!(resolve_grant_abs(&read_only, &root.join("sub"), false).is_ok());
+    }
+
+    #[test]
+    fn resolve_grant_abs_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("granted");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("link")).expect("symlink");
+
+        let grants = vec![FsGrant {
+            slot: "workspace".into(),
+            path: root.canonicalize().expect("canonical"),
+            read: true,
+            write: false,
+        }];
+        // The symlink canonicalizes to the outside directory: containment
+        // fails even though the link itself lives inside the grant.
+        assert!(resolve_grant_abs(&grants, &root.join("link"), false).is_err());
     }
 }

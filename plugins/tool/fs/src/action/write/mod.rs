@@ -5,15 +5,21 @@ use std::path::Path;
 
 pub async fn write(path: &Path, content: &str, sandbox: &Sandbox) -> Result<String, ToolError> {
     let resolved = sandbox.config().resolve_and_check(path, true)?;
+    let broker = sandbox.config().broker()?;
+    let resolved_str = resolved.to_string_lossy().into_owned();
 
     if let Some(parent) = resolved.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            ToolError::sandbox_violation(format!("Cannot create parent directory: {e}"))
-        })?;
+        broker
+            .create_dir(&parent.to_string_lossy(), true)
+            .await
+            .map_err(|e| {
+                ToolError::sandbox_violation(format!("Cannot create parent directory: {e}"))
+            })?;
     }
 
-    let original = if resolved.exists() {
-        Some(tokio::fs::read(&resolved).await.ok()).flatten()
+    let original = if broker.stat(&resolved_str).await?.is_some() {
+        let max = u64::try_from(sandbox.config().max_write_bytes).unwrap_or(u64::MAX);
+        Some(broker.read(&resolved_str, max).await?.data)
     } else {
         None
     };
@@ -40,7 +46,8 @@ pub async fn write(path: &Path, content: &str, sandbox: &Sandbox) -> Result<Stri
         )));
     }
 
-    tokio::fs::write(&resolved, output)
+    broker
+        .write(&resolved_str, output, true, true)
         .await
         .map_err(|e| ToolError::execution_failed(format!("Failed to write file: {e}")))?;
 

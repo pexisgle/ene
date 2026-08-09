@@ -9,16 +9,12 @@ use ene_plugin_proto::ToolError;
 
 pub const MAX_RESULTS: usize = 100;
 
-#[expect(
-    clippy::unused_async,
-    reason = "tool IPC handlers are async for uniform provider dispatch"
-)]
 pub async fn glob_search(
     pattern: &str,
     path: Option<&str>,
     sandbox: &SandboxConfig,
 ) -> Result<String, ToolError> {
-    search_glob::glob_search(pattern, path, sandbox)
+    search_glob::glob_search(pattern, path, sandbox).await
 }
 
 pub async fn grep_search(

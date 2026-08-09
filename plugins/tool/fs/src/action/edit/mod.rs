@@ -126,7 +126,13 @@ pub async fn edit(
         .await
         .map_err(|e| ToolError::execution_failed(format!("Lock error: {e}")))?;
 
-    let content = tokio::fs::read_to_string(&resolved)
+    let broker = sandbox.config().broker()?;
+    let resolved_str = resolved.to_string_lossy().into_owned();
+    let content = broker
+        .read_text(
+            &resolved_str,
+            u64::try_from(sandbox.config().max_write_bytes).unwrap_or(u64::MAX),
+        )
         .await
         .map_err(|e| ToolError::execution_failed(format!("Cannot read file: {e}")))?;
 
@@ -179,7 +185,8 @@ pub async fn edit(
         new_content
     };
 
-    tokio::fs::write(&resolved, final_content)
+    broker
+        .write(&resolved_str, final_content.into_bytes(), false, true)
         .await
         .map_err(|e| ToolError::execution_failed(format!("Failed to write file: {e}")))?;
 

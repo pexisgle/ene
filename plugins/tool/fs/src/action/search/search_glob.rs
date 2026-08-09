@@ -4,18 +4,24 @@ use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
 use std::path::Path;
 
-pub fn glob_search(
+pub async fn glob_search(
     pattern: &str,
     path: Option<&str>,
     sandbox: &SandboxConfig,
 ) -> Result<String, ToolError> {
+    let broker = sandbox.broker()?;
     let base = if let Some(p) = path {
         sandbox.resolve_and_check(Path::new(p), false)?
     } else {
         std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
     };
+    let base_str = base.to_string_lossy().into_owned();
 
-    if !base.is_dir() {
+    if broker
+        .stat(&base_str)
+        .await?
+        .is_none_or(|meta| !meta.is_dir)
+    {
         return Err(ToolError::execution_failed(format!(
             "glob path must be a directory: {}",
             base.display()
@@ -24,23 +30,16 @@ pub fn glob_search(
 
     let pattern_path = base.join(pattern);
     let glob_pattern = pattern_path.to_string_lossy().to_string();
+    let matcher = glob::Pattern::new(&glob_pattern)
+        .map_err(|e| ToolError::execution_failed(format!("Invalid glob pattern: {e}")))?;
 
-    let mut files = Vec::new();
-    match glob::glob(&glob_pattern) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                files.push(entry.to_string_lossy().to_string());
-                if files.len() >= MAX_RESULTS {
-                    break;
-                }
-            }
-        }
-        Err(e) => {
-            return Err(ToolError::execution_failed(format!(
-                "Invalid glob pattern: {e}"
-            )));
-        }
-    }
+    let mut candidates = Vec::new();
+    walk_all(&broker, &base, 0, &mut candidates).await;
+
+    let mut files: Vec<String> = candidates
+        .into_iter()
+        .filter(|candidate| matcher.matches(candidate))
+        .collect();
 
     files.sort();
 
@@ -99,6 +98,29 @@ impl FsGlobAction {
     async fn run(&self) -> Result<String, ToolError> {
         let sandbox = resolve_sandbox(&self.sandbox);
 
-        glob_search(&self.pattern, self.path.as_deref(), sandbox.config())
+        glob_search(&self.pattern, self.path.as_deref(), sandbox.config()).await
+    }
+}
+
+/// Recursively collects absolute paths under `dir` through the broker
+/// (symlink entries are never followed; depth is bounded).
+pub(super) async fn walk_all(
+    broker: &crate::utils::broker::FileBroker,
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    if depth >= 32 {
+        return;
+    }
+    let Ok(entries) = broker.list(&dir.to_string_lossy()).await else {
+        return;
+    };
+    for entry in entries {
+        if entry.is_dir {
+            Box::pin(walk_all(broker, Path::new(&entry.path), depth + 1, out)).await;
+        } else {
+            out.push(entry.path);
+        }
     }
 }

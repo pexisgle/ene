@@ -50,6 +50,26 @@ fn test_config() -> PluginConfig {
     config
 }
 
+fn test_config_with_fs_grant(root: &std::path::Path) -> PluginConfig {
+    let mut config = test_config();
+    // The `fs` built-in manifest declares a `workspace` slot with
+    // read+write permissions; bind it to a temp directory.
+    config.list.insert(
+        "fs".to_string(),
+        ene_plugin_host::PluginEntry {
+            enable: true,
+            fs_grants: vec![ene_plugin_host::config::FsGrantConfig {
+                slot: "workspace".to_string(),
+                path: root.to_string_lossy().into_owned(),
+                read: true,
+                write: true,
+            }],
+            ..Default::default()
+        },
+    );
+    config
+}
+
 async fn spawn_host_service(
     socket: &std::path::Path,
     config: &PluginConfig,
@@ -98,6 +118,12 @@ async fn open_network_session(socket: &std::path::Path) -> BrokerClient {
     BrokerClient::connect(socket, "web-token", HostServiceId::Network)
         .await
         .expect("open network session")
+}
+
+async fn open_file_session(socket: &std::path::Path, token: &str) -> BrokerClient {
+    BrokerClient::connect(socket, token, HostServiceId::File)
+        .await
+        .expect("open file session")
 }
 
 #[tokio::test]
@@ -276,4 +302,111 @@ fn sandbox_config_with_broker_fields_round_trips() {
         Some("/tmp/ene-host-service.sock")
     );
     assert_eq!(back.plugin_temp_dir.as_deref(), Some("/tmp/ene-plugin-tmp"));
+}
+
+#[tokio::test]
+async fn file_broker_serves_granted_absolute_paths_and_denies_others() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let grant = dir.path().join("granted");
+    std::fs::create_dir_all(&grant).expect("mkdir");
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, b"secret").expect("write");
+
+    let socket = dir.path().join("host-service-file.sock");
+    let config = test_config_with_fs_grant(&grant);
+    let db = Database::connect("sqlite::memory:").await.expect("db");
+    let hub = ene_plugin_host::BrokerHub::from_config(&config).expect("hub");
+    let hub = hub.with_approval_responder(Arc::new(AllowAllResponder));
+    let db_plugins = std::collections::HashMap::from([(
+        "fs-token".to_string(),
+        ene_store::host_service::DbPluginRegistration {
+            tool_name: "fs".to_string(),
+            prefix: "fs_".to_string(),
+            quota_bytes: None,
+        },
+    )]);
+    let server =
+        ene_store::host_service::HostServiceServer::new(db, socket.clone(), db_plugins)
+            .with_broker_handler(hub);
+    let server = tokio::spawn(async move {
+        if let Err(e) = server.run().await {
+            panic!("host service server failed: {e}");
+        }
+    });
+    wait_for_socket(&socket).await;
+
+    let mut file = open_file_session(&socket, "fs-token").await;
+    let target = grant.join("notes.txt");
+    let target_str = target.to_string_lossy().into_owned();
+    let response = file
+        .request(&BrokerRequest::FileWrite {
+            path: target_str.clone(),
+            data: b"hello broker".to_vec(),
+            create: true,
+            truncate: true,
+        })
+        .await
+        .expect("write inside grant");
+    assert!(matches!(response, BrokerResponse::FileWriteOk { .. }));
+
+    let response = file
+        .request(&BrokerRequest::FileRead {
+            path: target_str.clone(),
+            max_bytes: Some(1024),
+        })
+        .await
+        .expect("read inside grant");
+    match response {
+        BrokerResponse::FileReadOk { data, size, .. } => {
+            assert_eq!(data, b"hello broker");
+            assert_eq!(size, 12);
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    // Absolute path outside the grant is denied even with an allow-all
+    // responder (mandatory grant containment).
+    let response = file
+        .request(&BrokerRequest::FileRead {
+            path: outside.to_string_lossy().into_owned(),
+            max_bytes: Some(1024),
+        })
+        .await
+        .expect_err("outside grant must be denied");
+    assert!(
+        format!("{response}").contains("grant"),
+        "denial must cite the grant: {response}"
+    );
+
+    // Directory listing + recursive delete through the broker.
+    let sub = grant.join("sub").join("deep");
+    file.request(&BrokerRequest::FileCreateDir {
+        path: sub.to_string_lossy().into_owned(),
+        recursive: true,
+    })
+    .await
+    .expect("create dir");
+    let response = file
+        .request(&BrokerRequest::FileList {
+            path: grant.to_string_lossy().into_owned(),
+        })
+        .await
+        .expect("list");
+    assert!(
+        matches!(
+            response,
+            BrokerResponse::FileListOk { entries } if entries.iter().any(|e| e.name == "sub")
+        ),
+        "list must include the created subdirectory"
+    );
+    file.request(&BrokerRequest::FileDelete {
+        path: sub.to_string_lossy().into_owned(),
+        recursive: true,
+    })
+    .await
+    .expect("recursive delete");
+    assert!(!sub.exists());
+
+    drop(file);
+    server.abort();
 }

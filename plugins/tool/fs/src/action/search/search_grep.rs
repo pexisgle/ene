@@ -74,25 +74,17 @@ pub async fn grep_search(
         base.parent().unwrap_or(&base).to_path_buf()
     };
 
+    let broker = sandbox.broker()?;
     let mut per_file: Vec<(String, Vec<Entry>)> = Vec::new();
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut total_matches = 0usize;
     let mut exceeded = false;
 
-    let walker = walkdir::WalkDir::new(&search_dir)
-        .follow_links(false)
-        .max_depth(10);
+    let mut files = Vec::new();
+    crate::action::search::search_glob::walk_all(&broker, &search_dir, 0, &mut files).await;
 
-    'walk: for entry in walker {
-        let Ok(entry) = entry else {
-            continue;
-        };
-
-        if !entry.file_type().is_file() {
-            continue;
-        }
-
-        let file_path = entry.path();
+    'walk: for file_path_str in files {
+        let file_path = std::path::PathBuf::from(&file_path_str);
 
         if let Some(inc) = include {
             let file_name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -101,14 +93,14 @@ pub async fn grep_search(
             }
         }
 
-        let Ok(metadata) = std::fs::metadata(file_path) else {
+        let Ok(Some(metadata)) = broker.stat(&file_path_str).await else {
             continue;
         };
-        if metadata.len() > 1024 * 1024 {
+        if metadata.size > 1024 * 1024 {
             continue;
         }
 
-        let Ok(content) = std::fs::read_to_string(file_path) else {
+        let Ok(content) = broker.read_text(&file_path_str, 1024 * 1024).await else {
             continue;
         };
 
