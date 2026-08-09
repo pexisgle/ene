@@ -1366,6 +1366,7 @@ struct FetchBody {
 }
 
 /// One validated fetch hop ready to execute.
+#[derive(Debug)]
 struct FetchHop {
     client: reqwest::Client,
     request: reqwest::Request,
@@ -1989,6 +1990,7 @@ impl BrokerHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_approval::ManifestPermission;
 
     #[test]
     fn ssrf_blocks_private_and_metadata_addresses() {
@@ -2018,6 +2020,133 @@ mod tests {
             let parsed: std::net::IpAddr = ip.parse().expect("ip");
             assert!(policy.is_allowed(parsed), "{ip} must be allowed");
         }
+    }
+
+    /// A `credential` key on a fetch request makes the host inject
+    /// `Authorization: Bearer <value>` from its own state — the plugin only
+    /// names the key. Uses a numeric public IP so no DNS/network is needed
+    /// to build the hop.
+    #[tokio::test]
+    async fn credentialed_fetch_injects_bearer_from_host_state() {
+        let mut policy = ApprovalPolicy::default();
+        policy
+            .categories
+            .insert(ApprovalCategory::DynamicHttps, ApprovalMode::Allow);
+        policy
+            .categories
+            .insert(ApprovalCategory::CredentialUse, ApprovalMode::Allow);
+        let config = PluginConfig {
+            enabled: true,
+            approval: policy,
+            list: HashMap::from([("web".to_string(), PluginEntry::default())]),
+            ..PluginConfig::default()
+        };
+        let mut full = ene_config::EneConfig::default();
+        full.set_section(&config).expect("set plugin section");
+        let mut hub = BrokerHub::from_config(&full).expect("hub");
+        let mut manifest = crate::manifest::builtin_manifest("web").expect("web manifest");
+        manifest.permissions = vec![
+            ManifestPermission {
+                category: ApprovalCategory::DynamicHttps,
+                max: ApprovalMode::Allow,
+            },
+            ManifestPermission {
+                category: ApprovalCategory::CredentialUse,
+                max: ApprovalMode::Allow,
+            },
+        ];
+        let state = PluginState {
+            manifest: Some(manifest),
+            digest: None,
+            fs_grants: Vec::new(),
+            credentials: BTreeMap::from([("api_key".to_string(), "sk-test-123".to_string())]),
+            processes: Mutex::new(HashMap::new()),
+        };
+        Arc::get_mut(&mut hub)
+            .expect("sole hub owner")
+            .plugins
+            .insert("web".to_string(), state);
+
+        let hop = hub
+            .build_fetch_hop(
+                "web",
+                hub.plugins.get("web").expect("state"),
+                HttpMethod::Get,
+                "https://1.1.1.1/",
+                &[],
+                Some("api_key"),
+                None,
+            )
+            .await
+            .expect("hop");
+        let authorization = hop
+            .request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("authorization header");
+        assert_eq!(authorization, "Bearer sk-test-123");
+    }
+
+    /// A named credential the host does not hold fails the request before
+    /// any network work.
+    #[tokio::test]
+    async fn credentialed_fetch_rejects_unknown_key() {
+        let mut policy = ApprovalPolicy::default();
+        policy
+            .categories
+            .insert(ApprovalCategory::DynamicHttps, ApprovalMode::Allow);
+        policy
+            .categories
+            .insert(ApprovalCategory::CredentialUse, ApprovalMode::Allow);
+        let config = PluginConfig {
+            enabled: true,
+            approval: policy,
+            list: HashMap::from([("web".to_string(), PluginEntry::default())]),
+            ..PluginConfig::default()
+        };
+        let mut full = ene_config::EneConfig::default();
+        full.set_section(&config).expect("set plugin section");
+        let mut hub = BrokerHub::from_config(&full).expect("hub");
+        let mut manifest = crate::manifest::builtin_manifest("web").expect("web manifest");
+        manifest.permissions = vec![
+            ManifestPermission {
+                category: ApprovalCategory::DynamicHttps,
+                max: ApprovalMode::Allow,
+            },
+            ManifestPermission {
+                category: ApprovalCategory::CredentialUse,
+                max: ApprovalMode::Allow,
+            },
+        ];
+        let state = PluginState {
+            manifest: Some(manifest),
+            digest: None,
+            fs_grants: Vec::new(),
+            credentials: BTreeMap::new(),
+            processes: Mutex::new(HashMap::new()),
+        };
+        Arc::get_mut(&mut hub)
+            .expect("sole hub owner")
+            .plugins
+            .insert("web".to_string(), state);
+
+        let err = hub
+            .build_fetch_hop(
+                "web",
+                hub.plugins.get("web").expect("state"),
+                HttpMethod::Get,
+                "https://1.1.1.1/",
+                &[],
+                Some("api_key"),
+                None,
+            )
+            .await
+            .expect_err("missing credential must fail");
+        assert!(
+            err.message.contains("credential 'api_key' not found"),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

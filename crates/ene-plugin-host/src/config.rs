@@ -238,8 +238,10 @@ pub struct AutoSaveConfig {
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // Pure computation plugins carry no filesystem, network, or process
     // needs, so the OS sandbox is safe to enforce for them from day one.
-    // Remaining built-ins stay unsandboxed until their broker migration
-    // lands (see `docs/concepts/sandbox-and-approvals.md`).
+    // Broker-migrated built-ins (`web`, `fs`, `openai`) are sandboxed too:
+    // every OS-touching operation they perform goes through the host
+    // (see `docs/concepts/sandbox-and-approvals.md`). Remaining built-ins
+    // stay unsandboxed until their broker migration lands.
     let sandboxed_pure = PluginEntry {
         sandbox: Some(SandboxEntryConfig {
             enabled: true,
@@ -257,6 +259,7 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
         "geo",
         "git",
         "homeassistant",
+        "openai",
         "random",
         "utility",
         "web",
@@ -265,7 +268,7 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     .map(|name| (name.to_string(), PluginEntry::default()))
     .collect();
 
-    for name in ["calc", "counter", "random"] {
+    for name in ["calc", "counter", "random", "web", "fs"] {
         list.insert(name.to_string(), sandboxed_pure.clone());
     }
 
@@ -279,13 +282,18 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
         },
     );
 
-    // The OpenAI-compatible provider plugin needs OPENAI_API_KEY and
-    // OPENAI_BASE_URL forwarded from the host environment, mirroring the
-    // anthropic entry.
+    // The OpenAI-compatible provider plugin authenticates through broker
+    // credential injection (the host resolves `ai.providers.<kind>.api_key`
+    // and injects it at request time), so only OPENAI_BASE_URL is forwarded
+    // for the plugin-side base-URL fallback.
     list.insert(
         "openai".to_string(),
         PluginEntry {
-            env_passthrough: vec!["OPENAI_API_KEY".to_string(), "OPENAI_BASE_URL".to_string()],
+            sandbox: Some(SandboxEntryConfig {
+                enabled: true,
+                ..SandboxEntryConfig::default()
+            }),
+            env_passthrough: vec!["OPENAI_BASE_URL".to_string()],
             ..PluginEntry::default()
         },
     );

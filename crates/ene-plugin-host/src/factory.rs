@@ -325,12 +325,11 @@ mod tests {
             config.get("api_key").is_none(),
             "broker-credential kinds must not receive api_key, got {config:?}"
         );
-        assert_eq!(
+        assert!(
             is_broker_credential_kind("openai"),
-            true,
             "openai must be treated as a broker-credential kind"
         );
-        assert_eq!(is_broker_credential_kind("anthropic"), false);
+        assert!(!is_broker_credential_kind("anthropic"));
     }
 
     /// The decision task's `thinking_disabled` flag is forwarded into the

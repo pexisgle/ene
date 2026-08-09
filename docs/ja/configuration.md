@@ -106,7 +106,9 @@ Git 管理されません。
   （`openai`・`openai_compatible`・`anthropic`・`local` など）。`api_key` は
   `source: "env"`（指定した環境変数から読む）・`source: "inline"`・
   `source: "file"` に対応。プロバイダー *kind* 名は組み込みセットに対して
-  検証され、タイポ候補が提案されます。
+  検証され、タイポ候補が提案されます。Broker 移行済みの `openai` プラグインでは
+  キーはプラグインプロセスに渡らず、ホストがここで解決して各 API リクエストへ
+  注入します（[サンドボックス・Broker・承認](concepts/sandbox-and-approvals.md)参照）。
 - **`ai.tasks`** — パイプラインの各タスクにどのプロバイダー+モデルを使うか:
   `chat`（会話）、`classifier`（LLM 感情分類）、`embedding`（メモリ/ツール
   ベクトル）、`proactive`（プロアクティブ発話の判断）。`dimensions` は

@@ -83,6 +83,53 @@ impl StreamResponse {
     }
 }
 
+/// Consumes streamed broker events as they arrive.
+///
+/// The methods are async so a sink can forward chunks with backpressure;
+/// each returned future borrows `&mut self` only for its own execution
+/// (RPITIT), so a sink can hold channels and other owned state without
+/// lifetime gymnastics.
+pub trait StreamSink {
+    /// `StreamStart`: response status and headers, delivered before any
+    /// body chunk.
+    fn start(
+        &mut self,
+        status: u16,
+        headers: Vec<(String, String)>,
+    ) -> impl std::future::Future<Output = Result<(), BrokerClientError>> + Send + '_;
+
+    /// One `StreamChunk` body fragment.
+    fn chunk(
+        &mut self,
+        data: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<(), BrokerClientError>> + Send + '_;
+}
+
+/// [`StreamSink`] that buffers a whole streamed response.
+#[derive(Default)]
+struct Collector {
+    status: Option<u16>,
+    headers: Vec<(String, String)>,
+    chunks: Vec<Vec<u8>>,
+}
+
+impl StreamSink for Collector {
+    async fn start(
+        &mut self,
+        status: u16,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), BrokerClientError> {
+        self.status = Some(status);
+        self.headers = headers;
+        Ok(())
+    }
+
+    async fn chunk(&mut self, data: Vec<u8>) -> Result<(), BrokerClientError> {
+        self.chunks.push(data);
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for BrokerClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrokerClient").finish_non_exhaustive()
@@ -137,42 +184,38 @@ impl BrokerClient {
         &mut self,
         request: &BrokerRequest,
     ) -> Result<StreamResponse, BrokerClientError> {
-        let mut chunks = Vec::new();
-        let (status, headers) = self
-            .stream_chunks(request, |chunk| {
-                chunks.push(chunk.to_vec());
-                Ok(())
-            })
-            .await?;
+        let mut collector = Collector::default();
+        self.stream_events(request, &mut collector).await?;
         Ok(StreamResponse {
-            status,
-            headers,
-            chunks,
+            status: collector.status.ok_or_else(|| {
+                BrokerClientError::Request("stream ended before StreamStart".to_string())
+            })?,
+            headers: collector.headers,
+            chunks: collector.chunks,
         })
     }
 
-    /// Sends a streaming request and invokes `on_chunk` for every body
-    /// chunk as it arrives; returns the response status and headers.
-    pub async fn stream_chunks(
+    /// Sends a streaming request and feeds `StreamStart` / `StreamChunk`
+    /// frames to `sink` as they arrive.
+    ///
+    /// The sink's futures are awaited between socket reads, so a slow sink
+    /// applies backpressure to the channel. Returning `Err` from a sink
+    /// method aborts the exchange.
+    pub async fn stream_events<S: StreamSink + ?Sized>(
         &mut self,
         request: &BrokerRequest,
-        on_chunk: impl FnMut(&[u8]) -> Result<(), BrokerClientError>,
-    ) -> Result<(u16, Vec<(String, String)>), BrokerClientError> {
+        sink: &mut S,
+    ) -> Result<(), BrokerClientError> {
         write_framed_json(&mut self.stream, request).await?;
-        let mut status = None;
-        let mut headers = Vec::new();
-        let mut on_chunk = on_chunk;
         loop {
             match read_framed_json(&mut self.stream).await? {
-                Some(BrokerResponse::StreamStart {
-                    status: frame_status,
-                    headers: frame_headers,
-                }) => {
-                    status = Some(frame_status);
-                    headers = frame_headers;
+                Some(BrokerResponse::StreamStart { status, headers }) => {
+                    sink.start(status, headers).await?;
                 }
-                Some(BrokerResponse::StreamChunk { data }) => on_chunk(&data)?,
-                Some(BrokerResponse::StreamEnd) => break,
+                Some(BrokerResponse::StreamChunk { data }) => {
+                    sink.chunk(data).await?;
+                }
+                Some(BrokerResponse::StreamEnd) => return Ok(()),
                 Some(BrokerResponse::Error { code, message }) => {
                     return Err(BrokerClientError::Denied { code, message });
                 }
@@ -184,12 +227,6 @@ impl BrokerClient {
                 None => return Err(BrokerClientError::Closed),
             }
         }
-        Ok((
-            status.ok_or_else(|| {
-                BrokerClientError::Request("stream ended before StreamStart".to_string())
-            })?,
-            headers,
-        ))
     }
 
     /// Shuts the session down cleanly.
@@ -286,62 +323,6 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.chunks.len(), 2);
         assert_eq!(response.body(), b"data: hello\n\ndata: world\n\n");
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn stream_chunks_invokes_callback_per_chunk() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let socket = dir.path().join("stream-callback.sock");
-        let server = tokio::spawn(run_stream_mock(
-            socket.clone(),
-            vec![
-                BrokerResponse::StreamStart {
-                    status: 206,
-                    headers: vec![("content-range".to_string(), "bytes 0-3/8".to_string())],
-                },
-                BrokerResponse::StreamChunk {
-                    data: b"part1".to_vec(),
-                },
-                BrokerResponse::StreamChunk {
-                    data: b"part2".to_vec(),
-                },
-                BrokerResponse::StreamEnd,
-            ],
-        ));
-        for _ in 0..50 {
-            if socket.exists() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        let mut client = BrokerClient::connect(&socket, "tok", HostServiceId::Network)
-            .await
-            .expect("connect");
-        let mut seen = Vec::new();
-        let (status, headers) = client
-            .stream_chunks(
-                &BrokerRequest::NetworkFetchStream {
-                    method: HttpMethod::Get,
-                    url: "https://example.com/stream".to_string(),
-                    headers: vec![],
-                    credential: None,
-                    body: None,
-                    max_bytes: Some(1024),
-                },
-                |chunk| {
-                    seen.push(chunk.to_vec());
-                    Ok(())
-                },
-            )
-            .await
-            .expect("stream");
-        assert_eq!(status, 206);
-        assert_eq!(
-            headers,
-            vec![("content-range".to_string(), "bytes 0-3/8".to_string())]
-        );
-        assert_eq!(seen, vec![b"part1".to_vec(), b"part2".to_vec()]);
         server.abort();
     }
 

@@ -108,7 +108,10 @@ Unknown top-level keys are preserved across save (round-trip safe).
   (`openai`, `openai_compatible`, `anthropic`, `local`, …); `api_key`
   supports `source: "env"` (read from the named environment variable),
   `source: "inline"`, or `source: "file"`. Provider *kind* names are
-  validated against the built-in set, with typo suggestions.
+  validated against the built-in set, with typo suggestions. For the
+  broker-migrated `openai` plugin the key never reaches the plugin process:
+  the host resolves it here and injects it into each API request
+  (see [Sandbox, broker & approvals](concepts/sandbox-and-approvals.md)).
 - **`ai.tasks`** — which provider+model serves which pipeline task:
   `chat` (conversation), `classifier` (LLM emotion classification),
   `embedding` (memory/tool vectors), `proactive` (proactive speech

@@ -5,9 +5,12 @@
 //! Exposes the `OpenAI` Chat Completions and Embeddings APIs as provider
 //! traits over the plugin IPC protocol, supporting SSE streaming, tool use,
 //! vision inputs, structured output, and batch embeddings. Any
-//! OpenAI-compatible endpoint (`OpenAI`, `OpenRouter`, local servers) can be
-//! targeted via the `base_url` configuration.
+//! public OpenAI-compatible endpoint (`OpenAI`, `OpenRouter`) can be
+//! targeted via the `base_url` configuration; all traffic is mediated by
+//! the host's network broker (SSRF guard, origin approval, credential
+//! injection), so loopback/private endpoints are not reachable.
 
+mod broker;
 mod convert;
 mod plugin;
 
