@@ -362,8 +362,20 @@ impl HostServiceServer {
             let Some(request) = read_framed_json(&mut stream).await? else {
                 return Ok(());
             };
-            let response = handler.handle(&reg.tool_name, request).await;
-            write_framed_json(&mut stream, &response).await?;
+            if matches!(
+                request,
+                ene_plugin_proto::BrokerRequest::NetworkFetchStream { .. }
+            ) {
+                let mut sink = StreamSink {
+                    stream: &mut stream,
+                };
+                handler
+                    .handle_stream(&reg.tool_name, request, &mut sink)
+                    .await?;
+            } else {
+                let response = handler.handle(&reg.tool_name, request).await;
+                write_framed_json(&mut stream, &response).await?;
+            }
         }
     }
 
@@ -384,6 +396,18 @@ impl HostServiceServer {
         } else {
             debug!(attempts, "{message}");
         }
+    }
+}
+
+/// Frame sink that writes streaming broker responses to the session socket.
+struct StreamSink<'a> {
+    stream: &'a mut ene_plugin_proto::transport::IpcStream,
+}
+
+#[async_trait::async_trait]
+impl ene_plugin_proto::BrokerSink for StreamSink<'_> {
+    async fn write(&mut self, response: &ene_plugin_proto::BrokerResponse) -> std::io::Result<()> {
+        write_framed_json(self.stream, response).await
     }
 }
 

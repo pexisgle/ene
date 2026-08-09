@@ -64,8 +64,8 @@ pub mod broker;
 /// Plugin capability declarations.
 pub mod capabilities;
 pub use broker::{
-    ArtifactInfo, BrokerErrorCode, BrokerHandler, BrokerRequest, BrokerResponse, ConflictMode,
-    FileEntry, HttpMethod, SharedBrokerHandler, WireArtifactKind,
+    ArtifactInfo, BrokerErrorCode, BrokerHandler, BrokerRequest, BrokerResponse, BrokerSink,
+    ConflictMode, FileEntry, HttpMethod, SharedBrokerHandler, WireArtifactKind,
 };
 pub use host_service::{read_framed_json, write_framed_json};
 /// Capability-call wire types and the host-service `capability` passenger.

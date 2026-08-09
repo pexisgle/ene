@@ -59,6 +59,30 @@ pub struct BrokerClient {
     stream: IpcStream,
 }
 
+/// A collected streamed response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamResponse {
+    /// HTTP status.
+    pub status: u16,
+    /// Response headers.
+    pub headers: Vec<(String, String)>,
+    /// All body chunks in order.
+    pub chunks: Vec<Vec<u8>>,
+}
+
+impl StreamResponse {
+    /// Concatenated body bytes.
+    #[must_use]
+    pub fn body(&self) -> Vec<u8> {
+        let len = self.chunks.iter().map(Vec::len).sum();
+        let mut body = Vec::with_capacity(len);
+        for chunk in &self.chunks {
+            body.extend_from_slice(chunk);
+        }
+        body
+    }
+}
+
 impl std::fmt::Debug for BrokerClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrokerClient").finish_non_exhaustive()
@@ -107,6 +131,47 @@ impl BrokerClient {
         }
     }
 
+    /// Sends a streaming request and collects `StreamStart` / `StreamChunk` /
+    /// `StreamEnd` frames until the terminal frame.
+    pub async fn collect_stream(
+        &mut self,
+        request: &BrokerRequest,
+    ) -> Result<StreamResponse, BrokerClientError> {
+        write_framed_json(&mut self.stream, request).await?;
+        let mut status = None;
+        let mut headers = Vec::new();
+        let mut chunks = Vec::new();
+        loop {
+            match read_framed_json(&mut self.stream).await? {
+                Some(BrokerResponse::StreamStart {
+                    status: frame_status,
+                    headers: frame_headers,
+                }) => {
+                    status = Some(frame_status);
+                    headers = frame_headers;
+                }
+                Some(BrokerResponse::StreamChunk { data }) => chunks.push(data),
+                Some(BrokerResponse::StreamEnd) => break,
+                Some(BrokerResponse::Error { code, message }) => {
+                    return Err(BrokerClientError::Denied { code, message });
+                }
+                Some(other) => {
+                    return Err(BrokerClientError::Request(format!(
+                        "unexpected streaming frame: {other:?}"
+                    )));
+                }
+                None => return Err(BrokerClientError::Closed),
+            }
+        }
+        Ok(StreamResponse {
+            status: status.ok_or_else(|| {
+                BrokerClientError::Request("stream ended before StreamStart".to_string())
+            })?,
+            headers,
+            chunks,
+        })
+    }
+
     /// Shuts the session down cleanly.
     pub async fn shutdown(&mut self) -> std::io::Result<()> {
         self.stream.shutdown().await
@@ -117,3 +182,123 @@ impl BrokerClient {
 pub use ene_plugin_proto::{
     ArtifactInfo, BrokerErrorCode, ConflictMode, FileEntry, HttpMethod, WireArtifactKind,
 };
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "unit tests use expect for assertions")]
+mod tests {
+    use super::*;
+    use ene_plugin_proto::{HostServiceRequest, HostServiceResponse, write_host_service_response};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::UnixListener;
+
+    /// Mock host-service server that answers one `NetworkFetchStream` with
+    /// the given frames.
+    async fn run_stream_mock(socket: std::path::PathBuf, frames: Vec<BrokerResponse>) {
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let open: HostServiceRequest = read_framed_json(&mut stream)
+            .await
+            .expect("open")
+            .expect("frame");
+        assert!(matches!(
+            open,
+            HostServiceRequest::Open {
+                service: HostServiceId::Network,
+                ..
+            }
+        ));
+        write_host_service_response(&mut stream, &HostServiceResponse::OpenAck)
+            .await
+            .expect("ack");
+        // Consume the streaming request before answering, mirroring the
+        // host session loop (request/response framing per exchange).
+        let request: BrokerRequest = read_framed_json(&mut stream)
+            .await
+            .expect("request")
+            .expect("frame");
+        assert!(matches!(request, BrokerRequest::NetworkFetchStream { .. }));
+        for frame in frames {
+            write_framed_json(&mut stream, &frame).await.expect("frame");
+        }
+        drop(stream.shutdown().await);
+    }
+
+    #[tokio::test]
+    async fn collect_stream_reassembles_chunks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("stream.sock");
+        let server = tokio::spawn(run_stream_mock(
+            socket.clone(),
+            vec![
+                BrokerResponse::StreamStart {
+                    status: 200,
+                    headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+                },
+                BrokerResponse::StreamChunk {
+                    data: b"data: hello\n\n".to_vec(),
+                },
+                BrokerResponse::StreamChunk {
+                    data: b"data: world\n\n".to_vec(),
+                },
+                BrokerResponse::StreamEnd,
+            ],
+        ));
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let mut client = BrokerClient::connect(&socket, "tok", HostServiceId::Network)
+            .await
+            .expect("connect");
+        let response = client
+            .collect_stream(&BrokerRequest::NetworkFetchStream {
+                method: HttpMethod::Get,
+                url: "https://example.com/stream".to_string(),
+                headers: vec![],
+                body: None,
+                max_bytes: Some(1024),
+            })
+            .await
+            .expect("stream");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.chunks.len(), 2);
+        assert_eq!(response.body(), b"data: hello\n\ndata: world\n\n");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn collect_stream_surfaces_host_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("stream-error.sock");
+        let server = tokio::spawn(run_stream_mock(
+            socket.clone(),
+            vec![BrokerResponse::error(
+                BrokerErrorCode::Denied,
+                "denied by policy",
+            )],
+        ));
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let mut client = BrokerClient::connect(&socket, "tok", HostServiceId::Network)
+            .await
+            .expect("connect");
+        let err = client
+            .collect_stream(&BrokerRequest::NetworkFetchStream {
+                method: HttpMethod::Get,
+                url: "https://example.com/stream".to_string(),
+                headers: vec![],
+                body: None,
+                max_bytes: None,
+            })
+            .await
+            .expect_err("denied");
+        assert!(matches!(err, BrokerClientError::Denied { .. }));
+        server.abort();
+    }
+}

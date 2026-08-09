@@ -96,7 +96,11 @@ struct ArtifactServices {
     verifier: CatalogVerifier,
     downloader: Downloader,
     config: ArtifactConfig,
-    catalog: Mutex<Option<ene_artifact::CatalogMetadata>>,
+    /// Cached verified catalog plus its fetch timestamp (Unix ms). The
+    /// cache expires after `ArtifactConfig::refresh_hours` so a revoked or
+    /// rolled-back artifact cannot stay installable for the process
+    /// lifetime.
+    catalog: Mutex<Option<(ene_artifact::CatalogMetadata, u64)>>,
 }
 
 struct DownloadServices {
@@ -294,6 +298,46 @@ impl BrokerHandler for BrokerHub {
             Err(e) => BrokerResponse::error(e.code, e.message),
         }
     }
+
+    async fn handle_stream(
+        &self,
+        plugin: &str,
+        request: BrokerRequest,
+        sink: &mut (dyn ene_plugin_proto::BrokerSink + Send),
+    ) -> std::io::Result<()> {
+        let result = match request {
+            BrokerRequest::NetworkFetchStream {
+                method,
+                url,
+                headers,
+                body,
+                max_bytes,
+            } => {
+                let Some(state) = self.plugins.get(plugin) else {
+                    return sink
+                        .write(&BrokerResponse::error(
+                            BrokerErrorCode::NotDeclared,
+                            format!("plugin '{plugin}' has no verified manifest"),
+                        ))
+                        .await;
+                };
+                if let Err(e) = Self::require_service(state, "network") {
+                    return sink.write(&BrokerResponse::error(e.code, e.message)).await;
+                }
+                let cap = max_bytes.unwrap_or(self.download.config.max_bytes);
+                self.fetch_stream(plugin, state, method, &url, &headers, body, cap, sink)
+                    .await
+            }
+            other => {
+                let response = self.handle(plugin, other).await;
+                return sink.write(&response).await;
+            }
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) => sink.write(&BrokerResponse::error(e.code, e.message)).await,
+        }
+    }
 }
 
 impl BrokerHub {
@@ -350,6 +394,14 @@ impl BrokerHub {
                 self.network_fetch_to_temp(plugin, state, &url, max_bytes)
                     .await
             }
+            BrokerRequest::NetworkFetchStream { .. } => {
+                // The session loop routes streaming requests to
+                // `handle_stream`; this arm is unreachable through `handle`.
+                Err(BrokerError::new(
+                    BrokerErrorCode::Internal,
+                    "streaming requests must use the streaming handler",
+                ))
+            }
             // ── Process broker ──────────────────────────────────────────
             BrokerRequest::ProcessSpawn {
                 argv,
@@ -386,6 +438,7 @@ impl BrokerHub {
                 std::future::ready(self.artifact_rollback(&artifact_id)).await
             }
             BrokerRequest::ArtifactList => std::future::ready(self.artifact_list()).await,
+            BrokerRequest::ArtifactRefresh => self.artifact_refresh().await,
             // ── Platform broker ─────────────────────────────────────────
             BrokerRequest::PlatformNow => Ok(BrokerResponse::PlatformNowOk {
                 unix_ms: std::time::SystemTime::now()
@@ -517,6 +570,12 @@ impl BrokerHub {
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis().try_into().unwrap_or(u64::MAX))
+}
+
 fn service_of(request: &BrokerRequest) -> &'static str {
     match request {
         BrokerRequest::FileRead { .. }
@@ -527,13 +586,16 @@ fn service_of(request: &BrokerRequest) -> &'static str {
         | BrokerRequest::FileStat { .. }
         | BrokerRequest::FileMove { .. }
         | BrokerRequest::FileSaveDownload { .. } => "file",
-        BrokerRequest::NetworkFetch { .. } | BrokerRequest::NetworkFetchToTemp { .. } => "network",
+        BrokerRequest::NetworkFetch { .. }
+        | BrokerRequest::NetworkFetchToTemp { .. }
+        | BrokerRequest::NetworkFetchStream { .. } => "network",
         BrokerRequest::ProcessSpawn { .. } | BrokerRequest::ProcessSignal { .. } => "process",
         BrokerRequest::CredentialGet { .. } | BrokerRequest::CredentialListKeys => "credential",
         BrokerRequest::ArtifactResolve { .. }
         | BrokerRequest::ArtifactInstall { .. }
         | BrokerRequest::ArtifactRollback { .. }
-        | BrokerRequest::ArtifactList => "artifact",
+        | BrokerRequest::ArtifactList
+        | BrokerRequest::ArtifactRefresh => "artifact",
         BrokerRequest::PlatformNow
         | BrokerRequest::PlatformLocale
         | BrokerRequest::PlatformOpenExternal { .. } => "platform",
@@ -937,6 +999,156 @@ impl BrokerHub {
         })
     }
 
+    /// Builds one validated fetch hop: origin approval, SSRF check with
+    /// address pinning, and the request itself.
+    async fn build_fetch_hop(
+        &self,
+        plugin: &str,
+        state: &PluginState,
+        method: HttpMethod,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&Vec<u8>>,
+    ) -> Result<FetchHop, BrokerError> {
+        let parsed = url::Url::parse(url)
+            .map_err(|e| BrokerError::new(BrokerErrorCode::InvalidTarget, e.to_string()))?;
+        let scheme = parsed.scheme().to_string();
+        if scheme != "https" && scheme != "http" {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidTarget,
+                "only https (or approved http) URLs are supported",
+            ));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| BrokerError::new(BrokerErrorCode::InvalidTarget, "URL has no host"))?;
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        let origin = format!("{scheme}://{host}:{port}");
+        let category = Self::origin_category(state, &origin, &scheme)?;
+        self.approve(plugin, state, category, &origin).await?;
+        let ssrf = SsrfPolicy::production();
+        let ips = ssrf
+            .resolve_allowed(host)
+            .await
+            .map_err(|e| BrokerError::denied(format!("SSRF guard: {e}")))?;
+        let Some(ip) = ips.first() else {
+            return Err(BrokerError::denied("SSRF guard: no allowed address"));
+        };
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(host, std::net::SocketAddr::new(*ip, port))
+            .timeout(std::time::Duration::from_mins(2))
+            .build()
+            .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
+        let mut request = match method {
+            HttpMethod::Get => client.get(url),
+            HttpMethod::Post => client.post(url),
+            HttpMethod::Put => client.put(url),
+            HttpMethod::Delete => client.delete(url),
+            HttpMethod::Head => client.head(url),
+        };
+        if let Some(body) = body {
+            request = request.body(body.clone());
+        }
+        for (key, value) in headers {
+            if is_forbidden_request_header(key) {
+                continue;
+            }
+            request = request.header(key, value);
+        }
+        let request = request
+            .build()
+            .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
+        Ok(FetchHop { client, request })
+    }
+
+    /// Streams a fetch response as broker frames (protocol v8 streaming).
+    async fn fetch_stream(
+        &self,
+        plugin: &str,
+        state: &PluginState,
+        method: HttpMethod,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+        max_bytes: u64,
+        sink: &mut (dyn ene_plugin_proto::BrokerSink + Send),
+    ) -> Result<(), BrokerError> {
+        let mut current = url.to_string();
+        for _hop in 0..=self.download.config.max_redirects {
+            let hop = self
+                .build_fetch_hop(plugin, state, method, &current, headers, body.as_ref())
+                .await?;
+            let response = hop
+                .client
+                .execute(hop.request)
+                .await
+                .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
+            if response.status().is_redirection() {
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| {
+                        BrokerError::new(
+                            BrokerErrorCode::InvalidTarget,
+                            "redirect without Location",
+                        )
+                    })?;
+                current = url::Url::parse(&current)
+                    .and_then(|base| base.join(location))
+                    .map_err(|e| BrokerError::new(BrokerErrorCode::InvalidTarget, e.to_string()))?
+                    .to_string();
+                continue;
+            }
+            let response_headers = response
+                .headers()
+                .iter()
+                .filter(|(key, _)| !is_forbidden_response_header(key.as_str()))
+                .map(|(key, value)| {
+                    (
+                        key.as_str().to_string(),
+                        value.to_str().unwrap_or("?").to_string(),
+                    )
+                })
+                .collect();
+            let status = response.status().as_u16();
+            sink.write(&BrokerResponse::StreamStart {
+                status,
+                headers: response_headers,
+            })
+            .await
+            .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
+            let mut total = 0_u64;
+            let mut stream = response.bytes_stream();
+            use tokio_stream::StreamExt;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk
+                    .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
+                total = total.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                if total > max_bytes {
+                    return Err(BrokerError::new(
+                        BrokerErrorCode::SizeExceeded,
+                        format!("download exceeds {max_bytes} bytes"),
+                    ));
+                }
+                sink.write(&BrokerResponse::StreamChunk {
+                    data: chunk.to_vec(),
+                })
+                .await
+                .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
+            }
+            sink.write(&BrokerResponse::StreamEnd)
+                .await
+                .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
+            return Ok(());
+        }
+        Err(BrokerError::new(
+            BrokerErrorCode::InvalidTarget,
+            "too many redirects",
+        ))
+    }
+
     async fn fetch_loop(
         &self,
         plugin: &str,
@@ -949,55 +1161,13 @@ impl BrokerHub {
         temp_path: Option<&Path>,
     ) -> Result<FetchBody, BrokerError> {
         let mut current = url.to_string();
-        let ssrf = SsrfPolicy::production();
         for _hop in 0..=self.download.config.max_redirects {
-            let parsed = url::Url::parse(&current)
-                .map_err(|e| BrokerError::new(BrokerErrorCode::InvalidTarget, e.to_string()))?;
-            let scheme = parsed.scheme().to_string();
-            if scheme != "https" && scheme != "http" {
-                return Err(BrokerError::new(
-                    BrokerErrorCode::InvalidTarget,
-                    "only https (or approved http) URLs are supported",
-                ));
-            }
-            let host = parsed.host_str().ok_or_else(|| {
-                BrokerError::new(BrokerErrorCode::InvalidTarget, "URL has no host")
-            })?;
-            let port = parsed.port_or_known_default().unwrap_or(443);
-            let origin = format!("{scheme}://{host}:{port}");
-            let category = Self::origin_category(state, &origin, &scheme)?;
-            self.approve(plugin, state, category, &origin).await?;
-            let ips = ssrf
-                .resolve_allowed(host)
-                .await
-                .map_err(|e| BrokerError::denied(format!("SSRF guard: {e}")))?;
-            let Some(ip) = ips.first() else {
-                return Err(BrokerError::denied("SSRF guard: no allowed address"));
-            };
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .resolve(host, std::net::SocketAddr::new(*ip, port))
-                .timeout(std::time::Duration::from_mins(2))
-                .build()
-                .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
-            let mut request = match method {
-                HttpMethod::Get => client.get(&current),
-                HttpMethod::Post => client.post(&current),
-                HttpMethod::Put => client.put(&current),
-                HttpMethod::Delete => client.delete(&current),
-                HttpMethod::Head => client.head(&current),
-            };
-            if let Some(body) = &body {
-                request = request.body(body.clone());
-            }
-            for (key, value) in headers {
-                if is_forbidden_request_header(key) {
-                    continue;
-                }
-                request = request.header(key, value);
-            }
-            let response = request
-                .send()
+            let hop = self
+                .build_fetch_hop(plugin, state, method, &current, headers, body.as_ref())
+                .await?;
+            let response = hop
+                .client
+                .execute(hop.request)
                 .await
                 .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
             if response.status().is_redirection() {
@@ -1106,6 +1276,12 @@ struct FetchBody {
     size: u64,
     sha256: String,
     mime: Option<String>,
+}
+
+/// One validated fetch hop ready to execute.
+struct FetchHop {
+    client: reqwest::Client,
+    request: reqwest::Request,
 }
 
 fn is_forbidden_request_header(key: &str) -> bool {
@@ -1545,6 +1721,14 @@ impl BrokerHub {
         })
     }
 
+    async fn artifact_refresh(&self) -> Result<BrokerResponse, BrokerError> {
+        let services = self.artifact_services()?;
+        let metadata = self.fetch_catalog(services, true).await?;
+        Ok(BrokerResponse::ArtifactRefreshOk {
+            catalog_version: metadata.version,
+        })
+    }
+
     fn artifact_list(&self) -> Result<BrokerResponse, BrokerError> {
         let services = self.artifact_services()?;
         let state = services.installer.state();
@@ -1585,7 +1769,30 @@ impl BrokerHub {
         &self,
         services: &ArtifactServices,
     ) -> Result<ene_artifact::CatalogMetadata, BrokerError> {
-        if let Some(catalog) = services.catalog.lock().as_ref() {
+        self.fetch_catalog(services, false).await
+    }
+
+    /// Fetches the signed catalog, using the cache until `refresh_hours`
+    /// elapse. `force` bypasses the cache (manual refresh / installs).
+    ///
+    /// Every fetch re-verifies the signature, expiry, and rollback rules
+    /// against the installed state, so a revoked or rolled-back artifact
+    /// cannot stay installable past the refresh window.
+    async fn fetch_catalog(
+        &self,
+        services: &ArtifactServices,
+        force: bool,
+    ) -> Result<ene_artifact::CatalogMetadata, BrokerError> {
+        let now = now_ms();
+        let refresh_ms = services
+            .config
+            .refresh_hours
+            .max(1)
+            .saturating_mul(3600 * 1000);
+        if !force
+            && let Some((catalog, fetched_at)) = services.catalog.lock().as_ref()
+            && now.saturating_sub(*fetched_at) < refresh_ms
+        {
             return Ok(catalog.clone());
         }
         let url = services.config.catalog_url.as_ref().ok_or_else(|| {
@@ -1609,14 +1816,11 @@ impl BrokerHub {
             .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
         let signed: ene_artifact::SignedCatalog = serde_json::from_slice(&bytes)
             .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis().try_into().unwrap_or(u64::MAX));
         let metadata = services
             .verifier
             .verify(&signed, &services.installer.installed_refs(), now)
             .map_err(|e| BrokerError::new(BrokerErrorCode::Denied, e.to_string()))?;
-        *services.catalog.lock() = Some(metadata.clone());
+        *services.catalog.lock() = Some((metadata.clone(), now));
         Ok(metadata)
     }
 }

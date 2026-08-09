@@ -191,6 +191,23 @@ pub enum BrokerRequest {
         /// Byte cap (host caps anyway).
         max_bytes: Option<u64>,
     },
+    /// Streams a URL response as frames (`StreamStart`, `StreamChunk`,
+    /// `StreamEnd`) instead of buffering it whole. Same gates as
+    /// [`BrokerRequest::NetworkFetch`]: SSRF, origin approval, redirect
+    /// re-validation, size cap.
+    NetworkFetchStream {
+        /// HTTP method.
+        method: HttpMethod,
+        /// Absolute URL.
+        url: String,
+        /// Extra headers (authorization-like headers are stripped).
+        headers: Vec<(String, String)>,
+        /// Request body (form/JSON payloads).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<Vec<u8>>,
+        /// Byte cap for the whole stream.
+        max_bytes: Option<u64>,
+    },
 
     // ── Process broker ─────────────────────────────────────────────────
     /// Spawns a child process with the host's sandbox and limits.
@@ -245,6 +262,9 @@ pub enum BrokerRequest {
     },
     /// Lists installed artifacts.
     ArtifactList,
+    /// Forces a catalog re-fetch (manual refresh); re-verifies signature,
+    /// expiry, and rollback rules before replacing the cached metadata.
+    ArtifactRefresh,
 
     // ── Platform broker ────────────────────────────────────────────────
     /// Current wall-clock time.
@@ -322,6 +342,20 @@ pub enum BrokerResponse {
         /// Content type, when known.
         mime: Option<String>,
     },
+    /// First frame of a [`BrokerRequest::NetworkFetchStream`] response.
+    StreamStart {
+        /// HTTP status.
+        status: u16,
+        /// Response headers (authorization/cookie headers stripped).
+        headers: Vec<(String, String)>,
+    },
+    /// Body chunk of a streamed response.
+    StreamChunk {
+        /// Raw bytes.
+        data: Vec<u8>,
+    },
+    /// Terminal frame of a streamed response.
+    StreamEnd,
     /// [`BrokerRequest::ProcessSpawn`] succeeded.
     ProcessSpawnOk {
         /// Host-assigned pid.
@@ -364,6 +398,11 @@ pub enum BrokerResponse {
     ArtifactListOk {
         /// Installed artifacts, sorted by id.
         artifacts: Vec<ArtifactInfo>,
+    },
+    /// [`BrokerRequest::ArtifactRefresh`] succeeded.
+    ArtifactRefreshOk {
+        /// Version of the freshly verified catalog metadata.
+        catalog_version: u64,
     },
     /// [`BrokerRequest::PlatformNow`] succeeded.
     PlatformNowOk {
@@ -408,6 +447,29 @@ impl BrokerResponse {
 pub trait BrokerHandler: Send + Sync {
     /// Handles one broker request from `plugin`.
     async fn handle(&self, plugin: &str, request: BrokerRequest) -> BrokerResponse;
+
+    /// Handles a request that produces multiple response frames.
+    ///
+    /// The default writes the single [`handle`](Self::handle) response;
+    /// streaming services override this to write `StreamStart`/`StreamChunk`/
+    /// `StreamEnd` frames through `sink`.
+    async fn handle_stream(
+        &self,
+        plugin: &str,
+        request: BrokerRequest,
+        sink: &mut (dyn BrokerSink + Send),
+    ) -> std::io::Result<()> {
+        let response = self.handle(plugin, request).await;
+        sink.write(&response).await
+    }
+}
+
+/// Frame sink for streaming broker responses (the host-service session
+/// loop implements this over the framed socket).
+#[async_trait::async_trait]
+pub trait BrokerSink: Send {
+    /// Writes one response frame.
+    async fn write(&mut self, response: &BrokerResponse) -> std::io::Result<()>;
 }
 
 /// Convenience alias for sharing a broker handler.
