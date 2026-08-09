@@ -322,11 +322,14 @@ mod tests {
     }
 
     async fn wait_for_socket(path: &std::path::Path) {
-        for _ in 0..50 {
+        // The mock task runs on a runtime worker; under parallel test load
+        // it can take a while to be scheduled, so poll with real sleeps
+        // rather than a fixed number of yields.
+        for _ in 0..200 {
             if path.exists() {
                 return;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
