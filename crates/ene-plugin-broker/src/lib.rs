@@ -315,6 +315,7 @@ mod tests {
                 url: "https://example.com/stream".to_string(),
                 headers: vec![],
                 credential: None,
+                credential_header: None,
                 body: None,
                 max_bytes: Some(1024),
             })
@@ -352,6 +353,7 @@ mod tests {
                 url: "https://example.com/stream".to_string(),
                 headers: vec![],
                 credential: None,
+                credential_header: None,
                 body: None,
                 max_bytes: None,
             })

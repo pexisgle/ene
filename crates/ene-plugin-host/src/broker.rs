@@ -343,6 +343,7 @@ impl BrokerHandler for BrokerHub {
                 url,
                 headers,
                 credential,
+                credential_header,
                 body,
                 max_bytes,
             } => {
@@ -365,6 +366,7 @@ impl BrokerHandler for BrokerHub {
                     &url,
                     &headers,
                     credential.as_deref(),
+                    credential_header.as_deref(),
                     body,
                     cap,
                     sink,
@@ -428,6 +430,7 @@ impl BrokerHub {
                 url,
                 headers,
                 credential,
+                credential_header,
                 body,
                 max_bytes,
             } => {
@@ -438,6 +441,7 @@ impl BrokerHub {
                     &url,
                     &headers,
                     credential.as_deref(),
+                    credential_header.as_deref(),
                     body,
                     max_bytes,
                 )
@@ -1006,13 +1010,23 @@ impl BrokerHub {
         url: &str,
         headers: &[(String, String)],
         credential: Option<&str>,
+        credential_header: Option<&str>,
         body: Option<Vec<u8>>,
         max_bytes: Option<u64>,
     ) -> Result<BrokerResponse, BrokerError> {
         let cap = max_bytes.unwrap_or(self.download.config.max_bytes);
         let body = self
             .fetch_loop(
-                plugin, state, method, url, headers, credential, body, cap, None,
+                plugin,
+                state,
+                method,
+                url,
+                headers,
+                credential,
+                credential_header,
+                body,
+                cap,
+                None,
             )
             .await?;
         Ok(BrokerResponse::NetworkFetchOk {
@@ -1043,6 +1057,7 @@ impl BrokerHub {
                 &[],
                 None,
                 None,
+                None,
                 cap,
                 Some(&temp_path),
             )
@@ -1066,6 +1081,7 @@ impl BrokerHub {
         url: &str,
         headers: &[(String, String)],
         credential: Option<&str>,
+        credential_header: Option<&str>,
         body: Option<&Vec<u8>>,
     ) -> Result<FetchHop, BrokerError> {
         let parsed = url::Url::parse(url)
@@ -1123,7 +1139,13 @@ impl BrokerHub {
                     format!("credential '{key}' not found"),
                 )
             })?;
-            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {value}"));
+            let header = credential_header.unwrap_or("authorization");
+            let header_value = if header.eq_ignore_ascii_case("authorization") {
+                format!("Bearer {value}")
+            } else {
+                value.clone()
+            };
+            request = request.header(header, header_value);
         }
         let request = request
             .build()
@@ -1140,6 +1162,7 @@ impl BrokerHub {
         url: &str,
         headers: &[(String, String)],
         credential: Option<&str>,
+        credential_header: Option<&str>,
         body: Option<Vec<u8>>,
         max_bytes: u64,
         sink: &mut (dyn ene_plugin_proto::BrokerSink + Send),
@@ -1154,6 +1177,7 @@ impl BrokerHub {
                     &current,
                     headers,
                     credential,
+                    credential_header,
                     body.as_ref(),
                 )
                 .await?;
@@ -1235,6 +1259,7 @@ impl BrokerHub {
         url: &str,
         headers: &[(String, String)],
         credential: Option<&str>,
+        credential_header: Option<&str>,
         body: Option<Vec<u8>>,
         max_bytes: u64,
         temp_path: Option<&Path>,
@@ -1249,6 +1274,7 @@ impl BrokerHub {
                     &current,
                     headers,
                     credential,
+                    credential_header,
                     body.as_ref(),
                 )
                 .await?;
@@ -2076,6 +2102,7 @@ mod tests {
                 &[],
                 Some("api_key"),
                 None,
+                None,
             )
             .await
             .expect("hop");
@@ -2140,12 +2167,85 @@ mod tests {
                 &[],
                 Some("api_key"),
                 None,
+                None,
             )
             .await
             .expect_err("missing credential must fail");
         assert!(
             err.message.contains("credential 'api_key' not found"),
             "unexpected error: {err:?}"
+        );
+    }
+
+    /// A custom `credential_header` injects the raw value without the
+    /// `Bearer ` prefix (Anthropic's `x-api-key` contract).
+    #[tokio::test]
+    async fn credentialed_fetch_honors_custom_header() {
+        let mut policy = ApprovalPolicy::default();
+        policy
+            .categories
+            .insert(ApprovalCategory::DynamicHttps, ApprovalMode::Allow);
+        policy
+            .categories
+            .insert(ApprovalCategory::CredentialUse, ApprovalMode::Allow);
+        let config = PluginConfig {
+            enabled: true,
+            approval: policy,
+            list: HashMap::from([("web".to_string(), PluginEntry::default())]),
+            ..PluginConfig::default()
+        };
+        let mut full = ene_config::EneConfig::default();
+        full.set_section(&config).expect("set plugin section");
+        let mut hub = BrokerHub::from_config(&full).expect("hub");
+        let mut manifest = crate::manifest::builtin_manifest("web").expect("web manifest");
+        manifest.permissions = vec![
+            ManifestPermission {
+                category: ApprovalCategory::DynamicHttps,
+                max: ApprovalMode::Allow,
+            },
+            ManifestPermission {
+                category: ApprovalCategory::CredentialUse,
+                max: ApprovalMode::Allow,
+            },
+        ];
+        let state = PluginState {
+            manifest: Some(manifest),
+            digest: None,
+            fs_grants: Vec::new(),
+            credentials: BTreeMap::from([("api_key".to_string(), "sk-raw".to_string())]),
+            processes: Mutex::new(HashMap::new()),
+        };
+        Arc::get_mut(&mut hub)
+            .expect("sole hub owner")
+            .plugins
+            .insert("web".to_string(), state);
+
+        let hop = hub
+            .build_fetch_hop(
+                "web",
+                hub.plugins.get("web").expect("state"),
+                HttpMethod::Get,
+                "https://1.1.1.1/",
+                &[],
+                Some("api_key"),
+                Some("x-api-key"),
+                None,
+            )
+            .await
+            .expect("hop");
+        let injected = hop
+            .request
+            .headers()
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .expect("x-api-key header");
+        assert_eq!(injected, "sk-raw");
+        assert!(
+            hop.request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none(),
+            "custom header must not also inject authorization"
         );
     }
 
@@ -2210,6 +2310,7 @@ mod tests {
                 url: "https://x".into(),
                 headers: vec![],
                 credential: None,
+                credential_header: None,
                 body: None,
                 max_bytes: None,
             }),

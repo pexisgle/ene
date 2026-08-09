@@ -182,6 +182,11 @@ pub enum BrokerRequest {
         /// `CredentialUse`, and never returns it to the plugin.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential: Option<String>,
+        /// Header the credential is injected into. Defaults to
+        /// `authorization` (with a `Bearer ` prefix); other headers (e.g.
+        /// `x-api-key`) receive the raw value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_header: Option<String>,
         /// Request body (JSON/form payloads). The caller must set a matching
         /// `Content-Type` header; the host never interprets the body.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,6 +218,10 @@ pub enum BrokerRequest {
         /// [`BrokerRequest::NetworkFetch::credential`]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential: Option<String>,
+        /// Header the credential is injected into (same rules as
+        /// [`BrokerRequest::NetworkFetch::credential_header`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_header: Option<String>,
         /// Request body (form/JSON payloads).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<Vec<u8>>,
@@ -508,6 +517,7 @@ mod tests {
                 url: "https://example.com".to_string(),
                 headers: vec![],
                 credential: Some("api_key".to_string()),
+                credential_header: None,
                 body: None,
                 max_bytes: None,
             },

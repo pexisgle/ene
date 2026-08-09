@@ -404,10 +404,10 @@ pub fn builtin_manifest(name: &str) -> Option<PluginManifest> {
                 controls_browser: false,
                 reads_credentials: false,
             },
-            permissions: permissions(&[(
-                ApprovalCategory::FixedOriginNetwork,
-                ApprovalMode::Allow,
-            )]),
+            permissions: permissions(&[
+                (ApprovalCategory::FixedOriginNetwork, ApprovalMode::Allow),
+                (ApprovalCategory::CredentialUse, ApprovalMode::Allow),
+            ]),
             host_services: vec!["network".into()],
             ..base("anthropic")
         },

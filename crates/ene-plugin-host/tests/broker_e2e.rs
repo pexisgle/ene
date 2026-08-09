@@ -246,6 +246,7 @@ async fn ssrf_blocks_loopback_even_when_the_approval_says_allow() {
             url: "https://127.0.0.1:1/secret".to_string(),
             headers: vec![],
             credential: None,
+            credential_header: None,
             body: None,
             max_bytes: None,
         })
@@ -280,6 +281,7 @@ async fn denied_category_is_rejected_before_any_network_work() {
             url: "https://example.com/".to_string(),
             headers: vec![],
             credential: None,
+            credential_header: None,
             body: None,
             max_bytes: None,
         })
@@ -308,6 +310,7 @@ async fn streaming_requests_route_through_the_session_loop_and_apply_policy() {
             url: "https://example.com/stream".to_string(),
             headers: vec![],
             credential: None,
+            credential_header: None,
             body: None,
             max_bytes: None,
         })
@@ -373,6 +376,7 @@ async fn declared_platform_service_is_served() {
             url: "https://10.0.0.1/private".to_string(),
             headers: vec![],
             credential: None,
+            credential_header: None,
             body: None,
             max_bytes: None,
         })

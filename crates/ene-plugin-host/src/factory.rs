@@ -218,7 +218,7 @@ pub(crate) fn build_provider_config(
 /// (`NetworkFetch.credential`) and therefore never receive the API key in
 /// their provider config.
 pub(crate) fn is_broker_credential_kind(kind: &str) -> bool {
-    matches!(kind, "openai")
+    matches!(kind, "openai" | "anthropic")
 }
 
 /// Applies per-task overrides onto the provider config forwarded to a plugin.
@@ -329,7 +329,14 @@ mod tests {
             is_broker_credential_kind("openai"),
             "openai must be treated as a broker-credential kind"
         );
-        assert!(!is_broker_credential_kind("anthropic"));
+        assert!(
+            is_broker_credential_kind("anthropic"),
+            "anthropic must be treated as a broker-credential kind"
+        );
+        assert!(
+            !is_broker_credential_kind("elevenlabs"),
+            "non-migrated kinds still receive the key"
+        );
     }
 
     /// The decision task's `thinking_disabled` flag is forwarded into the

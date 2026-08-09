@@ -2877,9 +2877,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ene-plugin",
+ "ene-plugin-broker",
+ "ene-plugin-proto",
  "eventsource-stream",
- "reqwest",
+ "parking_lot",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tracing",

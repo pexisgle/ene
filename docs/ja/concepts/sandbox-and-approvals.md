@@ -28,9 +28,9 @@ Windows では有効化されたプラグインは **Job Object**(終了時 kill
 
 すべての層は fail-closed です。必須の層を初期化できなければプラグインは起動しません。特権が必要な層(cgroup・ネットワーク名前空間)は既定で無効で、提供できるホストでのみ明示的に有効化します。
 
-プラグイン別のサンドボックス設定は `plugins.list.<name>.sandbox`、全体の既定は `plugins.sandbox` にあります。純粋な計算系の同梱プラグイン(`calc`・`counter`・`random`)と、Broker 移行済みの同梱プラグイン `web`・`fs`・`openai` は既定で**有効**です。残りの同梱プラグインは Broker チャネルへの移行が完了するまで既定で無効です。有効化した場合、カーネルが要求層を適用できないと起動を拒否します。
+プラグイン別のサンドボックス設定は `plugins.list.<name>.sandbox`、全体の既定は `plugins.sandbox` にあります。純粋な計算系の同梱プラグイン(`calc`・`counter`・`random`)と、Broker 移行済みの同梱プラグイン `web`・`fs`・`openai`・`anthropic` は既定で**有効**です。残りの同梱プラグインは Broker チャネルへの移行が完了するまで既定で無効です。有効化した場合、カーネルが要求層を適用できないと起動を拒否します。
 
-`web` プラグインは `Network` Broker 経由で通信しています(SSRF・リダイレクト処理はホスト側へ移行済み)。`fs` プラグインはユーザーファイルの読み書きと shell 実行をすべて `File` / `Process` Broker 経由に移行済みです。ツールの引数は絶対パスのままで、ホストが `plugins.list.<name>.fs_grants` の許可フォルダに正規化パスが含まれるかで解決します。`openai` プラグインは全 API リクエストを `Network` Broker 経由で行い、API キーはホストが通信時に注入します(下記「資格情報の注入」参照)。
+`web` プラグインは `Network` Broker 経由で通信しています(SSRF・リダイレクト処理はホスト側へ移行済み)。`fs` プラグインはユーザーファイルの読み書きと shell 実行をすべて `File` / `Process` Broker 経由に移行済みです。ツールの引数は絶対パスのままで、ホストが `plugins.list.<name>.fs_grants` の許可フォルダに正規化パスが含まれるかで解決します。`openai`・`anthropic` プラグインは全 API リクエストを `Network` Broker 経由で行い、API キーはホストが通信時に注入します(下記「資格情報の注入」参照)。
 
 ## Broker チャネル(プロトコル v8)
 
@@ -50,7 +50,7 @@ ID は認証トークンに固定されるため、プラグインが他のプ�
 
 ### 資格情報の注入
 
-API キーはプラグインプロセスに渡りません。プラグインはネットワークリクエスト上でホスト管理の資格情報を名前で指定し(`NetworkFetch` / `NetworkFetchStream` の `credential: "api_key"`)、ホストが自身の状態(`plugins.list.<name>.credentials`、または同梱 provider プラグインでは解決済みの `ai.providers.<kind>.api_key`)から値を解決して `CredentialUse` カテゴリを判定し、送信リクエストへ `Authorization: Bearer <value>` を注入します。プラグインが見られるのはキー名のみで、監査ログにもキー名だけが記録されます。ホストが保持しない資格情報を指定したリクエストは、ネットワーク処理の前に失敗します。プラグイン自身が送る authorization 系ヘッダーは除去されます。
+API キーはプラグインプロセスに渡りません。プラグインはネットワークリクエスト上でホスト管理の資格情報を名前で指定し(`NetworkFetch` / `NetworkFetchStream` の `credential: "api_key"`)、ホストが自身の状態(`plugins.list.<name>.credentials`、または同梱 provider プラグインでは解決済みの `ai.providers.<kind>.api_key`)から値を解決して `CredentialUse` カテゴリを判定し、送信リクエストへ注入します。既定は `Authorization: Bearer <value>`(OpenAI)で、`credential_header` で指定すれば Anthropic の `x-api-key` のようなカスタムヘッダーにも注入できます。プラグインが見られるのはキー名のみで、監査ログにもキー名だけが記録されます。ホストが保持しない資格情報を指定したリクエストは、ネットワーク処理の前に失敗します。プラグイン自身が送る authorization 系ヘッダーは除去されます。
 
 ## Manifest 層
 

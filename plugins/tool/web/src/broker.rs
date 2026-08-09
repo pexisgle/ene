@@ -111,6 +111,7 @@ impl WebBroker {
                 url: url.to_string(),
                 headers,
                 credential: None,
+                credential_header: None,
                 body,
                 max_bytes: Some(max_bytes),
             })

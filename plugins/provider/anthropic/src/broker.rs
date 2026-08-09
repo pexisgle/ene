@@ -1,9 +1,9 @@
-//! Host-mediated network session for the `OpenAI` provider plugin.
+//! Host-mediated network session for the Anthropic provider plugin.
 //!
 //! Every HTTP request goes through the `Network` broker: the host validates
 //! SSRF, resolves origin approvals, re-checks redirects, injects the API
-//! credential by key name, and enforces size caps. The plugin never holds a
-//! socket, DNS, or the credential value.
+//! credential by key name (`x-api-key`), and enforces size caps. The plugin
+//! never holds a socket, DNS, or the credential value.
 
 use std::sync::Arc;
 
@@ -18,19 +18,14 @@ use tokio_stream::wrappers::ReceiverStream;
 pub struct FetchOutcome {
     /// HTTP status.
     pub status: u16,
-    /// Response headers (authorization-like headers are stripped by the
-    /// host unless the host itself injected them).
-    pub headers: Vec<(String, String)>,
     /// Response body (size-capped by the host).
     pub body: Vec<u8>,
 }
 
-/// A streamed HTTP response: status/headers plus body chunks.
+/// A streamed HTTP response: status plus body chunks.
 pub struct StreamSession {
     /// HTTP status.
     pub status: u16,
-    /// Response headers.
-    pub headers: Vec<(String, String)>,
     /// Body chunks in order; an `Err` item is terminal.
     pub chunks: ReceiverStream<Result<Vec<u8>, PluginError>>,
     /// The task driving the broker exchange. It self-terminates on stream
@@ -44,13 +39,13 @@ pub struct StreamSession {
 /// The socket and auth token arrive through
 /// [`ConfigurablePlugin::set_sandbox`]; the session opens on the first
 /// request and is reused for the process lifetime.
-pub struct OpenAiBroker {
+pub struct AnthropicBroker {
     socket: RwLock<Option<String>>,
     token: RwLock<Option<String>>,
     client: Mutex<Option<BrokerClient>>,
 }
 
-impl OpenAiBroker {
+impl AnthropicBroker {
     /// A broker with no connection configuration yet.
     #[must_use]
     pub fn new() -> Self {
@@ -101,6 +96,7 @@ impl OpenAiBroker {
         url: &str,
         headers: Vec<(String, String)>,
         credential: Option<&str>,
+        credential_header: Option<&str>,
         body: Option<Vec<u8>>,
     ) -> Result<FetchOutcome, BrokerClientError> {
         let mut client = self
@@ -118,7 +114,7 @@ impl OpenAiBroker {
                 url: url.to_string(),
                 headers,
                 credential: credential.map(str::to_string),
-                credential_header: None,
+                credential_header: credential_header.map(str::to_string),
                 body,
                 max_bytes: None,
             })
@@ -126,13 +122,9 @@ impl OpenAiBroker {
         match response {
             ene_plugin_broker::BrokerResponse::NetworkFetchOk {
                 status,
-                headers,
+                headers: _,
                 body,
-            } => Ok(FetchOutcome {
-                status,
-                headers,
-                body,
-            }),
+            } => Ok(FetchOutcome { status, body }),
             other => Err(BrokerClientError::Request(format!(
                 "unexpected broker response: {other:?}"
             ))),
@@ -140,7 +132,7 @@ impl OpenAiBroker {
     }
 
     /// Starts a streamed request. The returned session carries the response
-    /// status/headers and yields body chunks as they arrive; transport or
+    /// status and yields body chunks as they arrive; transport or
     /// policy errors surface as the first `Err` chunk and/or a failed status
     /// delivery.
     pub async fn stream(
@@ -149,6 +141,7 @@ impl OpenAiBroker {
         url: &str,
         headers: Vec<(String, String)>,
         credential: Option<&str>,
+        credential_header: Option<&str>,
         body: Option<Vec<u8>>,
     ) -> Result<StreamSession, PluginError> {
         let (start_tx, start_rx) = tokio::sync::oneshot::channel();
@@ -160,7 +153,7 @@ impl OpenAiBroker {
             url: url.to_string(),
             headers,
             credential: credential.map(str::to_string),
-            credential_header: None,
+            credential_header: credential_header.map(str::to_string),
             body,
             max_bytes: None,
         };
@@ -183,25 +176,23 @@ impl OpenAiBroker {
             }
         });
 
-        let (status, headers) =
-            match tokio::time::timeout(std::time::Duration::from_mins(2), start_rx).await {
-                Ok(Ok(Ok((status, headers)))) => (status, headers),
-                Ok(Ok(Err(message))) => {
-                    task.abort();
-                    return Err(PluginError::provider(format!(
-                        "broker stream failed: {message}"
-                    )));
-                }
-                Ok(Err(_)) | Err(_) => {
-                    task.abort();
-                    return Err(PluginError::provider(
-                        "broker stream ended before the response started",
-                    ));
-                }
-            };
+        let status = match tokio::time::timeout(std::time::Duration::from_mins(2), start_rx).await {
+            Ok(Ok(Ok((status, _)))) => status,
+            Ok(Ok(Err(message))) => {
+                task.abort();
+                return Err(PluginError::provider(format!(
+                    "broker stream failed: {message}"
+                )));
+            }
+            Ok(Err(_)) | Err(_) => {
+                task.abort();
+                return Err(PluginError::provider(
+                    "broker stream ended before the response started",
+                ));
+            }
+        };
         Ok(StreamSession {
             status,
-            headers,
             chunks: ReceiverStream::new(chunk_rx),
             _task: task,
         })
@@ -209,8 +200,8 @@ impl OpenAiBroker {
 }
 
 /// Forwards broker stream frames into the plugin's channel: the response
-/// start goes to a oneshot (status/headers for retry decisions), body
-/// chunks go to the bounded chunk channel with backpressure.
+/// start goes to a oneshot (status for error mapping), body chunks
+/// go to the bounded chunk channel with backpressure.
 type StartChannel = tokio::sync::oneshot::Sender<Result<(u16, Vec<(String, String)>), String>>;
 type ChunkChannel = tokio::sync::mpsc::Sender<Result<Vec<u8>, PluginError>>;
 
@@ -260,11 +251,11 @@ impl ChannelSink {
 
 /// Process-wide broker handle; the host delivers socket/token via
 /// `set_sandbox` before any request runs.
-static BROKER_ARC: std::sync::OnceLock<Arc<OpenAiBroker>> = std::sync::OnceLock::new();
+static BROKER_ARC: std::sync::OnceLock<Arc<AnthropicBroker>> = std::sync::OnceLock::new();
 
 /// Returns the shared broker, initializing the handle on first use.
-pub(crate) fn broker() -> Arc<OpenAiBroker> {
-    Arc::clone(BROKER_ARC.get_or_init(|| Arc::new(OpenAiBroker::new())))
+pub(crate) fn broker() -> Arc<AnthropicBroker> {
+    Arc::clone(BROKER_ARC.get_or_init(|| Arc::new(AnthropicBroker::new())))
 }
 
 /// Configures the shared broker from the host sandbox data.
@@ -340,9 +331,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stream_request_names_the_credential_and_forwards_chunks() {
+    async fn stream_request_names_credential_and_forwards_chunks() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let socket = dir.path().join("openai-stream.sock");
+        let socket = dir.path().join("anthropic-stream.sock");
         let server = tokio::spawn(run_mock(
             socket.clone(),
             |request| {
@@ -351,6 +342,7 @@ mod tests {
                     url,
                     headers,
                     credential,
+                    credential_header,
                     body,
                     ..
                 } = request
@@ -358,15 +350,16 @@ mod tests {
                     panic!("expected NetworkFetchStream, got {request:?}");
                 };
                 assert_eq!(method, HttpMethod::Post);
-                assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+                assert_eq!(url, "https://api.anthropic.com/v1/messages");
                 assert_eq!(credential.as_deref(), Some("api_key"));
+                assert_eq!(credential_header.as_deref(), Some("x-api-key"));
                 assert_eq!(
                     headers,
-                    vec![("Content-Type".to_string(), "application/json".to_string())]
+                    vec![("anthropic-version".to_string(), "2023-06-01".to_string())]
                 );
                 let body: serde_json::Value =
                     serde_json::from_slice(&body.expect("body")).expect("json");
-                assert_eq!(body["model"], "gpt-4o-mini");
+                assert_eq!(body["model"], "claude-sonnet-4-20250514");
             },
             vec![
                 BrokerResponse::StreamStart {
@@ -374,22 +367,27 @@ mod tests {
                     headers: vec![],
                 },
                 BrokerResponse::StreamChunk {
-                    data: b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n".to_vec(),
+                    data: b"event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
+                        .to_vec(),
                 },
                 BrokerResponse::StreamEnd,
             ],
         ));
         wait_for_socket(&socket).await;
-        let broker = Arc::new(OpenAiBroker::new());
+        let broker = Arc::new(AnthropicBroker::new());
         broker.configure(&test_sandbox(&socket));
 
         let session = broker
             .stream(
                 HttpMethod::Post,
-                "https://api.openai.com/v1/chat/completions",
-                vec![("Content-Type".to_string(), "application/json".to_string())],
+                "https://api.anthropic.com/v1/messages",
+                vec![("anthropic-version".to_string(), "2023-06-01".to_string())],
                 Some("api_key"),
-                Some(serde_json::to_vec(&json!({"model": "gpt-4o-mini"})).expect("json")),
+                Some("x-api-key"),
+                Some(
+                    serde_json::to_vec(&json!({"model": "claude-sonnet-4-20250514"}))
+                        .expect("json"),
+                ),
             )
             .await
             .expect("stream");
@@ -398,7 +396,7 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(
             chunks[0].as_ref().expect("chunk"),
-            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+            b"event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
         );
         server.abort();
     }
@@ -406,7 +404,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fetch_surfaces_non_ok_status_with_body() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let socket = dir.path().join("openai-fetch.sock");
+        let socket = dir.path().join("anthropic-fetch.sock");
         let server = tokio::spawn(run_mock(
             socket.clone(),
             |request| {
@@ -414,31 +412,34 @@ mod tests {
                     method,
                     url,
                     credential,
+                    credential_header,
                     ..
                 } = request
                 else {
                     panic!("expected NetworkFetch, got {request:?}");
                 };
                 assert_eq!(method, HttpMethod::Post);
-                assert_eq!(url, "https://api.openai.com/v1/embeddings");
+                assert_eq!(url, "https://api.anthropic.com/v1/messages");
                 assert_eq!(credential.as_deref(), Some("api_key"));
+                assert_eq!(credential_header.as_deref(), Some("x-api-key"));
             },
             vec![BrokerResponse::NetworkFetchOk {
                 status: 401,
-                headers: vec![],
-                body: br#"{"error":{"message":"bad key"}}"#.to_vec(),
+                headers: vec![("request-id".to_string(), "req_1".to_string())],
+                body: br#"{"type":"error","error":{"message":"invalid key"}}"#.to_vec(),
             }],
         ));
         wait_for_socket(&socket).await;
-        let broker = Arc::new(OpenAiBroker::new());
+        let broker = Arc::new(AnthropicBroker::new());
         broker.configure(&test_sandbox(&socket));
 
         let outcome = broker
             .fetch(
                 HttpMethod::Post,
-                "https://api.openai.com/v1/embeddings",
-                vec![],
+                "https://api.anthropic.com/v1/messages",
+                vec![("anthropic-version".to_string(), "2023-06-01".to_string())],
                 Some("api_key"),
+                Some("x-api-key"),
                 Some(b"{}".to_vec()),
             )
             .await
@@ -446,7 +447,7 @@ mod tests {
         assert_eq!(outcome.status, 401);
         assert_eq!(
             String::from_utf8(outcome.body).expect("utf8"),
-            r#"{"error":{"message":"bad key"}}"#
+            r#"{"type":"error","error":{"message":"invalid key"}}"#
         );
         server.abort();
     }
@@ -454,7 +455,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn broker_denial_surfaces_as_plugin_error() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let socket = dir.path().join("openai-deny.sock");
+        let socket = dir.path().join("anthropic-deny.sock");
         let server = tokio::spawn(run_mock(
             socket.clone(),
             |_| {},
@@ -464,15 +465,16 @@ mod tests {
             )],
         ));
         wait_for_socket(&socket).await;
-        let broker = Arc::new(OpenAiBroker::new());
+        let broker = Arc::new(AnthropicBroker::new());
         broker.configure(&test_sandbox(&socket));
 
         let err = broker
             .fetch(
                 HttpMethod::Post,
-                "https://api.openai.com/v1/embeddings",
+                "https://api.anthropic.com/v1/messages",
                 vec![],
                 Some("api_key"),
+                Some("x-api-key"),
                 Some(b"{}".to_vec()),
             )
             .await

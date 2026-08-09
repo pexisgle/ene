@@ -53,17 +53,18 @@ that can provide them.
 Per-plugin sandbox settings live at `plugins.list.<name>.sandbox`; the
 global default is `plugins.sandbox`. Pure computation built-ins (`calc`,
 `counter`, `random`) ship **sandboxed by default**, as do the
-broker-migrated built-ins `web`, `fs`, and `openai`: `web` talks through
-the `Network` broker (SSRF and redirect handling moved host-side), `fs`
-routes all user-file I/O and shell execution through the `File` /
-`Process` brokers — its tools keep absolute-path arguments, which the host
-resolves against the configured grants (`plugins.list.<name>.fs_grants`)
-by canonical containment — and `openai` mediates every API request through
-the `Network` broker with the API key injected host-side by name (see
-[Credential injection](#credential-injection)). Remaining built-ins
-default to disabled until their migration to the broker channel lands.
-Enabled plugins refuse to start when the kernel cannot enforce the
-requested layers.
+broker-migrated built-ins `web`, `fs`, `openai`, and `anthropic`: `web`
+talks through the `Network` broker (SSRF and redirect handling moved
+host-side), `fs` routes all user-file I/O and shell execution through the
+`File` / `Process` brokers — its tools keep absolute-path arguments, which
+the host resolves against the configured grants
+(`plugins.list.<name>.fs_grants`) by canonical containment — and the
+provider plugins mediate every API request through the `Network` broker
+with the API key injected host-side by name (see [Credential
+injection](#credential-injection)). Remaining built-ins default to
+disabled until their migration to the broker channel lands. Enabled
+plugins refuse to start when the kernel cannot enforce the requested
+layers.
 
 ## Broker channel (protocol v8)
 
@@ -91,11 +92,13 @@ credential on a network request (`credential: "api_key"` on `NetworkFetch`
 / `NetworkFetchStream`); the host resolves the value from its own state
 (`plugins.list.<name>.credentials`, or the resolved
 `ai.providers.<kind>.api_key` for built-in provider plugins), gates the
-`CredentialUse` category, and injects `Authorization: Bearer <value>` into
-the outgoing request. The plugin only ever sees the key name; the audit log
-records the key name, never the value. A credential the host does not hold
-fails the request before any network work, and authorization-like headers
-sent by the plugin itself are stripped.
+`CredentialUse` category, and injects the value into the outgoing request:
+`Authorization: Bearer <value>` by default (OpenAI), or a custom header
+named via `credential_header` such as Anthropic's `x-api-key`. The plugin
+only ever sees the key name; the audit log records the key name, never the
+value. A credential the host does not hold fails the request before any
+network work, and authorization-like headers sent by the plugin itself are
+stripped.
 
 ## Manifest layer
 

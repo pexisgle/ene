@@ -272,12 +272,17 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
         list.insert(name.to_string(), sandboxed_pure.clone());
     }
 
-    // The Anthropic provider plugin needs ANTHROPIC_API_KEY forwarded from
-    // the host environment; without it the provider cannot authenticate.
+    // The Anthropic provider plugin authenticates through broker credential
+    // injection (the host resolves `ai.providers.<kind>.api_key` and
+    // injects it as `x-api-key` at request time), so it runs sandboxed like
+    // the other broker-migrated providers.
     list.insert(
         "anthropic".to_string(),
         PluginEntry {
-            env_passthrough: vec!["ANTHROPIC_API_KEY".to_string()],
+            sandbox: Some(SandboxEntryConfig {
+                enabled: true,
+                ..SandboxEntryConfig::default()
+            }),
             ..PluginEntry::default()
         },
     );
