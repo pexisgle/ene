@@ -6,7 +6,10 @@
 //! allowlist entry would fail the exec and exit immediately.
 
 #![cfg(target_os = "linux")]
-#![expect(clippy::expect_used, reason = "integration test uses expect for concise assertions")]
+#![expect(
+    clippy::expect_used,
+    reason = "integration test uses expect for concise assertions"
+)]
 
 use std::os::unix::process::CommandExt;
 use std::time::Duration;
