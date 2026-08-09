@@ -363,7 +363,6 @@ impl ToolPlugin for ActionSetProvider {
         ProviderHooks::call_revoke_pattern(&self.hooks, action, target_pattern);
         Ok(())
     }
-
 }
 
 /// Adapts a single [`ToolAction`] into a [`ToolProvider`].
@@ -545,7 +544,6 @@ impl ToolPlugin for SingleActionProvider {
     fn revoke_pattern(&self, action: &str, target_pattern: &str) -> Result<(), ToolError> {
         ToolPlugin::revoke_pattern(&self.inner, action, target_pattern)
     }
-
 }
 
 impl ConfigurablePlugin for SingleActionProvider {

@@ -141,7 +141,6 @@ impl ToolPlugin for TestPlugin {
         revoked.push((action.to_string(), target_pattern.to_string()));
         Ok(())
     }
-
 }
 
 impl ene_plugin::ConfigurablePlugin for TestPlugin {

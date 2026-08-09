@@ -113,9 +113,7 @@ impl BrokerHub {
     ///
     /// Returns `None` when the plugin system is disabled.
     pub fn from_config(config: &ene_config::EneConfig) -> Option<Arc<Self>> {
-        let plugin_config = config
-            .get_section::<PluginConfig>()
-            .unwrap_or_default();
+        let plugin_config = config.get_section::<PluginConfig>().unwrap_or_default();
         if !plugin_config.enabled {
             return None;
         }
@@ -123,15 +121,15 @@ impl BrokerHub {
         // the ring provider crosses to Windows cleanly). Installing it once
         // is idempotent; a second install attempt is ignored.
         drop(rustls::crypto::ring::default_provider().install_default());
-        let audit = Some(AuditLog::new(plugin_config.audit_log_path.clone().unwrap_or_else(
-            || {
+        let audit = Some(AuditLog::new(
+            plugin_config.audit_log_path.clone().unwrap_or_else(|| {
                 ene_config::app_data_dir()
                     .join("audit")
                     .join("plugin-approval.jsonl")
                     .to_string_lossy()
                     .into_owned()
-            },
-        )));
+            }),
+        ));
         let manifest_store = ManifestStore::new(&plugin_config.trusted_publishers);
         let mut plugins = HashMap::new();
         for (name, entry) in &plugin_config.list {
@@ -202,8 +200,8 @@ fn seed_provider_credentials(
             continue;
         }
         for (name, state) in &mut *plugins {
-            let trusted = crate::manager::is_builtin_plugin(name)
-                || plugin_config.list.contains_key(name);
+            let trusted =
+                crate::manager::is_builtin_plugin(name) || plugin_config.list.contains_key(name);
             if !trusted || !crate::factory::provider_def_kind_matches(def, name) {
                 continue;
             }
@@ -1014,15 +1012,7 @@ impl BrokerHub {
         let cap = max_bytes.unwrap_or(self.download.config.max_bytes);
         let body = self
             .fetch_loop(
-                plugin,
-                state,
-                method,
-                url,
-                headers,
-                credential,
-                body,
-                cap,
-                None,
+                plugin, state, method, url, headers, credential, body, cap, None,
             )
             .await?;
         Ok(BrokerResponse::NetworkFetchOk {
@@ -1133,10 +1123,7 @@ impl BrokerHub {
                     format!("credential '{key}' not found"),
                 )
             })?;
-            request = request.header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {value}"),
-            );
+            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {value}"));
         }
         let request = request
             .build()

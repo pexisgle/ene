@@ -137,7 +137,6 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
         self.provider.revoke_pattern(action, target_pattern);
         Ok(())
     }
-
 }
 
 impl<T: ToolProvider> ConfigurablePlugin for ToolProviderPlugin<T> {
