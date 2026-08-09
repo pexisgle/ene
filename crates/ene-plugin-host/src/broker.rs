@@ -112,15 +112,18 @@ impl BrokerHub {
     /// Builds the hub from plugin configuration.
     ///
     /// Returns `None` when the plugin system is disabled.
-    pub fn from_config(config: &PluginConfig) -> Option<Arc<Self>> {
-        if !config.enabled {
+    pub fn from_config(config: &ene_config::EneConfig) -> Option<Arc<Self>> {
+        let plugin_config = config
+            .get_section::<PluginConfig>()
+            .unwrap_or_default();
+        if !plugin_config.enabled {
             return None;
         }
         // The host uses the ring TLS provider (no aws-lc native build, and
         // the ring provider crosses to Windows cleanly). Installing it once
         // is idempotent; a second install attempt is ignored.
         drop(rustls::crypto::ring::default_provider().install_default());
-        let audit = Some(AuditLog::new(config.audit_log_path.clone().unwrap_or_else(
+        let audit = Some(AuditLog::new(plugin_config.audit_log_path.clone().unwrap_or_else(
             || {
                 ene_config::app_data_dir()
                     .join("audit")
@@ -129,9 +132,9 @@ impl BrokerHub {
                     .into_owned()
             },
         )));
-        let manifest_store = ManifestStore::new(&config.trusted_publishers);
+        let manifest_store = ManifestStore::new(&plugin_config.trusted_publishers);
         let mut plugins = HashMap::new();
-        for (name, entry) in &config.list {
+        for (name, entry) in &plugin_config.list {
             if !entry.enable {
                 continue;
             }
@@ -140,10 +143,11 @@ impl BrokerHub {
                 build_plugin_state(name, entry, &manifest_store),
             );
         }
-        let artifact = build_artifact_services(&config.artifact);
+        seed_provider_credentials(config, &plugin_config, &mut plugins);
+        let artifact = build_artifact_services(&plugin_config.artifact);
         let download = DownloadServices {
             temp_dir: ene_config::app_data_dir().join("tmp").join("downloads"),
-            config: config.download.clone(),
+            config: plugin_config.download.clone(),
         };
         let http = match reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -159,8 +163,8 @@ impl BrokerHub {
         };
         let hub = Arc::new(Self {
             plugins,
-            global: config.approval.clone(),
-            plugin_approval: config.plugin_approval.clone(),
+            global: plugin_config.approval.clone(),
+            plugin_approval: plugin_config.plugin_approval.clone(),
             audit,
             artifact,
             download,
@@ -178,6 +182,36 @@ impl BrokerHub {
     ) -> Arc<Self> {
         *self.responder.write() = Some(responder);
         Arc::clone(self)
+    }
+}
+
+/// Seeds broker credentials from the resolved `ai.providers.<kind>.api_key`
+/// so provider plugins can reference the key by name (`credential:
+/// "api_key"`) and the host injects it at request time. Mirrors the
+/// factory's trust gate: only built-in or explicitly listed plugins receive
+/// the key, and an explicit `plugins.list.<name>.credentials` entry wins.
+fn seed_provider_credentials(
+    config: &ene_config::EneConfig,
+    plugin_config: &PluginConfig,
+    plugins: &mut HashMap<String, PluginState>,
+) {
+    let ai_config = config.get_section::<ene_ai::AiConfig>().unwrap_or_default();
+    for def in ai_config.providers.values() {
+        let key = def.api_key.resolve_api_key();
+        if key.is_empty() {
+            continue;
+        }
+        for (name, state) in &mut *plugins {
+            let trusted = crate::manager::is_builtin_plugin(name)
+                || plugin_config.list.contains_key(name);
+            if !trusted || !crate::factory::provider_def_kind_matches(def, name) {
+                continue;
+            }
+            state
+                .credentials
+                .entry("api_key".to_string())
+                .or_insert_with(|| key.clone());
+        }
     }
 }
 
@@ -310,6 +344,7 @@ impl BrokerHandler for BrokerHub {
                 method,
                 url,
                 headers,
+                credential,
                 body,
                 max_bytes,
             } => {
@@ -325,8 +360,18 @@ impl BrokerHandler for BrokerHub {
                     return sink.write(&BrokerResponse::error(e.code, e.message)).await;
                 }
                 let cap = max_bytes.unwrap_or(self.download.config.max_bytes);
-                self.fetch_stream(plugin, state, method, &url, &headers, body, cap, sink)
-                    .await
+                self.fetch_stream(
+                    plugin,
+                    state,
+                    method,
+                    &url,
+                    &headers,
+                    credential.as_deref(),
+                    body,
+                    cap,
+                    sink,
+                )
+                .await
             }
             other => {
                 let response = self.handle(plugin, other).await;
@@ -384,11 +429,21 @@ impl BrokerHub {
                 method,
                 url,
                 headers,
+                credential,
                 body,
                 max_bytes,
             } => {
-                self.network_fetch(plugin, state, method, &url, &headers, body, max_bytes)
-                    .await
+                self.network_fetch(
+                    plugin,
+                    state,
+                    method,
+                    &url,
+                    &headers,
+                    credential.as_deref(),
+                    body,
+                    max_bytes,
+                )
+                .await
             }
             BrokerRequest::NetworkFetchToTemp { url, max_bytes } => {
                 self.network_fetch_to_temp(plugin, state, &url, max_bytes)
@@ -952,12 +1007,23 @@ impl BrokerHub {
         method: HttpMethod,
         url: &str,
         headers: &[(String, String)],
+        credential: Option<&str>,
         body: Option<Vec<u8>>,
         max_bytes: Option<u64>,
     ) -> Result<BrokerResponse, BrokerError> {
         let cap = max_bytes.unwrap_or(self.download.config.max_bytes);
         let body = self
-            .fetch_loop(plugin, state, method, url, headers, body, cap, None)
+            .fetch_loop(
+                plugin,
+                state,
+                method,
+                url,
+                headers,
+                credential,
+                body,
+                cap,
+                None,
+            )
             .await?;
         Ok(BrokerResponse::NetworkFetchOk {
             status: body.status,
@@ -986,6 +1052,7 @@ impl BrokerHub {
                 url,
                 &[],
                 None,
+                None,
                 cap,
                 Some(&temp_path),
             )
@@ -1008,6 +1075,7 @@ impl BrokerHub {
         method: HttpMethod,
         url: &str,
         headers: &[(String, String)],
+        credential: Option<&str>,
         body: Option<&Vec<u8>>,
     ) -> Result<FetchHop, BrokerError> {
         let parsed = url::Url::parse(url)
@@ -1056,6 +1124,20 @@ impl BrokerHub {
             }
             request = request.header(key, value);
         }
+        if let Some(key) = credential {
+            self.approve(plugin, state, ApprovalCategory::CredentialUse, key)
+                .await?;
+            let value = state.credentials.get(key).ok_or_else(|| {
+                BrokerError::new(
+                    BrokerErrorCode::NotFound,
+                    format!("credential '{key}' not found"),
+                )
+            })?;
+            request = request.header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {value}"),
+            );
+        }
         let request = request
             .build()
             .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
@@ -1070,6 +1152,7 @@ impl BrokerHub {
         method: HttpMethod,
         url: &str,
         headers: &[(String, String)],
+        credential: Option<&str>,
         body: Option<Vec<u8>>,
         max_bytes: u64,
         sink: &mut (dyn ene_plugin_proto::BrokerSink + Send),
@@ -1077,7 +1160,15 @@ impl BrokerHub {
         let mut current = url.to_string();
         for _hop in 0..=self.download.config.max_redirects {
             let hop = self
-                .build_fetch_hop(plugin, state, method, &current, headers, body.as_ref())
+                .build_fetch_hop(
+                    plugin,
+                    state,
+                    method,
+                    &current,
+                    headers,
+                    credential,
+                    body.as_ref(),
+                )
                 .await?;
             let response = hop
                 .client
@@ -1156,6 +1247,7 @@ impl BrokerHub {
         method: HttpMethod,
         url: &str,
         headers: &[(String, String)],
+        credential: Option<&str>,
         body: Option<Vec<u8>>,
         max_bytes: u64,
         temp_path: Option<&Path>,
@@ -1163,7 +1255,15 @@ impl BrokerHub {
         let mut current = url.to_string();
         for _hop in 0..=self.download.config.max_redirects {
             let hop = self
-                .build_fetch_hop(plugin, state, method, &current, headers, body.as_ref())
+                .build_fetch_hop(
+                    plugin,
+                    state,
+                    method,
+                    &current,
+                    headers,
+                    credential,
+                    body.as_ref(),
+                )
                 .await?;
             let response = hop
                 .client
@@ -1993,6 +2093,7 @@ mod tests {
                 method: HttpMethod::Get,
                 url: "https://x".into(),
                 headers: vec![],
+                credential: None,
                 body: None,
                 max_bytes: None,
             }),

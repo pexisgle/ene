@@ -178,7 +178,9 @@ async fn spawn_host_service(
     config: &PluginConfig,
 ) -> tokio::task::JoinHandle<()> {
     let db = Database::connect("sqlite::memory:").await.expect("db");
-    let hub = ene_plugin_host::BrokerHub::from_config(config).expect("hub");
+    let mut full = ene_config::EneConfig::default();
+    full.set_section(config).expect("set plugin section");
+    let hub = ene_plugin_host::BrokerHub::from_config(&full).expect("hub");
     let hub = hub.with_approval_responder(Arc::new(AllowAllResponder));
     let db_plugins = std::collections::HashMap::from([
         (
@@ -243,6 +245,7 @@ async fn ssrf_blocks_loopback_even_when_the_approval_says_allow() {
             method: HttpMethod::Get,
             url: "https://127.0.0.1:1/secret".to_string(),
             headers: vec![],
+            credential: None,
             body: None,
             max_bytes: None,
         })
@@ -276,6 +279,7 @@ async fn denied_category_is_rejected_before_any_network_work() {
             method: HttpMethod::Get,
             url: "https://example.com/".to_string(),
             headers: vec![],
+            credential: None,
             body: None,
             max_bytes: None,
         })
@@ -303,6 +307,7 @@ async fn streaming_requests_route_through_the_session_loop_and_apply_policy() {
             method: HttpMethod::Get,
             url: "https://example.com/stream".to_string(),
             headers: vec![],
+            credential: None,
             body: None,
             max_bytes: None,
         })
@@ -367,6 +372,7 @@ async fn declared_platform_service_is_served() {
             method: HttpMethod::Get,
             url: "https://10.0.0.1/private".to_string(),
             headers: vec![],
+            credential: None,
             body: None,
             max_bytes: None,
         })
@@ -473,7 +479,9 @@ async fn signed_catalog_refreshes_on_demand_and_rejects_rollback() {
     };
 
     let db = Database::connect("sqlite::memory:").await.expect("db");
-    let hub = ene_plugin_host::BrokerHub::from_config(&config).expect("hub");
+    let mut full = ene_config::EneConfig::default();
+    full.set_section(&config).expect("set plugin section");
+    let hub = ene_plugin_host::BrokerHub::from_config(&full).expect("hub");
     let hub = hub.with_approval_responder(Arc::new(AllowAllResponder));
     let db_plugins = std::collections::HashMap::from([(
         "artifact-token".to_string(),
@@ -597,7 +605,9 @@ async fn file_broker_serves_granted_absolute_paths_and_denies_others() {
     let socket = dir.path().join("host-service-file.sock");
     let config = test_config_with_fs_grant(&grant);
     let db = Database::connect("sqlite::memory:").await.expect("db");
-    let hub = ene_plugin_host::BrokerHub::from_config(&config).expect("hub");
+    let mut full = ene_config::EneConfig::default();
+    full.set_section(&config).expect("set plugin section");
+    let hub = ene_plugin_host::BrokerHub::from_config(&full).expect("hub");
     let hub = hub.with_approval_responder(Arc::new(AllowAllResponder));
     let db_plugins = std::collections::HashMap::from([(
         "fs-token".to_string(),

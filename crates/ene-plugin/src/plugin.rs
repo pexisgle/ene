@@ -118,6 +118,13 @@ pub trait ConfigurablePlugin: Send + Sync {
     /// means profiles were cleared and must replace any previously stored map.
     fn set_profiles(&self, _profiles: &serde_json::Value) {}
 
+    /// Receives sandbox configuration (called once during Handshake).
+    ///
+    /// The host delivers the broker socket, auth token, and OS sandbox
+    /// settings here; plugins that mediate OS access through the broker
+    /// capture this data for their first request.
+    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
+
     /// Returns the JSON Schema for the configuration this plugin accepts.
     ///
     /// Safe to call repeatedly — the host may re-fetch after a
@@ -248,9 +255,6 @@ pub trait ToolPlugin: ConfigurablePlugin + Send + Sync {
     fn revoke_pattern(&self, _action: &str, _target_pattern: &str) -> Result<(), ToolError> {
         Ok(())
     }
-
-    /// Receives sandbox configuration (called once during Handshake).
-    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
 
     /// Drain any pending deferred completion notifications.
     ///

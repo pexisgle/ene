@@ -296,6 +296,10 @@ impl ConfigurablePlugin for ActionSetProvider {
     fn config_schema(&self) -> Option<serde_json::Value> {
         self.hooks.call_config_schema()
     }
+
+    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
+        self.hooks.call_set_sandbox(sandbox);
+    }
 }
 
 #[async_trait]
@@ -360,9 +364,6 @@ impl ToolPlugin for ActionSetProvider {
         Ok(())
     }
 
-    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
-        ProviderHooks::call_set_sandbox(&self.hooks, sandbox);
-    }
 }
 
 /// Adapts a single [`ToolAction`] into a [`ToolProvider`].
@@ -545,9 +546,6 @@ impl ToolPlugin for SingleActionProvider {
         ToolPlugin::revoke_pattern(&self.inner, action, target_pattern)
     }
 
-    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
-        ToolPlugin::set_sandbox(&self.inner, sandbox);
-    }
 }
 
 impl ConfigurablePlugin for SingleActionProvider {
@@ -561,6 +559,10 @@ impl ConfigurablePlugin for SingleActionProvider {
 
     fn config_schema(&self) -> Option<serde_json::Value> {
         ConfigurablePlugin::config_schema(&self.inner)
+    }
+
+    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
+        ConfigurablePlugin::set_sandbox(&self.inner, sandbox);
     }
 }
 

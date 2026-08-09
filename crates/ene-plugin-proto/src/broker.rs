@@ -176,6 +176,12 @@ pub enum BrokerRequest {
         /// Extra headers (host strips authorization-like headers it did not
         /// inject).
         headers: Vec<(String, String)>,
+        /// Name of a host-owned credential to inject as
+        /// `Authorization: Bearer <value>` at request time. The plugin only
+        /// names the key; the host resolves the value, gates
+        /// `CredentialUse`, and never returns it to the plugin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<String>,
         /// Request body (JSON/form payloads). The caller must set a matching
         /// `Content-Type` header; the host never interprets the body.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +208,11 @@ pub enum BrokerRequest {
         url: String,
         /// Extra headers (authorization-like headers are stripped).
         headers: Vec<(String, String)>,
+        /// Name of a host-owned credential to inject as
+        /// `Authorization: Bearer <value>` at request time (same rules as
+        /// [`BrokerRequest::NetworkFetch::credential`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<String>,
         /// Request body (form/JSON payloads).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<Vec<u8>>,
@@ -496,6 +507,7 @@ mod tests {
                 method: HttpMethod::Get,
                 url: "https://example.com".to_string(),
                 headers: vec![],
+                credential: Some("api_key".to_string()),
                 body: None,
                 max_bytes: None,
             },

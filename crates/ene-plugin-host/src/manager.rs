@@ -2207,7 +2207,7 @@ pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] = &[
 ///
 /// This matches against the compiled-in [`BUILTIN_PLUGIN_NAMES`] list rather
 /// than probing the filesystem (see that constant's docs for why).
-fn is_builtin_plugin(name: &str) -> bool {
+pub(crate) fn is_builtin_plugin(name: &str) -> bool {
     BUILTIN_PLUGIN_NAMES.contains(&name)
 }
 

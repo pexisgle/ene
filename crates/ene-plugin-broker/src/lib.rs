@@ -277,6 +277,7 @@ mod tests {
                 method: HttpMethod::Get,
                 url: "https://example.com/stream".to_string(),
                 headers: vec![],
+                credential: None,
                 body: None,
                 max_bytes: Some(1024),
             })
@@ -324,6 +325,7 @@ mod tests {
                     method: HttpMethod::Get,
                     url: "https://example.com/stream".to_string(),
                     headers: vec![],
+                    credential: None,
                     body: None,
                     max_bytes: Some(1024),
                 },
@@ -368,6 +370,7 @@ mod tests {
                 method: HttpMethod::Get,
                 url: "https://example.com/stream".to_string(),
                 headers: vec![],
+                credential: None,
                 body: None,
                 max_bytes: None,
             })

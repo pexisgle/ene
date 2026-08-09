@@ -5366,7 +5366,7 @@ pub(super) fn spawn_db_ipc_servers(
         if let Some(handler) = capability_handler {
             server = server.with_capability_handler(handler);
         }
-        if let Some(broker) = ene_plugin_host::BrokerHub::from_config(&plugin_config) {
+        if let Some(broker) = ene_plugin_host::BrokerHub::from_config(config) {
             let responder = crate::approval::ActorApprovalResponder::new(
                 cmd_tx.clone(),
                 std::time::Duration::from_millis(plugin_config.permission_prompt_timeout_ms),

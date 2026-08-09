@@ -147,7 +147,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
                              withholding API credentials"
                         );
                     }
-                    build_provider_config(def, trusted)
+                    build_provider_config(def, trusted, !is_broker_credential_kind(&self.kind))
                 },
             );
         let provider_config = apply_task_overrides(provider_config, task);
@@ -187,8 +187,14 @@ pub(crate) fn provider_def_kind_matches(def: &AiProviderDef, kind: &str) -> bool
 /// string** under `api_key`, matching the plugin-side contract (see the
 /// Anthropic plugin's `resolve_api_key`). When `trusted` is `false`, no
 /// `api_key` field is emitted at all, so credentials never reach an
-/// untrusted plugin.
-pub(crate) fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde_json::Value {
+/// untrusted plugin. `forward_api_key` additionally suppresses the key for
+/// provider kinds migrated to broker credential injection (the plugin only
+/// names the key; the host injects it at request time).
+pub(crate) fn build_provider_config(
+    def: &AiProviderDef,
+    trusted: bool,
+    forward_api_key: bool,
+) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     if !def.base_url.is_empty() {
         map.insert(
@@ -196,7 +202,7 @@ pub(crate) fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde
             serde_json::Value::String(def.base_url.clone()),
         );
     }
-    if trusted {
+    if trusted && forward_api_key {
         let api_key = def.api_key.resolve_api_key();
         if !api_key.is_empty() {
             map.insert("api_key".to_string(), serde_json::Value::String(api_key));
@@ -206,6 +212,13 @@ pub(crate) fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde
         map.insert(k.clone(), v.clone());
     }
     serde_json::Value::Object(map)
+}
+
+/// Provider kinds that authenticate through broker credential injection
+/// (`NetworkFetch.credential`) and therefore never receive the API key in
+/// their provider config.
+pub(crate) fn is_broker_credential_kind(kind: &str) -> bool {
+    matches!(kind, "openai")
 }
 
 /// Applies per-task overrides onto the provider config forwarded to a plugin.
@@ -254,7 +267,7 @@ mod tests {
     #[test]
     fn trusted_plugin_receives_plain_string_api_key() {
         let def = anthropic_def_with_inline_key();
-        let config = build_provider_config(&def, true);
+        let config = build_provider_config(&def, true, true);
 
         let api_key = config.get("api_key").expect("api_key present when trusted");
         assert!(
@@ -269,7 +282,7 @@ mod tests {
     #[test]
     fn untrusted_plugin_does_not_receive_api_key() {
         let def = anthropic_def_with_inline_key();
-        let config = build_provider_config(&def, false);
+        let config = build_provider_config(&def, false, true);
 
         assert!(
             config.get("api_key").is_none(),
@@ -289,7 +302,7 @@ mod tests {
         );
 
         for trusted in [true, false] {
-            let config = build_provider_config(&def, trusted);
+            let config = build_provider_config(&def, trusted, true);
             assert_eq!(
                 config.get("base_url").and_then(serde_json::Value::as_str),
                 Some("https://api.example.com")
@@ -301,13 +314,32 @@ mod tests {
         }
     }
 
+    /// Contract: broker-credential provider kinds never receive the key,
+    /// even when trusted — they name the key and the host injects it.
+    #[test]
+    fn broker_credential_kind_withholds_api_key_even_when_trusted() {
+        let mut def = anthropic_def_with_inline_key();
+        def.kind = "openai".to_string();
+        let config = build_provider_config(&def, true, false);
+        assert!(
+            config.get("api_key").is_none(),
+            "broker-credential kinds must not receive api_key, got {config:?}"
+        );
+        assert_eq!(
+            is_broker_credential_kind("openai"),
+            true,
+            "openai must be treated as a broker-credential kind"
+        );
+        assert_eq!(is_broker_credential_kind("anthropic"), false);
+    }
+
     /// The decision task's `thinking_disabled` flag is forwarded into the
     /// provider config so the plugin can disable thinking unconditionally
     /// (beyond its model-name heuristic).
     #[test]
     fn thinking_disabled_task_forwarded_to_plugin_config() {
         let def = anthropic_def_with_inline_key();
-        let base = build_provider_config(&def, true);
+        let base = build_provider_config(&def, true, true);
         let task = ene_ai::TaskRef {
             thinking_disabled: true,
             ..ene_ai::TaskRef::default()
@@ -324,7 +356,7 @@ mod tests {
     #[test]
     fn thinking_enabled_task_leaves_config_untouched() {
         let def = anthropic_def_with_inline_key();
-        let base = build_provider_config(&def, true);
+        let base = build_provider_config(&def, true, true);
         let task = ene_ai::TaskRef::default();
         let config = apply_task_overrides(base, &task);
         assert!(

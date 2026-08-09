@@ -138,16 +138,6 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
         Ok(())
     }
 
-    // `set_sandbox`/`set_config` are synchronous trait methods invoked exactly
-    // once during the handshake, before any tool call on the connection. They
-    // cannot await the async `call_mutex`, so they are not serialized under it.
-    // Last-writer-wins is acceptable here: the wrapped [`ToolProvider`]
-    // contractually requires interior mutability (e.g. `RwLock`) for any state
-    // these setters write, and handshakes do not overlap with tool calls on the
-    // same connection.
-    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
-        self.provider.set_sandbox(sandbox);
-    }
 }
 
 impl<T: ToolProvider> ConfigurablePlugin for ToolProviderPlugin<T> {
@@ -157,5 +147,16 @@ impl<T: ToolProvider> ConfigurablePlugin for ToolProviderPlugin<T> {
 
     fn config_schema(&self) -> Option<serde_json::Value> {
         self.provider.config_schema()
+    }
+
+    // `set_sandbox`/`set_config` are synchronous trait methods invoked exactly
+    // once during the handshake, before any tool call on the connection. They
+    // cannot await the async `call_mutex`, so they are not serialized under it.
+    // Last-writer-wins is acceptable here: the wrapped [`ToolProvider`]
+    // contractually requires interior mutability (e.g. `RwLock`) for any state
+    // these setters write, and handshakes do not overlap with tool calls on the
+    // same connection.
+    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
+        self.provider.set_sandbox(sandbox);
     }
 }
