@@ -244,6 +244,89 @@ fn value_span(input: &str, value_start: usize) -> (usize, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::{prop_assert, prop_assert_eq};
+
+    /// Random nested JSON documents for the redaction properties.
+    fn any_json_value() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(Value::from),
+            "[a-zA-Z0-9_-]{0,32}".prop_map(Value::String),
+        ];
+        leaf.prop_recursive(3, 24, 6, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..6).prop_map(Value::Array),
+                proptest::collection::hash_map("[a-zA-Z0-9_-]{0,16}", inner, 0..6)
+                    .prop_map(|map| Value::Object(map.into_iter().collect())),
+            ]
+        })
+    }
+
+    /// Asserts the structural redaction contract: every value under a
+    /// secret-bearing key is exactly the placeholder, recursively.
+    fn secrets_masked(value: &Value) -> bool {
+        match value {
+            Value::Object(obj) => obj.iter().all(|(key, value)| {
+                if is_secret_key_name(key) {
+                    value == &Value::String(REDACTED.to_string())
+                } else {
+                    secrets_masked(value)
+                }
+            }),
+            Value::Array(items) => items.iter().all(secrets_masked),
+            _ => true,
+        }
+    }
+
+    proptest::proptest! {
+        /// A second scrub pass must not resurrect or introduce secret
+        /// material, for any input text.
+        #[test]
+        fn scrub_secrets_is_idempotent(input in "\\PC{0,128}") {
+            let once = scrub_secrets(&input);
+            prop_assert_eq!(scrub_secrets(&once), once);
+        }
+
+        /// `Bearer` tokens are replaced wholesale, so the token value can
+        /// never survive in the output.
+        #[test]
+        fn scrub_bearer_never_leaks_token(token in "[A-Za-z0-9._~+/=-]{4,64}") {
+            let out = scrub_secrets(&format!("Authorization: Bearer {token}"));
+            prop_assert!(!out.contains(&token));
+        }
+
+        /// `key=value` pairs under secret-bearing names are replaced.
+        #[test]
+        fn scrub_key_value_never_leaks_value(
+            key in "api_key|access_token|password|auth|token",
+            value in "[A-Za-z0-9._~+/=-]{4,64}",
+        ) {
+            let out = scrub_secrets(&format!("{key}={value}"));
+            prop_assert!(!out.contains(&value));
+        }
+
+        /// JSON `"key": "value"` pairs under secret-bearing names are
+        /// replaced.
+        #[test]
+        fn scrub_json_pair_never_leaks_value(
+            key in "api_key|access_token|password|auth|token",
+            value in "[A-Za-z0-9._~+/=-]{4,64}",
+        ) {
+            let out = scrub_secrets(&format!(r#"{{"{key}": "{value}"}}"#));
+            prop_assert!(!out.contains(&value));
+        }
+
+        /// Redaction is idempotent and every value under a secret-bearing
+        /// key is the placeholder.
+        #[test]
+        fn redact_json_masks_all_secret_keys(value in any_json_value()) {
+            let once = redact_json(&value);
+            prop_assert_eq!(&redact_json(&once), &once);
+            prop_assert!(secrets_masked(&once));
+        }
+    }
 
     #[test]
     fn redact_json_masks_secret_keys_recursively() {

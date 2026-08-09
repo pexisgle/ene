@@ -359,4 +359,54 @@ mod tests {
         let err = SessionExport::from_json(json).unwrap_err();
         assert!(matches!(err, EneMemoryError::UnsupportedFormatVersion(999)));
     }
+
+    /// A fully populated export exercising every field of the v1 JSON
+    /// contract, with redacted secret shapes.
+    fn sample_export() -> SessionExport {
+        SessionExport {
+            format_version: SESSION_EXPORT_FORMAT_VERSION,
+            exported_at: chrono::DateTime::from_timestamp(1_752_450_000, 0).unwrap(),
+            session: SessionMeta {
+                id: 7,
+                session_id: "sess-abc123".into(),
+                card_name: "Aria".into(),
+                title: "Test session".into(),
+                created_at: chrono::DateTime::from_timestamp(1_752_449_000, 0).unwrap(),
+                updated_at: chrono::DateTime::from_timestamp(1_752_450_000, 0).unwrap(),
+                archived: false,
+                turn_count: 2,
+            },
+            messages: vec![
+                ExportedMessage {
+                    role: "user".into(),
+                    content: "hello".into(),
+                    created_at: chrono::DateTime::from_timestamp(1_752_449_100, 0).unwrap(),
+                },
+                ExportedMessage {
+                    role: "assistant".into(),
+                    content: "Bearer sk-top-secret-token".into(),
+                    created_at: chrono::DateTime::from_timestamp(1_752_449_200, 0).unwrap(),
+                },
+            ],
+            tool_logs: vec![ExportedToolLog {
+                turn_id: "turn-1".into(),
+                tool_name: "system.search_tools".into(),
+                action: "search".into(),
+                target: "tools".into(),
+                decision: "allowed".into(),
+                success: true,
+                redacted_args: r#"{"query":"scheduler","api_key":"***"}"#.into(),
+                created_at: chrono::DateTime::from_timestamp(1_752_449_300, 0).unwrap(),
+            }],
+        }
+    }
+
+    /// The serialized export is a stable, versioned JSON contract: any
+    /// accidental shape change fails the snapshot review instead of
+    /// silently breaking backup/transfer compatibility.
+    #[test]
+    fn session_export_json_contract_is_stable() {
+        let json = sample_export().to_json().expect("export serializes");
+        insta::assert_snapshot!(json);
+    }
 }

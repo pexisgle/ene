@@ -119,6 +119,92 @@ impl PromptPacket {
     }
 }
 
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::lifecycle::HistoryEntry;
+
+    /// A packet exercising every message class: system sections, history,
+    /// the post-history output contract, and the final user input.
+    fn sample_packet() -> PromptPacket {
+        let mut packet = PromptPacket::default();
+        for (kind, content) in [
+            (
+                PromptSectionKind::PlatformContract,
+                "You are Ene, a desktop companion.",
+            ),
+            (
+                PromptSectionKind::IdentityKernel,
+                "Name: Aria\nPersonality: warm and curious.",
+            ),
+            (PromptSectionKind::CharacterState, "Aria feels cheerful."),
+            (PromptSectionKind::SceneState, "Evening in the study."),
+            (
+                PromptSectionKind::SemanticContext,
+                "- Aria likes matcha tea.",
+            ),
+            (
+                PromptSectionKind::UserProfile,
+                "- The user prefers short replies.",
+            ),
+            (
+                PromptSectionKind::EpisodicMemories,
+                "- Yesterday the user shared a presentation.",
+            ),
+            (
+                PromptSectionKind::OutputContract,
+                "Reply in the user's language, at most 3 sentences.",
+            ),
+            (PromptSectionKind::UserInput, "Tell me about yourself."),
+        ] {
+            packet.sections.push(PromptSection::new(kind, content));
+        }
+        packet.history.push(HistoryEntry {
+            role: ene_ai::Role::User,
+            content: "hi".into(),
+        });
+        packet.history.push(HistoryEntry {
+            role: ene_ai::Role::Assistant,
+            content: "Hello!".into(),
+        });
+        packet
+    }
+
+    /// Stable text rendering of the LLM messages for snapshot comparison.
+    fn render(messages: &[LlmMessage]) -> String {
+        messages
+            .iter()
+            .map(|message| match message {
+                LlmMessage::System { content } => format!("[system]\n{content}"),
+                LlmMessage::User { parts } => {
+                    let text = parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            UserMessagePart::Text { text } => Some(text.clone()),
+                            UserMessagePart::Image { .. } => None,
+                        })
+                        .collect::<String>();
+                    format!("[user]\n{text}")
+                }
+                LlmMessage::Assistant { content, .. } => {
+                    format!("[assistant]\n{}", content.as_deref().unwrap_or_default())
+                }
+                LlmMessage::Tool { .. } => "[tool]".into(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n")
+    }
+
+    /// The composed LLM messages are a stable, user-visible contract:
+    /// wording changes fail the snapshot review instead of silently
+    /// altering every character's behavior.
+    #[test]
+    fn prompt_packet_llm_messages_contract_is_stable() {
+        let (messages, _meta) = sample_packet().to_llm_messages();
+        insta::assert_snapshot!(render(&messages));
+    }
+}
+
 /// Split recalled memories into semantic, profile, and episodic buckets.
 pub fn classify_recalled_memories(
     recalled: &[RecalledMemory],

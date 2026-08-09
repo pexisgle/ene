@@ -425,16 +425,32 @@ mod tests {
     #[tokio::test]
     async fn concurrent_loads_share_one_in_flight_load() {
         let loads = Arc::new(AtomicUsize::new(0));
+        // The test releases the single load closure only after it has
+        // confirmed the load started, so the assertion below observes the
+        // gate holding every concurrent caller instead of racing a sleep.
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel(1);
+        let release = Arc::new(tokio::sync::Notify::new());
         let mut handles = Vec::new();
         for _ in 0..8 {
             let loads = Arc::clone(&loads);
+            let release = Arc::clone(&release);
+            let started_tx = started_tx.clone();
             handles.push(tokio::spawn(async move {
                 let generation = config::generation();
                 load_once("model", &TEST_GATES, &TEST_EPOCHS, cached, move |epoch| {
                     let loads = Arc::clone(&loads);
+                    let release = Arc::clone(&release);
+                    let started_tx = started_tx.clone();
                     async move {
                         loads.fetch_add(1, Ordering::SeqCst);
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        // The send error is `Copy`, so `drop()` would trip
+                        // `clippy::dropping_copy_types`.
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "mpsc send error is Copy; drop() would trip dropping_copy_types"
+                        )]
+                        let _ = started_tx.send(()).await;
+                        release.notified().await;
                         let provider = Arc::new("loaded".to_string());
                         Ok(insert_if_unloaded(
                             &TEST_EPOCHS,
@@ -450,6 +466,11 @@ mod tests {
                 .expect("load succeeds")
             }));
         }
+        started_rx
+            .recv()
+            .await
+            .expect("the single load closure must start");
+        release.notify_waiters();
         let mut results = Vec::new();
         for handle in handles {
             results.push(handle.await.expect("task joins"));

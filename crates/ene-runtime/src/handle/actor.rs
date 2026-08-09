@@ -126,9 +126,12 @@ pub(super) struct TurnActor {
     /// The schedule run currently executing (prompt stream or tool task).
     active_scheduled_run: Option<ActiveScheduledRun>,
     /// Wakes the scheduler timer task after any schedule-state mutation.
-    scheduler_notify: watch::Sender<()>,
+    pub(super) scheduler_notify: watch::Sender<()>,
     /// Receiver handed to the timer task when it is spawned.
     scheduler_notify_rx: Option<watch::Receiver<()>>,
+    /// Wall-clock source for scheduler due-time evaluation (injectable in
+    /// tests so scheduler integration tests advance virtual time).
+    scheduler_clock: crate::scheduler::SchedulerClock,
     permission_scopes: Arc<Mutex<Vec<crate::streaming::PermissionScope>>>,
     /// Connector framework registry shared with the handle; the actor
     /// resolves permission prompts and records audit rows for lifecycle ops.
@@ -275,10 +278,8 @@ impl TurnActor {
     /// Constructs a ready `TurnActor`. Called once from [`crate::EneHandle::open`].
     #[expect(
         clippy::too_many_arguments,
-        reason = "single internal constructor call site (EneHandle::open); the #272 \
-                  event-bus split added two channel senders (lifecycle_tx, audio_tx) \
-                  and #397 added cmd_tx for internal command feedback, pushing this \
-                  from 17 to 18 — grouping into a config struct is a larger refactor \
+        reason = "single internal constructor call site (EneHandle::open); grouping the \
+                  bootstrap channels/handles into a config struct is a larger refactor \
                   out of scope here"
     )]
     pub(super) fn new(
@@ -305,6 +306,7 @@ impl TurnActor {
         host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
         shared_state: Arc<SharedActorState>,
         connectors: Arc<ene_connector::ConnectorRegistry>,
+        scheduler_clock: crate::scheduler::SchedulerClock,
     ) -> Self {
         let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
         let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
@@ -346,6 +348,7 @@ impl TurnActor {
             active_scheduled_run: None,
             scheduler_notify,
             scheduler_notify_rx: Some(scheduler_notify_rx),
+            scheduler_clock,
             permission_scopes: Arc::new(Mutex::new(Vec::new())),
             connectors,
             undo_stack: Arc::new(Mutex::new(crate::undo::UndoStack::new(64))),
@@ -2142,7 +2145,7 @@ impl TurnActor {
         if !enabled {
             return;
         }
-        let now = chrono::Utc::now();
+        let now = (self.scheduler_clock)();
         if let Err(e) = store.reconcile_startup(now).await {
             tracing::error!(
                 component = "Scheduler",
@@ -2175,8 +2178,9 @@ impl TurnActor {
             return;
         }
         let cmd_tx = self.cmd_tx.clone();
+        let scheduler_clock = Arc::clone(&self.scheduler_clock);
         self.aux_tasks.spawn(async move {
-            crate::scheduler::task::run(store, cmd_tx, notify_rx).await;
+            crate::scheduler::task::run(store, cmd_tx, notify_rx, scheduler_clock).await;
         });
     }
 
@@ -2206,7 +2210,7 @@ impl TurnActor {
             .config
             .get_section::<crate::scheduler::SchedulerConfig>()
             .unwrap_or_default();
-        let now = chrono::Utc::now();
+        let now = (self.scheduler_clock)();
         let Ok(Some(schedule)) = store.get_schedule(schedule_id).await else {
             // Notify even on read failure: the timer's `queued` set must not
             // keep suppressing a due fire after a transient DB error.
@@ -2362,7 +2366,7 @@ impl TurnActor {
         // Move the row out of `awaiting_approval` before executing so a
         // stale timeout can never record `timed_out` for a run that is
         // actually running (and a crash reconciles as `interrupted`).
-        let now = chrono::Utc::now();
+        let now = (self.scheduler_clock)();
         if let Err(e) = store
             .mark_run_running(pending.schedule_id, pending.run_id, now)
             .await
@@ -2617,7 +2621,7 @@ impl TurnActor {
             return;
         };
         if let Err(e) = store
-            .finish_run(schedule_id, run_id, status, error, chrono::Utc::now())
+            .finish_run(schedule_id, run_id, status, error, (self.scheduler_clock)())
             .await
         {
             tracing::error!(
@@ -3358,7 +3362,7 @@ impl TurnActor {
             EneCommand::AddSchedule { new, reply } => {
                 let result = match &self.concrete_store {
                     Some(store) => store
-                        .insert_schedule(&new, chrono::Utc::now())
+                        .insert_schedule(&new, (self.scheduler_clock)())
                         .await
                         .map_err(EneRuntimeError::from),
                     None => Err(EneRuntimeError::StoreRequired),
@@ -3428,7 +3432,7 @@ impl TurnActor {
             } => {
                 let result = match &self.concrete_store {
                     Some(store) => store
-                        .set_schedule_enabled(schedule_id, enabled, chrono::Utc::now())
+                        .set_schedule_enabled(schedule_id, enabled, (self.scheduler_clock)())
                         .await
                         .map_err(EneRuntimeError::from),
                     None => Err(EneRuntimeError::StoreRequired),

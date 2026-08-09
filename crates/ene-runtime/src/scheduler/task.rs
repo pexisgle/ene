@@ -9,7 +9,7 @@
 //! wakeup.
 
 use crate::handle::EneCommand;
-use chrono::Utc;
+use crate::scheduler::SchedulerClock;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,13 +23,14 @@ pub(crate) async fn run(
     store: Arc<ene_store::MemoryStore>,
     cmd_tx: mpsc::UnboundedSender<EneCommand>,
     mut notify_rx: watch::Receiver<()>,
+    clock: SchedulerClock,
 ) {
     // Consume the initial channel value so the first `changed()` below waits
     // for an actual notification instead of resolving immediately.
     notify_rx.borrow_and_update();
     let mut queued: HashSet<i64> = HashSet::new();
     loop {
-        let now = Utc::now();
+        let now = clock();
         match store.list_due_schedules(now).await {
             Ok(due) => {
                 for schedule in due {

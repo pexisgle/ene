@@ -1,0 +1,42 @@
+---
+source: crates/ene-store/src/export.rs
+expression: json
+---
+{
+  "format_version": 1,
+  "exported_at": "2025-07-13T23:40:00Z",
+  "session": {
+    "id": 7,
+    "session_id": "sess-abc123",
+    "card_name": "Aria",
+    "title": "Test session",
+    "created_at": "2025-07-13T23:23:20Z",
+    "updated_at": "2025-07-13T23:40:00Z",
+    "archived": false,
+    "turn_count": 2
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "hello",
+      "created_at": "2025-07-13T23:25:00Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Bearer sk-top-secret-token",
+      "created_at": "2025-07-13T23:26:40Z"
+    }
+  ],
+  "tool_logs": [
+    {
+      "turn_id": "turn-1",
+      "tool_name": "system.search_tools",
+      "action": "search",
+      "target": "tools",
+      "decision": "allowed",
+      "success": true,
+      "redacted_args": "{\"query\":\"scheduler\",\"api_key\":\"***\"}",
+      "created_at": "2025-07-13T23:28:20Z"
+    }
+  ]
+}

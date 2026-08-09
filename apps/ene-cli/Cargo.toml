@@ -38,5 +38,8 @@ i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop
 i18n-embed-fl = "0.10"
 thiserror = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

@@ -3,15 +3,18 @@
 
 #![expect(
     clippy::expect_used,
-    reason = "integration tests use expect for assertions"
+    clippy::panic,
+    reason = "integration tests use expect/panic for assertions"
 )]
 
+mod common;
+
 use async_trait::async_trait;
+use common::{VirtualClock, test_card};
 use ene_ai::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, EmbeddingProviderFactory, LlmCompletion,
     LlmMessage, LlmProvider, LlmProviderError, LlmProviderFactory, LlmResponseChunk,
 };
-use ene_card::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_runtime::{
     EneEvent, EneEventReceiver, EneHandle, NewSchedule, PermissionDecision, ScheduleAction,
@@ -19,15 +22,18 @@ use ene_runtime::{
 };
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio_stream::Stream;
 
-fn test_card() -> CharacterCardV3 {
-    let mut card = CharacterCardV3::default();
-    card.data.name = "SchedulerTest".into();
-    card.data.system_prompt = "Be brief.".into();
-    card
-}
+/// Virtual lead time pushed into the injected clock before waking the
+/// scheduler timer task, so a schedule armed 150ms ahead is already due.
+const FIRE_ADVANCE: Duration = Duration::from_millis(200);
+/// Bounded poll budget: the tests give up after this many real-time
+/// iterations, so a stalled actor fails fast instead of hanging.
+const WAIT_STEPS: usize = 400;
+/// Real-time poll interval between scheduler wake-ups; the step budget
+/// above bounds the wall-clock cost even on a loaded CI runner.
+const WAIT_POLL: Duration = Duration::from_millis(10);
 
 /// Chat provider that never completes, keeping the single-flight gate held
 /// so tests can exercise the "scheduled runs never interrupt a conversation"
@@ -248,14 +254,23 @@ fn test_config_memory_on(db_path: Option<&str>) -> (EneConfig, Arc<dyn ene_ai::P
 }
 
 /// Open a memory-enabled runtime against the hanging stub host.
-async fn open_memory_on(db_path: Option<&str>) -> EneHandle {
+async fn open_memory_on(db_path: Option<&str>, clock: &VirtualClock) -> EneHandle {
     let (config, host) = test_config_memory_on(db_path);
-    EneHandle::open_with_provider_host(config, test_card(), host)
-        .await
-        .expect("open initializes handle")
+    let scheduler_clock: ene_runtime::handle::SchedulerClock = {
+        let clock = clock.clone();
+        Arc::new(move || clock.now())
+    };
+    EneHandle::open_with_provider_host_and_clock(
+        config,
+        test_card("SchedulerTest"),
+        host,
+        scheduler_clock,
+    )
+    .await
+    .expect("open initializes handle")
 }
 
-fn one_shot_tool_schedule(confirm: bool) -> NewSchedule {
+fn one_shot_tool_schedule(confirm: bool, start_at: chrono::DateTime<chrono::Utc>) -> NewSchedule {
     NewSchedule {
         name: format!(
             "test-{}",
@@ -265,7 +280,7 @@ fn one_shot_tool_schedule(confirm: bool) -> NewSchedule {
         timezone: "UTC".to_string(),
         cron_expr: None,
         interval_secs: None,
-        start_at: Some(chrono::Utc::now() + chrono::Duration::milliseconds(150)),
+        start_at: Some(start_at),
         action: ScheduleAction::Tool {
             name: "system.search_tools".to_string(),
             arguments: serde_json::json!({ "query": "scheduler" }),
@@ -285,59 +300,64 @@ async fn wait_for_run_status(
     schedule_id: i64,
     wanted: ScheduleRunStatus,
 ) -> Vec<ene_runtime::ScheduleRun> {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
+    let mut last_runs = Vec::new();
+    for _ in 0..WAIT_STEPS {
         let runs = handle
             .list_schedule_runs(schedule_id, 20)
             .await
             .expect("list runs");
+        last_runs = runs.clone();
         if let Some(run) = runs.first()
             && run.status == wanted
         {
             return runs;
         }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for run status {wanted:?}; got {runs:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(WAIT_POLL).await;
     }
+    panic!("timed out waiting for run status {wanted:?}; runs={last_runs:?}");
 }
 
 /// A scheduled tool action fires, streams turn-scoped events, records a
 /// success run, and completes the one-shot schedule.
 #[tokio::test]
 async fn scheduled_tool_action_runs_and_records_success() {
-    let handle = open_memory_on(None).await;
+    let clock = VirtualClock::new();
+    let handle = open_memory_on(None, &clock).await;
     let mut rx = handle.subscribe();
     let schedule = handle
-        .add_schedule(one_shot_tool_schedule(false))
+        .add_schedule(one_shot_tool_schedule(
+            false,
+            clock.now() + chrono::Duration::milliseconds(150),
+        ))
         .await
         .expect("add schedule");
+    clock.advance(FIRE_ADVANCE);
+    handle.wake_scheduler();
 
     let mut saw_started = false;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let terminal = loop {
-        let event = tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            rx.recv(),
-        )
-        .await
-        .expect("timed out waiting for the scheduled turn to finish")
-        .expect("event channel open");
-        match event {
-            EneEvent::TurnStarted {
-                origin: TurnOrigin::Scheduled,
-                ..
-            } => saw_started = true,
-            EneEvent::Terminal {
-                origin: TurnOrigin::Scheduled,
-                reason,
-                ..
-            } => break reason,
-            _ => {}
+    let mut terminal = None;
+    for _ in 0..WAIT_STEPS {
+        match tokio::time::timeout(WAIT_POLL, rx.recv()).await {
+            Ok(Ok(event)) => match event {
+                EneEvent::TurnStarted {
+                    origin: TurnOrigin::Scheduled,
+                    ..
+                } => saw_started = true,
+                EneEvent::Terminal {
+                    origin: TurnOrigin::Scheduled,
+                    reason,
+                    ..
+                } => {
+                    terminal = Some(reason);
+                    break;
+                }
+                _ => {}
+            },
+            Ok(Err(_)) => panic!("event channel open"),
+            Err(_elapsed) => {}
         }
-    };
+    }
+    let terminal = terminal.expect("timed out waiting for the scheduled turn to finish");
     assert!(saw_started, "a scheduled TurnStarted must precede Terminal");
     assert!(matches!(terminal, TerminalReason::Done));
     let runs = wait_for_run_status(&handle, schedule.id, ScheduleRunStatus::Success).await;
@@ -358,13 +378,19 @@ async fn scheduled_tool_action_runs_and_records_success() {
 /// scheduled turn; the conversation's single-flight gate stays untouched.
 #[tokio::test]
 async fn scheduled_fire_never_interrupts_conversation() {
-    let handle = open_memory_on(None).await;
+    let clock = VirtualClock::new();
+    let handle = open_memory_on(None, &clock).await;
     let mut rx = handle.subscribe();
     let turn = handle.run("hello").expect("run claims the gate");
     let schedule = handle
-        .add_schedule(one_shot_tool_schedule(false))
+        .add_schedule(one_shot_tool_schedule(
+            false,
+            clock.now() + chrono::Duration::milliseconds(150),
+        ))
         .await
         .expect("add schedule");
+    clock.advance(FIRE_ADVANCE);
+    handle.wake_scheduler();
 
     wait_for_run_status(&handle, schedule.id, ScheduleRunStatus::SkippedBusy).await;
 
@@ -384,19 +410,23 @@ async fn scheduled_fire_never_interrupts_conversation() {
     assert_eq!(handle.active_turn().as_ref(), Some(&turn));
 
     drop(handle.cancel(&turn));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let event = tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            rx.recv(),
-        )
-        .await
-        .expect("timed out waiting for the cancelled turn's Terminal")
-        .expect("event channel open");
-        if matches!(event, EneEvent::Terminal { .. }) {
-            break;
+    let mut saw_terminal = false;
+    for _ in 0..WAIT_STEPS {
+        match tokio::time::timeout(WAIT_POLL, rx.recv()).await {
+            Ok(Ok(event)) => {
+                if matches!(event, EneEvent::Terminal { .. }) {
+                    saw_terminal = true;
+                    break;
+                }
+            }
+            Ok(Err(_)) => panic!("event channel open"),
+            Err(_elapsed) => {}
         }
     }
+    assert!(
+        saw_terminal,
+        "timed out waiting for the cancelled turn's Terminal"
+    );
     assert!(handle.active_turn().is_none(), "gate released after cancel");
     drop(handle.shutdown(Duration::from_secs(2)).await);
 }
@@ -404,12 +434,18 @@ async fn scheduled_fire_never_interrupts_conversation() {
 /// A denied confirmation records `denied` and never executes the action.
 #[tokio::test]
 async fn confirmation_deny_records_denied_run() {
-    let handle = open_memory_on(None).await;
+    let clock = VirtualClock::new();
+    let handle = open_memory_on(None, &clock).await;
     let mut rx = handle.subscribe();
     let schedule = handle
-        .add_schedule(one_shot_tool_schedule(true))
+        .add_schedule(one_shot_tool_schedule(
+            true,
+            clock.now() + chrono::Duration::milliseconds(150),
+        ))
         .await
         .expect("add schedule");
+    clock.advance(FIRE_ADVANCE);
+    handle.wake_scheduler();
 
     let request_id = wait_for_confirmation(&mut rx).await;
     drop(handle.decide_permission(request_id, PermissionDecision::Deny));
@@ -422,12 +458,18 @@ async fn confirmation_deny_records_denied_run() {
 /// An approved confirmation executes the action and records success.
 #[tokio::test]
 async fn confirmation_approve_executes_run() {
-    let handle = open_memory_on(None).await;
+    let clock = VirtualClock::new();
+    let handle = open_memory_on(None, &clock).await;
     let mut rx = handle.subscribe();
     let schedule = handle
-        .add_schedule(one_shot_tool_schedule(true))
+        .add_schedule(one_shot_tool_schedule(
+            true,
+            clock.now() + chrono::Duration::milliseconds(150),
+        ))
         .await
         .expect("add schedule");
+    clock.advance(FIRE_ADVANCE);
+    handle.wake_scheduler();
 
     let request_id = wait_for_confirmation(&mut rx).await;
     drop(handle.decide_permission(request_id, PermissionDecision::AllowOnce));
@@ -438,24 +480,23 @@ async fn confirmation_approve_executes_run() {
 }
 
 async fn wait_for_confirmation(rx: &mut EneEventReceiver) -> ene_runtime::RequestId {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let event = tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            rx.recv(),
-        )
-        .await
-        .expect("timed out waiting for a confirmation prompt")
-        .expect("event channel open");
-        if let EneEvent::PermissionRequired {
-            origin: TurnOrigin::Scheduled,
-            request_id,
-            ..
-        } = event
-        {
-            return request_id;
+    for _ in 0..WAIT_STEPS {
+        match tokio::time::timeout(WAIT_POLL, rx.recv()).await {
+            Ok(Ok(event)) => {
+                if let EneEvent::PermissionRequired {
+                    origin: TurnOrigin::Scheduled,
+                    request_id,
+                    ..
+                } = event
+                {
+                    return request_id;
+                }
+            }
+            Ok(Err(_)) => panic!("event channel open"),
+            Err(_elapsed) => {}
         }
     }
+    panic!("timed out waiting for a confirmation prompt");
 }
 
 /// Acceptance criterion 1: schedules and run history survive a restart and
@@ -466,16 +507,23 @@ async fn schedules_and_history_restore_after_restart() {
     let db_path = dir.path().join("scheduler.db");
     let db_str = db_path.to_str().expect("utf8 path").to_string();
 
-    let handle = open_memory_on(Some(&db_str)).await;
+    let clock = VirtualClock::new();
+    let handle = open_memory_on(Some(&db_str), &clock).await;
     let schedule = handle
-        .add_schedule(one_shot_tool_schedule(false))
+        .add_schedule(one_shot_tool_schedule(
+            false,
+            clock.now() + chrono::Duration::milliseconds(150),
+        ))
         .await
         .expect("add schedule");
+    clock.advance(FIRE_ADVANCE);
+    handle.wake_scheduler();
     wait_for_run_status(&handle, schedule.id, ScheduleRunStatus::Success).await;
     drop(handle.shutdown(Duration::from_secs(2)).await);
 
     // "Restart": reopen against the same database file.
-    let handle = open_memory_on(Some(&db_str)).await;
+    let clock = VirtualClock::new();
+    let handle = open_memory_on(Some(&db_str), &clock).await;
     let schedules = handle.list_schedules().await.expect("list schedules");
     let stored = schedules
         .iter()

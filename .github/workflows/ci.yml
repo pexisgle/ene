@@ -39,15 +39,44 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
-    name: Tests
+    name: Tests (${{ matrix.group.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          # Every workspace package belongs to exactly one group; the union
+          # is the full `cargo test --workspace` surface. Splitting the job
+          # isolates a flaky/slow package so a rerun targets one group.
+          - name: core
+            packages: >-
+              -p ene-ai -p ene-card -p ene-config -p ene-connector -p ene-core
+              -p ene-infer -p ene-mind -p ene-plugin -p ene-plugin-db
+              -p ene-plugin-host -p ene-plugin-macros -p ene-plugin-proto
+              -p ene-rag -p ene-runtime -p ene-store -p ene-util
+              -p ene-voice -p ene-vrm
+          - name: apps
+            packages: -p ene-cli -p ene-desktop
+          - name: plugins
+            packages: >-
+              -p ene-plugin-anthropic -p ene-plugin-edge-tts
+              -p ene-plugin-elevenlabs -p ene-plugin-kokoro
+              -p ene-plugin-llama-cpp -p ene-plugin-llama-server
+              -p ene-plugin-onnx -p ene-plugin-openai
+              -p ene-plugin-openai-tts -p ene-plugin-voicevox
+              -p ene-plugin-whisper -p ene-plugin-app
+              -p ene-plugin-browser -p ene-plugin-calc
+              -p ene-plugin-calendar -p ene-plugin-counter
+              -p ene-plugin-fs -p ene-plugin-geo -p ene-plugin-git
+              -p ene-plugin-homeassistant -p ene-plugin-random
+              -p ene-plugin-utility -p ene-plugin-web
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/rust-build-env
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test ${{ matrix.group.packages }}
 
   # GPU backends are compile-only in CI (no GPU hardware): the workspace no
   # longer enables llama.cpp's vulkan feature through ene-cli/ene-desktop, so

@@ -13,7 +13,10 @@
     reason = "integration tests use unwrap/expect and Default for concise fixtures"
 )]
 
-use ene_core::{AffectState, MemoryItem, MemoryScoreBreakdown, MemoryStatus};
+mod common;
+
+use common::insert_memory;
+use ene_core::{AffectState, MemoryItem, MemoryScoreBreakdown};
 use ene_mind::recall::{
     RecallBudgetHints, RecallPlan, RecallReason, RecallScopeFilter, RecallSearchHints,
     RecalledMemory,
@@ -22,10 +25,7 @@ use ene_mind::{
     CognitionEngine, ComposePrefetch, ComposedPrompt, ContextConfig, MindConfig, PreTurnOutput,
     TurnContext,
 };
-use ene_store::{
-    MemoryConfidence, MemoryKind, MemorySalience, MemoryScope, MemorySource, MemoryStore,
-    NewMemoryItem,
-};
+use ene_store::{MemoryKind, MemoryScope, MemorySource, MemoryStore};
 
 /// Wrap a stored `MemoryItem` in a recalled-memory DTO for prompt injection.
 fn build_recalled(item: MemoryItem, reason: RecallReason) -> RecalledMemory {
@@ -52,40 +52,6 @@ fn build_recalled(item: MemoryItem, reason: RecallReason) -> RecalledMemory {
         },
         sources: vec![],
     }
-}
-
-/// Insert a typed memory and return its assigned ID.
-async fn insert_memory(
-    store: &MemoryStore,
-    kind: MemoryKind,
-    source: MemorySource,
-    content: &str,
-    confidence: f32,
-) -> i64 {
-    store
-        .insert_typed_memory(&NewMemoryItem {
-            scope: MemoryScope::Character,
-            character_id: "ene".into(),
-            user_id: "user".into(),
-            kind,
-            title: "t".into(),
-            content: content.into(),
-            source,
-            source_ref: None,
-            confidence: MemoryConfidence::new(confidence),
-            salience: MemorySalience::new(0.8),
-            affect: Default::default(),
-            relationship_impact: 0.0,
-            valid_from: None,
-            valid_until: None,
-            status: MemoryStatus::Active,
-            supersedes_id: None,
-            pinned: false,
-            created_at: None,
-            commitment_id: None,
-        })
-        .await
-        .unwrap()
 }
 
 /// Build a config for the packing tests.
@@ -179,17 +145,21 @@ async fn injected_memories_are_bumped_when_section_fits() {
     // whole section fits, so both are injected and bumped.
     let first_id = insert_memory(
         &store,
+        MemoryScope::Character,
         MemoryKind::Episodic,
-        MemorySource::Conversation,
+        "t",
         "m1 m1 m1 m1 m1",
+        MemorySource::Conversation,
         0.9,
     )
     .await;
     let second_id = insert_memory(
         &store,
+        MemoryScope::Character,
         MemoryKind::Episodic,
-        MemorySource::Conversation,
+        "t",
         "m2 m2 m2 m2 m2",
+        MemorySource::Conversation,
         0.5,
     )
     .await;
@@ -233,17 +203,21 @@ async fn dropped_section_memories_are_not_bumped() {
     // memory whose section is dropped under the tight total budget.
     let semantic_id = insert_memory(
         &store,
+        MemoryScope::Character,
         MemoryKind::Semantic,
-        MemorySource::Ccv3,
+        "t",
         "prefers tea",
+        MemorySource::Ccv3,
         0.9,
     )
     .await;
     let episodic_id = insert_memory(
         &store,
+        MemoryScope::Character,
         MemoryKind::Episodic,
-        MemorySource::Conversation,
+        "t",
         &"episodic filler content ".repeat(15),
+        MemorySource::Conversation,
         0.8,
     )
     .await;

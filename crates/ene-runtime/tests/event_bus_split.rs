@@ -11,34 +11,19 @@
 
 #![expect(
     clippy::expect_used,
-    clippy::field_reassign_with_default,
     clippy::panic,
-    reason = "integration tests use expect, default-then-assign fixtures, \
-              and panic on invariant violations"
+    reason = "integration tests use expect and panic on invariant violations"
 )]
 
+mod common;
+
+use common::test_config_memory_off;
 use ene_card::CharacterCardV3;
-use ene_runtime::{AudioChunk, EneConfig, EneHandle, TurnId, TurnOrigin};
+use ene_runtime::{AudioChunk, EneHandle, TurnId, TurnOrigin};
 use tokio::sync::{broadcast, mpsc};
 
 fn test_card() -> CharacterCardV3 {
-    let mut card = CharacterCardV3::default();
-    card.data.name = "EventBusTest".into();
-    card.data.system_prompt = "Be brief.".into();
-    card
-}
-
-fn test_config_memory_off() -> EneConfig {
-    let mut config = EneConfig::default();
-    let mut store = ene_store::StoreConfig::default();
-    store.enabled = false;
-    config.set_section(&store).expect("store config merges");
-    let mut tools = ene_plugin_host::PluginConfig::default();
-    tools.enabled = false;
-    drop(config.set_section(&tools));
-    let ai = ene_ai::AiConfig::default();
-    drop(config.set_section(&ai));
-    config
+    common::test_card("EventBusTest")
 }
 
 /// Mirrors the chat bus capacity `EneHandle::open` wires up. Kept as

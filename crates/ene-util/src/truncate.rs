@@ -148,6 +148,78 @@ impl Truncate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::{prop_assert, prop_assert_eq};
+
+    proptest::proptest! {
+        /// `simple` never drops or invents leading characters and appends
+        /// the ellipsis exactly when the input exceeds the char limit.
+        #[test]
+        fn simple_respects_char_limit_and_prefix(
+            text in "\\PC{0,256}",
+            max_chars in 0usize..=64,
+        ) {
+            let out = Truncate::simple(&text, max_chars);
+            let prefix: String = text.chars().take(max_chars).collect();
+            prop_assert!(out.starts_with(&prefix));
+            if text.chars().count() <= max_chars {
+                prop_assert_eq!(out, text);
+            } else {
+                prop_assert!(out.ends_with("..."));
+            }
+        }
+
+        /// `detailed` preserves the leading characters and flags truncation.
+        #[test]
+        fn detailed_respects_char_limit_and_prefix(
+            text in "\\PC{0,256}",
+            max_chars in 0usize..=64,
+        ) {
+            let out = Truncate::detailed(&text, max_chars);
+            let prefix: String = text.chars().take(max_chars).collect();
+            prop_assert!(out.starts_with(&prefix));
+            if text.chars().count() <= max_chars {
+                prop_assert_eq!(out, text);
+            } else {
+                prop_assert!(out.contains("truncated"));
+            }
+        }
+
+        /// `output` truncates exactly when the line or byte bounds are
+        /// exceeded, and always reports the truncation in the notice.
+        #[test]
+        fn output_truncates_iff_over_bounds(
+            text in "\\PC{0,256}",
+            max_lines in 0usize..=16,
+            max_bytes in 0usize..=256,
+        ) {
+            let result = Truncate::output(&text, max_lines, max_bytes);
+            let fits = text.lines().count() <= max_lines && text.len() <= max_bytes;
+            prop_assert_eq!(result.truncated, !fits);
+            if fits {
+                prop_assert_eq!(result.content, text);
+            } else {
+                prop_assert!(result.content.contains("truncated"));
+            }
+        }
+
+        /// `tail` truncates exactly when the line or byte bounds are
+        /// exceeded, and always reports the truncation in the notice.
+        #[test]
+        fn tail_truncates_iff_over_bounds(
+            text in "\\PC{0,256}",
+            max_lines in 0usize..=16,
+            max_bytes in 0usize..=256,
+        ) {
+            let result = Truncate::tail(&text, max_lines, max_bytes);
+            let fits = text.lines().count() <= max_lines && text.len() <= max_bytes;
+            prop_assert_eq!(result.truncated, !fits);
+            if fits {
+                prop_assert_eq!(result.content, text);
+            } else {
+                prop_assert!(result.content.contains("truncated"));
+            }
+        }
+    }
 
     #[test]
     fn simple_returns_input_under_limit() {

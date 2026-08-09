@@ -48,6 +48,14 @@ pub use event::{
     LifecycleEvent, LifecycleReceiver, MemoryLedgerChange, TerminalReason,
 };
 
+/// Wall-clock source for scheduler due-time evaluation.
+///
+/// Injectable so scheduler integration tests pin deterministic instants;
+/// the production default is the system wall clock. The type is part of the
+/// crate surface only for the [`EneHandle::open_with_provider_host_and_clock`]
+/// test seam.
+pub type SchedulerClock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
 use crate::error::EneRuntimeError;
 use crate::public_api::PublicApiError;
@@ -60,7 +68,7 @@ use ene_mind::{ConversationSession, SessionId};
 use ene_plugin_host::{DisabledReason, PluginHealthEvent};
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
 /// Bounded capacity for the dedicated audio (PCM) channel.
 ///
@@ -324,6 +332,10 @@ pub struct EneHandle {
     /// drop-guard `Shutdown`, neither of which may be dropped by backpressure.
     /// Expensive work is bounded at `JoinSet` admission, not here.
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
+    /// Scheduler wake channel: a direct clone of the actor's notify sender
+    /// so tests can re-derive due schedules without a mailbox round-trip
+    /// (see [`EneHandle::wake_scheduler`]).
+    scheduler_notify: watch::Sender<()>,
     /// Mailbox-free shared actor state (card name, session id, turn count,
     /// config, character card) kept in sync by the actor. Read via the
     /// lightweight accessors below; large payloads (history) still go through
@@ -424,6 +436,7 @@ impl Clone for EneHandle {
             plugin_host: Arc::clone(&self.plugin_host),
             health_bridge_handle: Arc::clone(&self.health_bridge_handle),
             host_service_handle: Arc::clone(&self.host_service_handle),
+            scheduler_notify: self.scheduler_notify.clone(),
             sessions: self.sessions.clone(),
             candidates: self.candidates.clone(),
             ledger: self.ledger.clone(),
@@ -448,7 +461,14 @@ impl EneHandle {
         let provider_host: Arc<dyn ene_ai::ProviderHost> = Arc::new(
             crate::provider_host::LiveProviderCatalog::new(Arc::clone(&plugin_host_slot)),
         );
-        Self::open_inner(config, card, provider_host, plugin_host_slot).await
+        Self::open_inner(
+            config,
+            card,
+            provider_host,
+            plugin_host_slot,
+            crate::scheduler::real_clock(),
+        )
+        .await
     }
 
     /// Open a ready runtime handle with an injected provider host.
@@ -462,7 +482,39 @@ impl EneHandle {
         card: CharacterCardV3,
         provider_host: Arc<dyn ene_ai::ProviderHost>,
     ) -> Result<Self, EneRuntimeError> {
-        Self::open_inner(config, card, provider_host, Arc::new(Mutex::new(None))).await
+        Self::open_inner(
+            config,
+            card,
+            provider_host,
+            Arc::new(Mutex::new(None)),
+            crate::scheduler::real_clock(),
+        )
+        .await
+    }
+
+    /// Open a ready runtime handle with an injected provider host and a
+    /// scheduler wall-clock source.
+    ///
+    /// # Test seam
+    ///
+    /// Hidden from the public API surface: scheduler integration tests
+    /// inject a virtual clock so they can advance time deterministically
+    /// instead of waiting on the wall clock.
+    #[doc(hidden)]
+    pub async fn open_with_provider_host_and_clock(
+        config: EneConfig,
+        card: CharacterCardV3,
+        provider_host: Arc<dyn ene_ai::ProviderHost>,
+        scheduler_clock: SchedulerClock,
+    ) -> Result<Self, EneRuntimeError> {
+        Self::open_inner(
+            config,
+            card,
+            provider_host,
+            Arc::new(Mutex::new(None)),
+            scheduler_clock,
+        )
+        .await
     }
 
     async fn open_inner(
@@ -470,6 +522,7 @@ impl EneHandle {
         card: CharacterCardV3,
         provider_host: Arc<dyn ene_ai::ProviderHost>,
         plugin_host_slot: crate::provider_host::PluginHostSlot,
+        scheduler_clock: SchedulerClock,
     ) -> Result<Self, EneRuntimeError> {
         // The command mailbox is deliberately an *unbounded* `mpsc`.
         //
@@ -818,7 +871,9 @@ impl EneHandle {
             Arc::clone(&host_service_handle),
             Arc::clone(&shared),
             Arc::clone(&connectors_registry),
+            scheduler_clock,
         );
+        let scheduler_notify = actor.scheduler_notify.clone();
         let join = tokio::spawn(actor.run());
 
         let actor_handle = Arc::new(tokio::sync::Mutex::new(Some(join)));
@@ -834,6 +889,7 @@ impl EneHandle {
 
         Ok(Self {
             cmd_tx,
+            scheduler_notify,
             shared,
             event_tx,
             lifecycle_tx,
@@ -1283,6 +1339,24 @@ impl EneHandle {
             .send(EneCommand::AddSchedule { new, reply: tx })
             .map_err(|_| EneRuntimeError::ChannelClosed)?;
         rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
+    }
+
+    /// Wake the scheduler timer task so it re-derives due schedules.
+    ///
+    /// # Test seam
+    ///
+    /// Hidden from the public API surface: scheduler integration tests
+    /// advance an injected virtual clock and then poke the timer task,
+    /// instead of waiting for its next wall-clock sleep to elapse.
+    #[doc(hidden)]
+    pub fn wake_scheduler(&self) {
+        // The send error is `Copy`, so `drop()` would trip
+        // `clippy::dropping_copy_types`.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "watch send error is Copy; drop() would trip dropping_copy_types"
+        )]
+        let _ = self.scheduler_notify.send(());
     }
 
     /// List all persistent schedules, ordered by name.
@@ -2648,6 +2722,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::clone(&shared),
             Arc::new(ene_connector::ConnectorRegistry::new()),
+            crate::scheduler::real_clock(),
         );
         (actor, diag_rx, lifecycle_rx, gate, shared)
     }
@@ -2723,6 +2798,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::clone(&shared),
             connectors,
+            crate::scheduler::real_clock(),
         );
         (actor, event_rx, gate)
     }

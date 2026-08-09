@@ -24,6 +24,7 @@
 - [Character editor](guides/character-editor.md)
 - [Memory ledger](guides/memory-ledger.md)
 - [Schedules](guides/schedules.md)
+- [Testing](guides/testing.md)
 - [Workspace RAG](guides/workspace-rag.md)
 - [Write a tool](guides/tools/write-a-tool.md)
 - [MCP servers](guides/tools/mcp-servers.md)
