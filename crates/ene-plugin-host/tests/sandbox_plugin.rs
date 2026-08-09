@@ -1,47 +1,25 @@
-//! End-to-end smoke test: a real plugin binary starts under the OS sandbox.
+//! End-to-end smoke test: a real Rust binary starts under the OS sandbox.
 //!
-//! Runs the built `ene-plugin-calc` binary with the same Landlock allowlist
-//! the host computes (binary/lib dirs, CA roots, assets, temp, socket dir)
-//! and proves the process survives past exec — a missing allowlist entry
-//! would fail the exec and exit immediately.
+//! Spawns the package's `sandbox_fixture` binary with the same Landlock
+//! allowlist the host computes (binary/lib dirs, CA roots, assets, temp,
+//! socket dir) and proves the process survives past exec — a missing
+//! allowlist entry would fail the exec and exit immediately.
 
 #![cfg(target_os = "linux")]
-#![expect(
-    clippy::expect_used,
-    clippy::panic,
-    reason = "integration test uses expect/panic for concise assertions"
-)]
+#![expect(clippy::expect_used, reason = "integration test uses expect for concise assertions")]
 
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-fn built_plugin_binary(name: &str) -> PathBuf {
-    // Integration tests run from `target/debug/deps`; the workspace plugin
-    // binaries land in `target/debug`.
-    let exe = std::env::current_exe().expect("current exe");
-    let mut dir = exe.parent().expect("exe parent").to_path_buf();
-    loop {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return candidate;
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    panic!("plugin binary {name} not found next to the test executable");
-}
-
 #[test]
-fn real_plugin_starts_under_the_os_sandbox() {
+fn real_binary_starts_under_the_os_sandbox() {
     if !ene_sandbox::supported() {
         return;
     }
-    let binary = built_plugin_binary("ene-plugin-calc");
+    let binary = std::path::PathBuf::from(env!("CARGO_BIN_EXE_sandbox_fixture"));
     let temp = tempfile::tempdir().expect("tempdir");
     let socket_dir = temp.path().join("sockets");
-    let socket = socket_dir.join("calc.sock");
+    let socket = socket_dir.join("fixture.sock");
     std::fs::create_dir_all(&socket_dir).expect("socket dir");
 
     let mut read_paths = ene_sandbox::linux::default_read_paths(&binary);
@@ -75,9 +53,8 @@ fn real_plugin_starts_under_the_os_sandbox() {
     std::thread::sleep(Duration::from_millis(500));
     assert!(
         matches!(child.try_wait(), Ok(None)),
-        "plugin must still be running after exec; the sandbox allowlist broke it"
+        "binary must still be running after exec; the sandbox allowlist broke it"
     );
     drop(child.kill());
     drop(child.wait());
-    let _ = Path::new("");
 }
