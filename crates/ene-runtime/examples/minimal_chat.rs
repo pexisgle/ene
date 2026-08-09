@@ -119,6 +119,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\n[Permission] {description}");
                 drop(handle.decide_permission(request_id, PermissionDecision::Deny));
             }
+            EneEvent::BrokerApprovalRequired {
+                request_id,
+                description,
+                ..
+            } => {
+                // Headless example: broker approvals fail safe to denial.
+                println!("\n[Broker approval] {description}");
+                drop(handle.decide_permission(request_id, PermissionDecision::Deny));
+            }
             EneEvent::UserInputRequired {
                 request_id, prompt, ..
             } => {

@@ -38,6 +38,7 @@ ene-ai = { workspace = true }
 ene-store = { workspace = true }
 ene-config = { workspace = true }
 ene-card = { workspace = true }
+ene-approval = { workspace = true }
 ene-plugin-proto = { workspace = true }
 ene-plugin-host = { workspace = true }
 ene-util = { workspace = true }

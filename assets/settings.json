@@ -1,5 +1,128 @@
 {
   "$schema": "./schema/settings.schema.json",
+  "character": "Alicia",
+  "user_name": "User",
+  "ai": {
+    "local_models": {
+      "gemma-4-e2b": {
+        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+        "context_size": 16384,
+        "gpu_layers": "auto",
+        "quantization": "F16",
+        "model_path": "",
+        "dimensions": null
+      },
+      "gemma-4-e4b": {
+        "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
+        "context_size": 16384,
+        "gpu_layers": "auto",
+        "quantization": "F16",
+        "model_path": "",
+        "dimensions": null
+      },
+      "jina-v5-small": {
+        "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+        "context_size": 2048,
+        "dimensions": 1024,
+        "gpu_layers": "auto",
+        "quantization": "F16",
+        "model_path": ""
+      }
+    },
+    "providers": {
+      "openrouter": {
+        "api_key": {
+          "env": "OPENROUTER_API_KEY",
+          "inline": "",
+          "source": "env"
+        },
+        "base_url": "https://openrouter.ai/api/v1",
+        "kind": "openai_compatible",
+        "context_window": null
+      }
+    },
+    "tasks": {
+      "chat": {
+        "max_tokens": 8192,
+        "model": "openai/gpt-5.6-luna",
+        "provider": "openrouter",
+        "supports_vision": true,
+        "dimensions": null,
+        "query_prefix": null,
+        "thinking_disabled": false
+      },
+      "classifier": {
+        "model": "openai/gpt-5.6-luna",
+        "provider": "openrouter",
+        "max_tokens": null,
+        "dimensions": null,
+        "query_prefix": null,
+        "supports_vision": false,
+        "thinking_disabled": false
+      },
+      "embedding": {
+        "model": "jina-v5-small",
+        "provider": "local",
+        "max_tokens": null,
+        "dimensions": null,
+        "query_prefix": null,
+        "supports_vision": false,
+        "thinking_disabled": false
+      },
+      "proactive": {
+        "model": "gemma-4-e4b",
+        "provider": "local",
+        "max_tokens": null,
+        "dimensions": null,
+        "query_prefix": null,
+        "supports_vision": false,
+        "thinking_disabled": false
+      }
+    },
+    "retry": {
+      "max_attempts": 3,
+      "base_delay_ms": 500,
+      "max_delay_ms": 30000,
+      "timeout_ms": 120000
+    },
+    "fallback": {
+      "enabled": false,
+      "health_check_timeout_ms": 5000,
+      "cache_ttl_ms": 60000,
+      "max_history": 32
+    },
+    "tts": {
+      "provider": "kokoro",
+      "model": "kokoro-v1_0.onnx",
+      "voice": "af_heart",
+      "speed": 1.0,
+      "language": "ja",
+      "model_path": null
+    },
+    "stt": {
+      "provider": "whisper",
+      "model": "",
+      "language": ""
+    },
+    "vad": {
+      "provider": "none"
+    }
+  },
+  "desktop": {
+    "graphics": {
+      "quality": "medium"
+    },
+    "language": "ja",
+    "mic_device": null,
+    "spotlight_enabled": true,
+    "caption_enabled": true,
+    "caption_position": null,
+    "caption_pinned": null,
+    "beat_sync": {
+      "enabled": false,
+      "device": null
+    }
+  },
   "mind": {
     "language": "ja",
     "emotion": {
@@ -153,131 +276,35 @@
             "dimensions": 1024
           }
         }
-      }
-    }
-  },
-  "version": 5,
-  "character": "Alicia",
-  "user_name": "User",
-  "ai": {
-    "local_models": {
-      "gemma-4-e2b": {
-        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
-        "context_size": 16384,
-        "gpu_layers": "auto",
-        "quantization": "F16",
-        "model_path": "",
-        "dimensions": null
       },
-      "gemma-4-e4b": {
-        "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
-        "context_size": 16384,
-        "gpu_layers": "auto",
-        "quantization": "F16",
-        "model_path": "",
-        "dimensions": null
-      },
-      "jina-v5-small": {
-        "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
-        "context_size": 2048,
-        "dimensions": 1024,
-        "gpu_layers": "auto",
-        "quantization": "F16",
-        "model_path": ""
-      }
-    },
-    "providers": {
-      "openrouter": {
-        "api_key": {
-          "env": "OPENROUTER_API_KEY",
-          "inline": "",
-          "source": "env"
+      "llama-server": {
+        "config": {
+          "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
+          "acceleration": "auto"
         },
-        "base_url": "https://openrouter.ai/api/v1",
-        "kind": "openai_compatible",
-        "context_window": null
+        "profiles": {
+          "gemma-4-e2b": {
+            "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+            "gpu_layers": "auto",
+            "context_size": 16384,
+            "quantization": "F16"
+          },
+          "gemma-4-e4b": {
+            "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
+            "gpu_layers": "auto",
+            "context_size": 16384,
+            "quantization": "F16"
+          },
+          "jina-v5-small": {
+            "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+            "quantization": "F16",
+            "gpu_layers": "auto",
+            "context_size": 2048,
+            "dimensions": 1024
+          }
+        }
       }
-    },
-    "tasks": {
-      "chat": {
-        "max_tokens": 8192,
-        "model": "openai/gpt-5.6-luna",
-        "provider": "openrouter",
-        "supports_vision": true,
-        "dimensions": null,
-        "query_prefix": null,
-        "thinking_disabled": false
-      },
-      "classifier": {
-        "model": "openai/gpt-5.6-luna",
-        "provider": "openrouter",
-        "max_tokens": null,
-        "dimensions": null,
-        "query_prefix": null,
-        "supports_vision": false,
-        "thinking_disabled": false
-      },
-      "embedding": {
-        "model": "jina-v5-small",
-        "provider": "local",
-        "max_tokens": null,
-        "dimensions": null,
-        "query_prefix": null,
-        "supports_vision": false,
-        "thinking_disabled": false
-      },
-      "proactive": {
-        "model": "gemma-4-e4b",
-        "provider": "local",
-        "max_tokens": null,
-        "dimensions": null,
-        "query_prefix": null,
-        "supports_vision": false,
-        "thinking_disabled": false
-      }
-    },
-    "retry": {
-      "max_attempts": 3,
-      "base_delay_ms": 500,
-      "max_delay_ms": 30000,
-      "timeout_ms": 120000
-    },
-    "fallback": {
-      "enabled": false,
-      "health_check_timeout_ms": 5000,
-      "cache_ttl_ms": 60000,
-      "max_history": 32
-    },
-    "tts": {
-      "provider": "kokoro",
-      "model": "kokoro-v1_0.onnx",
-      "voice": "af_heart",
-      "speed": 1.0,
-      "language": "ja",
-      "model_path": null
-    },
-    "stt": {
-      "provider": "whisper",
-      "model": "",
-      "language": ""
-    },
-    "vad": {
-      "provider": "none"
     }
   },
-  "desktop": {
-    "graphics": {
-      "quality": "medium"
-    },
-    "language": "ja",
-    "mic_device": null,
-    "spotlight_enabled": true,
-    "caption_enabled": true,
-    "caption_position": null,
-    "caption_pinned": null,
-    "beat_sync": {
-      "enabled": false,
-      "device": null
-    }
-  }
+  "version": 6
 }

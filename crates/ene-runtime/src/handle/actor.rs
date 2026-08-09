@@ -3031,6 +3031,26 @@ impl TurnActor {
                 }
                 true
             }
+            EneCommand::BrokerApprovalRequested {
+                request_id,
+                plugin,
+                category,
+                target,
+                description,
+                reply,
+            } => {
+                let mut guard = self.pending_permissions.lock().await;
+                guard.insert(request_id.clone(), reply);
+                drop(guard);
+                drop(self.event_tx.send(EneEvent::BrokerApprovalRequired {
+                    request_id,
+                    plugin,
+                    category,
+                    target,
+                    description,
+                }));
+                true
+            }
             EneCommand::ListPermissions { reply } => {
                 let scopes = self.permission_scopes.lock().await.clone();
                 drop(reply.send(scopes));
@@ -4683,23 +4703,27 @@ async fn reconfigure_plugin_host_bg(
     let mediator: Arc<dyn ene_plugin_proto::CapabilityServiceHandler> = Arc::new(
         ene_plugin_host::CapabilityMediator::new(Arc::clone(&plugin_host)),
     );
-    let db_tokens =
-        match spawn_db_ipc_servers(&config, memory_store.as_ref(), Some(Arc::clone(&mediator))) {
-            Ok((tokens, new_handle)) => {
-                *host_service_handle.lock().await = new_handle;
-                tokens
-            }
-            Err(e) => {
-                *host_service_handle.lock().await = None;
-                tracing::warn!(
-                    component = "TurnActor",
-                    error = %e,
-                    "Failed to spawn host service during plugin reconfiguration; \
-                     continuing without plugin DB access"
-                );
-                HashMap::new()
-            }
-        };
+    let db_tokens = match spawn_db_ipc_servers(
+        &config,
+        memory_store.as_ref(),
+        Some(Arc::clone(&mediator)),
+        &cmd_tx,
+    ) {
+        Ok((tokens, new_handle)) => {
+            *host_service_handle.lock().await = new_handle;
+            tokens
+        }
+        Err(e) => {
+            *host_service_handle.lock().await = None;
+            tracing::warn!(
+                component = "TurnActor",
+                error = %e,
+                "Failed to spawn host service during plugin reconfiguration; \
+                 continuing without plugin DB access"
+            );
+            HashMap::new()
+        }
+    };
 
     let mut new_host = match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
         Ok(host) => Some(host),
@@ -5234,6 +5258,7 @@ pub(super) fn spawn_db_ipc_servers(
     config: &EneConfig,
     memory_store: Option<&Arc<ene_store::MemoryStore>>,
     capability_handler: Option<Arc<dyn ene_plugin_proto::CapabilityServiceHandler>>,
+    cmd_tx: &mpsc::UnboundedSender<EneCommand>,
 ) -> Result<DbIpcServers, EneRuntimeError> {
     let mut db_tokens = HashMap::new();
     let Some(store) = memory_store else {
@@ -5340,6 +5365,15 @@ pub(super) fn spawn_db_ipc_servers(
         let mut server = HostServiceServer::new(db, socket_path, db_plugins);
         if let Some(handler) = capability_handler {
             server = server.with_capability_handler(handler);
+        }
+        if let Some(broker) = ene_plugin_host::BrokerHub::from_config(&plugin_config) {
+            let responder = crate::approval::ActorApprovalResponder::new(
+                cmd_tx.clone(),
+                std::time::Duration::from_millis(plugin_config.permission_prompt_timeout_ms),
+            );
+            server = server.with_broker_handler(
+                broker.with_approval_responder(std::sync::Arc::new(responder)),
+            );
         }
 
         let handle = tokio::spawn(async move {

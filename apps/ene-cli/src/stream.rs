@@ -167,6 +167,44 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle, activ
                 drop(handle.decide_permission(request_id, decision));
                 tracing::info!("Permission decision submitted; resuming processing");
             }
+            Ok(EneEvent::BrokerApprovalRequired {
+                request_id,
+                plugin,
+                category,
+                target,
+                description,
+            }) => {
+                tracing::info!(
+                    request_id = %request_id,
+                    plugin = %plugin,
+                    category = %category,
+                    target = %target,
+                    description = %description,
+                    "Broker approval required"
+                );
+                let choices = vec![
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "permission-allow-once"),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "permission-allow-session"),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "permission-deny"),
+                ];
+                ui.pause_for_external_prompt();
+                let selection = dialoguer::Select::new()
+                    .with_prompt(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "permission-prompt"
+                    ))
+                    .items(&choices)
+                    .default(0)
+                    .interact()
+                    .unwrap_or(2);
+                ui.resume_after_external_prompt();
+                let decision = match selection {
+                    0 => PermissionDecision::AllowOnce,
+                    1 => PermissionDecision::AllowSession,
+                    _ => PermissionDecision::Deny,
+                };
+                drop(handle.decide_permission(request_id, decision));
+            }
             Ok(EneEvent::UserInputRequired {
                 turn,
                 origin: _,

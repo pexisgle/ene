@@ -308,6 +308,26 @@ async fn process_turn(
                     drop(handle.decide_permission(request_id, PermissionDecision::Deny));
                 }
             }
+            EneEvent::BrokerApprovalRequired {
+                request_id,
+                plugin,
+                category,
+                target,
+                description,
+            } => {
+                // Broker approvals follow the same `--yes` policy as tool
+                // permission prompts (no turn filtering: they are not tied
+                // to a turn).
+                if yes {
+                    drop(handle.decide_permission(request_id, PermissionDecision::AllowOnce));
+                } else {
+                    denied_permission = true;
+                    eprintln!(
+                        "plugin '{plugin}' requested {category} for '{target}': {description} (denied)"
+                    );
+                    drop(handle.decide_permission(request_id, PermissionDecision::Deny));
+                }
+            }
             EneEvent::UserInputRequired {
                 turn: t,
                 request_id,

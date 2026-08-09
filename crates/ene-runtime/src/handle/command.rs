@@ -462,6 +462,27 @@ pub enum EneCommand {
     /// when the tool registry failed to rebuild (the reconfiguration path
     /// normally rebuilds TTS via [`Self::PluginHostReconfigured`]).
     RebuildTtsProvider,
+    /// Internal: a plugin broker request needs interactive approval.
+    ///
+    /// The actor registers `reply` in `pending_permissions` (keyed by
+    /// `request_id`) and broadcasts
+    /// [`EneEvent::BrokerApprovalRequired`](crate::handle::EneEvent::BrokerApprovalRequired)
+    /// so the UI can show a confirmation. The existing
+    /// [`Self::PermissionDecision`] handling resolves `reply`.
+    BrokerApprovalRequested {
+        /// Unique request id (shown to the UI).
+        request_id: RequestId,
+        /// Plugin requesting the capability.
+        plugin: String,
+        /// Approval category (e.g. `FsRead`, `DynamicHttps`).
+        category: String,
+        /// Audit-safe target description.
+        target: String,
+        /// Human-readable description for the dialog.
+        description: String,
+        /// Decision channel resolved by the user's answer.
+        reply: tokio::sync::oneshot::Sender<PermissionDecision>,
+    },
     /// Internal: a plugin was permanently disabled and its provider
     /// factories must be evicted from the host registry.
     ///

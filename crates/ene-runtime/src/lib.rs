@@ -26,6 +26,9 @@
     )
 )]
 
+/// Interactive broker-approval responder (routes `Ask` through the actor's
+/// permission channel).
+pub mod approval;
 /// Shared runtime bootstrap helpers (folded into [`EneHandle::open`]).
 pub mod bootstrap;
 pub mod connectors;

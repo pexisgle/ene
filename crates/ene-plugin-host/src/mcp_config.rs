@@ -20,6 +20,10 @@ pub struct McpServerConfig {
     /// `env_passthrough` mechanism.
     #[serde(default)]
     pub env_passthrough: Vec<String>,
+    /// OS sandbox settings for the child process (stdio transport only).
+    /// `None` leaves the server unsandboxed.
+    #[serde(default)]
+    pub sandbox: Option<crate::config::SandboxEntryConfig>,
 }
 
 /// MCP server transport type.

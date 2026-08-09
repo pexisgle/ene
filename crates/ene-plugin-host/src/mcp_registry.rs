@@ -87,12 +87,43 @@ impl McpToolRegistry {
         command: &str,
         args: &[&str],
         env_passthrough: &[String],
+        sandbox: Option<&crate::config::SandboxEntryConfig>,
     ) -> Result<(), PluginHostError> {
         let passthrough = env_passthrough.to_vec();
+        let sandbox_spec = sandbox.filter(|config| config.enabled).and_then(|config| {
+            let temp_dir = ene_config::app_data_dir()
+                .join("tmp")
+                .join("mcp")
+                .join(name);
+            std::fs::create_dir_all(&temp_dir).ok()?;
+            crate::manager::build_plugin_sandbox(
+                name,
+                std::path::Path::new(command),
+                config,
+                &[],
+                &temp_dir,
+            )
+        });
+        let sandbox_spec = sandbox_spec.map(std::sync::Arc::new);
         let cmd = Command::new(command).configure(move |c| {
             // Harden: clear inherited environment and forward only essentials
             // via the shared helper (same whitelist as plugin spawn).
             crate::manager::apply_hardened_env(c, &passthrough);
+            if let Some(spec) = sandbox_spec.as_ref() {
+                if let Ok(temp_dir) = ene_config::app_data_dir()
+                    .join("tmp")
+                    .join("mcp")
+                    .join(name)
+                    .canonicalize()
+                {
+                    c.env("TMPDIR", temp_dir);
+                }
+                // SAFETY: the closure runs in the forked child before exec
+                // and only touches process-local state (see ene-sandbox).
+                unsafe {
+                    c.pre_exec(ene_sandbox::linux::pre_exec_closure((**spec).clone()));
+                }
+            }
             for arg in args {
                 c.arg(arg);
             }

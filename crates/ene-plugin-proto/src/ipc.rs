@@ -1,4 +1,4 @@
-//! Plugin IPC wire protocol (protocol version 7).
+//! Plugin IPC wire protocol (protocol version 8).
 //!
 //! Extends the tool IPC (v2) with streaming LLM messages and a richer
 //! handshake that carries [`PluginCapabilities`]. The framing is identical:
@@ -75,6 +75,13 @@ impl VersionRange {
 
 /// Plugin IPC protocol version.
 ///
+/// v8 adds the **Broker channel**: `HostServiceId` gains the `Artifact`,
+/// `File`, `Network`, `Process`, and `Platform` passengers (see
+/// [`crate::broker`]) and `SandboxConfigData` carries the plugin's broker
+/// socket and per-plugin temp directory. Hosts gate broker traffic on
+/// `negotiated_version >= 8`; v7 plugins keep the `db` / `capability`
+/// passengers only.
+///
 /// v7 adds:
 /// - `ProcessVadChunk` / `VadChunkResult` for out-of-process voice activity
 ///   detection, and `PluginCapabilities.vad_providers` (`VadProviderSpec`).
@@ -135,7 +142,7 @@ impl VersionRange {
 /// required field, or removing/renaming an enum variant. New fields should
 /// use `#[serde(default)]` so older/newer peers stay wire-compatible without
 /// a version bump.
-pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 7;
+pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 8;
 
 /// The oldest plugin IPC protocol version the host still accepts.
 ///

@@ -21,7 +21,7 @@
 //! - [`IpcStream`] / [`IpcListener`] / [`cleanup_path`] — cross-platform
 //!   transport layer (UDS / Named Pipe).
 //!
-//! ### Plugin types (protocol v7)
+//! ### Plugin types (protocol v8)
 //!
 //! - [`PluginCapabilities`] — advertised during the handshake so the host can
 //!   route tool registrations and provider factories.
@@ -36,6 +36,13 @@
 //!   handshake exchange always uses JSON; frames after the handshake use the
 //!   negotiated [`WireFormat`] (`MessagePack` for protocol v6+, JSON below).
 //! - [`PluginError`] — the plugin crate's error type.
+//!
+//! ### Broker channel (protocol v8)
+//!
+//! - [`broker`] — `BrokerRequest` / `BrokerResponse`: the typed surface of
+//!   the `Artifact` / `File` / `Network` / `Process` / `Credential` /
+//!   `Platform` host-service passengers. Plugins have no direct OS access;
+//!   every operation is mediated by the host through these messages.
 //!
 //! ## Crate boundaries
 //!
@@ -52,8 +59,15 @@
     )
 )]
 
+/// Broker-channel wire types (protocol v8).
+pub mod broker;
 /// Plugin capability declarations.
 pub mod capabilities;
+pub use broker::{
+    ArtifactInfo, BrokerErrorCode, BrokerHandler, BrokerRequest, BrokerResponse, ConflictMode,
+    FileEntry, HttpMethod, SharedBrokerHandler, WireArtifactKind,
+};
+pub use host_service::{read_framed_json, write_framed_json};
 /// Capability-call wire types and the host-service `capability` passenger.
 pub mod capability_service;
 /// Plugin error types.

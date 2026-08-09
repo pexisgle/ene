@@ -145,6 +145,17 @@ listed in `env_passthrough`. See the
   attribute reference.
 - [Plugin IPC protocol](../reference/plugin-ipc.md) — the wire format.
 
+## Sandbox, broker, and approvals
+
+Plugins never touch the OS directly. The host applies an OS sandbox
+(Landlock + seccomp + rlimits on Linux, Job Object on Windows), mediates
+every operation through the broker channel (`file`, `network`, `process`,
+`credential`, `artifact`, `platform`), and gates requests with a two-layer
+approval model (signed manifest → global/per-plugin policy). Downloads of
+executable artifacts come only from a signed catalog with CAS verification.
+See [Sandbox, broker & approvals](sandbox-and-approvals.md) for the full
+model, including the settings UI, the audit log, and the SSRF guard.
+
 ## FAQ
 
 **Can I write a plugin in another language?** The protocol is just framed

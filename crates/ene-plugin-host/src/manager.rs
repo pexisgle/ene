@@ -110,6 +110,12 @@ struct SupervisedPlugin {
     /// Recovery is a host restart (or a `plugins.list` reconfiguration, which
     /// builds a fresh [`SupervisedPlugin`]).
     disabled: bool,
+    /// OS sandbox applied to this process (re-applied on restart). `None`
+    /// means the plugin opted out (or the platform has no enforcement yet).
+    sandbox_spec: Option<ene_sandbox::SandboxSpec>,
+    /// Windows job guard: dropping it kills the whole sandboxed tree.
+    #[cfg(windows)]
+    sandbox_guard: Option<ene_sandbox::windows::JobGuard>,
 }
 
 impl SupervisedPlugin {
@@ -199,13 +205,34 @@ impl SupervisedPlugin {
             "Restarting plugin"
         );
 
-        let child =
-            build_plugin_command(&self.binary_path, &self.socket_path, &self.env_passthrough)
-                .spawn()
+        let mut command =
+            build_plugin_command(&self.binary_path, &self.socket_path, &self.env_passthrough);
+        apply_sandbox_to_command(&mut command, self.sandbox_spec.as_ref()).map_err(|e| {
+            PluginHostError::SpawnFailed {
+                name: self.name.clone(),
+                reason: e,
+            }
+        })?;
+        #[cfg(windows)]
+        let sandbox_guard;
+        #[cfg(windows)]
+        let mut child = {
+            let mut child = command.spawn().map_err(|e| PluginHostError::SpawnFailed {
+                name: self.name.clone(),
+                reason: e.to_string(),
+            })?;
+            self.sandbox_guard = attach_windows_sandbox(&mut child, self.sandbox_spec.as_ref())
                 .map_err(|e| PluginHostError::SpawnFailed {
                     name: self.name.clone(),
                     reason: e.to_string(),
                 })?;
+            child
+        };
+        #[cfg(not(windows))]
+        let child = command.spawn().map_err(|e| PluginHostError::SpawnFailed {
+            name: self.name.clone(),
+            reason: e.to_string(),
+        })?;
 
         self.child = child;
         Ok(())
@@ -376,6 +403,121 @@ fn build_plugin_command(
     cmd.env("ENE_PLUGIN_SOCKET", socket_path);
 
     cmd
+}
+
+/// Builds the OS sandbox spec for a plugin, or `None` when the plugin opted
+/// out. Enabled specs are fail-closed: an uninitializable layer aborts the
+/// spawn (see [`apply_sandbox_to_command`]).
+pub(crate) fn build_plugin_sandbox(
+    name: &str,
+    binary_path: &std::path::Path,
+    config: &crate::config::SandboxEntryConfig,
+    fs_grants: &[crate::config::FsGrantConfig],
+    temp_dir: &std::path::Path,
+) -> Option<ene_sandbox::SandboxSpec> {
+    if !config.enabled {
+        return None;
+    }
+    let mut allowed_read: Vec<std::path::PathBuf> = Vec::new();
+    let mut allowed_write: Vec<std::path::PathBuf> = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        allowed_read.extend(ene_sandbox::linux::default_read_paths(binary_path));
+        allowed_read.extend(ene_sandbox::linux::default_write_paths());
+        allowed_write.extend(ene_sandbox::linux::default_write_paths());
+        if let Some(path) = std::env::var_os("PATH") {
+            allowed_read.extend(std::env::split_paths(&path));
+        }
+    }
+    allowed_read.push(ene_config::assets_dir().to_path_buf());
+    #[cfg(unix)]
+    {
+        allowed_write.push(ene_config::plugin_socket_dir());
+        allowed_write.push(ene_config::paths::tool_socket_dir());
+    }
+    allowed_write.push(temp_dir.to_path_buf());
+    for extra in &config.allowed_read_paths {
+        allowed_read.push(extra.into());
+    }
+    for extra in &config.allowed_write_paths {
+        allowed_write.push(extra.into());
+    }
+    for grant in fs_grants {
+        let Ok(path) = std::path::PathBuf::from(&grant.path).canonicalize() else {
+            continue;
+        };
+        if grant.write {
+            allowed_write.push(path);
+        } else if grant.read {
+            allowed_read.push(path);
+        }
+    }
+    let spec = ene_sandbox::SandboxSpec {
+        allowed_read_paths: allowed_read,
+        allowed_write_paths: allowed_write,
+        limits: ene_sandbox::ResourceLimits {
+            max_address_space_bytes: config.max_memory_mb.saturating_mul(1024 * 1024),
+            max_fds: config.max_fds,
+            max_file_size_bytes: config.max_file_size_mb.saturating_mul(1024 * 1024),
+            ..ene_sandbox::ResourceLimits::default()
+        },
+        landlock: config.landlock,
+        seccomp: config.seccomp,
+        no_new_privs: config.no_new_privs,
+        network_namespace: config.network_namespace,
+        cgroup: config.cgroup.then(ene_sandbox::CgroupSpec::default),
+        job_object: config.job_object,
+    };
+    if !spec.is_enforced() {
+        return None;
+    }
+    tracing::info!(
+        component = "PluginHostManager",
+        plugin = %name,
+        landlock = spec.landlock,
+        seccomp = spec.seccomp,
+        network_namespace = spec.network_namespace,
+        cgroup = spec.cgroup.is_some(),
+        "Applying OS sandbox to plugin"
+    );
+    Some(spec)
+}
+
+/// Applies a sandbox spec to a command's child (Linux `pre_exec`, Windows
+/// `CREATE_SUSPENDED`). Returns `Ok` when the spec is `None`.
+fn apply_sandbox_to_command(
+    command: &mut std::process::Command,
+    spec: Option<&ene_sandbox::SandboxSpec>,
+) -> Result<(), String> {
+    let Some(spec) = spec else {
+        return Ok(());
+    };
+    #[cfg(target_os = "linux")]
+    {
+        ene_sandbox::linux::prepare_command(command, spec).map_err(|e| e.to_string())?;
+    }
+    #[cfg(windows)]
+    {
+        ene_sandbox::windows::prepare_command(command, spec).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Attaches a suspended child to its Windows sandbox job and resumes it.
+#[cfg(windows)]
+fn attach_windows_sandbox(
+    child: &mut std::process::Child,
+    spec: Option<&ene_sandbox::SandboxSpec>,
+) -> Result<Option<ene_sandbox::windows::JobGuard>, String> {
+    let Some(spec) = spec else {
+        return Ok(None);
+    };
+    if !spec.is_enforced() {
+        return Ok(None);
+    }
+    ene_sandbox::windows::attach(child, spec)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 /// A `ToolRegistry` adapter that routes tool calls to a plugin over IPC,
@@ -983,6 +1125,11 @@ impl PluginHostManager {
                 entry.delivered_profiles(),
                 entry.checksum.clone(),
                 entry.env_passthrough.clone(),
+                &entry
+                    .sandbox
+                    .clone()
+                    .unwrap_or_else(|| plugin_config.sandbox.clone()),
+                &entry.fs_grants,
                 db_tokens.get(name).cloned(),
                 Duration::from_millis(plugin_config.handshake_timeout_ms),
                 plugin_config.max_concurrent,
@@ -1353,6 +1500,7 @@ impl PluginHostManager {
                                 command,
                                 &args_ref,
                                 &server.env_passthrough,
+                                server.sandbox.as_ref(),
                             )
                             .await
                         {
@@ -1731,6 +1879,8 @@ impl PluginHostManager {
         plugin_profiles: Option<serde_json::Value>,
         expected_checksum: Option<String>,
         env_passthrough: Vec<String>,
+        sandbox_cfg: &crate::config::SandboxEntryConfig,
+        fs_grants: &[crate::config::FsGrantConfig],
         db_token: Option<String>,
         handshake_timeout: Duration,
         max_concurrent: usize,
@@ -1768,35 +1918,76 @@ impl PluginHostManager {
         };
 
         let mut sandbox = ene_plugin_proto::SandboxConfigData::default();
+        let host_socket = {
+            #[cfg(unix)]
+            {
+                ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
+            }
+            #[cfg(windows)]
+            {
+                PathBuf::from(r"\\.\pipe\ene-host-service")
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
+            }
+        };
+        let host_socket = host_socket.to_string_lossy().to_string();
+        // Broker channel (protocol v8): every plugin can open broker
+        // passengers on the shared host-service socket.
+        sandbox.broker_socket = Some(host_socket.clone());
         if let Some(token) = &db_token {
             sandbox.db_auth_token = Some(token.clone());
-            let host_socket = {
-                #[cfg(unix)]
-                {
-                    ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
-                }
-                #[cfg(windows)]
-                {
-                    PathBuf::from(r"\\.\pipe\ene-host-service")
-                }
-                #[cfg(not(any(unix, windows)))]
-                {
-                    ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
-                }
-            };
-            let host_socket = host_socket.to_string_lossy().to_string();
             sandbox.host_service_socket = Some(host_socket.clone());
             // Compatibility alias: plugins that only read `db_socket` still
             // reach the shared host-service endpoint.
             sandbox.db_socket = Some(host_socket);
         }
 
-        let mut child = build_plugin_command(&binary_path, &socket_path, &env_passthrough)
-            .spawn()
-            .map_err(|e| PluginHostError::SpawnFailed {
+        // Dedicated per-plugin temp directory (size-capped when the sandbox
+        // is enabled); `TMPDIR` always points here so plugins never fall back
+        // to a shared temp area.
+        let temp_dir = ene_config::app_data_dir()
+            .join("tmp")
+            .join("plugins")
+            .join(name);
+        std::fs::create_dir_all(&temp_dir).map_err(|e| PluginHostError::SpawnFailed {
+            name: name.to_string(),
+            reason: format!("failed to create plugin temp dir: {e}"),
+        })?;
+        sandbox.plugin_temp_dir = Some(temp_dir.to_string_lossy().into_owned());
+
+        let spec = build_plugin_sandbox(name, &binary_path, sandbox_cfg, fs_grants, &temp_dir);
+        let mut command = build_plugin_command(&binary_path, &socket_path, &env_passthrough);
+        command
+            .env("ENE_PLUGIN_TMPDIR", &temp_dir)
+            .env("TMPDIR", &temp_dir);
+        apply_sandbox_to_command(&mut command, spec.as_ref()).map_err(|e| {
+            PluginHostError::SpawnFailed {
+                name: name.to_string(),
+                reason: e,
+            }
+        })?;
+        #[cfg(windows)]
+        let mut child = {
+            let mut child = command.spawn().map_err(|e| PluginHostError::SpawnFailed {
                 name: name.to_string(),
                 reason: e.to_string(),
             })?;
+            let guard = attach_windows_sandbox(&mut child, spec.as_ref()).map_err(|e| {
+                PluginHostError::SpawnFailed {
+                    name: name.to_string(),
+                    reason: e,
+                }
+            })?;
+            sandbox_guard = guard;
+            child
+        };
+        #[cfg(not(windows))]
+        let mut child = command.spawn().map_err(|e| PluginHostError::SpawnFailed {
+            name: name.to_string(),
+            reason: e.to_string(),
+        })?;
 
         let conn = match IpcPluginConnection::connect(
             &socket_path,
@@ -1846,6 +2037,9 @@ impl PluginHostManager {
             env_passthrough,
             restart_times: VecDeque::new(),
             disabled: false,
+            sandbox_spec: spec,
+            #[cfg(windows)]
+            sandbox_guard,
         };
 
         Ok((Arc::new(Mutex::new(plugin)), Arc::new(conn), tofu_checksum))
@@ -2622,6 +2816,9 @@ mod tests {
             env_passthrough: Vec::new(),
             restart_times: VecDeque::new(),
             disabled: false,
+            sandbox_spec: None,
+            #[cfg(windows)]
+            sandbox_guard: None,
         }
     }
 
@@ -2980,6 +3177,9 @@ mod tests {
             env_passthrough: Vec::new(),
             restart_times: VecDeque::new(),
             disabled: false,
+            sandbox_spec: None,
+            #[cfg(windows)]
+            sandbox_guard: None,
         }
     }
 

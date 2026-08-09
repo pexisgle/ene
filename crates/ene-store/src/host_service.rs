@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use ene_plugin_db::{DbErrorCode, DbRequest, DbResponse};
 use ene_plugin_proto::{
     CapabilityServiceHandler, HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId,
-    HostServiceRequest, HostServiceResponse, write_host_service_response,
+    HostServiceRequest, HostServiceResponse, SharedBrokerHandler, read_framed_json,
+    write_framed_json, write_host_service_response,
 };
 use sea_orm::DatabaseConnection;
 use tokio::io::AsyncReadExt;
@@ -72,6 +73,9 @@ pub struct HostServiceServer {
     /// Optional handler for the `capability` passenger, supplied by the host
     /// runtime's mediation layer. `None` keeps the service unimplemented.
     capability: Option<Arc<dyn CapabilityServiceHandler>>,
+    /// Optional broker handler for the v8 broker passengers (`file`,
+    /// `network`, `process`, `credential`, `artifact`, `platform`).
+    broker: Option<SharedBrokerHandler>,
     failed_opens: Arc<Mutex<OpenFailureTracker>>,
 }
 
@@ -87,6 +91,7 @@ impl HostServiceServer {
             db,
             db_plugins: Arc::new(db_plugins),
             capability: None,
+            broker: None,
             failed_opens: Arc::new(Mutex::new(OpenFailureTracker::default())),
         }
     }
@@ -95,6 +100,13 @@ impl HostServiceServer {
     #[must_use]
     pub fn with_capability_handler(mut self, handler: Arc<dyn CapabilityServiceHandler>) -> Self {
         self.capability = Some(handler);
+        self
+    }
+
+    /// Registers the handler that serves v8 broker passenger sessions.
+    #[must_use]
+    pub fn with_broker_handler(mut self, handler: SharedBrokerHandler) -> Self {
+        self.broker = Some(handler);
         self
     }
 
@@ -150,11 +162,19 @@ impl HostServiceServer {
             let db = self.db.clone();
             let db_plugins = Arc::clone(&self.db_plugins);
             let capability = self.capability.clone();
+            let broker = self.broker.clone();
             let failed_opens = Arc::clone(&self.failed_opens);
 
             tokio::spawn(async move {
-                if let Err(e) =
-                    Self::handle_connection(stream, db, db_plugins, capability, failed_opens).await
+                if let Err(e) = Self::handle_connection(
+                    stream,
+                    db,
+                    db_plugins,
+                    capability,
+                    broker,
+                    failed_opens,
+                )
+                .await
                 {
                     error!(error = %e, "Host service connection error");
                 }
@@ -167,6 +187,7 @@ impl HostServiceServer {
         db: DatabaseConnection,
         db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
         capability: Option<Arc<dyn CapabilityServiceHandler>>,
+        broker: Option<SharedBrokerHandler>,
         failed_opens: Arc<Mutex<OpenFailureTracker>>,
     ) -> Result<(), DbServerError> {
         // Read the first frame manually so a legacy `DbRequest::Handshake`
@@ -216,15 +237,31 @@ impl HostServiceServer {
                     return Ok(());
                 }
                 HostServiceId::Assets | HostServiceId::Credential => {
-                    warn!(?service, "Host service Open for unimplemented service");
-                    write_host_service_response(
-                        &mut stream,
-                        &HostServiceResponse::Error {
-                            code: HostServiceErrorCode::UnknownService,
-                            message: format!("service {service:?} is not implemented"),
-                        },
-                    )
-                    .await?;
+                    // Credential is a v8 broker passenger; Assets remains
+                    // reserved/unimplemented.
+                    if service == HostServiceId::Credential {
+                        Self::open_broker_session(stream, db_plugins, broker, failed_opens, token)
+                            .await?;
+                    } else {
+                        warn!(?service, "Host service Open for unimplemented service");
+                        write_host_service_response(
+                            &mut stream,
+                            &HostServiceResponse::Error {
+                                code: HostServiceErrorCode::UnknownService,
+                                message: format!("service {service:?} is not implemented"),
+                            },
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
+                HostServiceId::Artifact
+                | HostServiceId::File
+                | HostServiceId::Network
+                | HostServiceId::Process
+                | HostServiceId::Platform => {
+                    Self::open_broker_session(stream, db_plugins, broker, failed_opens, token)
+                        .await?;
                     return Ok(());
                 }
             }
@@ -285,6 +322,49 @@ impl HostServiceServer {
 
         warn!("Host service connection sent an unrecognized first frame");
         Ok(())
+    }
+
+    /// Opens a v8 broker session: authenticates the token, acknowledges, and
+    /// serves `BrokerRequest`/`BrokerResponse` frames until the peer closes.
+    async fn open_broker_session(
+        mut stream: ene_plugin_proto::transport::IpcStream,
+        db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
+        broker: Option<SharedBrokerHandler>,
+        failed_opens: Arc<Mutex<OpenFailureTracker>>,
+        token: String,
+    ) -> Result<(), DbServerError> {
+        let Some(handler) = broker else {
+            warn!("Host service Open for broker service without a broker handler");
+            write_host_service_response(
+                &mut stream,
+                &HostServiceResponse::Error {
+                    code: HostServiceErrorCode::UnknownService,
+                    message: "broker services are not implemented by this host".to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        };
+        let Some(reg) = db_plugins.get(&token).cloned() else {
+            Self::log_rejected_open(&failed_opens, "Host service Open rejected: unknown token");
+            write_host_service_response(
+                &mut stream,
+                &HostServiceResponse::Error {
+                    code: HostServiceErrorCode::AuthRejected,
+                    message: "Invalid auth token".to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        };
+        write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await?;
+        loop {
+            let Some(request) = read_framed_json(&mut stream).await? else {
+                return Ok(());
+            };
+            let response = handler.handle(&reg.tool_name, request).await;
+            write_framed_json(&mut stream, &response).await?;
+        }
     }
 
     /// Logs a rejected `Open`/handshake at `warn` at most once per second,

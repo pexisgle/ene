@@ -11,6 +11,7 @@
 - [メモリ](concepts/memory.md)
 - [ターンとセッション](concepts/turns-and-sessions.md)
 - [プラグインと MCP](concepts/plugins-and-mcp.md)
+- [サンドボックス・Broker・承認](concepts/sandbox-and-approvals.md)
 - [コネクタ](concepts/connectors.md)
 - [音声とアバター](concepts/voice-and-avatar.md)
 

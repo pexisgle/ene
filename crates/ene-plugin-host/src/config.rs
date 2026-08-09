@@ -2,6 +2,10 @@
 
 use std::collections::HashMap;
 
+use ene_approval::{ApprovalPolicy, PluginApprovalPolicy, SignedManifest};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 const fn default_max_rounds() -> usize {
     10
 }
@@ -51,8 +55,198 @@ const fn default_db_quota_mb() -> Option<u64> {
     Some(256)
 }
 
+fn default_max_fds() -> u64 {
+    1024
+}
+
+const fn default_max_temp_mb() -> u64 {
+    1024
+}
+
+/// Per-plugin OS sandbox settings.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct SandboxEntryConfig {
+    /// Whether the OS sandbox is applied to this plugin.
+    ///
+    /// Defaults to `false` until every built-in plugin has been migrated to
+    /// the broker channel; enabled plugins fail to start (never degrade)
+    /// when a required layer cannot be initialized.
+    pub enabled: bool,
+    /// Apply the Landlock filesystem allowlist (Linux).
+    pub landlock: bool,
+    /// Apply the seccomp dangerous-syscall filter (Linux).
+    pub seccomp: bool,
+    /// Set `no_new_privs` (Linux).
+    pub no_new_privs: bool,
+    /// Place the plugin in a fresh network namespace (Linux; requires
+    /// privileges). When on, the plugin has no direct network at all.
+    pub network_namespace: bool,
+    /// Apply cgroup v2 memory/pids/cpu limits (Linux; requires a delegated
+    /// cgroupfs).
+    pub cgroup: bool,
+    /// Apply the Windows Job Object (kill-on-close + resource limits).
+    pub job_object: bool,
+    /// Extra read-only paths the plugin may see (in addition to the host
+    /// computed defaults: binary/lib dirs, CA roots, assets, artifacts).
+    #[serde(default)]
+    pub allowed_read_paths: Vec<String>,
+    /// Extra writable paths (in addition to the per-plugin temp dir, the
+    /// IPC socket dirs, and write-granted FS slots).
+    #[serde(default)]
+    pub allowed_write_paths: Vec<String>,
+    /// Maximum open file descriptors (`0` = no rlimit).
+    #[serde(default = "default_max_fds")]
+    pub max_fds: u64,
+    /// Maximum address space in MiB (`0` = no rlimit).
+    pub max_memory_mb: u64,
+    /// Maximum file size a child may write, in MiB (`0` = no rlimit).
+    pub max_file_size_mb: u64,
+    /// Per-plugin temp directory cap in MiB.
+    #[serde(default = "default_max_temp_mb")]
+    pub max_temp_mb: u64,
+}
+
+impl Default for SandboxEntryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            landlock: true,
+            seccomp: true,
+            no_new_privs: true,
+            network_namespace: false,
+            cgroup: false,
+            job_object: true,
+            allowed_read_paths: Vec::new(),
+            allowed_write_paths: Vec::new(),
+            max_fds: default_max_fds(),
+            max_memory_mb: 0,
+            max_file_size_mb: 0,
+            max_temp_mb: default_max_temp_mb(),
+        }
+    }
+}
+
+/// One user-approved filesystem grant: logical slot → canonical path.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FsGrantConfig {
+    /// Logical slot name the plugin declared in its manifest.
+    pub slot: String,
+    /// Real path the user chose for this slot. Stored as configured and
+    /// canonicalized at load time.
+    pub path: String,
+    /// Grant read access.
+    pub read: bool,
+    /// Grant write access.
+    pub write: bool,
+}
+
+/// A trusted publisher key for manifest verification.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TrustedPublisherConfig {
+    /// Publisher id (matches `PluginManifest.publisher`).
+    pub publisher: String,
+    /// Hex-encoded Ed25519 verifying key.
+    pub public_key_hex: String,
+}
+
+/// Catalog signing keys for artifact verification.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CatalogKeyConfig {
+    /// Key id referenced by signed catalogs.
+    pub key_id: String,
+    /// Hex-encoded Ed25519 verifying key.
+    pub public_key_hex: String,
+}
+
+/// Signed artifact catalog configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ArtifactConfig {
+    /// Whether the artifact system is active. Catalog-dependent plugins
+    /// refuse to start when `true` and no catalog is configured.
+    pub enabled: bool,
+    /// HTTPS URL of the signed catalog metadata.
+    pub catalog_url: Option<String>,
+    /// Catalog signing keys.
+    pub catalog_keys: Vec<CatalogKeyConfig>,
+    /// Root directory for the CAS + installation state. Defaults to
+    /// `app_data_dir()/artifacts`.
+    pub root_dir: Option<String>,
+    /// Maximum artifact size in bytes.
+    pub max_bytes: u64,
+    /// Catalog refresh interval in hours (startup + manual refresh always
+    /// happen).
+    pub refresh_hours: u64,
+    /// Per-hop download timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Maximum redirect hops per download.
+    pub max_redirects: usize,
+}
+
+impl Default for ArtifactConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            catalog_url: None,
+            catalog_keys: Vec::new(),
+            root_dir: None,
+            max_bytes: 8 * 1024 * 1024 * 1024,
+            refresh_hours: 6,
+            timeout_ms: 60_000,
+            max_redirects: 5,
+        }
+    }
+}
+
+/// Web-file download configuration (browsing downloads, not artifacts).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct DownloadConfig {
+    /// Maximum bytes per download.
+    pub max_bytes: u64,
+    /// Maximum redirect hops.
+    pub max_redirects: usize,
+    /// Optional auto-save preset. When set, `WebFileSave=Allow` saves without
+    /// a prompt; when unset, even `Allow` still shows the confirmation
+    /// (destination, type, size, SHA-256).
+    pub auto_save: Option<AutoSaveConfig>,
+}
+
+impl Default for DownloadConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: 256 * 1024 * 1024,
+            max_redirects: 5,
+            auto_save: None,
+        }
+    }
+}
+
+/// Auto-save preset for browsing downloads.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AutoSaveConfig {
+    /// Destination directory.
+    pub dir: String,
+    /// Maximum bytes accepted by the preset.
+    pub max_bytes: u64,
+    /// Name-conflict handling (never overwrite automatically).
+    pub conflict: ene_plugin_proto::ConflictMode,
+}
+
 /// Default plugin list containing the builtin tool and provider plugins.
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
+    // Pure computation plugins carry no filesystem, network, or process
+    // needs, so the OS sandbox is safe to enforce for them from day one.
+    // Remaining built-ins stay unsandboxed until their broker migration
+    // lands (see `docs/concepts/sandbox-and-approvals.md`).
+    let sandboxed_pure = PluginEntry {
+        sandbox: Some(SandboxEntryConfig {
+            enabled: true,
+            ..SandboxEntryConfig::default()
+        }),
+        ..PluginEntry::default()
+    };
     let mut list: HashMap<String, PluginEntry> = [
         "app",
         "browser",
@@ -70,6 +264,10 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     .into_iter()
     .map(|name| (name.to_string(), PluginEntry::default()))
     .collect();
+
+    for name in ["calc", "counter", "random"] {
+        list.insert(name.to_string(), sandboxed_pure.clone());
+    }
 
     // The Anthropic provider plugin needs ANTHROPIC_API_KEY forwarded from
     // the host environment; without it the provider cannot authenticate.
@@ -220,6 +418,20 @@ pub struct PluginEntry {
     /// at handshake time via `ConfigurablePlugin::set_profiles`.
     #[serde(default)]
     pub profiles: HashMap<String, serde_json::Value>,
+    /// Signed manifest for this plugin. Built-in plugins fall back to the
+    /// host's embedded manifest when this is absent.
+    #[serde(default)]
+    pub manifest: Option<SignedManifest>,
+    /// OS sandbox settings; `None` inherits the global default.
+    #[serde(default)]
+    pub sandbox: Option<SandboxEntryConfig>,
+    /// User-approved filesystem grants (logical slot → real path).
+    #[serde(default)]
+    pub fs_grants: Vec<FsGrantConfig>,
+    /// Host-owned credentials served through the `Credential` broker. Never
+    /// delivered inside the plugin config blob.
+    #[serde(default)]
+    pub credentials: std::collections::BTreeMap<String, String>,
     /// Unknown entry-level keys (anything beyond the declared fields),
     /// preserved verbatim across load → save so the host never drops keys
     /// it does not understand. At plugin startup these flat keys are folded
@@ -239,6 +451,10 @@ impl Default for PluginEntry {
             db_quota_mb: default_db_quota_mb(),
             config: serde_json::Value::Object(serde_json::Map::default()),
             profiles: HashMap::new(),
+            manifest: None,
+            sandbox: None,
+            fs_grants: Vec::new(),
+            credentials: std::collections::BTreeMap::new(),
             extra: serde_json::Map::default(),
         }
     }
@@ -479,6 +695,24 @@ ene_config::define_config!(
         /// stream, or a single completion) and released automatically when
         /// the request ends or the serving plugin crashes.
         pub resource_classes: Vec<ResourceClassBudget> = Vec::new(),
+        /// Global approval policy (per-category modes; defaults to `Ask`).
+        pub approval: ApprovalPolicy = ApprovalPolicy::default(),
+        /// Per-plugin approval overrides (`Inherit` delegates to the global
+        /// policy).
+        pub plugin_approval: std::collections::BTreeMap<String, PluginApprovalPolicy> =
+            std::collections::BTreeMap::new(),
+        /// Trusted publisher keys for third-party manifest verification.
+        pub trusted_publishers: Vec<TrustedPublisherConfig> = Vec::new(),
+        /// Audit log path for approval decisions. Defaults to
+        /// `app_data_dir()/audit/plugin-approval.jsonl`.
+        pub audit_log_path: Option<String> = None,
+        /// Default OS-sandbox settings for plugins without a per-entry
+        /// `sandbox` override.
+        pub sandbox: SandboxEntryConfig = SandboxEntryConfig::default(),
+        /// Signed artifact catalog / CAS configuration.
+        pub artifact: ArtifactConfig = ArtifactConfig::default(),
+        /// Web-file download limits and auto-save preset.
+        pub download: DownloadConfig = DownloadConfig::default(),
     }
 );
 

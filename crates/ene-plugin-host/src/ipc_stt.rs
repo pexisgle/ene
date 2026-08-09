@@ -22,6 +22,7 @@ use crate::error::PluginHostError;
 use crate::ipc_plugin::IpcPluginConnection;
 use crate::ipc_provider::ConcurrencyLimiter;
 use crate::wav;
+use base64::Engine as _;
 
 /// Audio format the host adapter can encode microphone PCM into. The wire
 /// contract carries the format echo so a future provider that accepts
@@ -132,8 +133,7 @@ impl SttProvider for IpcSttProvider {
             })?;
 
         let wav_bytes = wav::encode_wav(pcm, sample_rate)?;
-        let audio_base64 =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, wav_bytes);
+        let audio_base64 = base64::engine::general_purpose::STANDARD.encode(wav_bytes);
         let outcome = self
             .conn
             .transcribe_audio(

@@ -31,6 +31,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use ene_ai::AudioProviderError;
 use ene_ai::traits::{TtsChunk, TtsProvider};
 use tokio::sync::mpsc;
@@ -193,10 +194,7 @@ impl TtsProvider for IpcTtsProvider {
                 );
                 return;
             }
-            let audio = match base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                audio_base64,
-            ) {
+            let audio = match base64::engine::general_purpose::STANDARD.decode(audio_base64) {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     drop(

@@ -517,6 +517,23 @@ impl PublicChatEvent {
                 target: target.clone(),
                 description: description.clone(),
             },
+            // Broker approvals carry no turn; mirror them as a permission
+            // prompt under a synthetic turn so public consumers see a stable
+            // shape (headless consumers time out and the request is denied).
+            EneEvent::BrokerApprovalRequired {
+                request_id,
+                plugin,
+                category,
+                target,
+                description,
+            } => Self::PermissionRequired {
+                turn: crate::types::TurnId::new().to_string(),
+                origin: "plugin".to_string(),
+                request_id: request_id.to_string(),
+                action: format!("{plugin}:{category}"),
+                target: target.clone(),
+                description: description.clone(),
+            },
             EneEvent::UserInputRequired {
                 turn,
                 origin,

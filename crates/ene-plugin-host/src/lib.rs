@@ -3,7 +3,7 @@
 //! Host-side plugin process management for the ene unified plugin system.
 //!
 //! This crate provides [`PluginHostManager`], which discovers, spawns, and
-//! supervises plugin binaries (protocol v7), routing their advertised
+//! supervises plugin binaries (protocol v8), routing their advertised
 //! capabilities into the host's tool and LLM provider registries. It also
 //! owns the [`ToolRegistry`] trait and [`CompositeToolRegistry`] that
 //! aggregate plugin-provided and MCP tools.
@@ -29,7 +29,7 @@
 //! ## Relationship to other crates
 //!
 //! - [`ene-plugin-proto`](ene_plugin_proto) — wire protocol definitions
-//!   (tool IPC v2 + plugin protocol v7), framing helpers, and transport layer.
+//!   (tool IPC v2 + plugin protocol v8), framing helpers, and transport layer.
 //! - [`ene-plugin`](ene_plugin) — plugin authoring facade (used by plugin
 //!   binaries, not by the host).
 //! - [`ene-ai`](ene_ai) — `LlmProvider` / `LlmProviderFactory` traits that
@@ -37,9 +37,22 @@
 //!   `TtsProvider` / `TtsProviderFactory` traits that [`IpcTtsProvider`] /
 //!   [`IpcTtsProviderFactory`] implement.
 #![warn(missing_docs)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "unit tests use unwrap/expect for concise assertions"
+    )
+)]
 
 /// Host-side per-ResourceClass admission control for provider requests.
 pub mod admission;
+/// Host-mediated broker channel (protocol v8).
+pub mod broker;
+pub use broker::ApprovalResponder;
+pub use broker::BrokerHub;
+pub use ene_approval::{ALL_CATEGORIES, ApprovalCategory, ApprovalMode};
 /// Host-side registry of plugin capability declarations and resolution.
 pub mod capability_registry;
 /// Host mediation for plugin-to-plugin capability calls.
@@ -70,6 +83,8 @@ pub mod ipc_tts;
 pub mod ipc_vad;
 /// Plugin host manager: process supervision and capability routing.
 pub mod manager;
+/// Plugin manifest verification and built-in manifests.
+pub mod manifest;
 /// MCP server configuration types.
 pub mod mcp_config;
 /// MCP client for external server connections.

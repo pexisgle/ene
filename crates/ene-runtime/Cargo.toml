@@ -38,6 +38,7 @@ once_cell = { workspace = true }
 ene-rag = { workspace = true, features = ["tool"] }
 ene-plugin-proto = { workspace = true }
 ene-plugin-host = { workspace = true }
+ene-approval = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
