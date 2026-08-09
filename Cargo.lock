@@ -3153,6 +3153,7 @@ dependencies = [
  "ene-config",
  "ene-connector",
  "ene-plugin",
+ "ene-plugin-broker",
  "ene-plugin-proto",
  "ene-sandbox",
  "ene-store",

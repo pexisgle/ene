@@ -48,6 +48,7 @@ sys-locale = { workspace = true }
 
 [dev-dependencies]
 ene-plugin = { workspace = true }
+ene-plugin-broker = { workspace = true }
 ene-store = { workspace = true }
 sea-orm = { workspace = true }
 tempfile = { workspace = true }
