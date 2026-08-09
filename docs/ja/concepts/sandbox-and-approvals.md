@@ -30,6 +30,8 @@ Windows では有効化されたプラグインは **Job Object**(終了時 kill
 
 プラグイン別のサンドボックス設定は `plugins.list.<name>.sandbox`、全体の既定は `plugins.sandbox` にあります。純粋な計算系の同梱プラグイン(`calc`・`counter`・`random`)は既定で**有効**です。残りの同梱プラグインは Broker チャネルへの移行が完了するまで既定で無効です。有効化した場合、カーネルが要求層を適用できないと起動を拒否します。
 
+`web` プラグインはすでに `Network` Broker 経由で通信しています(SSRF・リダイレクト処理はホスト側へ移行済み)。サンドボックス有効化は次の段階です。
+
 ## Broker チャネル(プロトコル v8)
 
 ホストサービスソケットは `db`・`capability` に加えて次の passenger を多重化します:

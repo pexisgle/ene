@@ -2,10 +2,10 @@ use ene_plugin::prelude::*;
 use std::fmt::Write;
 use std::sync::{Arc, RwLock};
 
+use crate::broker::WebBroker;
 use crate::provider::WebSearchConfig;
 use crate::search::{
-    ArxivProvider, DuckDuckGoProvider, ExaProvider, SearchOptions, TavilyProvider, search_client,
-    web_search,
+    ArxivProvider, DuckDuckGoProvider, ExaProvider, SearchOptions, TavilyProvider, web_search,
 };
 
 fn default_config() -> Arc<RwLock<WebSearchConfig>> {
@@ -69,6 +69,9 @@ pub struct WebSearchAction {
     #[tool(skip)]
     #[serde(skip, default = "default_config")]
     config: Arc<RwLock<WebSearchConfig>>,
+    #[tool(skip)]
+    #[serde(skip)]
+    broker: Arc<WebBroker>,
     /// The search query.
     query: String,
     /// Search backend to use. Defaults to duckduckgo.
@@ -82,9 +85,10 @@ pub struct WebSearchAction {
 }
 
 impl WebSearchAction {
-    pub const fn new(config: Arc<RwLock<WebSearchConfig>>) -> Self {
+    pub const fn new(config: Arc<RwLock<WebSearchConfig>>, broker: Arc<WebBroker>) -> Self {
         Self {
             config,
+            broker,
             query: String::new(),
             backend: None,
             limit: None,
@@ -111,25 +115,24 @@ impl WebSearchAction {
             }
         };
 
-        // A single shared client is reused across providers so TLS
-        // setup and connection pooling are not repeated per request.
-        let client = search_client()
-            .map_err(|e| ToolError::execution_failed(format!("HTTP client init failed: {e}")))?;
-
         let provider: Box<dyn crate::search::SearchProvider> = match backend {
-            Backend::Arxiv => Box::new(ArxivProvider::new(client)),
-            Backend::DuckDuckGo => Box::new(DuckDuckGoProvider::new(client)),
+            Backend::Arxiv => Box::new(ArxivProvider::new(Arc::clone(&self.broker))),
+            Backend::DuckDuckGo => Box::new(DuckDuckGoProvider::new(Arc::clone(&self.broker))),
             Backend::Tavily => {
                 let api_key = resolve_api_key(config.as_ref(), backend, "TAVILY_API_KEY")?;
-                Box::new(TavilyProvider::new(&api_key, client).map_err(|e| {
-                    ToolError::execution_failed(format!("Tavily provider init failed: {e}"))
-                })?)
+                Box::new(
+                    TavilyProvider::new(&api_key, Arc::clone(&self.broker)).map_err(|e| {
+                        ToolError::execution_failed(format!("Tavily provider init failed: {e}"))
+                    })?,
+                )
             }
             Backend::Exa => {
                 let api_key = resolve_api_key(config.as_ref(), backend, "EXA_API_KEY")?;
-                Box::new(ExaProvider::new(&api_key, client).map_err(|e| {
-                    ToolError::execution_failed(format!("Exa provider init failed: {e}"))
-                })?)
+                Box::new(
+                    ExaProvider::new(&api_key, Arc::clone(&self.broker)).map_err(|e| {
+                        ToolError::execution_failed(format!("Exa provider init failed: {e}"))
+                    })?,
+                )
             }
         };
 

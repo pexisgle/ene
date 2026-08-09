@@ -1,95 +1,10 @@
-use std::net::IpAddr;
+use std::sync::Arc;
 
 use ene_plugin::prelude::*;
 
+use crate::broker::WebBroker;
+
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
-const MAX_TIMEOUT_SECS: u64 = 120;
-const MAX_REDIRECTS: usize = 5;
-
-/// Returns `Ok(())` if `host` resolves (or, when it is already a
-/// literal IP, is) an address we are willing to fetch from. The
-/// check rejects loopback, private, link-local, and unspecified
-/// addresses on both IPv4 and IPv6 to prevent SSRF against
-/// localhost, the cloud metadata service, RFC1918 hosts, etc.
-///
-/// Bare hostnames are resolved via the system resolver before the
-/// HTTP client opens a connection, so an attacker cannot bypass
-/// the check by pointing the URL at a public DNS name that
-/// resolves to a private IP.
-async fn assert_safe_host(url: &reqwest::Url) -> Result<(), ToolError> {
-    let host = url.host_str().ok_or_else(|| ToolError::InvalidArguments {
-        message: "URL must contain a host".to_string(),
-    })?;
-
-    let addresses: Vec<IpAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
-        vec![ip]
-    } else {
-        // Resolve via the system resolver using the async runtime.
-        // The resolver may return multiple addresses (e.g.
-        // dual-stack); if ANY of them is unsafe we reject.
-        let host_string = host.to_string();
-        let addrs = tokio::net::lookup_host(format!("{host_string}:0"))
-            .await
-            .map_err(|e| {
-                ToolError::execution_failed(format!("DNS lookup failed for {host}: {e}"))
-            })?;
-        addrs.map(|s| s.ip()).collect()
-    };
-
-    if addresses.is_empty() {
-        return Err(ToolError::InvalidArguments {
-            message: format!("No addresses resolved for host '{host}'"),
-        });
-    }
-
-    for ip in &addresses {
-        if is_blocked_address(*ip) {
-            return Err(ToolError::PermissionRequired {
-                request_id: "ssrf-block".to_string(),
-                action: "web.fetch".to_string(),
-                target: format!("{host} -> {ip}"),
-                description: format!(
-                    "Refusing to fetch blocked address ({ip}); loopback, \
-                     private, link-local, and unspecified ranges are \
-                     not allowed"
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn is_blocked_address(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()          // 127.0.0.0/8
-                || v4.is_private()    // 10/8, 172.16/12, 192.168/16
-                || v4.is_link_local()  // 169.254/16 (incl. cloud metadata)
-                || v4.is_unspecified() // 0.0.0.0
-                || v4.is_broadcast()   // 255.255.255.255
-                || v4.is_multicast()   // 224.0.0.0/4
-                || v4.is_documentation() // 192.0.2/24, 198.51.100/24, 203.0.113/24
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()    // ::1
-                || v6.is_unspecified() // ::
-                || v6.is_multicast()
-                // Unique-local fc00::/7
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                // Link-local fe80::/10
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                // IPv4-mapped (::ffff:a.b.c.d) — recurse into v4
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| is_blocked_address(IpAddr::V4(v4)))
-                // IPv4-compatible (deprecated but still routable): ::a.b.c.d
-                || v6
-                    .to_ipv4()
-                    .is_some_and(|v4| is_blocked_address(IpAddr::V4(v4)))
-        }
-    }
-}
 
 fn is_binary_content_type(mime: &str) -> bool {
     let lower = mime.to_ascii_lowercase();
@@ -150,10 +65,6 @@ fn html_to_plain_text(html: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn default_client() -> reqwest::Client {
-    reqwest::Client::new()
-}
-
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "web",
@@ -166,8 +77,8 @@ fn default_client() -> reqwest::Client {
 )]
 pub struct WebFetchAction {
     #[tool(skip)]
-    #[serde(skip, default = "default_client")]
-    client: reqwest::Client,
+    #[serde(skip)]
+    broker: Arc<WebBroker>,
     /// The URL to fetch content from (must start with http:// or https://).
     url: String,
     /// The format to return: text, markdown, or html. Defaults to markdown.
@@ -175,15 +86,18 @@ pub struct WebFetchAction {
     #[serde(default)]
     format: Option<String>,
     /// Optional timeout in seconds (max 120).
+    ///
+    /// Kept for schema compatibility; the host enforces its own timeouts on
+    /// broker-mediated requests.
     #[arg(minimum = 1, maximum = 120, default = "30")]
     #[serde(default)]
     timeout: Option<u64>,
 }
 
 impl WebFetchAction {
-    pub const fn new(client: reqwest::Client) -> Self {
+    pub const fn new(broker: Arc<WebBroker>) -> Self {
         Self {
-            client,
+            broker,
             url: String::new(),
             format: None,
             timeout: None,
@@ -198,20 +112,21 @@ impl WebFetchAction {
             });
         }
 
-        // Parse + SSRF check before doing any network work. A bare
-        // hostname is resolved up front so a public DNS name that
-        // points at a private IP cannot bypass the check via the
-        // OS resolver inside reqwest.
-        let mut current_url =
-            reqwest::Url::parse(url).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Invalid URL: {e}"),
-            })?;
-        assert_safe_host(&current_url).await?;
+        // URL shape check only: the host validates SSRF, origins, and every
+        // redirect hop through the Network broker.
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(ToolError::InvalidArguments {
+                message: "URL must start with http:// or https://".to_string(),
+            });
+        }
+        if let Some(timeout) = self.timeout
+            && !(1..=120).contains(&timeout)
+        {
+            return Err(ToolError::InvalidArguments {
+                message: "timeout must be between 1 and 120 seconds".to_string(),
+            });
+        }
 
-        let timeout_secs = self
-            .timeout
-            .unwrap_or(DEFAULT_TIMEOUT_SECS)
-            .min(MAX_TIMEOUT_SECS);
         let format = self.format.as_deref().unwrap_or("markdown");
 
         let accept_header = match format {
@@ -220,79 +135,33 @@ impl WebFetchAction {
             _ => "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         };
 
-        // Manual redirect loop: the client is configured with
-        // `redirect::Policy::none()` so we can re-validate each
-        // redirect target against the SSRF blocklist before
-        // following it.
-        let mut redirects_remaining = MAX_REDIRECTS;
-        let response = loop {
-            let resp = self
-                .client
-                .get(current_url.clone())
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .header("Accept", accept_header)
-                .header("Accept-Language", "en-US,en;q=0.9")
-                .send()
-                .await
-                .map_err(|e| ToolError::execution_failed(format!("HTTP request failed: {e}")))?;
+        // The host mediates the request: SSRF checks, origin approval, and
+        // redirect re-validation all happen there.
+        let response = self
+            .broker
+            .fetch(
+                ene_plugin_broker::HttpMethod::Get,
+                url,
+                vec![
+                    ("Accept".to_string(), accept_header.to_string()),
+                    ("Accept-Language".to_string(), "en-US,en;q=0.9".to_string()),
+                ],
+                None,
+                MAX_RESPONSE_SIZE as u64,
+            )
+            .await?;
 
-            let status = resp.status();
-            if status.is_redirection() {
-                if redirects_remaining == 0 {
-                    return Err(ToolError::execution_failed(format!(
-                        "Too many redirects (max {MAX_REDIRECTS})"
-                    )));
-                }
-                redirects_remaining -= 1;
-
-                let location = resp
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| {
-                        ToolError::execution_failed(format!(
-                            "Redirect ({}) without a valid Location header",
-                            status.as_u16()
-                        ))
-                    })?;
-
-                let next_url = current_url.join(location).map_err(|e| {
-                    ToolError::execution_failed(format!(
-                        "Invalid redirect target '{location}': {e}"
-                    ))
-                })?;
-
-                if next_url.scheme() != "http" && next_url.scheme() != "https" {
-                    return Err(ToolError::execution_failed(format!(
-                        "Redirect to unsupported scheme '{}'",
-                        next_url.scheme()
-                    )));
-                }
-
-                assert_safe_host(&next_url).await?;
-                current_url = next_url;
-                continue;
-            }
-
-            break resp;
-        };
-
-        let status = response.status();
-        if !status.is_success() {
+        if !(200..300).contains(&response.status) {
             return Err(ToolError::execution_failed(format!(
                 "HTTP request returned status: {} {}",
-                status.as_u16(),
-                status.canonical_reason().unwrap_or("Unknown")
+                response.status,
+                status_reason(response.status)
             )));
         }
 
         // Reject known binary content types before attempting
         // UTF-8 conversion, which would produce garbage.
-        if let Some(content_type) = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-        {
+        if let Some(content_type) = response.content_type() {
             let mime = content_type.split(';').next().unwrap_or_default().trim();
             if is_binary_content_type(mime) {
                 return Err(ToolError::execution_failed(format!(
@@ -301,26 +170,7 @@ impl WebFetchAction {
             }
         }
 
-        let content_length = response.content_length();
-        if let Some(len) = content_length
-            && len > MAX_RESPONSE_SIZE as u64
-        {
-            return Err(ToolError::execution_failed(
-                "Response too large (exceeds 5MB limit)".to_string(),
-            ));
-        }
-
-        let bytes = response.bytes().await.map_err(|e| {
-            ToolError::execution_failed(format!("Failed to read response body: {e}"))
-        })?;
-
-        if bytes.len() > MAX_RESPONSE_SIZE {
-            return Err(ToolError::execution_failed(
-                "Response too large (exceeds 5MB limit)".to_string(),
-            ));
-        }
-
-        let body = String::from_utf8_lossy(&bytes);
+        let body = String::from_utf8_lossy(&response.body);
 
         match format {
             "html" => Ok(body.to_string()),
@@ -330,102 +180,230 @@ impl WebFetchAction {
     }
 }
 
+fn status_reason(status: u16) -> &'static str {
+    match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "Unknown",
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    reason = "URL safety unit tests use unwrap for fixture construction"
+    reason = "unit tests use unwrap for concise assertions"
 )]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
-    use std::net::Ipv6Addr;
+    use ene_plugin_broker::{BrokerRequest, BrokerResponse, HttpMethod};
+    use ene_plugin_proto::{
+        BrokerErrorCode, HostServiceId, HostServiceRequest, HostServiceResponse, read_framed_json,
+        write_framed_json, write_host_service_response,
+    };
+    use tokio::net::UnixListener;
 
-    #[test]
-    fn blocks_ipv4_loopback() {
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::LOCALHOST)));
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::new(
-            127, 255, 255, 254
-        ))));
+    struct RecordedRequest {
+        method: HttpMethod,
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Option<Vec<u8>>,
     }
 
-    #[test]
-    fn blocks_ipv4_private() {
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::new(
-            192, 168, 1, 1
-        ))));
+    /// Minimal host-service mock: authenticates the `Network` open, then
+    /// answers every fetch with a canned response (or the provided status).
+    async fn run_mock_broker(
+        socket: std::path::PathBuf,
+        mock_body: &'static [u8],
+        content_type: &'static str,
+        status: u16,
+        recorded: std::sync::Arc<parking_lot::Mutex<Vec<RecordedRequest>>>,
+    ) {
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let open: HostServiceRequest = read_framed_json(&mut stream).await.unwrap().unwrap();
+        assert!(matches!(
+            open,
+            HostServiceRequest::Open {
+                service: HostServiceId::Network,
+                ..
+            }
+        ));
+        write_host_service_response(&mut stream, &HostServiceResponse::OpenAck)
+            .await
+            .unwrap();
+        loop {
+            let Some(request) = read_framed_json::<_, BrokerRequest>(&mut stream)
+                .await
+                .unwrap()
+            else {
+                return;
+            };
+            match request {
+                BrokerRequest::NetworkFetch {
+                    method,
+                    url,
+                    headers,
+                    body,
+                    ..
+                } => {
+                    recorded.lock().push(RecordedRequest {
+                        method,
+                        url,
+                        headers,
+                        body,
+                    });
+                    let response = BrokerResponse::NetworkFetchOk {
+                        status,
+                        headers: vec![("content-type".to_string(), content_type.to_string())],
+                        body: mock_body.to_vec(),
+                    };
+                    write_framed_json(&mut stream, &response).await.unwrap();
+                }
+                other => {
+                    write_framed_json(
+                        &mut stream,
+                        &BrokerResponse::error(
+                            BrokerErrorCode::Internal,
+                            format!("unexpected request: {other:?}"),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        }
     }
 
-    #[test]
-    fn blocks_ipv4_link_local_and_metadata() {
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::new(
-            169, 254, 169, 254
-        ))));
-    }
-
-    #[test]
-    fn blocks_unspecified_and_broadcast() {
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::BROADCAST)));
-    }
-
-    #[test]
-    fn blocks_ipv6_loopback_and_unspecified() {
-        assert!(is_blocked_address(IpAddr::V6(Ipv6Addr::LOCALHOST)));
-        assert!(is_blocked_address(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
-    }
-
-    #[test]
-    fn blocks_ipv6_ula_and_link_local() {
-        // fc00::/7 (unique local)
-        assert!(is_blocked_address(IpAddr::V6(Ipv6Addr::new(
-            0xfc00, 0, 0, 0, 0, 0, 0, 1
-        ))));
-        // fe80::/10 (link local)
-        assert!(is_blocked_address(IpAddr::V6(Ipv6Addr::new(
-            0xfe80, 0, 0, 0, 0, 0, 0, 1
-        ))));
-    }
-
-    #[test]
-    fn blocks_ipv4_mapped_ipv6() {
-        // ::ffff:127.0.0.1 — the v4 portion is loopback
-        let mapped = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001);
-        assert!(is_blocked_address(IpAddr::V6(mapped)));
-    }
-
-    #[test]
-    fn allows_public_ipv4() {
-        assert!(!is_blocked_address(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
-        assert!(!is_blocked_address(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
-    }
-
-    #[test]
-    fn allows_public_ipv6() {
-        // 2606:4700:4700::1111 (Cloudflare DNS, public)
-        assert!(!is_blocked_address(IpAddr::V6(Ipv6Addr::new(
-            0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111
-        ))));
+    fn broker_with_mock(
+        socket: &std::path::Path,
+    ) -> (
+        std::sync::Arc<crate::broker::WebBroker>,
+        std::sync::Arc<parking_lot::Mutex<Vec<RecordedRequest>>>,
+    ) {
+        let broker = crate::broker::WebBroker::new();
+        let sandbox = ene_plugin_proto::SandboxConfigData {
+            broker_socket: Some(socket.to_string_lossy().into_owned()),
+            db_auth_token: Some("test-token".to_string()),
+            ..Default::default()
+        };
+        broker.configure(&sandbox);
+        (
+            broker,
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+        )
     }
 
     #[tokio::test]
-    async fn rejects_loopback_url() {
-        let url = reqwest::Url::parse("http://127.0.0.1/foo").unwrap();
-        let err = assert_safe_host(&url).await.unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(msg.contains("Refusing") || msg.contains("Permission"));
+    async fn fetch_round_trips_through_the_broker_and_converts_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("broker.sock");
+        let html: &'static [u8] = b"<html><body><h1>Hello</h1><p>World</p></body></html>";
+        let recorded = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let server = tokio::spawn(run_mock_broker(
+            socket.clone(),
+            html,
+            "text/html",
+            200,
+            std::sync::Arc::clone(&recorded),
+        ));
+        // Wait for the listener to bind.
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let (broker, _) = broker_with_mock(&socket);
+        let action = WebFetchAction {
+            broker,
+            url: "https://example.com/page".to_string(),
+            format: Some("markdown".to_string()),
+            timeout: Some(30),
+        };
+        let output = action.run().await.unwrap();
+        assert!(output.contains("Hello"), "markdown output: {output}");
+
+        let requests = recorded.lock();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, HttpMethod::Get);
+        assert_eq!(requests[0].url, "https://example.com/page");
+        assert!(requests[0].body.is_none());
+        assert!(requests[0].headers.iter().any(|(key, _)| key == "Accept"));
+        drop(requests);
+        server.abort();
     }
 
     #[tokio::test]
-    async fn rejects_metadata_url() {
-        let url = reqwest::Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
-        assert!(assert_safe_host(&url).await.is_err());
+    async fn fetch_reports_non_success_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("broker-404.sock");
+        let recorded = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let server = tokio::spawn(run_mock_broker(
+            socket.clone(),
+            b"not found",
+            "text/plain",
+            404,
+            std::sync::Arc::clone(&recorded),
+        ));
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let (broker, _) = broker_with_mock(&socket);
+        let action = WebFetchAction {
+            broker,
+            url: "https://example.com/missing".to_string(),
+            format: None,
+            timeout: None,
+        };
+        let err = action.run().await.unwrap_err();
+        let message = format!("{err:?}");
+        assert!(message.contains("404"), "error message: {message}");
+        server.abort();
     }
 
     #[tokio::test]
-    async fn rejects_private_url() {
-        let url = reqwest::Url::parse("http://10.0.0.1/secret").unwrap();
-        assert!(assert_safe_host(&url).await.is_err());
+    async fn fetch_rejects_binary_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("broker-bin.sock");
+        let recorded = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let server = tokio::spawn(run_mock_broker(
+            socket.clone(),
+            b"\x89PNG\r\n\x1a\n",
+            "image/png",
+            200,
+            std::sync::Arc::clone(&recorded),
+        ));
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let (broker, _) = broker_with_mock(&socket);
+        let action = WebFetchAction {
+            broker,
+            url: "https://example.com/image.png".to_string(),
+            format: None,
+            timeout: None,
+        };
+        let err = action.run().await.unwrap_err();
+        let message = format!("{err:?}");
+        assert!(message.contains("binary"), "error message: {message}");
+        server.abort();
     }
 }

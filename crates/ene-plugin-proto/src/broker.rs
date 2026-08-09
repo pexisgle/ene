@@ -169,6 +169,10 @@ pub enum BrokerRequest {
         /// Extra headers (host strips authorization-like headers it did not
         /// inject).
         headers: Vec<(String, String)>,
+        /// Request body (JSON/form payloads). The caller must set a matching
+        /// `Content-Type` header; the host never interprets the body.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<Vec<u8>>,
         /// Byte cap (host caps anyway).
         max_bytes: Option<u64>,
     },
@@ -423,6 +427,7 @@ mod tests {
                 method: HttpMethod::Get,
                 url: "https://example.com".to_string(),
                 headers: vec![],
+                body: None,
                 max_bytes: None,
             },
             BrokerRequest::ProcessSpawn {

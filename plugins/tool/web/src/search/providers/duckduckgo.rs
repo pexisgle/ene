@@ -1,6 +1,9 @@
 use async_trait::async_trait;
+use ene_plugin_broker::HttpMethod;
 use scraper::{Html, Selector};
+use std::sync::Arc;
 
+use crate::broker::WebBroker;
 use crate::search::error::SearchError;
 use crate::search::types::{SearchOptions, SearchProvider, SearchResult};
 
@@ -8,12 +11,12 @@ use super::extract_domain;
 
 #[derive(Debug)]
 pub struct DuckDuckGoProvider {
-    client: reqwest::Client,
+    broker: Arc<WebBroker>,
 }
 
 impl DuckDuckGoProvider {
-    pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
+    pub fn new(broker: Arc<WebBroker>) -> Self {
+        Self { broker }
     }
 }
 
@@ -24,12 +27,25 @@ impl SearchProvider for DuckDuckGoProvider {
     }
 
     async fn search(&self, options: &SearchOptions) -> Result<Vec<SearchResult>, SearchError> {
+        let body = format!("q={}&b=&kl=wt-wt", percent_encode(&options.query));
         let response = self
-            .client
-            .post("https://html.duckduckgo.com/html")
-            .header("Referer", "https://html.duckduckgo.com/")
-            .form(&[("q", options.query.as_str()), ("b", ""), ("kl", "wt-wt")])
-            .send()
+            .broker
+            .fetch(
+                HttpMethod::Post,
+                "https://html.duckduckgo.com/html",
+                vec![
+                    (
+                        "Referer".to_string(),
+                        "https://html.duckduckgo.com/".to_string(),
+                    ),
+                    (
+                        "Content-Type".to_string(),
+                        "application/x-www-form-urlencoded".to_string(),
+                    ),
+                ],
+                Some(body.into_bytes()),
+                5 * 1024 * 1024,
+            )
             .await
             .map_err(|e| SearchError::HttpError {
                 message: format!("DuckDuckGo request failed: {e}"),
@@ -37,23 +53,41 @@ impl SearchProvider for DuckDuckGoProvider {
                 response_body: None,
             })?;
 
-        let status = response.status();
-        let html = response.text().await.map_err(|e| SearchError::HttpError {
-            message: format!("DuckDuckGo response read failed: {e}"),
-            status_code: Some(status.as_u16()),
-            response_body: None,
-        })?;
+        let status = response.status;
+        let html = String::from_utf8_lossy(&response.body).into_owned();
 
-        if !status.is_success() {
+        if !(200..300).contains(&status) {
             return Err(SearchError::HttpError {
                 message: "DuckDuckGo returned an error".to_string(),
-                status_code: Some(status.as_u16()),
+                status_code: Some(status),
                 response_body: Some(html),
             });
         }
 
         parse_text_results(&html, options.max_results.unwrap_or(10))
     }
+}
+
+fn percent_encode(input: &str) -> String {
+    // Form-encoding for the DuckDuckGo query: percent-encode everything
+    // except unreserved characters.
+    let mut out = String::new();
+    for byte in input.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(*byte));
+            }
+            _ => {
+                use std::fmt::Write;
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "fmt::Write to a String is infallible in practice"
+                )]
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 fn parse_text_results(html: &str, max_results: u32) -> Result<Vec<SearchResult>, SearchError> {

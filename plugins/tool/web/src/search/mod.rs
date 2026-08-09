@@ -1,11 +1,10 @@
-//! In-tree web search providers backed by workspace `reqwest`.
+//! In-tree web search providers backed by the host's `Network` broker.
 
 mod error;
 mod providers;
 mod types;
 
 pub use error::SearchError;
-pub(crate) use providers::search_client;
 pub use providers::{ArxivProvider, DuckDuckGoProvider, ExaProvider, TavilyProvider};
 pub use types::{SearchOptions, SearchProvider, SearchResult};
 

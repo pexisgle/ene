@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use ene_plugin_proto::{
+pub use ene_plugin_proto::{
     BrokerRequest, BrokerResponse, HostServiceErrorCode, HostServiceId, HostServiceRequest,
     HostServiceResponse, IpcStream, read_framed_json, read_host_service_response,
     write_framed_json, write_host_service_request,

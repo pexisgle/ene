@@ -54,8 +54,10 @@ Per-plugin sandbox settings live at `plugins.list.<name>.sandbox`; the
 global default is `plugins.sandbox`. Pure computation built-ins (`calc`,
 `counter`, `random`) ship **sandboxed by default**; the remaining built-ins
 default to disabled until their migration to the broker channel lands.
-Enabled plugins refuse to start when the kernel cannot enforce the
-requested layers.
+The `web` plugin already talks through the `Network` broker (its SSRF and
+redirect handling moved host-side) and is next in line for sandbox
+enablement. Enabled plugins refuse to start when the kernel cannot enforce
+the requested layers.
 
 ## Broker channel (protocol v8)
 

@@ -12,6 +12,7 @@
 )]
 
 mod action;
+mod broker;
 mod provider;
 mod search;
 

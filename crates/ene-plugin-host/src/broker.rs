@@ -338,9 +338,10 @@ impl BrokerHub {
                 method,
                 url,
                 headers,
+                body,
                 max_bytes,
             } => {
-                self.network_fetch(plugin, state, method, &url, &headers, max_bytes)
+                self.network_fetch(plugin, state, method, &url, &headers, body, max_bytes)
                     .await
             }
             BrokerRequest::NetworkFetchToTemp { url, max_bytes } => {
@@ -877,11 +878,12 @@ impl BrokerHub {
         method: HttpMethod,
         url: &str,
         headers: &[(String, String)],
+        body: Option<Vec<u8>>,
         max_bytes: Option<u64>,
     ) -> Result<BrokerResponse, BrokerError> {
         let cap = max_bytes.unwrap_or(self.download.config.max_bytes);
         let body = self
-            .fetch_loop(plugin, state, method, url, headers, cap, None)
+            .fetch_loop(plugin, state, method, url, headers, body, cap, None)
             .await?;
         Ok(BrokerResponse::NetworkFetchOk {
             status: body.status,
@@ -909,6 +911,7 @@ impl BrokerHub {
                 HttpMethod::Get,
                 url,
                 &[],
+                None,
                 cap,
                 Some(&temp_path),
             )
@@ -929,6 +932,7 @@ impl BrokerHub {
         method: HttpMethod,
         url: &str,
         headers: &[(String, String)],
+        body: Option<Vec<u8>>,
         max_bytes: u64,
         temp_path: Option<&Path>,
     ) -> Result<FetchBody, BrokerError> {
@@ -971,6 +975,9 @@ impl BrokerHub {
                 HttpMethod::Delete => client.delete(&current),
                 HttpMethod::Head => client.head(&current),
             };
+            if let Some(body) = &body {
+                request = request.body(body.clone());
+            }
             for (key, value) in headers {
                 if is_forbidden_request_header(key) {
                     continue;
@@ -998,12 +1005,6 @@ impl BrokerHub {
                     .to_string();
                 current = next;
                 continue;
-            }
-            if !response.status().is_success() {
-                return Err(BrokerError::new(
-                    BrokerErrorCode::Internal,
-                    format!("HTTP {}", response.status()),
-                ));
             }
             let final_url = response.url().to_string();
             let mime = response
@@ -1776,6 +1777,7 @@ mod tests {
                 method: HttpMethod::Get,
                 url: "https://x".into(),
                 headers: vec![],
+                body: None,
                 max_bytes: None,
             }),
             "network"

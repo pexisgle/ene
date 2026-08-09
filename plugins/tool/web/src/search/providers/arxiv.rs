@@ -1,7 +1,10 @@
 use async_trait::async_trait;
+use ene_plugin_broker::HttpMethod;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::broker::WebBroker;
 use crate::search::error::SearchError;
 use crate::search::types::{SearchOptions, SearchProvider, SearchResult};
 
@@ -38,12 +41,12 @@ struct ArxivFeed {
 
 #[derive(Debug)]
 pub struct ArxivProvider {
-    client: reqwest::Client,
+    broker: Arc<WebBroker>,
 }
 
 impl ArxivProvider {
-    pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
+    pub fn new(broker: Arc<WebBroker>) -> Self {
+        Self { broker }
     }
 }
 
@@ -54,7 +57,7 @@ impl SearchProvider for ArxivProvider {
     }
 
     async fn search(&self, options: &SearchOptions) -> Result<Vec<SearchResult>, SearchError> {
-        let mut url = url::Url::parse("http://export.arxiv.org/api/query")
+        let mut url = url::Url::parse("https://export.arxiv.org/api/query")
             .map_err(|e| SearchError::ConfigError(format!("Invalid ArXiv base URL: {e}")))?;
 
         let search_query = format!("all:{}", options.query.trim());
@@ -68,9 +71,8 @@ impl SearchProvider for ArxivProvider {
         }
 
         let response = self
-            .client
-            .get(url)
-            .send()
+            .broker
+            .fetch(HttpMethod::Get, url.as_str(), vec![], None, 5 * 1024 * 1024)
             .await
             .map_err(|e| SearchError::HttpError {
                 message: format!("ArXiv API request failed: {e}"),
@@ -78,17 +80,13 @@ impl SearchProvider for ArxivProvider {
                 response_body: None,
             })?;
 
-        let status = response.status();
-        let xml_text = response.text().await.map_err(|e| SearchError::HttpError {
-            message: format!("ArXiv response read failed: {e}"),
-            status_code: Some(status.as_u16()),
-            response_body: None,
-        })?;
+        let status = response.status;
+        let xml_text = String::from_utf8_lossy(&response.body).into_owned();
 
-        if !status.is_success() {
+        if !(200..300).contains(&status) {
             return Err(SearchError::HttpError {
-                message: format!("ArXiv API returned error: {status}"),
-                status_code: Some(status.as_u16()),
+                message: format!("ArXiv API returned error: HTTP {status}"),
+                status_code: Some(status),
                 response_body: Some(xml_text),
             });
         }
