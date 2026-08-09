@@ -2774,6 +2774,7 @@ dependencies = [
  "ene-util",
  "ene-vrm",
  "fluent-bundle",
+ "futures",
  "glam 0.33.2",
  "global-hotkey",
  "gtk",

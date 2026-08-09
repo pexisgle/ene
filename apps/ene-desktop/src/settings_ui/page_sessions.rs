@@ -29,6 +29,9 @@ use i18n_embed_fl::fl;
 use crate::ai_bridge::AiBridge;
 use crate::component::ui::UiStateComponent;
 use crate::settings::SessionSearchRow;
+use crate::settings_ui::components::{
+    BadgeTone, empty_state, section_card, setting_row, status_badge, toggle_row,
+};
 
 /// Maximum number of sessions listed in one fetch.
 const LIST_LIMIT: usize = 50;
@@ -38,9 +41,6 @@ const SEARCH_LIMIT: usize = 20;
 const CONTENT_PREVIEW_LEN: usize = 120;
 
 pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.heading(fl!(crate::i18n::loader(), "sessions-title"));
-    ui.label(fl!(crate::i18n::loader(), "sessions-hint"));
-
     // Lazy-load the session list the first time the page is shown so it
     // is not empty behind a manual refresh.
     if world
@@ -50,17 +50,32 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
         refresh_sessions(ai, world, ui_entity, false);
     }
 
-    render_search(ui, ai, world, ui_entity);
-    ui.separator();
-    render_import(ui, ai, world, ui_entity);
-    ui.separator();
-    render_list(ui, ai, world, ui_entity);
+    ui.vertical(|ui| {
+        section_card(
+            ui,
+            "sessions-search",
+            &fl!(crate::i18n::loader(), "sessions-search-title"),
+            |ui| render_search(ui, ai, world, ui_entity),
+        );
+        section_card(
+            ui,
+            "sessions-import",
+            &fl!(crate::i18n::loader(), "sessions-import-title"),
+            |ui| render_import(ui, ai, world, ui_entity),
+        );
+        section_card(
+            ui,
+            "sessions-list",
+            &fl!(crate::i18n::loader(), "sessions-list-title"),
+            |ui| render_list(ui, ai, world, ui_entity),
+        );
+    });
 
     if let Some(message) = world
         .get::<UiStateComponent>(ui_entity)
         .and_then(|s| s.0.session_message.clone())
     {
-        ui.separator();
+        ui.add_space(6.0);
         ui.label(message);
     }
 }
@@ -68,24 +83,28 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
 /// Search section: a query field plus a button that runs a message
 /// search and caches the hits.
 fn render_search(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.label(fl!(crate::i18n::loader(), "sessions-search-title"));
-
     let mut do_search = false;
-    ui.horizontal(|ui| {
-        if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-            ui.add(
-                egui::TextEdit::singleline(&mut state.0.session_search_query)
-                    .desired_width(240.0)
-                    .hint_text(fl!(crate::i18n::loader(), "sessions-search-placeholder")),
-            );
-        }
-        if ui
-            .button(fl!(crate::i18n::loader(), "sessions-search"))
-            .clicked()
-        {
-            do_search = true;
-        }
-    });
+    setting_row(
+        ui,
+        "session_search_row",
+        &fl!(crate::i18n::loader(), "sessions-hint"),
+        "",
+        |ui| {
+            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.0.session_search_query)
+                        .desired_width(240.0)
+                        .hint_text(fl!(crate::i18n::loader(), "sessions-search-placeholder")),
+                );
+            }
+            if ui
+                .button(fl!(crate::i18n::loader(), "sessions-search"))
+                .clicked()
+            {
+                do_search = true;
+            }
+        },
+    );
 
     if do_search {
         run_search(ai, world, ui_entity);
@@ -97,7 +116,7 @@ fn render_search(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_en
         .unwrap_or_default();
 
     if rows.is_empty() {
-        ui.weak(fl!(crate::i18n::loader(), "sessions-search-empty"));
+        empty_state(ui, &fl!(crate::i18n::loader(), "sessions-search-empty"), "");
         return;
     }
 
@@ -113,35 +132,42 @@ fn render_search(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_en
 }
 
 fn render_search_row(ui: &mut egui::Ui, row: &SessionSearchRow) {
-    ui.group(|ui| {
-        ui.label(format!(
-            "{}: {}  |  {}: {}",
-            fl!(crate::i18n::loader(), "sessions-col-session"),
-            row.session_id,
-            fl!(crate::i18n::loader(), "sessions-col-role"),
-            row.role,
-        ));
-        ui.add(egui::Label::new(row.content.as_str()).wrap());
-    });
+    egui::Frame::group(ui.style())
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.label(format!(
+                "{}: {}  |  {}: {}",
+                fl!(crate::i18n::loader(), "sessions-col-session"),
+                row.session_id,
+                fl!(crate::i18n::loader(), "sessions-col-role"),
+                row.role,
+            ));
+            ui.add(egui::Label::new(row.content.as_str()).wrap());
+        });
 }
 
 /// Import section: a path field plus a button that reads the file and
 /// imports its JSON contents.
 fn render_import(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.label(fl!(crate::i18n::loader(), "sessions-import-title"));
-
     let mut do_import = false;
-    ui.horizontal(|ui| {
-        if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-            super::widgets::path_row(ui, &mut state.0.session_import_path, 240.0);
-        }
-        if ui
-            .button(fl!(crate::i18n::loader(), "sessions-import"))
-            .clicked()
-        {
-            do_import = true;
-        }
-    });
+    setting_row(
+        ui,
+        "session_import_row",
+        &fl!(crate::i18n::loader(), "sessions-hint"),
+        "",
+        |ui| {
+            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                super::widgets::path_row(ui, &mut state.0.session_import_path, 240.0);
+            }
+            if ui
+                .button(fl!(crate::i18n::loader(), "sessions-import"))
+                .clicked()
+            {
+                do_import = true;
+            }
+        },
+    );
 
     if do_import {
         run_import(ai, world, ui_entity);
@@ -151,31 +177,35 @@ fn render_import(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_en
 /// Session-list section: refreshable rows with per-row archive /
 /// unarchive and export actions.
 fn render_list(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.horizontal(|ui| {
-        ui.label(fl!(crate::i18n::loader(), "sessions-list-title"));
-        if ui
-            .button(fl!(crate::i18n::loader(), "sessions-refresh"))
-            .clicked()
-        {
-            refresh_sessions(ai, world, ui_entity, true);
-        }
-    });
+    setting_row(
+        ui,
+        "session_list_refresh_row",
+        &fl!(crate::i18n::loader(), "sessions-hint"),
+        "",
+        |ui| {
+            if ui
+                .button(fl!(crate::i18n::loader(), "sessions-refresh"))
+                .clicked()
+            {
+                refresh_sessions(ai, world, ui_entity, true);
+            }
+        },
+    );
 
     // Toggling "show archived" re-fetches with the new flag.
-    let mut toggled = false;
-    ui.horizontal(|ui| {
-        if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity)
-            && ui
-                .checkbox(
-                    &mut state.0.session_show_archived,
-                    fl!(crate::i18n::loader(), "sessions-show-archived"),
-                )
-                .changed()
-        {
-            toggled = true;
+    let mut show_archived = world
+        .get::<UiStateComponent>(ui_entity)
+        .is_some_and(|s| s.0.session_show_archived);
+    if toggle_row(
+        ui,
+        "session_show_archived_row",
+        &fl!(crate::i18n::loader(), "sessions-show-archived"),
+        "",
+        &mut show_archived,
+    ) {
+        if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+            state.0.session_show_archived = show_archived;
         }
-    });
-    if toggled {
         refresh_sessions(ai, world, ui_entity, false);
     }
 
@@ -185,7 +215,7 @@ fn render_list(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_enti
         .unwrap_or_default();
 
     if sessions.is_empty() {
-        ui.weak(fl!(crate::i18n::loader(), "sessions-empty"));
+        empty_state(ui, &fl!(crate::i18n::loader(), "sessions-empty"), "");
         return;
     }
 
@@ -207,51 +237,60 @@ fn render_session_row(
     ui_entity: Entity,
     session: &ene_runtime::PublicSessionMeta,
 ) {
-    ui.group(|ui| {
-        let title = if session.title.is_empty() {
-            fl!(crate::i18n::loader(), "sessions-untitled")
-        } else {
-            session.title.clone()
-        };
-        ui.label(format!(
-            "{}: {}  |  {}: {}",
-            fl!(crate::i18n::loader(), "sessions-col-session"),
-            session.session_id,
-            fl!(crate::i18n::loader(), "sessions-col-title"),
-            title,
-        ));
-        ui.label(format!(
-            "{}: {}  |  {}: {}",
-            fl!(crate::i18n::loader(), "sessions-col-turns"),
-            session.turn_count,
-            fl!(crate::i18n::loader(), "sessions-col-updated"),
-            session.updated_at.format("%Y-%m-%d %H:%M:%S UTC"),
-        ));
-        if session.archived {
-            ui.weak(fl!(crate::i18n::loader(), "sessions-archived-badge"));
-        }
-        ui.horizontal(|ui| {
-            if session.archived {
-                if ui
-                    .button(fl!(crate::i18n::loader(), "sessions-unarchive"))
+    egui::Frame::group(ui.style())
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            let title = if session.title.is_empty() {
+                fl!(crate::i18n::loader(), "sessions-untitled")
+            } else {
+                session.title.clone()
+            };
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{}: {}  |  {}: {}",
+                    fl!(crate::i18n::loader(), "sessions-col-session"),
+                    session.session_id,
+                    fl!(crate::i18n::loader(), "sessions-col-title"),
+                    title,
+                ));
+                if session.archived {
+                    status_badge(
+                        ui,
+                        &fl!(crate::i18n::loader(), "sessions-archived-badge"),
+                        BadgeTone::Neutral,
+                    );
+                }
+            });
+            ui.label(format!(
+                "{}: {}  |  {}: {}",
+                fl!(crate::i18n::loader(), "sessions-col-turns"),
+                session.turn_count,
+                fl!(crate::i18n::loader(), "sessions-col-updated"),
+                session.updated_at.format("%Y-%m-%d %H:%M:%S UTC"),
+            ));
+            ui.horizontal(|ui| {
+                if session.archived {
+                    if ui
+                        .button(fl!(crate::i18n::loader(), "sessions-unarchive"))
+                        .clicked()
+                    {
+                        set_archived(ai, world, ui_entity, &session.session_id, false);
+                    }
+                } else if ui
+                    .button(fl!(crate::i18n::loader(), "sessions-archive"))
                     .clicked()
                 {
-                    set_archived(ai, world, ui_entity, &session.session_id, false);
+                    set_archived(ai, world, ui_entity, &session.session_id, true);
                 }
-            } else if ui
-                .button(fl!(crate::i18n::loader(), "sessions-archive"))
-                .clicked()
-            {
-                set_archived(ai, world, ui_entity, &session.session_id, true);
-            }
-            if ui
-                .button(fl!(crate::i18n::loader(), "sessions-export"))
-                .clicked()
-            {
-                export_session(ai, world, ui_entity, &session.session_id);
-            }
+                if ui
+                    .button(fl!(crate::i18n::loader(), "sessions-export"))
+                    .clicked()
+                {
+                    export_session(ai, world, ui_entity, &session.session_id);
+                }
+            });
         });
-    });
 }
 
 /// Re-fetch the session list from the actor. When `announce` is `true`

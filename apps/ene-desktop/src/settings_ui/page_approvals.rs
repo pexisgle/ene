@@ -13,6 +13,7 @@ use i18n_embed_fl::fl;
 
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
+use crate::settings_ui::components::section_card;
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -21,72 +22,78 @@ pub fn render(
     _world: &mut World,
     _ui_entity: bevy_ecs::entity::Entity,
 ) {
-    ui.heading(fl!(crate::i18n::loader(), "approvals-title"));
-    ui.label(fl!(crate::i18n::loader(), "approvals-hint"));
+    section_card(
+        ui,
+        "approvals-policy",
+        &fl!(crate::i18n::loader(), "approvals-title"),
+        |ui| {
+            ui.label(fl!(crate::i18n::loader(), "approvals-hint"));
 
-    let mut config = settings.config_section::<PluginConfig>();
-    let mut changed = false;
+            let mut config = settings.config_section::<PluginConfig>();
+            let mut changed = false;
 
-    if config.approval.has_high_risk_allow() {
-        ui.colored_label(
-            crate::settings_ui::WARNING_COLOR,
-            fl!(crate::i18n::loader(), "approvals-high-risk-warning"),
-        );
-        ui.add_space(4.0);
-    }
+            if config.approval.has_high_risk_allow() {
+                ui.colored_label(
+                    crate::settings_ui::WARNING_COLOR,
+                    fl!(crate::i18n::loader(), "approvals-high-risk-warning"),
+                );
+                ui.add_space(4.0);
+            }
 
-    let mut emergency = config.approval.emergency_stop;
-    if ui
-        .checkbox(
-            &mut emergency,
-            fl!(crate::i18n::loader(), "approvals-emergency"),
-        )
-        .changed()
-    {
-        config.approval.emergency_stop = emergency;
-        changed = true;
-    }
-    ui.label(fl!(crate::i18n::loader(), "approvals-emergency-hint"));
-    ui.separator();
+            let mut emergency = config.approval.emergency_stop;
+            if ui
+                .checkbox(
+                    &mut emergency,
+                    fl!(crate::i18n::loader(), "approvals-emergency"),
+                )
+                .changed()
+            {
+                config.approval.emergency_stop = emergency;
+                changed = true;
+            }
+            ui.label(fl!(crate::i18n::loader(), "approvals-emergency-hint"));
+            ui.separator();
 
-    ui.label(fl!(crate::i18n::loader(), "approvals-global"));
-    render_category_table(ui, &mut config, None, &mut changed);
+            ui.label(fl!(crate::i18n::loader(), "approvals-global"));
+            render_category_table(ui, &mut config, None, &mut changed);
 
-    if ui
-        .button(fl!(crate::i18n::loader(), "approvals-reset"))
-        .clicked()
-    {
-        config.approval = ene_approval::ApprovalPolicy::default();
-        changed = true;
-    }
-    ui.separator();
+            if ui
+                .button(fl!(crate::i18n::loader(), "approvals-reset"))
+                .clicked()
+            {
+                config.approval = ene_approval::ApprovalPolicy::default();
+                changed = true;
+            }
+            ui.separator();
 
-    ui.label(fl!(crate::i18n::loader(), "approvals-per-plugin"));
-    let mut names: Vec<String> = config.list.keys().cloned().collect();
-    names.sort();
-    if names.is_empty() {
-        ui.weak(fl!(crate::i18n::loader(), "approvals-no-plugins"));
-    }
-    for name in names {
-        egui::CollapsingHeader::new(&name)
-            .id_salt(("approval_plugin", name.as_str()))
-            .show(ui, |ui| {
-                render_category_table(ui, &mut config, Some(&name), &mut changed);
-            });
-    }
+            ui.label(fl!(crate::i18n::loader(), "approvals-per-plugin"));
+            let mut names: Vec<String> = config.list.keys().cloned().collect();
+            names.sort();
+            if names.is_empty() {
+                ui.weak(fl!(crate::i18n::loader(), "approvals-no-plugins"));
+            }
+            for name in names {
+                egui::CollapsingHeader::new(&name)
+                    .id_salt(("approval_plugin", name.as_str()))
+                    .show(ui, |ui| {
+                        render_category_table(ui, &mut config, Some(&name), &mut changed);
+                    });
+            }
 
-    if let Some(path) = &config.audit_log_path {
-        ui.separator();
-        ui.label(format!(
-            "{} {path}",
-            fl!(crate::i18n::loader(), "approvals-audit-path")
-        ));
-    }
+            if let Some(path) = &config.audit_log_path {
+                ui.separator();
+                ui.label(format!(
+                    "{} {path}",
+                    fl!(crate::i18n::loader(), "approvals-audit-path")
+                ));
+            }
 
-    if changed {
-        settings.set_config_section(&config);
-        settings.mark_dirty();
-    }
+            if changed {
+                settings.set_config_section(&config);
+                settings.mark_dirty();
+            }
+        },
+    );
 }
 
 /// Renders one category × mode row grid. With `plugin` set, edits the

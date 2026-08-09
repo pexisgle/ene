@@ -14,6 +14,7 @@ off = 無効
 none = なし
 empty-parentheses = (空)
 settings = 設定
+toggle = 切り替え
 quit = 終了
 send = 送信
 tray-chat = チャット
@@ -28,6 +29,7 @@ chat-greeting-failed = 挨拶を設定できませんでした: { $error }
 
 # Graphics
 graphics = グラフィックス
+display = 表示
 graphics-quality = グラフィック品質
 shadow-quality = 影の品質
 antialiasing = アンチエイリアス
@@ -486,6 +488,8 @@ audio-open-voice-settings = 音声設定を開く
 audio-tts-presets = プリセット選択
 audio-preset-kokoro = Kokoro 82M (ローカル・推奨)
 audio-preset-openai = OpenAI TTS (クラウド)
+audio-preset-kokoro-tooltip = Kokoro-82M ローカル ONNX エンジンを一括設定します。
+audio-preset-openai-tooltip = OpenAI TTS クラウド API を一括設定します。
 audio-preset-none = 無効
 
 # Permission
@@ -635,3 +639,52 @@ approvals-inherit = 継承
 approvals-ask = 確認
 approvals-allow = 許可
 approvals-deny = 拒否
+
+# 設定ナビゲーション
+page-category-basics = 基本
+page-category-ai-voice = AI・音声
+page-category-data-access = データ・アクセス
+page-category-system = システム
+
+# 設定検索
+settings-search-placeholder = 設定を検索…
+settings-search-clear = クリア
+settings-search-empty = 「{ $query }」に一致する設定が見つかりません。
+
+# 設定ページの説明
+page-character-description = アクティブなキャラクター、デフォルト表情、シーン内の変形を設定します。
+page-character-card-description = アクティブなキャラクターカード（アイデンティティ、ロアブック、モーション一覧）を編集します。
+page-graphics-description = 描画品質、UI言語、カラーテーマを設定します。
+page-ai-description = チャットプロバイダー、モデル、APIキー、埋め込み、プロバイダー健全性を設定します。
+page-voice-description = 音声認識、音声合成、マイク、VADを設定します。
+page-features-description = 音声、プロアクティブ発話、マインド、ツールなどの機能を切り替えます。
+page-accessibility-description = スポットライトとキャプションオーバーレイを設定します。
+page-memory-description = メモリの閲覧、検索、承認、管理を行います。
+page-memory-ledger-description = 保存済みメモリを編集・削除できる完全な台帳です。
+page-permissions-description = 保留中のツール操作を承認し、セッション権限を管理します。
+page-approvals-description = プラグイン機能のポリシーと緊急停止を設定します。
+page-connectors-description = 外部サービスのアカウント、健全性、権限付与を確認します。
+page-sessions-description = 保存済み会話セッションの検索、エクスポート、インポート、アーカイブ。
+page-debug-description = 診断用オーバーレイとパイプラインの詳細を表示します。
+
+# 設定セクション見出し
+section-character-model = キャラクターとアニメーション
+section-character-transform = 位置とスケール
+section-character-expressions = 表情テスト
+section-graphics-quality = 品質
+section-graphics-language = 言語
+section-graphics-theme = テーマ
+section-ai-chat = チャット
+section-ai-embedding = 埋め込み
+section-ai-health = プロバイダー健全性
+section-features-capabilities = 機能
+section-accessibility-overlays = オーバーレイ
+section-debug-overlays = デバッグオーバーレイ
+section-debug-pipeline = パイプライン
+
+# テーマ
+theme = テーマ
+theme-hint = すべてのアプリウィンドウの配色。System は OS 設定に追従します。
+theme-system = システム
+theme-light = ライト
+theme-dark = ダーク

@@ -16,11 +16,11 @@ use i18n_embed_fl::fl;
 
 use crate::ai_bridge::AiBridge;
 use crate::component::ui::UiStateComponent;
+use crate::settings_ui::components::{
+    BadgeTone, empty_state, section_card, setting_row, status_badge,
+};
 
 pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.heading(fl!(crate::i18n::loader(), "connectors-title"));
-    ui.label(fl!(crate::i18n::loader(), "connectors-hint"));
-
     if world
         .get::<UiStateComponent>(ui_entity)
         .is_some_and(|s| !s.0.connectors_loaded)
@@ -28,29 +28,45 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
         refresh_list(ai, world, ui_entity);
     }
 
-    render_list(ui, ai, world, ui_entity);
-    ui.separator();
-    render_selected(ui, ai, world, ui_entity);
+    ui.vertical(|ui| {
+        section_card(
+            ui,
+            "connectors-list",
+            &fl!(crate::i18n::loader(), "connectors-list"),
+            |ui| render_list(ui, ai, world, ui_entity),
+        );
+        section_card(
+            ui,
+            "connectors-detail",
+            &fl!(crate::i18n::loader(), "connectors-status-title"),
+            |ui| render_selected(ui, ai, world, ui_entity),
+        );
+    });
 
     if let Some(message) = world
         .get::<UiStateComponent>(ui_entity)
         .and_then(|s| s.0.connector_message.clone())
     {
-        ui.separator();
+        ui.add_space(6.0);
         ui.label(message);
     }
 }
 
 fn render_list(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.horizontal(|ui| {
-        ui.label(fl!(crate::i18n::loader(), "connectors-list"));
-        if ui
-            .button(fl!(crate::i18n::loader(), "connectors-refresh"))
-            .clicked()
-        {
-            refresh_list(ai, world, ui_entity);
-        }
-    });
+    setting_row(
+        ui,
+        "connectors_refresh_row",
+        &fl!(crate::i18n::loader(), "connectors-hint"),
+        "",
+        |ui| {
+            if ui
+                .button(fl!(crate::i18n::loader(), "connectors-refresh"))
+                .clicked()
+            {
+                refresh_list(ai, world, ui_entity);
+            }
+        },
+    );
 
     let summaries = world
         .get::<UiStateComponent>(ui_entity)
@@ -58,7 +74,7 @@ fn render_list(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_enti
         .unwrap_or_default();
 
     if summaries.is_empty() {
-        ui.weak(fl!(crate::i18n::loader(), "connectors-list-empty"));
+        empty_state(ui, &fl!(crate::i18n::loader(), "connectors-list-empty"), "");
         return;
     }
 
@@ -68,19 +84,25 @@ fn render_list(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_enti
     for summary in &summaries {
         let id = summary.identity.id.clone();
         let label = format!(
-            "{} — {} ({}, {} {})",
+            "{} — {} ({} {})",
             id,
             summary.identity.display_name,
-            connection_label(&summary.connection),
             summary.account_count,
             fl!(crate::i18n::loader(), "connectors-accounts-label")
         );
-        if ui
-            .selectable_label(selected.as_ref() == Some(&id), label)
-            .clicked()
-        {
-            select(ai, world, ui_entity, id);
-        }
+        ui.horizontal(|ui| {
+            status_badge(
+                ui,
+                &connection_label(&summary.connection),
+                connection_tone(&summary.connection),
+            );
+            if ui
+                .selectable_label(selected.as_ref() == Some(&id), label)
+                .clicked()
+            {
+                select(ai, world, ui_entity, id);
+            }
+        });
     }
 }
 
@@ -89,39 +111,56 @@ fn render_selected(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_
         .get::<UiStateComponent>(ui_entity)
         .and_then(|s| s.0.connector_selected.clone())
     else {
-        ui.weak(fl!(crate::i18n::loader(), "connectors-none-selected"));
+        empty_state(
+            ui,
+            &fl!(crate::i18n::loader(), "connectors-none-selected"),
+            "",
+        );
         return;
     };
 
-    ui.horizontal(|ui| {
-        ui.label(format!(
-            "{} {}",
-            fl!(crate::i18n::loader(), "connectors-status-title"),
-            selected
-        ));
-        if ui
-            .button(fl!(crate::i18n::loader(), "connectors-check"))
-            .clicked()
-        {
-            check(ai, world, ui_entity, &selected);
-        }
-    });
+    setting_row(
+        ui,
+        "connectors_selected_row",
+        &selected.to_string(),
+        "",
+        |ui| {
+            if ui
+                .button(fl!(crate::i18n::loader(), "connectors-check"))
+                .clicked()
+            {
+                check(ai, world, ui_entity, &selected);
+            }
+        },
+    );
 
     let status = world
         .get::<UiStateComponent>(ui_entity)
         .and_then(|s| s.0.connector_status.clone());
     if let Some(status) = status {
         if let Some(health) = &status.health {
-            ui.label(format!(
-                "{}: {} ({})",
-                fl!(crate::i18n::loader(), "connectors-health"),
-                if health.healthy {
-                    fl!(crate::i18n::loader(), "connectors-healthy")
-                } else {
-                    fl!(crate::i18n::loader(), "connectors-unhealthy")
+            let health_label = if health.healthy {
+                fl!(crate::i18n::loader(), "connectors-healthy")
+            } else {
+                fl!(crate::i18n::loader(), "connectors-unhealthy")
+            };
+            setting_row(
+                ui,
+                "connectors_health_row",
+                &fl!(crate::i18n::loader(), "connectors-health"),
+                health.message.as_deref().unwrap_or("-"),
+                |ui| {
+                    status_badge(
+                        ui,
+                        &health_label,
+                        if health.healthy {
+                            BadgeTone::Ok
+                        } else {
+                            BadgeTone::Error
+                        },
+                    );
                 },
-                health.message.as_deref().unwrap_or("-")
-            ));
+            );
         }
         if status.accounts.is_empty() {
             ui.weak(fl!(crate::i18n::loader(), "connectors-accounts-empty"));
@@ -147,23 +186,26 @@ fn render_selected(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_
             .max_height(180.0)
             .show(ui, |ui| {
                 for grant in &grants {
-                    ui.group(|ui| {
-                        field_label(
-                            ui,
-                            &fl!(crate::i18n::loader(), "action-label"),
-                            &grant.action,
-                        );
-                        field_label(
-                            ui,
-                            &fl!(crate::i18n::loader(), "permissions-target-pattern"),
-                            &grant.target_pattern,
-                        );
-                        ui.label(format!(
-                            "{}: {}",
-                            fl!(crate::i18n::loader(), "permissions-granted-at"),
-                            grant.granted_at.format("%Y-%m-%d %H:%M:%S UTC")
-                        ));
-                    });
+                    egui::Frame::group(ui.style())
+                        .corner_radius(egui::CornerRadius::same(6))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            field_label(
+                                ui,
+                                &fl!(crate::i18n::loader(), "action-label"),
+                                &grant.action,
+                            );
+                            field_label(
+                                ui,
+                                &fl!(crate::i18n::loader(), "permissions-target-pattern"),
+                                &grant.target_pattern,
+                            );
+                            ui.label(format!(
+                                "{}: {}",
+                                fl!(crate::i18n::loader(), "permissions-granted-at"),
+                                grant.granted_at.format("%Y-%m-%d %H:%M:%S UTC")
+                            ));
+                        });
                     ui.add_space(4.0);
                 }
             });
@@ -241,6 +283,14 @@ fn connection_label(connection: &ConnectionState) -> String {
             fl!(crate::i18n::loader(), "connectors-connected")
         }
         ConnectionState::Error { .. } => fl!(crate::i18n::loader(), "connectors-error"),
+    }
+}
+
+fn connection_tone(connection: &ConnectionState) -> BadgeTone {
+    match connection {
+        ConnectionState::Disconnected => BadgeTone::Neutral,
+        ConnectionState::Connected { .. } => BadgeTone::Ok,
+        ConnectionState::Error { .. } => BadgeTone::Error,
     }
 }
 

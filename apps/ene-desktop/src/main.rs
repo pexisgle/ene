@@ -10,7 +10,6 @@
     clippy::collapsible_match,
     clippy::match_same_arms,
     clippy::significant_drop_tightening,
-    clippy::branches_sharing_code,
     clippy::needless_pass_by_value,
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
@@ -74,6 +73,7 @@ mod spotlight;
 mod startup;
 mod state;
 mod system;
+mod theme;
 mod tray;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

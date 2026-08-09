@@ -13,6 +13,10 @@ use ene_store::MemoryKind;
 use i18n_embed_fl::fl;
 use std::sync::Arc;
 
+use crate::settings_ui::components::{
+    BadgeTone, danger_button, empty_state, section_card, status_badge,
+};
+
 /// Deferred ledger mutation collected during a render pass, applied after the
 /// table loop so blocking bridge calls never borrow the world mid-iteration.
 enum PendingLedgerAction {
@@ -24,8 +28,6 @@ enum PendingLedgerAction {
 }
 
 pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.heading(fl!(crate::i18n::loader(), "memory-ledger-title"));
-
     let mut do_refresh = false;
     if let Some(state) = world.get::<UiStateComponent>(ui_entity)
         && !state.0.memory_ledger_loaded
@@ -112,14 +114,45 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
         return;
     };
     if !snapshot.memory_ledger_loaded {
-        ui.weak(fl!(crate::i18n::loader(), "memory-ledger-empty"));
+        empty_state(ui, &fl!(crate::i18n::loader(), "memory-ledger-empty"), "");
         return;
     }
 
-    // ── Kind distribution ─────────────────────────────────────────────────────
+    let mut pending: Vec<PendingLedgerAction> = Vec::new();
+    section_card(
+        ui,
+        "ledger-browse",
+        &fl!(crate::i18n::loader(), "memory-ledger-title"),
+        |ui| {
+            render_kind_distribution(ui, &snapshot);
+            render_memory_table(ui, world, ui_entity, &snapshot, &mut pending);
+        },
+    );
+    section_card(
+        ui,
+        "ledger-commitments",
+        &fl!(crate::i18n::loader(), "memory-ledger-commitments-title"),
+        |ui| render_commitment_table(ui, &snapshot, &mut pending),
+    );
+    apply_pending(ai, world, ui_entity, pending);
+
+    if let Some(message) = snapshot.memory_ledger_message.as_deref() {
+        ui.separator();
+        ui.label(message);
+    }
+
+    render_edit_dialog(ui, ai, world, ui_entity);
+}
+
+fn render_kind_distribution(ui: &mut egui::Ui, snapshot: &crate::settings::UiState) {
     let distribution = MemoryLedgerPresenter::kind_distribution(&snapshot.memory_ledger_rows);
-    if !distribution.is_empty() {
-        ui.group(|ui| {
+    if distribution.is_empty() {
+        return;
+    }
+    egui::Frame::group(ui.style())
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
             ui.label(fl!(
                 crate::i18n::loader(),
                 "memory-ledger-kind-distribution"
@@ -138,19 +171,6 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
                 }
             });
         });
-    }
-
-    let mut pending: Vec<PendingLedgerAction> = Vec::new();
-    render_memory_table(ui, world, ui_entity, &snapshot, &mut pending);
-    render_commitment_table(ui, &snapshot, &mut pending);
-    apply_pending(ai, world, ui_entity, pending);
-
-    if let Some(message) = snapshot.memory_ledger_message.as_deref() {
-        ui.separator();
-        ui.label(message);
-    }
-
-    render_edit_dialog(ui, ai, world, ui_entity);
 }
 
 fn render_memory_table(
@@ -175,13 +195,66 @@ fn render_memory_table(
 
     ui.separator();
     if rows.is_empty() {
-        ui.weak(fl!(crate::i18n::loader(), "memory-ledger-empty"));
+        empty_state(ui, &fl!(crate::i18n::loader(), "memory-ledger-empty"), "");
         return;
     }
 
     let pending_delete = world
         .get::<UiStateComponent>(ui_entity)
         .and_then(|s| s.0.memory_ledger_pending_delete);
+
+    if ui.available_width() < 680.0 {
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .show(ui, |ui| {
+                for row in &rows {
+                    egui::Frame::group(ui.style())
+                        .corner_radius(egui::CornerRadius::same(6))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.colored_label(
+                                    kind_color(row.kind),
+                                    label_from_key(MemoryLedgerPresenter::kind_label_key(row.kind)),
+                                );
+                                status_badge(
+                                    ui,
+                                    &label_from_key(MemoryLedgerPresenter::status_label_key(
+                                        row.status,
+                                    )),
+                                    status_tone(row.status),
+                                );
+                                if row.pinned {
+                                    status_badge(
+                                        ui,
+                                        &fl!(crate::i18n::loader(), "memory-journal-pinned"),
+                                        BadgeTone::Neutral,
+                                    );
+                                }
+                            });
+                            ui.strong(&row.title);
+                            ui.weak(&row.content_preview);
+                            ui.weak(format!(
+                                "{}: {} · {}",
+                                fl!(crate::i18n::loader(), "memory-journal-scope"),
+                                row.scope,
+                                row.created_at.format("%Y-%m-%d")
+                            ));
+                            render_salience_slider(ui, row, pending);
+                            render_memory_actions(
+                                ui,
+                                world,
+                                ui_entity,
+                                row,
+                                pending_delete,
+                                pending,
+                            );
+                        });
+                    ui.add_space(4.0);
+                }
+            });
+        return;
+    }
 
     egui::ScrollArea::vertical()
         .max_height(360.0)
@@ -215,44 +288,53 @@ fn render_memory_table(
                             ));
                         });
                         ui.label(row.created_at.format("%Y-%m-%d").to_string());
-                        ui.label(label_from_key(MemoryLedgerPresenter::status_label_key(
-                            row.status,
-                        )));
+                        status_badge(
+                            ui,
+                            &label_from_key(MemoryLedgerPresenter::status_label_key(row.status)),
+                            status_tone(row.status),
+                        );
                         render_salience_slider(ui, row, pending);
-                        ui.horizontal(|ui| {
-                            if ui
-                                .button(fl!(crate::i18n::loader(), "memory-ledger-action-edit"))
-                                .clicked()
-                            {
-                                open_edit_draft(world, ui_entity, row);
-                            }
-                            if row.status != ene_store::MemoryStatus::UserDeleted {
-                                if pending_delete == Some(row.id) {
-                                    if ui
-                                        .button(fl!(
-                                            crate::i18n::loader(),
-                                            "memory-ledger-action-confirm"
-                                        ))
-                                        .clicked()
-                                    {
-                                        pending.push(PendingLedgerAction::Forget { id: row.id });
-                                        clear_pending_delete(world, ui_entity);
-                                    }
-                                } else if ui
-                                    .button(fl!(
-                                        crate::i18n::loader(),
-                                        "memory-ledger-action-delete"
-                                    ))
-                                    .clicked()
-                                {
-                                    set_pending_delete(world, ui_entity, row.id);
-                                }
-                            }
-                        });
+                        render_memory_actions(ui, world, ui_entity, row, pending_delete, pending);
                         ui.end_row();
                     }
                 });
         });
+}
+
+fn render_memory_actions(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    ui_entity: Entity,
+    row: &crate::memory_ledger::MemoryLedgerRow,
+    pending_delete: Option<i64>,
+    pending: &mut Vec<PendingLedgerAction>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button(fl!(crate::i18n::loader(), "memory-ledger-action-edit"))
+            .clicked()
+        {
+            open_edit_draft(world, ui_entity, row);
+        }
+        if row.status != ene_store::MemoryStatus::UserDeleted {
+            if pending_delete == Some(row.id) {
+                if ui
+                    .button(fl!(crate::i18n::loader(), "memory-ledger-action-confirm"))
+                    .clicked()
+                {
+                    pending.push(PendingLedgerAction::Forget { id: row.id });
+                    clear_pending_delete(world, ui_entity);
+                }
+            } else if danger_button(
+                ui,
+                &fl!(crate::i18n::loader(), "memory-ledger-action-delete"),
+            )
+            .clicked()
+            {
+                set_pending_delete(world, ui_entity, row.id);
+            }
+        }
+    });
 }
 
 fn render_salience_slider(
@@ -285,16 +367,47 @@ fn render_commitment_table(
     pending: &mut Vec<PendingLedgerAction>,
 ) {
     ui.separator();
-    ui.heading(fl!(
-        crate::i18n::loader(),
-        "memory-ledger-commitments-title"
-    ));
     let commitments = &snapshot.memory_ledger_commitments;
     if commitments.is_empty() {
-        ui.weak(fl!(
-            crate::i18n::loader(),
-            "memory-ledger-commitments-empty"
-        ));
+        empty_state(
+            ui,
+            &fl!(crate::i18n::loader(), "memory-ledger-commitments-empty"),
+            "",
+        );
+        return;
+    }
+    if ui.available_width() < 680.0 {
+        egui::ScrollArea::vertical()
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for commitment in commitments {
+                    egui::Frame::group(ui.style())
+                        .corner_radius(egui::CornerRadius::same(6))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong(&commitment.title);
+                                status_badge(
+                                    ui,
+                                    &label_from_key(commitment_status_key(commitment.status)),
+                                    commitment_status_tone(commitment.status),
+                                );
+                            });
+                            ui.weak(format!(
+                                "{}: {} · {}: {}",
+                                fl!(crate::i18n::loader(), "memory-ledger-commitment-due"),
+                                commitment.due_at.map_or_else(
+                                    || "-".to_string(),
+                                    |ts| ts.format("%Y-%m-%d").to_string(),
+                                ),
+                                fl!(crate::i18n::loader(), "memory-ledger-column-created"),
+                                commitment.created_at.format("%Y-%m-%d")
+                            ));
+                            render_commitment_actions(ui, commitment, pending);
+                        });
+                    ui.add_space(4.0);
+                }
+            });
         return;
     }
     egui::ScrollArea::vertical()
@@ -312,42 +425,54 @@ fn render_commitment_table(
                     ui.end_row();
                     for commitment in commitments {
                         ui.strong(&commitment.title);
-                        ui.label(label_from_key(commitment_status_key(commitment.status)));
+                        status_badge(
+                            ui,
+                            &label_from_key(commitment_status_key(commitment.status)),
+                            commitment_status_tone(commitment.status),
+                        );
                         ui.label(commitment.due_at.map_or_else(
                             || "-".to_string(),
                             |ts| ts.format("%Y-%m-%d").to_string(),
                         ));
                         ui.label(commitment.created_at.format("%Y-%m-%d").to_string());
-                        ui.horizontal(|ui| {
-                            if commitment.status == ene_store::CommitmentStatus::Active {
-                                if ui
-                                    .button(fl!(
-                                        crate::i18n::loader(),
-                                        "memory-ledger-commitment-complete"
-                                    ))
-                                    .clicked()
-                                {
-                                    pending.push(PendingLedgerAction::CompleteCommitment {
-                                        id: commitment.id.unwrap_or_default(),
-                                    });
-                                }
-                                if ui
-                                    .button(fl!(
-                                        crate::i18n::loader(),
-                                        "memory-ledger-commitment-cancel"
-                                    ))
-                                    .clicked()
-                                {
-                                    pending.push(PendingLedgerAction::CancelCommitment {
-                                        id: commitment.id.unwrap_or_default(),
-                                    });
-                                }
-                            }
-                        });
+                        render_commitment_actions(ui, commitment, pending);
                         ui.end_row();
                     }
                 });
         });
+}
+
+fn render_commitment_actions(
+    ui: &mut egui::Ui,
+    commitment: &ene_store::Commitment,
+    pending: &mut Vec<PendingLedgerAction>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        if commitment.status == ene_store::CommitmentStatus::Active {
+            if ui
+                .button(fl!(
+                    crate::i18n::loader(),
+                    "memory-ledger-commitment-complete"
+                ))
+                .clicked()
+            {
+                pending.push(PendingLedgerAction::CompleteCommitment {
+                    id: commitment.id.unwrap_or_default(),
+                });
+            }
+            if ui
+                .button(fl!(
+                    crate::i18n::loader(),
+                    "memory-ledger-commitment-cancel"
+                ))
+                .clicked()
+            {
+                pending.push(PendingLedgerAction::CancelCommitment {
+                    id: commitment.id.unwrap_or_default(),
+                });
+            }
+        }
+    });
 }
 
 fn apply_pending(
@@ -618,6 +743,27 @@ fn kind_color(kind: MemoryKind) -> egui::Color32 {
         MemoryKind::WorldState => egui::Color32::from_rgb(120, 140, 120),
         MemoryKind::Reflection => egui::Color32::from_rgb(190, 180, 120),
         _ => egui::Color32::GRAY,
+    }
+}
+
+fn status_tone(status: ene_store::MemoryStatus) -> BadgeTone {
+    match status {
+        ene_store::MemoryStatus::Active => BadgeTone::Ok,
+        ene_store::MemoryStatus::Faded => BadgeTone::Warn,
+        ene_store::MemoryStatus::Archived => BadgeTone::Neutral,
+        ene_store::MemoryStatus::Disputed => BadgeTone::Error,
+        ene_store::MemoryStatus::Superseded => BadgeTone::Neutral,
+        ene_store::MemoryStatus::UserDeleted => BadgeTone::Error,
+        _ => BadgeTone::Neutral,
+    }
+}
+
+fn commitment_status_tone(status: ene_store::CommitmentStatus) -> BadgeTone {
+    match status {
+        ene_store::CommitmentStatus::Active => BadgeTone::Ok,
+        ene_store::CommitmentStatus::Done => BadgeTone::Neutral,
+        ene_store::CommitmentStatus::Cancelled => BadgeTone::Warn,
+        _ => BadgeTone::Neutral,
     }
 }
 

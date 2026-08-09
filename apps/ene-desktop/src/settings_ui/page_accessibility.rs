@@ -1,49 +1,45 @@
 //! Accessibility settings page — spotlight and caption overlay toggles.
 
+use super::components::{section_card, toggle_row};
 use crate::settings::{CharacterSettings, DesktopSection};
 
 pub fn render(ui: &mut egui::Ui, settings: &mut CharacterSettings) {
-    ui.vertical(|ui| {
-        ui.weak(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "accessibility-hint"
-        ));
-        ui.separator();
+    let mut desktop = settings.config_section::<DesktopSection>();
+    let mut changed = false;
 
-        let mut desktop = settings.config_section::<DesktopSection>();
-
-        let mut spotlight_enabled = desktop.spotlight_enabled;
-        if ui
-            .checkbox(
+    section_card(
+        ui,
+        "accessibility-overlays",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "section-accessibility-overlays"),
+        |ui| {
+            let mut spotlight_enabled = desktop.spotlight_enabled;
+            if toggle_row(
+                ui,
+                "accessibility_spotlight",
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "accessibility-spotlight"),
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "accessibility-spotlight-hint"),
                 &mut spotlight_enabled,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "accessibility-spotlight"),
-            )
-            .on_hover_text(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "accessibility-spotlight-hint"
-            ))
-            .changed()
-        {
-            desktop.spotlight_enabled = spotlight_enabled;
-            settings.set_config_section(&desktop);
-            settings.mark_dirty();
-        }
+            ) {
+                desktop.spotlight_enabled = spotlight_enabled;
+                changed = true;
+            }
 
-        let mut caption_enabled = desktop.caption_enabled;
-        if ui
-            .checkbox(
+            let mut caption_enabled = desktop.caption_enabled;
+            if toggle_row(
+                ui,
+                "accessibility_caption",
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "accessibility-caption"),
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "accessibility-caption-hint"),
                 &mut caption_enabled,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "accessibility-caption"),
-            )
-            .on_hover_text(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "accessibility-caption-hint"
-            ))
-            .changed()
-        {
-            desktop.caption_enabled = caption_enabled;
-            settings.set_config_section(&desktop);
-            settings.mark_dirty();
-        }
-    });
+            ) {
+                desktop.caption_enabled = caption_enabled;
+                changed = true;
+            }
+        },
+    );
+
+    if changed {
+        settings.set_config_section(&desktop);
+        settings.mark_dirty();
+    }
 }

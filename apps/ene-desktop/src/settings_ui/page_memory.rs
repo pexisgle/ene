@@ -8,9 +8,9 @@ use ene_store::{Commitment, MemoryStatus};
 use i18n_embed_fl::fl;
 use std::sync::Arc;
 
-pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.heading(fl!(crate::i18n::loader(), "memory-journal-title"));
+use crate::settings_ui::components::{BadgeTone, empty_state, section_card, status_badge};
 
+pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
     // ── Tab bar ───────────────────────────────────────────────────────────────
     let mut do_refresh = false;
     let mut do_recall_search = false;
@@ -129,16 +129,45 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
     // ── Mode-specific content ─────────────────────────────────────────────────
     match snapshot.memory_journal_mode {
         MemoryPageMode::Browse => {
-            render_browse_rows(ui, ai, world, ui_entity, &snapshot);
+            section_card(
+                ui,
+                "memory-browse",
+                &fl!(crate::i18n::loader(), "memory-page-tab-browse"),
+                |ui| render_browse_rows(ui, ai, world, ui_entity, &snapshot),
+            );
         }
         MemoryPageMode::RecallSearch => {
-            render_recall_search_ui(ui, ai, world, ui_entity, &snapshot, &mut do_recall_search);
+            section_card(
+                ui,
+                "memory-recall",
+                &fl!(crate::i18n::loader(), "memory-page-tab-recall"),
+                |ui| {
+                    render_recall_search_ui(
+                        ui,
+                        ai,
+                        world,
+                        ui_entity,
+                        &snapshot,
+                        &mut do_recall_search,
+                    );
+                },
+            );
         }
         MemoryPageMode::PendingApproval => {
-            render_pending_approval(ui, ai, world, ui_entity);
+            section_card(
+                ui,
+                "memory-pending",
+                &fl!(crate::i18n::loader(), "memory-page-tab-pending"),
+                |ui| render_pending_approval(ui, ai, world, ui_entity),
+            );
         }
         MemoryPageMode::Commitments => {
-            render_commitments(ui, ai, world, ui_entity);
+            section_card(
+                ui,
+                "memory-commitments",
+                &fl!(crate::i18n::loader(), "memory-commitments-title"),
+                |ui| render_commitments(ui, ai, world, ui_entity),
+            );
         }
     }
 
@@ -149,43 +178,49 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
     }
 
     // ── Journal stats (always visible) ────────────────────────────────────────
-    ui.group(|ui| {
-        ui.label(fl!(crate::i18n::loader(), "memory-journal-pending-writes"));
-        ui.label(format!(
-            "{}: {}",
-            fl!(crate::i18n::loader(), "memory-journal-pending-count"),
-            snapshot.memory_journal_pending_writes
-        ));
-        ui.label(format!(
-            "{}: {}",
-            fl!(crate::i18n::loader(), "memory-journal-permanent-count"),
-            snapshot.memory_journal_permanent_writes
-        ));
-    });
+    egui::Frame::group(ui.style())
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.label(fl!(crate::i18n::loader(), "memory-journal-pending-writes"));
+            ui.label(format!(
+                "{}: {}",
+                fl!(crate::i18n::loader(), "memory-journal-pending-count"),
+                snapshot.memory_journal_pending_writes
+            ));
+            ui.label(format!(
+                "{}: {}",
+                fl!(crate::i18n::loader(), "memory-journal-permanent-count"),
+                snapshot.memory_journal_permanent_writes
+            ));
+        });
 
-    ui.group(|ui| {
-        ui.label(fl!(crate::i18n::loader(), "memory-journal-affect"));
-        ui.label(format!(
-            "{}: {}",
-            fl!(crate::i18n::loader(), "memory-journal-mood"),
-            snapshot.memory_journal_affect.mood
-        ));
-        ui.label(format!(
-            "{}: {}",
-            fl!(crate::i18n::loader(), "memory-journal-expression"),
-            snapshot.memory_journal_affect.expression
-        ));
-        ui.label(format!(
-            "{}: {:.2}",
-            fl!(crate::i18n::loader(), "memory-journal-affinity"),
-            snapshot.memory_journal_affect.affinity
-        ));
-        ui.label(format!(
-            "{}: {:.2}",
-            fl!(crate::i18n::loader(), "memory-journal-trust"),
-            snapshot.memory_journal_affect.trust
-        ));
-    });
+    egui::Frame::group(ui.style())
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.label(fl!(crate::i18n::loader(), "memory-journal-affect"));
+            ui.label(format!(
+                "{}: {}",
+                fl!(crate::i18n::loader(), "memory-journal-mood"),
+                snapshot.memory_journal_affect.mood
+            ));
+            ui.label(format!(
+                "{}: {}",
+                fl!(crate::i18n::loader(), "memory-journal-expression"),
+                snapshot.memory_journal_affect.expression
+            ));
+            ui.label(format!(
+                "{}: {:.2}",
+                fl!(crate::i18n::loader(), "memory-journal-affinity"),
+                snapshot.memory_journal_affect.affinity
+            ));
+            ui.label(format!(
+                "{}: {:.2}",
+                fl!(crate::i18n::loader(), "memory-journal-trust"),
+                snapshot.memory_journal_affect.trust
+            ));
+        });
 }
 
 // ── Recall search UI ─────────────────────────────────────────────────────────
@@ -233,7 +268,6 @@ fn render_pending_approval(
     ui_entity: Entity,
 ) {
     ui.separator();
-    ui.heading(fl!(crate::i18n::loader(), "memory-pending-approval"));
 
     ui.horizontal(|ui| {
         let mut show_history = world
@@ -270,7 +304,7 @@ fn render_pending_approval(
         .unwrap_or_default();
 
     if candidates.is_empty() {
-        ui.weak(fl!(crate::i18n::loader(), "memory-pending-empty"));
+        empty_state(ui, &fl!(crate::i18n::loader(), "memory-pending-empty"), "");
         return;
     }
 
@@ -284,103 +318,107 @@ fn render_pending_approval(
         .max_height(400.0)
         .show(ui, |ui| {
             for candidate in &candidates {
-                ui.group(|ui| {
-                    ui.strong(&candidate.title);
+                egui::Frame::group(ui.style())
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.strong(&candidate.title);
 
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-kind"),
-                        candidate.kind
-                    ));
-
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-content"),
-                        candidate.content
-                    ));
-
-                    ui.horizontal(|ui| {
-                        ui.label(fl!(crate::i18n::loader(), "memory-journal-confidence"));
-                        render_salience_bar(ui, candidate.confidence);
-                        ui.label(format!("{:.1}%", candidate.confidence * 100.0));
-                    });
-
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-reason"),
-                        candidate.reason_detail
-                    ));
-
-                    if !candidate.source_quote.is_empty() {
-                        ui.label(format!(
-                            "{}: \"{}\"",
-                            fl!(crate::i18n::loader(), "memory-journal-source-quote"),
-                            candidate.source_quote
-                        ));
-                    }
-
-                    if let Some(ref existing_title) = candidate.existing_memory_title {
                         ui.label(format!(
                             "{}: {}",
-                            fl!(crate::i18n::loader(), "memory-pending-conflict"),
-                            existing_title
+                            fl!(crate::i18n::loader(), "memory-journal-kind"),
+                            candidate.kind
                         ));
-                    }
 
-                    ui.horizontal(|ui| {
-                        let candidate_id = candidate.id;
-                        let editing = world
-                            .get::<UiStateComponent>(ui_entity)
-                            .and_then(|s| s.0.memory_journal_candidate_draft.clone())
-                            .is_some_and(|d| d.id == candidate_id);
-                        if editing {
-                            render_candidate_editor(ui, ai, world, ui_entity, candidate_id);
-                        } else if ui
-                            .button(fl!(crate::i18n::loader(), "memory-approve-edit"))
-                            .clicked()
-                            && let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity)
-                        {
-                            state.0.memory_journal_candidate_draft =
-                                Some(crate::settings::MemoryCandidateDraft {
-                                    id: candidate_id,
-                                    title: candidate.title.clone(),
-                                    content: candidate.content.clone(),
-                                    kind: candidate.kind.clone(),
-                                    confidence: candidate.confidence,
-                                });
+                        ui.label(format!(
+                            "{}: {}",
+                            fl!(crate::i18n::loader(), "memory-journal-content"),
+                            candidate.content
+                        ));
+
+                        ui.horizontal(|ui| {
+                            ui.label(fl!(crate::i18n::loader(), "memory-journal-confidence"));
+                            render_salience_bar(ui, candidate.confidence);
+                            ui.label(format!("{:.1}%", candidate.confidence * 100.0));
+                        });
+
+                        ui.label(format!(
+                            "{}: {}",
+                            fl!(crate::i18n::loader(), "memory-journal-reason"),
+                            candidate.reason_detail
+                        ));
+
+                        if !candidate.source_quote.is_empty() {
+                            ui.label(format!(
+                                "{}: \"{}\"",
+                                fl!(crate::i18n::loader(), "memory-journal-source-quote"),
+                                candidate.source_quote
+                            ));
                         }
-                        if !editing
-                            && ui
-                                .button(fl!(crate::i18n::loader(), "memory-approve"))
+
+                        if let Some(ref existing_title) = candidate.existing_memory_title {
+                            ui.label(format!(
+                                "{}: {}",
+                                fl!(crate::i18n::loader(), "memory-pending-conflict"),
+                                existing_title
+                            ));
+                        }
+
+                        ui.horizontal(|ui| {
+                            let candidate_id = candidate.id;
+                            let editing = world
+                                .get::<UiStateComponent>(ui_entity)
+                                .and_then(|s| s.0.memory_journal_candidate_draft.clone())
+                                .is_some_and(|d| d.id == candidate_id);
+                            if editing {
+                                render_candidate_editor(ui, ai, world, ui_entity, candidate_id);
+                            } else if ui
+                                .button(fl!(crate::i18n::loader(), "memory-approve-edit"))
                                 .clicked()
-                        {
-                            let result = ai.approve_candidate(candidate_id);
-                            clear_candidate_draft(world, ui_entity);
-                            set_action_message(
-                                world,
-                                ui_entity,
-                                result.map(|()| true),
-                                "memory-approve",
-                            );
-                            fetch_pending_candidates(ai, world, ui_entity);
-                        }
-                        if !editing
-                            && ui
-                                .button(fl!(crate::i18n::loader(), "memory-reject"))
-                                .clicked()
-                        {
-                            let result = ai.reject_candidate(candidate_id);
-                            clear_candidate_draft(world, ui_entity);
-                            set_action_message(
-                                world,
-                                ui_entity,
-                                result.map(|()| true),
-                                "memory-reject",
-                            );
-                            fetch_pending_candidates(ai, world, ui_entity);
-                        }
+                                && let Some(mut state) =
+                                    world.get_mut::<UiStateComponent>(ui_entity)
+                            {
+                                state.0.memory_journal_candidate_draft =
+                                    Some(crate::settings::MemoryCandidateDraft {
+                                        id: candidate_id,
+                                        title: candidate.title.clone(),
+                                        content: candidate.content.clone(),
+                                        kind: candidate.kind.clone(),
+                                        confidence: candidate.confidence,
+                                    });
+                            }
+                            if !editing
+                                && ui
+                                    .button(fl!(crate::i18n::loader(), "memory-approve"))
+                                    .clicked()
+                            {
+                                let result = ai.approve_candidate(candidate_id);
+                                clear_candidate_draft(world, ui_entity);
+                                set_action_message(
+                                    world,
+                                    ui_entity,
+                                    result.map(|()| true),
+                                    "memory-approve",
+                                );
+                                fetch_pending_candidates(ai, world, ui_entity);
+                            }
+                            if !editing
+                                && ui
+                                    .button(fl!(crate::i18n::loader(), "memory-reject"))
+                                    .clicked()
+                            {
+                                let result = ai.reject_candidate(candidate_id);
+                                clear_candidate_draft(world, ui_entity);
+                                set_action_message(
+                                    world,
+                                    ui_entity,
+                                    result.map(|()| true),
+                                    "memory-reject",
+                                );
+                                fetch_pending_candidates(ai, world, ui_entity);
+                            }
+                        });
                     });
-                });
                 ui.add_space(4.0);
             }
         });
@@ -538,46 +576,53 @@ fn render_candidate_history(
         .map(|s| s.0.memory_journal_pending_history.clone())
         .unwrap_or_default();
     if rows.is_empty() {
-        ui.weak(fl!(crate::i18n::loader(), "memory-pending-history-empty"));
+        empty_state(
+            ui,
+            &fl!(crate::i18n::loader(), "memory-pending-history-empty"),
+            "",
+        );
         return;
     }
     egui::ScrollArea::vertical()
         .max_height(400.0)
         .show(ui, |ui| {
             for row in &rows {
-                ui.group(|ui| {
-                    ui.strong(&row.title);
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-status"),
-                        match row.status.as_str() {
-                            "approved" => {
-                                fl!(crate::i18n::loader(), "memory-approval-status-approved")
-                            }
-                            "rejected" => {
-                                fl!(crate::i18n::loader(), "memory-approval-status-rejected")
-                            }
-                            _ => fl!(crate::i18n::loader(), "memory-approval-status-pending"),
-                        }
-                    ));
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-created"),
-                        row.created_at
-                    ));
-                    if let Some(resolved) = &row.resolved_at {
+                egui::Frame::group(ui.style())
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.strong(&row.title);
                         ui.label(format!(
                             "{}: {}",
-                            fl!(crate::i18n::loader(), "memory-approval-resolved-at"),
-                            resolved
+                            fl!(crate::i18n::loader(), "memory-journal-status"),
+                            match row.status.as_str() {
+                                "approved" => {
+                                    fl!(crate::i18n::loader(), "memory-approval-status-approved")
+                                }
+                                "rejected" => {
+                                    fl!(crate::i18n::loader(), "memory-approval-status-rejected")
+                                }
+                                _ => fl!(crate::i18n::loader(), "memory-approval-status-pending"),
+                            }
                         ));
-                    }
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-reason"),
-                        row.reason_detail
-                    ));
-                });
+                        ui.label(format!(
+                            "{}: {}",
+                            fl!(crate::i18n::loader(), "memory-journal-created"),
+                            row.created_at
+                        ));
+                        if let Some(resolved) = &row.resolved_at {
+                            ui.label(format!(
+                                "{}: {}",
+                                fl!(crate::i18n::loader(), "memory-approval-resolved-at"),
+                                resolved
+                            ));
+                        }
+                        ui.label(format!(
+                            "{}: {}",
+                            fl!(crate::i18n::loader(), "memory-journal-reason"),
+                            row.reason_detail
+                        ));
+                    });
                 ui.add_space(4.0);
             }
         });
@@ -587,7 +632,6 @@ fn render_candidate_history(
 
 fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
     ui.separator();
-    ui.heading(fl!(crate::i18n::loader(), "memory-commitments-title"));
 
     ui.horizontal(|ui| {
         if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
@@ -625,7 +669,11 @@ fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
         .unwrap_or_default();
 
     if commitments.is_empty() {
-        ui.weak(fl!(crate::i18n::loader(), "memory-commitments-empty"));
+        empty_state(
+            ui,
+            &fl!(crate::i18n::loader(), "memory-commitments-empty"),
+            "",
+        );
         return;
     }
 
@@ -649,85 +697,91 @@ fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
         .max_height(400.0)
         .show(ui, |ui| {
             for commitment in &filtered {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong(&commitment.title);
-
-                        let status_label = match commitment.status {
-                            ene_store::CommitmentStatus::Active => {
-                                fl!(crate::i18n::loader(), "memory-commitment-status-active")
-                            }
-                            ene_store::CommitmentStatus::Done => {
-                                fl!(crate::i18n::loader(), "memory-commitment-status-done")
-                            }
-                            ene_store::CommitmentStatus::Cancelled => {
-                                fl!(crate::i18n::loader(), "memory-commitment-status-cancelled")
-                            }
-                            ene_store::CommitmentStatus::Stale => {
-                                fl!(crate::i18n::loader(), "memory-commitment-status-stale")
-                            }
-                            _ => "unknown".to_string(),
-                        };
-                        ui.label(format!("[{status_label}]"));
-                    });
-
-                    if !commitment.description.is_empty() {
-                        ui.label(&commitment.description);
-                    }
-
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-created"),
-                        commitment.created_at.format("%Y-%m-%d %H:%M")
-                    ));
-                    if let Some(ref due) = commitment.due_at {
-                        ui.label(format!(
-                            "{}: {}",
-                            fl!(crate::i18n::loader(), "memory-commitment-due"),
-                            due.format("%Y-%m-%d %H:%M")
-                        ));
-                    }
-                    if let Some(ref due_label) = commitment.due_label {
-                        ui.label(format!(
-                            "{}: {}",
-                            fl!(crate::i18n::loader(), "memory-commitment-due-label"),
-                            due_label
-                        ));
-                    }
-
-                    if commitment.status == ene_store::CommitmentStatus::Active
-                        && let Some(c_id) = commitment.id
-                    {
+                egui::Frame::group(ui.style())
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            if ui
-                                .button(fl!(crate::i18n::loader(), "memory-commitment-complete"))
-                                .clicked()
-                            {
-                                let result = ai.complete_commitment(c_id);
-                                set_action_message(
-                                    world,
-                                    ui_entity,
-                                    result,
-                                    "memory-commitment-complete",
-                                );
-                                refresh_journal(ai, world, ui_entity);
-                            }
-                            if ui
-                                .button(fl!(crate::i18n::loader(), "memory-commitment-cancel"))
-                                .clicked()
-                            {
-                                let result = ai.cancel_commitment(c_id);
-                                set_action_message(
-                                    world,
-                                    ui_entity,
-                                    result,
-                                    "memory-commitment-cancel",
-                                );
-                                refresh_journal(ai, world, ui_entity);
-                            }
+                            ui.strong(&commitment.title);
+
+                            let status_label = match commitment.status {
+                                ene_store::CommitmentStatus::Active => {
+                                    fl!(crate::i18n::loader(), "memory-commitment-status-active")
+                                }
+                                ene_store::CommitmentStatus::Done => {
+                                    fl!(crate::i18n::loader(), "memory-commitment-status-done")
+                                }
+                                ene_store::CommitmentStatus::Cancelled => {
+                                    fl!(crate::i18n::loader(), "memory-commitment-status-cancelled")
+                                }
+                                ene_store::CommitmentStatus::Stale => {
+                                    fl!(crate::i18n::loader(), "memory-commitment-status-stale")
+                                }
+                                _ => "unknown".to_string(),
+                            };
+                            ui.label(format!("[{status_label}]"));
                         });
-                    }
-                });
+
+                        if !commitment.description.is_empty() {
+                            ui.label(&commitment.description);
+                        }
+
+                        ui.label(format!(
+                            "{}: {}",
+                            fl!(crate::i18n::loader(), "memory-journal-created"),
+                            commitment.created_at.format("%Y-%m-%d %H:%M")
+                        ));
+                        if let Some(ref due) = commitment.due_at {
+                            ui.label(format!(
+                                "{}: {}",
+                                fl!(crate::i18n::loader(), "memory-commitment-due"),
+                                due.format("%Y-%m-%d %H:%M")
+                            ));
+                        }
+                        if let Some(ref due_label) = commitment.due_label {
+                            ui.label(format!(
+                                "{}: {}",
+                                fl!(crate::i18n::loader(), "memory-commitment-due-label"),
+                                due_label
+                            ));
+                        }
+
+                        if commitment.status == ene_store::CommitmentStatus::Active
+                            && let Some(c_id) = commitment.id
+                        {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button(fl!(
+                                        crate::i18n::loader(),
+                                        "memory-commitment-complete"
+                                    ))
+                                    .clicked()
+                                {
+                                    let result = ai.complete_commitment(c_id);
+                                    set_action_message(
+                                        world,
+                                        ui_entity,
+                                        result,
+                                        "memory-commitment-complete",
+                                    );
+                                    refresh_journal(ai, world, ui_entity);
+                                }
+                                if ui
+                                    .button(fl!(crate::i18n::loader(), "memory-commitment-cancel"))
+                                    .clicked()
+                                {
+                                    let result = ai.cancel_commitment(c_id);
+                                    set_action_message(
+                                        world,
+                                        ui_entity,
+                                        result,
+                                        "memory-commitment-cancel",
+                                    );
+                                    refresh_journal(ai, world, ui_entity);
+                                }
+                            });
+                        }
+                    });
                 ui.add_space(4.0);
             }
         });
@@ -764,75 +818,75 @@ fn render_browse_rows(
         .max_height(420.0)
         .show(ui, |ui| {
             if snapshot.memory_journal_rows.is_empty() {
-                ui.weak(fl!(crate::i18n::loader(), "memory-journal-empty"));
+                empty_state(ui, &fl!(crate::i18n::loader(), "memory-journal-empty"), "");
                 return;
             }
 
             for row in &snapshot.memory_journal_rows {
-                ui.group(|ui| {
-                    let pin_label = if row.pinned {
-                        fl!(crate::i18n::loader(), "memory-journal-pinned")
-                    } else {
-                        String::new()
-                    };
-                    ui.label(format!(
-                        "{}: {}{}",
-                        fl!(crate::i18n::loader(), "memory-journal-title-field"),
-                        row.title,
-                        if pin_label.is_empty() {
-                            String::new()
+                egui::Frame::group(ui.style())
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        let pin_label = if row.pinned {
+                            fl!(crate::i18n::loader(), "memory-journal-pinned")
                         } else {
-                            format!(" [{pin_label}]")
-                        }
-                    ));
-                    ui.horizontal(|ui| {
-                        ui.colored_label(
-                            status_color(row.status),
-                            format!("[{}]", status_label(row.status)),
-                        );
+                            String::new()
+                        };
                         ui.label(format!(
-                            "{}: {}  |  {}: {}",
-                            fl!(crate::i18n::loader(), "memory-journal-kind"),
-                            row.kind,
-                            fl!(crate::i18n::loader(), "memory-journal-scope"),
-                            row.scope
-                        ));
-                    });
-                    if let Some(hint) = lifecycle_hint(row) {
-                        ui.label(hint);
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "{}: {:.2}  |",
-                            fl!(crate::i18n::loader(), "memory-journal-confidence"),
-                            row.confidence,
-                        ));
-                        ui.label(fl!(crate::i18n::loader(), "memory-salience"));
-                        render_salience_bar(ui, row.salience);
-                        ui.label(format!("{:.2}", row.salience));
-                    });
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-last-accessed"),
-                        row.last_accessed.as_deref().unwrap_or("-")
-                    ));
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-source"),
-                        row.source_metadata
-                    ));
-                    ui.horizontal_wrapped(|ui| {
-                        for action in &row.available_actions {
-                            if ui.button(action_label(*action)).clicked() {
-                                let result = ai.execute_journal_action(row.id, *action);
-                                if result.is_ok() {
-                                    refresh_journal(ai, world, ui_entity);
-                                }
-                                set_action_message(world, ui_entity, result, action.i18n_key());
+                            "{}: {}{}",
+                            fl!(crate::i18n::loader(), "memory-journal-title-field"),
+                            row.title,
+                            if pin_label.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" [{pin_label}]")
                             }
+                        ));
+                        ui.horizontal(|ui| {
+                            status_badge(ui, &status_label(row.status), status_tone(row.status));
+                            ui.label(format!(
+                                "{}: {}  |  {}: {}",
+                                fl!(crate::i18n::loader(), "memory-journal-kind"),
+                                row.kind,
+                                fl!(crate::i18n::loader(), "memory-journal-scope"),
+                                row.scope
+                            ));
+                        });
+                        if let Some(hint) = lifecycle_hint(row) {
+                            ui.label(hint);
                         }
+                        ui.horizontal(|ui| {
+                            ui.label(format!(
+                                "{}: {:.2}  |",
+                                fl!(crate::i18n::loader(), "memory-journal-confidence"),
+                                row.confidence,
+                            ));
+                            ui.label(fl!(crate::i18n::loader(), "memory-salience"));
+                            render_salience_bar(ui, row.salience);
+                            ui.label(format!("{:.2}", row.salience));
+                        });
+                        ui.label(format!(
+                            "{}: {}",
+                            fl!(crate::i18n::loader(), "memory-journal-last-accessed"),
+                            row.last_accessed.as_deref().unwrap_or("-")
+                        ));
+                        ui.label(format!(
+                            "{}: {}",
+                            fl!(crate::i18n::loader(), "memory-journal-source"),
+                            row.source_metadata
+                        ));
+                        ui.horizontal_wrapped(|ui| {
+                            for action in &row.available_actions {
+                                if ui.button(action_label(*action)).clicked() {
+                                    let result = ai.execute_journal_action(row.id, *action);
+                                    if result.is_ok() {
+                                        refresh_journal(ai, world, ui_entity);
+                                    }
+                                    set_action_message(world, ui_entity, result, action.i18n_key());
+                                }
+                            }
+                        });
                     });
-                });
                 ui.add_space(4.0);
             }
         });
@@ -856,15 +910,15 @@ fn status_label(status: MemoryStatus) -> String {
     }
 }
 
-fn status_color(status: MemoryStatus) -> egui::Color32 {
+fn status_tone(status: MemoryStatus) -> BadgeTone {
     match status {
-        MemoryStatus::Active => egui::Color32::GREEN,
-        MemoryStatus::Faded => egui::Color32::YELLOW,
-        MemoryStatus::Archived => egui::Color32::GRAY,
-        MemoryStatus::Disputed => egui::Color32::RED,
-        MemoryStatus::Superseded => egui::Color32::LIGHT_BLUE,
-        MemoryStatus::UserDeleted => egui::Color32::LIGHT_RED,
-        _ => egui::Color32::GRAY,
+        MemoryStatus::Active => BadgeTone::Ok,
+        MemoryStatus::Faded => BadgeTone::Warn,
+        MemoryStatus::Archived => BadgeTone::Neutral,
+        MemoryStatus::Disputed => BadgeTone::Error,
+        MemoryStatus::Superseded => BadgeTone::Neutral,
+        MemoryStatus::UserDeleted => BadgeTone::Error,
+        _ => BadgeTone::Neutral,
     }
 }
 
@@ -907,24 +961,31 @@ fn render_recall_rows(ui: &mut egui::Ui, snapshot: &crate::settings::UiState) {
         .max_height(320.0)
         .show(ui, |ui| {
             if snapshot.memory_journal_recall_rows.is_empty() {
-                ui.weak(fl!(crate::i18n::loader(), "memory-journal-recall-empty"));
+                empty_state(
+                    ui,
+                    &fl!(crate::i18n::loader(), "memory-journal-recall-empty"),
+                    "",
+                );
                 return;
             }
 
             for row in &snapshot.memory_journal_recall_rows {
-                ui.group(|ui| {
-                    ui.label(format!("#{} {}", row.id, row.title));
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-recall-reason"),
-                        recall_reason_label(&row.reason)
-                    ));
-                    ui.label(format!(
-                        "{}: {}",
-                        fl!(crate::i18n::loader(), "memory-journal-recall-scores"),
-                        row.score_summary
-                    ));
-                });
+                egui::Frame::group(ui.style())
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.label(format!("#{} {}", row.id, row.title));
+                        ui.label(format!(
+                            "{}: {}",
+                            fl!(crate::i18n::loader(), "memory-journal-recall-reason"),
+                            recall_reason_label(&row.reason)
+                        ));
+                        ui.label(format!(
+                            "{}: {}",
+                            fl!(crate::i18n::loader(), "memory-journal-recall-scores"),
+                            row.score_summary
+                        ));
+                    });
                 ui.add_space(4.0);
             }
         });

@@ -117,6 +117,30 @@ pub enum Language {
     Ja,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    ene_config::schemars::JsonSchema,
+    PartialEq,
+    Eq,
+    Default,
+)]
+#[schemars(crate = "::ene_config::schemars")]
+pub enum DesktopThemePreference {
+    /// Follow the OS color scheme (XDG portal on Linux, winit theme on
+    /// Windows). Falls back to dark when the OS preference is unavailable.
+    #[serde(rename = "system")]
+    #[default]
+    System,
+    #[serde(rename = "light")]
+    Light,
+    #[serde(rename = "dark")]
+    Dark,
+}
+
 ene_config::define_config!(
     settings,
     "desktop",
@@ -124,6 +148,9 @@ ene_config::define_config!(
         pub graphics: GraphicsSection,
         #[serde(default)]
         pub language: Language,
+        /// Color scheme for every app window; `system` follows the OS.
+        #[serde(default)]
+        pub theme: DesktopThemePreference,
         /// Selected microphone device name for voice capture, or `None`
         /// for the OS default input device.
         #[serde(default)]
@@ -205,12 +232,6 @@ pub fn graphics_quality_label(lang: Language, quality: GraphicsQuality) -> Strin
         GraphicsQuality::Medium => i18n_embed_fl::fl!(crate::i18n::loader(), "medium"),
         GraphicsQuality::High => i18n_embed_fl::fl!(crate::i18n::loader(), "high"),
     }
-}
-
-pub const LANGUAGE_CHOICES: [Language; 2] = [Language::En, Language::Ja];
-
-pub fn cycle_language(current: Language, step: isize) -> Language {
-    cycle_choice(&LANGUAGE_CHOICES, current, step)
 }
 
 pub fn debug_fps_label(lang: Language, debug_fps: u32) -> String {
@@ -914,6 +935,10 @@ impl CharacterSettings {
         self.config_section::<DesktopSection>().language
     }
 
+    pub fn theme(&self) -> DesktopThemePreference {
+        self.config_section::<DesktopSection>().theme
+    }
+
     pub fn mic_device(&self) -> Option<String> {
         self.config_section::<DesktopSection>().mic_device
     }
@@ -944,6 +969,15 @@ impl CharacterSettings {
         });
     }
 
+    pub fn set_theme(&self, theme: DesktopThemePreference) {
+        self.store.read().with_config_mut(|c| {
+            if let Ok(mut d) = c.get_section::<DesktopSection>() {
+                d.theme = theme;
+                drop(c.set_section(&d));
+            }
+        });
+    }
+
     pub fn set_mic_device(&self, mic_device: Option<String>) {
         self.store.read().with_config_mut(|c| {
             if let Ok(mut d) = c.get_section::<DesktopSection>() {
@@ -953,10 +987,12 @@ impl CharacterSettings {
         });
     }
 
+    #[cfg(feature = "voice")]
     pub fn beat_sync_device(&self) -> Option<String> {
         self.config_section::<DesktopSection>().beat_sync.device
     }
 
+    #[cfg(feature = "voice")]
     pub fn set_beat_sync_enabled(&self, enabled: bool) {
         self.store.read().with_config_mut(|c| {
             if let Ok(mut d) = c.get_section::<DesktopSection>() {
@@ -1156,6 +1192,38 @@ impl CharacterSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_theme_preference_defaults_and_round_trips() {
+        assert_eq!(
+            DesktopThemePreference::default(),
+            DesktopThemePreference::System
+        );
+        for (json, expected) in [
+            (r#""system""#, DesktopThemePreference::System),
+            (r#""light""#, DesktopThemePreference::Light),
+            (r#""dark""#, DesktopThemePreference::Dark),
+        ] {
+            let decoded: DesktopThemePreference = serde_json::from_str(json).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn desktop_section_without_theme_uses_system() {
+        let desktop: DesktopSection = serde_json::from_str("{}").unwrap();
+        assert_eq!(desktop.theme, DesktopThemePreference::System);
+    }
+
+    #[test]
+    fn desktop_theme_schema_lists_persisted_values() {
+        let schema = ene_config::schemars::schema_for!(DesktopThemePreference);
+        let json = serde_json::to_string(&schema).unwrap();
+        for value in ["system", "light", "dark"] {
+            assert!(json.contains(&format!(r#""{value}""#)));
+        }
+    }
 
     fn empty_settings() -> CharacterSettings {
         CharacterSettings {

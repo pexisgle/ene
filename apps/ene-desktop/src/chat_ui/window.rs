@@ -121,6 +121,7 @@ impl ChatEguiWindow {
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
         self.egui_ctx.begin_pass(raw_input);
+        crate::theme::apply_egui_visuals(&self.egui_ctx);
 
         let mut panel_ui = egui::Ui::new(
             self.egui_ctx.clone(),
@@ -132,7 +133,6 @@ impl ChatEguiWindow {
         panel_ui.set_clip_rect(self.egui_ctx.content_rect());
 
         egui::CentralPanel::default().show(&mut panel_ui, |ui| {
-            crate::settings_ui::apply_egui_visuals(ui.ctx());
             self.chat_ui.render(ui, ai, world, chat_entity, mic_handle);
         });
 

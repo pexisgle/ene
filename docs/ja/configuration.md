@@ -201,11 +201,20 @@ Git 管理されません。
 |---|---|---|
 | `desktop.graphics.quality` | `"medium"` | 描画品質プリセット。 |
 | `desktop.language` | `"ja"` | UI 言語（デスクトップ i18n は `en-US` / `ja`）。 |
+| `desktop.theme` | `"system"` | アプリ全体の配色テーマ: `system`・`light`・`dark`。 |
 | `desktop.mic_device` | `null` | 音声入力用マイクデバイス ID。 |
 | `desktop.spotlight_enabled` | `true` | グローバルスポットライトオーバーレイ。 |
 | `desktop.caption_enabled` | `true` | キャラクター発話の字幕オーバーレイ。 |
 | `desktop.caption_position` / `caption_pinned` | `null` | 字幕の配置。 |
 | `desktop.beat_sync` | `{ "enabled": false, "device": null }` | 音楽ビート同期（アバターモーション）。 |
+
+`desktop.theme` の既定値は `system` です。Linux のシステムテーマは XDG
+settings portal 経由で `org.freedesktop.appearance` の `color-scheme` を初期取得し、
+変更通知を購読します。Windows では winit の初期ウィンドウテーマと
+`ThemeChanged` 通知を使用します。OS が配色を指定しない場合や取得に失敗した
+場合はダークになります。明示した `light`・`dark` は OS 通知より優先し、対応する
+ネイティブウィンドウ装飾にも反映されます。環境変数では
+`ENE_DESKTOP__THEME=system|light|dark` を指定します。
 
 ## キャラクターごとの設定（`character_settings.json`）
 

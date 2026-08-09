@@ -37,21 +37,43 @@ audio. Settings → Voice selects providers, models, voices, and speed.
 
 ## Settings pages
 
+The settings window opens at 900 × 700 logical pixels and can be resized down
+to 520 × 560. At 720 pixels or wider, its sidebar groups all pages into four
+categories. The search field at the top of the sidebar replaces the category
+list with ranked page and section results; choosing a section opens its page,
+scrolls to the matching card, and highlights it. Below 720 pixels, a grouped
+page picker and the same search UI replace the sidebar, and setting controls
+wrap below their labels instead of requiring horizontal scrolling.
+
+| Category | Pages |
+|---|---|
+| Basics | Character, Character card, Display, Accessibility |
+| AI & Voice | AI, Voice, Features |
+| Data & Access | Memory, Memory ledger, Sessions, Permissions, Connectors |
+| System | Debug |
+
 | Page | What it edits |
 |---|---|
-| AI | Providers, task models, retry/fallback, TTS/STT/VAD |
 | Character | Default expression/motion, look-at strength, position, scale |
-| Character editor | Edit the active card's fields (see [Character editor](../guides/character-editor.md)) |
+| Character card | Edit the active card's fields (see [Character editor](../guides/character-editor.md)) |
+| Display | Quality preset, UI language, and Appearance theme |
+| Accessibility | Spotlight and caption overlays |
+| AI | Providers, task models, retry/fallback, and provider health |
+| Voice | TTS, STT, microphone/VAD selection, and voice tuning |
+| Features | Voice, proactive, mind, and tool capability toggles |
 | Memory | Browse/search/pending/commitments tabs |
 | Memory ledger | Full typed-memory review: edit, pin, approve, reject |
+| Sessions | List, search, import, export, and archive sessions |
 | Permissions | Standing tool-permission grants, revoke/reset |
 | Connectors | External-service accounts (see [Connectors](../concepts/connectors.md)) |
-| Sessions | List, archive, export sessions |
-| Voice | STT/TTS/VAD selection and voice tuning |
-| Graphics | Quality preset |
-| Features | Feature toggles (spotlight, captions, proactive, …) |
-| Accessibility | UI accessibility options |
 | Debug | Diagnostics and pipeline detail |
+
+### Appearance
+
+Display → Theme applies to the settings, chat, Spotlight, caption, and native
+windows. **System** follows the OS color scheme, while **Light** and **Dark**
+override OS changes immediately. See [`desktop.theme`](../configuration.md)
+for platform behavior and configuration values.
 
 ## Platform notes
 
