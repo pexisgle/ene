@@ -38,6 +38,7 @@ blake3 = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+insta = { workspace = true }
 indexmap = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }

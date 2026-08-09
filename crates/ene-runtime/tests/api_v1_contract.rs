@@ -9,28 +9,15 @@
     reason = "contract tests use unwrap/expect, fixed indices, and panic on invariant violations"
 )]
 
+mod common;
+
+use common::test_config_memory_off;
 use ene_card::CharacterCardV3;
 use ene_runtime::{CancelError, EneConfig, EneEvent, EneHandle, RunError, TerminalReason, TurnId};
 use std::sync::Arc;
 
 fn test_card() -> CharacterCardV3 {
-    let mut card = CharacterCardV3::default();
-    card.data.name = "ContractTest".into();
-    card.data.system_prompt = "Be brief.".into();
-    card
-}
-
-fn test_config_memory_off() -> EneConfig {
-    let mut config = EneConfig::default();
-    let mut store = ene_store::StoreConfig::default();
-    store.enabled = false;
-    config.set_section(&store).expect("store config merges");
-    let mut tools = ene_plugin_host::PluginConfig::default();
-    tools.enabled = false;
-    drop(config.set_section(&tools));
-    let ai = ene_ai::AiConfig::default();
-    drop(config.set_section(&ai));
-    config
+    common::test_card("ContractTest")
 }
 
 #[tokio::test]

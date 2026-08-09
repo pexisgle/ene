@@ -6,6 +6,8 @@
     reason = "integration tests use unwrap/expect for concise assertions"
 )]
 
+mod common;
+
 use ene_card::CharacterCardV3;
 use ene_runtime::{EneConfig, EneHandle, LifecycleEvent, MemoryLedgerChange};
 use ene_store::{
@@ -28,10 +30,7 @@ impl Drop for TestCharacterDir {
 }
 
 fn test_card() -> CharacterCardV3 {
-    let mut card = CharacterCardV3::default();
-    card.data.name = "LedgerTest".into();
-    card.data.system_prompt = "Be brief.".into();
-    card
+    common::test_card("LedgerTest")
 }
 
 fn test_memory(title: &str, kind: MemoryKind, status: MemoryStatus) -> NewMemoryItem {

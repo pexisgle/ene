@@ -9,9 +9,12 @@
     reason = "integration tests use unwrap/expect/Default for concise fixtures"
 )]
 
-use ene_core::{MemoryKind, MemoryStatus};
+mod common;
+
+use common::insert_memory;
+use ene_core::{MemoryKind, MemoryScope, MemorySource};
 use ene_mind::{CognitionEngine, MindConfig, TurnContext, load_proactive_memory_notes};
-use ene_store::{MemoryStore, NewMemoryItem};
+use ene_store::MemoryStore;
 
 fn test_config() -> MindConfig {
     let mut config = MindConfig {
@@ -26,34 +29,7 @@ fn test_config() -> MindConfig {
     config
 }
 
-async fn insert_memory(store: &MemoryStore, kind: MemoryKind, title: &str, content: &str) -> i64 {
-    use ene_core::{MemoryConfidence, MemorySalience, MemoryScope, MemorySource};
-    store
-        .insert_typed_memory(&NewMemoryItem {
-            scope: MemoryScope::User,
-            character_id: "ene".into(),
-            user_id: "user".into(),
-            kind,
-            title: title.into(),
-            content: content.into(),
-            source: MemorySource::Conversation,
-            source_ref: None,
-            confidence: MemoryConfidence::new(0.9),
-            salience: MemorySalience::new(0.8),
-            affect: Default::default(),
-            relationship_impact: 0.0,
-            valid_from: None,
-            valid_until: None,
-            status: MemoryStatus::Active,
-            supersedes_id: None,
-            pinned: false,
-            created_at: None,
-            commitment_id: None,
-        })
-        .await
-        .unwrap()
-}
-
+/// Build a proactive pre-turn context against `store`.
 fn turn_ctx<'a>(
     config: &'a MindConfig,
     card: &'a ene_card::CharacterCardV3,
@@ -88,19 +64,34 @@ async fn memory_notes_inject_user_standing_rules_without_scoring() {
     let store = MemoryStore::open_in_memory(4).await.unwrap();
     insert_memory(
         &store,
+        MemoryScope::User,
         MemoryKind::Preference,
         "Do not disturb",
         "don't talk while I work",
+        MemorySource::Conversation,
+        0.9,
     )
     .await;
     insert_memory(
         &store,
+        MemoryScope::User,
         MemoryKind::UserProfile,
         "Night owl",
         "quiet at night",
+        MemorySource::Conversation,
+        0.9,
     )
     .await;
-    insert_memory(&store, MemoryKind::Semantic, "Fact", "the sky is blue").await;
+    insert_memory(
+        &store,
+        MemoryScope::User,
+        MemoryKind::Semantic,
+        "Fact",
+        "the sky is blue",
+        MemorySource::Conversation,
+        0.9,
+    )
+    .await;
 
     let notes = load_proactive_memory_notes(&store, "ene", "user", 12)
         .await
@@ -121,17 +112,23 @@ async fn before_proactive_turn_recalls_memories_matching_the_topic() {
     let store = MemoryStore::open_in_memory(4).await.unwrap();
     insert_memory(
         &store,
+        MemoryScope::User,
         MemoryKind::Episodic,
         "Presentation day",
         "the user has a big presentation today at 3pm",
+        MemorySource::Conversation,
+        0.9,
     )
     .await;
     // Unrelated memory must not surface for this topic.
     insert_memory(
         &store,
+        MemoryScope::User,
         MemoryKind::Preference,
         "Drinks",
         "user prefers matcha",
+        MemorySource::Conversation,
+        0.9,
     )
     .await;
 
@@ -162,9 +159,12 @@ async fn before_proactive_turn_skips_recall_when_memory_source_disabled() {
     let store = MemoryStore::open_in_memory(4).await.unwrap();
     insert_memory(
         &store,
+        MemoryScope::User,
         MemoryKind::Episodic,
         "Presentation day",
         "the user has a big presentation today",
+        MemorySource::Conversation,
+        0.9,
     )
     .await;
 
@@ -191,9 +191,12 @@ async fn before_proactive_turn_skips_recall_without_a_topic_hint() {
     let store = MemoryStore::open_in_memory(4).await.unwrap();
     insert_memory(
         &store,
+        MemoryScope::User,
         MemoryKind::Episodic,
         "Presentation day",
         "the user has a big presentation today",
+        MemorySource::Conversation,
+        0.9,
     )
     .await;
 
