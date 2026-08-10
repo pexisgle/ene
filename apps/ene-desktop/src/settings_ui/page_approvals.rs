@@ -13,7 +13,7 @@ use i18n_embed_fl::fl;
 
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
-use crate::settings_ui::components::section_card;
+use crate::settings_ui::components::{section_card, warning_box};
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -33,9 +33,9 @@ pub fn render(
             let mut changed = false;
 
             if config.approval.has_high_risk_allow() {
-                ui.colored_label(
-                    crate::settings_ui::WARNING_COLOR,
-                    fl!(crate::i18n::loader(), "approvals-high-risk-warning"),
+                warning_box(
+                    ui,
+                    &fl!(crate::i18n::loader(), "approvals-high-risk-warning"),
                 );
                 ui.add_space(4.0);
             }
