@@ -148,6 +148,8 @@ impl WebFetchAction {
                 ],
                 None,
                 MAX_RESPONSE_SIZE as u64,
+                None,
+                None,
             )
             .await?;
 

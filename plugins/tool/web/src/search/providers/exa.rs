@@ -38,20 +38,20 @@ struct ExaSearchRequest {
 
 #[derive(Debug)]
 pub struct ExaProvider {
-    api_key: String,
+    credential: String,
     broker: Arc<WebBroker>,
 }
 
 impl ExaProvider {
-    pub fn new(api_key: &str, broker: Arc<WebBroker>) -> Result<Self, SearchError> {
-        if api_key.is_empty() {
+    pub fn new(credential: &str, broker: Arc<WebBroker>) -> Result<Self, SearchError> {
+        if credential.is_empty() {
             return Err(SearchError::ConfigError(
-                "Exa API key is required".to_string(),
+                "Exa credential name is required".to_string(),
             ));
         }
 
         Ok(Self {
-            api_key: api_key.to_string(),
+            credential: credential.to_string(),
             broker,
         })
     }
@@ -79,12 +79,11 @@ impl SearchProvider for ExaProvider {
             .fetch(
                 HttpMethod::Post,
                 "https://api.exa.ai/search",
-                vec![
-                    ("Content-Type".to_string(), "application/json".to_string()),
-                    ("x-api-key".to_string(), self.api_key.clone()),
-                ],
+                vec![("Content-Type".to_string(), "application/json".to_string())],
                 Some(body),
                 5 * 1024 * 1024,
+                Some(&self.credential),
+                Some("x-api-key"),
             )
             .await
             .map_err(|e| SearchError::ProviderError(format!("Exa API request failed: {e}")))?;

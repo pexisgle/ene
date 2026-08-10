@@ -100,13 +100,16 @@ fn test_artifact_manifest() -> SignedManifest {
         fs_slots: vec![],
         fixed_origins: vec![],
         dynamic_web: false,
-        artifacts: vec![],
+        artifacts: vec![ene_approval::manifest::ArtifactRequirement {
+            artifact_id: "fs".to_string(),
+            version_constraint: ">=1.0.0".to_string(),
+        }],
         sidecars: vec![],
         host_services: vec!["artifact".to_string()],
         side_effects: ManifestSideEffects::default(),
         resource_limits: ResourceLimits::default(),
         permissions: vec![ManifestPermission {
-            category: ApprovalCategory::ModelInstall,
+            category: ApprovalCategory::PluginInstall,
             max: ApprovalMode::Allow,
         }],
     };
@@ -478,6 +481,7 @@ async fn signed_catalog_refreshes_on_demand_and_rejects_rollback() {
             key_id: "test-publisher".to_string(),
             public_key_hex: hex::encode(test_signing_key().verifying_key().to_bytes()),
         }],
+        root_dir: Some(dir.path().join("artifacts").to_string_lossy().into_owned()),
         refresh_hours: 1,
         ..Default::default()
     };

@@ -104,6 +104,12 @@ impl McpToolRegistry {
                 &temp_dir,
             )
         });
+        #[cfg(not(target_os = "linux"))]
+        if sandbox_spec.is_some() {
+            return Err(PluginHostError::McpConnect(
+                "sandboxed MCP stdio is only supported on Linux".to_string(),
+            ));
+        }
         let sandbox_spec = sandbox_spec.map(std::sync::Arc::new);
         let cmd = Command::new(command).configure(move |c| {
             // Harden: clear inherited environment and forward only essentials
@@ -118,10 +124,13 @@ impl McpToolRegistry {
                 {
                     c.env("TMPDIR", temp_dir);
                 }
-                // SAFETY: the closure runs in the forked child before exec
-                // and only touches process-local state (see ene-sandbox).
-                unsafe {
-                    c.pre_exec(ene_sandbox::linux::pre_exec_closure((**spec).clone()));
+                #[cfg(target_os = "linux")]
+                {
+                    // SAFETY: the closure runs in the forked child before exec
+                    // and only touches process-local state (see ene-sandbox).
+                    unsafe {
+                        c.pre_exec(ene_sandbox::linux::pre_exec_closure((**spec).clone()));
+                    }
                 }
             }
             for arg in args {

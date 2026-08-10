@@ -36,6 +36,9 @@ pub struct InstalledArtifact {
 pub struct InstalledState {
     /// Active generations by artifact id.
     pub artifacts: BTreeMap<String, InstalledArtifact>,
+    /// Highest verified catalog version seen by this installer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_version: Option<u64>,
 }
 
 /// Constructor inputs for [`ArtifactInstaller`].
@@ -105,6 +108,31 @@ impl ArtifactInstaller {
             .collect()
     }
 
+    /// Highest catalog version recorded by this installer.
+    #[must_use]
+    pub fn catalog_version(&self) -> Option<u64> {
+        self.state.lock().catalog_version
+    }
+
+    /// Persists a verified catalog version, rejecting rollbacks across host
+    /// restarts as well as during one process lifetime.
+    pub fn record_catalog_version(&self, version: u64) -> Result<()> {
+        let mut state = self.state.lock();
+        if let Some(current) = state.catalog_version {
+            if version < current {
+                return Err(ArtifactError::Rollback {
+                    artifact: "catalog".to_string(),
+                    detail: format!("catalog version {version} is older than {current}"),
+                });
+            }
+            if version == current {
+                return Ok(());
+            }
+        }
+        state.catalog_version = Some(version);
+        self.persist_locked(&state)
+    }
+
     /// Downloads `target` (via the signed catalog's URL/digest/size) and
     /// activates it. Mirrors are tried in order; the first successful
     /// download wins.
@@ -117,7 +145,10 @@ impl ArtifactInstaller {
         on_redirect: &(dyn Fn(&str) -> Result<()> + Sync),
     ) -> Result<InstalledArtifact> {
         crate::digest::validate_digest(&target.sha256)?;
-        if self.cas.contains(&target.sha256)? {
+        if self.cas.contains(&target.sha256)?
+            && std::fs::metadata(self.cas.object_path(&target.sha256))
+                .is_ok_and(|metadata| metadata.len() == target.size)
+        {
             let entry = CasEntry {
                 sha256: target.sha256.clone(),
                 size: target.size,
@@ -128,7 +159,7 @@ impl ArtifactInstaller {
 
         let part_dir = self.cas.root().join(".tmp");
         std::fs::create_dir_all(&part_dir)?;
-        let part_path = part_dir.join(format!("{id}-{}.part", target.version));
+        let part_path = part_dir.join(format!("{}.part", target.sha256));
         let mut last_error: Option<ArtifactError> = None;
         for url in &target.urls {
             match downloader
@@ -177,6 +208,16 @@ impl ArtifactInstaller {
         entry: &CasEntry,
     ) -> Result<InstalledArtifact> {
         if entry.sha256 != target.sha256 || entry.size != target.size {
+            return Err(ArtifactError::DigestMismatch {
+                artifact: id.to_string(),
+                expected: target.sha256.clone(),
+                actual: entry.sha256.clone(),
+            });
+        }
+        if entry.path != self.cas.object_path(&entry.sha256)
+            || !self.cas.contains(&entry.sha256)?
+            || std::fs::metadata(&entry.path).map_or(true, |metadata| metadata.len() != entry.size)
+        {
             return Err(ArtifactError::DigestMismatch {
                 artifact: id.to_string(),
                 expected: target.sha256.clone(),

@@ -48,16 +48,19 @@ impl Cas {
     /// Whether an object with this digest is present and valid.
     pub fn contains(&self, sha256: &str) -> Result<bool> {
         validate_digest(sha256)?;
-        Ok(self.object_path(sha256).is_file())
+        let path = self.object_path(sha256);
+        if !path.is_file() {
+            return Ok(false);
+        }
+        crate::digest::verify_sha256(&path, sha256)
     }
 
     /// Path of the object for `sha256` (may not exist yet).
     #[must_use]
     pub fn object_path(&self, sha256: &str) -> PathBuf {
-        self.root
-            .join("objects")
-            .join(&sha256[..2])
-            .join(&sha256[2..])
+        let prefix = sha256.get(..2).unwrap_or_default();
+        let remainder = sha256.get(2..).unwrap_or_default();
+        self.root.join("objects").join(prefix).join(remainder)
     }
 
     /// Opens the object for reading.

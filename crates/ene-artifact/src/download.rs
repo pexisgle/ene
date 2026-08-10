@@ -98,14 +98,21 @@ impl Downloader {
     ) -> Result<DownloadOutcome> {
         let mut current_url = url.to_string();
         let mut etag: Option<String> = None;
-        let mut bytes = 0_u64;
+        let mut bytes = std::fs::metadata(destination).map_or(0, |metadata| metadata.len());
         for _hop in 0..=self.max_redirects {
             let outcome = self
                 .fetch_once(&current_url, destination, etag.as_deref(), bytes, max_bytes)
                 .await?;
             if let Some(location) = outcome.redirect_to {
-                on_redirect(&location)?;
-                current_url = location;
+                let next_url = url::Url::parse(&current_url)
+                    .and_then(|base| base.join(&location))
+                    .map_err(|e| ArtifactError::Transport {
+                        url: current_url.clone(),
+                        message: format!("invalid redirect URL: {e}"),
+                    })?
+                    .to_string();
+                on_redirect(&next_url)?;
+                current_url = next_url;
                 // ETag belongs to the resource, not the hop: keep the value
                 // so a resumed transfer after a redirect still matches.
                 continue;

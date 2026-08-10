@@ -72,7 +72,15 @@ impl SearchProvider for ArxivProvider {
 
         let response = self
             .broker
-            .fetch(HttpMethod::Get, url.as_str(), vec![], None, 5 * 1024 * 1024)
+            .fetch(
+                HttpMethod::Get,
+                url.as_str(),
+                vec![],
+                None,
+                5 * 1024 * 1024,
+                None,
+                None,
+            )
             .await
             .map_err(|e| SearchError::HttpError {
                 message: format!("ArXiv API request failed: {e}"),

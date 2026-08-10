@@ -80,6 +80,8 @@ impl WebBroker {
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
         max_bytes: u64,
+        credential: Option<&str>,
+        credential_header: Option<&str>,
     ) -> Result<FetchOutcome, ToolError> {
         let mut client = self.client.lock().await;
         if client.is_none() {
@@ -110,8 +112,8 @@ impl WebBroker {
                 method,
                 url: url.to_string(),
                 headers,
-                credential: None,
-                credential_header: None,
+                credential: credential.map(str::to_string),
+                credential_header: credential_header.map(str::to_string),
                 body,
                 max_bytes: Some(max_bytes),
             })

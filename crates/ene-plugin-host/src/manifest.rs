@@ -43,6 +43,17 @@ pub enum ManifestError {
         /// The entry name the manifest is attached to.
         expected: String,
     },
+    /// A signed manifest's publisher does not match the trusted key it used.
+    #[error("manifest publisher '{publisher}' does not match signing key '{key_id}'")]
+    PublisherMismatch {
+        /// Publisher id from the manifest.
+        publisher: String,
+        /// Trusted key id used to verify the signature.
+        key_id: String,
+    },
+    /// An unsigned manifest for a built-in name differs from the host copy.
+    #[error("unsigned manifest for built-in '{0}' does not match the embedded manifest")]
+    BuiltinMismatch(String),
     /// A logical FS slot in the manifest was requested but never granted.
     #[error("plugin has no {access} grant for slot '{slot}'")]
     MissingGrant {
@@ -117,14 +128,29 @@ impl ManifestStore {
                 })?);
             key.verify(&signed.payload, &signature)
                 .map_err(|e| ManifestError::BadSignature(entry_name.to_string(), e.to_string()))?;
-            serde_json::from_slice(&signed.payload)
-                .map_err(|e| ManifestError::InvalidPayload(entry_name.to_string(), e.to_string()))?
-        } else {
-            if builtin_manifest(entry_name).is_none() {
-                return Err(ManifestError::MissingPayload(entry_name.to_string()));
+            let manifest: PluginManifest =
+                serde_json::from_slice(&signed.payload).map_err(|e| {
+                    ManifestError::InvalidPayload(entry_name.to_string(), e.to_string())
+                })?;
+            if manifest.publisher != key_id {
+                return Err(ManifestError::PublisherMismatch {
+                    publisher: manifest.publisher,
+                    key_id: key_id.to_string(),
+                });
             }
-            serde_json::from_slice(&signed.payload)
-                .map_err(|e| ManifestError::InvalidPayload(entry_name.to_string(), e.to_string()))?
+            manifest
+        } else {
+            let Some(expected) = builtin_manifest(entry_name) else {
+                return Err(ManifestError::MissingPayload(entry_name.to_string()));
+            };
+            let manifest: PluginManifest =
+                serde_json::from_slice(&signed.payload).map_err(|e| {
+                    ManifestError::InvalidPayload(entry_name.to_string(), e.to_string())
+                })?;
+            if manifest != expected {
+                return Err(ManifestError::BuiltinMismatch(entry_name.to_string()));
+            }
+            manifest
         };
         if manifest.plugin_id != entry_name {
             return Err(ManifestError::IdMismatch {
@@ -349,6 +375,7 @@ pub fn builtin_manifest(name: &str) -> Option<PluginManifest> {
             permissions: permissions(&[
                 (ApprovalCategory::DynamicHttps, ApprovalMode::Allow),
                 (ApprovalCategory::WebFileSave, ApprovalMode::Allow),
+                (ApprovalCategory::CredentialUse, ApprovalMode::Allow),
             ]),
             host_services: vec!["network".into(), "file".into()],
             ..base("web")
@@ -664,6 +691,22 @@ mod tests {
     }
 
     #[test]
+    fn verify_rejects_unsigned_manifest_that_reuses_builtin_name() {
+        let store = ManifestStore::default();
+        let mut manifest = builtin_manifest("fs").expect("fs");
+        manifest.permissions.clear();
+        let signed = SignedManifest {
+            payload: ene_approval::canonical_manifest_bytes(&manifest).expect("canonical"),
+            signature: None,
+            key_id: None,
+        };
+        assert!(matches!(
+            store.verify(&signed, "fs"),
+            Err(ManifestError::BuiltinMismatch(name)) if name == "fs"
+        ));
+    }
+
+    #[test]
     fn verify_rejects_untrusted_signature() {
         let store = ManifestStore::default();
         let manifest = builtin_manifest("fs").expect("fs");
@@ -701,6 +744,31 @@ mod tests {
         };
         let verified = store.verify(&signed, "myfs").expect("verify");
         assert_eq!(verified.publisher, "acme");
+    }
+
+    #[test]
+    fn verify_rejects_signed_manifest_with_mismatched_publisher() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[12u8; 32]);
+        let verifying = key.verifying_key().to_bytes();
+        let store = ManifestStore::new(&[TrustedPublisherConfig {
+            publisher: "acme".into(),
+            public_key_hex: hex::encode(verifying),
+        }]);
+        let mut manifest = builtin_manifest("fs").expect("fs");
+        manifest.publisher = "other".into();
+        manifest.plugin_id = "myfs".into();
+        use ed25519_dalek::Signer;
+        let payload = ene_approval::canonical_manifest_bytes(&manifest).expect("canonical");
+        let signed = SignedManifest {
+            signature: Some(key.sign(&payload).to_bytes().to_vec()),
+            key_id: Some("acme".into()),
+            payload,
+        };
+        assert!(matches!(
+            store.verify(&signed, "myfs"),
+            Err(ManifestError::PublisherMismatch { publisher, key_id })
+                if publisher == "other" && key_id == "acme"
+        ));
     }
 
     #[test]

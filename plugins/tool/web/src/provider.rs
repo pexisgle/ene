@@ -7,14 +7,33 @@ use std::sync::{Arc, RwLock};
 
 use crate::broker::WebBroker;
 
-/// Configuration for web search providers (Tavily, Exa).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+/// Names of host-owned credentials used by web search providers.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, rename_all = "snake_case")]
 pub struct WebSearchConfig {
-    /// Tavily Search API Key
-    pub tavily_api_key: String,
-    /// Exa Search API Key
-    pub exa_api_key: String,
+    /// Host credential name for Tavily Search.
+    #[serde(default = "default_tavily_credential")]
+    pub tavily_credential: String,
+    /// Host credential name for Exa Search.
+    #[serde(default = "default_exa_credential")]
+    pub exa_credential: String,
+}
+
+fn default_tavily_credential() -> String {
+    "tavily_api_key".to_string()
+}
+
+fn default_exa_credential() -> String {
+    "exa_api_key".to_string()
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            tavily_credential: default_tavily_credential(),
+            exa_credential: default_exa_credential(),
+        }
+    }
 }
 
 fn generate_web_search_schema() -> serde_json::Value {

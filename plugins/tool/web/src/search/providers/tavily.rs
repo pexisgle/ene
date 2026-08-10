@@ -24,7 +24,6 @@ struct TavilyResponse {
 
 #[derive(Debug, Serialize)]
 struct TavilyRequest {
-    api_key: String,
     query: String,
     search_depth: String,
     include_answer: bool,
@@ -35,20 +34,20 @@ struct TavilyRequest {
 
 #[derive(Debug)]
 pub struct TavilyProvider {
-    api_key: String,
+    credential: String,
     broker: Arc<WebBroker>,
 }
 
 impl TavilyProvider {
-    pub fn new(api_key: &str, broker: Arc<WebBroker>) -> Result<Self, SearchError> {
-        if api_key.is_empty() {
+    pub fn new(credential: &str, broker: Arc<WebBroker>) -> Result<Self, SearchError> {
+        if credential.is_empty() {
             return Err(SearchError::ConfigError(
-                "Tavily API key is required".to_string(),
+                "Tavily credential name is required".to_string(),
             ));
         }
 
         Ok(Self {
-            api_key: api_key.to_string(),
+            credential: credential.to_string(),
             broker,
         })
     }
@@ -63,7 +62,6 @@ impl SearchProvider for TavilyProvider {
     async fn search(&self, options: &SearchOptions) -> Result<Vec<SearchResult>, SearchError> {
         let max_results = options.max_results.unwrap_or(10).min(50);
         let request_body = TavilyRequest {
-            api_key: self.api_key.clone(),
             query: options.query.clone(),
             search_depth: "basic".to_string(),
             include_answer: true,
@@ -85,6 +83,8 @@ impl SearchProvider for TavilyProvider {
                 vec![("Content-Type".to_string(), "application/json".to_string())],
                 Some(body),
                 5 * 1024 * 1024,
+                Some(&self.credential),
+                None,
             )
             .await
             .map_err(|e| SearchError::HttpError {

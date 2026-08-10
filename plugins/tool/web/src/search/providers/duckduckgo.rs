@@ -45,6 +45,8 @@ impl SearchProvider for DuckDuckGoProvider {
                 ],
                 Some(body.into_bytes()),
                 5 * 1024 * 1024,
+                None,
+                None,
             )
             .await
             .map_err(|e| SearchError::HttpError {

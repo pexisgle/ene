@@ -36,7 +36,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::config::{ArtifactConfig, DownloadConfig, FsGrantConfig, PluginConfig, PluginEntry};
-use crate::manifest::{FsGrant, ManifestStore, canonical_within, resolve_grant_path};
+use crate::manifest::{FsGrant, ManifestStore, resolve_grant_abs, resolve_grant_path};
 
 /// Interactive approval responder: resolves `Ask` requests by showing the
 /// user a confirmation. Headless hosts leave the hub without a responder,
@@ -248,6 +248,19 @@ fn build_plugin_state(
         .fs_grants
         .iter()
         .filter_map(|grant: &FsGrantConfig| {
+            let Some(slot) = manifest.as_ref().and_then(|manifest| {
+                manifest
+                    .fs_slots
+                    .iter()
+                    .find(|slot| slot.name == grant.slot)
+            }) else {
+                tracing::warn!(
+                    plugin = %name,
+                    slot = %grant.slot,
+                    "ignoring fs grant: slot is not declared in the verified manifest"
+                );
+                return None;
+            };
             let path = PathBuf::from(&grant.path);
             let canonical = path.canonicalize().unwrap_or(path);
             if !canonical.is_dir() {
@@ -259,11 +272,21 @@ fn build_plugin_state(
                 );
                 return None;
             }
+            let read = grant.read && slot.read;
+            let write = grant.write && slot.write;
+            if !read && !write {
+                tracing::warn!(
+                    plugin = %name,
+                    slot = %grant.slot,
+                    "ignoring fs grant: access exceeds the verified manifest"
+                );
+                return None;
+            }
             Some(FsGrant {
                 slot: grant.slot.clone(),
                 path: canonical,
-                read: grant.read,
-                write: grant.write,
+                read,
+                write,
             })
         })
         .collect();
@@ -358,7 +381,7 @@ impl BrokerHandler for BrokerHub {
                 if let Err(e) = Self::require_service(state, "network") {
                     return sink.write(&BrokerResponse::error(e.code, e.message)).await;
                 }
-                let cap = max_bytes.unwrap_or(self.download.config.max_bytes);
+                let cap = self.network_cap(state, max_bytes);
                 self.fetch_stream(
                     plugin,
                     state,
@@ -386,6 +409,19 @@ impl BrokerHandler for BrokerHub {
 }
 
 impl BrokerHub {
+    fn network_cap(&self, state: &PluginState, requested: Option<u64>) -> u64 {
+        let host_cap = self.download.config.max_bytes;
+        let manifest_cap = state.manifest.as_ref().map_or(0, |manifest| {
+            manifest.resource_limits.max_network_bytes_per_request
+        });
+        let requested = requested.unwrap_or(host_cap).min(host_cap);
+        if manifest_cap == 0 {
+            requested
+        } else {
+            requested.min(manifest_cap)
+        }
+    }
+
     async fn dispatch(
         &self,
         plugin: &str,
@@ -492,7 +528,7 @@ impl BrokerHub {
                     .await
             }
             BrokerRequest::ArtifactRollback { artifact_id } => {
-                std::future::ready(self.artifact_rollback(&artifact_id)).await
+                self.artifact_rollback(plugin, state, &artifact_id).await
             }
             BrokerRequest::ArtifactList => std::future::ready(self.artifact_list()).await,
             BrokerRequest::ArtifactRefresh => self.artifact_refresh().await,
@@ -533,12 +569,13 @@ impl BrokerHub {
         category: ApprovalCategory,
         target: &str,
     ) -> Result<(), BrokerError> {
-        let manifest_allows = state.manifest.as_ref().is_some_and(|m| {
-            m.permissions
+        let Some(manifest_max) = state.manifest.as_ref().and_then(|manifest| {
+            manifest
+                .permissions
                 .iter()
-                .any(|p| p.category == category && p.max != ApprovalMode::Deny)
-        });
-        if !manifest_allows {
+                .find(|permission| permission.category == category)
+                .map(|permission| permission.max)
+        }) else {
             self.audit(
                 plugin,
                 state,
@@ -552,9 +589,32 @@ impl BrokerHub {
                 BrokerErrorCode::NotDeclared,
                 format!("category {category:?} is not declared in the plugin manifest"),
             ));
+        };
+        if manifest_max == ApprovalMode::Deny {
+            self.audit(
+                plugin,
+                state,
+                category,
+                target,
+                "manifest_layer",
+                "capability is denied by the signed manifest",
+                ResolvedMode::Deny,
+            );
+            return Err(BrokerError::new(
+                BrokerErrorCode::NotDeclared,
+                format!("category {category:?} is denied by the plugin manifest"),
+            ));
         }
         let resolution =
             ApprovalResolver::new(&self.global, &self.plugin_approval).resolve(plugin, category);
+        let mode = match manifest_max {
+            ApprovalMode::Allow => resolution.mode,
+            ApprovalMode::Ask | ApprovalMode::Inherit => match resolution.mode {
+                ResolvedMode::Allow => ResolvedMode::Ask,
+                mode => mode,
+            },
+            ApprovalMode::Deny => ResolvedMode::Deny,
+        };
         self.audit(
             plugin,
             state,
@@ -562,9 +622,9 @@ impl BrokerHub {
             target,
             resolution.reason.label(),
             resolution.rule,
-            resolution.mode,
+            mode,
         );
-        match resolution.mode {
+        match mode {
             ResolvedMode::Allow => Ok(()),
             ResolvedMode::Deny => Err(BrokerError::denied(format!(
                 "denied by policy: {}",
@@ -672,13 +732,13 @@ fn resolve_file_target(
     need_write: bool,
 ) -> Result<PathBuf, BrokerError> {
     if Path::new(path).is_absolute() {
-        crate::manifest::resolve_grant_abs(&state.fs_grants, Path::new(path), need_write)
+        resolve_grant_abs(&state.fs_grants, Path::new(path), need_write)
             .map_err(|e| BrokerError::denied(e.to_string()))
     } else {
-        let (grant, target) = resolve_grant_path(&state.fs_grants, path, need_write)
+        let (_, target) = resolve_grant_path(&state.fs_grants, path, need_write)
             .map_err(|e| BrokerError::denied(e.to_string()))?;
-        canonical_within(&grant.path, &target)
-            .ok_or_else(|| BrokerError::denied("path escapes the granted directory"))
+        resolve_grant_abs(&state.fs_grants, &target, need_write)
+            .map_err(|e| BrokerError::denied(e.to_string()))
     }
 }
 
@@ -698,7 +758,7 @@ impl BrokerHub {
             &canonical.to_string_lossy(),
         )
         .await?;
-        let cap = max_bytes.unwrap_or(50 * 1024 * 1024);
+        let cap = max_bytes.unwrap_or(50 * 1024 * 1024).min(50 * 1024 * 1024);
         let metadata = std::fs::metadata(&canonical)
             .map_err(|e| BrokerError::new(BrokerErrorCode::NotFound, e.to_string()))?;
         if !metadata.is_file() {
@@ -918,16 +978,21 @@ impl BrokerHub {
         dest_path: &str,
         conflict: ConflictMode,
     ) -> Result<BrokerResponse, BrokerError> {
-        let (grant, target) = resolve_grant_path(&state.fs_grants, dest_path, true)
+        let (_, target) = resolve_grant_path(&state.fs_grants, dest_path, true)
+            .map_err(|e| BrokerError::denied(e.to_string()))?;
+        let target = resolve_grant_abs(&state.fs_grants, &target, true)
             .map_err(|e| BrokerError::denied(e.to_string()))?;
         let safe_name = sanitize_file_name(
             target
                 .file_name()
                 .map_or("download", |n| n.to_str().unwrap_or("download")),
         );
-        let final_path = grant.path.join(safe_name);
-        let canonical = canonical_within(&grant.path, &final_path)
-            .ok_or_else(|| BrokerError::denied("path escapes the granted directory"))?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| BrokerError::denied("destination has no parent directory"))?;
+        let final_path = resolve_grant_abs(&state.fs_grants, &parent.join(safe_name), true)
+            .map_err(|e| BrokerError::denied(e.to_string()))?;
+        let canonical = final_path;
         if canonical.exists() {
             match conflict {
                 ConflictMode::Fail => {
@@ -947,16 +1012,25 @@ impl BrokerHub {
             &format!("temp {temp_id} -> {}", destination.to_string_lossy()),
         )
         .await?;
-        let source = self.download.temp_dir.join(temp_id);
+        let temp_uuid = uuid::Uuid::parse_str(temp_id).map_err(|_| {
+            BrokerError::new(BrokerErrorCode::InvalidTarget, "invalid download temp id")
+        })?;
+        let source = self
+            .download
+            .temp_dir
+            .join(plugin)
+            .join(temp_uuid.to_string());
         let bytes = std::fs::read(&source)
             .map_err(|e| BrokerError::new(BrokerErrorCode::NotFound, e.to_string()))?;
+        let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let sha256 = ene_artifact::sha256_hex(&bytes);
         std::fs::write(&destination, bytes)
             .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
         drop(std::fs::remove_file(&source));
         Ok(BrokerResponse::FileSaveDownloadOk {
             path: destination.to_string_lossy().into_owned(),
-            sha256: ene_artifact::sha256_hex(&std::fs::read(&destination).unwrap_or_default()),
-            size: std::fs::metadata(&destination).map_or(0, |m| m.len()),
+            sha256,
+            size,
         })
     }
 }
@@ -1014,7 +1088,7 @@ impl BrokerHub {
         body: Option<Vec<u8>>,
         max_bytes: Option<u64>,
     ) -> Result<BrokerResponse, BrokerError> {
-        let cap = max_bytes.unwrap_or(self.download.config.max_bytes);
+        let cap = self.network_cap(state, max_bytes);
         let body = self
             .fetch_loop(
                 plugin,
@@ -1043,11 +1117,12 @@ impl BrokerHub {
         url: &str,
         max_bytes: Option<u64>,
     ) -> Result<BrokerResponse, BrokerError> {
-        let cap = max_bytes.unwrap_or(self.download.config.max_bytes);
-        std::fs::create_dir_all(&self.download.temp_dir)
+        let cap = self.network_cap(state, max_bytes);
+        let plugin_temp_dir = self.download.temp_dir.join(plugin);
+        std::fs::create_dir_all(&plugin_temp_dir)
             .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
         let temp_id = uuid::Uuid::new_v4().to_string();
-        let temp_path = self.download.temp_dir.join(&temp_id);
+        let temp_path = plugin_temp_dir.join(&temp_id);
         let body = self
             .fetch_loop(
                 plugin,
@@ -1082,6 +1157,7 @@ impl BrokerHub {
         headers: &[(String, String)],
         credential: Option<&str>,
         credential_header: Option<&str>,
+        credential_origin: Option<&str>,
         body: Option<&Vec<u8>>,
     ) -> Result<FetchHop, BrokerError> {
         let parsed = url::Url::parse(url)
@@ -1097,7 +1173,7 @@ impl BrokerHub {
             .host_str()
             .ok_or_else(|| BrokerError::new(BrokerErrorCode::InvalidTarget, "URL has no host"))?;
         let port = parsed.port_or_known_default().unwrap_or(443);
-        let origin = format!("{scheme}://{host}:{port}");
+        let origin = normalized_origin(&parsed);
         let category = Self::origin_category(state, &origin, &scheme)?;
         self.approve(plugin, state, category, &origin).await?;
         let ssrf = SsrfPolicy::production();
@@ -1130,7 +1206,9 @@ impl BrokerHub {
             }
             request = request.header(key, value);
         }
-        if let Some(key) = credential {
+        if let Some(key) = credential.filter(|_| {
+            scheme == "https" && credential_origin.is_some_and(|expected| expected == origin)
+        }) {
             self.approve(plugin, state, ApprovalCategory::CredentialUse, key)
                 .await?;
             let value = state.credentials.get(key).ok_or_else(|| {
@@ -1168,6 +1246,7 @@ impl BrokerHub {
         sink: &mut (dyn ene_plugin_proto::BrokerSink + Send),
     ) -> Result<(), BrokerError> {
         let mut current = url.to_string();
+        let credential_origin = credential.map(|_| parse_origin(url)).transpose()?;
         for _hop in 0..=self.download.config.max_redirects {
             let hop = self
                 .build_fetch_hop(
@@ -1178,6 +1257,7 @@ impl BrokerHub {
                     headers,
                     credential,
                     credential_header,
+                    credential_origin.as_deref(),
                     body.as_ref(),
                 )
                 .await?;
@@ -1265,6 +1345,7 @@ impl BrokerHub {
         temp_path: Option<&Path>,
     ) -> Result<FetchBody, BrokerError> {
         let mut current = url.to_string();
+        let credential_origin = credential.map(|_| parse_origin(url)).transpose()?;
         for _hop in 0..=self.download.config.max_redirects {
             let hop = self
                 .build_fetch_hop(
@@ -1275,6 +1356,7 @@ impl BrokerHub {
                     headers,
                     credential,
                     credential_header,
+                    credential_origin.as_deref(),
                     body.as_ref(),
                 )
                 .await?;
@@ -1378,6 +1460,31 @@ impl BrokerHub {
             BrokerErrorCode::NotDeclared,
             format!("origin {origin} is not declared (no dynamic_web)"),
         ))
+    }
+}
+
+fn parse_origin(url: &str) -> Result<String, BrokerError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| BrokerError::new(BrokerErrorCode::InvalidTarget, e.to_string()))?;
+    Ok(normalized_origin(&parsed))
+}
+
+fn normalized_origin(url: &url::Url) -> String {
+    let scheme = url.scheme();
+    let host = url.host_str().unwrap_or_default();
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let default_port = match scheme {
+        "https" => Some(443),
+        "http" => Some(80),
+        _ => None,
+    };
+    match url.port().filter(|port| Some(*port) != default_port) {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
     }
 }
 
@@ -1546,14 +1653,38 @@ impl BrokerHub {
         reject_implicit_download(base, &argv)?;
         self.approve(plugin, state, category, &argv.join(" "))
             .await?;
+        let process_temp_dir = self.download.temp_dir.join("processes").join(plugin);
+        std::fs::create_dir_all(&process_temp_dir)
+            .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
+        let cwd = match cwd {
+            Some(cwd) => {
+                let cwd = resolve_file_target(state, &cwd, false)?;
+                if !cwd.is_dir() {
+                    return Err(BrokerError::new(
+                        BrokerErrorCode::InvalidTarget,
+                        "process cwd is not a directory",
+                    ));
+                }
+                cwd
+            }
+            None => process_temp_dir.clone(),
+        };
         let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]);
         command.kill_on_drop(true);
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
         command.stdin(std::process::Stdio::null());
-        if let Some(cwd) = cwd {
-            command.current_dir(cwd);
+        command
+            .env_clear()
+            .current_dir(cwd)
+            .env("TMPDIR", &process_temp_dir);
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env("PATH", path);
+        }
+        #[cfg(windows)]
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
         }
         for (key, value) in env {
             if !is_forbidden_env(key.as_str()) {
@@ -1568,18 +1699,33 @@ impl BrokerHub {
         let mut child = command
             .spawn()
             .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
-        let pid = child.id().unwrap_or(0);
+        let pid = child.id().ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::Internal,
+                "spawned process has no operating-system pid",
+            )
+        })?;
         state.processes.lock().insert(pid, argv.join(" "));
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let status = tokio::time::timeout(timeout, child.wait())
-            .await
-            .map_err(|_| BrokerError::denied("process timed out"))?
-            .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;
-        state.processes.lock().remove(&pid);
         let cap = usize::try_from(max_output_bytes.min(10 * 1024 * 1024)).unwrap_or(usize::MAX);
-        let stdout_text = read_capped(stdout, cap).await;
-        let stderr_text = read_capped_stderr(stderr, cap).await;
+        let result = tokio::time::timeout(timeout, async {
+            let (status, stdout, stderr) = tokio::join!(
+                child.wait(),
+                read_capped(stdout, cap),
+                read_capped_stderr(stderr, cap)
+            );
+            (status, stdout, stderr)
+        })
+        .await;
+        state.processes.lock().remove(&pid);
+        let (status, stdout_text, stderr_text) = match result {
+            Ok((Ok(status), stdout, stderr)) => (status, stdout, stderr),
+            Ok((Err(e), _, _)) => {
+                return Err(BrokerError::new(BrokerErrorCode::Internal, e.to_string()));
+            }
+            Err(_) => return Err(BrokerError::denied("process timed out")),
+        };
         Ok(BrokerResponse::ProcessSpawnOk {
             pid,
             exit_code: status.code(),
@@ -1643,6 +1789,9 @@ fn is_forbidden_env(key: &str) -> bool {
             | "ENE_PLUGIN_SOCKET"
             | "ENE_BROKER_SOCKET"
             | "ENE_PLUGIN_TMPDIR"
+            | "TMPDIR"
+            | "TMP"
+            | "TEMP"
     )
 }
 
@@ -1656,9 +1805,9 @@ async fn read_capped(reader: Option<tokio::process::ChildStdout>, cap: usize) ->
         if n == 0 {
             break;
         }
-        buffer.extend_from_slice(&chunk[..n]);
-        if buffer.len() >= cap {
-            break;
+        if buffer.len() < cap {
+            let keep = (cap - buffer.len()).min(n);
+            buffer.extend_from_slice(&chunk[..keep]);
         }
     }
     String::from_utf8_lossy(&buffer).into_owned()
@@ -1674,9 +1823,9 @@ async fn read_capped_stderr(reader: Option<tokio::process::ChildStderr>, cap: us
         if n == 0 {
             break;
         }
-        buffer.extend_from_slice(&chunk[..n]);
-        if buffer.len() >= cap {
-            break;
+        if buffer.len() < cap {
+            let keep = (cap - buffer.len()).min(n);
+            buffer.extend_from_slice(&chunk[..keep]);
         }
     }
     String::from_utf8_lossy(&buffer).into_owned()
@@ -1760,16 +1909,22 @@ impl BrokerHub {
         version: Option<String>,
     ) -> Result<BrokerResponse, BrokerError> {
         let services = self.artifact_services()?;
-        self.approve(
-            plugin,
-            state,
-            ApprovalCategory::ModelInstall,
-            &format!("resolve {artifact_id}"),
-        )
-        .await?;
         if let Some(installed) = services.installer.installed(artifact_id)
             && version.as_deref().is_none_or(|v| v == installed.version)
         {
+            if !manifest_declares_artifact(state, artifact_id, installed.kind) {
+                return Err(BrokerError::new(
+                    BrokerErrorCode::NotDeclared,
+                    format!("artifact '{artifact_id}' is not required by the plugin manifest"),
+                ));
+            }
+            self.approve(
+                plugin,
+                state,
+                artifact_install_category(installed.kind, true),
+                &format!("resolve {artifact_id}"),
+            )
+            .await?;
             return Ok(BrokerResponse::ArtifactResolveOk {
                 artifact: to_wire_artifact(&installed),
             });
@@ -1777,6 +1932,19 @@ impl BrokerHub {
         let target = self
             .catalog_target(services, artifact_id, version.as_deref())
             .await?;
+        if !manifest_declares_artifact(state, artifact_id, target.kind) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::NotDeclared,
+                format!("artifact '{artifact_id}' is not required by the plugin manifest"),
+            ));
+        }
+        self.approve(
+            plugin,
+            state,
+            artifact_install_category(target.kind, false),
+            &format!("resolve {artifact_id}"),
+        )
+        .await?;
         Ok(BrokerResponse::ArtifactResolveOk {
             artifact: wire_artifact(artifact_id, &target),
         })
@@ -1793,15 +1961,14 @@ impl BrokerHub {
         let target = self
             .catalog_target(services, artifact_id, Some(version))
             .await?;
+        if !manifest_declares_artifact(state, artifact_id, target.kind) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::NotDeclared,
+                format!("artifact '{artifact_id}' is not required by the plugin manifest"),
+            ));
+        }
         let installed = services.installer.installed(artifact_id);
-        let category = match (&installed, target.kind) {
-            (None, ArtifactKind::Plugin) => ApprovalCategory::PluginInstall,
-            (None, ArtifactKind::Sidecar) => ApprovalCategory::SidecarInstall,
-            (None, ArtifactKind::Model) => ApprovalCategory::ModelInstall,
-            (Some(_), ArtifactKind::Plugin) => ApprovalCategory::PluginUpdate,
-            (Some(_), ArtifactKind::Sidecar) => ApprovalCategory::SidecarUpdate,
-            (Some(_), ArtifactKind::Model) => ApprovalCategory::ModelUpdate,
-        };
+        let category = artifact_install_category(target.kind, installed.is_some());
         self.approve(plugin, state, category, &format!("{artifact_id} {version}"))
             .await?;
         let installed = services
@@ -1824,8 +1991,30 @@ impl BrokerHub {
         })
     }
 
-    fn artifact_rollback(&self, artifact_id: &str) -> Result<BrokerResponse, BrokerError> {
+    async fn artifact_rollback(
+        &self,
+        plugin: &str,
+        state: &PluginState,
+        artifact_id: &str,
+    ) -> Result<BrokerResponse, BrokerError> {
         let services = self.artifact_services()?;
+        let current = services
+            .installer
+            .installed(artifact_id)
+            .ok_or_else(|| BrokerError::new(BrokerErrorCode::NotFound, "artifact not installed"))?;
+        if !manifest_declares_artifact(state, artifact_id, current.kind) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::NotDeclared,
+                format!("artifact '{artifact_id}' is not required by the plugin manifest"),
+            ));
+        }
+        self.approve(
+            plugin,
+            state,
+            artifact_install_category(current.kind, true),
+            &format!("rollback {artifact_id}"),
+        )
+        .await?;
         let rolled = services
             .installer
             .rollback(artifact_id)
@@ -1934,6 +2123,10 @@ impl BrokerHub {
             .verifier
             .verify(&signed, &services.installer.installed_refs(), now)
             .map_err(|e| BrokerError::new(BrokerErrorCode::Denied, e.to_string()))?;
+        services
+            .installer
+            .record_catalog_version(metadata.version)
+            .map_err(|e| BrokerError::new(BrokerErrorCode::Denied, e.to_string()))?;
         *services.catalog.lock() = Some((metadata.clone(), now));
         Ok(metadata)
     }
@@ -1950,6 +2143,36 @@ fn to_wire_artifact(installed: &ene_artifact::InstalledArtifact) -> ArtifactInfo
         },
         sha256: installed.sha256.clone(),
         size: installed.size,
+    }
+}
+
+fn artifact_install_category(kind: ArtifactKind, installed: bool) -> ApprovalCategory {
+    match (kind, installed) {
+        (ArtifactKind::Plugin, false) => ApprovalCategory::PluginInstall,
+        (ArtifactKind::Plugin, true) => ApprovalCategory::PluginUpdate,
+        (ArtifactKind::Sidecar, false) => ApprovalCategory::SidecarInstall,
+        (ArtifactKind::Sidecar, true) => ApprovalCategory::SidecarUpdate,
+        (ArtifactKind::Model, false) => ApprovalCategory::ModelInstall,
+        (ArtifactKind::Model, true) => ApprovalCategory::ModelUpdate,
+    }
+}
+
+fn manifest_declares_artifact(state: &PluginState, artifact_id: &str, kind: ArtifactKind) -> bool {
+    let Some(manifest) = state.manifest.as_ref() else {
+        return false;
+    };
+    match kind {
+        ArtifactKind::Plugin => manifest
+            .artifacts
+            .iter()
+            .any(|requirement| requirement.artifact_id == artifact_id),
+        ArtifactKind::Sidecar => manifest
+            .sidecars
+            .iter()
+            .any(|requirement| requirement.artifact_id == artifact_id),
+        // Models are selected by the model configuration rather than by the
+        // executable-plugin requirement list.
+        ArtifactKind::Model => true,
     }
 }
 
@@ -1976,6 +2199,14 @@ impl BrokerHub {
         state: &PluginState,
         url: &str,
     ) -> Result<BrokerResponse, BrokerError> {
+        let parsed = url::Url::parse(url)
+            .map_err(|e| BrokerError::new(BrokerErrorCode::InvalidTarget, e.to_string()))?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidTarget,
+                "external target must be an http(s) URL",
+            ));
+        }
         self.approve(plugin, state, ApprovalCategory::Platform, url)
             .await?;
         #[cfg(unix)]
@@ -2102,6 +2333,7 @@ mod tests {
                 &[],
                 Some("api_key"),
                 None,
+                Some("https://1.1.1.1"),
                 None,
             )
             .await
@@ -2113,6 +2345,47 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("authorization header");
         assert_eq!(authorization, "Bearer sk-test-123");
+    }
+
+    #[tokio::test]
+    async fn manifest_ask_caps_an_allow_policy_to_confirmation() {
+        let mut policy = ApprovalPolicy::default();
+        policy
+            .categories
+            .insert(ApprovalCategory::FsRead, ApprovalMode::Allow);
+        let config = PluginConfig {
+            enabled: true,
+            approval: policy,
+            list: HashMap::from([("web".to_string(), PluginEntry::default())]),
+            ..PluginConfig::default()
+        };
+        let mut full = ene_config::EneConfig::default();
+        full.set_section(&config).expect("set plugin section");
+        let mut hub = BrokerHub::from_config(&full).expect("hub");
+        let state = PluginState {
+            manifest: Some(PluginManifest {
+                permissions: vec![ManifestPermission {
+                    category: ApprovalCategory::FsRead,
+                    max: ApprovalMode::Ask,
+                }],
+                ..crate::manifest::builtin_manifest("web").expect("web manifest")
+            }),
+            digest: None,
+            fs_grants: Vec::new(),
+            credentials: BTreeMap::new(),
+            processes: Mutex::new(HashMap::new()),
+        };
+        Arc::get_mut(&mut hub)
+            .expect("sole hub owner")
+            .plugins
+            .insert("web".to_string(), state);
+        let state = hub.plugins.get("web").expect("state");
+        let error = hub
+            .approve("web", state, ApprovalCategory::FsRead, "target")
+            .await
+            .expect_err("manifest Ask must require a responder");
+        assert_eq!(error.code, BrokerErrorCode::Denied);
+        assert!(error.message.contains("user"));
     }
 
     /// A named credential the host does not hold fails the request before
@@ -2167,6 +2440,7 @@ mod tests {
                 &[],
                 Some("api_key"),
                 None,
+                Some("https://1.1.1.1"),
                 None,
             )
             .await
@@ -2229,6 +2503,7 @@ mod tests {
                 &[],
                 Some("api_key"),
                 Some("x-api-key"),
+                Some("https://1.1.1.1"),
                 None,
             )
             .await

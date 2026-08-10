@@ -157,7 +157,7 @@ disables memory features (chat still works without persistence).
     "enabled": true,
     "list": {
       "fs": { "enable": true },
-      "web": { "enable": true, "brave_api_key": "", "exa_api_key": "", "tavily_api_key": "" },
+      "web": { "enable": true },
       "homeassistant": { "enable": true, "base_url": "http://homeassistant.local:8123", "token": "" }
     },
     "mcp_servers": [],
@@ -166,9 +166,9 @@ disables memory features (chat still works without persistence).
 }
 ```
 
-- `tools.list.<name>.enable` turns a built-in tool plugin on or off. Each
-  tool defines its own extra keys (API keys, URLs) via
-  `define_tool_config!`.
+- `tools.list.<name>.enable` turns a built-in tool plugin on or off. New
+  plugin configuration lives under `plugins.list.<name>`; host-owned secrets
+  use its `credentials` map.
 - `tools.mcp_servers` attaches external MCP servers (see
   [MCP servers guide](guides/tools/mcp-servers.md)).
 - `tools.rag` configures embedding-based tool selection (the `tool` feature
@@ -194,7 +194,11 @@ disables memory features (chat still works without persistence).
 Each key names a plugin binary (`plugins.list.<name>`), and each plugin
 declares its own configuration schema (`config`) plus optional named
 `profiles` (model presets). The host passes the matching section to the
-plugin over IPC at startup. See [Plugins & MCP](concepts/plugins-and-mcp.md).
+plugin over IPC at startup. Host-owned credentials belong in the entry's
+`credentials` map and are injected by the network broker; they are never
+included in `config`. For example, web search keys use
+`plugins.list.web.credentials.exa_api_key` and
+`plugins.list.web.credentials.tavily_api_key`. See [Plugins & MCP](concepts/plugins-and-mcp.md).
 
 ## `desktop.*` — desktop app
 

@@ -242,16 +242,19 @@
         "enable": true
       },
       "web": {
-        "brave_api_key": "",
-        "enable": true,
-        "exa_api_key": "",
-        "tavily_api_key": ""
+        "enable": true
       }
     },
     "mcp_servers": []
   },
   "plugins": {
     "list": {
+      "web": {
+        "credentials": {
+          "exa_api_key": "",
+          "tavily_api_key": ""
+        }
+      },
       "llama-cpp": {
         "config": {
           "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",

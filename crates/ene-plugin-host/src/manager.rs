@@ -32,6 +32,7 @@ use crate::factory::IpcLlmProviderFactory;
 use crate::health::PluginHealthEvent;
 use crate::ipc_plugin::IpcPluginConnection;
 use crate::ipc_vad::IpcVadFactory;
+use crate::manifest::{ManifestStore, builtin_manifest};
 use crate::mcp_config::McpTransport;
 use crate::mcp_registry::{McpToolRegistry, redacted_endpoint};
 use crate::stt_factory::IpcSttProviderFactory;
@@ -432,21 +433,29 @@ pub(crate) fn build_plugin_sandbox(
     allowed_read.push(ene_config::assets_dir().to_path_buf());
     #[cfg(unix)]
     {
-        allowed_write.push(ene_config::plugin_socket_dir());
-        allowed_write.push(ene_config::paths::tool_socket_dir());
+        let plugin_socket_dir = ene_config::plugin_socket_dir();
+        let tool_socket_dir = ene_config::paths::tool_socket_dir();
+        allowed_read.push(plugin_socket_dir.clone());
+        allowed_read.push(tool_socket_dir.clone());
+        allowed_write.push(plugin_socket_dir);
+        allowed_write.push(tool_socket_dir);
     }
+    allowed_read.push(temp_dir.to_path_buf());
     allowed_write.push(temp_dir.to_path_buf());
     for extra in &config.allowed_read_paths {
         allowed_read.push(extra.into());
     }
     for extra in &config.allowed_write_paths {
-        allowed_write.push(extra.into());
+        let path: std::path::PathBuf = extra.into();
+        allowed_read.push(path.clone());
+        allowed_write.push(path);
     }
     for grant in fs_grants {
         let Ok(path) = std::path::PathBuf::from(&grant.path).canonicalize() else {
             continue;
         };
         if grant.write {
+            allowed_read.push(path.clone());
             allowed_write.push(path);
         } else if grant.read {
             allowed_read.push(path);
@@ -481,6 +490,38 @@ pub(crate) fn build_plugin_sandbox(
         "Applying OS sandbox to plugin"
     );
     Some(spec)
+}
+
+fn sandbox_fs_grants(
+    name: &str,
+    entry: &crate::config::PluginEntry,
+    manifest_store: &ManifestStore,
+) -> Vec<crate::config::FsGrantConfig> {
+    let manifest = match &entry.manifest {
+        Some(signed) => manifest_store.verify(signed, name).ok(),
+        None => builtin_manifest(name),
+    };
+    let Some(manifest) = manifest else {
+        return Vec::new();
+    };
+    entry
+        .fs_grants
+        .iter()
+        .filter_map(|grant| {
+            let slot = manifest
+                .fs_slots
+                .iter()
+                .find(|slot| slot.name == grant.slot)?;
+            let read = grant.read && slot.read;
+            let write = grant.write && slot.write;
+            (read || write).then(|| crate::config::FsGrantConfig {
+                slot: grant.slot.clone(),
+                path: grant.path.clone(),
+                read,
+                write,
+            })
+        })
+        .collect()
 }
 
 /// Applies a sandbox spec to a command's child (Linux `pre_exec`, Windows
@@ -1044,6 +1085,7 @@ impl PluginHostManager {
         }
 
         let (health_tx, health_rx) = mpsc::unbounded_channel::<PluginHealthEvent>();
+        let manifest_store = ManifestStore::new(&plugin_config.trusted_publishers);
 
         let mut supervised: Vec<Arc<Mutex<SupervisedPlugin>>> = Vec::new();
         let mut connections: Vec<Arc<IpcPluginConnection>> = Vec::new();
@@ -1119,6 +1161,7 @@ impl PluginHostManager {
                 continue;
             }
 
+            let sandbox_grants = sandbox_fs_grants(name, entry, &manifest_store);
             match Self::start_plugin(
                 name,
                 entry.delivered_config(name),
@@ -1129,7 +1172,7 @@ impl PluginHostManager {
                     .sandbox
                     .clone()
                     .unwrap_or_else(|| plugin_config.sandbox.clone()),
-                &entry.fs_grants,
+                &sandbox_grants,
                 db_tokens.get(name).cloned(),
                 Duration::from_millis(plugin_config.handshake_timeout_ms),
                 plugin_config.max_concurrent,
