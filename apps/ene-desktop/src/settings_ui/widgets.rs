@@ -7,8 +7,8 @@ use crate::ai_bridge::AiBridge;
 use crate::character_state::{AnimationControl, EmotionCommand, EmotionQueue};
 use crate::component::ui::UiStateComponent;
 use crate::settings::{
-    CharacterSettings, EditorIssue, EditorSeverity, GraphicsQuality, GraphicsSettings, UiState,
-    cycle_graphics_quality, graphics_quality_label,
+    CharacterSettings, EditorIssue, EditorSeverity, GraphicsQuality, UiState,
+    graphics_quality_label,
 };
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
@@ -29,13 +29,13 @@ use std::sync::Arc;
 pub enum SettingsAction {
     PrevCharacter,
     NextCharacter,
+    SelectCharacter(usize),
     PrevMotion,
     NextMotion,
+    SelectMotion(usize),
     TogglePlay,
     #[cfg(target_os = "linux")]
     ToggleDebugOverlay,
-    GraphicsQualityDown,
-    GraphicsQualityUp,
     LookAtStrengthDown,
     LookAtStrengthUp,
     ModelScaleDown,
@@ -56,8 +56,6 @@ pub enum SettingsAction {
     /// colliders (debug)" checkbox on the Character page.
     ToggleColliderDebug,
     ToggleInputRegionDebug,
-    LanguageDown,
-    LanguageUp,
     /// Load the character card at `path` into the editor buffers
     /// (Character Card editor page).
     LoadCharacterCard {
@@ -94,12 +92,9 @@ pub fn apply_action(
                 settings.characters.len(),
                 -1,
             );
-            if defer_character_switch_if_unsaved(idx, world, ui_entity) {
+            if !apply_character_selection(idx, settings, emotion_queue, now_secs, world, ui_entity)
+            {
                 return;
-            }
-            push_default_expression(settings.select_character(idx), emotion_queue, now_secs);
-            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-                state.0.reset_character_editor();
             }
         }
         SettingsAction::NextCharacter => {
@@ -108,12 +103,15 @@ pub fn apply_action(
                 settings.characters.len(),
                 1,
             );
-            if defer_character_switch_if_unsaved(idx, world, ui_entity) {
+            if !apply_character_selection(idx, settings, emotion_queue, now_secs, world, ui_entity)
+            {
                 return;
             }
-            push_default_expression(settings.select_character(idx), emotion_queue, now_secs);
-            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-                state.0.reset_character_editor();
+        }
+        SettingsAction::SelectCharacter(idx) => {
+            if !apply_character_selection(idx, settings, emotion_queue, now_secs, world, ui_entity)
+            {
+                return;
             }
         }
         SettingsAction::PrevMotion => {
@@ -132,6 +130,14 @@ pub fn apply_action(
             settings.character_state.needs_respawn = true;
             settings.mark_dirty();
         }
+        SettingsAction::SelectMotion(idx) => {
+            let motion_len = settings.current_entry().map_or(0, |e| e.motion_names.len());
+            if idx < motion_len && idx != settings.character_state.selected_motion {
+                settings.character_state.selected_motion = idx;
+                settings.character_state.motion_override = None;
+                settings.character_state.needs_respawn = true;
+            }
+        }
         SettingsAction::TogglePlay => {
             animation.toggle_playing();
             if let Some(mut ui_anim) = world.get_mut::<crate::component::ui::UiAnimation>(ui_entity)
@@ -145,16 +151,6 @@ pub fn apply_action(
                 ui_state.0.debug_overlay_visible = !ui_state.0.debug_overlay_visible;
             }
             settings.mark_dirty();
-        }
-        SettingsAction::GraphicsQualityDown => {
-            let current = settings.graphics().quality;
-            let next = cycle_graphics_quality(current, -1);
-            settings.set_graphics(GraphicsSettings { quality: next });
-        }
-        SettingsAction::GraphicsQualityUp => {
-            let current = settings.graphics().quality;
-            let next = cycle_graphics_quality(current, 1);
-            settings.set_graphics(GraphicsSettings { quality: next });
         }
         SettingsAction::LookAtStrengthDown => {
             adjust_f32(&mut settings.character_state.look_at_strength, -0.05);
@@ -200,20 +196,6 @@ pub fn apply_action(
                 ui_state.0.show_input_region_debug = !ui_state.0.show_input_region_debug;
             }
         }
-        SettingsAction::LanguageDown => {
-            let current = settings.language();
-            let next = crate::settings::cycle_language(current, -1);
-            settings.set_language(next);
-            crate::i18n::select_language(next);
-            settings.sync_classifier_language_from_ui();
-        }
-        SettingsAction::LanguageUp => {
-            let current = settings.language();
-            let next = crate::settings::cycle_language(current, 1);
-            settings.set_language(next);
-            crate::i18n::select_language(next);
-            settings.sync_classifier_language_from_ui();
-        }
         SettingsAction::LoadCharacterCard { path } => {
             load_character_card(&path, world, ui_entity);
         }
@@ -230,6 +212,24 @@ pub fn apply_action(
 
     settings.clamp_runtime_values();
     settings.mark_dirty();
+}
+
+fn apply_character_selection(
+    idx: usize,
+    settings: &mut CharacterSettings,
+    emotion_queue: Option<&mut EmotionQueue>,
+    now_secs: f64,
+    world: &mut World,
+    ui_entity: Entity,
+) -> bool {
+    if defer_character_switch_if_unsaved(idx, world, ui_entity) {
+        return false;
+    }
+    push_default_expression(settings.select_character(idx), emotion_queue, now_secs);
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.reset_character_editor();
+    }
+    true
 }
 
 /// Load the character card at `path` into the editor buffers on
@@ -882,6 +882,15 @@ pub fn format_quality_label(lang: crate::settings::Language, quality: GraphicsQu
 pub(crate) struct EditableComboResponse {
     pub response: egui::Response,
     pub selection_changed: bool,
+}
+
+impl EditableComboResponse {
+    /// Popup choices commit immediately; free-form text commits only after
+    /// the editor loses focus so partially typed identifiers never reach the
+    /// live configuration.
+    pub fn commit_requested(&self) -> bool {
+        self.selection_changed || self.response.lost_focus()
+    }
 }
 
 /// Render a combo box of known choices next to a free-form single-line

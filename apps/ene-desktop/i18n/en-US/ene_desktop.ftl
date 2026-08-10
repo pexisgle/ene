@@ -14,6 +14,7 @@ off = Off
 none = None
 empty-parentheses = (empty)
 settings = Settings
+toggle = Toggle
 quit = Quit
 send = Send
 tray-chat = Chat
@@ -28,6 +29,7 @@ chat-greeting-failed = Failed to set greeting: { $error }
 
 # Graphics
 graphics = Graphics
+display = Display
 graphics-quality = Graphics Quality
 shadow-quality = Shadow Quality
 antialiasing = Antialiasing
@@ -486,6 +488,8 @@ audio-open-voice-settings = Open Voice Settings
 audio-tts-presets = Quick Presets
 audio-preset-kokoro = Kokoro 82M (Local, Recommended)
 audio-preset-openai = OpenAI TTS (Cloud)
+audio-preset-kokoro-tooltip = Apply the local Kokoro-82M ONNX engine settings.
+audio-preset-openai-tooltip = Apply the OpenAI TTS cloud API settings.
 audio-preset-none = Disabled
 
 # Permission
@@ -635,3 +639,52 @@ approvals-inherit = Inherit
 approvals-ask = Ask
 approvals-allow = Allow
 approvals-deny = Deny
+
+# Settings navigation
+page-category-basics = Basics
+page-category-ai-voice = AI & Voice
+page-category-data-access = Data & Access
+page-category-system = System
+
+# Settings search
+settings-search-placeholder = Search settings…
+settings-search-clear = Clear
+settings-search-empty = No settings found for "{ $query }".
+
+# Settings page descriptions
+page-character-description = Active character, default expression, and scene transform.
+page-character-card-description = Edit the active character card: identity, lorebook, and motion catalog.
+page-graphics-description = Render quality, UI language, and color theme.
+page-ai-description = Chat providers, models, API keys, embeddings, and provider health.
+page-voice-description = Speech-to-text, text-to-speech, microphone, and VAD.
+page-features-description = Capability toggles for voice, proactive speech, mind, and tools.
+page-accessibility-description = Spotlight and caption overlays.
+page-memory-description = Browse, recall, approve, and manage memories.
+page-memory-ledger-description = Full review of every stored memory with edit and delete.
+page-permissions-description = Approve pending tool requests and manage session grants.
+page-approvals-description = Configure plugin capability policies and emergency stop.
+page-connectors-description = External service accounts, health, and permission grants.
+page-sessions-description = Search, export, import, and archive conversation sessions.
+page-debug-description = Diagnostic overlays and pipeline detail.
+
+# Settings section titles
+section-character-model = Character & Animation
+section-character-transform = Position & Scale
+section-character-expressions = Expression Test
+section-graphics-quality = Quality
+section-graphics-language = Language
+section-graphics-theme = Theme
+section-ai-chat = Chat
+section-ai-embedding = Embeddings
+section-ai-health = Provider Health
+section-features-capabilities = Capabilities
+section-accessibility-overlays = Overlays
+section-debug-overlays = Debug Overlays
+section-debug-pipeline = Pipeline
+
+# Theme
+theme = Theme
+theme-hint = Color scheme for every app window. System follows the OS setting.
+theme-system = System
+theme-light = Light
+theme-dark = Dark

@@ -186,8 +186,19 @@ impl SpotlightWindow {
         let mut input_buf = String::new();
         let mut selected_idx = 0;
 
+        crate::theme::apply_egui_visuals(&self.egui_ctx);
+        let overlay_fill = if self
+            .egui_ctx
+            .style_of(self.egui_ctx.theme())
+            .visuals
+            .dark_mode
+        {
+            egui::Color32::from_black_alpha(210)
+        } else {
+            egui::Color32::from_white_alpha(235)
+        };
         let frame_style = egui::Frame {
-            fill: egui::Color32::from_black_alpha(210),
+            fill: overlay_fill,
             inner_margin: egui::Margin::same(10),
             corner_radius: egui::CornerRadius::same(8),
             ..Default::default()
@@ -205,7 +216,6 @@ impl SpotlightWindow {
         egui::CentralPanel::default()
             .frame(frame_style)
             .show(&mut panel_ui, |ui| {
-                crate::settings_ui::apply_egui_visuals(ui.ctx());
                 ui.horizontal(|ui| {
                     let drag_bar = ui.add(
                         egui::Label::new(

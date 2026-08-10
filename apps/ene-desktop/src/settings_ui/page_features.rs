@@ -5,6 +5,9 @@
 
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
+use crate::settings_ui::components::{
+    BadgeTone, section_card, setting_row, slider_row, status_badge, toggle_row, warning_box,
+};
 use crate::settings_ui::input::SettingsInputState;
 use crate::settings_ui::widgets::editable_combo;
 use bevy_ecs::world::World;
@@ -38,30 +41,40 @@ pub fn render(
 ) {
     ui.vertical(|ui| {
         ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "features-hint"));
-        ui.separator();
-
-        render_mind(ui, settings, ai);
-        ui.separator();
-        render_tools(ui, settings, ai);
-        ui.separator();
-        render_audio(ui, settings, ai, input, world);
+        ui.add_space(6.0);
+        section_card(
+            ui,
+            "features-mind",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "features-mind"),
+            |ui| render_mind(ui, settings, ai),
+        );
+        section_card(
+            ui,
+            "features-tools",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "features-tools"),
+            |ui| render_tools(ui, settings, ai),
+        );
+        section_card(
+            ui,
+            "features-capabilities",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "section-features-capabilities"),
+            |ui| render_audio(ui, settings, ai, input, world),
+        );
     });
 }
 
 fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
-    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "features-mind"));
-
     let mut memory = settings.config_section::<ene_store::StoreConfig>();
     let mut mind = settings.config_section::<ene_mind::MindConfig>();
 
     let mut memory_enabled = memory.enabled;
-    if ui
-        .checkbox(
-            &mut memory_enabled,
-            i18n_embed_fl::fl!(crate::i18n::loader(), "enable-long-term-memory"),
-        )
-        .changed()
-    {
+    if toggle_row(
+        ui,
+        "features_memory",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "enable-long-term-memory"),
+        "",
+        &mut memory_enabled,
+    ) {
         memory.enabled = memory_enabled;
         settings.set_config_section(&memory);
         settings.mark_dirty();
@@ -69,130 +82,132 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
     }
 
     let mut emotion_enabled = mind.emotion.enabled;
-    if ui
-        .checkbox(
-            &mut emotion_enabled,
-            i18n_embed_fl::fl!(crate::i18n::loader(), "enable-emotion"),
-        )
-        .changed()
-    {
+    if toggle_row(
+        ui,
+        "features_emotion",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "enable-emotion"),
+        "",
+        &mut emotion_enabled,
+    ) {
         mind.emotion.enabled = emotion_enabled;
         persist_mind(settings, ai, &mind);
     }
 
-    ui.separator();
+    ui.add_space(6.0);
     ui.label(i18n_embed_fl::fl!(
         crate::i18n::loader(),
         "proactive-speech"
     ));
+    ui.add_space(2.0);
 
     let mut proactive_enabled = mind.proactive.enabled;
-    if ui
-        .checkbox(
-            &mut proactive_enabled,
-            i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-enabled"),
-        )
-        .changed()
-    {
+    if toggle_row(
+        ui,
+        "features_proactive",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-enabled"),
+        "",
+        &mut proactive_enabled,
+    ) {
         mind.proactive.enabled = proactive_enabled;
         persist_mind(settings, ai, &mind);
     }
 
     ui.add_enabled_ui(mind.proactive.enabled, |ui| {
         let mut paused = mind.proactive.paused;
-        if ui
-            .checkbox(
-                &mut paused,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-pause"),
-            )
-            .on_hover_text(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "proactive-pause-hint"
-            ))
-            .changed()
-        {
+        if toggle_row(
+            ui,
+            "features_proactive_pause",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-pause"),
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-pause-hint"),
+            &mut paused,
+        ) {
             mind.proactive.paused = paused;
             persist_mind(settings, ai, &mind);
         }
 
-        ui.horizontal(|ui| {
-            ui.label(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "proactive-interval"
-            ));
-            let mut value = mind.proactive.interval_seconds as i32;
-            if ui
-                .add(egui::DragValue::new(&mut value).range(1..=3600))
-                .changed()
-            {
-                mind.proactive.interval_seconds = value.max(1) as u64;
-                persist_mind(settings, ai, &mind);
-            }
-        });
+        setting_row(
+            ui,
+            "proactive_interval_row",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-interval"),
+            "",
+            |ui| {
+                let mut value = mind.proactive.interval_seconds as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut value).range(1..=3600))
+                    .changed()
+                {
+                    mind.proactive.interval_seconds = value.max(1) as u64;
+                    persist_mind(settings, ai, &mind);
+                }
+            },
+        );
 
-        ui.horizontal(|ui| {
-            ui.label(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "proactive-cooldown"
-            ));
-            let mut value = mind.proactive.cooldown_seconds as i32;
-            if ui
-                .add(egui::DragValue::new(&mut value).range(0..=86_400))
-                .changed()
-            {
-                mind.proactive.cooldown_seconds = value.max(0) as u64;
-                persist_mind(settings, ai, &mind);
-            }
-        });
+        setting_row(
+            ui,
+            "proactive_cooldown_row",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-cooldown"),
+            "",
+            |ui| {
+                let mut value = mind.proactive.cooldown_seconds as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut value).range(0..=86_400))
+                    .changed()
+                {
+                    mind.proactive.cooldown_seconds = value.max(0) as u64;
+                    persist_mind(settings, ai, &mind);
+                }
+            },
+        );
 
-        ui.horizontal(|ui| {
-            ui.label(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "proactive-min-idle"
-            ));
-            let mut value = mind.proactive.min_idle_seconds as i32;
-            if ui
-                .add(egui::DragValue::new(&mut value).range(0..=86_400))
-                .changed()
-            {
-                mind.proactive.min_idle_seconds = value.max(0) as u64;
-                persist_mind(settings, ai, &mind);
-            }
-        });
+        setting_row(
+            ui,
+            "proactive_min_idle_row",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-min-idle"),
+            "",
+            |ui| {
+                let mut value = mind.proactive.min_idle_seconds as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut value).range(0..=86_400))
+                    .changed()
+                {
+                    mind.proactive.min_idle_seconds = value.max(0) as u64;
+                    persist_mind(settings, ai, &mind);
+                }
+            },
+        );
 
-        ui.horizontal(|ui| {
-            ui.label(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "proactive-fatigue-threshold"
-            ));
-            let mut value = mind.proactive.fatigue_suppression_threshold;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut value)
-                        .range(0.0..=1.0)
-                        .speed(0.01),
-                )
-                .changed()
-            {
-                mind.proactive.fatigue_suppression_threshold = value.clamp(0.0, 1.0);
-                persist_mind(settings, ai, &mind);
-            }
-        });
-        ui.weak(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "proactive-fatigue-threshold-hint"
-        ));
+        setting_row(
+            ui,
+            "proactive_fatigue_row",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-fatigue-threshold"),
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-fatigue-threshold-hint"),
+            |ui| {
+                let mut value = mind.proactive.fatigue_suppression_threshold;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut value)
+                            .range(0.0..=1.0)
+                            .speed(0.01),
+                    )
+                    .changed()
+                {
+                    mind.proactive.fatigue_suppression_threshold = value.clamp(0.0, 1.0);
+                    persist_mind(settings, ai, &mind);
+                }
+            },
+        );
 
-        ui.separator();
+        ui.add_space(6.0);
         ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours"));
+        ui.add_space(2.0);
         let mut quiet_enabled = mind.proactive.quiet_hours.enabled;
-        if ui
-            .checkbox(
-                &mut quiet_enabled,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-enabled"),
-            )
-            .changed()
-        {
+        if toggle_row(
+            ui,
+            "features_quiet_hours",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-enabled"),
+            "",
+            &mut quiet_enabled,
+        ) {
             mind.proactive.quiet_hours.enabled = quiet_enabled;
             persist_mind(settings, ai, &mind);
         }
@@ -207,7 +222,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             let status = if mind.proactive.paused {
                 Some((
                     i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-paused-override"),
-                    egui::Color32::from_rgb(0xc0, 0x6a, 0x1b),
+                    BadgeTone::Warn,
                 ))
             } else if eval.active {
                 Some((
@@ -216,13 +231,13 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                         i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-active"),
                         eval.local_time
                     ),
-                    egui::Color32::from_rgb(0xc0, 0x6a, 0x1b),
+                    BadgeTone::Warn,
                 ))
             } else {
                 None
             };
-            if let Some((text, color)) = status {
-                ui.colored_label(color, text);
+            if let Some((text, tone)) = status {
+                status_badge(ui, &text, tone);
             } else {
                 ui.weak(format!(
                     "{} ({})",
@@ -231,41 +246,44 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                 ));
             }
 
-            ui.horizontal(|ui| {
-                ui.label(i18n_embed_fl::fl!(
-                    crate::i18n::loader(),
-                    "quiet-hours-timezone"
-                ));
-                let mut timezone = mind.proactive.quiet_hours.timezone.clone();
-                let mut choices: Vec<(String, String)> = vec![(
-                    String::new(),
-                    i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-timezone-system"),
-                )];
-                let mut zones: Vec<String> = chrono_tz::TZ_VARIANTS
-                    .iter()
-                    .map(|zone| zone.name().to_string())
-                    .collect();
-                zones.sort();
-                choices.extend(zones.into_iter().map(|name| (name.clone(), name.clone())));
-                if !timezone.is_empty() && !choices.iter().any(|(value, _)| value == &timezone) {
-                    choices.insert(0, (timezone.clone(), timezone.clone()));
-                }
-                let combo = editable_combo(
-                    ui,
-                    "quiet_hours_timezone_combo",
-                    &mut timezone,
-                    &choices,
-                    180.0,
-                );
-                if combo.response.changed() || combo.selection_changed {
-                    mind.proactive.quiet_hours.timezone = timezone.trim().to_string();
-                    persist_mind(settings, ai, &mind);
-                }
-            });
+            setting_row(
+                ui,
+                "quiet_hours_timezone_row",
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-timezone"),
+                "",
+                |ui| {
+                    let mut timezone = mind.proactive.quiet_hours.timezone.clone();
+                    let mut choices: Vec<(String, String)> = vec![(
+                        String::new(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-timezone-system"),
+                    )];
+                    let mut zones: Vec<String> = chrono_tz::TZ_VARIANTS
+                        .iter()
+                        .map(|zone| zone.name().to_string())
+                        .collect();
+                    zones.sort();
+                    choices.extend(zones.into_iter().map(|name| (name.clone(), name.clone())));
+                    if !timezone.is_empty() && !choices.iter().any(|(value, _)| value == &timezone)
+                    {
+                        choices.insert(0, (timezone.clone(), timezone.clone()));
+                    }
+                    let combo = editable_combo(
+                        ui,
+                        "quiet_hours_timezone_combo",
+                        &mut timezone,
+                        &choices,
+                        180.0,
+                    );
+                    if combo.commit_requested() {
+                        mind.proactive.quiet_hours.timezone = timezone.trim().to_string();
+                        persist_mind(settings, ai, &mind);
+                    }
+                },
+            );
             if !eval.timezone_valid {
-                ui.colored_label(
-                    egui::Color32::from_rgb(0xb3, 0x2d, 0x2d),
-                    i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-timezone-invalid"),
+                warning_box(
+                    ui,
+                    &i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-timezone-invalid"),
                 );
             }
             ui.weak(i18n_embed_fl::fl!(
@@ -280,87 +298,39 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             let mut days_changed = false;
             ui.horizontal_wrapped(|ui| {
                 let days = &mut mind.proactive.quiet_hours.days;
-                if ui
-                    .checkbox(
-                        &mut days.monday,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-monday"),
-                    )
-                    .changed()
-                {
-                    days_changed = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut days.tuesday,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-tuesday"),
-                    )
-                    .changed()
-                {
-                    days_changed = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut days.wednesday,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-wednesday"),
-                    )
-                    .changed()
-                {
-                    days_changed = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut days.thursday,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-thursday"),
-                    )
-                    .changed()
-                {
-                    days_changed = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut days.friday,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-friday"),
-                    )
-                    .changed()
-                {
-                    days_changed = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut days.saturday,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-saturday"),
-                    )
-                    .changed()
-                {
-                    days_changed = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut days.sunday,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-day-sunday"),
-                    )
-                    .changed()
-                {
-                    days_changed = true;
+                for (field, key) in [
+                    (&mut days.monday, "quiet-hours-day-monday"),
+                    (&mut days.tuesday, "quiet-hours-day-tuesday"),
+                    (&mut days.wednesday, "quiet-hours-day-wednesday"),
+                    (&mut days.thursday, "quiet-hours-day-thursday"),
+                    (&mut days.friday, "quiet-hours-day-friday"),
+                    (&mut days.saturday, "quiet-hours-day-saturday"),
+                    (&mut days.sunday, "quiet-hours-day-sunday"),
+                ] {
+                    if ui.checkbox(field, crate::i18n::loader().get(key)).changed() {
+                        days_changed = true;
+                    }
                 }
             });
             if days_changed {
                 persist_mind(settings, ai, &mind);
             }
 
-            ui.horizontal(|ui| {
-                ui.label(i18n_embed_fl::fl!(
-                    crate::i18n::loader(),
-                    "quiet-hours-start"
-                ));
-                if render_time(ui, &mut mind.proactive.quiet_hours.start) {
-                    persist_mind(settings, ai, &mind);
-                }
-                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-end"));
-                if render_time(ui, &mut mind.proactive.quiet_hours.end) {
-                    persist_mind(settings, ai, &mind);
-                }
-            });
+            setting_row(
+                ui,
+                "quiet_hours_time_row",
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-start"),
+                "",
+                |ui| {
+                    if render_time(ui, &mut mind.proactive.quiet_hours.start) {
+                        persist_mind(settings, ai, &mind);
+                    }
+                    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-end"));
+                    if render_time(ui, &mut mind.proactive.quiet_hours.end) {
+                        persist_mind(settings, ai, &mind);
+                    }
+                },
+            );
 
             ui.label(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
@@ -369,71 +339,64 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             let mut suppress_changed = false;
             {
                 let suppress = &mut mind.proactive.quiet_hours.suppress;
-                if ui
-                    .checkbox(
+                for (field, key) in [
+                    (
                         &mut suppress.notifications,
-                        i18n_embed_fl::fl!(
-                            crate::i18n::loader(),
-                            "quiet-hours-suppress-notifications"
-                        ),
-                    )
-                    .changed()
-                {
-                    suppress_changed = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut suppress.decisions,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-suppress-decisions"),
-                    )
-                    .changed()
-                {
-                    suppress_changed = true;
-                }
-                if ui
-                    .checkbox(
-                        &mut suppress.tts,
-                        i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-suppress-tts"),
-                    )
-                    .changed()
-                {
-                    suppress_changed = true;
+                        "quiet-hours-suppress-notifications",
+                    ),
+                    (&mut suppress.decisions, "quiet-hours-suppress-decisions"),
+                    (&mut suppress.tts, "quiet-hours-suppress-tts"),
+                ] {
+                    if ui.checkbox(field, crate::i18n::loader().get(key)).changed() {
+                        suppress_changed = true;
+                    }
                 }
             }
             if suppress_changed {
                 persist_mind(settings, ai, &mind);
             }
 
-            ui.horizontal(|ui| {
-                ui.label(i18n_embed_fl::fl!(
-                    crate::i18n::loader(),
-                    "quiet-hours-policy"
-                ));
-                let mut selected = mind.proactive.quiet_hours.policy;
-                egui::ComboBox::from_id_salt("quiet_hours_policy")
-                    .selected_text(quiet_hours_policy_label(selected))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut selected,
-                            ene_mind::QuietHoursPolicy::Discard,
-                            i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-policy-discard"),
-                        );
-                        ui.selectable_value(
-                            &mut selected,
-                            ene_mind::QuietHoursPolicy::Queue,
-                            i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-policy-queue"),
-                        );
-                        ui.selectable_value(
-                            &mut selected,
-                            ene_mind::QuietHoursPolicy::Summary,
-                            i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-policy-summary"),
-                        );
-                    });
-                if selected != mind.proactive.quiet_hours.policy {
-                    mind.proactive.quiet_hours.policy = selected;
-                    persist_mind(settings, ai, &mind);
-                }
-            });
+            setting_row(
+                ui,
+                "quiet_hours_policy_row",
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-policy"),
+                "",
+                |ui| {
+                    let mut selected = mind.proactive.quiet_hours.policy;
+                    egui::ComboBox::from_id_salt("quiet_hours_policy")
+                        .selected_text(quiet_hours_policy_label(selected))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut selected,
+                                ene_mind::QuietHoursPolicy::Discard,
+                                i18n_embed_fl::fl!(
+                                    crate::i18n::loader(),
+                                    "quiet-hours-policy-discard"
+                                ),
+                            );
+                            ui.selectable_value(
+                                &mut selected,
+                                ene_mind::QuietHoursPolicy::Queue,
+                                i18n_embed_fl::fl!(
+                                    crate::i18n::loader(),
+                                    "quiet-hours-policy-queue"
+                                ),
+                            );
+                            ui.selectable_value(
+                                &mut selected,
+                                ene_mind::QuietHoursPolicy::Summary,
+                                i18n_embed_fl::fl!(
+                                    crate::i18n::loader(),
+                                    "quiet-hours-policy-summary"
+                                ),
+                            );
+                        });
+                    if selected != mind.proactive.quiet_hours.policy {
+                        mind.proactive.quiet_hours.policy = selected;
+                        persist_mind(settings, ai, &mind);
+                    }
+                },
+            );
             ui.weak(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
                 "quiet-hours-policy-hint"
@@ -444,31 +407,33 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             ));
         });
 
+        ui.add_space(6.0);
         ui.label(i18n_embed_fl::fl!(
             crate::i18n::loader(),
             "proactive-sources"
         ));
+        ui.add_space(2.0);
 
         let mut conversation = mind.proactive.sources.conversation;
-        if ui
-            .checkbox(
-                &mut conversation,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-conversation"),
-            )
-            .changed()
-        {
+        if toggle_row(
+            ui,
+            "proactive_source_conversation",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-conversation"),
+            "",
+            &mut conversation,
+        ) {
             mind.proactive.sources.conversation = conversation;
             persist_mind(settings, ai, &mind);
         }
 
         let mut activity = mind.proactive.sources.activity;
-        if ui
-            .checkbox(
-                &mut activity,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-activity"),
-            )
-            .changed()
-        {
+        if toggle_row(
+            ui,
+            "proactive_source_activity",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-activity"),
+            "",
+            &mut activity,
+        ) {
             mind.proactive.sources.activity = activity;
             persist_mind(settings, ai, &mind);
         }
@@ -478,36 +443,28 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
         });
 
         let mut screen = mind.proactive.sources.screen_summary;
-        if ui
-            .checkbox(
-                &mut screen,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-screen"),
-            )
-            .changed()
-        {
+        if toggle_row(
+            ui,
+            "proactive_source_screen",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-screen"),
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-screen-hint"),
+            &mut screen,
+        ) {
             mind.proactive.sources.screen_summary = screen;
             persist_mind(settings, ai, &mind);
         }
-        ui.weak(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "proactive-source-screen-hint"
-        ));
 
         let mut memory = mind.proactive.sources.memory;
-        if ui
-            .checkbox(
-                &mut memory,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-memory"),
-            )
-            .changed()
-        {
+        if toggle_row(
+            ui,
+            "proactive_source_memory",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-memory"),
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-memory-hint"),
+            &mut memory,
+        ) {
             mind.proactive.sources.memory = memory;
             persist_mind(settings, ai, &mind);
         }
-        ui.weak(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "proactive-source-memory-hint"
-        ));
     });
 }
 
@@ -522,41 +479,38 @@ fn render_window_title_level(
     ai: &Arc<AiBridge>,
     mind: &mut ene_mind::MindConfig,
 ) {
-    let current = mind.proactive.sources.window_title_level;
-    ui.horizontal(|ui| {
-        ui.label(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "proactive-window-title-level"
-        ));
-        let mut selected = current;
-        egui::ComboBox::from_id_salt("proactive_window_title_level")
-            .selected_text(window_title_level_label(selected))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut selected,
-                    WindowTitleLevel::AppOnly,
-                    i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-app-only"),
-                );
-                ui.selectable_value(
-                    &mut selected,
-                    WindowTitleLevel::RedactedTitle,
-                    i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-redacted"),
-                );
-                ui.selectable_value(
-                    &mut selected,
-                    WindowTitleLevel::FullTitle,
-                    i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-full"),
-                );
-            });
-        if selected != current {
-            mind.proactive.sources.window_title_level = selected;
-            persist_mind(settings, ai, mind);
-        }
-    });
-    ui.weak(i18n_embed_fl::fl!(
-        crate::i18n::loader(),
-        "proactive-window-title-hint"
-    ));
+    setting_row(
+        ui,
+        "proactive_window_title_row",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-window-title-level"),
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-window-title-hint"),
+        |ui| {
+            let mut selected = mind.proactive.sources.window_title_level;
+            egui::ComboBox::from_id_salt("proactive_window_title_level")
+                .selected_text(window_title_level_label(selected))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut selected,
+                        WindowTitleLevel::AppOnly,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-app-only"),
+                    );
+                    ui.selectable_value(
+                        &mut selected,
+                        WindowTitleLevel::RedactedTitle,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-redacted"),
+                    );
+                    ui.selectable_value(
+                        &mut selected,
+                        WindowTitleLevel::FullTitle,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-full"),
+                    );
+                });
+            if selected != mind.proactive.sources.window_title_level {
+                mind.proactive.sources.window_title_level = selected;
+                persist_mind(settings, ai, mind);
+            }
+        },
+    );
 }
 
 fn window_title_level_label(level: WindowTitleLevel) -> String {
@@ -628,19 +582,17 @@ fn sync_features(settings: &CharacterSettings, ai: &Arc<AiBridge>) {
 }
 
 fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
-    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "features-tools"));
-
     let mut tools = settings.config_section::<PluginConfig>();
     let mut rag = settings.config_section::<ToolRagConfig>();
 
     let mut tools_enabled = tools.enabled;
-    if ui
-        .checkbox(
-            &mut tools_enabled,
-            i18n_embed_fl::fl!(crate::i18n::loader(), "enable-tools"),
-        )
-        .changed()
-    {
+    if toggle_row(
+        ui,
+        "features_tools_enabled",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "enable-tools"),
+        "",
+        &mut tools_enabled,
+    ) {
         tools.enabled = tools_enabled;
         settings.set_config_section(&tools);
         settings.mark_dirty();
@@ -649,19 +601,20 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
 
     ui.add_enabled_ui(tools.enabled, |ui| {
         let mut rag_enabled = rag.enabled;
-        if ui
-            .checkbox(
-                &mut rag_enabled,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "enable-tool-rag"),
-            )
-            .changed()
-        {
+        if toggle_row(
+            ui,
+            "features_tool_rag",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "enable-tool-rag"),
+            "",
+            &mut rag_enabled,
+        ) {
             rag.enabled = rag_enabled;
             settings.set_config_section(&rag);
             settings.mark_dirty();
             sync_features(settings, ai);
         }
 
+        ui.add_space(6.0);
         ui.label(i18n_embed_fl::fl!(
             crate::i18n::loader(),
             "features-per-tool"
@@ -702,8 +655,8 @@ fn render_audio(
     input: &mut SettingsInputState,
     world: &mut World,
 ) {
-    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio"));
-
+    #[cfg(not(feature = "voice"))]
+    let _ = world;
     #[cfg(feature = "voice")]
     if input.mic_devices.is_empty() {
         input.mic_devices = crate::audio::capture::list_input_device_names();
@@ -714,83 +667,89 @@ fn render_audio(
     let mut mic_device_changed = false;
 
     // Microphone device selection (stored on the desktop section).
-    ui.horizontal(|ui| {
-        ui.label(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "audio-mic-device"
-        ));
-        let mut device = settings.mic_device().unwrap_or_default();
-        let mut choices: Vec<(String, String)> = vec![(
-            String::new(),
-            i18n_embed_fl::fl!(crate::i18n::loader(), "audio-mic-default"),
-        )];
-        choices.extend(
-            input
-                .mic_devices
-                .iter()
-                .map(|name| (name.clone(), name.clone())),
-        );
-        if !device.is_empty() && !choices.iter().any(|(value, _)| value == &device) {
-            choices.insert(0, (device.clone(), device.clone()));
-        }
-        let combo = editable_combo(
-            ui,
-            "features_mic_device_combo",
-            &mut device,
-            &choices,
-            200.0,
-        );
-        if ui
-            .button(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "audio-mic-refresh"
-            ))
-            .clicked()
-        {
-            #[cfg(feature = "voice")]
-            {
-                input.mic_devices = crate::audio::capture::list_input_device_names();
+    setting_row(
+        ui,
+        "features_mic_device_row",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-mic-device"),
+        "",
+        |ui| {
+            let mut device = settings.mic_device().unwrap_or_default();
+            let mut choices: Vec<(String, String)> = vec![(
+                String::new(),
+                i18n_embed_fl::fl!(crate::i18n::loader(), "audio-mic-default"),
+            )];
+            choices.extend(
+                input
+                    .mic_devices
+                    .iter()
+                    .map(|name| (name.clone(), name.clone())),
+            );
+            if !device.is_empty() && !choices.iter().any(|(value, _)| value == &device) {
+                choices.insert(0, (device.clone(), device.clone()));
             }
-        }
-        if combo.response.changed() || combo.selection_changed {
-            settings.set_mic_device(if device.trim().is_empty() {
-                None
-            } else {
-                Some(device.trim().to_string())
-            });
-            mic_device_changed = true;
-        }
-    });
+            let combo = editable_combo(
+                ui,
+                "features_mic_device_combo",
+                &mut device,
+                &choices,
+                200.0,
+            );
+            if ui
+                .button(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "audio-mic-refresh"
+                ))
+                .clicked()
+            {
+                #[cfg(feature = "voice")]
+                {
+                    input.mic_devices = crate::audio::capture::list_input_device_names();
+                }
+            }
+            if combo.commit_requested() {
+                settings.set_mic_device(if device.trim().is_empty() {
+                    None
+                } else {
+                    Some(device.trim().to_string())
+                });
+                mic_device_changed = true;
+            }
+        },
+    );
 
-    ui.horizontal(|ui| {
-        ui.label(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "audio-vad-threshold"
-        ));
-        let mut threshold = settings.vad_threshold();
-        if ui
-            .add(egui::Slider::new(&mut threshold, 0.0..=1.0))
-            .changed()
-        {
-            settings.set_vad_threshold(threshold);
-            changed = true;
-        }
-    });
+    let mut vad_threshold = settings.vad_threshold();
+    if slider_row(
+        ui,
+        "features_vad_threshold_row",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-vad-threshold"),
+        "",
+        &mut vad_threshold,
+        0.0..=1.0,
+        0.05,
+        |v| format!("{v:.2}"),
+    ) {
+        settings.set_vad_threshold(vad_threshold);
+        changed = true;
+    }
 
-    ui.horizontal(|ui| {
-        ui.label(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "audio-stt-provider"
-        ));
-        ui.weak(provider_display(&ai_cfg.stt.provider));
-    });
-    ui.horizontal(|ui| {
-        ui.label(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "audio-tts-provider"
-        ));
-        ui.weak(provider_display(&ai_cfg.tts.provider));
-    });
+    setting_row(
+        ui,
+        "features_stt_provider_row",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-stt-provider"),
+        "",
+        |ui| {
+            ui.weak(provider_display(&ai_cfg.stt.provider));
+        },
+    );
+    setting_row(
+        ui,
+        "features_tts_provider_row",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-provider"),
+        "",
+        |ui| {
+            ui.weak(provider_display(&ai_cfg.tts.provider));
+        },
+    );
     #[cfg(feature = "voice")]
     {
         // Display the live capture state (a dead thread after a device
@@ -799,14 +758,13 @@ fn render_audio(
         let mut enabled = world
             .get_resource::<crate::resource::beat_sync::BeatSyncRuntime>()
             .is_some_and(crate::resource::beat_sync::BeatSyncRuntime::is_running);
-        if ui
-            .checkbox(
-                &mut enabled,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "beat-sync-enabled"),
-            )
-            .on_hover_text(i18n_embed_fl::fl!(crate::i18n::loader(), "beat-sync-hint"))
-            .changed()
-        {
+        if toggle_row(
+            ui,
+            "features_beat_sync",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "beat-sync-enabled"),
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "beat-sync-hint"),
+            &mut enabled,
+        ) {
             settings.set_beat_sync_enabled(enabled);
             settings.mark_dirty();
             if let Err(e) =

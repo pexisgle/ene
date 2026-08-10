@@ -203,6 +203,7 @@ impl AiBridge {
 
     /// Report a detected system-audio beat pulse to the runtime for
     /// broadcast on the chat bus. Called from the beat-sync capture thread.
+    #[cfg(feature = "voice")]
     pub fn report_beat_pulse(&self, bpm: f32, intensity: f32) {
         if let Err(e) = self.handle.report_beat_pulse(bpm, intensity) {
             tracing::warn!(
@@ -330,6 +331,7 @@ impl AiBridge {
     /// Build an STT provider through the runtime's plugin host. Blocks the
     /// calling thread while the actor answers; used by the microphone
     /// capture path, which runs on the UI thread.
+    #[cfg(feature = "voice")]
     pub fn create_stt_provider_blocking(
         &self,
         kind: &str,
@@ -342,6 +344,7 @@ impl AiBridge {
     /// Build a VAD engine through the runtime's plugin host. Blocks the
     /// calling thread while the actor answers; used by the microphone
     /// capture path, which runs on the UI thread.
+    #[cfg(feature = "voice")]
     pub fn create_vad_engine_blocking(
         &self,
         kind: &str,
@@ -797,9 +800,9 @@ fn forward_audio_chunk(
     }
     #[cfg(not(feature = "voice"))]
     {
-        let _audio_turn = audio_turn;
-        let _audio_tx = audio_tx;
-        let _chunk = chunk;
+        let _ = audio_turn;
+        let _ = audio_tx;
+        let _ = chunk;
     }
 }
 
@@ -975,6 +978,8 @@ async fn pump_events(
                     | ene_runtime::TerminalReason::Cancelled
                     | ene_runtime::TerminalReason::Declined),
             }) => {
+                #[cfg(not(feature = "voice"))]
+                let _ = reason;
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }

@@ -205,8 +205,19 @@ impl CaptionOverlayWindow {
         let mut close = false;
         let mut pin_changed = false;
 
+        crate::theme::apply_egui_visuals(&self.egui_ctx);
+        let overlay_fill = if self
+            .egui_ctx
+            .style_of(self.egui_ctx.theme())
+            .visuals
+            .dark_mode
+        {
+            egui::Color32::from_black_alpha(170)
+        } else {
+            egui::Color32::from_white_alpha(220)
+        };
         let frame_style = egui::Frame {
-            fill: egui::Color32::from_black_alpha(170),
+            fill: overlay_fill,
             inner_margin: egui::Margin::same(8),
             corner_radius: egui::CornerRadius::same(6),
             ..Default::default()
@@ -224,7 +235,6 @@ impl CaptionOverlayWindow {
         egui::CentralPanel::default()
             .frame(frame_style)
             .show(&mut panel_ui, |ui| {
-                crate::settings_ui::apply_egui_visuals(ui.ctx());
                 ui.horizontal(|ui| {
                     let drag_bar = ui.add(
                         egui::Label::new(

@@ -24,7 +24,7 @@ use crate::chat_ui::ChatEguiWindow;
 use crate::events::AppEventSender;
 use crate::gpu::{WindowSurfaceError, pick_format_and_alpha};
 use crate::hotkey::HotkeyState;
-use crate::settings::{CharacterSettings, DesktopSection};
+use crate::settings::{CharacterSettings, DesktopSection, DesktopThemePreference};
 use crate::settings_ui::{PageKind, SettingsUi, widgets::SettingsAction};
 use crate::spotlight::SpotlightWindow;
 use crate::state::AppState;
@@ -68,6 +68,10 @@ pub struct Runtime {
     /// Global Alt+Space registration; `None` on Wayland or when the
     /// registration is taken, in which case in-window handling stays on.
     hotkey: HotkeyState,
+    /// Theme preference last pushed to every window. `None` means the first
+    /// reconciliation has not happened; `Some(System)` maps to no native
+    /// override so winit keeps reporting OS theme changes on Windows.
+    native_theme_preference: Option<DesktopThemePreference>,
     /// Previous frame's `tts_playing` value, used to detect the
     /// true→false transition and reset the viseme mouth shape.
     #[cfg(feature = "voice")]
@@ -119,6 +123,9 @@ impl Runtime {
         {
             tracing::warn!(error = %error, "Failed to release global hotkey at startup");
         }
+        crate::theme::set_preference(state.settings.theme());
+        #[cfg(target_os = "linux")]
+        crate::theme::spawn_os_theme_watch();
 
         Self {
             state,
@@ -136,6 +143,7 @@ impl Runtime {
             char_surface_fatal: false,
             alt_held: false,
             hotkey,
+            native_theme_preference: None,
             #[cfg(feature = "voice")]
             prev_tts_playing: false,
             mic_handle: None,
@@ -145,7 +153,8 @@ impl Runtime {
     fn create_ui_window(&mut self, event_loop: &ActiveEventLoop) {
         let ui_attrs = WindowAttributes::default()
             .with_title("ene UI")
-            .with_inner_size(LogicalSize::new(460.0, 620.0))
+            .with_inner_size(LogicalSize::new(900.0, 700.0))
+            .with_min_inner_size(LogicalSize::new(520.0, 560.0))
             .with_resizable(true);
         let ui_w = match event_loop.create_window(ui_attrs) {
             Ok(w) => Arc::new(w),
@@ -155,6 +164,7 @@ impl Runtime {
                 return;
             }
         };
+        apply_window_theme(&ui_w, self.state.settings.theme());
         let ui_size = ui_w.inner_size();
         match UiWindow::new(
             ui_w,
@@ -257,6 +267,7 @@ impl Runtime {
                 return;
             }
         };
+        apply_window_theme(&chat_w, self.state.settings.theme());
         let chat_size = chat_w.inner_size();
         match ChatEguiWindow::new(
             chat_w,
@@ -340,6 +351,7 @@ impl Runtime {
                 return;
             }
         };
+        apply_window_theme(&spotlight_w, self.state.settings.theme());
         let size = spotlight_w.inner_size();
         match SpotlightWindow::new(
             spotlight_w,
@@ -399,6 +411,7 @@ impl Runtime {
                 return;
             }
         };
+        apply_window_theme(&caption_w, self.state.settings.theme());
         let size = caption_w.inner_size();
         match CaptionOverlayWindow::new(
             caption_w,
@@ -436,6 +449,9 @@ impl ApplicationHandler for Runtime {
                 return;
             }
         };
+        #[cfg(target_os = "windows")]
+        crate::theme::observe_winit_system_theme(&char_w);
+        apply_window_theme(&char_w, self.state.settings.theme());
         let char_size = char_w.inner_size();
         match CharacterWindow::new(
             char_w,
@@ -621,6 +637,13 @@ impl ApplicationHandler for Runtime {
         if let WindowEvent::ModifiersChanged(modifiers) = &event {
             self.alt_held = modifiers.state().alt_key();
         }
+        #[cfg(target_os = "windows")]
+        if let WindowEvent::ThemeChanged(theme) = &event {
+            crate::theme::set_os_theme(match theme {
+                winit::window::Theme::Light => crate::theme::ThemeMode::Light,
+                winit::window::Theme::Dark => crate::theme::ThemeMode::Dark,
+            });
+        }
 
         // In-window Alt+Space fallback when no global grab is active
         // (Wayland, or Spotlight disabled). Works from any app window;
@@ -652,6 +675,7 @@ impl ApplicationHandler for Runtime {
         if self.hotkey.consume_press() {
             self.toggle_spotlight(event_loop);
         }
+        self.sync_theme();
         self.sync_runtime_to_bevy();
         self.state.app.update();
         self.state.pull_runtime_health_from_ui();
@@ -666,6 +690,31 @@ impl ApplicationHandler for Runtime {
 }
 
 impl Runtime {
+    /// Push the persisted theme preference into the shared theme state,
+    /// then propagate a resolved-theme change to every window's native
+    /// decorations exactly once.
+    fn sync_theme(&mut self) {
+        crate::theme::set_preference(self.state.settings.theme());
+        let preference = self.state.settings.theme();
+        if self.native_theme_preference == Some(preference) {
+            return;
+        }
+        self.native_theme_preference = Some(preference);
+        let native_override = native_theme_override(preference);
+        for window in [
+            self.char_window.as_ref().map(|w| w.window.as_ref()),
+            self.ui_window.as_ref().map(|w| w.window.as_ref()),
+            self.chat_egui_window.as_ref().map(|w| w.window.as_ref()),
+            self.spotlight_window.as_ref().map(|w| w.window.as_ref()),
+            self.caption_window.as_ref().map(|w| w.window.as_ref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            window.set_theme(native_override);
+        }
+    }
+
     /// Push the per-frame runtime state into bevy resources before
     /// `app.update()` runs so the `should_render_debug_system` and the
     /// Linux-only `apply_linux_click_through_system` can read them.
@@ -2130,6 +2179,22 @@ const fn key_code_pressed(event: &WindowEvent) -> Option<winit::keyboard::KeyCod
     }
 }
 
+const fn native_theme_override(preference: DesktopThemePreference) -> Option<winit::window::Theme> {
+    match preference {
+        DesktopThemePreference::System => None,
+        DesktopThemePreference::Light => Some(winit::window::Theme::Light),
+        DesktopThemePreference::Dark => Some(winit::window::Theme::Dark),
+    }
+}
+
+fn apply_window_theme(window: &Window, preference: DesktopThemePreference) {
+    // Seed the resolved palette first so newly-created windows never flash
+    // the wrong decoration; System then removes the override to preserve OS
+    // theme notifications.
+    crate::theme::apply_native_theme(window);
+    window.set_theme(native_theme_override(preference));
+}
+
 fn window_attributes(transparent: bool, fullscreen: Option<Fullscreen>) -> WindowAttributes {
     let mut attrs = WindowAttributes::default()
         .with_title("Ene")
@@ -2335,6 +2400,7 @@ impl UiWindow {
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
         self.egui_ctx.begin_pass(raw_input);
+        crate::theme::apply_egui_visuals(&self.egui_ctx);
 
         let mut panel_ui = egui::Ui::new(
             self.egui_ctx.clone(),
@@ -2419,5 +2485,23 @@ impl UiWindow {
 
         frame.present();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    #[test]
+    fn native_theme_override_preserves_system_notifications() {
+        assert_eq!(native_theme_override(DesktopThemePreference::System), None);
+        assert_eq!(
+            native_theme_override(DesktopThemePreference::Light),
+            Some(winit::window::Theme::Light)
+        );
+        assert_eq!(
+            native_theme_override(DesktopThemePreference::Dark),
+            Some(winit::window::Theme::Dark)
+        );
     }
 }

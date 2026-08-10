@@ -206,11 +206,20 @@ included in `config`. For example, web search keys use
 |---|---|---|
 | `desktop.graphics.quality` | `"medium"` | Render quality preset. |
 | `desktop.language` | `"ja"` | UI language (desktop i18n files are `en-US` / `ja`). |
+| `desktop.theme` | `"system"` | App-wide color theme: `system`, `light`, or `dark`. |
 | `desktop.mic_device` | `null` | Microphone device id for voice input. |
 | `desktop.spotlight_enabled` | `true` | Global spotlight overlay. |
 | `desktop.caption_enabled` | `true` | Caption overlay for character speech. |
 | `desktop.caption_position` / `caption_pinned` | `null` | Caption placement. |
 | `desktop.beat_sync` | `{ "enabled": false, "device": null }` | Music beat-sync for avatar motion. |
+
+`desktop.theme` defaults to `system`. On Linux, System reads and subscribes
+to `org.freedesktop.appearance` `color-scheme` through the XDG settings
+portal. On Windows, it uses winit's initial window theme and `ThemeChanged`
+notifications. If the OS does not specify a scheme or it cannot be read, Ene
+uses dark. Explicit `light` or `dark` settings override OS notifications and
+also update supported native window decorations. The environment override is
+`ENE_DESKTOP__THEME=system|light|dark`.
 
 ## Per-character settings (`character_settings.json`)
 

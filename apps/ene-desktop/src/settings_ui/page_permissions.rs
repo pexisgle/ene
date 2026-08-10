@@ -26,11 +26,9 @@ use i18n_embed_fl::fl;
 use crate::ai_bridge::AiBridge;
 use crate::component::ui::UiStateComponent;
 use crate::settings::PendingPermission;
+use crate::settings_ui::components::{danger_button, empty_state, section_card, setting_row};
 
 pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.heading(fl!(crate::i18n::loader(), "permissions-title"));
-    ui.label(fl!(crate::i18n::loader(), "permissions-hint"));
-
     // Load the grants the first time the page is shown so the list is
     // not empty behind a manual refresh.
     if world
@@ -40,30 +38,43 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
         refresh_grants(ai, world, ui_entity, false);
     }
 
-    render_pending(ui, ai, world, ui_entity);
-    ui.separator();
-    render_granted(ui, ai, world, ui_entity);
+    ui.vertical(|ui| {
+        section_card(
+            ui,
+            "permissions-pending",
+            &fl!(crate::i18n::loader(), "permissions-pending"),
+            |ui| render_pending(ui, ai, world, ui_entity),
+        );
+        section_card(
+            ui,
+            "permissions-grants",
+            &fl!(crate::i18n::loader(), "permissions-granted"),
+            |ui| render_granted(ui, ai, world, ui_entity),
+        );
+    });
 
     if let Some(message) = world
         .get::<UiStateComponent>(ui_entity)
         .and_then(|s| s.0.permission_message.clone())
     {
-        ui.separator();
+        ui.add_space(6.0);
         ui.label(message);
     }
 }
 
 /// Pending-approval section: one group per outstanding request.
 fn render_pending(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.label(fl!(crate::i18n::loader(), "permissions-pending"));
-
     let pending = world
         .get::<UiStateComponent>(ui_entity)
         .map(|s| s.0.permission_requests.clone())
         .unwrap_or_default();
 
     if pending.is_empty() {
-        ui.weak(fl!(crate::i18n::loader(), "permissions-pending-empty"));
+        empty_state(
+            ui,
+            &fl!(crate::i18n::loader(), "permissions-pending-empty"),
+            "",
+        );
         return;
     }
 
@@ -85,77 +96,85 @@ fn render_pending_row(
     ui_entity: Entity,
     request: &PendingPermission,
 ) {
-    ui.group(|ui| {
-        field_label(
-            ui,
-            &fl!(crate::i18n::loader(), "action-label"),
-            &request.action,
-        );
-        field_label(
-            ui,
-            &fl!(crate::i18n::loader(), "target-label"),
-            &request.target,
-        );
-        if let Some(description) = &request.description {
+    egui::Frame::group(ui.style())
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
             field_label(
                 ui,
-                &fl!(crate::i18n::loader(), "description-label"),
-                description,
+                &fl!(crate::i18n::loader(), "action-label"),
+                &request.action,
             );
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .button(fl!(crate::i18n::loader(), "permissions-approve-once"))
-                .clicked()
-            {
-                decide(
-                    ai,
-                    world,
-                    ui_entity,
-                    request.request_id.clone(),
-                    PermissionDecision::AllowOnce,
+            field_label(
+                ui,
+                &fl!(crate::i18n::loader(), "target-label"),
+                &request.target,
+            );
+            if let Some(description) = &request.description {
+                field_label(
+                    ui,
+                    &fl!(crate::i18n::loader(), "description-label"),
+                    description,
                 );
             }
-            if ui
-                .button(fl!(crate::i18n::loader(), "permissions-approve-session"))
-                .clicked()
-            {
-                decide(
-                    ai,
-                    world,
-                    ui_entity,
-                    request.request_id.clone(),
-                    PermissionDecision::AllowSession,
-                );
-            }
-            if ui
-                .button(fl!(crate::i18n::loader(), "permissions-deny"))
-                .clicked()
-            {
-                decide(
-                    ai,
-                    world,
-                    ui_entity,
-                    request.request_id.clone(),
-                    PermissionDecision::Deny,
-                );
-            }
+            ui.horizontal(|ui| {
+                if ui
+                    .button(fl!(crate::i18n::loader(), "permissions-approve-once"))
+                    .clicked()
+                {
+                    decide(
+                        ai,
+                        world,
+                        ui_entity,
+                        request.request_id.clone(),
+                        PermissionDecision::AllowOnce,
+                    );
+                }
+                if ui
+                    .button(fl!(crate::i18n::loader(), "permissions-approve-session"))
+                    .clicked()
+                {
+                    decide(
+                        ai,
+                        world,
+                        ui_entity,
+                        request.request_id.clone(),
+                        PermissionDecision::AllowSession,
+                    );
+                }
+                if ui
+                    .button(fl!(crate::i18n::loader(), "permissions-deny"))
+                    .clicked()
+                {
+                    decide(
+                        ai,
+                        world,
+                        ui_entity,
+                        request.request_id.clone(),
+                        PermissionDecision::Deny,
+                    );
+                }
+            });
         });
-    });
 }
 
 /// Granted-scope section: refreshable table with per-row revoke and a
 /// reset-all action.
 fn render_granted(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    ui.horizontal(|ui| {
-        ui.label(fl!(crate::i18n::loader(), "permissions-granted"));
-        if ui
-            .button(fl!(crate::i18n::loader(), "permissions-refresh"))
-            .clicked()
-        {
-            refresh_grants(ai, world, ui_entity, true);
-        }
-    });
+    setting_row(
+        ui,
+        "permissions_refresh_row",
+        &fl!(crate::i18n::loader(), "permissions-hint"),
+        "",
+        |ui| {
+            if ui
+                .button(fl!(crate::i18n::loader(), "permissions-refresh"))
+                .clicked()
+            {
+                refresh_grants(ai, world, ui_entity, true);
+            }
+        },
+    );
 
     let grants = world
         .get::<UiStateComponent>(ui_entity)
@@ -163,12 +182,13 @@ fn render_granted(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_e
         .unwrap_or_default();
 
     if grants.is_empty() {
-        ui.weak(fl!(crate::i18n::loader(), "permissions-granted-empty"));
+        empty_state(
+            ui,
+            &fl!(crate::i18n::loader(), "permissions-granted-empty"),
+            "",
+        );
     } else {
-        if ui
-            .button(fl!(crate::i18n::loader(), "permissions-reset-all"))
-            .clicked()
-        {
+        if danger_button(ui, &fl!(crate::i18n::loader(), "permissions-reset-all")).clicked() {
             reset_all(ai, world, ui_entity);
         }
         ui.add_space(4.0);
@@ -191,31 +211,34 @@ fn render_grant_row(
     ui_entity: Entity,
     grant: &PermissionScope,
 ) {
-    ui.group(|ui| {
-        field_label(
-            ui,
-            &fl!(crate::i18n::loader(), "action-label"),
-            &grant.action,
-        );
-        field_label(
-            ui,
-            &fl!(crate::i18n::loader(), "permissions-target-pattern"),
-            &grant.target_pattern,
-        );
-        ui.label(format!(
-            "{}: {}  |  {}: {}",
-            fl!(crate::i18n::loader(), "permissions-grant-type"),
-            grant_type_label(grant.grant_type),
-            fl!(crate::i18n::loader(), "permissions-granted-at"),
-            grant.granted_at.format("%Y-%m-%d %H:%M:%S UTC"),
-        ));
-        if ui
-            .button(fl!(crate::i18n::loader(), "permissions-revoke"))
-            .clicked()
-        {
-            revoke(ai, world, ui_entity, grant.id);
-        }
-    });
+    egui::Frame::group(ui.style())
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            field_label(
+                ui,
+                &fl!(crate::i18n::loader(), "action-label"),
+                &grant.action,
+            );
+            field_label(
+                ui,
+                &fl!(crate::i18n::loader(), "permissions-target-pattern"),
+                &grant.target_pattern,
+            );
+            ui.label(format!(
+                "{}: {}  |  {}: {}",
+                fl!(crate::i18n::loader(), "permissions-grant-type"),
+                grant_type_label(grant.grant_type),
+                fl!(crate::i18n::loader(), "permissions-granted-at"),
+                grant.granted_at.format("%Y-%m-%d %H:%M:%S UTC"),
+            ));
+            if ui
+                .button(fl!(crate::i18n::loader(), "permissions-revoke"))
+                .clicked()
+            {
+                revoke(ai, world, ui_entity, grant.id);
+            }
+        });
 }
 
 /// Forward a decision, drop the request from the pending list, then

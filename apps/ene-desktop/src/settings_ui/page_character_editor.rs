@@ -6,7 +6,7 @@
 //! with a one-time backup), reload, and a discard-confirmation dialog when
 //! the window is closed with unsaved changes.
 
-use super::WARNING_COLOR;
+use super::components::{error_box, section_card_collapsible, warning_box};
 use super::widgets::{SettingsAction, apply_action};
 use crate::ai_bridge::AiBridge;
 use crate::component::ui::UiStateComponent;
@@ -25,9 +25,9 @@ pub fn render(
     ui_entity: Entity,
 ) {
     let Some((card_path, _)) = resolve_card_path(settings) else {
-        ui.colored_label(
-            WARNING_COLOR,
-            i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-none-selected"),
+        warning_box(
+            ui,
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-none-selected"),
         );
         return;
     };
@@ -63,17 +63,17 @@ pub fn render(
     ui.vertical(|ui| {
         // ── Modified warning ──
         if snapshot.character_editor_modified {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-modified"),
+            warning_box(
+                ui,
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-modified"),
             );
         }
 
         // ── Locale-diff notice ──
         if !snapshot.character_editor_locale_diffs.is_empty() {
-            ui.colored_label(
-                WARNING_COLOR,
-                i18n_embed_fl::fl!(
+            warning_box(
+                ui,
+                &i18n_embed_fl::fl!(
                     crate::i18n::loader(),
                     "character-editor-locale-diffs-notice",
                     files = snapshot.character_editor_locale_diffs.join(", ")
@@ -83,26 +83,29 @@ pub fn render(
 
         // ── Validation issues ──
         if !snapshot.character_editor_validation_errors.is_empty() {
-            ui.group(|ui| {
-                for issue in &snapshot.character_editor_validation_errors {
-                    ui.horizontal_wrapped(|ui| {
-                        let color = match issue.severity {
-                            EditorSeverity::Error => egui::Color32::LIGHT_RED,
-                            EditorSeverity::Warning => WARNING_COLOR,
-                        };
-                        ui.colored_label(color, &issue.location);
-                        ui.label(&issue.message);
-                    });
-                }
-            });
+            egui::Frame::group(ui.style())
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    for issue in &snapshot.character_editor_validation_errors {
+                        match issue.severity {
+                            EditorSeverity::Error => {
+                                error_box(ui, &format!("{}: {}", issue.location, issue.message));
+                            }
+                            EditorSeverity::Warning => {
+                                warning_box(ui, &format!("{}: {}", issue.location, issue.message));
+                            }
+                        }
+                    }
+                });
             if snapshot
                 .character_editor_validation_errors
                 .iter()
                 .any(|issue| issue.severity == EditorSeverity::Error)
             {
-                ui.colored_label(
-                    egui::Color32::LIGHT_RED,
-                    i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-save-blocked"),
+                error_box(
+                    ui,
+                    &i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-save-blocked"),
                 );
             }
             ui.separator();
@@ -111,6 +114,7 @@ pub fn render(
         // ── Sections ──
         section(
             ui,
+            "editor-identity",
             i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-section-identity"),
             |ui| {
                 text_field(
@@ -139,6 +143,7 @@ pub fn render(
 
         section(
             ui,
+            "editor-personality",
             i18n_embed_fl::fl!(
                 crate::i18n::loader(),
                 "character-editor-section-personality"
@@ -156,6 +161,7 @@ pub fn render(
 
         section(
             ui,
+            "editor-scenario",
             i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-section-scenario"),
             |ui| {
                 text_area(
@@ -170,6 +176,7 @@ pub fn render(
 
         section(
             ui,
+            "editor-greetings",
             i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-section-greetings"),
             |ui| {
                 text_area(
@@ -185,6 +192,7 @@ pub fn render(
 
         section(
             ui,
+            "editor-memory",
             i18n_embed_fl::fl!(
                 crate::i18n::loader(),
                 "character-editor-section-memory-instructions"
@@ -216,12 +224,14 @@ pub fn render(
 
         section(
             ui,
+            "editor-lorebook",
             i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-section-lorebook"),
             |ui| lorebook_editor(ui, world, ui_entity),
         );
 
         section(
             ui,
+            "editor-motions",
             i18n_embed_fl::fl!(crate::i18n::loader(), "character-editor-section-motions"),
             |ui| motion_editor(ui, world, ui_entity),
         );
@@ -379,10 +389,8 @@ fn resolve_card_path(settings: &CharacterSettings) -> Option<(PathBuf, PathBuf)>
 }
 
 /// A collapsible section; open by default so the whole card is visible.
-fn section(ui: &mut egui::Ui, title: String, add: impl FnOnce(&mut egui::Ui)) {
-    egui::CollapsingHeader::new(title)
-        .default_open(true)
-        .show(ui, add);
+fn section(ui: &mut egui::Ui, id: &str, title: String, add: impl FnOnce(&mut egui::Ui)) {
+    section_card_collapsible(ui, id, &title, true, add);
 }
 
 /// Render a single-line text field bound to a `String` field on [`UiState`].
