@@ -11,6 +11,7 @@
 - [Memory](concepts/memory.md)
 - [Turns & sessions](concepts/turns-and-sessions.md)
 - [Plugins & MCP](concepts/plugins-and-mcp.md)
+- [Sandbox, broker & approvals](concepts/sandbox-and-approvals.md)
 - [Connectors](concepts/connectors.md)
 - [Voice & avatar](concepts/voice-and-avatar.md)
 

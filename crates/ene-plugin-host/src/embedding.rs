@@ -253,7 +253,11 @@ impl ene_ai::EmbeddingProviderFactory for IpcEmbeddingProviderFactory {
                              withholding API credentials"
                         );
                     }
-                    crate::factory::build_provider_config(def, trusted)
+                    crate::factory::build_provider_config(
+                        def,
+                        trusted,
+                        !crate::factory::is_broker_credential_kind(&self.kind),
+                    )
                 },
             );
 

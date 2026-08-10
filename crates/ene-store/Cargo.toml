@@ -12,7 +12,7 @@ crate-type = ["lib"]
 
 [dependencies]
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "fs"] }
+tokio = { workspace = true, features = ["io-util", "fs", "time"] }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 sea-orm = { workspace = true }

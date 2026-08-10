@@ -27,19 +27,19 @@ pub async fn read(
     sandbox: &SandboxConfig,
 ) -> Result<String, ToolError> {
     let resolved = sandbox.resolve_and_check(path, false)?;
+    let broker = sandbox.broker()?;
+    let resolved_str = resolved.to_string_lossy().into_owned();
 
-    if !resolved.exists() {
+    if broker.stat(&resolved_str).await?.is_none() {
         let dir = resolved.parent().unwrap_or_else(|| Path::new("."));
         let base = resolved.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let mut suggestions = Vec::new();
-        if let Ok(entries) = tokio::fs::read_dir(dir).await {
-            let mut entries = entries;
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if let Ok(name) = entry.file_name().into_string()
-                    && (name.to_lowercase().contains(&base.to_lowercase())
-                        || base.to_lowercase().contains(&name.to_lowercase()))
+        if let Ok(entries) = broker.list(&dir.to_string_lossy()).await {
+            for entry in entries {
+                if entry.name.to_lowercase().contains(&base.to_lowercase())
+                    || base.to_lowercase().contains(&entry.name.to_lowercase())
                 {
-                    suggestions.push(format!("{}", entry.path().display()));
+                    suggestions.push(entry.path);
                     if suggestions.len() >= 3 {
                         break;
                     }
@@ -59,17 +59,18 @@ pub async fn read(
         )));
     }
 
-    let metadata = tokio::fs::metadata(&resolved).await.map_err(|e| {
-        ToolError::execution_failed(format!("Cannot stat {}: {}", resolved.display(), e))
+    let metadata = broker.stat(&resolved_str).await?.ok_or_else(|| {
+        ToolError::execution_failed(format!("Cannot stat {}: not found", resolved.display()))
     })?;
 
-    if metadata.is_dir() {
-        return read_directory(&resolved, offset, limit).await;
+    if metadata.is_dir {
+        return read_directory(&resolved, offset, limit, sandbox).await;
     }
 
-    let sample = tokio::fs::read(&resolved).await.map_err(|e| {
-        ToolError::execution_failed(format!("Cannot read {}: {}", resolved.display(), e))
-    })?;
+    let read_outcome = broker
+        .read(&resolved_str, sandbox.max_read_bytes as u64)
+        .await?;
+    let sample = read_outcome.data;
 
     if is_binary_file(&resolved, &sample) {
         return Err(ToolError::execution_failed(format!(
@@ -81,7 +82,7 @@ pub async fn read(
     let text = String::from_utf8_lossy(&sample);
     let text = text.trim_start_matches('\u{FEFF}');
 
-    if sample.len() > sandbox.max_read_bytes {
+    if read_outcome.truncated {
         let lines: Vec<&str> = text.lines().collect();
         let default_limit = DEFAULT_LINE_LIMIT;
         let start = offset.unwrap_or(1).saturating_sub(1);
@@ -173,21 +174,17 @@ async fn read_directory(
     path: &Path,
     offset: Option<usize>,
     limit: Option<usize>,
+    sandbox: &SandboxConfig,
 ) -> Result<String, ToolError> {
-    let mut entries = tokio::fs::read_dir(path).await.map_err(|e| {
-        ToolError::execution_failed(format!("Cannot read directory {}: {}", path.display(), e))
+    let broker = sandbox.broker()?;
+    let entries = broker.list(&path.to_string_lossy()).await.map_err(|e| {
+        ToolError::execution_failed(format!("Cannot read directory {}: {e}", path.display()))
     })?;
 
     let mut items = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name().into_string().unwrap_or_default();
-        let file_type = entry.file_type().await.ok();
-        let suffix = if file_type.is_some_and(|t| t.is_dir()) {
-            "/"
-        } else {
-            ""
-        };
-        items.push(format!("{name}{suffix}"));
+    for entry in entries {
+        let suffix = if entry.is_dir { "/" } else { "" };
+        items.push(format!("{}{suffix}", entry.name));
     }
 
     items.sort();

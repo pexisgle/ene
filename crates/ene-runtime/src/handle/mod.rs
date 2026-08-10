@@ -623,6 +623,7 @@ impl EneHandle {
             &config,
             memory_store.as_ref(),
             Some(Arc::clone(&mediator)),
+            &cmd_tx,
         )?;
 
         // Start the plugin host (discovers and launches v3 plugin binaries).

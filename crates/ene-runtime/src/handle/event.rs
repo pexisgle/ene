@@ -94,6 +94,23 @@ pub enum EneEvent {
         /// Human-readable description of what will be done.
         description: String,
     },
+    /// A plugin broker request requires interactive approval (protocol v8).
+    ///
+    /// Unlike [`Self::PermissionRequired`] this is not tied to a turn: broker
+    /// requests can originate from any plugin session, so the payload carries
+    /// the plugin name and approval category instead.
+    BrokerApprovalRequired {
+        /// Unique identifier for this approval request.
+        request_id: RequestId,
+        /// Plugin requesting the capability.
+        plugin: String,
+        /// Approval category (e.g. `FsRead`, `DynamicHttps`).
+        category: String,
+        /// Audit-safe target description (origin, path, artifact, key name).
+        target: String,
+        /// Human-readable description shown in the confirmation dialog.
+        description: String,
+    },
     /// An interactive tool needs user input (e.g. a clarifying question).
     UserInputRequired {
         /// Active turn.

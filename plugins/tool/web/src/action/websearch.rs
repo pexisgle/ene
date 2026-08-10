@@ -2,10 +2,10 @@ use ene_plugin::prelude::*;
 use std::fmt::Write;
 use std::sync::{Arc, RwLock};
 
+use crate::broker::WebBroker;
 use crate::provider::WebSearchConfig;
 use crate::search::{
-    ArxivProvider, DuckDuckGoProvider, ExaProvider, SearchOptions, TavilyProvider, search_client,
-    web_search,
+    ArxivProvider, DuckDuckGoProvider, ExaProvider, SearchOptions, TavilyProvider, web_search,
 };
 
 fn default_config() -> Arc<RwLock<WebSearchConfig>> {
@@ -36,15 +36,6 @@ impl Backend {
         }
     }
 
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Arxiv => "arxiv",
-            Self::DuckDuckGo => "duckduckgo",
-            Self::Exa => "exa",
-            Self::Tavily => "tavily",
-        }
-    }
-
     const fn label(self) -> &'static str {
         match self {
             Self::Arxiv => "ArXiv",
@@ -69,6 +60,9 @@ pub struct WebSearchAction {
     #[tool(skip)]
     #[serde(skip, default = "default_config")]
     config: Arc<RwLock<WebSearchConfig>>,
+    #[tool(skip)]
+    #[serde(skip)]
+    broker: Arc<WebBroker>,
     /// The search query.
     query: String,
     /// Search backend to use. Defaults to duckduckgo.
@@ -82,9 +76,10 @@ pub struct WebSearchAction {
 }
 
 impl WebSearchAction {
-    pub const fn new(config: Arc<RwLock<WebSearchConfig>>) -> Self {
+    pub const fn new(config: Arc<RwLock<WebSearchConfig>>, broker: Arc<WebBroker>) -> Self {
         Self {
             config,
+            broker,
             query: String::new(),
             backend: None,
             limit: None,
@@ -101,8 +96,8 @@ impl WebSearchAction {
         // a hot-reload from a reconfigure (which takes the
         // write lock) does not block the search. A
         // `OnceLock::get()` would only return the value set
-        // on the first call, so updating an API key would
-        // require a process restart.
+        // on the first call, so changing the credential name
+        // would require a process restart.
         let config = match self.config.read() {
             Ok(guard) => Some(guard.clone()),
             Err(e) => {
@@ -111,25 +106,25 @@ impl WebSearchAction {
             }
         };
 
-        // A single shared client is reused across providers so TLS
-        // setup and connection pooling are not repeated per request.
-        let client = search_client()
-            .map_err(|e| ToolError::execution_failed(format!("HTTP client init failed: {e}")))?;
-
         let provider: Box<dyn crate::search::SearchProvider> = match backend {
-            Backend::Arxiv => Box::new(ArxivProvider::new(client)),
-            Backend::DuckDuckGo => Box::new(DuckDuckGoProvider::new(client)),
+            Backend::Arxiv => Box::new(ArxivProvider::new(Arc::clone(&self.broker))),
+            Backend::DuckDuckGo => Box::new(DuckDuckGoProvider::new(Arc::clone(&self.broker))),
             Backend::Tavily => {
-                let api_key = resolve_api_key(config.as_ref(), backend, "TAVILY_API_KEY")?;
-                Box::new(TavilyProvider::new(&api_key, client).map_err(|e| {
-                    ToolError::execution_failed(format!("Tavily provider init failed: {e}"))
-                })?)
+                let credential =
+                    resolve_credential_name(config.as_ref(), backend, "tavily_api_key");
+                Box::new(
+                    TavilyProvider::new(&credential, Arc::clone(&self.broker)).map_err(|e| {
+                        ToolError::execution_failed(format!("Tavily provider init failed: {e}"))
+                    })?,
+                )
             }
             Backend::Exa => {
-                let api_key = resolve_api_key(config.as_ref(), backend, "EXA_API_KEY")?;
-                Box::new(ExaProvider::new(&api_key, client).map_err(|e| {
-                    ToolError::execution_failed(format!("Exa provider init failed: {e}"))
-                })?)
+                let credential = resolve_credential_name(config.as_ref(), backend, "exa_api_key");
+                Box::new(
+                    ExaProvider::new(&credential, Arc::clone(&self.broker)).map_err(|e| {
+                        ToolError::execution_failed(format!("Exa provider init failed: {e}"))
+                    })?,
+                )
             }
         };
 
@@ -171,21 +166,19 @@ impl WebSearchAction {
     }
 }
 
-fn resolve_api_key(
+fn resolve_credential_name(
     config: Option<&WebSearchConfig>,
     backend: Backend,
-    env_var: &str,
-) -> Result<String, ToolError> {
-    if let Some(cfg) = config {
-        let configured = match backend {
-            Backend::Tavily => &cfg.tavily_api_key,
-            Backend::Exa => &cfg.exa_api_key,
-            // Backends without an API key never call this helper.
-            Backend::Arxiv | Backend::DuckDuckGo => "",
-        };
-        if !configured.is_empty() {
-            return Ok(configured.to_string());
-        }
+    default: &str,
+) -> String {
+    let credential = config.map_or(default, |cfg| match backend {
+        Backend::Tavily => cfg.tavily_credential.as_str(),
+        Backend::Exa => cfg.exa_credential.as_str(),
+        Backend::Arxiv | Backend::DuckDuckGo => default,
+    });
+    if credential.trim().is_empty() {
+        default.to_string()
+    } else {
+        credential.trim().to_string()
     }
-    std::env::var(env_var).map_err(|_| ToolError::execution_failed(format!("{env_var} not set. Set it in settings.json (tools.web.{}_api_key) or as environment variable {env_var}.", backend.name())))
 }

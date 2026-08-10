@@ -67,6 +67,16 @@ pub struct SandboxConfigData {
     /// [`crate::HostServiceRequest::Open`] before any DB request. `None`
     /// disables DB access for this plugin.
     pub db_auth_token: Option<String>,
+    /// Path to the shared broker socket (protocol v8+). Plugins open broker
+    /// passengers (`file`, `network`, `process`, `credential`, `artifact`,
+    /// `platform`) here; the host pins the plugin identity to the channel.
+    #[serde(default)]
+    pub broker_socket: Option<String>,
+    /// Per-plugin temp directory with a host-enforced size cap (protocol
+    /// v8+). The plugin's `TMPDIR` points here; no other temp area is
+    /// visible to the sandbox.
+    #[serde(default)]
+    pub plugin_temp_dir: Option<String>,
 }
 
 impl Default for SandboxConfigData {
@@ -84,6 +94,8 @@ impl Default for SandboxConfigData {
             host_service_socket: None,
             db_socket: None,
             db_auth_token: None,
+            broker_socket: None,
+            plugin_temp_dir: None,
         }
     }
 }
@@ -144,6 +156,8 @@ mod tests {
             host_service_socket: Some("/tmp/ene-host-service.sock".into()),
             db_socket: Some("/tmp/ene-host-service.sock".into()),
             db_auth_token: Some("ene-db-deadbeef".into()),
+            broker_socket: Some("/tmp/ene-host-service.sock".into()),
+            plugin_temp_dir: Some("/tmp/ene-plugin-tmp".into()),
         };
         let json = serde_json::to_string(&config).unwrap();
         let deser: SandboxConfigData = serde_json::from_str(&json).unwrap();

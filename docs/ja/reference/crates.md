@@ -28,11 +28,15 @@
 | `ene-infer` | シングルスレッドローカルモデルフレームワーク（`LocalModel`・`EngineHandle`）: ワーカースレッド・有界キュー・協調キャンセル・パニック回復 | （内部なし） |
 | `ene-rag` | RAG ポリシー: ハイブリッドスコアリング・減衰・ワークスペースチャンク化。`tool` フィーチャーでツール選択パイプライン（ene-ai が必要） | core, config |
 | `ene-connector` | 外部サービス接続フレームワーク: 資格情報・権限ゲート・ポリシー・webhook | （内部なし） |
-| `ene-plugin-proto` | ワイヤ ABI: IPC プロトコル v7・ツール型・capability・サンドボックス設定 | （内部なし） |
+| `ene-approval` | 許可モデル: カテゴリ・モード・全体/プラグイン別ポリシー解決・監査ログ・署名付き manifest 型 | （内部なし） |
+| `ene-artifact` | 署名付き Artifact Catalog・CAS(SHA-256)・再開ダウンロード・1 世代ロールバック付きインストーラ | （内部なし） |
+| `ene-sandbox` | OS サンドボックス基盤: Landlock + seccomp + rlimits + cgroup v2(Linux)、Job Object(Windows) | （内部なし） |
+| `ene-plugin-proto` | ワイヤ ABI: IPC プロトコル v8・ツール型・capability・サンドボックス設定・Broker チャネル型 | （内部なし） |
 | `ene-plugin` | プラグイン作成ファサード: `run_plugin_server`・`PluginDispatch`・トレイト・`prelude` | proto, infer, macros |
 | `ene-plugin-macros` | プロシージャルマクロ: `ToolAction`・`ToolSpec`・`tool_action`・プロバイダー derive | proto |
-| `ene-plugin-host` | プラグイン監視: 起動/ハンドシェイク/capability/ヘルス/サーキットブレーカー・IPC プロバイダーブリッジ・MCP クライアント・資格情報レジストリ | proto, ai, config, connector |
+| `ene-plugin-host` | プラグイン監視: 起動/ハンドシェイク/capability/ヘルス/サーキットブレーカー・IPC プロバイダーブリッジ・MCP クライアント・資格情報レジストリ・Broker hub(file/network/process/credential/artifact/platform)・manifest 検証・承認エンジン | proto, ai, config, connector, approval, artifact, sandbox |
 | `ene-plugin-db` | ホスト `db` サービス上のプラグイン向け型付き CRUD クライアント | proto |
+| `ene-plugin-broker` | プラグイン側 Broker クライアント(プロトコル v8)。ホスト仲介の file/network/process/credential/artifact/platform サービス向け | proto |
 | `ene-voice` | ローカル音声エンジン: whisper STT・Kokoro TTS・Silero VAD（フィーチャー: `local-stt`・`local-tts`・`silero-vad`） | ai, config, infer |
 | `ene-vrm` | VRM 1.0 ローダー + wgpu レンダラー。独立（ene-desktop が使用） | （内部なし） |
 | `ene-util` | 純粋ヘルパー: truncate・HTML→Markdown（フィーチャー `html`） | （内部なし） |

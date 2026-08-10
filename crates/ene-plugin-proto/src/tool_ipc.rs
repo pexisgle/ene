@@ -18,6 +18,10 @@ pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 /// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Handshake carries the full SandboxConfigData (grew with broker_socket/plugin_temp_dir); boxing would churn every construction site for a wire type whose size is irrelevant"
+)]
 pub enum IpcRequest {
     /// Handshake to negotiate protocol version, exchange sandbox config,
     /// and push tool-specific configuration.

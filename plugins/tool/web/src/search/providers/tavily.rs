@@ -1,6 +1,9 @@
 use async_trait::async_trait;
+use ene_plugin_broker::HttpMethod;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
+use crate::broker::WebBroker;
 use crate::search::error::SearchError;
 use crate::search::types::{SearchOptions, SearchProvider, SearchResult};
 
@@ -21,7 +24,6 @@ struct TavilyResponse {
 
 #[derive(Debug, Serialize)]
 struct TavilyRequest {
-    api_key: String,
     query: String,
     search_depth: String,
     include_answer: bool,
@@ -32,21 +34,21 @@ struct TavilyRequest {
 
 #[derive(Debug)]
 pub struct TavilyProvider {
-    api_key: String,
-    client: reqwest::Client,
+    credential: String,
+    broker: Arc<WebBroker>,
 }
 
 impl TavilyProvider {
-    pub fn new(api_key: &str, client: reqwest::Client) -> Result<Self, SearchError> {
-        if api_key.is_empty() {
+    pub fn new(credential: &str, broker: Arc<WebBroker>) -> Result<Self, SearchError> {
+        if credential.is_empty() {
             return Err(SearchError::ConfigError(
-                "Tavily API key is required".to_string(),
+                "Tavily credential name is required".to_string(),
             ));
         }
 
         Ok(Self {
-            api_key: api_key.to_string(),
-            client,
+            credential: credential.to_string(),
+            broker,
         })
     }
 }
@@ -60,7 +62,6 @@ impl SearchProvider for TavilyProvider {
     async fn search(&self, options: &SearchOptions) -> Result<Vec<SearchResult>, SearchError> {
         let max_results = options.max_results.unwrap_or(10).min(50);
         let request_body = TavilyRequest {
-            api_key: self.api_key.clone(),
             query: options.query.clone(),
             search_depth: "basic".to_string(),
             include_answer: true,
@@ -69,12 +70,22 @@ impl SearchProvider for TavilyProvider {
             max_results,
         };
 
+        let body = serde_json::to_vec(&request_body).map_err(|e| SearchError::HttpError {
+            message: format!("Tavily request serialization failed: {e}"),
+            status_code: None,
+            response_body: None,
+        })?;
         let response = self
-            .client
-            .post("https://api.tavily.com/search")
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
+            .broker
+            .fetch(
+                HttpMethod::Post,
+                "https://api.tavily.com/search",
+                vec![("Content-Type".to_string(), "application/json".to_string())],
+                Some(body),
+                5 * 1024 * 1024,
+                Some(&self.credential),
+                None,
+            )
             .await
             .map_err(|e| SearchError::HttpError {
                 message: format!("Tavily request failed: {e}"),
@@ -82,17 +93,13 @@ impl SearchProvider for TavilyProvider {
                 response_body: None,
             })?;
 
-        let status = response.status();
-        let response_text = response.text().await.map_err(|e| SearchError::HttpError {
-            message: format!("Tavily response read failed: {e}"),
-            status_code: Some(status.as_u16()),
-            response_body: None,
-        })?;
+        let status = response.status;
+        let response_text = String::from_utf8_lossy(&response.body).into_owned();
 
-        if !status.is_success() {
+        if !(200..300).contains(&status) {
             return Err(SearchError::HttpError {
-                message: format!("Tavily API error ({status})"),
-                status_code: Some(status.as_u16()),
+                message: format!("Tavily API error (HTTP {status})"),
+                status_code: Some(status),
                 response_body: Some(response_text),
             });
         }

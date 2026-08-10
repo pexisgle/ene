@@ -1,7 +1,10 @@
 use async_trait::async_trait;
+use ene_plugin_broker::HttpMethod;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::broker::WebBroker;
 use crate::search::error::SearchError;
 use crate::search::types::{SearchOptions, SearchProvider, SearchResult};
 
@@ -35,21 +38,21 @@ struct ExaSearchRequest {
 
 #[derive(Debug)]
 pub struct ExaProvider {
-    api_key: String,
-    client: reqwest::Client,
+    credential: String,
+    broker: Arc<WebBroker>,
 }
 
 impl ExaProvider {
-    pub fn new(api_key: &str, client: reqwest::Client) -> Result<Self, SearchError> {
-        if api_key.is_empty() {
+    pub fn new(credential: &str, broker: Arc<WebBroker>) -> Result<Self, SearchError> {
+        if credential.is_empty() {
             return Err(SearchError::ConfigError(
-                "Exa API key is required".to_string(),
+                "Exa credential name is required".to_string(),
             ));
         }
 
         Ok(Self {
-            api_key: api_key.to_string(),
-            client,
+            credential: credential.to_string(),
+            broker,
         })
     }
 }
@@ -68,30 +71,35 @@ impl SearchProvider for ExaProvider {
             include_contents: false,
         };
 
+        let body = serde_json::to_vec(&request_body).map_err(|e| {
+            SearchError::ProviderError(format!("Exa request serialization failed: {e}"))
+        })?;
         let response = self
-            .client
-            .post("https://api.exa.ai/search")
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&request_body)
-            .send()
+            .broker
+            .fetch(
+                HttpMethod::Post,
+                "https://api.exa.ai/search",
+                vec![("Content-Type".to_string(), "application/json".to_string())],
+                Some(body),
+                5 * 1024 * 1024,
+                Some(&self.credential),
+                Some("x-api-key"),
+            )
             .await
             .map_err(|e| SearchError::ProviderError(format!("Exa API request failed: {e}")))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+        let status = response.status;
+        if !(200..300).contains(&status) {
+            let error_text = String::from_utf8_lossy(&response.body).into_owned();
             return Err(SearchError::ProviderError(format!(
-                "Exa API request failed ({status}): {error_text}"
+                "Exa API request failed (HTTP {status}): {error_text}"
             )));
         }
 
-        let exa_response: ExaSearchResponse = response.json().await.map_err(|e| {
-            SearchError::ProviderError(format!("Failed to parse Exa response: {e}"))
-        })?;
+        let exa_response: ExaSearchResponse =
+            serde_json::from_slice(&response.body).map_err(|e| {
+                SearchError::ProviderError(format!("Failed to parse Exa response: {e}"))
+            })?;
 
         Ok(exa_response
             .results

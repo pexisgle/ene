@@ -1,3 +1,4 @@
+pub mod broker;
 pub mod permission;
 pub mod sandbox;
 

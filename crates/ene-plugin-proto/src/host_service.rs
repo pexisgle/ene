@@ -23,8 +23,18 @@ pub enum HostServiceId {
     Assets,
     /// Host-mediated capability calls (`ene-plugin-proto::capability_service`).
     Capability,
-    /// Reserved: credential / secret retrieval (not yet implemented).
+    /// Credential retrieval through the `Credential` broker (protocol v8+).
     Credential,
+    /// Executable-artifact fetch/verify/switch through the `Artifact` broker.
+    Artifact,
+    /// User-file read/write/save through the `File` broker.
+    File,
+    /// Download / web access through the `Network` broker.
+    Network,
+    /// Child-process spawn through the `Process` broker.
+    Process,
+    /// Platform capabilities through the `Platform` broker.
+    Platform,
 }
 
 /// Requests sent on a new host-service connection before a service session
@@ -100,7 +110,8 @@ pub async fn read_host_service_response<R: AsyncRead + Unpin>(
     read_framed_json(reader).await
 }
 
-async fn write_framed_json<W, T>(writer: &mut W, value: &T) -> std::io::Result<()>
+/// Writes a length-prefixed JSON value (shared broker framing).
+pub async fn write_framed_json<W, T>(writer: &mut W, value: &T) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
     T: Serialize,
@@ -123,7 +134,9 @@ where
     Ok(())
 }
 
-async fn read_framed_json<R, T>(reader: &mut R) -> std::io::Result<Option<T>>
+/// Reads a length-prefixed JSON value (shared broker framing); `Ok(None)`
+/// at a clean EOF.
+pub async fn read_framed_json<R, T>(reader: &mut R) -> std::io::Result<Option<T>>
 where
     R: AsyncRead + Unpin,
     T: for<'de> Deserialize<'de>,

@@ -1,13 +1,11 @@
 mod shell_platform;
 
-use self::shell_platform::execute_shell_command;
 use crate::utils::sandbox::SandboxConfig;
 use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
 use ene_util::truncate::Truncate;
 use std::fmt::Write;
 use std::path::Path;
-use std::time::Duration;
 
 pub async fn shell_exec(
     command: &str,
@@ -29,28 +27,28 @@ pub async fn shell_exec(
     };
 
     let timeout_ms = timeout.unwrap_or(sandbox.shell_timeout_ms);
-    let timeout_duration = Duration::from_millis(timeout_ms);
+    let broker = sandbox.broker()?;
+    let outcome = broker
+        .spawn_process(
+            self::shell_platform::shell_argv(command),
+            Some(cwd),
+            vec![],
+            timeout_ms,
+            u64::try_from(sandbox.max_shell_output_bytes).unwrap_or(u64::MAX),
+        )
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("timed out") {
+                ToolError::timeout(format!("Command timed out after {timeout_ms} ms"))
+            } else {
+                ToolError::execution_failed(format!("Failed to execute command: {e}"))
+            }
+        })?;
 
-    let result = execute_shell_command(command, &cwd, timeout_duration).await;
+    let stdout = outcome.stdout;
+    let stderr = outcome.stderr;
 
-    let result = match result {
-        Ok(o) => o,
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            return Err(ToolError::timeout(format!(
-                "Command timed out after {timeout_ms} ms"
-            )));
-        }
-        Err(e) => {
-            return Err(ToolError::execution_failed(format!(
-                "Failed to execute command: {e}"
-            )));
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    let stderr = String::from_utf8_lossy(&result.stderr);
-
-    let mut full_output = stdout.to_string();
+    let mut full_output = stdout;
     if !stderr.is_empty() {
         if !full_output.is_empty() {
             full_output.push('\n');
@@ -69,12 +67,11 @@ pub async fn shell_exec(
     );
 
     let mut output_text = truncated.content;
-    if result.status.code() != Some(0) {
+    if outcome.exit_code != Some(0) {
         output_text = format!(
             "[Exit code: {}]\n{}",
-            result
-                .status
-                .code()
+            outcome
+                .exit_code
                 .map_or_else(|| "?".to_string(), |c| c.to_string()),
             output_text
         );

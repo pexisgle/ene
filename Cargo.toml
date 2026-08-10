@@ -1,5 +1,10 @@
 [workspace]
-members = [ "crates/*", "apps/*", "plugins/provider/*", "plugins/tool/*" ]
+members = [
+    "crates/*",
+    "apps/*",
+    "plugins/provider/*",
+    "plugins/tool/*",
+]
 default-members = [ "apps/ene-cli" ]
 resolver = "2"
 
@@ -101,9 +106,16 @@ git2 = { version = "0.21", features = ["vendored-libgit2"] }
 # ── Data Structures ──
 crossbeam-channel = "0.5"
 dashmap = "6"
+fs2 = "0.4"
 indexmap = { version = "2", features = ["serde"] }
 once_cell = "1"
 parking_lot = "0.12"
+
+# ── Sandbox / Security ──
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8"] }
+landlock = "0.4"
+libc = "0.2"
+seccompiler = "0.5"
 
 # ── Text Processing ──
 ego-tree = "0.11"
@@ -143,18 +155,22 @@ zip = { version = "8", default-features = false }
 # ── Internal crates ──
 ene-connector = { path = "crates/ene-connector" }
 ene-ai = { path = "crates/ene-ai" }
+ene-approval = { path = "crates/ene-approval" }
+ene-artifact = { path = "crates/ene-artifact" }
 ene-card = { path = "crates/ene-card" }
 ene-config = { path = "crates/ene-config" }
 ene-core = { path = "crates/ene-core" }
 ene-infer = { path = "crates/ene-infer" }
 ene-mind = { path = "crates/ene-mind" }
 ene-plugin = { path = "crates/ene-plugin" }
+ene-plugin-broker = { path = "crates/ene-plugin-broker" }
 ene-plugin-db = { path = "crates/ene-plugin-db" }
 ene-plugin-host = { path = "crates/ene-plugin-host" }
 ene-plugin-macros = { path = "crates/ene-plugin-macros" }
 ene-plugin-proto = { path = "crates/ene-plugin-proto" }
 ene-rag = { path = "crates/ene-rag" }
 ene-runtime = { path = "crates/ene-runtime" }
+ene-sandbox = { path = "crates/ene-sandbox" }
 ene-store = { path = "crates/ene-store" }
 ene-util = { path = "crates/ene-util" }
 ene-voice = { path = "crates/ene-voice" }

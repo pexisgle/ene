@@ -142,6 +142,17 @@ HTTP エンドポイントです。`tools.mcp_servers` に設定します:
   属性リファレンス。
 - [プラグイン IPC プロトコル](../reference/plugin-ipc.md) — ワイヤ形式。
 
+## サンドボックス・Broker・承認
+
+プラグインは OS に直接触れません。ホストが OS サンドボックス(Linux は
+Landlock + seccomp + rlimits、Windows は Job Object)を適用し、すべての操作を
+Broker チャネル(`file`・`network`・`process`・`credential`・`artifact`・
+`platform`)で仲介し、二層の承認モデル(署名 manifest → 全体/プラグイン別
+ポリシー)で要求をゲートします。実行可能 Artifact のダウンロードは署名付き
+Catalog と CAS 検証からのみ可能です。詳細は
+[サンドボックス・Broker・承認](sandbox-and-approvals.md)を参照してください
+(設定 UI・監査ログ・SSRF ガードを含みます)。
+
 ## FAQ
 
 **別言語でプラグインを書けますか？** プロトコル自体は stdio 上のフレーム化

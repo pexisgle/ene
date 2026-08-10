@@ -924,6 +924,23 @@ async fn pump_events(
                     description,
                 })));
             }
+            Ok(EneEvent::BrokerApprovalRequired {
+                request_id,
+                plugin,
+                category,
+                target,
+                description,
+            }) => {
+                // Broker approvals are not tied to a turn; reuse the
+                // permission-prompt UI with the plugin/category in the
+                // action label.
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::PermissionRequired {
+                    request_id,
+                    action: format!("{plugin}:{category}"),
+                    target,
+                    description,
+                })));
+            }
             Ok(EneEvent::UserInputRequired {
                 turn,
                 origin: _,

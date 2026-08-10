@@ -1,0 +1,28 @@
+[package]
+name = "ene-sandbox"
+version.workspace = true
+edition.workspace = true
+description = "OS-enforced plugin sandbox: Landlock + seccomp + rlimits + cgroup v2 on Linux, Job Object + restricted token on Windows"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+libc = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = { workspace = true }
+libc = { workspace = true }
+seccompiler = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

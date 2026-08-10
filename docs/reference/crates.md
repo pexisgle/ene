@@ -28,11 +28,15 @@ refactoring seams), see [Crate interfaces](interfaces/overview.md).
 | `ene-infer` | Single-threaded local-model framework (`LocalModel`, `EngineHandle`): worker thread, bounded queue, cooperative cancellation, panic recovery | (nothing internal) |
 | `ene-rag` | RAG policy: hybrid scoring, decay, workspace chunking; feature `tool` adds tool-selection pipeline (needs ene-ai) | core, config |
 | `ene-connector` | External-service connector framework: credentials, permission gates, policies, webhooks | (nothing internal) |
-| `ene-plugin-proto` | Wire ABI: IPC protocol v7, tool types, capabilities, sandbox config | (nothing internal) |
+| `ene-approval` | Permission model: categories, modes, global/per-plugin policy resolution, audit log, signed manifest types | (nothing internal) |
+| `ene-artifact` | Signed artifact catalog, CAS (SHA-256), resumable downloads, one-generation rollback installer | (nothing internal) |
+| `ene-sandbox` | OS sandbox primitives: Landlock + seccomp + rlimits + cgroup v2 (Linux), Job Object (Windows) | (nothing internal) |
+| `ene-plugin-proto` | Wire ABI: IPC protocol v8, tool types, capabilities, sandbox config, broker channel types | (nothing internal) |
 | `ene-plugin` | Plugin authoring facade: `run_plugin_server`, `PluginDispatch`, traits, `prelude` | proto, infer, macros |
 | `ene-plugin-macros` | Proc macros: `ToolAction`, `ToolSpec`, `tool_action`, provider derives | proto |
-| `ene-plugin-host` | Plugin supervision: spawn/handshake/capabilities/health/circuit breaker, IPC provider bridges, MCP client, credential registry | proto, ai, config, connector |
+| `ene-plugin-host` | Plugin supervision: spawn/handshake/capabilities/health/circuit breaker, IPC provider bridges, MCP client, credential registry, broker hub (file/network/process/credential/artifact/platform), manifest verification, approval engine | proto, ai, config, connector, approval, artifact, sandbox |
 | `ene-plugin-db` | Typed CRUD client for plugin binaries over the host `db` service | proto |
+| `ene-plugin-broker` | Plugin-side broker client (protocol v8) for host-mediated file/network/process/credential/artifact/platform services | proto |
 | `ene-voice` | Local voice engines: whisper STT, Kokoro TTS, Silero VAD (feature-gated: `local-stt`, `local-tts`, `silero-vad`) | ai, config, infer |
 | `ene-vrm` | VRM 1.0 loader + wgpu renderer; standalone (used by ene-desktop) | (nothing internal) |
 | `ene-util` | Pure helpers: truncation, HTML→Markdown (feature `html`) | (nothing internal) |

@@ -1,162 +1,5 @@
 {
   "$schema": "./schema/settings.schema.json",
-  "mind": {
-    "language": "ja",
-    "emotion": {
-      "classifier_language": "ja",
-      "enabled": true
-    },
-    "proactive": {
-      "cooldown_seconds": 60,
-      "enabled": false,
-      "interval_seconds": 10,
-      "min_idle_seconds": 20,
-      "sources": {
-        "activity": true,
-        "conversation": true,
-        "screen_summary": true,
-        "memory": true,
-        "window_title_level": "app_only"
-      },
-      "confirmation_enabled": false,
-      "fatigue_suppression_threshold": 0.7,
-      "paused": false,
-      "quiet_hours": {
-        "enabled": false,
-        "days": {
-          "monday": false,
-          "tuesday": false,
-          "wednesday": false,
-          "thursday": false,
-          "friday": false,
-          "saturday": false,
-          "sunday": false
-        },
-        "start": {
-          "hour": 22,
-          "minute": 0
-        },
-        "end": {
-          "hour": 7,
-          "minute": 0
-        },
-        "suppress": {
-          "notifications": true,
-          "decisions": true,
-          "tts": true
-        },
-        "policy": "discard",
-        "timezone": ""
-      },
-      "pending_confirmation": {
-        "enabled": false,
-        "min_age_days": 3,
-        "min_confidence": 0.7,
-        "reask_after_days": 7
-      },
-      "world_state": {
-        "enabled": false,
-        "max_snapshots": 64,
-        "min_snapshots_for_trend": 3,
-        "engaged_idle_seconds": 60,
-        "change_window": 3
-      }
-    },
-    "memory_limits": {
-      "commitment_active_match_limit": 4096
-    },
-    "memory_approval": {
-      "require_approval": false
-    },
-    "topic_boundary": {
-      "enabled": true,
-      "boundary_threshold": 0.3,
-      "weight_centroid": 0.6,
-      "weight_silence": 0.15,
-      "weight_topic_length": 0.25,
-      "centroid_alpha": 0.15,
-      "min_utterance_chars": 6,
-      "silence_saturation_secs": 300,
-      "max_topic_turns": 12
-    },
-    "session": {
-      "session_timeout_minutes": 120
-    }
-  },
-  "store": {
-    "enabled": true
-  },
-  "tools": {
-    "enabled": true,
-    "list": {
-      "app": {
-        "enable": true
-      },
-      "browser": {
-        "enable": true
-      },
-      "calc": {
-        "enable": true
-      },
-      "fs": {
-        "enable": true
-      },
-      "geo": {
-        "enable": true
-      },
-      "random": {
-        "enable": true
-      },
-      "git": {
-        "enable": true
-      },
-      "homeassistant": {
-        "base_url": "http://homeassistant.local:8123",
-        "enable": true,
-        "token": ""
-      },
-      "utility": {
-        "enable": true
-      },
-      "web": {
-        "brave_api_key": "",
-        "enable": true,
-        "exa_api_key": "",
-        "tavily_api_key": ""
-      }
-    },
-    "mcp_servers": []
-  },
-  "plugins": {
-    "list": {
-      "llama-cpp": {
-        "config": {
-          "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
-          "acceleration": "auto"
-        },
-        "profiles": {
-          "gemma-4-e2b": {
-            "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
-            "gpu_layers": "auto",
-            "context_size": 16384
-          },
-          "gemma-4-e4b": {
-            "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
-            "gpu_layers": "auto",
-            "context_size": 16384
-          },
-          "jina-v5-small": {
-            "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
-            "quantization": "F16",
-            "gpu_layers": "auto",
-            "context_size": 2048,
-            "dimensions": 1024
-          }
-        }
-      }
-    }
-  },
-  "version": 5,
   "character": "Alicia",
   "user_name": "User",
   "ai": {
@@ -279,5 +122,192 @@
       "enabled": false,
       "device": null
     }
-  }
+  },
+  "mind": {
+    "language": "ja",
+    "emotion": {
+      "classifier_language": "ja",
+      "enabled": true
+    },
+    "proactive": {
+      "cooldown_seconds": 60,
+      "enabled": false,
+      "interval_seconds": 10,
+      "min_idle_seconds": 20,
+      "sources": {
+        "activity": true,
+        "conversation": true,
+        "screen_summary": true,
+        "memory": true,
+        "window_title_level": "app_only"
+      },
+      "confirmation_enabled": false,
+      "fatigue_suppression_threshold": 0.7,
+      "paused": false,
+      "quiet_hours": {
+        "enabled": false,
+        "days": {
+          "monday": false,
+          "tuesday": false,
+          "wednesday": false,
+          "thursday": false,
+          "friday": false,
+          "saturday": false,
+          "sunday": false
+        },
+        "start": {
+          "hour": 22,
+          "minute": 0
+        },
+        "end": {
+          "hour": 7,
+          "minute": 0
+        },
+        "suppress": {
+          "notifications": true,
+          "decisions": true,
+          "tts": true
+        },
+        "policy": "discard",
+        "timezone": ""
+      },
+      "pending_confirmation": {
+        "enabled": false,
+        "min_age_days": 3,
+        "min_confidence": 0.7,
+        "reask_after_days": 7
+      },
+      "world_state": {
+        "enabled": false,
+        "max_snapshots": 64,
+        "min_snapshots_for_trend": 3,
+        "engaged_idle_seconds": 60,
+        "change_window": 3
+      }
+    },
+    "memory_limits": {
+      "commitment_active_match_limit": 4096
+    },
+    "memory_approval": {
+      "require_approval": false
+    },
+    "topic_boundary": {
+      "enabled": true,
+      "boundary_threshold": 0.3,
+      "weight_centroid": 0.6,
+      "weight_silence": 0.15,
+      "weight_topic_length": 0.25,
+      "centroid_alpha": 0.15,
+      "min_utterance_chars": 6,
+      "silence_saturation_secs": 300,
+      "max_topic_turns": 12
+    },
+    "session": {
+      "session_timeout_minutes": 120
+    }
+  },
+  "store": {
+    "enabled": true
+  },
+  "tools": {
+    "enabled": true,
+    "list": {
+      "app": {
+        "enable": true
+      },
+      "browser": {
+        "enable": true
+      },
+      "calc": {
+        "enable": true
+      },
+      "fs": {
+        "enable": true
+      },
+      "geo": {
+        "enable": true
+      },
+      "random": {
+        "enable": true
+      },
+      "git": {
+        "enable": true
+      },
+      "homeassistant": {
+        "base_url": "http://homeassistant.local:8123",
+        "enable": true,
+        "token": ""
+      },
+      "utility": {
+        "enable": true
+      },
+      "web": {
+        "enable": true
+      }
+    },
+    "mcp_servers": []
+  },
+  "plugins": {
+    "list": {
+      "web": {
+        "credentials": {
+          "exa_api_key": "",
+          "tavily_api_key": ""
+        }
+      },
+      "llama-cpp": {
+        "config": {
+          "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
+          "acceleration": "auto"
+        },
+        "profiles": {
+          "gemma-4-e2b": {
+            "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+            "gpu_layers": "auto",
+            "context_size": 16384
+          },
+          "gemma-4-e4b": {
+            "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
+            "gpu_layers": "auto",
+            "context_size": 16384
+          },
+          "jina-v5-small": {
+            "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+            "quantization": "F16",
+            "gpu_layers": "auto",
+            "context_size": 2048,
+            "dimensions": 1024
+          }
+        }
+      },
+      "llama-server": {
+        "config": {
+          "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
+          "acceleration": "auto"
+        },
+        "profiles": {
+          "gemma-4-e2b": {
+            "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+            "gpu_layers": "auto",
+            "context_size": 16384,
+            "quantization": "F16"
+          },
+          "gemma-4-e4b": {
+            "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
+            "gpu_layers": "auto",
+            "context_size": 16384,
+            "quantization": "F16"
+          },
+          "jina-v5-small": {
+            "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+            "quantization": "F16",
+            "gpu_layers": "auto",
+            "context_size": 2048,
+            "dimensions": 1024
+          }
+        }
+      }
+    }
+  },
+  "version": 6
 }

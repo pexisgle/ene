@@ -141,10 +141,6 @@ impl ToolPlugin for TestPlugin {
         revoked.push((action.to_string(), target_pattern.to_string()));
         Ok(())
     }
-
-    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {
-        self.state.sandbox_received.store(true, Ordering::SeqCst);
-    }
 }
 
 impl ene_plugin::ConfigurablePlugin for TestPlugin {
@@ -154,6 +150,10 @@ impl ene_plugin::ConfigurablePlugin for TestPlugin {
 
     fn config_schema(&self) -> Option<serde_json::Value> {
         Some(serde_json::json!({"type": "object", "properties": {"key": {"type": "string"}}}))
+    }
+
+    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {
+        self.state.sandbox_received.store(true, Ordering::SeqCst);
     }
 }
 

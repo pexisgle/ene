@@ -6,12 +6,17 @@
 
 ## バージョン
 
-現在のプロトコルバージョン: **7**（`PLUGIN_IPC_PROTOCOL_VERSION`）。
+現在のプロトコルバージョン: **8**（`PLUGIN_IPC_PROTOCOL_VERSION`）。
 
 - ホストは `VersionRange { min: N-1, max: N }`（N-1 後方互換）を広告します。
   プラグインは自分がビルドされた単一バージョンを宣言します。
 - ネゴシエーションされるバージョンは共通の最高値です。範囲が重ならないと
   ハンドシェイクは失敗します。
+- v8 で **Broker チャネル**が追加されました。ホストサービスソケットに
+  `Artifact`・`File`・`Network`・`Process`・`Platform`（および
+  `Credential`）passenger が増え、`SandboxConfigData` が Broker ソケットと
+  プラグイン専用 temp ディレクトリを運びます。プラグインに直接の OS アクセス
+  はなく、すべての操作がホストによって仲介されます。
 - v7 でプロセス外 VAD（`ProcessVadChunk`）が追加され、v6 でハンドシェイク後の
   フレームが JSON から MessagePack に変わりました。ホストは新しいリクエスト
   種別をネゴシエーション済みバージョンでゲートするため、古いプラグインに
@@ -65,7 +70,15 @@
 - ホストはサンドボックス設定（`SandboxConfigData`）も渡します。プラグインの
   作業ディレクトリ・権限コンテキスト・リソース制限を記述します。
 
-## ホストサービス（`db` と `capability`）
+## ホストサービス
+
+共有ホストサービスソケットは次の passenger を多重化します:
+
+| Passenger | 追加 | 用途 |
+|---|---|---|
+| `db` | v3 | `memory.db` に対する型付き CRUD（`ene-plugin-db`） |
+| `capability` | v6 | プラグイン間 capability 呼び出し |
+| `file`・`network`・`process`・`credential`・`artifact`・`platform` | v8 | Broker チャネル — ホスト仲介のファイルシステム・ダウンロード/Web・プロセス・資格情報・署名 Artifact・プラットフォーム機能 |
 
 状態保持プラグインは **`db` パッセンジャー**経由でホストのデータベースに
 到達します。`ene-plugin-db` が共有ホストサービスソケット上で型付き CRUD
@@ -76,6 +89,10 @@
 します。呼び出し側の宣言済み `requires` がリクエストを許可し、ホストが
 capability レジストリからプロバイダーを解決し、プロバイダーの接続へ転送
 します。
+
+v8 の **Broker passenger** が、プラグインが OS に触れる唯一の経路です。
+プラグイン側クライアントは `ene-plugin-broker`、ホスト側ハンドラーは
+`ene-plugin-host` にあります（[サンドボックス・Broker・承認](../concepts/sandbox-and-approvals.md)）。
 
 ## ホスト側のバージョンゲート
 

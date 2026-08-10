@@ -18,6 +18,32 @@ use sea_orm::{
     QuerySelect, TransactionTrait, TryIntoModel,
 };
 
+/// Detects `SQLite` busy/locked errors.
+///
+/// `busy_timeout` does not cover `SQLITE_BUSY_SNAPSHOT` (extended code 517):
+/// in WAL mode a writer that started its transaction from a stale snapshot
+/// fails immediately even though another connection's commit just finished.
+/// The scheduler's claim/finish writes race each other (and the timer's
+/// reads) across pool connections, so a single lost write would otherwise
+/// leave a run row `Running` forever.
+fn is_busy_error(err: &EneMemoryError) -> bool {
+    let EneMemoryError::MemoryStoreError(
+        sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(err))
+        | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(err)),
+    ) = err
+    else {
+        return false;
+    };
+    matches!(
+        err.as_ref(),
+        sea_orm::sqlx::Error::Database(db_err)
+            if matches!(
+                db_err.code().as_deref(),
+                Some("5" | "6" | "517" | "261" | "262")
+            )
+    )
+}
+
 /// How the actor wants a claimed fire handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FireClaimMode {
@@ -220,6 +246,28 @@ impl MemoryStore {
         now: DateTime<Utc>,
         mode: FireClaimMode,
     ) -> Result<Option<ClaimedFire>, EneMemoryError> {
+        let mut attempts = 5;
+        loop {
+            match self
+                .claim_fire_once(schedule_id, scheduled_at, now, mode)
+                .await
+            {
+                Err(e) if is_busy_error(&e) && attempts > 1 => {
+                    attempts -= 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    async fn claim_fire_once(
+        &self,
+        schedule_id: i64,
+        scheduled_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+        mode: FireClaimMode,
+    ) -> Result<Option<ClaimedFire>, EneMemoryError> {
         let txn = self.db.begin().await?;
         let Some(model) = entities::schedules::Entity::find_by_id(schedule_id)
             .one(&txn)
@@ -341,6 +389,29 @@ impl MemoryStore {
     /// left untouched, so a retry-fire outcome can never overwrite a newer
     /// attempt's history.
     pub async fn finish_run(
+        &self,
+        schedule_id: i64,
+        run_id: i64,
+        status: ScheduleRunStatus,
+        error: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<(), EneMemoryError> {
+        let mut attempts = 5;
+        loop {
+            match self
+                .finish_run_once(schedule_id, run_id, status, error.clone(), now)
+                .await
+            {
+                Err(e) if is_busy_error(&e) && attempts > 1 => {
+                    attempts -= 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    async fn finish_run_once(
         &self,
         schedule_id: i64,
         run_id: i64,

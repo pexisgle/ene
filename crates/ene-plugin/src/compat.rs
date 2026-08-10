@@ -137,6 +137,16 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
         self.provider.revoke_pattern(action, target_pattern);
         Ok(())
     }
+}
+
+impl<T: ToolProvider> ConfigurablePlugin for ToolProviderPlugin<T> {
+    fn set_config(&self, config: &serde_json::Value) {
+        self.provider.set_config(config);
+    }
+
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        self.provider.config_schema()
+    }
 
     // `set_sandbox`/`set_config` are synchronous trait methods invoked exactly
     // once during the handshake, before any tool call on the connection. They
@@ -147,15 +157,5 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
     // same connection.
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
         self.provider.set_sandbox(sandbox);
-    }
-}
-
-impl<T: ToolProvider> ConfigurablePlugin for ToolProviderPlugin<T> {
-    fn set_config(&self, config: &serde_json::Value) {
-        self.provider.set_config(config);
-    }
-
-    fn config_schema(&self) -> Option<serde_json::Value> {
-        self.provider.config_schema()
     }
 }

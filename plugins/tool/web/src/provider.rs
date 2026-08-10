@@ -5,14 +5,35 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
-/// Configuration for web search providers (Tavily, Exa).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+use crate::broker::WebBroker;
+
+/// Names of host-owned credentials used by web search providers.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, rename_all = "snake_case")]
 pub struct WebSearchConfig {
-    /// Tavily Search API Key
-    pub tavily_api_key: String,
-    /// Exa Search API Key
-    pub exa_api_key: String,
+    /// Host credential name for Tavily Search.
+    #[serde(default = "default_tavily_credential")]
+    pub tavily_credential: String,
+    /// Host credential name for Exa Search.
+    #[serde(default = "default_exa_credential")]
+    pub exa_credential: String,
+}
+
+fn default_tavily_credential() -> String {
+    "tavily_api_key".to_string()
+}
+
+fn default_exa_credential() -> String {
+    "exa_api_key".to_string()
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            tavily_credential: default_tavily_credential(),
+            exa_credential: default_exa_credential(),
+        }
+    }
 }
 
 fn generate_web_search_schema() -> serde_json::Value {
@@ -37,33 +58,8 @@ pub struct WebToolProvider {
 }
 
 impl WebToolProvider {
-    #[expect(
-        clippy::expect_used,
-        reason = "a default reqwest client silently loses the SSRF redirect policy, timeout, and user agent — failing fast is safer"
-    )]
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
-            .default_headers({
-                let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(
-                    reqwest::header::ACCEPT,
-                    reqwest::header::HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
-                );
-                headers.insert(
-                    reqwest::header::ACCEPT_LANGUAGE,
-                    reqwest::header::HeaderValue::from_static("en-US,en;q=0.5"),
-                );
-                headers
-            })
-            // Disable automatic redirects entirely. The fetch action
-            // follows redirects manually so it can re-run the SSRF
-            // host check on every hop — a limited redirect policy
-            // only caps hop count, not destination validation.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("reqwest client builder should not fail");
+        let broker = WebBroker::new();
 
         // RwLock so the API key can be hot-reloaded by a reconfigure
         // without restarting the tool binary; a `OnceLock` would only
@@ -72,8 +68,11 @@ impl WebToolProvider {
         let config = Arc::new(RwLock::new(WebSearchConfig::default()));
 
         let actions: Vec<Box<dyn ToolAction>> = vec![
-            Box::new(crate::action::WebFetchAction::new(client)),
-            Box::new(crate::action::WebSearchAction::new(config.clone())),
+            Box::new(crate::action::WebFetchAction::new(Arc::clone(&broker))),
+            Box::new(crate::action::WebSearchAction::new(
+                config.clone(),
+                Arc::clone(&broker),
+            )),
         ];
 
         let config_for_set = config;
@@ -92,6 +91,11 @@ impl WebToolProvider {
                 }
             })
             .with_config_schema_hook(|| Some(generate_web_search_schema()));
+
+        let broker_for_sandbox = broker;
+        let inner = inner.with_sandbox_hook(move |sandbox| {
+            broker_for_sandbox.configure(sandbox);
+        });
 
         Self { inner }
     }

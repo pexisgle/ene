@@ -6,13 +6,18 @@ binaries. The authoritative implementation is
 
 ## Version
 
-Current protocol version: **7** (`PLUGIN_IPC_PROTOCOL_VERSION`).
+Current protocol version: **8** (`PLUGIN_IPC_PROTOCOL_VERSION`).
 
 - The host advertises `VersionRange { min: N-1, max: N }` (N-1 backward
   compatibility). Plugins should declare the single version they were
   built against.
 - The negotiated version is the highest common version; the handshake
   fails when ranges do not overlap.
+- v8 added the **Broker channel**: the host-service socket gains `Artifact`,
+  `File`, `Network`, `Process`, and `Platform` passengers (plus
+  `Credential`), and `SandboxConfigData` carries the broker socket and the
+  per-plugin temp directory. Plugins have no direct OS access; every
+  operation is mediated.
 - v7 added out-of-process VAD (`ProcessVadChunk`); v6 switched frames after
   the handshake from JSON to MessagePack. Hosts gate new request variants
   on the negotiated version, so an older plugin never receives them.
@@ -53,9 +58,10 @@ plugin ── negotiated version + PluginCapabilities + ack ──▶ host
 | Class | Examples |
 |---|---|
 | Tool IPC (v2 lineage) | `ToolCall` / `ToolResult` / `ToolError` (structured, IPC-serializable), `ToolSpec` |
-| Plugin IPC (v7) | `CreateChatStream`, `StreamChunk`, `StreamEnd`, `StreamError`, embeddings, `SynthesizeTts`, `Transcribe`, `ProcessVadChunk` |
+| Plugin IPC (v8) | `CreateChatStream`, `StreamChunk`, `StreamEnd`, `StreamError`, embeddings, `SynthesizeTts`, `Transcribe`, `ProcessVadChunk` |
 | Deferred tasks | `DeferredStatus` — background tool completion reported asynchronously |
-| Host services | `HostServiceRequest` / `HostServiceResponse` — multiplexed passengers on a shared socket |
+| Host services | `HostServiceRequest` / `HostServiceResponse` — multiplexed passengers on a shared socket (`db`, `capability`, and the v8 brokers: `file`, `network`, `process`, `credential`, `artifact`, `platform`) |
+| Broker channel | `BrokerRequest` / `BrokerResponse` — typed, host-mediated operations; identity is pinned to the authenticated plugin token |
 | Capability calls | `CapabilityCall` — plugin-to-plugin mediation through the host |
 
 ## Transport
@@ -65,7 +71,15 @@ plugin ── negotiated version + PluginCapabilities + ack ──▶ host
 - The host also passes a sandbox config (`SandboxConfigData`) describing
   the plugin's working directory, permission context, and resource limits.
 
-## Host services (`db` and `capability`)
+## Host services
+
+The shared host-service socket multiplexes passengers:
+
+| Passenger | Since | Purpose |
+|---|---|---|
+| `db` | v3 | typed CRUD against `memory.db` (`ene-plugin-db`) |
+| `capability` | v6 | plugin-to-plugin capability calls |
+| `file`, `network`, `process`, `credential`, `artifact`, `platform` | v8 | the broker channel — host-mediated filesystem, downloads/web, processes, credentials, signed artifacts, and platform features |
 
 Stateful plugins reach the host's database through the **`db` passenger**:
 `ene-plugin-db` provides typed CRUD (list/insert/update/delete/search)
@@ -76,6 +90,11 @@ The **`capability` passenger** mediates plugin-to-plugin capability calls:
 the caller's declared `requires` authorize the request, the host resolves
 the provider from the capability registry, and forwards over the
 provider's connection.
+
+The v8 **broker passengers** are the only way a plugin touches the OS.
+`ene-plugin-broker` is the plugin-side client; the host implements the
+handlers in `ene-plugin-host` (see
+[Sandbox, broker & approvals](../concepts/sandbox-and-approvals.md)).
 
 ## Version gates in the host
 

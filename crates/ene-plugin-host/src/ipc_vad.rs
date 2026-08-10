@@ -428,12 +428,12 @@ mod tests {
         server.abort();
     }
 
-    /// The negotiated-version gate: a v6 peer cannot receive `ProcessVadChunk`
-    /// (the variant did not exist before v7), so the connection must report
-    /// no VAD support even though the mock "advertises" it.
+    /// The negotiated-version gate: `ProcessVadChunk` exists since v7, so
+    /// every version the host still negotiates (v7 = N-1, v8 = current)
+    /// must report VAD support.
     #[tokio::test(flavor = "multi_thread")]
     async fn supports_vad_follows_negotiated_version() {
-        for (ack_version, expected) in [(6, false), (7, true)] {
+        for (ack_version, expected) in [(7, true), (8, true)] {
             let received = Arc::new(Mutex::new(Vec::new()));
             let dir = tempfile::tempdir().expect("tempdir");
             let socket_path = dir.path().join(format!("vad-{ack_version}.sock"));

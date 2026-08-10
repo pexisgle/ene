@@ -17,7 +17,7 @@ use ene_plugin_proto::{
     PluginIpcRequest, PluginIpcResponse, WireFormat, cleanup_path, read_plugin_request,
     write_plugin_response,
 };
-use ene_plugin_proto::{DeferredOutcome, VersionRange};
+use ene_plugin_proto::{DeferredOutcome, SandboxConfigData, VersionRange};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -221,6 +221,34 @@ impl PluginDispatch {
         }
         if let Some(capability) = &self.capability {
             capability.set_profiles(profiles);
+        }
+    }
+
+    /// Delivers the sandbox configuration (broker socket, auth token, OS
+    /// sandbox settings) to every registered trait implementation, so
+    /// provider plugins can mediate network/file access through the broker
+    /// exactly like tool plugins.
+    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
+        if let Some(tool) = &self.tool {
+            tool.set_sandbox(sandbox);
+        }
+        if let Some(llm) = &self.llm {
+            llm.set_sandbox(sandbox);
+        }
+        if let Some(embed) = &self.embed {
+            embed.set_sandbox(sandbox);
+        }
+        if let Some(tts) = &self.tts {
+            tts.set_sandbox(sandbox);
+        }
+        if let Some(stt) = &self.stt {
+            stt.set_sandbox(sandbox);
+        }
+        if let Some(vad) = &self.vad {
+            vad.set_sandbox(sandbox);
+        }
+        if let Some(capability) = &self.capability {
+            capability.set_sandbox(sandbox);
         }
     }
 
@@ -926,9 +954,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                     ),
                 };
             };
-            if let Some(tool) = &dispatch.tool {
-                tool.set_sandbox(sandbox);
-            }
+            dispatch.set_sandbox(sandbox);
             // Configuration is delivered to **every** registered trait
             // implementation (tool or provider), not just the tool plugin.
             // Both blobs are opaque to the plugin server; the plugin

@@ -2,13 +2,14 @@
 //!
 //! Implements [`LlmPlugin`] (SSE streaming + non-streaming chat completions
 //! with tool use, vision, and structured output) and [`EmbedPlugin`] (batch
-//! embeddings) against any OpenAI-compatible `/v1` endpoint, using plain
-//! HTTP rather than the `async-openai` client so the transport tweaks
-//! (thinking-disabled bodies, `stream_options.include_usage`,
-//! `Retry-After` handling) have a single code path.
+//! embeddings) against any OpenAI-compatible `/v1` endpoint. All HTTP
+//! traffic is mediated by the host through the `Network` broker (SSRF
+//! guard, origin approval, size caps, credential injection); the plugin
+//! keeps a single code path for the transport tweaks (thinking-disabled
+//! bodies, `stream_options.include_usage`, `Retry-After` handling).
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,24 +18,20 @@ use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::broker::{FetchOutcome, StreamSession, broker};
 use crate::convert;
 
 const DEFAULT_API_BASE: &str = "https://api.openai.com/v1";
-/// Timeout for establishing an HTTP connection.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Total timeout for a single HTTP request (covers streamed bodies).
-const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 /// Retry budget for transient upstream failures (429 / network), matching
 /// the defaults `ene-ai` applies to its in-process retry policy.
 const MAX_ATTEMPTS: u32 = 3;
 const BASE_DELAY: Duration = Duration::from_millis(500);
 const MAX_DELAY: Duration = Duration::from_secs(30);
 
-/// Shared HTTP client, built once with timeouts and reused for all requests.
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
 /// Configuration delivered by the host at handshake time
-/// (`plugins.list.openai.config`), stored per process.
+/// (`plugins.list.openai.config`), stored per process. The API key is no
+/// longer part of this blob's contract — the host injects it into broker
+/// requests by key name.
 ///
 /// `Mutex` (rather than `OnceLock`) so tests can reset it between cases; in
 /// production the handshake is a one-shot and reconnects resend the same
@@ -69,8 +66,14 @@ impl ene_plugin::ConfigurablePlugin for OpenAiPlugin {
         *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
     }
 
+    /// Captures the broker socket/token so every request is host-mediated.
+    fn set_sandbox(&self, sandbox: &ene_plugin_proto::SandboxConfigData) {
+        crate::broker::configure_broker(sandbox);
+    }
+
     /// Advertises the config schema; `api_key` is marked `x-ene-secret: true`
-    /// so the host masks/redacts it.
+    /// so the host masks/redacts it. The key itself is unused by the plugin:
+    /// the host injects it into broker requests by key name.
     fn config_schema(&self) -> Option<Value> {
         Some(json!({
             "type": "object",
@@ -135,15 +138,11 @@ impl EmbedPlugin for OpenAiPlugin {
             }
         }
 
-        let api_key = resolve_api_key(&config)?;
         let base_url = resolve_base_url(&config);
         let body = json!({ "model": model, "input": items });
 
-        let response = post_with_retry(&base_url, &api_key, "embeddings", &body).await?;
-        let raw = response
-            .text()
-            .await
-            .map_err(|e| PluginError::provider(format!("failed to read response: {e}")))?;
+        let response = post_with_retry(&base_url, "api_key", "embeddings", &body).await?;
+        let raw = String::from_utf8_lossy(&response.body);
         let parsed: Value = serde_json::from_str(&raw)
             .map_err(|e| PluginError::provider(format!("failed to parse response: {e}")))?;
 
@@ -164,97 +163,6 @@ impl EmbedPlugin for OpenAiPlugin {
         }
         Ok(embeddings)
     }
-}
-
-/// Returns the shared HTTP client, building it on first use.
-fn http_client() -> Result<&'static reqwest::Client, PluginError> {
-    if let Some(client) = HTTP_CLIENT.get() {
-        return Ok(client);
-    }
-    let client = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| PluginError::provider(format!("failed to build HTTP client: {e}")))?;
-    // A racing task may have initialized first; either client is equivalent.
-    drop(HTTP_CLIENT.set(client));
-    HTTP_CLIENT
-        .get()
-        .ok_or_else(|| PluginError::provider("HTTP client initialization failed"))
-}
-
-/// Resolves a single `api_key` value per the `{"source": ...}` contract.
-///
-/// Accepted shapes for `value`:
-/// 1. A plain JSON string — used directly.
-/// 2. `{"source": "inline", "inline": "..."}` — the inline value.
-/// 3. `{"source": "env", "env": "VAR"}` — the named environment variable
-///    (defaults to `OPENAI_API_KEY` when `env` is empty).
-/// 4. Anything else (including `{"source": "auto"}`) — `None`, so the caller
-///    falls back to the process environment.
-fn resolve_key_value(value: &Value) -> Option<String> {
-    match value {
-        Value::String(key) if !key.trim().is_empty() => Some(key.trim().to_string()),
-        Value::Object(obj) => {
-            let source = obj.get("source").and_then(Value::as_str).unwrap_or("auto");
-            match source {
-                "inline" => obj
-                    .get("inline")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|key| !key.is_empty())
-                    .map(str::to_string),
-                "env" => {
-                    let var_name = obj
-                        .get("env")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or("OPENAI_API_KEY");
-                    std::env::var(var_name).ok().filter(|key| !key.is_empty())
-                }
-                // "auto" (or unrecognized) falls through to the caller's
-                // process-env fallback.
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Resolves the effective API key for a request.
-///
-/// Precedence:
-/// 1. The config delivered by the host at handshake time via
-///    [`ConfigurablePlugin::set_config`] (`plugins.list.openai.config`),
-///    resolved with the same `{"source": ...}` contract.
-/// 2. The per-request `config` argument (`ai.providers.<name>.api_key`).
-/// 3. The `OPENAI_API_KEY` environment variable.
-fn resolve_api_key(config: &Value) -> Result<String, PluginError> {
-    let host_config = PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner);
-    resolve_api_key_with_host(host_config.as_ref(), config)
-}
-
-/// The precedence logic behind [`resolve_api_key`], parameterized over the
-/// host-delivered config so tests can exercise it deterministically.
-fn resolve_api_key_with_host(
-    host_config: Option<&Value>,
-    config: &Value,
-) -> Result<String, PluginError> {
-    if let Some(key) = host_config
-        .and_then(|cfg| cfg.get("api_key"))
-        .and_then(resolve_key_value)
-    {
-        return Ok(key);
-    }
-    if let Some(key) = config.get("api_key").and_then(resolve_key_value) {
-        return Ok(key);
-    }
-    std::env::var("OPENAI_API_KEY").map_err(|_| {
-        PluginError::provider(
-            "no API key found: set api_key, api_key.inline, api_key.env, or OPENAI_API_KEY",
-        )
-    })
 }
 
 /// Resolves the effective API base URL, with the same precedence as the API
@@ -302,6 +210,7 @@ fn effective_thinking_disabled(config: &Value, model: &str) -> bool {
 /// An upstream OpenAI-compatible API failure, before mapping to
 /// [`PluginError`]. Transport failures and HTTP 429 are retryable;
 /// everything else is terminal.
+#[derive(Clone)]
 enum UpstreamError {
     /// Transport-level failure (DNS, connect, timeout, mid-read).
     Network(String),
@@ -348,80 +257,143 @@ impl UpstreamError {
 }
 
 /// Parses a `Retry-After` response header (seconds) if present and valid.
-fn retry_after_secs(response: &reqwest::Response) -> Option<u64> {
-    response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
+fn retry_after_secs(headers: &[(String, String)]) -> Option<u64> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
 }
 
-/// POSTs `body` to `{base_url}/{endpoint}`, retrying transient failures
-/// (network / HTTP 429) with exponential backoff and jitter.
+/// POSTs `body` to `{base_url}/{endpoint}` through the network broker,
+/// retrying transient failures (network / HTTP 429) with exponential
+/// backoff and jitter.
 ///
-/// Retries happen before the response body is consumed; a 2xx response is
-/// returned as-is so the caller can stream or parse it. Non-transient
-/// statuses fail immediately with the body snippet in the message.
+/// The host injects the credential named by `credential` (typically
+/// `"api_key"`) as `Authorization: Bearer <value>`; the plugin never holds
+/// the value. Non-transient statuses fail immediately with the body snippet
+/// in the message.
 async fn post_with_retry(
     base_url: &str,
-    api_key: &str,
+    credential: &str,
     endpoint: &str,
     body: &Value,
-) -> Result<reqwest::Response, PluginError> {
+) -> Result<FetchOutcome, PluginError> {
     let url = format!("{}/{}", base_url.trim_end_matches('/'), endpoint);
-    let client = http_client()?;
+    let payload = serde_json::to_vec(body)
+        .map_err(|e| PluginError::provider(format!("failed to serialize request: {e}")))?;
 
     let mut attempt: u32 = 0;
     loop {
-        let sent = client
-            .post(&url)
-            .bearer_auth(api_key)
-            .header("Content-Type", "application/json")
-            .json(body)
-            .send()
+        let sent = broker()
+            .fetch(
+                ene_plugin_broker::HttpMethod::Post,
+                &url,
+                vec![("Content-Type".to_string(), "application/json".to_string())],
+                Some(credential),
+                Some(payload.clone()),
+            )
             .await;
 
         let err = match sent {
+            Ok(response) if (200..300).contains(&response.status) => return Ok(response),
             Ok(response) => {
-                if response.status().is_success() {
-                    return Ok(response);
-                }
-                let status = response.status().as_u16();
-                let retry_after = retry_after_secs(&response);
-                let raw = response.text().await.map_err(|e| {
-                    PluginError::provider(format!("failed to read error response: {e}"))
-                })?;
+                let status = response.status;
+                let retry_after = retry_after_secs(&response.headers);
+                let raw = String::from_utf8_lossy(&response.body).into_owned();
                 UpstreamError::Http {
                     status,
                     body: raw,
                     retry_after,
                 }
             }
-            Err(e) => UpstreamError::Network(format!("HTTP request failed: {e}")),
+            Err(e) => UpstreamError::Network(format!("broker request failed: {e}")),
         };
 
-        let next = attempt.saturating_add(1);
-        if !err.is_retryable() || next >= MAX_ATTEMPTS {
+        let Some(delay) = retry_delay(&err, attempt) else {
             return Err(err.into_plugin_error());
-        }
-        let delay = match &err {
-            UpstreamError::Http {
-                retry_after: Some(secs),
-                ..
-            } => Duration::from_secs(*secs),
-            _ => backoff_delay(attempt),
-        }
-        .min(MAX_DELAY);
-        tracing::warn!(
-            component = "ene-plugin-openai",
-            attempt = next,
-            delay_ms = delay.as_millis() as u64,
-            error = %err.into_plugin_error(),
-            "retryable upstream failure; backing off"
-        );
+        };
         tokio::time::sleep(delay).await;
-        attempt = next;
+        attempt = attempt.saturating_add(1);
     }
+}
+
+/// POSTs `body` to `{base_url}/{endpoint}` as a streamed request, retrying
+/// transient failures (network / HTTP 429) with the same policy as
+/// [`post_with_retry`]. The host injects the `"api_key"` credential.
+async fn stream_with_retry(
+    base_url: &str,
+    endpoint: &str,
+    body: &Value,
+) -> Result<StreamSession, PluginError> {
+    let url = format!("{}/{}", base_url.trim_end_matches('/'), endpoint);
+    let payload = serde_json::to_vec(body)
+        .map_err(|e| PluginError::provider(format!("failed to serialize request: {e}")))?;
+
+    let mut attempt: u32 = 0;
+    loop {
+        let sent = broker()
+            .stream(
+                ene_plugin_broker::HttpMethod::Post,
+                &url,
+                vec![("Content-Type".to_string(), "application/json".to_string())],
+                Some("api_key"),
+                Some(payload.clone()),
+            )
+            .await;
+
+        let err = match sent {
+            Ok(session) if (200..300).contains(&session.status) => return Ok(session),
+            Ok(mut session) => {
+                let status = session.status;
+                let retry_after = retry_after_secs(&session.headers);
+                let mut raw = Vec::new();
+                while let Some(chunk) = session.chunks.next().await {
+                    let Ok(bytes) = chunk else { break };
+                    raw.extend_from_slice(&bytes);
+                    if raw.len() > 64 * 1024 {
+                        break;
+                    }
+                }
+                UpstreamError::Http {
+                    status,
+                    body: String::from_utf8_lossy(&raw).into_owned(),
+                    retry_after,
+                }
+            }
+            Err(e) => UpstreamError::Network(format!("broker request failed: {e}")),
+        };
+
+        let Some(delay) = retry_delay(&err, attempt) else {
+            return Err(err.into_plugin_error());
+        };
+        tokio::time::sleep(delay).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// The backoff delay for a retryable error, or `None` when the error is
+/// terminal or the retry budget is spent.
+fn retry_delay(err: &UpstreamError, attempt: u32) -> Option<Duration> {
+    let next = attempt.saturating_add(1);
+    if !err.is_retryable() || next >= MAX_ATTEMPTS {
+        return None;
+    }
+    let delay = match err {
+        UpstreamError::Http {
+            retry_after: Some(secs),
+            ..
+        } => Duration::from_secs(*secs),
+        _ => backoff_delay(attempt),
+    }
+    .min(MAX_DELAY);
+    tracing::warn!(
+        component = "ene-plugin-openai",
+        attempt = next,
+        delay_ms = delay.as_millis() as u64,
+        error = %err.clone().into_plugin_error(),
+        "retryable upstream failure; backing off"
+    );
+    Some(delay)
 }
 
 /// Jittered exponential backoff for retry attempt `retry_index` (0-indexed).
@@ -493,18 +465,46 @@ fn build_chat_body(
     body
 }
 
-/// Reads an SSE response body and sends parsed chunks through the channel.
+/// Reads a streamed SSE response and sends parsed chunks through the
+/// channel.
 ///
 /// Skips malformed payloads (debug-logged), stops at `[DONE]`, and emits a
 /// usage-only chunk when the final payload carries one.
 async fn stream_sse_response(
-    response: reqwest::Response,
+    mut session: StreamSession,
     name_mapping: HashMap<String, String>,
     tx: tokio::sync::mpsc::Sender<Result<PluginStreamChunk, PluginError>>,
 ) {
     use eventsource_stream::Eventsource;
 
-    let mut events = response.bytes_stream().eventsource();
+    if !(200..300).contains(&session.status) {
+        let mut raw = Vec::new();
+        while let Some(chunk) = session.chunks.next().await {
+            let Ok(bytes) = chunk else { break };
+            raw.extend_from_slice(&bytes);
+            if raw.len() > 64 * 1024 {
+                break;
+            }
+        }
+        let snippet: String = String::from_utf8_lossy(&raw).chars().take(280).collect();
+        drop(
+            tx.send(Err(match session.status {
+                401 | 403 => PluginError::provider_typed(
+                    ProviderErrorKind::Auth,
+                    format!("authentication failed: {snippet}"),
+                ),
+                429 => PluginError::provider_typed(
+                    ProviderErrorKind::RateLimit,
+                    format!("rate limited: {snippet}"),
+                ),
+                _ => PluginError::provider(format!("HTTP {}: {snippet}", session.status)),
+            }))
+            .await,
+        );
+        return;
+    }
+
+    let mut events = session.chunks.eventsource();
     while let Some(event) = events.next().await {
         let event = match event {
             Ok(event) => event,
@@ -592,7 +592,6 @@ impl LlmPlugin for OpenAiPlugin {
             return Err(PluginError::not_supported(format!("provider kind: {kind}")));
         }
 
-        let api_key = resolve_api_key(&config)?;
         let base_url = resolve_base_url(&config);
         let oa_messages = convert::to_openai_messages(&messages)?;
         let oa_tools = convert::to_openai_tools(&tools);
@@ -607,10 +606,10 @@ impl LlmPlugin for OpenAiPlugin {
             effective_thinking_disabled(&config, &model),
         );
 
-        let response = post_with_retry(&base_url, &api_key, "chat/completions", &body).await?;
+        let session = stream_with_retry(&base_url, "chat/completions", &body).await?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        tokio::spawn(stream_sse_response(response, name_mapping, tx));
+        tokio::spawn(stream_sse_response(session, name_mapping, tx));
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -628,7 +627,6 @@ impl LlmPlugin for OpenAiPlugin {
             return Err(PluginError::not_supported(format!("provider kind: {kind}")));
         }
 
-        let api_key = resolve_api_key(&config)?;
         let base_url = resolve_base_url(&config);
         let oa_messages = convert::to_openai_messages(&messages)?;
         let body = build_chat_body(
@@ -641,11 +639,8 @@ impl LlmPlugin for OpenAiPlugin {
             effective_thinking_disabled(&config, &model),
         );
 
-        let response = post_with_retry(&base_url, &api_key, "chat/completions", &body).await?;
-        let raw = response
-            .text()
-            .await
-            .map_err(|e| PluginError::provider(format!("failed to read response: {e}")))?;
+        let response = post_with_retry(&base_url, "api_key", "chat/completions", &body).await?;
+        let raw = String::from_utf8_lossy(&response.body);
         let parsed: Value = serde_json::from_str(&raw)
             .map_err(|e| PluginError::provider(format!("failed to parse response: {e}")))?;
 
@@ -690,8 +685,7 @@ impl LlmPlugin for OpenAiPlugin {
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "unit tests use expect/unwrap for concise assertions"
+    reason = "unit tests use expect for concise assertions"
 )]
 mod tests {
     use std::sync::Mutex;
@@ -705,107 +699,8 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Serializes tests that read or write the process-wide `PLUGIN_CONFIG`
-    /// static (every `resolve_api_key` / `resolve_base_url` call reads it).
+    /// static (every `resolve_base_url` call reads it).
     static TEST_SERIAL: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn resolve_api_key_plain_string() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = json!({"api_key": "sk-plain-789"});
-        assert_eq!(resolve_api_key(&config).unwrap(), "sk-plain-789");
-    }
-
-    #[test]
-    fn resolve_api_key_inline() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let config = json!({"api_key": {"source": "inline", "inline": "sk-inline-123"}});
-        assert_eq!(resolve_api_key(&config).unwrap(), "sk-inline-123");
-    }
-
-    #[test]
-    fn resolve_api_key_from_env_var() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
-        // SAFETY: Test-only env var mutation, serialized by `ENV_MUTEX`.
-        unsafe {
-            std::env::set_var("ENE_TEST_OPENAI_KEY", "sk-env-test-456");
-        }
-        let config = json!({"api_key": {"source": "env", "env": "ENE_TEST_OPENAI_KEY"}});
-        assert_eq!(resolve_api_key(&config).unwrap(), "sk-env-test-456");
-        // SAFETY: Test-only cleanup, serialized by `ENV_MUTEX`.
-        unsafe {
-            std::env::remove_var("ENE_TEST_OPENAI_KEY");
-        }
-    }
-
-    #[test]
-    fn resolve_api_key_auto_source_uses_env_fallback() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
-        let original = std::env::var("OPENAI_API_KEY").ok();
-        // SAFETY: Test-only env var mutation, serialized by `ENV_MUTEX`.
-        unsafe {
-            std::env::set_var("OPENAI_API_KEY", "sk-auto-000");
-        }
-
-        let config = json!({"api_key": {"source": "auto"}});
-        assert_eq!(resolve_api_key(&config).unwrap(), "sk-auto-000");
-        assert_eq!(resolve_api_key(&json!({})).unwrap(), "sk-auto-000");
-
-        if let Some(value) = original {
-            // SAFETY: Test-only env restore, serialized by `ENV_MUTEX`.
-            unsafe {
-                std::env::set_var("OPENAI_API_KEY", value);
-            }
-        } else {
-            // SAFETY: Test-only env restore, serialized by `ENV_MUTEX`.
-            unsafe {
-                std::env::remove_var("OPENAI_API_KEY");
-            }
-        }
-    }
-
-    #[test]
-    fn host_config_key_wins_over_request_config() {
-        let host = json!({"api_key": "sk-host-wins"});
-        let request = json!({"api_key": "sk-request-loses"});
-        assert_eq!(
-            resolve_api_key_with_host(Some(&host), &request).unwrap(),
-            "sk-host-wins"
-        );
-    }
-
-    #[test]
-    fn host_config_supports_inline_shape() {
-        let host = json!({"api_key": {"source": "inline", "inline": "sk-host-inline"}});
-        assert_eq!(
-            resolve_api_key_with_host(Some(&host), &json!({})).unwrap(),
-            "sk-host-inline"
-        );
-    }
-
-    #[test]
-    fn missing_host_key_falls_back_to_request_config() {
-        let host = json!({"base_url": "https://example.com"});
-        let request = json!({"api_key": "sk-request-fallback"});
-        assert_eq!(
-            resolve_api_key_with_host(Some(&host), &request).unwrap(),
-            "sk-request-fallback"
-        );
-    }
-
-    #[test]
-    fn set_config_stores_key_used_by_resolve() {
-        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        OpenAiPlugin.set_config(&json!({"api_key": "sk-via-set-config"}));
-        assert_eq!(
-            resolve_api_key(&json!({})).unwrap(),
-            "sk-via-set-config",
-            "key delivered via set_config must be used by request resolution"
-        );
-        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
-    }
 
     #[test]
     fn resolve_base_url_precedence_and_default() {

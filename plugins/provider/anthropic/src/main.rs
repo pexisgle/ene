@@ -4,8 +4,11 @@
 //!
 //! Exposes the Anthropic Messages API as an LLM provider over the plugin IPC
 //! protocol (v3), supporting both SSE streaming and non-streaming chat
-//! completions with tool use and vision inputs.
+//! completions with tool use and vision inputs. All HTTP traffic is
+//! mediated by the host's network broker (SSRF guard, origin approval,
+//! credential injection).
 
+mod broker;
 mod convert;
 mod plugin;
 

@@ -17,19 +17,20 @@ Namespaces and actions below match what `/tool list` shows.
 | `homeassistant` | `homeassistant.state`, `homeassistant.turn_on`, `homeassistant.turn_off`, `homeassistant.set_temperature` | Config: `base_url`, `token` |
 | `random` | `random.number`, `random.uuid`, `random.pick`, `random.color` | |
 | `utility` | `utility.notify_send`, `utility.todo_*` (list/add/update/complete/delete), `utility.get_current_time`, `utility.get_system_info`, `utility.timer_start`, `utility.timer_stop`, `utility.question` | Notifications run as background tasks; questions ask the user inline |
-| `web` | `web.webfetch`, `web.websearch` | Search providers: Brave, Exa, Tavily, DuckDuckGo, arXiv; keys under `tools.list.web` |
+| `web` | `web.webfetch`, `web.websearch` | Search providers: Exa, Tavily, DuckDuckGo, arXiv; keys under `plugins.list.web.credentials` |
 
 ## Tool-specific configuration
 
 ```json
 {
-  "tools": {
+  "plugins": {
     "list": {
       "web": {
         "enable": true,
-        "brave_api_key": "",
-        "exa_api_key": "",
-        "tavily_api_key": ""
+        "credentials": {
+          "exa_api_key": "",
+          "tavily_api_key": ""
+        }
       },
       "homeassistant": {
         "enable": true,

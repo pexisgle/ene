@@ -106,7 +106,9 @@ Git 管理されません。
   （`openai`・`openai_compatible`・`anthropic`・`local` など）。`api_key` は
   `source: "env"`（指定した環境変数から読む）・`source: "inline"`・
   `source: "file"` に対応。プロバイダー *kind* 名は組み込みセットに対して
-  検証され、タイポ候補が提案されます。
+  検証され、タイポ候補が提案されます。Broker 移行済みの `openai` プラグインでは
+  キーはプラグインプロセスに渡らず、ホストがここで解決して各 API リクエストへ
+  注入します（[サンドボックス・Broker・承認](concepts/sandbox-and-approvals.md)参照）。
 - **`ai.tasks`** — パイプラインの各タスクにどのプロバイダー+モデルを使うか:
   `chat`（会話）、`classifier`（LLM 感情分類）、`embedding`（メモリ/ツール
   ベクトル）、`proactive`（プロアクティブ発話の判断）。`dimensions` は
@@ -150,7 +152,7 @@ Git 管理されません。
     "enabled": true,
     "list": {
       "fs": { "enable": true },
-      "web": { "enable": true, "brave_api_key": "", "exa_api_key": "", "tavily_api_key": "" },
+      "web": { "enable": true },
       "homeassistant": { "enable": true, "base_url": "http://homeassistant.local:8123", "token": "" }
     },
     "mcp_servers": [],
@@ -159,9 +161,9 @@ Git 管理されません。
 }
 ```
 
-- `tools.list.<name>.enable` は組み込みツールプラグインのオン/オフ。
-  各ツールは `define_tool_config!` で独自の追加キー（API キー・URL など）を
-  定義します。
+- `tools.list.<name>.enable` は組み込みツールプラグインのオン/オフです。新しい
+  プラグイン設定は `plugins.list.<name>` に置き、ホスト管理の秘密情報は
+  `credentials` マップを使います。
 - `tools.mcp_servers` は外部 MCP サーバーを接続します
   （[MCP サーバーガイド](guides/tools/mcp-servers.md)参照）。
 - `tools.rag` は埋め込みベースのツール選択（`ene-rag` の `tool`
@@ -187,7 +189,11 @@ Git 管理されません。
 各キーはプラグインバイナリ名（`plugins.list.<name>`）で、各プラグインは
 独自の設定スキーマ（`config`）と任意の名前付き `profiles`（モデルプリセット）
 を宣言します。ホストは起動時に該当セクションを IPC 経由でプラグインへ
-渡します。[プラグインと MCP](concepts/plugins-and-mcp.md) 参照。
+渡します。ホスト管理の資格情報はエントリの `credentials` マップに置き、
+ネットワークブローカーが注入します。`config` には含まれません。例えば web 検索のキーは
+`plugins.list.web.credentials.exa_api_key` と
+`plugins.list.web.credentials.tavily_api_key` を使います。
+[プラグインと MCP](concepts/plugins-and-mcp.md) 参照。
 
 ## `desktop.*` — デスクトップアプリ
 
