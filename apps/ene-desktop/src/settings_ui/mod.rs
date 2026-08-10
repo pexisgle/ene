@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use crate::ai_bridge::AiBridge;
 use crate::character_state::{AnimationControl, EmotionQueue};
-use crate::settings::CharacterSettings;
+use crate::settings::{CharacterSettings, Language};
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use components::NARROW_NAV_THRESHOLD;
@@ -399,8 +399,9 @@ pub struct SettingsUi {
     /// When the runtime was constructed. Used for `now_secs` in
     /// emotion-queue timestamps.
     pub started_at: Instant,
-    /// Settings search box text; results are recomputed when it changes.
+    /// Settings search box text; results are recomputed when it or the locale changes.
     pub search_query: String,
+    search_language: Language,
     search_computed_for: String,
     search_hits: Vec<SearchHit>,
     /// Consumed on the next frame to switch page and highlight a section.
@@ -416,6 +417,7 @@ impl SettingsUi {
             emotion_queue: EmotionQueue::default(),
             started_at: Instant::now(),
             search_query: String::new(),
+            search_language: Language::default(),
             search_computed_for: String::new(),
             search_hits: Vec::new(),
             pending_focus: None,
@@ -448,6 +450,7 @@ impl SettingsUi {
         ui_entity: Entity,
         now_secs: f64,
     ) {
+        self.sync_search_language(settings.language());
         crate::theme::apply_egui_visuals(ui.ctx());
 
         let mut dismiss_fatal = false;
@@ -677,6 +680,15 @@ impl SettingsUi {
         }
         self.search_computed_for = self.search_query.clone();
         self.search_hits = compute_search(&self.search_query);
+    }
+
+    fn sync_search_language(&mut self, language: Language) {
+        if self.search_language == language {
+            return;
+        }
+        self.search_language = language;
+        self.search_computed_for.clear();
+        self.search_hits.clear();
     }
 
     fn render_sidebar(&mut self, ui: &mut egui::Ui, selected_page: &mut Option<PageKind>) {
@@ -1016,6 +1028,26 @@ mod tests {
     fn empty_search_has_no_results() {
         assert!(compute_search("").is_empty());
         assert!(compute_search("   ").is_empty());
+    }
+
+    #[test]
+    fn search_cache_invalidates_when_language_changes() {
+        let mut ui = SettingsUi::new();
+        ui.search_query = "voice".to_string();
+        ui.search_computed_for = ui.search_query.clone();
+        ui.search_hits.push(SearchHit {
+            page: PageKind::Voice,
+            section: None,
+            title: "Voice".to_string(),
+            detail: "Voice settings".to_string(),
+            rank: 0,
+        });
+
+        ui.sync_search_language(Language::Ja);
+
+        assert_eq!(ui.search_language, Language::Ja);
+        assert!(ui.search_computed_for.is_empty());
+        assert!(ui.search_hits.is_empty());
     }
 
     #[test]
