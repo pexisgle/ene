@@ -141,33 +141,45 @@ impl ene_plugin::ConfigurablePlugin for KokoroPlugin {
     fn config_schema(&self) -> Option<Value> {
         Some(json!({
             "type": "object",
+            "x-ene-profiles-schema": {
+                "type": "object",
+                "properties": {
+                    "voices_path": { "type": "string", "description": "Path to a voices.bin for this profile" }
+                }
+            },
             "properties": {
                 "model_path": {
                     "type": "string",
-                    "description": "Kokoro ONNX model file path (defaults to the shared models cache)"
+                    "description": "Kokoro ONNX model file path (defaults to the shared models cache)",
+                    "x-ene-ui": { "group": "model", "order": 0, "impact": "plugin_restart" }
                 },
                 "voices_path": {
                     "type": "string",
-                    "description": "voices.bin path; falls back to plugins.list.kokoro.profiles.kokoro.voices_path, then the shared models cache"
+                    "description": "voices.bin path; falls back to the kokoro profile's voices_path, then the shared models cache",
+                    "x-ene-ui": { "group": "model", "order": 1, "impact": "plugin_restart" }
                 },
                 "voice": {
                     "type": "string",
-                    "description": "Default voice (e.g. af_heart, jf_alpha); a per-request voice overrides it; empty selects the first voice in voices.bin. Alternating voices reload the model on each switch."
+                    "description": "Default voice (e.g. af_heart, jf_alpha); a per-request voice overrides it; empty selects the first voice in voices.bin. Alternating voices reload the model on each switch.",
+                    "x-ene-ui": { "group": "voice", "order": 0, "impact": "runtime_reload" }
                 },
                 "speed": {
                     "type": "number",
                     "minimum": 0.5,
                     "maximum": 2.0,
                     "default": 1.0,
-                    "description": "Speech speed multiplier (0.5-2.0)"
+                    "description": "Speech speed multiplier (0.5-2.0)",
+                    "x-ene-ui": { "group": "voice", "order": 1, "impact": "runtime_reload" }
                 },
                 "language": {
                     "type": "string",
-                    "description": "G2P language: \"ja\" selects the Japanese kana rules; anything else uses the English rules"
+                    "description": "G2P language: \"ja\" selects the Japanese kana rules; anything else uses the English rules",
+                    "x-ene-ui": { "group": "voice", "order": 2, "impact": "runtime_reload" }
                 },
                 "ort_dylib_path": {
                     "type": "string",
-                    "description": "ONNX Runtime dynamic library path override (ort default resolution when unset). Fixed at process start: ONNX Runtime initializes once, so a change requires a restart"
+                    "description": "ONNX Runtime dynamic library path override (ort default resolution when unset). Fixed at process start: ONNX Runtime initializes once, so a change requires a restart",
+                    "x-ene-ui": { "group": "runtime", "order": 0, "advanced": true, "impact": "app_restart" }
                 }
             }
         }))

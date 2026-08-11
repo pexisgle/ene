@@ -42,7 +42,8 @@ mod event;
 /// some embedders import) keeps resolving; the type lives in
 /// [`crate::query::candidates`].
 pub use crate::query::candidates::PendingCandidateSummary;
-pub use command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
+pub use command::DeferredToolTask;
+pub use command::EneCommand;
 pub use event::{
     AudioChunk, AudioStreamReceiver, EneEvent, EneEventReceiver, EneStateSnapshot, EneStatus,
     LifecycleEvent, LifecycleReceiver, MemoryLedgerChange, TerminalReason,
@@ -1568,33 +1569,134 @@ impl EneHandle {
             .map_err(|_| PublicApiError::ActorDead)
     }
 
-    /// Hot-update proactive policy in the running actor.
+    /// Apply a unified settings draft to the running actor.
     ///
-    /// Prefer [`Self::update_feature_settings`] when emotion / store / tools
-    /// also change — this path only patches `mind.proactive` and does not
-    /// reload the local decision model.
-    pub fn update_proactive_settings(
+    /// The actor diffs the proposed config against its live copy, writes the
+    /// changed sections, reacts per section (proactive abort, TTS provider
+    /// rebuild, plugin-host reconfigure when the enable set changed), and
+    /// returns the actual impact. The returned revision echoes the request
+    /// revision so the caller can detect a stale apply.
+    pub async fn apply_settings(
         &self,
-        mind: ene_mind::ProactiveConfig,
-    ) -> Result<(), PublicApiError> {
+        request: crate::settings::SettingsApplyRequest,
+    ) -> Result<crate::settings::SettingsApplyResult, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(EneCommand::UpdateProactiveSettings { mind })
-            .map_err(|_| PublicApiError::ActorDead)
+            .send(EneCommand::ApplySettings {
+                request: Box::new(request),
+                reply: tx,
+            })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
-    /// Hot-update Features-tab sections (mind / store / tools / RAG).
-    ///
-    /// Does not tear down local GGUF handles. Tool process registry is rebuilt
-    /// when the tools section changes.
-    pub fn update_feature_settings(
+    /// Fetch settings snapshots for every configured plugin (plugin center).
+    pub async fn plugin_snapshots(&self) -> Vec<ene_plugin_host::PluginSettingsSnapshot> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::GetPluginSnapshots { reply: tx })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Fetch dynamic config options for one plugin config path.
+    pub async fn list_plugin_config_options(
         &self,
-        settings: FeatureSettingsUpdate,
-    ) -> Result<(), PublicApiError> {
+        plugin: &str,
+        path: &str,
+    ) -> Result<Vec<ene_plugin_proto::ConfigOption>, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(EneCommand::UpdateFeatureSettings {
-                settings: Box::new(settings),
+            .send(EneCommand::ListPluginConfigOptions {
+                plugin: plugin.to_string(),
+                path: path.to_string(),
+                reply: tx,
             })
-            .map_err(|_| PublicApiError::ActorDead)
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
+    }
+
+    /// Validate a plugin config value through the plugin's own validator.
+    pub async fn validate_plugin_config(
+        &self,
+        plugin: &str,
+        value: serde_json::Value,
+    ) -> Result<Vec<ene_plugin_proto::ConfigFieldError>, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ValidatePluginConfig {
+                plugin: plugin.to_string(),
+                value,
+                reply: tx,
+            })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
+    }
+
+    /// List plugin binaries discovered on disk but not configured.
+    pub async fn discovered_plugins(&self) -> Vec<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::GetDiscoveredPlugins { reply: tx })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// List MCP server liveness statuses.
+    pub async fn mcp_statuses(&self) -> Vec<ene_plugin_host::McpServerStatus> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::ListMcpStatuses { reply: tx })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Answers a schedule-run confirmation prompt by schedule + run id.
+    ///
+    /// Returns whether a matching pending confirmation was found (a run may
+    /// already have been answered through the chat permission prompt).
+    pub async fn resolve_schedule_confirmation(
+        &self,
+        schedule_id: i64,
+        run_id: i64,
+        approve: bool,
+    ) -> Result<bool, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ResolveScheduleConfirmation {
+                schedule_id,
+                run_id,
+                approve,
+                reply: tx,
+            })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
+    }
+
+    /// Update an existing schedule's editable fields (validated like
+    /// [`Self::add_schedule`]).
+    pub async fn update_schedule(
+        &self,
+        id: i64,
+        new: ene_core::NewSchedule,
+    ) -> Result<ene_core::Schedule, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::UpdateSchedule { id, new, reply: tx })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 }
 

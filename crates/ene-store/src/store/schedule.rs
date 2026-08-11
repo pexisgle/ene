@@ -151,6 +151,41 @@ impl MemoryStore {
         maybe.map(model_to_schedule).transpose()
     }
 
+    /// Replace the editable fields of an existing schedule.
+    ///
+    /// Runs the same [`ene_core::first_run_at`] validation as
+    /// [`Self::insert_schedule`] (name, kind fields, timezone, cron,
+    /// interval, future one-shot start), recomputes `next_run_at`, and keeps
+    /// the id, enabled flag, and run counters untouched.
+    pub async fn update_schedule(
+        &self,
+        id: i64,
+        new: &NewSchedule,
+        now: DateTime<Utc>,
+    ) -> Result<Schedule, EneMemoryError> {
+        let next_run_at = ene_core::first_run_at(new, now)?;
+        let active = entities::schedules::ActiveModel {
+            id: Set(id),
+            name: Set(new.name.clone()),
+            kind: Set(new.kind.as_str().to_string()),
+            timezone: Set(new.timezone.clone()),
+            cron_expr: Set(new.cron_expr.clone()),
+            interval_secs: Set(new.interval_secs),
+            start_at: Set(new.start_at),
+            action: Set(serde_json::to_string(&new.action)?),
+            confirmation: Set(new.confirmation.as_str().to_string()),
+            max_retries: Set(new.max_retries),
+            retry_delay_secs: Set(new.retry_delay_secs),
+            next_run_at: Set(Some(next_run_at)),
+            pending_retry_of_run_id: Set(None),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let updated = active.update(&self.db).await?;
+        let model: entities::schedules::Model = updated.try_into_model()?;
+        model_to_schedule(model)
+    }
+
     /// Fetch a schedule by its unique name.
     pub async fn get_schedule_by_name(
         &self,

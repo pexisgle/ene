@@ -142,7 +142,12 @@ mod tests {
         let out = run(&fixture, true).await;
         assert_eq!(out["clean"], true);
         assert_eq!(out["entries"].as_array().unwrap().len(), 0);
-        assert_eq!(out["branch"], "master");
+        assert!(
+            out["branch"]
+                .as_str()
+                .is_some_and(|branch| !branch.is_empty()),
+            "the current branch name is reported (its default depends on the host git config)"
+        );
     }
 
     #[tokio::test]

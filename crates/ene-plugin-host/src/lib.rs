@@ -61,6 +61,11 @@ pub mod capability_service;
 pub mod circuit_breaker;
 /// Plugin system configuration section.
 pub mod config;
+/// Public plugin settings snapshot for the plugin center UI.
+pub mod snapshot;
+pub use snapshot::{
+    EffectiveSecurity, PluginHealthState, PluginManifestSummary, PluginSettingsSnapshot,
+};
 /// Host-side registry of per-plugin credential declarations.
 pub mod credential_registry;
 /// IPC-backed embedding provider bridging to `ene_ai::EmbeddingProvider`.
@@ -147,6 +152,7 @@ pub use manager::{
 pub use mcp_config::{McpServerConfig, McpTransport};
 /// MCP client for external servers.
 pub use mcp_registry::McpToolRegistry;
+pub use mcp_registry::{McpServerStatus, McpTransportKind};
 /// Config redaction helpers (see [`redact`]).
 pub use redact::{redact_config, redact_config_unschematized};
 /// STT provider factory for plugin-provided providers.

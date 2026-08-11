@@ -279,7 +279,9 @@ impl AppState {
 
     /// Persist current runtime state.
     pub fn save(&self) {
-        self.settings.save();
+        if let Err(e) = self.settings.save() {
+            tracing::warn!("[Config] Failed to save config: {e}");
+        }
     }
 
     /// Forward `Quit` into the bus. The runtime observes the next

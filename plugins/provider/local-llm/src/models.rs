@@ -443,6 +443,10 @@ mod tests {
                     let started_tx = started_tx.clone();
                     async move {
                         loads.fetch_add(1, Ordering::SeqCst);
+                        // Register the waiter before signaling the test
+                        // task: `notify_waiters` stores no permit, so a
+                        // late registration would wait forever.
+                        let release = release.notified();
                         // The send error is `Copy`, so `drop()` would trip
                         // `clippy::dropping_copy_types`.
                         #[expect(
@@ -450,7 +454,7 @@ mod tests {
                             reason = "mpsc send error is Copy; drop() would trip dropping_copy_types"
                         )]
                         let _ = started_tx.send(()).await;
-                        release.notified().await;
+                        release.await;
                         let provider = Arc::new("loaded".to_string());
                         Ok(insert_if_unloaded(
                             &TEST_EPOCHS,

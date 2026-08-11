@@ -59,30 +59,81 @@ fn is_secret_key_name(key: &str) -> bool {
 /// the embedded value can never leak). Everything else is preserved and
 /// recursed into.
 ///
-/// This is a pure, allocation-friendly function used by host logging paths and
-/// (later) by the settings UI to mask secret fields.
+/// `schema` recursion follows the value shape: object values descend into
+/// the matching property schema (so a nested `client.token` marked secret is
+/// caught, not just root-level keys), array items descend into `items`, and
+/// `oneOf` variant schemas are applied in [`redact_config_one_of`]. `$ref`
+/// nodes resolve against the schema's own `$defs` / `definitions`.
 #[must_use]
 pub fn redact_config(
     config: &serde_json::Value,
     schema: Option<&serde_json::Value>,
 ) -> serde_json::Value {
+    let schema = schema.and_then(resolve_refs);
     match config {
         serde_json::Value::Object(obj) => {
             let mut out = serde_json::Map::with_capacity(obj.len());
             for (key, value) in obj {
-                if is_secret_marked(schema, key) || is_secret_key_name(key) {
+                if is_secret_marked(schema.as_ref(), key) || is_secret_key_name(key) {
                     out.insert(key.clone(), serde_json::Value::String(REDACTED.to_string()));
                 } else {
-                    out.insert(key.clone(), redact_config(value, schema));
+                    let child_schema = schema
+                        .as_ref()
+                        .and_then(|s| s.get("properties"))
+                        .and_then(|props| props.get(key));
+                    out.insert(key.clone(), redact_config(value, child_schema));
                 }
             }
             serde_json::Value::Object(out)
         }
         serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(|v| redact_config(v, schema)).collect())
+            let item_schema = schema.as_ref().and_then(|s| s.get("items"));
+            serde_json::Value::Array(
+                items
+                    .iter()
+                    .map(|v| redact_config(v, item_schema))
+                    .collect(),
+            )
         }
         other => other.clone(),
     }
+}
+
+/// Resolves a `$ref`-only schema node against its own `$defs` /
+/// `definitions`. Non-ref nodes (and unresolvable refs) pass through.
+fn resolve_refs(schema: &serde_json::Value) -> Option<serde_json::Value> {
+    let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) else {
+        return Some(schema.clone());
+    };
+    let name = reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))?;
+    for defs in ["$defs", "definitions"] {
+        if let Some(resolved) = schema.get(defs).and_then(|d| d.get(name)) {
+            return resolve_refs(resolved);
+        }
+    }
+    None
+}
+
+/// Like [`redact_config`], but also applies every `oneOf` variant schema so
+/// secrets in branches whose active state is unknown are masked too
+/// (idempotent, fails safe).
+#[must_use]
+pub fn redact_config_one_of(
+    config: &serde_json::Value,
+    schema: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut redacted = redact_config(config, schema);
+    if let Some(one_of) = schema
+        .and_then(|s| s.get("oneOf"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for variant in one_of {
+            redacted = redact_config(&redacted, Some(variant));
+        }
+    }
+    redacted
 }
 
 /// Redacts a config blob without a schema (host logging fallback).

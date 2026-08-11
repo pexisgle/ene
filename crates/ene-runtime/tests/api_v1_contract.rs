@@ -545,57 +545,125 @@ async fn turn_count_reflects_in_flight_turn() {
 }
 
 /// `EneHandle::config()` returns the shared `Arc<EneConfig>` the actor swaps
-/// under a write lock on `UpdateFeatureSettings` — the read-only
-/// sharing side of the write-path fixes.
+/// after a unified settings apply, and the apply round-trips revision +
+/// impact back to the caller.
 #[tokio::test]
-async fn shared_config_reflects_feature_settings_update() {
+async fn shared_config_reflects_settings_apply() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
         .expect("open initializes handle");
-    let initial_timeout = handle
-        .config()
+    let mut proposed = handle.config().as_ref().clone();
+    let mut mind = proposed
         .get_section::<ene_mind::MindConfig>()
-        .expect("mind section present")
-        .session
-        .session_timeout_minutes;
-
-    let mut mind = ene_mind::MindConfig::default();
+        .expect("mind section present");
     mind.session.session_timeout_minutes = 42;
-    let store = ene_store::StoreConfig {
-        enabled: false,
-        ..Default::default()
-    };
-    let plugins = ene_plugin_host::PluginConfig {
-        enabled: false,
-        ..Default::default()
-    };
-    let rag = ene_rag::ToolRagConfig::default();
-    handle
-        .update_feature_settings(ene_runtime::FeatureSettingsUpdate {
-            mind,
-            store,
-            plugins,
-            rag,
-        })
-        .expect("update accepted by the mailbox");
+    proposed.set_section(&mind).expect("mind section merges");
+    let mut store = proposed
+        .get_section::<ene_store::StoreConfig>()
+        .expect("store section present");
+    store.enabled = true;
+    proposed.set_section(&store).expect("store section merges");
 
-    // Fire-and-forget update: poll the shared slot until the actor applies it.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut seen = None;
-    while tokio::time::Instant::now() < deadline {
-        let timeout = handle
+    let result = handle
+        .apply_settings(ene_runtime::SettingsApplyRequest {
+            revision: 7,
+            base_revision: Some(0),
+            config: proposed,
+        })
+        .await
+        .expect("apply succeeds");
+
+    assert_eq!(
+        result.revision, 7,
+        "revision must echo so the UI can detect a stale apply"
+    );
+    assert!(!result.conflicted);
+    assert_eq!(
+        result.current_revision, 1,
+        "the actor bumps its settings revision on every successful apply"
+    );
+    assert!(
+        result.applied_sections.contains("mind") && result.applied_sections.contains("store"),
+        "only changed sections are reported: {result:?}"
+    );
+    assert!(
+        result.impact.runtime_reload && !result.impact.plugin_restart,
+        "mind/store changes hot-reload without a plugin restart: {result:?}"
+    );
+    assert_eq!(
+        handle
             .config()
             .get_section::<ene_mind::MindConfig>()
             .expect("mind section present")
             .session
-            .session_timeout_minutes;
-        if timeout != initial_timeout {
-            seen = Some(timeout);
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert_eq!(seen, Some(42), "config() must observe the applied update");
+            .session_timeout_minutes,
+        42,
+        "config() must observe the applied update"
+    );
+
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+}
+
+/// A draft based on a stale actor revision is rejected without touching the
+/// config, so a concurrent writer's settings are never silently overwritten.
+#[tokio::test]
+async fn stale_draft_is_rejected_and_config_is_untouched() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open initializes handle");
+
+    let mut first = handle.config().as_ref().clone();
+    let mut mind = first
+        .get_section::<ene_mind::MindConfig>()
+        .expect("mind section present");
+    mind.session.session_timeout_minutes = 42;
+    first.set_section(&mind).expect("mind section merges");
+    let first_result = handle
+        .apply_settings(ene_runtime::SettingsApplyRequest {
+            revision: 1,
+            base_revision: Some(0),
+            config: first,
+        })
+        .await
+        .expect("first apply succeeds");
+    assert!(!first_result.conflicted);
+
+    // The second writer still believes the actor is at revision 0.
+    let mut stale = handle.config().as_ref().clone();
+    let mut store = stale
+        .get_section::<ene_store::StoreConfig>()
+        .expect("store section present");
+    store.enabled = true;
+    stale.set_section(&store).expect("store section merges");
+    let stale_result = handle
+        .apply_settings(ene_runtime::SettingsApplyRequest {
+            revision: 2,
+            base_revision: Some(0),
+            config: stale,
+        })
+        .await
+        .expect("stale apply is rejected, not failed");
+
+    assert!(stale_result.conflicted, "stale base revision must conflict");
+    assert!(stale_result.applied_sections.is_empty());
+    assert!(
+        !handle
+            .config()
+            .get_section::<ene_store::StoreConfig>()
+            .expect("store section present")
+            .enabled,
+        "the stale writer's store change must not land"
+    );
+    assert_eq!(
+        handle
+            .config()
+            .get_section::<ene_mind::MindConfig>()
+            .expect("mind section present")
+            .session
+            .session_timeout_minutes,
+        42,
+        "the first writer's change stays intact"
+    );
 
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }

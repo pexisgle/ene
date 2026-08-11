@@ -378,6 +378,46 @@ async fn scheduled_tool_action_runs_and_records_success() {
     drop(handle.shutdown(Duration::from_secs(2)).await);
 }
 
+/// `update_schedule` replaces the editable fields, keeps the row id, and
+/// validates the new values exactly like add.
+#[tokio::test]
+async fn update_schedule_replaces_fields_and_recomputes_next_run() {
+    let clock = VirtualClock::new();
+    let handle = open_memory_on(None, &clock).await;
+    let original = handle
+        .add_schedule(one_shot_tool_schedule(
+            false,
+            clock.now() + chrono::Duration::minutes(5),
+        ))
+        .await
+        .expect("add schedule");
+
+    let mut updated = one_shot_tool_schedule(true, clock.now() + chrono::Duration::minutes(30));
+    updated.name = "renamed-schedule".to_string();
+    let stored = handle
+        .update_schedule(original.id, updated)
+        .await
+        .expect("update schedule");
+    assert_eq!(stored.id, original.id, "the row id survives an update");
+    assert_eq!(stored.name, "renamed-schedule");
+    assert_eq!(stored.confirmation, ScheduleConfirmation::Confirm);
+
+    let schedules = handle.list_schedules().await.expect("list schedules");
+    assert_eq!(schedules.len(), 1, "update must not create a new row");
+    assert_eq!(schedules[0].name, "renamed-schedule");
+
+    // Invalid values are rejected with the same strict validation as add.
+    let mut invalid = one_shot_tool_schedule(false, clock.now() + chrono::Duration::minutes(30));
+    invalid.timezone = "Not/AZone".to_string();
+    let rejected = handle.update_schedule(original.id, invalid).await;
+    assert!(
+        rejected.is_err(),
+        "an invalid timezone must be rejected on update"
+    );
+
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+}
+
 /// A fire due mid-conversation is recorded `skipped_busy` and never starts a
 /// scheduled turn; the conversation's single-flight gate stays untouched.
 #[tokio::test]

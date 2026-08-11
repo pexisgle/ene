@@ -8,9 +8,15 @@ use ene_store::{Commitment, MemoryStatus};
 use i18n_embed_fl::fl;
 use std::sync::Arc;
 
+use super::draft::SettingsDraft;
 use crate::settings_ui::components::{BadgeTone, empty_state, section_card, status_badge};
 
-pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
+pub fn render_journal(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
+    ui.weak(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "memory-ledger-below-hint"
+    ));
+    ui.add_space(4.0);
     // ── Tab bar ───────────────────────────────────────────────────────────────
     let mut do_refresh = false;
     let mut do_recall_search = false;
@@ -1231,5 +1237,152 @@ fn error_category_label(error: &crate::ai_bridge::AiBridgeError) -> Option<Strin
             "memory-journal-error-actor-dead"
         )),
         _ => None,
+    }
+}
+
+/// Memory & Storage settings: store enable/backup/integrity, approval
+/// workflow, and retention limits. Edits land on the draft and are applied
+/// through the window-level Apply bar.
+pub fn render_config(
+    ui: &mut egui::Ui,
+    _settings: &mut crate::settings::CharacterSettings,
+    draft: &mut SettingsDraft,
+) {
+    let mut store = draft.section::<ene_store::StoreConfig>();
+    let mut mind = draft.section::<ene_mind::MindConfig>();
+    let mut changed = false;
+
+    section_card(
+        ui,
+        "memory-config",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-storage"),
+        |ui| {
+            ui.weak(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "memory-config-hint"
+            ));
+            let mut enabled = store.enabled;
+            if crate::settings_ui::components::toggle_row(
+                ui,
+                "memory_config_enabled",
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "enable-long-term-memory"),
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-enable-hint"),
+                &mut enabled,
+            ) {
+                store.enabled = enabled;
+                changed = true;
+            }
+            let mut backup = store.backup_on_migrate;
+            if crate::settings_ui::components::toggle_row(
+                ui,
+                "memory_config_backup",
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-backup"),
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-backup-hint"),
+                &mut backup,
+            ) {
+                store.backup_on_migrate = backup;
+                changed = true;
+            }
+            let mut integrity = store.integrity_check_on_open;
+            if crate::settings_ui::components::toggle_row(
+                ui,
+                "memory_config_integrity",
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-integrity"),
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-integrity-hint"),
+                &mut integrity,
+            ) {
+                store.integrity_check_on_open = integrity;
+                changed = true;
+            }
+            let mut in_memory = store.in_memory;
+            if crate::settings_ui::components::toggle_row(
+                ui,
+                "memory_config_in_memory",
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-in-memory"),
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-in-memory-hint"),
+                &mut in_memory,
+            ) {
+                store.in_memory = in_memory;
+                changed = true;
+            }
+            let mut max_backups = store.max_backups;
+            ui.horizontal(|ui| {
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "memory-config-max-backups"
+                ));
+                if ui
+                    .add(egui::DragValue::new(&mut max_backups).range(0..=32))
+                    .changed()
+                {
+                    store.max_backups = max_backups;
+                    changed = true;
+                }
+            });
+        },
+    );
+
+    section_card(
+        ui,
+        "memory-approval",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-approval"),
+        |ui| {
+            let mut require_approval = mind.memory_approval.require_approval;
+            if crate::settings_ui::components::toggle_row(
+                ui,
+                "memory_config_require_approval",
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-require-approval"),
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-require-approval-hint"),
+                &mut require_approval,
+            ) {
+                mind.memory_approval.require_approval = require_approval;
+                changed = true;
+            }
+            let mut max_age = mind.memory.pending_candidate_retention.max_age_days;
+            ui.horizontal(|ui| {
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "memory-config-retention-days"
+                ));
+                if ui
+                    .add(egui::DragValue::new(&mut max_age).range(0..=3650))
+                    .changed()
+                {
+                    mind.memory.pending_candidate_retention.max_age_days = max_age;
+                    changed = true;
+                }
+            });
+        },
+    );
+
+    section_card(
+        ui,
+        "memory-limits",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "memory-config-limits"),
+        |ui| {
+            let mut match_limit = mind.memory_limits.commitment_active_match_limit;
+            ui.horizontal(|ui| {
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "memory-config-match-limit"
+                ));
+                if ui
+                    .add(egui::DragValue::new(&mut match_limit).range(1..=16384))
+                    .changed()
+                {
+                    mind.memory_limits.commitment_active_match_limit = match_limit;
+                    changed = true;
+                }
+            });
+        },
+    );
+
+    ui.weak(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "memory-config-manage-hint"
+    ));
+    if changed {
+        draft.set_section(&store);
+        draft.set_section(&mind);
     }
 }

@@ -37,30 +37,36 @@ impl ene_plugin::ConfigurablePlugin for EdgeTtsPlugin {
                 "voice": {
                     "type": "string",
                     "default": "ja-JP-NanamiNeural",
-                    "description": "Edge voice name, short (ja-JP-NanamiNeural) or long form"
+                    "description": "Edge voice name, short (ja-JP-NanamiNeural) or long form",
+                    "x-ene-ui": { "group": "voice", "order": 0, "options_path": "voices", "impact": "runtime_reload" }
                 },
                 "locale": {
                     "type": "string",
                     "default": "ja-JP",
-                    "description": "SSML xml:lang value on the <speak> element"
+                    "description": "SSML xml:lang value on the <speak> element",
+                    "x-ene-ui": { "group": "voice", "order": 1, "impact": "runtime_reload" }
                 },
                 "rate": {
                     "type": "string",
                     "default": "+0%",
-                    "description": "Prosody rate adjustment (e.g. +10%, -10%)"
+                    "description": "Prosody rate adjustment (e.g. +10%, -10%)",
+                    "x-ene-ui": { "group": "voice", "order": 2, "impact": "runtime_reload" }
                 },
                 "pitch": {
                     "type": "string",
                     "default": "+0Hz",
-                    "description": "Prosody pitch adjustment (e.g. +5Hz, -5Hz)"
+                    "description": "Prosody pitch adjustment (e.g. +5Hz, -5Hz)",
+                    "x-ene-ui": { "group": "voice", "order": 3, "impact": "runtime_reload" }
                 },
                 "volume": {
                     "type": "string",
                     "default": "+0%",
-                    "description": "Prosody volume adjustment (e.g. +10%, -10%)"
+                    "description": "Prosody volume adjustment (e.g. +10%, -10%)",
+                    "x-ene-ui": { "group": "voice", "order": 4, "impact": "runtime_reload" }
                 },
                 "max_retries": {
                     "type": "integer",
+                    "x-ene-ui": { "group": "voice", "order": 5, "advanced": true, "impact": "runtime_reload" },
                     "minimum": 0,
                     "maximum": 10,
                     "default": 3,

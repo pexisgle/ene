@@ -8,6 +8,7 @@ use crate::settings::CharacterSettings;
 use crate::settings_ui::components::{
     BadgeTone, section_card, setting_row, slider_row, status_badge, toggle_row, warning_box,
 };
+use crate::settings_ui::draft::SettingsDraft;
 use crate::settings_ui::input::SettingsInputState;
 use crate::settings_ui::widgets::editable_combo;
 use bevy_ecs::world::World;
@@ -35,6 +36,7 @@ const DEFAULT_TOOL_NAMES: &[&str] = &[
 pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
+    draft: &mut SettingsDraft,
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
     world: &mut World,
@@ -46,26 +48,26 @@ pub fn render(
             ui,
             "features-mind",
             &i18n_embed_fl::fl!(crate::i18n::loader(), "features-mind"),
-            |ui| render_mind(ui, settings, ai),
+            |ui| render_mind(ui, draft),
         );
         section_card(
             ui,
             "features-tools",
             &i18n_embed_fl::fl!(crate::i18n::loader(), "features-tools"),
-            |ui| render_tools(ui, settings, ai),
+            |ui| render_tools(ui, draft),
         );
         section_card(
             ui,
             "features-capabilities",
             &i18n_embed_fl::fl!(crate::i18n::loader(), "section-features-capabilities"),
-            |ui| render_audio(ui, settings, ai, input, world),
+            |ui| render_audio(ui, settings, draft, ai, input, world),
         );
     });
 }
 
-fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
-    let mut memory = settings.config_section::<ene_store::StoreConfig>();
-    let mut mind = settings.config_section::<ene_mind::MindConfig>();
+fn render_mind(ui: &mut egui::Ui, draft: &mut SettingsDraft) {
+    let mut memory = draft.section::<ene_store::StoreConfig>();
+    let mut mind = draft.section::<ene_mind::MindConfig>();
 
     let mut memory_enabled = memory.enabled;
     if toggle_row(
@@ -76,9 +78,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
         &mut memory_enabled,
     ) {
         memory.enabled = memory_enabled;
-        settings.set_config_section(&memory);
-        settings.mark_dirty();
-        sync_features(settings, ai);
+        draft.set_section(&memory);
     }
 
     let mut emotion_enabled = mind.emotion.enabled;
@@ -90,7 +90,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
         &mut emotion_enabled,
     ) {
         mind.emotion.enabled = emotion_enabled;
-        persist_mind(settings, ai, &mind);
+        persist_mind(draft, &mind);
     }
 
     ui.add_space(6.0);
@@ -109,7 +109,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
         &mut proactive_enabled,
     ) {
         mind.proactive.enabled = proactive_enabled;
-        persist_mind(settings, ai, &mind);
+        persist_mind(draft, &mind);
     }
 
     ui.add_enabled_ui(mind.proactive.enabled, |ui| {
@@ -122,7 +122,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             &mut paused,
         ) {
             mind.proactive.paused = paused;
-            persist_mind(settings, ai, &mind);
+            persist_mind(draft, &mind);
         }
 
         setting_row(
@@ -137,7 +137,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                     .changed()
                 {
                     mind.proactive.interval_seconds = value.max(1) as u64;
-                    persist_mind(settings, ai, &mind);
+                    persist_mind(draft, &mind);
                 }
             },
         );
@@ -154,7 +154,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                     .changed()
                 {
                     mind.proactive.cooldown_seconds = value.max(0) as u64;
-                    persist_mind(settings, ai, &mind);
+                    persist_mind(draft, &mind);
                 }
             },
         );
@@ -171,7 +171,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                     .changed()
                 {
                     mind.proactive.min_idle_seconds = value.max(0) as u64;
-                    persist_mind(settings, ai, &mind);
+                    persist_mind(draft, &mind);
                 }
             },
         );
@@ -192,7 +192,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                     .changed()
                 {
                     mind.proactive.fatigue_suppression_threshold = value.clamp(0.0, 1.0);
-                    persist_mind(settings, ai, &mind);
+                    persist_mind(draft, &mind);
                 }
             },
         );
@@ -209,7 +209,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             &mut quiet_enabled,
         ) {
             mind.proactive.quiet_hours.enabled = quiet_enabled;
-            persist_mind(settings, ai, &mind);
+            persist_mind(draft, &mind);
         }
 
         ui.add_enabled_ui(quiet_enabled, |ui| {
@@ -276,7 +276,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                     );
                     if combo.commit_requested() {
                         mind.proactive.quiet_hours.timezone = timezone.trim().to_string();
-                        persist_mind(settings, ai, &mind);
+                        persist_mind(draft, &mind);
                     }
                 },
             );
@@ -313,7 +313,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                 }
             });
             if days_changed {
-                persist_mind(settings, ai, &mind);
+                persist_mind(draft, &mind);
             }
 
             setting_row(
@@ -323,11 +323,11 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                 "",
                 |ui| {
                     if render_time(ui, &mut mind.proactive.quiet_hours.start) {
-                        persist_mind(settings, ai, &mind);
+                        persist_mind(draft, &mind);
                     }
                     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "quiet-hours-end"));
                     if render_time(ui, &mut mind.proactive.quiet_hours.end) {
-                        persist_mind(settings, ai, &mind);
+                        persist_mind(draft, &mind);
                     }
                 },
             );
@@ -353,7 +353,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                 }
             }
             if suppress_changed {
-                persist_mind(settings, ai, &mind);
+                persist_mind(draft, &mind);
             }
 
             setting_row(
@@ -393,7 +393,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
                         });
                     if selected != mind.proactive.quiet_hours.policy {
                         mind.proactive.quiet_hours.policy = selected;
-                        persist_mind(settings, ai, &mind);
+                        persist_mind(draft, &mind);
                     }
                 },
             );
@@ -423,7 +423,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             &mut conversation,
         ) {
             mind.proactive.sources.conversation = conversation;
-            persist_mind(settings, ai, &mind);
+            persist_mind(draft, &mind);
         }
 
         let mut activity = mind.proactive.sources.activity;
@@ -435,11 +435,11 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             &mut activity,
         ) {
             mind.proactive.sources.activity = activity;
-            persist_mind(settings, ai, &mind);
+            persist_mind(draft, &mind);
         }
 
         ui.add_enabled_ui(mind.proactive.sources.activity, |ui| {
-            render_window_title_level(ui, settings, ai, &mut mind);
+            render_window_title_level(ui, draft, &mut mind);
         });
 
         let mut screen = mind.proactive.sources.screen_summary;
@@ -451,7 +451,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             &mut screen,
         ) {
             mind.proactive.sources.screen_summary = screen;
-            persist_mind(settings, ai, &mind);
+            persist_mind(draft, &mind);
         }
 
         let mut memory = mind.proactive.sources.memory;
@@ -463,7 +463,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             &mut memory,
         ) {
             mind.proactive.sources.memory = memory;
-            persist_mind(settings, ai, &mind);
+            persist_mind(draft, &mind);
         }
     });
 }
@@ -475,8 +475,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
 /// a cloud provider when one is configured).
 fn render_window_title_level(
     ui: &mut egui::Ui,
-    settings: &mut CharacterSettings,
-    ai: &Arc<AiBridge>,
+    draft: &mut SettingsDraft,
     mind: &mut ene_mind::MindConfig,
 ) {
     setting_row(
@@ -507,7 +506,7 @@ fn render_window_title_level(
                 });
             if selected != mind.proactive.sources.window_title_level {
                 mind.proactive.sources.window_title_level = selected;
-                persist_mind(settings, ai, mind);
+                persist_mind(draft, mind);
             }
         },
     );
@@ -567,23 +566,13 @@ fn render_time(ui: &mut egui::Ui, time: &mut ene_mind::QuietHoursTimeConfig) -> 
     changed
 }
 
-fn persist_mind(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, mind: &ene_mind::MindConfig) {
-    settings.set_config_section(mind);
-    settings.mark_dirty();
-    sync_features(settings, ai);
+fn persist_mind(draft: &mut SettingsDraft, mind: &ene_mind::MindConfig) {
+    draft.set_section(mind);
 }
 
-fn sync_features(settings: &CharacterSettings, ai: &Arc<AiBridge>) {
-    let mind = settings.config_section::<ene_mind::MindConfig>();
-    let store = settings.config_section::<ene_store::StoreConfig>();
-    let tools = settings.config_section::<PluginConfig>();
-    let rag = settings.config_section::<ToolRagConfig>();
-    ai.sync_feature_runtime(&mind, &store, &tools, &rag);
-}
-
-fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
-    let mut tools = settings.config_section::<PluginConfig>();
-    let mut rag = settings.config_section::<ToolRagConfig>();
+fn render_tools(ui: &mut egui::Ui, draft: &mut SettingsDraft) {
+    let mut tools = draft.section::<PluginConfig>();
+    let mut rag = draft.section::<ToolRagConfig>();
 
     let mut tools_enabled = tools.enabled;
     if toggle_row(
@@ -594,9 +583,7 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
         &mut tools_enabled,
     ) {
         tools.enabled = tools_enabled;
-        settings.set_config_section(&tools);
-        settings.mark_dirty();
-        sync_features(settings, ai);
+        draft.set_section(&tools);
     }
 
     ui.add_enabled_ui(tools.enabled, |ui| {
@@ -609,9 +596,7 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
             &mut rag_enabled,
         ) {
             rag.enabled = rag_enabled;
-            settings.set_config_section(&rag);
-            settings.mark_dirty();
-            sync_features(settings, ai);
+            draft.set_section(&rag);
         }
 
         ui.add_space(6.0);
@@ -641,9 +626,7 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
             }
         }
         if list_changed {
-            settings.set_config_section(&tools);
-            settings.mark_dirty();
-            sync_features(settings, ai);
+            draft.set_section(&tools);
         }
     });
 }
@@ -651,6 +634,7 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
 fn render_audio(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
+    draft: &mut SettingsDraft,
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
     world: &mut World,
@@ -662,7 +646,7 @@ fn render_audio(
         input.mic_devices = crate::audio::capture::list_input_device_names();
     }
 
-    let ai_cfg = settings.config_section::<ene_ai::AiConfig>();
+    let ai_cfg = draft.section::<ene_ai::AiConfig>();
     let mut changed = false;
     let mut mic_device_changed = false;
 
@@ -789,8 +773,7 @@ fn render_audio(
     ));
 
     if changed {
-        settings.set_config_section(&ai_cfg);
-        settings.mark_dirty();
+        draft.set_section(&ai_cfg);
     }
 
     // Propagate audio settings into the shared `AudioState` so the next
@@ -807,12 +790,6 @@ fn render_audio(
     #[cfg(not(feature = "voice"))]
     {
         let _ = mic_device_changed;
-    }
-
-    // Push the VAD threshold to the runtime actor like the other feature
-    // settings do.
-    if changed {
-        sync_features(settings, ai);
     }
 }
 

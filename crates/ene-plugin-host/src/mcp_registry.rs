@@ -44,6 +44,18 @@ pub enum McpTransportKind {
     Http,
 }
 
+/// Liveness status of one MCP server connection, for the plugin center.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerStatus {
+    /// Server name.
+    pub name: String,
+    /// Transport kind.
+    pub transport: McpTransportKind,
+    /// Whether the transport channel is alive. For HTTP servers this is
+    /// only a torn-down-channel signal; a full liveness check needs a ping.
+    pub alive: bool,
+}
+
 /// Represents a connection to an MCP server.
 pub struct McpServerConnection {
     /// The server name.
@@ -384,6 +396,17 @@ impl McpToolRegistry {
                 "Pruned dead MCP server(s) from registry"
             );
         }
+    }
+
+    /// Liveness status of this registry's single server connection.
+    #[must_use]
+    pub fn status(&self) -> Option<McpServerStatus> {
+        let servers = self.servers.read();
+        servers.first().map(|server| McpServerStatus {
+            name: server.name.clone(),
+            transport: server.transport,
+            alive: !server.client.is_transport_closed(),
+        })
     }
 }
 

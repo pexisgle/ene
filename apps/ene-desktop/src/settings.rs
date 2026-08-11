@@ -373,33 +373,12 @@ pub struct UiState {
     /// from `AiPermissionRequested` messages; a request is removed
     /// once the user answers it from the Permission Center page.
     pub permission_requests: Vec<PendingPermission>,
-    /// Standing session-wide permission grants listed from the actor.
-    /// Refreshed after every decision / revocation.
-    pub permission_grants: Vec<ene_runtime::PermissionScope>,
-    pub permission_message: Option<String>,
-    /// Cached connector summaries for the connectors settings page.
-    /// Refreshed when the page is first shown and on explicit refresh.
-    pub connector_summaries: Vec<ene_connector::ConnectorSummary>,
-    pub connectors_loaded: bool,
     pub connector_selected: Option<ene_connector::ConnectorId>,
-    pub connector_grants: Vec<ene_connector::PermissionGrant>,
-    pub connector_status: Option<ene_connector::ConnectorStatus>,
-    pub connector_message: Option<String>,
-    /// Cached session metadata rows for the sessions page.
-    /// Lazy-loaded the first time the page is shown and refreshed
-    /// after every archive / import action. Rendered directly from the
-    /// API v1 [`ene_runtime::PublicSessionMeta`] DTO.
-    pub session_rows: Vec<ene_runtime::PublicSessionMeta>,
-    /// Whether `session_rows` has been populated at least once, so an
-    /// empty store is not mistaken for "not yet loaded".
-    pub sessions_loaded: bool,
     pub session_search_query: String,
-    pub session_search_rows: Vec<SessionSearchRow>,
     pub session_import_path: String,
     /// Whether archived sessions are included in the list.
     /// Defaults to `false`, matching the initial lazy load.
     pub session_show_archived: bool,
-    pub session_message: Option<String>,
     /// First-run onboarding banner when the chat API key is missing.
     pub show_onboarding: bool,
     /// Localized startup failure when the runtime actor could not open.
@@ -835,6 +814,11 @@ impl CharacterSettings {
         self.store.read().config()
     }
 
+    /// Replace the whole global config (draft-apply path).
+    pub fn set_config(&self, config: ene_config::EneConfig) {
+        self.store.read().set_config(config);
+    }
+
     /// Get a typed section from the global config.
     pub fn config_section<T>(&self) -> T
     where
@@ -857,8 +841,7 @@ impl CharacterSettings {
     }
 
     /// Reads the Kokoro `voices.bin` path from the Kokoro plugin profile
-    /// (`plugins.list.kokoro.profiles.kokoro.voices_path`, #313). Empty when
-    /// unset.
+    /// (`plugins.list.kokoro.profiles.kokoro.voices_path`). Empty when unset.
     pub fn kokoro_voices_path(&self) -> String {
         let value = self
             .config()
@@ -871,8 +854,8 @@ impl CharacterSettings {
     }
 
     /// Writes the Kokoro `voices.bin` path into the Kokoro plugin profile
-    /// (`plugins.list.kokoro.profiles.kokoro.voices_path`, #313). Passing an
-    /// empty string clears it (`null`).
+    /// (`plugins.list.kokoro.profiles.kokoro.voices_path`). Passing an empty
+    /// string clears it (`null`).
     pub fn set_kokoro_voices_path(&self, path: &str) {
         let trimmed = path.trim();
         let value = if trimmed.is_empty() { "null" } else { trimmed };
@@ -1069,16 +1052,16 @@ impl CharacterSettings {
         Some(self.character_state.default_expression.clone())
     }
 
-    pub fn save(&self) {
+    /// Persist both stores to disk. Returns the first I/O failure so callers
+    /// (the draft apply pipeline) can surface it instead of treating a
+    /// silent log as success.
+    pub fn save(&self) -> Result<(), ene_config::EneConfigError> {
         self.sync_character_state_to_store();
         let char_name = self.current_entry().map(|e| e.name.clone());
         let store = self.store.read();
-        if let Err(e) = store.flush() {
-            tracing::warn!("[Config] Failed to save config: {e}");
-        }
-        if let Err(e) = self.character_store.flush(char_name.as_deref()) {
-            tracing::warn!("[Config] Failed to save config: {e}");
-        }
+        store.flush()?;
+        self.character_store.flush(char_name.as_deref())?;
+        Ok(())
     }
 
     pub fn mark_dirty(&self) {

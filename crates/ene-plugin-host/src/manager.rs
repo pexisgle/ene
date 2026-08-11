@@ -35,6 +35,7 @@ use crate::ipc_vad::IpcVadFactory;
 use crate::manifest::{ManifestStore, builtin_manifest};
 use crate::mcp_config::McpTransport;
 use crate::mcp_registry::{McpToolRegistry, redacted_endpoint};
+use crate::snapshot::{PluginHealthState, PluginSettingsSnapshot, serde_code};
 use crate::stt_factory::IpcSttProviderFactory;
 use crate::tool_registry::{DeferredCallResult, ToolRegistry};
 use crate::tts_factory::IpcTtsProviderFactory;
@@ -977,6 +978,9 @@ impl ene_ai::ProviderHost for PluginHostManager {
 pub struct PluginHostManager {
     supervised: Vec<Arc<Mutex<SupervisedPlugin>>>,
     connections: Vec<Arc<IpcPluginConnection>>,
+    /// Per-server MCP tool registries, retained so the plugin center can
+    /// report liveness status.
+    mcp_registries: Vec<Arc<McpToolRegistry>>,
     /// Plugin names, index-aligned with `connections` — both vectors are
     /// pushed together in [`start`](Self::start). Stored separately from
     /// `supervised` so config pushes can identify a connection without
@@ -1064,6 +1068,7 @@ impl PluginHostManager {
             return Ok(Self {
                 supervised: Vec::new(),
                 connections: Vec::new(),
+                mcp_registries: Vec::new(),
                 names: Vec::new(),
                 tool_registries: Vec::new(),
                 llm_factories: HashMap::new(),
@@ -1091,6 +1096,7 @@ impl PluginHostManager {
         let mut connections: Vec<Arc<IpcPluginConnection>> = Vec::new();
         let mut names: Vec<String> = Vec::new();
         let mut tool_registries: Vec<Arc<dyn ToolRegistry>> = Vec::new();
+        let mut mcp_registries: Vec<Arc<McpToolRegistry>> = Vec::new();
         let mut llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
             HashMap::new();
         let mut llm_factory_plugins: HashMap<String, String> = HashMap::new();
@@ -1532,6 +1538,7 @@ impl PluginHostManager {
                 }
 
                 let registry = Arc::new(McpToolRegistry::new());
+                mcp_registries.push(Arc::clone(&registry));
 
                 match &server.transport {
                     McpTransport::Stdio { command, args } => {
@@ -1615,6 +1622,7 @@ impl PluginHostManager {
         let manager = Self {
             supervised,
             connections,
+            mcp_registries,
             names,
             tool_registries,
             llm_factories,
@@ -1898,6 +1906,228 @@ impl PluginHostManager {
         }
     }
 
+    /// Builds settings snapshots for every configured plugin.
+    ///
+    /// Covers enabled and disabled entries alike so the plugin center can show
+    /// the full `plugins.list` plus per-plugin health, capabilities, schema,
+    /// config/profiles, credentials, and effective security. Schema fetch is
+    /// an IPC round-trip per live connection; the method is async so it never
+    /// blocks on process I/O.
+    pub async fn settings_snapshots(&self, config: &EneConfig) -> Vec<PluginSettingsSnapshot> {
+        let plugin_config = config
+            .get_section::<crate::config::PluginConfig>()
+            .unwrap_or_default();
+        let mut names: Vec<&String> = plugin_config.list.keys().collect();
+        names.sort();
+        let mut snapshots = Vec::with_capacity(names.len());
+        for name in names {
+            let entry = &plugin_config.list[name];
+            let connection = self.connection(name);
+            let (schema, schema_version) = match &connection {
+                Some(conn) => conn.config_schema_with_version().await.unwrap_or((None, 0)),
+                None => (None, 0),
+            };
+            let capabilities = connection
+                .as_ref()
+                .map_or_else(ene_plugin_proto::PluginCapabilities::default, |conn| {
+                    conn.capabilities()
+                });
+            let credentials = self.credential_registry.declarations(name);
+            let global_approval = &plugin_config.approval.categories;
+            let plugin_override = plugin_config
+                .plugin_approval
+                .get(name)
+                .map(|policy| &policy.categories);
+            let approvals = ene_approval::ALL_CATEGORIES
+                .iter()
+                .map(|category| {
+                    (
+                        serde_code(category),
+                        serde_code(
+                            &crate::snapshot::PluginSettingsSnapshot::resolved_approval_mode(
+                                global_approval,
+                                plugin_override,
+                                *category,
+                            ),
+                        ),
+                    )
+                })
+                .collect();
+            let sandbox_enabled = entry
+                .sandbox
+                .as_ref()
+                .map_or(plugin_config.sandbox.enabled, |sandbox| sandbox.enabled);
+            let config = entry
+                .delivered_config(name)
+                .map(|value| crate::redact::redact_config_one_of(&value, schema.as_ref()));
+            let profiles = entry.delivered_profiles().map(|value| {
+                let profile_schema = schema
+                    .as_ref()
+                    .and_then(|s| s.get("x-ene-profiles-schema"))
+                    .or_else(|| {
+                        schema
+                            .as_ref()
+                            .and_then(|s| s.get("properties"))
+                            .and_then(|p| p.get("profiles"))
+                    });
+                Self::redact_profiles(&value, profile_schema)
+            });
+            let actions = if capabilities.tools > 0 {
+                match &connection {
+                    Some(conn) => match conn.list_tools().await {
+                        Ok(tools) => tools
+                            .into_iter()
+                            .map(|tool| crate::snapshot::ToolActionInfo {
+                                name: tool.name.to_string(),
+                                description: tool.description,
+                            })
+                            .collect(),
+                        Err(e) => {
+                            tracing::warn!(
+                                component = "PluginHostManager",
+                                plugin = %name,
+                                error = %e,
+                                "failed to list plugin tools for the settings snapshot"
+                            );
+                            Vec::new()
+                        }
+                    },
+                    None => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            snapshots.push(PluginSettingsSnapshot {
+                id: name.clone(),
+                kind: PluginSettingsSnapshot::classify_kind(&capabilities).to_string(),
+                enabled: entry.enable,
+                health: self.health_state(name, entry.enable).await,
+                capabilities,
+                actions,
+                manifest: crate::snapshot::PluginManifestSummary {
+                    key_id: entry.manifest.as_ref().and_then(|m| m.key_id.clone()),
+                    signed: entry
+                        .manifest
+                        .as_ref()
+                        .is_some_and(|m| m.signature.is_some()),
+                    checksum: entry.checksum.clone(),
+                },
+                schema,
+                schema_version,
+                supports_dynamic_config: connection
+                    .as_ref()
+                    .is_some_and(|conn| conn.supports_list_config_options()),
+                supports_validate_config: connection
+                    .as_ref()
+                    .is_some_and(|conn| conn.supports_validate_config()),
+                config,
+                profiles,
+                credentials,
+                effective_security: crate::snapshot::EffectiveSecurity {
+                    approvals,
+                    emergency_stop: plugin_config.approval.emergency_stop,
+                    fs_grants: entry.fs_grants.clone(),
+                    sandbox_enabled,
+                    db_quota_mb: entry.db_quota_mb,
+                },
+            });
+        }
+        snapshots
+    }
+
+    /// Plugin binaries discovered on disk that are not yet present in
+    /// `plugins.list` (detected-but-unconfigured), sorted.
+    pub fn discovered_plugins(&self, config: &EneConfig) -> Vec<String> {
+        let plugin_config = config
+            .get_section::<crate::config::PluginConfig>()
+            .unwrap_or_default();
+        let mut discovered: Vec<String> = discover_plugins();
+        discovered.sort();
+        discovered.retain(|name| !plugin_config.list.contains_key(name));
+        discovered
+    }
+
+    /// Redacts every profile in the `profiles` blob (name → value) with the
+    /// profile schema when one is declared.
+    fn redact_profiles(
+        profiles: &serde_json::Value,
+        profile_schema: Option<&serde_json::Value>,
+    ) -> serde_json::Value {
+        match profiles {
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.iter()
+                    .map(|(name, profile)| {
+                        (
+                            name.clone(),
+                            crate::redact::redact_config_one_of(profile, profile_schema),
+                        )
+                    })
+                    .collect(),
+            ),
+            other => crate::redact::redact_config_one_of(other, profile_schema),
+        }
+    }
+
+    /// Derives the UI health state for one configured plugin.
+    async fn health_state(&self, name: &str, enabled: bool) -> PluginHealthState {
+        if !enabled {
+            return PluginHealthState::Stopped;
+        }
+        for supervised in &self.supervised {
+            let plugin = supervised.lock().await;
+            if plugin.name == name {
+                return if plugin.disabled {
+                    PluginHealthState::Disabled
+                } else {
+                    PluginHealthState::Running
+                };
+            }
+        }
+        if !self
+            .capability_registry
+            .unmet_hard_requirements(name)
+            .is_empty()
+        {
+            return PluginHealthState::RequirementsUnmet;
+        }
+        PluginHealthState::Stopped
+    }
+
+    /// Liveness status of every connected MCP server.
+    #[must_use]
+    pub fn mcp_statuses(&self) -> Vec<crate::mcp_registry::McpServerStatus> {
+        self.mcp_registries
+            .iter()
+            .filter_map(|registry| registry.status())
+            .collect()
+    }
+
+    /// Fetches dynamic config options from one live plugin (empty when the
+    /// plugin does not advertise `ListConfigOptions` or is not connected).
+    pub async fn list_config_options(
+        &self,
+        name: &str,
+        path: &str,
+    ) -> Result<Vec<ene_plugin_proto::ConfigOption>, PluginHostError> {
+        match self.connection(name) {
+            Some(connection) => connection.list_config_options(path).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Validates a config value against one live plugin (empty when the
+    /// plugin does not advertise `ValidateConfig` or is not connected).
+    pub async fn validate_config(
+        &self,
+        name: &str,
+        value: &serde_json::Value,
+    ) -> Result<Vec<ene_plugin_proto::ConfigFieldError>, PluginHostError> {
+        match self.connection(name) {
+            Some(connection) => connection.validate_config(value).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Sends a graceful `Shutdown` to all plugins and kills the processes.
     pub async fn shutdown(&mut self) {
         // Abort every per-plugin supervisor first so none can race with
@@ -2096,6 +2326,7 @@ impl PluginHostManager {
             connections: Vec::new(),
             names: Vec::new(),
             tool_registries: Vec::new(),
+            mcp_registries: Vec::new(),
             llm_factories: HashMap::new(),
             llm_factory_plugins: HashMap::new(),
             embedding_factories: HashMap::new(),

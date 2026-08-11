@@ -7,6 +7,7 @@ use crate::component::ui::UiStateComponent;
 use crate::memory_journal::MemoryJournalAction;
 use crate::memory_ledger::{CreatedWithinFilter, MemoryLedgerPresenter};
 use crate::settings::MemoryLedgerDraft;
+use crate::settings_ui::input::SettingsInputState;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use ene_store::MemoryKind;
@@ -27,7 +28,14 @@ enum PendingLedgerAction {
     CancelCommitment { id: i64 },
 }
 
-pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
+pub fn render(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+) {
+    poll_ledger_feedback(ai, input, world, ui_entity);
     let mut do_refresh = false;
     if let Some(state) = world.get::<UiStateComponent>(ui_entity)
         && !state.0.memory_ledger_loaded
@@ -134,14 +142,14 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
         &fl!(crate::i18n::loader(), "memory-ledger-commitments-title"),
         |ui| render_commitment_table(ui, &snapshot, &mut pending),
     );
-    apply_pending(ai, world, ui_entity, pending);
+    apply_pending(ai, input, pending);
 
     if let Some(message) = snapshot.memory_ledger_message.as_deref() {
         ui.separator();
         ui.label(message);
     }
 
-    render_edit_dialog(ui, ai, world, ui_entity);
+    render_edit_dialog(ui, ai, input, world, ui_entity);
 }
 
 fn render_kind_distribution(ui: &mut egui::Ui, snapshot: &crate::settings::UiState) {
@@ -477,85 +485,119 @@ fn render_commitment_actions(
 
 fn apply_pending(
     ai: &Arc<AiBridge>,
-    world: &mut World,
-    ui_entity: Entity,
+    input: &mut SettingsInputState,
     pending: Vec<PendingLedgerAction>,
 ) {
-    let mut changed = false;
-    let mut feedback = None;
     for action in pending {
-        changed = true;
-        match action {
+        let receiver = match action {
             PendingLedgerAction::Edit { id, draft } => {
-                let edit = ene_store::MemoryEdit {
+                let edit = ene_core::MemoryEdit {
                     title: draft.title,
                     content: draft.content,
                     kind: MemoryKind::from_db_str(&draft.kind),
                     confidence: ene_store::MemoryConfidence::new(draft.confidence),
                 };
-                match ai.edit_memory_blocking(id, edit) {
-                    Ok(()) => {
-                        feedback = Some(fl!(crate::i18n::loader(), "memory-ledger-message-saved"));
+                let ok_label = fl!(crate::i18n::loader(), "memory-ledger-message-saved");
+                let error_label = fl!(crate::i18n::loader(), "memory-ledger-error");
+                let receiver = ai.apply_memory_edit(id, edit);
+                ai.spawn_fetch(async move {
+                    match receiver.await {
+                        Ok(Ok(())) => ok_label,
+                        Ok(Err(error)) => format!("{error_label}: {error}"),
+                        Err(_) => error_label,
                     }
-                    Err(error) => {
-                        feedback = Some(format!(
-                            "{}: {error}",
-                            fl!(crate::i18n::loader(), "memory-ledger-error")
-                        ));
-                    }
-                }
+                })
             }
             PendingLedgerAction::Salience { id, salience } => {
-                match ai.set_memory_salience_blocking(id, salience) {
-                    Ok(()) => {
-                        feedback =
-                            Some(fl!(crate::i18n::loader(), "memory-ledger-message-salience"));
+                let ok_label = fl!(crate::i18n::loader(), "memory-ledger-message-salience");
+                let error_label = fl!(crate::i18n::loader(), "memory-ledger-error");
+                let receiver = ai.apply_memory_salience(id, salience);
+                ai.spawn_fetch(async move {
+                    match receiver.await {
+                        Ok(Ok(())) => ok_label,
+                        Ok(Err(error)) => format!("{error_label}: {error}"),
+                        Err(_) => error_label,
                     }
-                    Err(error) => {
-                        feedback = Some(format!(
-                            "{}: {error}",
-                            fl!(crate::i18n::loader(), "memory-ledger-error")
-                        ));
-                    }
-                }
+                })
             }
             PendingLedgerAction::Forget { id } => {
-                match ai.execute_journal_action(id, MemoryJournalAction::Forget) {
-                    Ok(true) => {
-                        feedback =
-                            Some(fl!(crate::i18n::loader(), "memory-ledger-message-deleted"));
+                let ok_label = fl!(crate::i18n::loader(), "memory-ledger-message-deleted");
+                let error_label = fl!(crate::i18n::loader(), "memory-ledger-error");
+                let receiver = ai.apply_journal_action(id, MemoryJournalAction::Forget);
+                ai.spawn_fetch(async move {
+                    match receiver.await {
+                        Ok(Ok(true)) => ok_label,
+                        Ok(Ok(false) | Err(_)) | Err(_) => error_label,
                     }
-                    Ok(false) | Err(_) => {
-                        feedback = Some(fl!(crate::i18n::loader(), "memory-ledger-error"));
-                    }
-                }
+                })
             }
-            PendingLedgerAction::CompleteCommitment { id } => match ai.complete_commitment(id) {
-                Ok(true) => {
-                    feedback = Some(fl!(
-                        crate::i18n::loader(),
-                        "memory-ledger-message-commitment-done"
-                    ));
-                }
-                _ => feedback = Some(fl!(crate::i18n::loader(), "memory-ledger-error")),
-            },
-            PendingLedgerAction::CancelCommitment { id } => match ai.cancel_commitment(id) {
-                Ok(true) => {
-                    feedback = Some(fl!(
-                        crate::i18n::loader(),
-                        "memory-ledger-message-commitment-cancelled"
-                    ));
-                }
-                _ => feedback = Some(fl!(crate::i18n::loader(), "memory-ledger-error")),
-            },
-        }
-    }
-    if changed {
-        refresh_ledger(ai, world, ui_entity, feedback);
+            PendingLedgerAction::CompleteCommitment { id } => {
+                let ok_label = fl!(
+                    crate::i18n::loader(),
+                    "memory-ledger-message-commitment-done"
+                );
+                let error_label = fl!(crate::i18n::loader(), "memory-ledger-error");
+                let receiver = ai.apply_complete_commitment(id);
+                ai.spawn_fetch(async move {
+                    match receiver.await {
+                        Ok(Ok(true)) => ok_label,
+                        Ok(Ok(false) | Err(_)) | Err(_) => error_label,
+                    }
+                })
+            }
+            PendingLedgerAction::CancelCommitment { id } => {
+                let ok_label = fl!(
+                    crate::i18n::loader(),
+                    "memory-ledger-message-commitment-cancelled"
+                );
+                let error_label = fl!(crate::i18n::loader(), "memory-ledger-error");
+                let receiver = ai.apply_cancel_commitment(id);
+                ai.spawn_fetch(async move {
+                    match receiver.await {
+                        Ok(Ok(true)) => ok_label,
+                        Ok(Ok(false) | Err(_)) | Err(_) => error_label,
+                    }
+                })
+            }
+        };
+        input.ledger_pending.push(receiver);
     }
 }
 
-fn render_edit_dialog(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
+/// Polls in-flight ledger mutation messages; the first completion surfaces
+/// its message and refreshes the ledger.
+fn poll_ledger_feedback(
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+) {
+    let mut done = None;
+    input
+        .ledger_pending
+        .retain_mut(|receiver| match receiver.try_recv() {
+            Ok(message) => {
+                done = Some(message);
+                false
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => true,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                done = Some(fl!(crate::i18n::loader(), "memory-ledger-error"));
+                false
+            }
+        });
+    if let Some(message) = done {
+        refresh_ledger(ai, world, ui_entity, Some(message));
+    }
+}
+
+fn render_edit_dialog(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+) {
     let draft = world
         .get::<UiStateComponent>(ui_entity)
         .and_then(|s| s.0.memory_ledger_edit_draft.clone());
@@ -620,7 +662,7 @@ fn render_edit_dialog(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
             id: draft.id,
             draft,
         };
-        apply_pending(ai, world, ui_entity, vec![pending]);
+        apply_pending(ai, input, vec![pending]);
     }
 }
 

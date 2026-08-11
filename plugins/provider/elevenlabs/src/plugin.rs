@@ -71,28 +71,33 @@ impl ene_plugin::ConfigurablePlugin for ElevenLabsPlugin {
                 },
                 "base_url": {
                     "type": "string",
-                    "description": "API base URL override (defaults to https://api.elevenlabs.io/v1; websocket mode swaps the scheme)"
+                    "description": "API base URL override (defaults to https://api.elevenlabs.io/v1; websocket mode swaps the scheme)",
+                    "x-ene-ui": { "group": "connection", "order": 0, "impact": "runtime_reload" }
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["rest", "ws"],
                     "default": "rest",
-                    "description": "Transport: rest (POST /text-to-speech/{voice_id}/stream) or ws (stream-input websocket)"
+                    "description": "Transport: rest (POST /text-to-speech/{voice_id}/stream) or ws (stream-input websocket)",
+                    "x-ene-ui": { "group": "connection", "order": 1, "impact": "runtime_reload" }
                 },
                 "model_id": {
                     "type": "string",
                     "default": DEFAULT_MODEL,
-                    "description": "ElevenLabs model ID (e.g. eleven_multilingual_v2)"
+                    "description": "ElevenLabs model ID (e.g. eleven_multilingual_v2)",
+                    "x-ene-ui": { "group": "voice", "order": 0, "impact": "runtime_reload" }
                 },
                 "voice_id": {
                     "type": "string",
-                    "description": "Default voice ID; a per-request voice overrides it. Required when the request carries none."
+                    "description": "Default voice ID; a per-request voice overrides it. Required when the request carries none.",
+                    "x-ene-ui": { "group": "voice", "order": 1, "options_path": "voices", "impact": "runtime_reload" }
                 },
                 "sample_rate": {
                     "type": "integer",
                     "enum": SUPPORTED_SAMPLE_RATES,
                     "default": DEFAULT_SAMPLE_RATE,
-                    "description": "PCM output sample rate; selects the API's pcm_{rate} format and the WAV header rate"
+                    "description": "PCM output sample rate; selects the API's pcm_{rate} format and the WAV header rate",
+                    "x-ene-ui": { "group": "voice", "order": 2, "advanced": true, "impact": "runtime_reload" }
                 },
                 "voice_settings": {
                     "type": "object",

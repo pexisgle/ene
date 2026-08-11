@@ -38,35 +38,77 @@ audio. Settings → Voice selects providers, models, voices, and speed.
 ## Settings pages
 
 The settings window opens at 900 × 700 logical pixels and can be resized down
-to 520 × 560. At 720 pixels or wider, its sidebar groups all pages into four
-categories. The search field at the top of the sidebar replaces the category
-list with ranked page and section results; choosing a section opens its page,
-scrolls to the matching card, and highlights it. Below 720 pixels, a grouped
-page picker and the same search UI replace the sidebar, and setting controls
-wrap below their labels instead of requiring horizontal scrolling.
+to 520 × 560. At 720 pixels or wider, its sidebar groups pages into two
+categories — **Settings** (what a user tunes day to day) and **Management**
+(data, accounts, and diagnostics). The search field at the top of the sidebar
+replaces the category list with ranked page, section, and *plugin* results;
+choosing a section opens its page, scrolls to the matching card, and
+highlights it, and an active search reveals hidden advanced fields. Below 720
+pixels, a grouped page picker and the same search UI replace the sidebar, and
+setting controls wrap below their labels instead of requiring horizontal
+scrolling. The window is keyboard-navigable (tab, arrows, Enter) and renders
+correctly with long Japanese text.
 
 | Category | Pages |
 |---|---|
-| Basics | Character, Character card, Display, Accessibility |
-| AI & Voice | AI, Voice, Features |
-| Data & Access | Memory, Memory ledger, Sessions, Permissions, Connectors |
-| System | Debug |
+| Settings | Overview, General, Character & User, AI & Models, Voice & Audio, Behavior, Memory & Storage, Security & Downloads, Plugins, Advanced |
+| Management | Character Card Editor, Memories, Sessions, Schedules, Permissions, Connectors, Diagnostics |
 
 | Page | What it edits |
 |---|---|
-| Character | Default expression/motion, look-at strength, position, scale |
-| Character card | Edit the active card's fields (see [Character editor](../guides/character-editor.md)) |
-| Display | Quality preset, UI language, and Appearance theme |
-| Accessibility | Spotlight and caption overlays |
-| AI | Providers, task models, retry/fallback, and provider health |
-| Voice | TTS, STT, microphone/VAD selection, and voice tuning |
-| Features | Voice, proactive, mind, and tool capability toggles |
-| Memory | Browse/search/pending/commitments tabs |
-| Memory ledger | Full typed-memory review: edit, pin, approve, reject |
+| Overview | Setup needs, health issues, restart-pending changes, and required credentials, each linking to the page that resolves it |
+| General | Quality preset, UI language, Appearance theme, Spotlight, captions, accessibility |
+| Character & User | Default expression/motion, look-at strength, position, scale, user name |
+| Character Card Editor | Edit the active card's fields (see [Character editor](../guides/character-editor.md)) |
+| AI & Models | Providers, task models, retry/fallback, provider health, and API keys (masked) |
+| Voice & Audio | TTS, STT, microphone/VAD selection, and voice tuning |
+| Behavior | Voice, proactive, mind, and tool capability toggles |
+| Memory & Storage | Memory enablement, approval workflow, retention limits, store integrity |
+| Memories | Browse/search/pending/commitments tabs plus the full typed-memory ledger (edit, pin, approve, reject) |
+| Schedules | Scheduled tool runs: create, enable, delete, run history |
+| Plugins | Plugin center: detected/configured/MCP plugins, schema-driven config and profiles, credentials, security posture, dynamic options, validation |
+| Advanced | Every remaining `settings.json` field, searchable and schema-driven |
 | Sessions | List, search, import, export, and archive sessions |
 | Permissions | Standing tool-permission grants, revoke/reset |
 | Connectors | External-service accounts (see [Connectors](../concepts/connectors.md)) |
-| Debug | Diagnostics and pipeline detail |
+| Diagnostics | Runtime/AI/voice/plugin health, pipeline detail, and debug overlays |
+
+Local model configuration is unified on plugin profiles: the AI page lists
+profiles from `plugins.list.local-llm` / `llama-server` as model choices, and
+`ai.local_models` is derived from those profiles at apply time instead of
+being edited separately. The Schedules page validates cron / interval / JSON
+inputs before submission, uses the host timezone by default, and can approve
+or deny pending run confirmations directly.
+
+### Draft apply pipeline
+
+Pages never write to `settings.json` directly. Edits land on a draft that
+tracks dirty paths, a monotonic revision, per-field schema validation, and
+secret states; the window shows a **Pending changes** bar with Apply /
+Discard. Applying runs asynchronously: the draft is secret-merged, validated
+against the registered schemas *and* each dirty plugin's own `ValidateConfig`,
+persisted atomically, and pushed to the runtime actor, which diffs it against
+its live config and reports the actual impact — immediate, hot-reload,
+plugin restart, or app restart — in a result banner. A stale draft is
+rejected with a conflict, and a failed runtime apply rolls the persisted
+config back. Stored secrets (API keys, plugin configs/profiles/credentials,
+MCP auth headers) never live in UI state: the draft holds redacted
+placeholders that are merged back from the store at apply time, and the
+plugin center receives host-redacted snapshots. List, search, and status
+fetches across the settings and management pages run on the bridge runtime
+and are polled asynchronously, so the render thread never blocks on IPC.
+
+### Plugin center
+
+Plugins, MCP servers, and detected-but-unconfigured binaries all appear in
+one place. Each plugin card shows health, kind, capabilities, manifest
+facts, and an effective-security summary (approval modes, emergency stop, fs
+grants, sandbox, DB quota); config and profiles are edited through the
+plugin's own JSON Schema (typed controls with a raw-JSON fallback, unknown
+keys preserved). Plugins that advertise dynamic config answer the *Fetch
+options* button, and *Validate config* runs the plugin's own validator.
+`x-ene-ui` metadata (group/order/control/advanced/impact/options_path) and
+`x-ene-profiles-schema` drive the forms.
 
 ### Appearance
 

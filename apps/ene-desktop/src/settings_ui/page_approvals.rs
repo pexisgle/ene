@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use bevy_ecs::world::World;
 use ene_plugin_host::{ALL_CATEGORIES, ApprovalCategory, ApprovalMode, PluginConfig};
+
+use super::draft::SettingsDraft;
 use i18n_embed_fl::fl;
 
 use crate::ai_bridge::AiBridge;
@@ -17,7 +19,8 @@ use crate::settings_ui::components::{section_card, warning_box};
 
 pub fn render(
     ui: &mut egui::Ui,
-    settings: &mut CharacterSettings,
+    _settings: &mut CharacterSettings,
+    draft: &mut SettingsDraft,
     _ai: &Arc<AiBridge>,
     _world: &mut World,
     _ui_entity: bevy_ecs::entity::Entity,
@@ -29,7 +32,7 @@ pub fn render(
         |ui| {
             ui.label(fl!(crate::i18n::loader(), "approvals-hint"));
 
-            let mut config = settings.config_section::<PluginConfig>();
+            let mut config = draft.section::<PluginConfig>();
             let mut changed = false;
 
             if config.approval.has_high_risk_allow() {
@@ -89,8 +92,7 @@ pub fn render(
             }
 
             if changed {
-                settings.set_config_section(&config);
-                settings.mark_dirty();
+                draft.set_section(&config);
             }
         },
     );

@@ -1,12 +1,10 @@
 //! Connectors settings page.
 //!
 //! Read-only status surface for the connector framework: lists the
-//! registered connectors with their cached connection state, and for the
-//! selected connector shows health, accounts, standing per-action grants,
-//! and a connectivity-check button. Mirrors the data-fetch pattern of
-//! [`super::page_permissions`]: blocking calls run on the UI thread through
-//! the bridge's tokio handle and results are cached on `UiStateComponent`.
-
+//! registered connectors, and for the selected connector shows health,
+//! accounts, standing per-action grants, and a connectivity-check button.
+//! All fetches run on the bridge runtime through [`AsyncData`] receivers so
+//! the render thread never blocks.
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
@@ -19,13 +17,29 @@ use crate::component::ui::UiStateComponent;
 use crate::settings_ui::components::{
     BadgeTone, empty_state, section_card, setting_row, status_badge,
 };
+use crate::settings_ui::input::{AsyncData, SettingsInputState};
 
-pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    if world
+pub fn render(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+) {
+    input.connectors.poll();
+    if !input.connectors.started() {
+        input.connectors.start(ai.fetch_connectors());
+    }
+    input.connector_detail.poll();
+    input.connector_check.poll();
+    if let Some(selected) = world
         .get::<UiStateComponent>(ui_entity)
-        .is_some_and(|s| !s.0.connectors_loaded)
+        .and_then(|s| s.0.connector_selected.clone())
+        && !input.connector_detail.started()
     {
-        refresh_list(ai, world, ui_entity);
+        input
+            .connector_detail
+            .start(ai.fetch_connector_detail(selected));
     }
 
     ui.vertical(|ui| {
@@ -33,26 +47,43 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
             ui,
             "connectors-list",
             &fl!(crate::i18n::loader(), "connectors-list"),
-            |ui| render_list(ui, ai, world, ui_entity),
+            |ui| render_list(ui, ai, input, world, ui_entity),
         );
         section_card(
             ui,
             "connectors-detail",
             &fl!(crate::i18n::loader(), "connectors-status-title"),
-            |ui| render_selected(ui, ai, world, ui_entity),
+            |ui| render_selected(ui, ai, input, world, ui_entity),
         );
     });
 
-    if let Some(message) = world
-        .get::<UiStateComponent>(ui_entity)
-        .and_then(|s| s.0.connector_message.clone())
-    {
+    input.connector_check.poll();
+    if let Some(result) = input.connector_check.data.take() {
         ui.add_space(6.0);
-        ui.label(message);
+        ui.label(match result {
+            Ok(health) if health.healthy => {
+                fl!(crate::i18n::loader(), "connectors-check-ok")
+            }
+            Ok(health) => format!(
+                "{}: {}",
+                fl!(crate::i18n::loader(), "connectors-check-failed"),
+                health.message.as_deref().unwrap_or("-")
+            ),
+            Err(error) => format!(
+                "{}: {error}",
+                fl!(crate::i18n::loader(), "connectors-check-error")
+            ),
+        });
     }
 }
 
-fn render_list(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
+fn render_list(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+) {
     setting_row(
         ui,
         "connectors_refresh_row",
@@ -63,15 +94,19 @@ fn render_list(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_enti
                 .button(fl!(crate::i18n::loader(), "connectors-refresh"))
                 .clicked()
             {
-                refresh_list(ai, world, ui_entity);
+                input.connectors = AsyncData::new();
             }
         },
     );
-
-    let summaries = world
-        .get::<UiStateComponent>(ui_entity)
-        .map(|s| s.0.connector_summaries.clone())
-        .unwrap_or_default();
+    if input.connectors.loading() {
+        ui.weak(fl!(crate::i18n::loader(), "connectors-loading"));
+        return;
+    }
+    if let Some(error) = input.connectors.error.clone() {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+        return;
+    }
+    let summaries = input.connectors.data.clone().unwrap_or_default();
 
     if summaries.is_empty() {
         empty_state(ui, &fl!(crate::i18n::loader(), "connectors-list-empty"), "");
@@ -100,13 +135,19 @@ fn render_list(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_enti
                 .selectable_label(selected.as_ref() == Some(&id), label)
                 .clicked()
             {
-                select(ai, world, ui_entity, id);
+                select(ai, input, world, ui_entity, id);
             }
         });
     }
 }
 
-fn render_selected(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
+fn render_selected(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+) {
     let Some(selected) = world
         .get::<UiStateComponent>(ui_entity)
         .and_then(|s| s.0.connector_selected.clone())
@@ -129,14 +170,21 @@ fn render_selected(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_
                 .button(fl!(crate::i18n::loader(), "connectors-check"))
                 .clicked()
             {
-                check(ai, world, ui_entity, &selected);
+                input.connector_check = AsyncData::new();
+                input
+                    .connector_check
+                    .start(ai.apply_connector_check(selected.clone()));
             }
         },
     );
 
-    let status = world
-        .get::<UiStateComponent>(ui_entity)
-        .and_then(|s| s.0.connector_status.clone());
+    if input.connector_detail.loading() {
+        ui.weak(fl!(crate::i18n::loader(), "connectors-loading"));
+        return;
+    }
+    let Some((status, grants)) = input.connector_detail.data.clone() else {
+        return;
+    };
     if let Some(status) = status {
         if let Some(health) = &status.health {
             let health_label = if health.healthy {
@@ -174,10 +222,6 @@ fn render_selected(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_
 
     ui.add_space(4.0);
     ui.label(fl!(crate::i18n::loader(), "connectors-grants"));
-    let grants = world
-        .get::<UiStateComponent>(ui_entity)
-        .map(|s| s.0.connector_grants.clone())
-        .unwrap_or_default();
     if grants.is_empty() {
         ui.weak(fl!(crate::i18n::loader(), "connectors-grants-empty"));
     } else {
@@ -212,66 +256,18 @@ fn render_selected(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_
     }
 }
 
-fn refresh_list(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    let summaries = ai.list_connectors_blocking();
-    let selected = world
-        .get::<UiStateComponent>(ui_entity)
-        .and_then(|s| s.0.connector_selected.clone());
-    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        state.0.connector_summaries = summaries;
-        state.0.connectors_loaded = true;
-    }
-    // A refresh may have removed the selected connector (unregister).
-    let Some(selected) = selected else {
-        return;
-    };
-    let still_registered = world.get::<UiStateComponent>(ui_entity).is_some_and(|s| {
-        s.0.connector_summaries
-            .iter()
-            .any(|summary| summary.identity.id == selected)
-    });
-    if !still_registered && let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        state.0.connector_selected = None;
-        state.0.connector_status = None;
-        state.0.connector_grants = Vec::new();
-    }
-}
-
-fn select(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity, id: ConnectorId) {
+fn select(
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+    id: ConnectorId,
+) {
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
         state.0.connector_selected = Some(id.clone());
     }
-    refresh_selected(ai, world, ui_entity, &id);
-}
-
-fn refresh_selected(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity, id: &ConnectorId) {
-    let status = ai.connector_status_blocking(id);
-    let grants = ai.connector_permissions_blocking(id);
-    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        state.0.connector_status = status.ok();
-        state.0.connector_grants = grants.unwrap_or_default();
-    }
-}
-
-fn check(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity, id: &ConnectorId) {
-    let result = ai.check_connector_blocking(id);
-    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        state.0.connector_message = Some(match result {
-            Ok(health) if health.healthy => {
-                fl!(crate::i18n::loader(), "connectors-check-ok")
-            }
-            Ok(health) => format!(
-                "{}: {}",
-                fl!(crate::i18n::loader(), "connectors-check-failed"),
-                health.message.as_deref().unwrap_or("-")
-            ),
-            Err(error) => format!(
-                "{}: {error}",
-                fl!(crate::i18n::loader(), "connectors-check-error")
-            ),
-        });
-    }
-    refresh_selected(ai, world, ui_entity, id);
+    input.connector_detail = AsyncData::new();
+    input.connector_detail.start(ai.fetch_connector_detail(id));
 }
 
 fn connection_label(connection: &ConnectionState) -> String {
@@ -288,16 +284,15 @@ fn connection_label(connection: &ConnectionState) -> String {
 
 fn connection_tone(connection: &ConnectionState) -> BadgeTone {
     match connection {
-        ConnectionState::Disconnected => BadgeTone::Neutral,
+        ConnectionState::Disconnected => BadgeTone::Warn,
         ConnectionState::Connected { .. } => BadgeTone::Ok,
         ConnectionState::Error { .. } => BadgeTone::Error,
     }
 }
 
 fn field_label(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.add(
-        egui::Label::new(format!("{label}: {value}"))
-            .wrap()
-            .selectable(true),
-    );
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.monospace(value);
+    });
 }
