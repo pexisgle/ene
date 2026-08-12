@@ -108,6 +108,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
+    // `run_app` consumes the event loop, so its owned Wayland display would
+    // be disconnected before `Runtime` drops the egui windows, whose
+    // smithay-clipboard worker threads still share that display and are
+    // joined from `Runtime::drop`. Hold the display handle until after the
+    // `Runtime` drop so the display outlives those joins.
+    let _display_handle = event_loop.owned_display_handle();
+
     let mut app = runtime::Runtime::new(app_state, event_tx);
     event_loop.run_app(&mut app)?;
 
