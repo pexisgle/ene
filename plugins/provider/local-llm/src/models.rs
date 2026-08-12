@@ -423,7 +423,19 @@ mod tests {
     /// Concurrent callers for the same model key share one in-flight load:
     /// the load closure runs once and every caller receives the same `Arc`.
     #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the config-mutation lock serializes cross-test generation bumps; no task on this runtime ever takes it"
+    )]
     async fn concurrent_loads_share_one_in_flight_load() {
+        // Hold the config-mutation lock for the whole test: a concurrent
+        // `set_config` from another test bumps the global generation, which
+        // would suppress the load's cache insert, make a later caller
+        // re-load, and deadlock it on the started-signal channel once the
+        // test body has stopped receiving.
+        let _config_guard = crate::config::CONFIG_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let loads = Arc::new(AtomicUsize::new(0));
         // The test releases the single load closure only after it has
         // confirmed the load started, so the assertion below observes the
@@ -442,19 +454,21 @@ mod tests {
                     let release = Arc::clone(&release);
                     let started_tx = started_tx.clone();
                     async move {
-                        loads.fetch_add(1, Ordering::SeqCst);
-                        // Register the waiter before signaling the test
-                        // task: `notify_waiters` stores no permit, so a
-                        // late registration would wait forever.
-                        let release = release.notified();
-                        // The send error is `Copy`, so `drop()` would trip
-                        // `clippy::dropping_copy_types`.
-                        #[expect(
-                            clippy::let_underscore_must_use,
-                            reason = "mpsc send error is Copy; drop() would trip dropping_copy_types"
-                        )]
-                        let _ = started_tx.send(()).await;
-                        release.await;
+                        let first_load = loads.fetch_add(1, Ordering::SeqCst) == 0;
+                        if first_load {
+                            // Register the waiter before signaling the test
+                            // task: `notify_waiters` stores no permit, so a
+                            // late registration would wait forever.
+                            let release = release.notified();
+                            // The send error is `Copy`, so `drop()` would
+                            // trip `clippy::dropping_copy_types`.
+                            #[expect(
+                                clippy::let_underscore_must_use,
+                                reason = "mpsc send error is Copy; drop() would trip dropping_copy_types"
+                            )]
+                            let _ = started_tx.try_send(());
+                            release.await;
+                        }
                         let provider = Arc::new("loaded".to_string());
                         Ok(insert_if_unloaded(
                             &TEST_EPOCHS,
