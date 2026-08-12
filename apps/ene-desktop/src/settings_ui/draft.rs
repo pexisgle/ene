@@ -188,7 +188,39 @@ impl SettingsDraft {
     }
 
     /// Writes a dotted path into the working copy and records it dirty.
+    ///
+    /// Top-level declared `EneConfig` fields (`character`, `user_name`,
+    /// `runtime_rules`, `user_persona`) live outside the flattened `extra`
+    /// map and are routed to the struct field; the actor's apply diff
+    /// compares those fields directly, so writing them into `extra` would
+    /// silently no-op the live apply.
     pub fn set_path(&mut self, dotted_path: &str, value: serde_json::Value) {
+        match dotted_path {
+            "character" => {
+                self.editing.character = value.as_str().unwrap_or_default().to_string();
+                self.touch(dotted_path.to_string());
+                return;
+            }
+            "user_name" => {
+                self.editing.user_name = value.as_str().unwrap_or_default().to_string();
+                self.touch(dotted_path.to_string());
+                return;
+            }
+            "runtime_rules" => {
+                self.editing.runtime_rules = value.as_str().unwrap_or_default().to_string();
+                self.touch(dotted_path.to_string());
+                return;
+            }
+            "user_persona" => {
+                let Ok(persona) = serde_json::from_value(value) else {
+                    return;
+                };
+                self.editing.user_persona = Some(persona);
+                self.touch(dotted_path.to_string());
+                return;
+            }
+            _ => {}
+        }
         let Ok(json) = serde_json::to_string(&value) else {
             return;
         };
@@ -696,6 +728,20 @@ mod tests {
                 .session_timeout_minutes,
             30
         );
+    }
+
+    #[test]
+    fn set_path_routes_top_level_fields_to_declared_fields() {
+        let mut d = draft();
+        d.set_path("user_name", json!("Alice"));
+        assert!(d.dirty_paths().contains("user_name"));
+        assert_eq!(d.editing().user_name, "Alice");
+        assert!(
+            !d.editing().extra.contains_key("user_name"),
+            "top-level fields must not leak into `extra`"
+        );
+        d.set_path("runtime_rules", json!("be concise"));
+        assert_eq!(d.editing().runtime_rules, "be concise");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //!
 //! Quality preset, UI language, and the app-wide color theme.
 use super::components::section_card;
+use super::draft::SettingsDraft;
 use crate::settings::{
     CharacterSettings, DesktopThemePreference, GraphicsQuality, GraphicsSettings, Language,
 };
@@ -16,6 +17,7 @@ fn language_label(language: Language) -> &'static str {
 pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
+    draft: &mut SettingsDraft,
     _animation: &mut crate::character_state::AnimationControl,
     _ai: &std::sync::Arc<crate::ai_bridge::AiBridge>,
     _world: &mut bevy_ecs::world::World,
@@ -71,6 +73,14 @@ pub fn render(
                 crate::i18n::select_language(language);
                 settings.sync_classifier_language_from_ui();
                 settings.mark_dirty();
+                // The draft is the apply baseline; mirror the classifier
+                // language into it so a later apply (e.g. a mind-section
+                // edit) does not revert it to the window-open value.
+                let lang = match language {
+                    Language::En => "en",
+                    Language::Ja => "ja",
+                };
+                draft.set_path("mind.language", serde_json::Value::String(lang.to_string()));
             }
         },
     );

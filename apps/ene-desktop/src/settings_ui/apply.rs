@@ -103,7 +103,7 @@ pub async fn prepare_apply(
     dirty_paths: &std::collections::BTreeSet<String>,
     handle: std::sync::Arc<ene_runtime::EneHandle>,
 ) -> ApplyPrepare {
-    let mut proposed = merge_secrets(original, editing);
+    let mut proposed = build_proposed(original, editing, dirty_paths);
     derive_local_models(&mut proposed);
     let mut errors = Vec::new();
 
@@ -129,6 +129,96 @@ pub async fn prepare_apply(
         }
     }
     ApplyPrepare { proposed, errors }
+}
+
+/// Overlays the draft's dirty paths onto a fresh copy of `original`.
+///
+/// Sections the draft never touched stay verbatim from `original`, so
+/// settings written directly to `CharacterSettings` while the settings
+/// window is open (graphics, theme, language, mic device, character
+/// switch) survive an apply instead of reverting to the window-open
+/// snapshot. Values copied from the redacted draft are secret-restored
+/// from `original` afterwards.
+pub(crate) fn build_proposed(
+    original: &ene_config::EneConfig,
+    editing: &ene_config::EneConfig,
+    dirty_paths: &std::collections::BTreeSet<String>,
+) -> ene_config::EneConfig {
+    let mut proposed = original.clone();
+    for path in dirty_paths {
+        overlay_dirty_path(&mut proposed, editing, path);
+    }
+    merge_value_map(&mut proposed.extra, &original.extra);
+    proposed
+}
+
+/// Copies one dirty path from `editing` into `proposed`, removing the path
+/// when the draft deleted it. Top-level declared fields live outside
+/// `extra` and are copied directly.
+fn overlay_dirty_path(
+    proposed: &mut ene_config::EneConfig,
+    editing: &ene_config::EneConfig,
+    path: &str,
+) {
+    match path {
+        "character" => {
+            proposed.character.clone_from(&editing.character);
+            return;
+        }
+        "user_name" => {
+            proposed.user_name.clone_from(&editing.user_name);
+            return;
+        }
+        "runtime_rules" => {
+            proposed.runtime_rules.clone_from(&editing.runtime_rules);
+            return;
+        }
+        "user_persona" => {
+            proposed.user_persona.clone_from(&editing.user_persona);
+            return;
+        }
+        _ => {}
+    }
+    let keys: Vec<&str> = path.split('.').filter(|key| !key.is_empty()).collect();
+    if keys.is_empty() {
+        return;
+    }
+    match editing.get_path(path) {
+        Some(value) => {
+            if let Ok(json) = serde_json::to_string(&value) {
+                // `EneConfig::set_path` re-parses the JSON value, so this
+                // round-trip preserves the draft value exactly.
+                if proposed.set_path(path, &json).is_err() {
+                    tracing::warn!(
+                        component = "SettingsApply",
+                        path,
+                        "failed to overlay a dirty config path"
+                    );
+                }
+            }
+        }
+        None => remove_nested(&mut proposed.extra, &keys),
+    }
+}
+
+/// Removes a nested value from `extra`; used when a dirty path disappeared
+/// from the draft (a section or entry the user deleted).
+fn remove_nested(extra: &mut indexmap::IndexMap<String, serde_json::Value>, keys: &[&str]) {
+    if keys.len() == 1 {
+        extra.shift_remove(keys[0]);
+        return;
+    }
+    let Some(serde_json::Value::Object(parent)) = extra.get_mut(keys[0]) else {
+        return;
+    };
+    let mut current = parent;
+    for key in &keys[1..keys.len() - 1] {
+        let Some(serde_json::Value::Object(next)) = current.get_mut(*key) else {
+            return;
+        };
+        current = next;
+    }
+    current.remove(keys[keys.len() - 1]);
 }
 
 /// Persists `proposed` and pushes it to the runtime actor, rolling back to
@@ -511,7 +601,7 @@ mod tests {
         mind.session.session_timeout_minutes = original.saturating_add(7);
         draft.set_section(&mind);
 
-        let mut proposed = merge_secrets(&original_config, draft.editing());
+        let mut proposed = build_proposed(&original_config, draft.editing(), draft.dirty_paths());
         derive_local_models(&mut proposed);
         let result = finalize_apply(
             &settings,
@@ -569,6 +659,112 @@ mod tests {
         );
     }
 
+    /// Direct writes to `CharacterSettings` while the window is open
+    /// (graphics, theme, language, mic device, character switch) land in
+    /// sections the draft never touched; an apply must keep them instead of
+    /// reverting to the window-open snapshot.
+    #[test]
+    fn build_proposed_overlays_only_dirty_paths() {
+        let mut original = ene_config::EneConfig {
+            user_name: "Old Name".to_string(),
+            ..ene_config::EneConfig::default()
+        };
+        drop(original.set_path("desktop.theme", r#""light""#));
+        drop(original.set_path("ai.tasks.chat.model", r#""gpt-original""#));
+
+        let mut editing = original.clone();
+        // The draft was created before the theme was switched to light, so
+        // its `desktop` section is stale.
+        drop(editing.set_path("desktop.theme", r#""system""#));
+        editing.user_name = "New Name".to_string();
+        drop(editing.set_path("ai.tasks.chat.model", r#""gpt-edited""#));
+
+        let dirty = std::collections::BTreeSet::from(["user_name".to_string(), "ai".to_string()]);
+        let proposed = build_proposed(&original, &editing, &dirty);
+
+        assert_eq!(proposed.user_name, "New Name");
+        assert_eq!(
+            proposed.get_path("ai.tasks.chat.model"),
+            Some(serde_json::json!("gpt-edited")),
+            "dirty paths are overlaid from the draft"
+        );
+        assert_eq!(
+            proposed.get_path("desktop.theme"),
+            Some(serde_json::json!("light")),
+            "a direct write outside the dirty paths must survive"
+        );
+    }
+
+    /// Secrets redacted into the draft's dirty sections are restored from
+    /// the original config, exactly like the full-config merge path.
+    #[test]
+    fn build_proposed_restores_secrets_in_overlaid_sections() {
+        let mut original = ene_config::EneConfig::default();
+        drop(original.set_section_value(
+            "plugins",
+            serde_json::json!({
+                "list": {
+                    "demo": {
+                        "enable": true,
+                        "config": {
+                            "api_key": "sk-stored",
+                            "voice": "af_original"
+                        }
+                    }
+                }
+            }),
+        ));
+
+        let mut editing = original.clone();
+        drop(editing.set_section_value(
+            "plugins",
+            serde_json::json!({
+                "list": {
+                    "demo": {
+                        "enable": true,
+                        "config": {
+                            "api_key": super::super::draft::SECRET_PLACEHOLDER,
+                            "voice": "af_heart"
+                        }
+                    }
+                }
+            }),
+        ));
+
+        let dirty = std::collections::BTreeSet::from(["plugins".to_string()]);
+        let proposed = build_proposed(&original, &editing, &dirty);
+        assert_eq!(
+            proposed.get_path("plugins.list.demo.config.api_key"),
+            Some(serde_json::json!("sk-stored")),
+            "the placeholder must be replaced by the stored secret"
+        );
+        assert_eq!(
+            proposed.get_path("plugins.list.demo.config.voice"),
+            Some(serde_json::json!("af_heart")),
+            "the user's edit wins"
+        );
+    }
+
+    /// A dirty path that disappeared from the draft is removed from the
+    /// proposed config instead of being resurrected from the original.
+    #[test]
+    fn build_proposed_removes_paths_deleted_from_the_draft() {
+        let mut original = ene_config::EneConfig::default();
+        drop(original.set_section_value(
+            "plugins",
+            serde_json::json!({ "list": { "demo": { "enable": true } } }),
+        ));
+        let mut editing = original.clone();
+        let _ = editing.remove_section("plugins");
+
+        let dirty = std::collections::BTreeSet::from(["plugins".to_string()]);
+        let proposed = build_proposed(&original, &editing, &dirty);
+        assert!(
+            proposed.section_value("plugins").is_none(),
+            "a section deleted from the draft must not reappear"
+        );
+    }
+
     #[test]
     fn stale_draft_conflict_rolls_back_disk_and_keeps_edits() {
         let settings = test_settings();
@@ -583,7 +779,7 @@ mod tests {
         draft.set_section(&mind);
         let revision = draft.revision();
 
-        let mut proposed = merge_secrets(&original_config, draft.editing());
+        let mut proposed = build_proposed(&original_config, draft.editing(), draft.dirty_paths());
         derive_local_models(&mut proposed);
         let outcome = finalize_apply(
             &settings,
