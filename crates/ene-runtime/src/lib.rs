@@ -60,6 +60,9 @@ pub mod message_builder;
 mod proactive;
 mod proactive_llm;
 mod provider_host;
+/// Unified settings-apply contract (revision, diff, impact).
+pub mod settings;
+pub use settings::{SettingsApplyRequest, SettingsApplyResult, SettingsImpact};
 /// Stable public API v1 facade: version, JSON event mirrors, redaction.
 pub mod public_api;
 /// Read-only session and pending-candidate query handles that bypass the
@@ -103,8 +106,8 @@ pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 /// [`EneHandle::subscribe_lifecycle`]).
 pub use handle::{
     AudioChunk, AudioStreamReceiver, DeferredToolTask, EneEvent, EneEventReceiver, EneHandle,
-    EneStateSnapshot, EneStatus, FeatureSettingsUpdate, LifecycleEvent, LifecycleReceiver,
-    MemoryLedgerChange, ProviderCatalog, ShutdownTimeout, TerminalReason,
+    EneStateSnapshot, EneStatus, LifecycleEvent, LifecycleReceiver, MemoryLedgerChange,
+    ProviderCatalog, ShutdownTimeout, TerminalReason,
 };
 
 // ── Read-only query / vision handles ──

@@ -63,7 +63,7 @@ fn focus_accent(ui: &Ui) -> Color32 {
     }
 }
 
-pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 39] = [
+pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 55] = [
     ("character-model", "section-character-model"),
     ("character-transform", "section-character-transform"),
     ("character-expressions", "section-character-expressions"),
@@ -106,6 +106,22 @@ pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 39] = [
     ("sessions-import", "sessions-import-title"),
     ("debug-overlays", "section-debug-overlays"),
     ("debug-pipeline", "section-debug-pipeline"),
+    ("overview-needs-config", "overview-needs-config"),
+    ("overview-issues", "overview-issues"),
+    ("overview-restart-pending", "overview-restart-pending"),
+    ("overview-credentials", "overview-credentials"),
+    ("schedules-list", "schedules-list-title"),
+    ("schedules-history", "schedules-history-title"),
+    ("schedules-pending", "schedules-pending-title"),
+    ("schedules-add", "schedules-add-title"),
+    ("memory-config", "memory-config-storage"),
+    ("memory-approval", "memory-config-approval"),
+    ("memory-limits", "memory-config-limits"),
+    ("plugins-runtime", "plugins-runtime-title"),
+    ("plugins-list", "plugins-list-title"),
+    ("plugins-mcp", "plugins-mcp-title"),
+    ("plugins-discovered", "plugins-discovered-title"),
+    ("advanced-sections", "advanced-sections"),
 ];
 
 /// Localized title for a registered section id, if the section is

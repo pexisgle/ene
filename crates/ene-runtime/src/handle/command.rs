@@ -408,16 +408,77 @@ pub enum EneCommand {
         /// Normalized onset strength in `[0, 1]`.
         intensity: f32,
     },
-    /// Hot-update proactive policy. Provider routing comes from [`AiConfig`].
-    UpdateProactiveSettings {
-        /// Mind proactive policy.
-        mind: ene_mind::ProactiveConfig,
-    },
-    /// Hot-update Features-tab settings (mind / store / tools / RAG) without
-    /// tearing down the local proactive GGUF.
-    UpdateFeatureSettings {
+    /// Apply a unified settings draft.
+    ///
+    /// Replaces the previous `UpdateProactiveSettings` /
+    /// `UpdateFeatureSettings` split: the actor diffs the proposed config
+    /// against its live copy, writes the changed sections, reacts per section
+    /// (proactive abort, TTS provider rebuild, plugin-host reconfigure on
+    /// enable-set or MCP-server changes), and reports the actual impact
+    /// through the reply channel. The revision is echoed back so the UI can
+    /// detect a stale apply.
+    ApplySettings {
         /// Boxed payload to keep [`EneCommand`] small.
-        settings: Box<FeatureSettingsUpdate>,
+        request: Box<crate::settings::SettingsApplyRequest>,
+        /// Reply channel carrying the apply outcome.
+        reply: oneshot::Sender<Result<crate::settings::SettingsApplyResult, EneRuntimeError>>,
+    },
+    /// Fetch settings snapshots for every configured plugin (plugin center).
+    GetPluginSnapshots {
+        /// Reply channel carrying the snapshots.
+        reply: oneshot::Sender<Vec<ene_plugin_host::PluginSettingsSnapshot>>,
+    },
+    /// Fetch dynamic config options for one plugin config path
+    /// (plugin-center wiring of `ListConfigOptions`).
+    ListPluginConfigOptions {
+        /// Plugin name.
+        plugin: String,
+        /// Dotted path inside the plugin config blob.
+        path: String,
+        /// Reply channel carrying the options.
+        reply: oneshot::Sender<Result<Vec<ene_plugin_proto::ConfigOption>, EneRuntimeError>>,
+    },
+    /// Validate a plugin config value through the plugin's own validator
+    /// (plugin-center wiring of `ValidateConfig`).
+    ValidatePluginConfig {
+        /// Plugin name.
+        plugin: String,
+        /// Proposed config value.
+        value: serde_json::Value,
+        /// Reply channel carrying field-level errors (empty = valid).
+        reply: oneshot::Sender<Result<Vec<ene_plugin_proto::ConfigFieldError>, EneRuntimeError>>,
+    },
+    /// List plugin binaries discovered on disk but not configured.
+    GetDiscoveredPlugins {
+        /// Reply channel carrying the names.
+        reply: oneshot::Sender<Vec<String>>,
+    },
+    /// List MCP server liveness statuses (plugin center).
+    ListMcpStatuses {
+        /// Reply channel carrying the statuses.
+        reply: oneshot::Sender<Vec<ene_plugin_host::McpServerStatus>>,
+    },
+    /// Answer a schedule-run confirmation prompt (approve or deny) from the
+    /// Schedules management page, by run identity rather than request id.
+    ResolveScheduleConfirmation {
+        /// Owning schedule.
+        schedule_id: i64,
+        /// The run waiting for confirmation.
+        run_id: i64,
+        /// `true` approves the run, `false` denies it.
+        approve: bool,
+        /// Reply channel carrying whether a matching pending confirmation
+        /// was found and resolved.
+        reply: oneshot::Sender<Result<bool, EneRuntimeError>>,
+    },
+    /// Update an existing schedule's editable fields.
+    UpdateSchedule {
+        /// Schedule row id.
+        id: i64,
+        /// New field values (validated exactly like [`EneCommand::AddSchedule`]).
+        new: ene_core::NewSchedule,
+        /// Reply channel carrying the updated schedule.
+        reply: oneshot::Sender<Result<ene_core::Schedule, EneRuntimeError>>,
     },
     /// Prepare a screen-image vision summary.
     ///
@@ -566,17 +627,4 @@ pub enum EneCommand {
         /// admitted and spawned, so the test knows the slot is occupied.
         reply: oneshot::Sender<()>,
     },
-}
-
-/// Payload for [`EneCommand::UpdateFeatureSettings`].
-#[derive(Debug, Clone)]
-pub struct FeatureSettingsUpdate {
-    /// Full mind section (emotion + proactive).
-    pub mind: ene_mind::MindConfig,
-    /// Long-term memory store section.
-    pub store: ene_store::StoreConfig,
-    /// Plugin system section.
-    pub plugins: ene_plugin_host::PluginConfig,
-    /// Tool RAG section.
-    pub rag: ene_rag::ToolRagConfig,
 }

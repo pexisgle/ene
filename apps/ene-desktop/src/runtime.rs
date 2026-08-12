@@ -195,6 +195,7 @@ impl Runtime {
                 .ui_bevy_state_mut()
                 .0
                 .character_editor_close_requested = false;
+            self.state.ui_bevy_state_mut().0.settings_close_requested = false;
             self.state.ui_bevy_state_mut().0.settings_window_visible = true;
         }
     }
@@ -212,8 +213,22 @@ impl Runtime {
             }
             return;
         }
+        // Pending draft edits must survive an accidental close too: hold the
+        // window open and let the settings discard dialog decide.
+        if self
+            .ui_window
+            .as_ref()
+            .is_some_and(|uw| uw.settings_ui.draft.is_dirty())
+        {
+            self.state.ui_bevy_state_mut().0.settings_close_requested = true;
+            if let Some(uw) = self.ui_window.as_ref() {
+                uw.window.request_redraw();
+            }
+            return;
+        }
         let visible = self.state.ui_bevy_state().0.settings_window_visible;
         if visible {
+            self.state.ui_bevy_state_mut().0.settings_close_requested = false;
             self.state.save();
             self.state.ui_bevy_state_mut().0.settings_window_visible = false;
             // Drop the window entirely to work around Wayland/winit 0.30 unmap bugs.
@@ -1027,6 +1042,21 @@ impl Runtime {
             ui_state.0.character_editor_close_requested && !ui_state.0.editor_has_unsaved_changes()
         };
         if close_after_discard {
+            self.hide_settings_window();
+            return;
+        }
+
+        // A discard decision from the settings close dialog clears the draft
+        // while keeping `settings_close_requested` set; complete the close.
+        let close_settings_after_discard = {
+            let ui_state = self.state.ui_bevy_state();
+            ui_state.0.settings_close_requested
+                && self
+                    .ui_window
+                    .as_ref()
+                    .is_none_or(|uw| !uw.settings_ui.draft.is_dirty())
+        };
+        if close_settings_after_discard {
             self.hide_settings_window();
             return;
         }

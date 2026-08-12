@@ -626,7 +626,7 @@ mod tests {
     /// a bare `NotFound` far from its cause.
     async fn spawn_mock_db() -> (PathBuf, tokio::task::JoinHandle<()>) {
         let socket_path = std::env::temp_dir().join(format!(
-            "ene-utility-test-{}-{}.sock",
+            "et-{}-{}.sock",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -21,7 +21,7 @@
 //!
 //! `EneHandle` methods *not* listed above (e.g. `subscribe`,
 //! `subscribe_lifecycle`, `take_audio_stream`, `diagnostics`,
-//! `update_feature_settings`) are host-internal wiring between
+//! `apply_settings`) are host-internal wiring between
 //! `ene-runtime` and its embedders (`ene-cli`, `ene-desktop`) and are
 //! explicitly out of contract, same as `streaming` / `message_builder`.
 //! They may freely take or return internal crate types.

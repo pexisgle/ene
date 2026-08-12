@@ -2765,6 +2765,7 @@ dependencies = [
  "ene-card",
  "ene-config",
  "ene-connector",
+ "ene-core",
  "ene-mind",
  "ene-plugin-host",
  "ene-plugin-proto",

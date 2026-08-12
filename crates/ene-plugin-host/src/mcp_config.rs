@@ -1,7 +1,9 @@
 //! MCP server configuration types.
 
 /// Configuration for an MCP server connection.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema,
+)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct McpServerConfig {
     /// Server name (used for display and routing).
@@ -27,7 +29,9 @@ pub struct McpServerConfig {
 }
 
 /// MCP server transport type.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema,
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[schemars(crate = "::ene_config::schemars")]
 pub enum McpTransport {

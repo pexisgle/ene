@@ -143,7 +143,8 @@ impl ene_plugin::ConfigurablePlugin for WhisperPlugin {
             "properties": {
                 "model_path": {
                     "type": "string",
-                    "description": "whisper.cpp GGUF model file path (defaults to the shared models cache; ai.stt.model is used as a path fallback)"
+                    "description": "whisper.cpp GGUF model file path (defaults to the shared models cache; ai.stt.model is used as a path fallback)",
+                    "x-ene-ui": { "order": 0, "impact": "plugin_restart" }
                 }
             }
         }))

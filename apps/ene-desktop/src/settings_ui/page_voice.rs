@@ -1,6 +1,7 @@
 //! Voice settings page — Text-to-Speech (TTS), Speech-to-Text (STT), and Microphone/VAD configuration.
 
 use super::components::{section_card, setting_row, slider_row};
+use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
 use super::widgets::editable_combo;
 use crate::ai_bridge::AiBridge;
@@ -111,21 +112,23 @@ fn stt_model_choices(current: &str) -> Vec<(String, String)> {
 pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
+    draft: &mut SettingsDraft,
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
     world: &mut World,
 ) {
     #[cfg(not(feature = "voice"))]
     let _ = world;
-    if input.provider_catalog.is_none() {
-        input.provider_catalog = ai.provider_catalog_blocking().ok();
+    input.provider_catalog.poll();
+    if !input.provider_catalog.started() {
+        input.provider_catalog.start(ai.fetch_provider_catalog());
     }
     #[cfg(feature = "voice")]
     if input.mic_devices.is_empty() {
         input.mic_devices = crate::audio::capture::list_input_device_names();
     }
 
-    let mut ai_cfg = settings.config_section::<ene_ai::AiConfig>();
+    let mut ai_cfg = draft.section::<ene_ai::AiConfig>();
     let mut changed = false;
     let mut mic_device_changed = false;
 
@@ -205,7 +208,9 @@ pub fn render(
                             "none".to_string(),
                             i18n_embed_fl::fl!(crate::i18n::loader(), "audio-provider-none"),
                         ));
-                        if let Some(catalog) = input.provider_catalog.as_ref() {
+                        if let Some(catalog) =
+                            input.provider_catalog.data.clone().flatten().as_ref()
+                        {
                             choices.extend(
                                 catalog.tts.iter().map(|kind| (kind.clone(), kind.clone())),
                             );
@@ -369,7 +374,9 @@ pub fn render(
                             "none".to_string(),
                             i18n_embed_fl::fl!(crate::i18n::loader(), "audio-provider-none"),
                         )];
-                        if let Some(catalog) = input.provider_catalog.as_ref() {
+                        if let Some(catalog) =
+                            input.provider_catalog.data.clone().flatten().as_ref()
+                        {
                             choices.extend(
                                 catalog.stt.iter().map(|kind| (kind.clone(), kind.clone())),
                             );
@@ -535,8 +542,7 @@ pub fn render(
     });
 
     if changed {
-        settings.set_config_section(&ai_cfg);
-        settings.mark_dirty();
+        draft.set_section(&ai_cfg);
     }
 
     #[cfg(feature = "voice")]
@@ -549,13 +555,5 @@ pub fn render(
     #[cfg(not(feature = "voice"))]
     {
         let _ = mic_device_changed;
-    }
-
-    if changed {
-        let mind = settings.config_section::<ene_mind::MindConfig>();
-        let store = settings.config_section::<ene_store::StoreConfig>();
-        let tools = settings.config_section::<ene_plugin_host::PluginConfig>();
-        let rag = settings.config_section::<ene_rag::ToolRagConfig>();
-        ai.sync_feature_runtime(&mind, &store, &tools, &rag);
     }
 }

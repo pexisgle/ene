@@ -359,6 +359,51 @@ impl EneConfig {
         set_nested(&mut self.extra, &path, value)
     }
 
+    /// Replace a whole settings section under `extra` with `value`.
+    ///
+    /// This is the generic counterpart of [`set_section`](Self::set_section)
+    /// for callers that hold a section as an opaque JSON value (the runtime's
+    /// unified settings-apply path diffs sections generically rather than
+    /// knowing every typed section). The value is written verbatim — unlike
+    /// [`set_section`](Self::set_section) there is no declared-field merge,
+    /// so callers must merge themselves when unknown keys must survive.
+    /// Writes are skipped when the value already equals what sits at the key.
+    pub fn set_section_value(
+        &mut self,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), EneConfigError> {
+        if key.is_empty() {
+            return Err(EneConfigError::GenericConfigError(
+                "empty section key".to_string(),
+            ));
+        }
+        if self.extra.get(key).is_some_and(|current| current == &value) {
+            return Ok(());
+        }
+        set_nested(&mut self.extra, &[key], value)
+    }
+
+    /// Read a whole settings section under `extra` as an opaque JSON value.
+    ///
+    /// `None` when the section is absent (i.e. all defaults). Top-level
+    /// declared fields (`character`, `user_name`, …) are *not* returned;
+    /// use [`get_path`](Self::get_path) with the exact key for those.
+    #[must_use]
+    pub fn section_value(&self, key: &str) -> Option<serde_json::Value> {
+        self.get_path(key)
+    }
+
+    /// Remove a whole settings section from `extra`.
+    ///
+    /// Returns whether the key was present. Used by the unified settings-apply
+    /// path when a section disappears from the proposed config (a deleted
+    /// plugin entry or a cleared section), where writing `null` would leave a
+    /// misleading literal behind.
+    pub fn remove_section(&mut self, key: &str) -> bool {
+        self.extra.shift_remove(key).is_some()
+    }
+
     /// Read a value at a dotted JSON path under `extra`.
     ///
     /// Walks the map directly instead of serialising the entire `extra`

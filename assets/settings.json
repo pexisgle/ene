@@ -1,5 +1,6 @@
 {
   "$schema": "./schema/settings.schema.json",
+  "version": 6,
   "character": "Alicia",
   "user_name": "User",
   "ai": {
@@ -121,7 +122,8 @@
     "beat_sync": {
       "enabled": false,
       "device": null
-    }
+    },
+    "theme": "system"
   },
   "mind": {
     "language": "ja",
@@ -308,6 +310,5 @@
         }
       }
     }
-  },
-  "version": 6
+  }
 }

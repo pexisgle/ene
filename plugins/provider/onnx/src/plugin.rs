@@ -88,22 +88,26 @@ impl ene_plugin::ConfigurablePlugin for OnnxPlugin {
             "properties": {
                 "model": {
                     "type": "string",
-                    "description": "Silero VAD model name; used as a path fallback when model_path is unset"
+                    "description": "Silero VAD model name; used as a path fallback when model_path is unset",
+                    "x-ene-ui": { "order": 0, "impact": "plugin_restart" }
                 },
                 "model_path": {
                     "type": "string",
-                    "description": "Silero VAD ONNX model file path (defaults to the shared models cache)"
+                    "description": "Silero VAD ONNX model file path (defaults to the shared models cache)",
+                    "x-ene-ui": { "order": 1, "impact": "plugin_restart" }
                 },
                 "threshold": {
                     "type": "number",
                     "minimum": 0.0,
                     "maximum": 1.0,
                     "default": 0.5,
-                    "description": "Speech probability threshold (0.0-1.0)"
+                    "description": "Speech probability threshold (0.0-1.0)",
+                    "x-ene-ui": { "order": 2, "impact": "runtime_reload" }
                 },
                 "ort_dylib_path": {
                     "type": "string",
-                    "description": "ONNX Runtime dynamic library path override (ort default resolution when unset). Fixed at process start: ONNX Runtime initializes once, so a change requires a restart"
+                    "description": "ONNX Runtime dynamic library path override (ort default resolution when unset). Fixed at process start: ONNX Runtime initializes once, so a change requires a restart",
+                    "x-ene-ui": { "order": 3, "advanced": true, "impact": "app_restart" }
                 }
             }
         }))

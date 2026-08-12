@@ -3,9 +3,12 @@
 //! The runtime owns a single [`SettingsUi`] per `UiWindow`. Each
 //! frame the `UiWindow` calls [`SettingsUi::render`] with the live
 //! `&mut CharacterSettings` and the `Arc<AiBridge>`.
+pub mod apply;
 pub mod components;
+pub mod draft;
 pub mod input;
 pub mod page_accessibility;
+pub mod page_advanced;
 pub mod page_ai;
 pub mod page_approvals;
 pub mod page_character;
@@ -16,9 +19,13 @@ pub mod page_features;
 pub mod page_graphics;
 pub mod page_memory;
 pub mod page_memory_ledger;
+pub mod page_overview;
 pub mod page_permissions;
+pub mod page_plugins;
+pub mod page_schedules;
 pub mod page_sessions;
 pub mod page_voice;
+pub mod schema_form;
 pub mod widgets;
 
 pub use components::section_title;
@@ -37,46 +44,49 @@ use components::NARROW_NAV_THRESHOLD;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PageKind {
     #[default]
+    /// Overview: needs-config, health issues, restart-pending, credentials.
+    Overview,
+    /// General: display, language, theme, spotlight, captions, hotkeys,
+    /// accessibility.
+    General,
     Character,
     /// Character Card (`CCv3`) editor.
     CharacterEditor,
-    Graphics,
     Ai,
     Voice,
     Features,
-    Accessibility,
     Memory,
-    MemoryLedger,
+    /// Management view: memory journal + ledger merged as tabs.
+    Memories,
     Permissions,
     Approvals,
     Connectors,
     Sessions,
-    Debug,
+    /// Scheduled tool runs: CRUD, next run, history, pending confirmations.
+    Schedules,
+    /// Plugin center: detected / configured / MCP.
+    Plugins,
+    /// Generic schema leaf editor for everything without a dedicated page.
+    Advanced,
+    /// Diagnostics: runtime/AI/voice/plugin health and debug overlays.
+    Diagnostics,
 }
 
-/// Navigation grouping shown in the settings sidebar.
+/// Navigation grouping shown in the settings sidebar: user-facing settings
+/// vs management/operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageCategory {
-    Basics,
-    AiVoice,
-    DataAccess,
-    System,
+    Settings,
+    Management,
 }
 
 impl PageCategory {
-    pub const ALL: [PageCategory; 4] = [
-        PageCategory::Basics,
-        PageCategory::AiVoice,
-        PageCategory::DataAccess,
-        PageCategory::System,
-    ];
+    pub const ALL: [PageCategory; 2] = [PageCategory::Settings, PageCategory::Management];
 
     pub fn label(self) -> String {
         let key = match self {
-            PageCategory::Basics => "page-category-basics",
-            PageCategory::AiVoice => "page-category-ai-voice",
-            PageCategory::DataAccess => "page-category-data-access",
-            PageCategory::System => "page-category-system",
+            PageCategory::Settings => "page-category-settings",
+            PageCategory::Management => "page-category-management",
         };
         crate::i18n::loader().get(key)
     }
@@ -100,30 +110,81 @@ pub struct SectionAlias {
 }
 
 impl PageKind {
-    pub const ALL: [PageKind; 14] = [
+    pub const ALL: [PageKind; 17] = [
+        PageKind::Overview,
+        PageKind::General,
         PageKind::Character,
         PageKind::CharacterEditor,
-        PageKind::Graphics,
         PageKind::Ai,
         PageKind::Voice,
         PageKind::Features,
-        PageKind::Accessibility,
         PageKind::Memory,
-        PageKind::MemoryLedger,
+        PageKind::Memories,
         PageKind::Sessions,
         PageKind::Permissions,
         PageKind::Approvals,
         PageKind::Connectors,
-        PageKind::Debug,
+        PageKind::Schedules,
+        PageKind::Plugins,
+        PageKind::Advanced,
+        PageKind::Diagnostics,
     ];
 
     pub fn meta(self) -> &'static PageMeta {
         match self {
+            PageKind::Overview => &PageMeta {
+                category: PageCategory::Settings,
+                title_key: "page-overview",
+                description_key: "page-overview-description",
+                aliases: &["home", "start", "setup", "credential", "restart"],
+                sections: &[
+                    "overview-needs-config",
+                    "overview-issues",
+                    "overview-restart-pending",
+                    "overview-credentials",
+                ],
+                section_aliases: &[],
+            },
+            PageKind::General => &PageMeta {
+                category: PageCategory::Settings,
+                title_key: "general",
+                description_key: "page-general-description",
+                aliases: &[
+                    "graphics",
+                    "display",
+                    "quality",
+                    "language",
+                    "theme",
+                    "dark",
+                    "light",
+                    "spotlight",
+                    "caption",
+                    "overlay",
+                    "subtitle",
+                    "accessibility",
+                ],
+                sections: &[
+                    "graphics-quality",
+                    "graphics-language",
+                    "graphics-theme",
+                    "accessibility-overlays",
+                ],
+                section_aliases: &[],
+            },
             PageKind::Character => &PageMeta {
-                category: PageCategory::Basics,
-                title_key: "character",
+                category: PageCategory::Settings,
+                title_key: "character-and-user",
                 description_key: "page-character-description",
-                aliases: &["vrm", "motion", "expression", "animation"],
+                aliases: &[
+                    "vrm",
+                    "motion",
+                    "expression",
+                    "animation",
+                    "user",
+                    "persona",
+                    "user-name",
+                    "name",
+                ],
                 sections: &[
                     "character-model",
                     "character-transform",
@@ -132,8 +193,8 @@ impl PageKind {
                 section_aliases: &[],
             },
             PageKind::CharacterEditor => &PageMeta {
-                category: PageCategory::Basics,
-                title_key: "character-card",
+                category: PageCategory::Management,
+                title_key: "character-card-editor",
                 description_key: "page-character-card-description",
                 aliases: &["card", "ccv3", "lorebook", "greeting"],
                 sections: &[
@@ -147,27 +208,28 @@ impl PageKind {
                 ],
                 section_aliases: &[],
             },
-            PageKind::Graphics => &PageMeta {
-                category: PageCategory::Basics,
-                title_key: "display",
-                description_key: "page-graphics-description",
-                aliases: &[
-                    "graphics", "display", "quality", "language", "theme", "dark", "light",
-                ],
-                sections: &["graphics-quality", "graphics-language", "graphics-theme"],
-                section_aliases: &[],
-            },
             PageKind::Ai => &PageMeta {
-                category: PageCategory::AiVoice,
-                title_key: "ai",
+                category: PageCategory::Settings,
+                title_key: "ai-models",
                 description_key: "page-ai-description",
-                aliases: &["openai", "api", "chat", "embedding", "provider", "model"],
+                aliases: &[
+                    "openai",
+                    "api",
+                    "chat",
+                    "embedding",
+                    "provider",
+                    "model",
+                    "models",
+                    "anthropic",
+                    "local",
+                    "gguf",
+                ],
                 sections: &["ai-chat", "ai-embedding", "ai-health"],
                 section_aliases: &[],
             },
             PageKind::Voice => &PageMeta {
-                category: PageCategory::AiVoice,
-                title_key: "voice",
+                category: PageCategory::Settings,
+                title_key: "voice-audio",
                 description_key: "page-voice-description",
                 aliases: &[
                     "tts",
@@ -212,44 +274,63 @@ impl PageKind {
                 ],
             },
             PageKind::Features => &PageMeta {
-                category: PageCategory::AiVoice,
-                title_key: "features",
+                category: PageCategory::Settings,
+                title_key: "behavior",
                 description_key: "page-features-description",
-                aliases: &["proactive", "mind", "tools", "capability"],
+                aliases: &[
+                    "proactive",
+                    "mind",
+                    "tools",
+                    "capability",
+                    "emotion",
+                    "quiet",
+                    "privacy",
+                    "session",
+                ],
                 sections: &["features-capabilities", "features-mind", "features-tools"],
                 section_aliases: &[],
             },
-            PageKind::Accessibility => &PageMeta {
-                category: PageCategory::Basics,
-                title_key: "accessibility",
-                description_key: "page-accessibility-description",
-                aliases: &["spotlight", "caption", "overlay", "subtitle"],
-                sections: &["accessibility-overlays"],
+            PageKind::Memory => &PageMeta {
+                category: PageCategory::Settings,
+                title_key: "memory-storage",
+                description_key: "page-memory-storage-description",
+                aliases: &[
+                    "memory",
+                    "store",
+                    "backup",
+                    "integrity",
+                    "approval",
+                    "limit",
+                    "in-memory",
+                ],
+                sections: &["memory-config", "memory-approval", "memory-limits"],
                 section_aliases: &[],
             },
-            PageKind::Memory => &PageMeta {
-                category: PageCategory::DataAccess,
-                title_key: "memory",
-                description_key: "page-memory-description",
-                aliases: &["journal", "recall", "commitment"],
+            PageKind::Memories => &PageMeta {
+                category: PageCategory::Management,
+                title_key: "memories",
+                description_key: "page-memories-description",
+                aliases: &[
+                    "journal",
+                    "ledger",
+                    "recall",
+                    "commitment",
+                    "browse",
+                    "delete",
+                    "edit",
+                ],
                 sections: &[
                     "memory-browse",
                     "memory-recall",
                     "memory-pending",
                     "memory-commitments",
+                    "ledger-browse",
+                    "ledger-commitments",
                 ],
                 section_aliases: &[],
             },
-            PageKind::MemoryLedger => &PageMeta {
-                category: PageCategory::DataAccess,
-                title_key: "memory-ledger",
-                description_key: "page-memory-ledger-description",
-                aliases: &["ledger", "journal", "delete", "edit"],
-                sections: &["ledger-browse", "ledger-commitments"],
-                section_aliases: &[],
-            },
             PageKind::Permissions => &PageMeta {
-                category: PageCategory::DataAccess,
+                category: PageCategory::Management,
                 title_key: "permissions",
                 description_key: "page-permissions-description",
                 aliases: &["tools", "approval", "grant", "revoke"],
@@ -257,15 +338,26 @@ impl PageKind {
                 section_aliases: &[],
             },
             PageKind::Approvals => &PageMeta {
-                category: PageCategory::DataAccess,
-                title_key: "approvals",
+                category: PageCategory::Settings,
+                title_key: "security-downloads",
                 description_key: "page-approvals-description",
-                aliases: &["plugin", "policy", "sandbox", "broker"],
+                aliases: &[
+                    "plugin",
+                    "policy",
+                    "sandbox",
+                    "broker",
+                    "approval",
+                    "audit",
+                    "download",
+                    "artifact",
+                    "publisher",
+                    "emergency",
+                ],
                 sections: &["approvals-policy"],
                 section_aliases: &[],
             },
             PageKind::Connectors => &PageMeta {
-                category: PageCategory::DataAccess,
+                category: PageCategory::Management,
                 title_key: "connectors",
                 description_key: "page-connectors-description",
                 aliases: &["accounts", "service", "oauth"],
@@ -273,18 +365,67 @@ impl PageKind {
                 section_aliases: &[],
             },
             PageKind::Sessions => &PageMeta {
-                category: PageCategory::DataAccess,
+                category: PageCategory::Management,
                 title_key: "sessions",
                 description_key: "page-sessions-description",
                 aliases: &["archive", "export", "import", "history"],
                 sections: &["sessions-list", "sessions-search", "sessions-import"],
                 section_aliases: &[],
             },
-            PageKind::Debug => &PageMeta {
-                category: PageCategory::System,
-                title_key: "debug",
+            PageKind::Schedules => &PageMeta {
+                category: PageCategory::Management,
+                title_key: "schedules",
+                description_key: "page-schedules-description",
+                aliases: &["cron", "timer", "scheduled", "repeat"],
+                sections: &[
+                    "schedules-list",
+                    "schedules-history",
+                    "schedules-pending",
+                    "schedules-add",
+                ],
+                section_aliases: &[],
+            },
+            PageKind::Plugins => &PageMeta {
+                category: PageCategory::Settings,
+                title_key: "plugins",
+                description_key: "page-plugins-description",
+                aliases: &[
+                    "mcp",
+                    "tool",
+                    "provider",
+                    "sandbox",
+                    "credential",
+                    "schema",
+                    "plugin",
+                    "llama",
+                    "whisper",
+                    "kokoro",
+                ],
+                sections: &[
+                    "plugins-runtime",
+                    "plugins-list",
+                    "plugins-discovered",
+                    "plugins-mcp",
+                ],
+                section_aliases: &[],
+            },
+            PageKind::Advanced => &PageMeta {
+                category: PageCategory::Settings,
+                title_key: "advanced",
+                description_key: "page-advanced-description",
+                aliases: &[
+                    "json", "schema", "raw", "config", "expert", "hidden", "advanced",
+                ],
+                sections: &["advanced-sections"],
+                section_aliases: &[],
+            },
+            PageKind::Diagnostics => &PageMeta {
+                category: PageCategory::Management,
+                title_key: "diagnostics",
                 description_key: "page-debug-description",
-                aliases: &["overlay", "fps", "mask", "collider"],
+                aliases: &[
+                    "overlay", "fps", "mask", "collider", "debug", "health", "pipeline",
+                ],
                 sections: &["debug-overlays", "debug-pipeline"],
                 section_aliases: &[],
             },
@@ -307,12 +448,32 @@ pub struct SearchHit {
     pub section: Option<&'static str>,
     pub title: String,
     pub detail: String,
+    /// For schema-leaf hits: the dotted config path used to pre-filter the
+    /// Advanced page.
+    pub filter: Option<String>,
+    /// For plugin/action hits: the plugin card to open and focus.
+    pub plugin_focus: Option<String>,
     rank: u8,
 }
 
+/// Outcome of the last draft apply, shown as a banner in the window chrome.
+#[derive(Debug, Clone)]
+pub struct ApplyFeedback {
+    pub revision: u64,
+    pub ok: bool,
+    pub impact: ene_runtime::SettingsImpact,
+    /// Section keys the runtime actually wrote (display detail).
+    pub applied_sections: Vec<String>,
+    pub message: Option<String>,
+}
+
 /// Ranked page/section search over localized titles, descriptions,
-/// technical aliases (TTS/STT/VAD), and section names.
-fn compute_search(query: &str) -> Vec<SearchHit> {
+/// technical aliases (TTS/STT/VAD), section names, and configured plugin
+/// names (which land on the plugin center page).
+fn compute_search(
+    query: &str,
+    plugin_snapshots: &[ene_plugin_host::PluginSettingsSnapshot],
+) -> Vec<SearchHit> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
         return Vec::new();
@@ -341,6 +502,8 @@ fn compute_search(query: &str) -> Vec<SearchHit> {
                 section: None,
                 title: title.clone(),
                 detail: page.description(),
+                filter: None,
+                plugin_focus: None,
                 rank,
             });
         }
@@ -358,7 +521,69 @@ fn compute_search(query: &str) -> Vec<SearchHit> {
                     section: Some(section),
                     title: section_title,
                     detail: title.clone(),
+                    filter: None,
+                    plugin_focus: None,
                     rank: 1,
+                });
+            }
+        }
+    }
+    for snapshot in plugin_snapshots {
+        if snapshot.id.to_lowercase().contains(&query) {
+            hits.push(SearchHit {
+                page: PageKind::Plugins,
+                section: None,
+                title: snapshot.id.clone(),
+                detail: i18n_embed_fl::fl!(crate::i18n::loader(), "page-plugins-description"),
+                filter: None,
+                plugin_focus: Some(snapshot.id.clone()),
+                rank: 4,
+            });
+        }
+        // Plugin action search: tool names + descriptions, navigating to
+        // the owning plugin card.
+        for action in &snapshot.actions {
+            if action.name.to_lowercase().contains(&query)
+                || action.description.to_lowercase().contains(&query)
+            {
+                hits.push(SearchHit {
+                    page: PageKind::Plugins,
+                    section: None,
+                    title: action.name.clone(),
+                    detail: action.description.clone(),
+                    filter: None,
+                    plugin_focus: Some(snapshot.id.clone()),
+                    rank: 4,
+                });
+            }
+        }
+    }
+    // Schema-leaf search: every registered settings schema contributes its
+    // dotted paths and leaf titles/descriptions. Selecting one navigates to
+    // the Advanced page with the filter pre-applied.
+    for (section_key, entry) in
+        ene_config::config::registered_schemas_for(ene_config::ConfigTarget::Settings)
+    {
+        let Ok(schema) = serde_json::to_value(&entry.schema) else {
+            continue;
+        };
+        let mut leaves = Vec::new();
+        collect_schema_leaves(&schema, &section_key, &mut leaves);
+        for (path, title, description) in leaves {
+            let path_lower = path.to_lowercase();
+            let title_lower = title.to_lowercase();
+            if path_lower.contains(&query)
+                || title_lower.contains(&query)
+                || description.to_lowercase().contains(&query)
+            {
+                hits.push(SearchHit {
+                    page: PageKind::Advanced,
+                    section: Some("advanced-sections"),
+                    title: path,
+                    detail: title,
+                    filter: Some(path_lower),
+                    plugin_focus: None,
+                    rank: 5,
                 });
             }
         }
@@ -368,8 +593,62 @@ fn compute_search(query: &str) -> Vec<SearchHit> {
     hits
 }
 
+/// Walks a settings schema, collecting `(dotted_path, title, description)`
+/// for every leaf property.
+fn collect_schema_leaves(
+    schema: &serde_json::Value,
+    prefix: &str,
+    out: &mut Vec<(String, String, String)>,
+) {
+    if let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, property_schema) in properties {
+            let child = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}.{name}")
+            };
+            let title = property_schema
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(name);
+            let description = property_schema
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let has_children = property_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|properties| !properties.is_empty());
+            if has_children {
+                collect_schema_leaves(property_schema, &child, out);
+            } else {
+                out.push((child.clone(), title.to_string(), description.to_string()));
+            }
+        }
+    }
+    if let Some(items) = schema.get("items") {
+        collect_schema_leaves(items, prefix, out);
+    }
+}
+
 const fn use_compact_navigation(width: f32) -> bool {
     width < NARROW_NAV_THRESHOLD
+}
+
+/// Localized label for a runtime-reported apply impact.
+fn impact_label(impact: ene_runtime::SettingsImpact) -> String {
+    if impact.app_restart {
+        i18n_embed_fl::fl!(crate::i18n::loader(), "impact-app-restart")
+    } else if impact.plugin_restart {
+        i18n_embed_fl::fl!(crate::i18n::loader(), "impact-plugin-restart")
+    } else if impact.runtime_reload {
+        i18n_embed_fl::fl!(crate::i18n::loader(), "impact-runtime-reload")
+    } else {
+        i18n_embed_fl::fl!(crate::i18n::loader(), "impact-immediate")
+    }
 }
 
 fn memory_mode_for_section(section: &str) -> Option<crate::settings::MemoryPageMode> {
@@ -394,6 +673,20 @@ fn prepare_section_focus(world: &mut World, ui_entity: Entity, section: &str) {
 pub struct SettingsUi {
     pub current_page: PageKind,
     pub input: SettingsInputState,
+    /// Draft holding every pending settings edit; pages write here and the
+    /// apply bar pushes it through validation → persist → runtime apply.
+    pub draft: draft::SettingsDraft,
+    /// Outcome of the last draft apply, shown as a banner until dismissed.
+    pub apply_feedback: Option<ApplyFeedback>,
+    /// In-flight async apply preparation (validation + secret merge).
+    apply_prepare: input::AsyncData<apply::ApplyPrepare>,
+    /// In-flight async runtime apply receiver.
+    apply_rx:
+        Option<tokio::sync::oneshot::Receiver<Result<ene_runtime::SettingsApplyResult, String>>>,
+    /// Real config captured before persist, used for rollback.
+    apply_original: Option<ene_config::EneConfig>,
+    /// Whether an apply (preparation or finalize) is currently running.
+    applying: bool,
     pub animation: AnimationControl,
     pub emotion_queue: EmotionQueue,
     /// When the runtime was constructed. Used for `now_secs` in
@@ -404,6 +697,10 @@ pub struct SettingsUi {
     search_language: Language,
     search_computed_for: String,
     search_hits: Vec<SearchHit>,
+    /// One-shot Advanced-page filter applied from a schema-leaf search hit.
+    advanced_filter: Option<String>,
+    /// One-shot plugin-card focus applied from a plugin/action search hit.
+    plugin_focus: Option<String>,
     /// Consumed on the next frame to switch page and highlight a section.
     pending_focus: Option<(PageKind, Option<&'static str>)>,
 }
@@ -411,8 +708,14 @@ pub struct SettingsUi {
 impl SettingsUi {
     pub fn new() -> Self {
         Self {
-            current_page: PageKind::Character,
+            current_page: PageKind::Overview,
             input: SettingsInputState::new(),
+            draft: draft::SettingsDraft::new(ene_config::EneConfig::default()),
+            apply_feedback: None,
+            apply_prepare: input::AsyncData::new(),
+            apply_rx: None,
+            apply_original: None,
+            applying: false,
             animation: AnimationControl::new(),
             emotion_queue: EmotionQueue::default(),
             started_at: Instant::now(),
@@ -420,6 +723,8 @@ impl SettingsUi {
             search_language: Language::default(),
             search_computed_for: String::new(),
             search_hits: Vec::new(),
+            advanced_filter: None,
+            plugin_focus: None,
             pending_focus: None,
         }
     }
@@ -433,9 +738,153 @@ impl SettingsUi {
         ui_state: &crate::settings::UiState,
     ) {
         self.input.sync_from_settings(settings, ui_state);
+        self.draft.resync(settings.config());
         if let Some(page) = ui_state.focused_page {
             self.current_page = page;
         }
+    }
+
+    /// Runs the apply pipeline for the pending draft.
+    ///
+    /// Called from the window-level Apply button. On success the persisted
+    /// config is refreshed into the draft; the feedback banner shows the
+    /// reported impact (immediate / hot-reload / plugin restart / app
+    /// restart) or the validation/runtime errors.
+    pub fn apply_pending(&mut self, settings: &CharacterSettings, ai: &Arc<AiBridge>) {
+        if self.applying || self.apply_prepare.loading() {
+            return;
+        }
+        self.draft.validate();
+        if self.draft.has_issues() {
+            self.apply_feedback = Some(ApplyFeedback {
+                revision: self.draft.revision(),
+                ok: false,
+                impact: ene_runtime::SettingsImpact::default(),
+                applied_sections: Vec::new(),
+                message: Some(
+                    self.draft
+                        .all_issues()
+                        .into_iter()
+                        .map(|issue| format!("{}: {}", issue.path, issue.message))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+            });
+            return;
+        }
+        let original = settings.config();
+        let editing = self.draft.editing().clone();
+        let dirty = self.draft.dirty_paths().clone();
+        self.applying = true;
+        self.apply_prepare = input::AsyncData::new();
+        self.apply_prepare
+            .start(ai.prepare_apply_async(original, editing, dirty));
+    }
+
+    /// Pumps the async apply preparation; a clean result is finalized
+    /// (persist + runtime apply), errors are surfaced without touching disk.
+    fn pump_apply(&mut self, settings: &CharacterSettings, ai: &Arc<AiBridge>) {
+        if !self.applying {
+            return;
+        }
+        self.apply_prepare.poll();
+        if let Some(prepare) = self.apply_prepare.data.take() {
+            self.apply_prepare = input::AsyncData::new();
+            if !prepare.errors.is_empty() {
+                self.applying = false;
+                self.apply_feedback = Some(ApplyFeedback {
+                    revision: self.draft.revision(),
+                    ok: false,
+                    impact: ene_runtime::SettingsImpact::default(),
+                    applied_sections: Vec::new(),
+                    message: Some(prepare.errors.join("\n")),
+                });
+                return;
+            }
+            // Persist synchronously (fast file write), then start the actor
+            // round-trip asynchronously.
+            let original = settings.config();
+            self.apply_original = Some(original.clone());
+            match apply::begin_finalize(settings, &self.draft, ai.as_ref(), prepare.proposed) {
+                Ok(receiver) => {
+                    self.apply_rx = Some(receiver);
+                }
+                Err(error) => {
+                    self.applying = false;
+                    self.apply_feedback = Some(ApplyFeedback {
+                        revision: self.draft.revision(),
+                        ok: false,
+                        impact: ene_runtime::SettingsImpact::default(),
+                        applied_sections: Vec::new(),
+                        message: Some(error.to_string()),
+                    });
+                }
+            }
+            return;
+        }
+        if let Some(receiver) = &mut self.apply_rx
+            && let Ok(result) = receiver.try_recv()
+        {
+            self.apply_rx = None;
+            self.applying = false;
+            let original = self.apply_original.take().unwrap_or_default();
+            match apply::finish_finalize(settings, &mut self.draft, result, original) {
+                Ok(outcome) => self.handle_apply_outcome(settings, outcome),
+                Err(error) => {
+                    self.apply_feedback = Some(ApplyFeedback {
+                        revision: self.draft.revision(),
+                        ok: false,
+                        impact: ene_runtime::SettingsImpact::default(),
+                        applied_sections: Vec::new(),
+                        message: Some(error.to_string()),
+                    });
+                }
+            }
+        }
+    }
+
+    fn handle_apply_outcome(&mut self, settings: &CharacterSettings, outcome: apply::ApplyOutcome) {
+        // A committed secret never stays in a UI text buffer, even when it
+        // was typed this session.
+        self.input.ai_api_key.clear();
+        self.input.plugin_options.clear();
+        if outcome.conflicted {
+            // Keep the user's edits; only the baseline moves to the actor's
+            // newer state so the next apply is not stale.
+            self.draft.resync_baseline(settings.config());
+            self.apply_feedback = Some(ApplyFeedback {
+                revision: outcome.revision,
+                ok: false,
+                impact: ene_runtime::SettingsImpact::default(),
+                applied_sections: Vec::new(),
+                message: Some(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "settings-apply-conflict"
+                )),
+            });
+        } else {
+            self.draft.resync(settings.config());
+            self.apply_feedback = Some(ApplyFeedback {
+                revision: outcome.revision,
+                ok: outcome.ok(),
+                impact: outcome.impact,
+                applied_sections: outcome.applied_sections.clone(),
+                message: None,
+            });
+        }
+    }
+
+    /// Discards every pending edit back to the persisted config.
+    pub fn discard_pending(&mut self, settings: &CharacterSettings) {
+        self.draft.resync(settings.config());
+        self.apply_feedback = None;
+    }
+
+    /// Whether a non-empty search is active; pages use this to auto-reveal
+    /// hidden (`x-ene-ui.advanced`) fields.
+    #[must_use]
+    pub fn search_active(&self) -> bool {
+        !self.search_query.trim().is_empty()
     }
 
     /// Render the full settings window. The caller is expected to
@@ -621,6 +1070,11 @@ impl SettingsUi {
                 components::request_section_focus(ui.ctx(), section);
             }
         }
+        if let Some(filter) = self.advanced_filter.take() {
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(egui::Id::new("advanced_filter"), filter);
+            });
+        }
         let mut selected_page: Option<PageKind> = None;
         let narrow = use_compact_navigation(ui.available_width());
         if narrow {
@@ -661,6 +1115,10 @@ impl SettingsUi {
             self.current_page = page;
         }
 
+        // Draft apply bar: feedback banner + Apply/Discard controls whenever
+        // any page has pending edits.
+        self.render_apply_bar(ui, settings, ai);
+
         // Rendered last so it floats above every page: a close, app exit,
         // reload, or character switch with unsaved card edits must confirm
         // before the action proceeds.
@@ -672,6 +1130,185 @@ impl SettingsUi {
             world,
             ui_entity,
         );
+        self.render_settings_close_dialog(ui, settings, world, ui_entity);
+    }
+
+    /// Confirms a window close while the draft holds pending edits: the
+    /// runtime defers the hide and sets `settings_close_requested`, and this
+    /// modal lets the user discard (which clears the draft and lets the
+    /// deferred close complete) or keep editing.
+    fn render_settings_close_dialog(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &CharacterSettings,
+        world: &mut World,
+        ui_entity: Entity,
+    ) {
+        let pending = world
+            .get::<crate::component::ui::UiStateComponent>(ui_entity)
+            .is_some_and(|state| state.0.settings_close_requested);
+        if !pending {
+            return;
+        }
+        let mut discard = false;
+        let mut keep_editing = false;
+        egui::Modal::new(egui::Id::new("settings-close-discard-modal")).show(ui.ctx(), |ui| {
+            ui.set_min_width(280.0);
+            ui.heading(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "settings-discard-title"
+            ));
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "settings-discard-body"
+            ));
+            ui.horizontal(|ui| {
+                if ui
+                    .button(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "settings-discard-close"
+                    ))
+                    .clicked()
+                {
+                    discard = true;
+                }
+                if ui
+                    .button(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "settings-keep-editing"
+                    ))
+                    .clicked()
+                {
+                    keep_editing = true;
+                }
+            });
+        });
+        if discard {
+            // Discarding clears the draft; the runtime's per-frame close
+            // check then completes the deferred hide.
+            self.discard_pending(settings);
+            if let Some(mut state) =
+                world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+            {
+                state.0.settings_close_requested = true;
+            }
+        } else if keep_editing
+            && let Some(mut state) =
+                world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+        {
+            state.0.settings_close_requested = false;
+        }
+    }
+
+    fn render_apply_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &CharacterSettings,
+        ai: &Arc<AiBridge>,
+    ) {
+        self.pump_apply(settings, ai);
+        let mut dismiss_feedback = false;
+        if let Some(feedback) = &self.apply_feedback {
+            let (color, message) = if feedback.ok {
+                let impact = impact_label(feedback.impact);
+                (
+                    egui::Color32::from_rgb(0x2e, 0x7d, 0x32),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "settings-apply-ok", impact = impact),
+                )
+            } else {
+                (
+                    egui::Color32::from_rgb(0xc6, 0x28, 0x28),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "settings-apply-failed"),
+                )
+            };
+            egui::Frame::new()
+                .fill(color.gamma_multiply(0.18))
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(color, message);
+                        if let Some(detail) = &feedback.message {
+                            ui.weak(detail);
+                        } else if !feedback.applied_sections.is_empty() {
+                            ui.weak(format!(
+                                "{}: {} (rev {})",
+                                i18n_embed_fl::fl!(
+                                    crate::i18n::loader(),
+                                    "settings-applied-sections"
+                                ),
+                                feedback.applied_sections.join(", "),
+                                feedback.revision
+                            ));
+                        } else {
+                            ui.weak(format!("rev {}", feedback.revision));
+                        }
+                        if ui.small_button("✕").clicked() {
+                            dismiss_feedback = true;
+                        }
+                    });
+                });
+            ui.add_space(4.0);
+        }
+        if dismiss_feedback {
+            self.apply_feedback = None;
+        }
+
+        if !self.draft.is_dirty() {
+            return;
+        }
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(0x33, 0x35, 0x3b))
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if self.applying {
+                        ui.weak(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "settings-apply-validating"
+                        ));
+                    }
+                    ui.label(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "settings-draft-pending",
+                        revision = self.draft.revision(),
+                        count = self.draft.dirty_paths().len(),
+                        applied = self.draft.applied_revision()
+                    ));
+                    if ui
+                        .add_enabled(
+                            !self.draft.has_issues() && !self.applying,
+                            egui::Button::new(i18n_embed_fl::fl!(
+                                crate::i18n::loader(),
+                                "settings-apply"
+                            )),
+                        )
+                        .on_hover_text(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "settings-apply-hint"
+                        ))
+                        .clicked()
+                    {
+                        self.apply_pending(settings, ai);
+                    }
+                    if ui
+                        .button(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "settings-discard"
+                        ))
+                        .clicked()
+                    {
+                        self.discard_pending(settings);
+                    }
+                });
+                if self.draft.has_issues() {
+                    for issue in self.draft.all_issues() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0xff, 0x8a, 0x65),
+                            format!("{}: {}", issue.path, issue.message),
+                        );
+                    }
+                }
+            });
     }
 
     fn recompute_search(&mut self) {
@@ -679,7 +1316,9 @@ impl SettingsUi {
             return;
         }
         self.search_computed_for = self.search_query.clone();
-        self.search_hits = compute_search(&self.search_query);
+        let plugin_snapshots: Vec<ene_plugin_host::PluginSettingsSnapshot> =
+            self.input.plugin_snapshots.data.clone().unwrap_or_default();
+        self.search_hits = compute_search(&self.search_query, &plugin_snapshots);
     }
 
     fn sync_search_language(&mut self, language: Language) {
@@ -774,10 +1413,20 @@ impl SettingsUi {
         let description = self.current_page.description();
         components::page_header(ui, &title, &description);
         ui.separator();
+        let reveal_advanced = self.search_active();
+        let plugin_focus = self.plugin_focus.take();
         egui::ScrollArea::vertical()
             .id_salt("settings_page_scroll")
             .auto_shrink([false; 2])
             .show(ui, |ui| match self.current_page {
+                PageKind::Overview => page_overview::render(
+                    ui,
+                    settings,
+                    ai,
+                    &mut self.input,
+                    &mut self.current_page,
+                    self.apply_feedback.as_ref(),
+                ),
                 PageKind::Character => page_character::render(
                     ui,
                     settings,
@@ -792,30 +1441,71 @@ impl SettingsUi {
                 PageKind::CharacterEditor => {
                     page_character_editor::render(ui, settings, ai, world, ui_entity);
                 }
-                PageKind::Graphics => {
-                    page_graphics::render(ui, settings, &mut self.animation, ai, world, ui_entity);
+                PageKind::General => {
+                    page_graphics::render(
+                        ui,
+                        settings,
+                        &mut self.draft,
+                        &mut self.animation,
+                        ai,
+                        world,
+                        ui_entity,
+                    );
+                    page_accessibility::render(ui, settings);
                 }
                 PageKind::Ai => page_ai::render(
                     ui,
                     settings,
+                    &mut self.draft,
                     &mut self.animation,
                     ai,
                     &mut self.input,
                     world,
                     ui_entity,
                 ),
-                PageKind::Voice => page_voice::render(ui, settings, ai, &mut self.input, world),
-                PageKind::Features => {
-                    page_features::render(ui, settings, ai, &mut self.input, world);
+                PageKind::Voice => {
+                    page_voice::render(ui, settings, &mut self.draft, ai, &mut self.input, world);
                 }
-                PageKind::Accessibility => page_accessibility::render(ui, settings),
-                PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
-                PageKind::MemoryLedger => page_memory_ledger::render(ui, ai, world, ui_entity),
-                PageKind::Permissions => page_permissions::render(ui, ai, world, ui_entity),
-                PageKind::Approvals => page_approvals::render(ui, settings, ai, world, ui_entity),
-                PageKind::Connectors => page_connectors::render(ui, ai, world, ui_entity),
-                PageKind::Sessions => page_sessions::render(ui, ai, world, ui_entity),
-                PageKind::Debug => {
+                PageKind::Features => {
+                    page_features::render(
+                        ui,
+                        settings,
+                        &mut self.draft,
+                        ai,
+                        &mut self.input,
+                        world,
+                    );
+                }
+                PageKind::Memory => page_memory::render_config(ui, settings, &mut self.draft),
+                PageKind::Memories => {
+                    page_memory::render_journal(ui, ai, world, ui_entity);
+                    page_memory_ledger::render(ui, ai, &mut self.input, world, ui_entity);
+                }
+                PageKind::Permissions => {
+                    page_permissions::render(ui, ai, &mut self.input, world, ui_entity);
+                }
+                PageKind::Approvals => {
+                    page_approvals::render(ui, settings, &mut self.draft, ai, world, ui_entity);
+                }
+                PageKind::Connectors => {
+                    page_connectors::render(ui, ai, &mut self.input, world, ui_entity);
+                }
+                PageKind::Sessions => {
+                    page_sessions::render(ui, ai, &mut self.input, world, ui_entity);
+                }
+                PageKind::Schedules => page_schedules::render(ui, ai, &mut self.input),
+                PageKind::Plugins => {
+                    page_plugins::render(
+                        ui,
+                        settings,
+                        &mut self.draft,
+                        ai,
+                        &mut self.input,
+                        plugin_focus.as_deref(),
+                    );
+                }
+                PageKind::Advanced => page_advanced::render(ui, &mut self.draft, reveal_advanced),
+                PageKind::Diagnostics => {
                     page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);
                 }
             });
@@ -879,6 +1569,8 @@ impl SettingsUi {
             && let Some(hit) = self.search_hits.get(index).cloned()
         {
             self.pending_focus = Some((hit.page, hit.section));
+            self.advanced_filter = hit.filter;
+            self.plugin_focus = hit.plugin_focus;
         }
     }
 }
@@ -939,7 +1631,7 @@ mod tests {
 
     #[test]
     fn every_page_is_unique_and_has_one_category() {
-        assert_eq!(PageKind::ALL.len(), 14);
+        assert_eq!(PageKind::ALL.len(), 17);
         for (index, page) in PageKind::ALL.iter().enumerate() {
             assert!(PageKind::ALL[index + 1..].iter().all(|other| other != page));
         }
@@ -949,7 +1641,7 @@ mod tests {
                 .filter(|page| page.meta().category == category)
                 .count()
         });
-        assert_eq!(counts, [4, 3, 6, 1]);
+        assert_eq!(counts, [10, 7]);
         assert_eq!(counts.into_iter().sum::<usize>(), PageKind::ALL.len());
     }
 
@@ -993,7 +1685,7 @@ mod tests {
             ("vad", "voice-mic"),
             ("mic", "voice-mic"),
         ] {
-            let hits = compute_search(query);
+            let hits = compute_search(query, &[]);
             assert_eq!(hits.first().and_then(|hit| hit.section), Some(expected));
             assert_eq!(hits.first().map(|hit| hit.page), Some(PageKind::Voice));
         }
@@ -1001,7 +1693,7 @@ mod tests {
 
     #[test]
     fn search_ranks_page_titles_before_other_page_matches() {
-        let hits = compute_search(&PageKind::Voice.title());
+        let hits = compute_search(&PageKind::Voice.title(), &[]);
         let first = hits.first().unwrap();
         assert_eq!(first.page, PageKind::Voice);
         assert_eq!(first.section, None);
@@ -1010,7 +1702,7 @@ mod tests {
 
     #[test]
     fn search_ranks_section_aliases_before_page_aliases() {
-        let hits = compute_search("tts");
+        let hits = compute_search("tts", &[]);
         let section = hits
             .iter()
             .position(|hit| hit.section == Some("voice-tts"))
@@ -1026,8 +1718,8 @@ mod tests {
 
     #[test]
     fn empty_search_has_no_results() {
-        assert!(compute_search("").is_empty());
-        assert!(compute_search("   ").is_empty());
+        assert!(compute_search("", &[]).is_empty());
+        assert!(compute_search("   ", &[]).is_empty());
     }
 
     #[test]
@@ -1040,6 +1732,8 @@ mod tests {
             section: None,
             title: "Voice".to_string(),
             detail: "Voice settings".to_string(),
+            filter: None,
+            plugin_focus: None,
             rank: 0,
         });
 

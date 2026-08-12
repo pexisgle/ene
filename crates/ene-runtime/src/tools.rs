@@ -20,7 +20,8 @@
 //!   keep reporting [`EneRuntimeError::Busy`] when at capacity.
 //!   The caps are actor-owned, so the work cannot move out of the mailbox.
 //! - **Registry freshness**: the actor's `Arc<dyn ToolRegistry>` is swapped
-//!   on plugin-host reconfiguration (`UpdateFeatureSettings` →
+//!   on plugin-host reconfiguration (`ApplySettings` with a changed plugin
+//!   enable-set →
 //!   `PluginHostReconfigured`). A mailbox-bypassing handle would need the
 //!   actor to write through a shared `ArcSwap`-style container on every
 //!   swap, plus a second container for the actor-owned `tool_rag` that

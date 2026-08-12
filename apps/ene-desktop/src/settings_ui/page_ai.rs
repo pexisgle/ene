@@ -4,14 +4,15 @@
 //! and proactive speech policy live on the Features tab.
 
 use super::components::{BadgeTone, section_card, setting_row, status_badge, warning_box};
-use super::input::SettingsInputState;
+use super::draft::{SecretState, SettingsDraft};
+use super::input::{AsyncData, SettingsInputState};
 use super::widgets::editable_combo;
 use crate::ai_bridge::AiBridge;
 use crate::character_state::AnimationControl;
 use crate::settings::CharacterSettings;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use ene_ai::{AiConfig, AiProviderDef, LOCAL_PROVIDER, LocalModelDef};
+use ene_ai::{AiConfig, AiProviderDef, LOCAL_PROVIDER};
 use std::sync::Arc;
 
 const DEFAULT_LOCAL_EMBED_MODEL: &str = "jina-v5-small";
@@ -26,6 +27,24 @@ const CHAT_MODEL_FALLBACK: &[&str] = &[
     "gpt-5",
     "gpt-5-mini",
 ];
+
+/// Records the secret state of the chat provider's inline API key so the
+/// draft never echoes the stored value into the UI and never overwrites an
+/// unchanged secret with an empty buffer.
+fn track_api_key_secret(draft: &mut SettingsDraft, provider: &str, source: &str, buffer: &str) {
+    let path = format!("ai.providers.{provider}.api_key.inline");
+    if source == "env" {
+        draft.set_secret(&path, SecretState::EnvSource);
+    } else if buffer.is_empty() {
+        // A user-initiated deletion wins over the "unchanged" default; the
+        // delete button above marks `Deleted` explicitly.
+        if draft.secret(&path) != SecretState::Deleted {
+            draft.set_secret(&path, SecretState::Unchanged);
+        }
+    } else {
+        draft.set_secret(&path, SecretState::Replaced);
+    }
+}
 /// Static embedding-model fallback for cloud providers (same fallback
 /// rationale as [`CHAT_MODEL_FALLBACK`]).
 const EMBEDDING_MODEL_FALLBACK: &[&str] = &[
@@ -42,18 +61,22 @@ fn first_openai_compatible_provider(ai: &AiConfig) -> Option<String> {
         .find_map(|(name, def)| def.is_openai_compatible().then(|| name.clone()))
 }
 
-fn ensure_local_embedding_provider(ai: &mut AiConfig) {
-    if !ai.local_models.contains_key(DEFAULT_LOCAL_EMBED_MODEL) {
-        ai.local_models.insert(
+fn ensure_local_embedding_provider(ai: &mut AiConfig, draft: &mut SettingsDraft) {
+    // Plugin profiles are the single source of truth for local models:
+    // `ai.local_models` is derived from them at apply time.
+    let mut plugins = draft.section::<ene_plugin_host::PluginConfig>();
+    let entry = plugins.list.entry("local-llm".to_string()).or_default();
+    if !entry.profiles.contains_key(DEFAULT_LOCAL_EMBED_MODEL) {
+        entry.profiles.insert(
             DEFAULT_LOCAL_EMBED_MODEL.to_string(),
-            LocalModelDef {
-                url: "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf".to_string(),
-                quantization: "F16".to_string(),
-                dimensions: Some(1024),
-                ..LocalModelDef::default()
-            },
+            serde_json::json!({
+                "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+                "quantization": "F16",
+                "dimensions": 1024
+            }),
         );
     }
+    draft.set_section(&plugins);
     ai.tasks.embedding.provider = LOCAL_PROVIDER.to_string();
     if ai.tasks.embedding.model.is_none() {
         ai.tasks.embedding.model = Some(DEFAULT_LOCAL_EMBED_MODEL.to_string());
@@ -103,12 +126,28 @@ fn provider_choices(ai: &AiConfig) -> Vec<(String, String)> {
 /// cached `/models` catalog (when fetched) plus the static fallback. The
 /// currently configured model is always included so an out-of-catalog value
 /// stays selectable and visible.
-fn chat_model_choices(ai: &AiConfig, input: &SettingsInputState) -> Vec<(String, String)> {
+fn local_profile_names(draft: &SettingsDraft) -> Vec<String> {
+    let plugins = draft.section::<ene_plugin_host::PluginConfig>();
+    let mut names: Vec<String> = ["local-llm", "llama-server"]
+        .iter()
+        .filter_map(|plugin| plugins.list.get(*plugin))
+        .flat_map(|entry| entry.profiles.keys().cloned())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn chat_model_choices(
+    ai: &AiConfig,
+    input: &SettingsInputState,
+    local_profiles: &[String],
+) -> Vec<(String, String)> {
     let mut choices = Vec::new();
     if ai.tasks.chat.provider == LOCAL_PROVIDER {
         choices.extend(
-            ai.local_models
-                .keys()
+            local_profiles
+                .iter()
                 .map(|name| (name.clone(), name.clone())),
         );
     } else {
@@ -130,12 +169,16 @@ fn chat_model_choices(ai: &AiConfig, input: &SettingsInputState) -> Vec<(String,
 }
 
 /// Embedding model candidates for the current embedding provider.
-fn embedding_model_choices(ai: &AiConfig, input: &SettingsInputState) -> Vec<(String, String)> {
+fn embedding_model_choices(
+    ai: &AiConfig,
+    input: &SettingsInputState,
+    local_profiles: &[String],
+) -> Vec<(String, String)> {
     let mut choices = Vec::new();
     if AiConfig::is_local_provider(&ai.tasks.embedding.provider) {
         choices.extend(
-            ai.local_models
-                .keys()
+            local_profiles
+                .iter()
                 .map(|name| (name.clone(), name.clone())),
         );
     } else {
@@ -162,7 +205,9 @@ fn sync_provider_buffers(input: &mut SettingsInputState, ai: &AiConfig) {
     if let Some(def) = ai.providers.get(&ai.tasks.chat.provider) {
         input.ai_base_url.clone_from(&def.base_url);
         input.ai_api_key_source.clone_from(&def.api_key.source);
-        input.ai_api_key.clone_from(&def.api_key.inline);
+        // Secrets never round-trip into UI text buffers, including on
+        // provider switches: the draft tracks them by state instead.
+        input.ai_api_key.clear();
         input.ai_api_key_env.clone_from(&def.api_key.env);
     } else {
         input.ai_base_url.clear();
@@ -175,15 +220,48 @@ fn sync_provider_buffers(input: &mut SettingsInputState, ai: &AiConfig) {
 pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
+    draft: &mut SettingsDraft,
     _animation: &mut AnimationControl,
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
     _world: &mut World,
     _ui_entity: Entity,
 ) {
-    let mut ai_cfg = settings.config_section::<ene_runtime::AiConfig>();
+    let mut ai_cfg = draft.section::<ene_runtime::AiConfig>();
+    // Local-model resolution reads `ai.local_models`, which is derived from
+    // plugin profiles; mirror the derivation into the working copy so
+    // choices, resolution, and test-connection agree with what apply will
+    // persist.
+    ai_cfg.local_models = super::apply::local_model_defs_from_plugins(draft.editing());
+    // Resolution (test connection, model list) must use the *merged*
+    // config: the draft holds redacted secrets, so resolving against it
+    // would send the placeholder as the API key.
+    let mut resolved_ai_cfg = super::apply::merge_secrets(&settings.config(), draft.editing())
+        .get_section::<ene_runtime::AiConfig>()
+        .unwrap_or_else(|_| ai_cfg.clone());
+    resolved_ai_cfg.local_models = ai_cfg.local_models.clone();
+
+    input.model_list.poll();
+    if let Some(models) = input.model_list.data.take() {
+        input
+            .model_catalog
+            .insert(ai_cfg.tasks.chat.provider.clone(), models);
+    }
+    input.api_test.poll();
+    if let Some(result) = input.api_test.data.take() {
+        input.ai_validation_message = Some(match result {
+            Ok(()) => {
+                i18n_embed_fl::fl!(crate::i18n::loader(), "ai-test-connection-ok").to_string()
+            }
+            Err(error) => format!(
+                "{}: {error}",
+                i18n_embed_fl::fl!(crate::i18n::loader(), "ai-test-connection-error")
+            ),
+        });
+    }
 
     ui.vertical(|ui| {
+        let local_profiles = local_profile_names(draft);
         section_card(
             ui,
             "ai-chat",
@@ -211,10 +289,10 @@ pub fn render(
                                 .desired_width(260.0),
                         );
                         if response.changed() {
-                            settings.with_config_mut(|c| {
-                                c.user_name = input.ai_user_name.trim().to_string();
-                            });
-                            settings.mark_dirty();
+                            draft.set_path(
+                                "user_name",
+                                serde_json::Value::String(input.ai_user_name.trim().to_string()),
+                            );
                         }
                     },
                 );
@@ -258,8 +336,7 @@ pub fn render(
                                         .insert(new_provider.clone(), AiProviderDef::default());
                                 }
                                 sync_provider_buffers(input, &ai_cfg);
-                                settings.set_config_section(&ai_cfg);
-                                settings.mark_dirty();
+                                draft.set_section(&ai_cfg);
                             }
                         }
                     },
@@ -271,7 +348,7 @@ pub fn render(
                     &i18n_embed_fl::fl!(crate::i18n::loader(), "model"),
                     "",
                     |ui| {
-                        let choices = chat_model_choices(&ai_cfg, input);
+                        let choices = chat_model_choices(&ai_cfg, input, &local_profiles);
                         let combo = editable_combo(
                             ui,
                             "chat_model_combo",
@@ -291,26 +368,25 @@ pub fn render(
                             .clicked()
                         {
                             input.model_fetch_error = None;
-                            match ai_cfg.resolve_chat() {
-                                Ok(resolved) => {
-                                    match ai
-                                        .list_models_blocking(&resolved.base_url, &resolved.api_key)
-                                    {
-                                        Ok(models) => {
-                                            input
-                                                .model_catalog
-                                                .insert(ai_cfg.tasks.chat.provider.clone(), models);
-                                        }
-                                        Err(e) => input.model_fetch_error = Some(e.to_string()),
-                                    }
-                                }
-                                Err(e) => input.model_fetch_error = Some(e.to_string()),
+                            input.model_list = AsyncData::new();
+                            if let Ok(resolved) = resolved_ai_cfg.resolve_chat() {
+                                input.model_list.start(ai.apply_fetch_model_ids(
+                                    resolved.base_url.clone(),
+                                    resolved.api_key.clone(),
+                                ));
+                            } else {
+                                input.model_fetch_error = Some(
+                                    i18n_embed_fl::fl!(
+                                        crate::i18n::loader(),
+                                        "ai-test-connection-error"
+                                    )
+                                    .to_string(),
+                                );
                             }
                         }
                         if combo.commit_requested() {
                             ai_cfg.tasks.chat.model = Some(input.ai_chat_model.trim().to_string());
-                            settings.set_config_section(&ai_cfg);
-                            settings.mark_dirty();
+                            draft.set_section(&ai_cfg);
                         }
                     },
                 );
@@ -344,8 +420,7 @@ pub fn render(
                                     );
                                 }
                             }
-                            settings.set_config_section(&ai_cfg);
-                            settings.mark_dirty();
+                            draft.set_section(&ai_cfg);
                         }
                     },
                 );
@@ -379,8 +454,7 @@ pub fn render(
                             {
                                 def.api_key.source = current_source;
                             }
-                            settings.set_config_section(&ai_cfg);
-                            settings.mark_dirty();
+                            draft.set_section(&ai_cfg);
                         }
                     },
                 );
@@ -402,8 +476,7 @@ pub fn render(
                                     && def.is_openai_compatible()
                                 {
                                     def.api_key.env = input.ai_api_key_env.trim().to_string();
-                                    settings.set_config_section(&ai_cfg);
-                                    settings.mark_dirty();
+                                    draft.set_section(&ai_cfg);
                                 }
                             }
                         },
@@ -415,26 +488,57 @@ pub fn render(
                         &i18n_embed_fl::fl!(crate::i18n::loader(), "api-key"),
                         "",
                         |ui| {
-                            let response = ui.add(
-                                egui::TextEdit::singleline(&mut input.ai_api_key)
-                                    .password(true)
-                                    .desired_width(260.0),
-                            );
-                            if response.changed() {
-                                let provider_key = ai_cfg.tasks.chat.provider.clone();
-                                if let Some(def) = ai_cfg.providers.get_mut(&provider_key)
-                                    && def.is_openai_compatible()
-                                {
-                                    def.api_key.inline = input.ai_api_key.trim().to_string();
-                                    settings.set_config_section(&ai_cfg);
-                                    settings.mark_dirty();
+                            ui.horizontal(|ui| {
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut input.ai_api_key)
+                                        .password(true)
+                                        .desired_width(260.0),
+                                );
+                                if response.changed() {
+                                    let provider_key = ai_cfg.tasks.chat.provider.clone();
+                                    if let Some(def) = ai_cfg.providers.get_mut(&provider_key)
+                                        && def.is_openai_compatible()
+                                    {
+                                        def.api_key.inline = input.ai_api_key.trim().to_string();
+                                        draft.set_section(&ai_cfg);
+                                    }
                                 }
-                            }
+                                if ui
+                                    .small_button(i18n_embed_fl::fl!(
+                                        crate::i18n::loader(),
+                                        "api-key-delete"
+                                    ))
+                                    .on_hover_text(i18n_embed_fl::fl!(
+                                        crate::i18n::loader(),
+                                        "api-key-delete-hint"
+                                    ))
+                                    .clicked()
+                                {
+                                    let provider_key = ai_cfg.tasks.chat.provider.clone();
+                                    if let Some(def) = ai_cfg.providers.get_mut(&provider_key)
+                                        && def.is_openai_compatible()
+                                    {
+                                        def.api_key.inline.clear();
+                                        draft.set_section(&ai_cfg);
+                                        draft.set_secret(
+                                            &format!("ai.providers.{provider_key}.api_key.inline"),
+                                            SecretState::Deleted,
+                                        );
+                                        input.ai_api_key.clear();
+                                    }
+                                }
+                            });
                         },
                     );
                 }
+                track_api_key_secret(
+                    draft,
+                    ai_cfg.tasks.chat.provider.as_str(),
+                    &input.ai_api_key_source,
+                    &input.ai_api_key,
+                );
 
-                let issues = ene_ai::validate_settings(&settings.config());
+                let issues = ene_ai::validate_settings(draft.editing());
                 for issue in &issues {
                     warning_box(ui, &issue.message());
                 }
@@ -445,31 +549,19 @@ pub fn render(
                     ))
                     .clicked()
                 {
-                    input.ai_validation_message = Some(match ai_cfg.resolve_chat() {
-                        Ok(resolved) => {
-                            match ai
-                                .validate_api_key_blocking(&resolved.base_url, &resolved.api_key)
-                            {
-                                Ok(()) => {
-                                    i18n_embed_fl::fl!(
-                                        crate::i18n::loader(),
-                                        "ai-test-connection-ok"
-                                    )
-                                }
-                                Err(e) => format!(
-                                    "{}: {e}",
-                                    i18n_embed_fl::fl!(
-                                        crate::i18n::loader(),
-                                        "ai-test-connection-error"
-                                    )
-                                ),
-                            }
-                        }
-                        Err(e) => format!(
-                            "{}: {e}",
+                    input.ai_validation_message = None;
+                    input.api_test = AsyncData::new();
+                    if let Ok(resolved) = resolved_ai_cfg.resolve_chat() {
+                        input.api_test.start(ai.apply_validate_api_key(
+                            resolved.base_url.clone(),
+                            resolved.api_key.clone(),
+                        ));
+                    } else {
+                        input.ai_validation_message = Some(
                             i18n_embed_fl::fl!(crate::i18n::loader(), "ai-test-connection-error")
-                        ),
-                    });
+                                .to_string(),
+                        );
+                    }
                 }
                 if let Some(message) = input.ai_validation_message.as_deref() {
                     ui.label(message);
@@ -506,7 +598,7 @@ pub fn render(
                         if current_provider != input.ai_embedding_provider {
                             input.ai_embedding_provider.clone_from(&current_provider);
                             if current_provider.as_str() == "local" {
-                                ensure_local_embedding_provider(&mut ai_cfg);
+                                ensure_local_embedding_provider(&mut ai_cfg, draft);
                                 input.ai_embedding_model.clone_from(
                                     ai_cfg
                                         .tasks
@@ -532,8 +624,7 @@ pub fn render(
                                     .dimensions
                                     .map_or_else(|| "1536".to_string(), |d| d.to_string());
                             }
-                            settings.set_config_section(&ai_cfg);
-                            settings.mark_dirty();
+                            draft.set_section(&ai_cfg);
                         }
                     },
                 );
@@ -544,7 +635,7 @@ pub fn render(
                     &i18n_embed_fl::fl!(crate::i18n::loader(), "model"),
                     "",
                     |ui| {
-                        let choices = embedding_model_choices(&ai_cfg, input);
+                        let choices = embedding_model_choices(&ai_cfg, input, &local_profiles);
                         let combo = editable_combo(
                             ui,
                             "embedding_model_combo",
@@ -555,8 +646,7 @@ pub fn render(
                         if combo.commit_requested() {
                             ai_cfg.tasks.embedding.model =
                                 Some(input.ai_embedding_model.trim().to_string());
-                            settings.set_config_section(&ai_cfg);
-                            settings.mark_dirty();
+                            draft.set_section(&ai_cfg);
                         }
                     },
                 );
@@ -591,8 +681,7 @@ pub fn render(
                                 && let Ok(dims) = input.ai_embedding_dimensions.parse::<usize>()
                             {
                                 ai_cfg.tasks.embedding.dimensions = Some(dims);
-                                settings.set_config_section(&ai_cfg);
-                                settings.mark_dirty();
+                                draft.set_section(&ai_cfg);
                             }
                         }
                     },

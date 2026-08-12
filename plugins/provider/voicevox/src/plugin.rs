@@ -52,28 +52,33 @@ impl ene_plugin::ConfigurablePlugin for VoicevoxPlugin {
                 "server_url": {
                     "type": "string",
                     "default": "http://127.0.0.1:50021",
-                    "description": "Engine HTTP base URL (VOICEVOX: 50021, Aivis Speech: 10101)"
+                    "description": "Engine HTTP base URL (VOICEVOX: 50021, Aivis Speech: 10101)",
+                    "x-ene-ui": { "group": "engine", "order": 0, "impact": "runtime_reload" }
                 },
                 "speaker_id": {
                     "type": "integer",
                     "minimum": 0,
                     "default": 0,
-                    "description": "Default speaker / style ID (u64; Aivis style IDs exceed u32)"
+                    "description": "Default speaker / style ID (u64; Aivis style IDs exceed u32)",
+                    "x-ene-ui": { "group": "voice", "order": 0, "options_path": "speakers", "impact": "runtime_reload" }
                 },
                 "speed_scale": {
                     "type": "number",
                     "default": 1.0,
-                    "description": "Speech speed multiplier (engine-validated, e.g. 0.5-2.0)"
+                    "description": "Speech speed multiplier (engine-validated, e.g. 0.5-2.0)",
+                    "x-ene-ui": { "group": "voice", "order": 1, "impact": "runtime_reload" }
                 },
                 "pitch_scale": {
                     "type": "number",
                     "default": 0.0,
-                    "description": "Pitch shift (engine-validated, e.g. -0.15-0.15)"
+                    "description": "Pitch shift (engine-validated, e.g. -0.15-0.15)",
+                    "x-ene-ui": { "group": "voice", "order": 2, "impact": "runtime_reload" }
                 },
                 "intonation_scale": {
                     "type": "number",
                     "default": 1.0,
-                    "description": "Intonation strength (engine-validated, e.g. 0-2)"
+                    "description": "Intonation strength (engine-validated, e.g. 0-2)",
+                    "x-ene-ui": { "group": "voice", "order": 3, "impact": "runtime_reload" }
                 },
                 "volume_scale": {
                     "type": "number",

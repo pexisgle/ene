@@ -33,6 +33,7 @@ egui-wgpu = "0.35"
 egui-winit = "0.35"
 ene-runtime = { workspace = true }
 ene-connector = { workspace = true }
+ene-core = { workspace = true }
 ene-mind = { workspace = true }
 ene-ai = { workspace = true }
 ene-store = { workspace = true }

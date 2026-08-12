@@ -101,7 +101,10 @@ mod tests {
     #[test]
     fn bundle_defaults_are_safe() {
         let bundle = SettingsUiBundle::default();
-        assert!(matches!(bundle.page.0, PageKind::Character));
+        assert!(
+            matches!(bundle.page.0, PageKind::Overview),
+            "the settings window opens on the Overview page"
+        );
         assert_eq!(bundle.input.0.ai_embedding_provider, "");
         assert!(!bundle.state.0.settings_window_visible);
         assert!(bundle.emotion_queue.0.commands.is_empty());

@@ -45,7 +45,7 @@ pub struct MemoryLedgerPayload {
 /// Owns the actor handle. The runtime can also send user input
 /// back through [`AiBridge::run`] and [`AiBridge::cancel`].
 pub struct AiBridge {
-    handle: EneHandle,
+    handle: Arc<EneHandle>,
     runtime: tokio::runtime::Handle,
     /// Set on run, cleared on Terminal.
     processing: Arc<AtomicBool>,
@@ -132,7 +132,7 @@ impl AiBridge {
         let active_turn = Arc::new(Mutex::new(None));
         let proactive_observe = spawn_proactive_observer(bootstrap_handle, handle.clone(), &mind);
         let bridge = Self {
-            handle: handle.clone(),
+            handle: Arc::new(handle.clone()),
             runtime: bootstrap_handle.clone(),
             processing: processing.clone(),
             active_turn: active_turn.clone(),
@@ -228,32 +228,39 @@ impl AiBridge {
         self.active_turn.lock().is_ok_and(|g| g.is_some())
     }
 
-    /// Refresh Features-tab settings into the runtime actor (no GGUF reload).
-    pub fn sync_feature_runtime(
+    /// Apply a unified settings draft to the runtime actor. Test-only: the
+    /// UI path uses [`Self::apply_settings_async`].
+    #[cfg(test)]
+    pub fn apply_settings_blocking(
         &self,
-        mind: &ene_mind::MindConfig,
-        store: &ene_store::StoreConfig,
-        plugins: &ene_plugin_host::PluginConfig,
-        rag: &ene_rag::ToolRagConfig,
-    ) {
-        self.proactive_observe.apply_mind(mind);
-        if let Err(e) = self
-            .handle
-            .update_feature_settings(ene_runtime::FeatureSettingsUpdate {
-                mind: mind.clone(),
-                store: store.clone(),
-                plugins: plugins.clone(),
-                rag: rag.clone(),
-            })
-        {
-            tracing::warn!(
-                component = "AiBridge",
-                error = %e,
-                "Failed to push feature settings to runtime actor"
-            );
-        }
+        request: ene_runtime::SettingsApplyRequest,
+    ) -> Result<ene_runtime::SettingsApplyResult, AiBridgeError> {
+        let mind = request
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .unwrap_or_default();
+        self.proactive_observe.apply_mind(&mind);
+        Ok(self.block_on_timeout(self.handle.apply_settings(request))??)
     }
 
+    /// Starts an asynchronous runtime apply of a settings draft.
+    pub fn apply_settings_async(
+        &self,
+        request: ene_runtime::SettingsApplyRequest,
+    ) -> tokio::sync::oneshot::Receiver<Result<ene_runtime::SettingsApplyResult, String>> {
+        let mind = request
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .unwrap_or_default();
+        self.proactive_observe.apply_mind(&mind);
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .apply_settings(request)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
     /// Forward a `PermissionDecision` for the request
     /// currently sitting in `ChatState::pending_permission`.
     pub fn answer_permission(
@@ -262,64 +269,6 @@ impl AiBridge {
         decision: PermissionDecision,
     ) -> Result<(), AiBridgeError> {
         Ok(self.handle.decide_permission(request_id, decision)?)
-    }
-
-    /// List the standing session-wide permission grants. Blocks the
-    /// calling thread while the actor answers; intended for the
-    /// permission-center settings page.
-    pub fn list_permissions_blocking(
-        &self,
-    ) -> Result<Vec<ene_runtime::PermissionScope>, AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.list_permissions())??)
-    }
-
-    /// Revoke a single standing permission grant by id.
-    ///
-    /// Returns whether a grant was actually removed.
-    pub fn revoke_permission_blocking(&self, id: u64) -> Result<bool, AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.revoke_permission(id))??)
-    }
-
-    /// Revoke every standing permission grant, returning the number
-    /// removed.
-    pub fn reset_all_permissions_blocking(&self) -> Result<usize, AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.reset_all_permissions())??)
-    }
-
-    /// Lists the cached connector summaries (I/O-free).
-    pub fn list_connectors_blocking(&self) -> Vec<ene_connector::ConnectorSummary> {
-        self.handle.connectors().list()
-    }
-
-    /// Returns the cached status snapshot of one connector (I/O-free).
-    pub fn connector_status_blocking(
-        &self,
-        id: &ene_connector::ConnectorId,
-    ) -> Result<ene_connector::ConnectorStatus, AiBridgeError> {
-        self.handle
-            .connectors()
-            .status(id)
-            .map_err(AiBridgeError::from)
-    }
-
-    /// Lists the standing per-action grants of one connector (I/O-free).
-    pub fn connector_permissions_blocking(
-        &self,
-        id: &ene_connector::ConnectorId,
-    ) -> Result<Vec<ene_connector::PermissionGrant>, AiBridgeError> {
-        self.handle
-            .connectors()
-            .permissions(id)
-            .map_err(AiBridgeError::from)
-    }
-
-    /// Runs a connector connectivity check. Blocks the calling thread while
-    /// the actor answers.
-    pub fn check_connector_blocking(
-        &self,
-        id: &ene_connector::ConnectorId,
-    ) -> Result<ene_connector::HealthStatus, AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.connectors().check(id))??)
     }
 
     /// Undo the most recent reversible tool operation. Blocks the
@@ -363,59 +312,6 @@ impl AiBridge {
         self.handle.character_card()
     }
 
-    /// List stored session metadata. Returns the API v1
-    /// [`ene_runtime::PublicSessionMeta`] DTO directly — the desktop UI
-    /// renders it as its canonical session type, so there is no reverse
-    /// conversion to `ene_store::SessionMeta`.
-    pub fn list_sessions_blocking(
-        &self,
-        include_archived: bool,
-        limit: usize,
-    ) -> Result<Vec<ene_runtime::PublicSessionMeta>, AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.sessions().list(include_archived, limit))??)
-    }
-
-    /// Export a session as a pretty-printed JSON string.
-    pub fn export_session_blocking(
-        &self,
-        session_id: impl Into<String>,
-    ) -> Result<String, AiBridgeError> {
-        let session_id = session_id.into();
-        Ok(self.block_on_timeout(self.handle.sessions().export(&session_id))??)
-    }
-
-    /// Import a session from a JSON string, returning the imported
-    /// session's row id.
-    pub fn import_session_blocking(&self, json: impl Into<String>) -> Result<i64, AiBridgeError> {
-        let json = json.into();
-        Ok(self.block_on_timeout(self.handle.sessions().import(&json))??)
-    }
-
-    /// Search session messages, returning matching
-    /// `(session_id, message)` pairs. Messages are the API v1
-    /// [`ene_runtime::PublicExportedMessage`] DTO, rendered directly by
-    /// the desktop UI — no reverse conversion to `ene_store::ExportedMessage`.
-    pub fn search_sessions_blocking(
-        &self,
-        query: impl Into<String>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<(String, ene_runtime::PublicExportedMessage)>, AiBridgeError> {
-        let query = query.into();
-        Ok(self.block_on_timeout(self.handle.sessions().search(&query, limit, offset))??)
-    }
-
-    /// Archive or unarchive a session, returning whether the archived
-    /// flag actually changed.
-    pub fn archive_session_blocking(
-        &self,
-        session_id: impl Into<String>,
-        archived: bool,
-    ) -> Result<bool, AiBridgeError> {
-        let session_id = session_id.into();
-        Ok(self.block_on_timeout(self.handle.sessions().set_archived(&session_id, archived))??)
-    }
-
     /// Forward a `UserInputResponse` for the request
     /// currently sitting in `ChatState::pending_user_input`.
     pub fn answer_user_input(
@@ -439,29 +335,6 @@ impl AiBridge {
     /// Snapshot of recent provider fallback events for the AI settings page.
     pub fn provider_fallback_history(&self) -> Vec<ene_ai::FallbackRecord> {
         self.handle.diagnostics().provider_fallback_history()
-    }
-
-    /// Run [`ene_ai::validate_api_key`] on the bridge runtime.
-    pub fn validate_api_key_blocking(
-        &self,
-        base_url: &str,
-        api_key: &str,
-    ) -> Result<(), AiBridgeError> {
-        Ok(self.block_on_timeout(ene_ai::validate_api_key(base_url, api_key))??)
-    }
-
-    /// Snapshot the provider kinds registered by the plugin host.
-    pub fn provider_catalog_blocking(&self) -> Result<ene_runtime::ProviderCatalog, AiBridgeError> {
-        self.block_on_timeout(self.handle.provider_catalog())
-    }
-
-    /// Run [`ene_ai::fetch_model_ids`] on the bridge runtime.
-    pub fn list_models_blocking(
-        &self,
-        base_url: &str,
-        api_key: &str,
-    ) -> Result<Vec<String>, AiBridgeError> {
-        Ok(self.block_on_timeout(ene_ai::fetch_model_ids(base_url, api_key))??)
     }
 
     /// Refresh memory journal payload (typed memories + affect + commitments).
@@ -535,36 +408,6 @@ impl AiBridge {
                 commitments,
             })
         })?
-    }
-
-    /// Edit a persisted typed memory in place through the ledger handle.
-    pub fn edit_memory_blocking(
-        &self,
-        id: i64,
-        edit: ene_store::MemoryEdit,
-    ) -> Result<(), AiBridgeError> {
-        Ok(
-            self.block_on_timeout(self.handle.memory_ledger().edit_memory(
-                id,
-                edit,
-                self.handle.active_turn(),
-            ))??,
-        )
-    }
-
-    /// Adjust a typed memory's salience (importance / Preference weight).
-    pub fn set_memory_salience_blocking(
-        &self,
-        id: i64,
-        salience: f32,
-    ) -> Result<(), AiBridgeError> {
-        Ok(
-            self.block_on_timeout(self.handle.memory_ledger().set_memory_salience(
-                id,
-                salience,
-                self.handle.active_turn(),
-            ))??,
-        )
     }
 
     /// Run explainable recall search for the journal debug mode.
@@ -646,6 +489,511 @@ impl AiBridge {
                 .candidates()
                 .approve(id, self.handle.active_turn()),
         )??)
+    }
+
+    /// Starts an asynchronous plugin `ValidateConfig` call.
+    pub fn validate_plugin_config_async(
+        &self,
+        plugin: String,
+        value: serde_json::Value,
+    ) -> tokio::sync::oneshot::Receiver<Vec<String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .validate_plugin_config(&plugin, value)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|error| format!("{}: {}", error.field_path, error.message))
+                .collect()
+        })
+    }
+    /// Spawns `fut` on the bridge runtime and returns a receiver for its
+    /// output. UI code stores the receiver and polls it with `try_recv`
+    /// every frame, so fetching never blocks the render loop.
+    pub fn spawn_fetch<T: Send + 'static>(
+        &self,
+        fut: impl std::future::Future<Output = T> + Send + 'static,
+    ) -> tokio::sync::oneshot::Receiver<T> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
+            if tx.send(fut.await).is_err() {
+                tracing::debug!(
+                    component = "AiBridge",
+                    "async fetch result dropped (UI closed the window)"
+                );
+            }
+        });
+        rx
+    }
+
+    /// Starts an asynchronous plugin-snapshot fetch (never blocks the
+    /// render loop).
+    pub fn fetch_plugin_snapshots(
+        &self,
+    ) -> tokio::sync::oneshot::Receiver<Vec<ene_plugin_host::PluginSettingsSnapshot>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.plugin_snapshots().await })
+    }
+
+    /// Starts an asynchronous fetch of detected-but-unconfigured plugin
+    /// binaries.
+    pub fn fetch_discovered_plugins(&self) -> tokio::sync::oneshot::Receiver<Vec<String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.discovered_plugins().await })
+    }
+
+    /// Starts an asynchronous MCP server status fetch.
+    pub fn fetch_mcp_statuses(
+        &self,
+    ) -> tokio::sync::oneshot::Receiver<Vec<ene_plugin_host::McpServerStatus>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.mcp_statuses().await })
+    }
+
+    /// Starts an asynchronous `ListConfigOptions` fetch for one plugin,
+    /// covering every `(field_path, options_path)` pair.
+    pub fn fetch_plugin_options(
+        &self,
+        plugin: String,
+        fields: Vec<(String, String)>,
+    ) -> tokio::sync::oneshot::Receiver<std::collections::BTreeMap<String, Vec<(String, String)>>>
+    {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            let mut map = std::collections::BTreeMap::new();
+            for (field_path, options_path) in fields {
+                if let Ok(options) = handle
+                    .list_plugin_config_options(&plugin, &options_path)
+                    .await
+                {
+                    map.insert(
+                        field_path,
+                        options
+                            .into_iter()
+                            .map(|option| (option.label, option.value.to_string()))
+                            .collect(),
+                    );
+                }
+            }
+            map
+        })
+    }
+
+    /// Starts an asynchronous schedule-list fetch.
+    pub fn fetch_schedules(&self) -> tokio::sync::oneshot::Receiver<Vec<ene_core::Schedule>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.list_schedules().await.unwrap_or_default() })
+    }
+
+    /// Starts an asynchronous schedule-run-history fetch.
+    pub fn fetch_schedule_runs(
+        &self,
+        schedule_id: i64,
+        limit: u64,
+    ) -> tokio::sync::oneshot::Receiver<Vec<ene_core::ScheduleRun>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .list_schedule_runs(schedule_id, limit)
+                .await
+                .unwrap_or_default()
+        })
+    }
+
+    /// Starts an asynchronous fetch of the recent run history of every
+    /// schedule (used by the pending-confirmations list).
+    pub fn fetch_all_schedule_runs(
+        &self,
+        limit: u64,
+    ) -> tokio::sync::oneshot::Receiver<Vec<(i64, Vec<ene_core::ScheduleRun>)>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            let schedules = handle.list_schedules().await.unwrap_or_default();
+            let mut out = Vec::new();
+            for schedule in schedules {
+                let runs = handle
+                    .list_schedule_runs(schedule.id, limit)
+                    .await
+                    .unwrap_or_default();
+                out.push((schedule.id, runs));
+            }
+            out
+        })
+    }
+
+    /// Starts an asynchronous schedule enable/disable mutation.
+    pub fn apply_schedule_enabled(
+        &self,
+        schedule_id: i64,
+        enabled: bool,
+    ) -> tokio::sync::oneshot::Receiver<Result<bool, ene_runtime::EneRuntimeError>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.set_schedule_enabled(schedule_id, enabled).await })
+    }
+
+    /// Starts an asynchronous schedule deletion.
+    pub fn apply_schedule_delete(
+        &self,
+        schedule_id: i64,
+    ) -> tokio::sync::oneshot::Receiver<Result<bool, ene_runtime::EneRuntimeError>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.delete_schedule(schedule_id).await })
+    }
+
+    /// Starts an asynchronous schedule creation.
+    pub fn apply_schedule_add(
+        &self,
+        new: ene_core::NewSchedule,
+    ) -> tokio::sync::oneshot::Receiver<Result<ene_core::Schedule, ene_runtime::EneRuntimeError>>
+    {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.add_schedule(new).await })
+    }
+
+    /// Starts an asynchronous schedule-confirmation resolution.
+    pub fn apply_schedule_confirmation(
+        &self,
+        schedule_id: i64,
+        run_id: i64,
+        approve: bool,
+    ) -> tokio::sync::oneshot::Receiver<Result<bool, ene_runtime::EneRuntimeError>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .resolve_schedule_confirmation(schedule_id, run_id, approve)
+                .await
+        })
+    }
+
+    /// Starts an asynchronous schedule update.
+    pub fn apply_schedule_update(
+        &self,
+        id: i64,
+        new: ene_core::NewSchedule,
+    ) -> tokio::sync::oneshot::Receiver<Result<ene_core::Schedule, String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .update_schedule(id, new)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous direct tool call (plugin-center connection
+    /// tests).
+    pub fn apply_call_tool(
+        &self,
+        name: String,
+        arguments: String,
+    ) -> tokio::sync::oneshot::Receiver<Result<String, String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .tools()
+                .call_tool(name, arguments)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts the async apply-preparation phase: secret merge, schema
+    /// validation, and plugin `ValidateConfig` for dirty plugins. The render
+    /// loop polls the receiver; only a clean result is finalized.
+    pub fn prepare_apply_async(
+        &self,
+        original: ene_config::EneConfig,
+        editing: ene_config::EneConfig,
+        dirty_paths: std::collections::BTreeSet<String>,
+    ) -> tokio::sync::oneshot::Receiver<crate::settings_ui::apply::ApplyPrepare> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            crate::settings_ui::apply::prepare_apply(&original, &editing, &dirty_paths, handle)
+                .await
+        })
+    }
+
+    /// Starts an asynchronous fetch of the standing permission grants.
+    pub fn fetch_permissions(
+        &self,
+    ) -> tokio::sync::oneshot::Receiver<Vec<ene_runtime::PermissionScope>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.list_permissions().await.unwrap_or_default() })
+    }
+
+    /// Starts an asynchronous permission revocation.
+    pub fn apply_revoke_permission(
+        &self,
+        id: u64,
+    ) -> tokio::sync::oneshot::Receiver<Result<bool, String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .revoke_permission(id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous reset of every permission grant.
+    pub fn apply_reset_permissions(&self) -> tokio::sync::oneshot::Receiver<Result<usize, String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .reset_all_permissions()
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous connector-list fetch.
+    pub fn fetch_connectors(
+        &self,
+    ) -> tokio::sync::oneshot::Receiver<Vec<ene_connector::ConnectorSummary>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.connectors().list() })
+    }
+
+    /// Starts an asynchronous connector status + grants fetch.
+    pub fn fetch_connector_detail(
+        &self,
+        id: ene_connector::ConnectorId,
+    ) -> tokio::sync::oneshot::Receiver<(
+        Option<ene_connector::ConnectorStatus>,
+        Vec<ene_connector::PermissionGrant>,
+    )> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            let status = handle.connectors().status(&id).ok();
+            let grants = handle.connectors().permissions(&id).unwrap_or_default();
+            (status, grants)
+        })
+    }
+
+    /// Starts an asynchronous connector connectivity check.
+    pub fn apply_connector_check(
+        &self,
+        id: ene_connector::ConnectorId,
+    ) -> tokio::sync::oneshot::Receiver<Result<ene_connector::HealthStatus, String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .connectors()
+                .check(&id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous session-list fetch.
+    pub fn fetch_sessions(
+        &self,
+        include_archived: bool,
+        limit: usize,
+    ) -> tokio::sync::oneshot::Receiver<Vec<ene_runtime::PublicSessionMeta>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .sessions()
+                .list(include_archived, limit)
+                .await
+                .unwrap_or_default()
+        })
+    }
+
+    /// Starts an asynchronous session search.
+    pub fn fetch_session_search(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> tokio::sync::oneshot::Receiver<Vec<(String, ene_runtime::PublicExportedMessage)>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .sessions()
+                .search(&query, limit, 0)
+                .await
+                .unwrap_or_default()
+        })
+    }
+
+    /// Starts an asynchronous session export.
+    pub fn apply_export_session(
+        &self,
+        session_id: String,
+    ) -> tokio::sync::oneshot::Receiver<Result<String, String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .sessions()
+                .export(&session_id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous session import.
+    pub fn apply_import_session(
+        &self,
+        json: String,
+    ) -> tokio::sync::oneshot::Receiver<Result<i64, String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .sessions()
+                .import(&json)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous archive toggle.
+    pub fn apply_archive_session(
+        &self,
+        session_id: String,
+        archived: bool,
+    ) -> tokio::sync::oneshot::Receiver<Result<bool, String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .sessions()
+                .set_archived(&session_id, archived)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous provider-catalog fetch.
+    pub fn fetch_provider_catalog(
+        &self,
+    ) -> tokio::sync::oneshot::Receiver<Option<ene_runtime::ProviderCatalog>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { Some(handle.provider_catalog().await) })
+    }
+
+    /// Starts an asynchronous API-key validation against a provider.
+    pub fn apply_validate_api_key(
+        &self,
+        base_url: String,
+        api_key: String,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        self.spawn_fetch(async move {
+            ene_ai::validate_api_key(&base_url, &api_key)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous typed-memory edit (memory ledger page).
+    pub fn apply_memory_edit(
+        &self,
+        id: i64,
+        edit: ene_core::MemoryEdit,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .memory_ledger()
+                .edit_memory(id, edit, handle.active_turn())
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous typed-memory salience adjustment.
+    pub fn apply_memory_salience(
+        &self,
+        id: i64,
+        salience: f32,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move {
+            handle
+                .memory_ledger()
+                .set_memory_salience(id, salience, handle.active_turn())
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous journal action (pin / archive / forget / …).
+    pub fn apply_journal_action(
+        &self,
+        id: i64,
+        action: crate::memory_journal::MemoryJournalAction,
+    ) -> tokio::sync::oneshot::Receiver<Result<bool, String>> {
+        let memory = self.handle.diagnostics().memory().clone();
+        self.spawn_fetch(async move {
+            let result = match action {
+                crate::memory_journal::MemoryJournalAction::Pin => {
+                    memory.pin_typed_memory(id, true).await
+                }
+                crate::memory_journal::MemoryJournalAction::Unpin => {
+                    memory.pin_typed_memory(id, false).await
+                }
+                crate::memory_journal::MemoryJournalAction::Archive => {
+                    memory
+                        .set_memory_status(id, ene_store::MemoryStatus::Archived)
+                        .await
+                }
+                crate::memory_journal::MemoryJournalAction::Forget => {
+                    memory.user_forget_typed_memory(id).await
+                }
+                crate::memory_journal::MemoryJournalAction::Dispute => {
+                    memory
+                        .set_memory_status(id, ene_store::MemoryStatus::Disputed)
+                        .await
+                }
+                crate::memory_journal::MemoryJournalAction::Restore => {
+                    memory
+                        .set_memory_status(id, ene_store::MemoryStatus::Active)
+                        .await
+                }
+            };
+            result.map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous commitment completion.
+    pub fn apply_complete_commitment(
+        &self,
+        id: i64,
+    ) -> tokio::sync::oneshot::Receiver<Result<bool, String>> {
+        let memory = self.handle.diagnostics().memory().clone();
+        self.spawn_fetch(async move {
+            memory
+                .complete_commitment(id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous commitment cancellation.
+    pub fn apply_cancel_commitment(
+        &self,
+        id: i64,
+    ) -> tokio::sync::oneshot::Receiver<Result<bool, String>> {
+        let memory = self.handle.diagnostics().memory().clone();
+        self.spawn_fetch(async move {
+            memory
+                .cancel_commitment(id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts an asynchronous `/models` fetch for a provider.
+    pub fn apply_fetch_model_ids(
+        &self,
+        base_url: String,
+        api_key: String,
+    ) -> tokio::sync::oneshot::Receiver<Vec<String>> {
+        self.spawn_fetch(async move {
+            ene_ai::fetch_model_ids(&base_url, &api_key)
+                .await
+                .unwrap_or_default()
+        })
     }
 
     /// Reject a pending memory candidate.

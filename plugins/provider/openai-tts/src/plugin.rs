@@ -74,25 +74,29 @@ impl ene_plugin::ConfigurablePlugin for OpenAiTtsPlugin {
                 },
                 "base_url": {
                     "type": "string",
-                    "description": "API base URL override (defaults to https://api.openai.com/v1)"
+                    "description": "API base URL override (defaults to https://api.openai.com/v1)",
+                    "x-ene-ui": { "group": "connection", "order": 0, "impact": "runtime_reload" }
                 },
                 "model": {
                     "type": "string",
                     "enum": ["tts-1", "tts-1-hd"],
                     "default": "tts-1",
-                    "description": "Speech synthesis model (tts-1 for low latency, tts-1-hd for higher quality)"
+                    "description": "Speech synthesis model (tts-1 for low latency, tts-1-hd for higher quality)",
+                    "x-ene-ui": { "group": "voice", "order": 0, "impact": "runtime_reload" }
                 },
                 "voice": {
                     "type": "string",
                     "enum": SUPPORTED_VOICES,
                     "default": "alloy",
-                    "description": "Default voice; a per-request voice overrides it"
+                    "description": "Default voice; a per-request voice overrides it",
+                    "x-ene-ui": { "group": "voice", "order": 1, "impact": "runtime_reload" }
                 },
                 "speed": {
                     "type": "number",
                     "minimum": 0.25,
                     "maximum": 4.0,
                     "default": 1.0,
+                    "x-ene-ui": { "group": "voice", "order": 2, "impact": "runtime_reload" },
                     "description": "Speech speed multiplier (0.25-4.0)"
                 },
                 "sample_rate": {

@@ -17,14 +17,14 @@
 //! `PrepareVisionSummary` request (busy-check + lazy model handle) and a
 //! fire-and-forget `StashProactiveScreenImage`.
 //!
-//! Config/control operations (`SetCharacter`, `UpdateFeatureSettings`,
+//! Config/control operations (`SetCharacter`, `ApplySettings`,
 //! plugin host restart) stay on this actor rather than a separate control
 //! plane: they are infrequent, low-latency, and never block behind a `Run`
 //! turn any worse than `Run` itself already does.
 
 use super::SharedActorState;
 use super::TurnGate;
-use super::command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
+use super::command::{DeferredToolTask, EneCommand};
 use super::event::{
     AudioChunk, EneEvent, EneStateSnapshot, EneStatus, LifecycleEvent, MemoryLedgerChange,
     TerminalReason,
@@ -87,6 +87,11 @@ pub(super) struct TurnActor {
     diag_tx: broadcast::Sender<DiagnosticEvent>,
     turn_gate: Arc<TurnGate>,
     config: EneConfig,
+    /// Monotonic revision bumped on every successful unified settings apply.
+    /// Drafts carry the value they were based on
+    /// ([`SettingsApplyRequest::base_revision`]) so a stale writer is
+    /// rejected instead of silently overwriting newer settings.
+    settings_revision: u64,
     session: ConversationSession,
     /// Concrete store for IPC server (`connection()`) and `ToolRag`.
     ///
@@ -326,6 +331,7 @@ impl TurnActor {
             diag_tx,
             turn_gate,
             config,
+            settings_revision: 0,
             session,
             concrete_store,
             registry,
@@ -2864,54 +2870,82 @@ impl TurnActor {
                 drop(self.event_tx.send(EneEvent::BeatPulse { bpm, intensity }));
                 true
             }
-            EneCommand::UpdateProactiveSettings { mind } => {
-                if let Ok(mut mind_cfg) = self.config.get_section::<ene_mind::MindConfig>() {
-                    mind_cfg.proactive = mind;
-                    drop(self.config.set_section(&mind_cfg));
-                    self.sync_shared_config();
+            EneCommand::ApplySettings { request, reply } => {
+                let result = self.apply_settings(*request).await;
+                if reply.send(result).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        "settings apply reply dropped (UI closed the window)"
+                    );
                 }
-                self.abort_proactive_decision();
-                self.abort_proactive_resolution();
                 true
             }
-            EneCommand::UpdateFeatureSettings { settings } => {
-                let FeatureSettingsUpdate {
-                    mind,
-                    store,
-                    plugins,
-                    rag,
-                } = *settings;
-                let prev_plugins = self
-                    .config
-                    .get_section::<ene_plugin_host::PluginConfig>()
-                    .unwrap_or_default();
-                let plugins_changed = plugin_enable_set_changed(&prev_plugins, &plugins);
-                let config_updates = if plugins_changed {
-                    HashMap::new()
-                } else {
-                    plugin_config_blob_updates(&prev_plugins, &plugins)
-                };
-
-                drop(self.config.set_section(&mind));
-                drop(self.config.set_section(&store));
-                drop(self.config.set_section(&plugins));
-                drop(self.config.set_section(&rag));
-                self.sync_shared_config();
-                self.abort_proactive_decision();
-                self.abort_proactive_resolution();
-
-                if plugins_changed {
-                    // The enabled plugin set changed: restart the plugin host
-                    // so newly-enabled plugins are spawned and disabled ones
-                    // are stopped, then rebuild the tool registry from the new
-                    // host. Runs in bg_command_tasks so the actor loop is
-                    // never blocked on process I/O.
-                    self.spawn_reconfigure_plugin_host();
-                } else if !config_updates.is_empty() {
-                    // Enable-set unchanged but config/profiles blobs changed:
-                    // push SetConfig to live connections (and refresh their
-                    // reconnect cache) without a full host restart.
-                    self.spawn_push_plugin_configs(config_updates);
+            EneCommand::GetPluginSnapshots { reply } => {
+                let snapshots = self.plugin_snapshots().await;
+                if reply.send(snapshots).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        "plugin snapshot reply dropped (UI closed the window)"
+                    );
+                }
+                true
+            }
+            EneCommand::ListPluginConfigOptions {
+                plugin,
+                path,
+                reply,
+            } => {
+                let result = self.list_plugin_config_options(&plugin, &path).await;
+                if reply.send(result).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        plugin,
+                        "plugin config options reply dropped (UI closed the window)"
+                    );
+                }
+                true
+            }
+            EneCommand::ValidatePluginConfig {
+                plugin,
+                value,
+                reply,
+            } => {
+                let result = self.validate_plugin_config(&plugin, &value).await;
+                if reply.send(result).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        plugin,
+                        "plugin config validation reply dropped (UI closed the window)"
+                    );
+                }
+                true
+            }
+            EneCommand::GetDiscoveredPlugins { reply } => {
+                let config = self.config.clone();
+                let mut host = self.plugin_host.lock().await;
+                let discovered = host
+                    .as_mut()
+                    .map_or_else(Vec::new, |manager| manager.discovered_plugins(&config));
+                drop(host);
+                if reply.send(discovered).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        "discovered-plugins reply dropped (UI closed the window)"
+                    );
+                }
+                true
+            }
+            EneCommand::ListMcpStatuses { reply } => {
+                let mut host = self.plugin_host.lock().await;
+                let statuses = host
+                    .as_mut()
+                    .map_or_else(Vec::new, |manager| manager.mcp_statuses());
+                drop(host);
+                if reply.send(statuses).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        "MCP status reply dropped (UI closed the window)"
+                    );
                 }
                 true
             }
@@ -2999,35 +3033,38 @@ impl TurnActor {
                 request_id,
                 decision,
             } => {
-                let mut guard = self.pending_permissions.lock().await;
-                if let Some(tx) = guard.remove(&request_id) {
-                    // A oneshot `Sender<PermissionDecision>::send` error is
-                    // `Copy` (it's just the unsent value), so `drop()` would
-                    // itself trip `clippy::dropping_copy_types`; a dropped
-                    // receiver just means the caller stopped waiting.
-                    #[expect(
-                        clippy::let_underscore_must_use,
-                        reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
-                    )]
-                    let _ = tx.send(decision);
-                }
-                drop(guard);
-                if let Some(pending) = self.pending_schedule_confirmations.remove(&request_id) {
-                    pending.timeout.cancel();
-                    match decision {
-                        PermissionDecision::AllowOnce | PermissionDecision::AllowSession => {
-                            self.begin_approved_scheduled_run(pending).await;
-                        }
-                        PermissionDecision::Deny => {
-                            self.finish_scheduled_run(
-                                pending.schedule_id,
-                                pending.run_id,
-                                ScheduleRunStatus::Denied,
-                                None,
-                            )
-                            .await;
-                        }
-                    }
+                self.resolve_permission(request_id, decision).await;
+                true
+            }
+            EneCommand::ResolveScheduleConfirmation {
+                schedule_id,
+                run_id,
+                approve,
+                reply,
+            } => {
+                let decision = if approve {
+                    PermissionDecision::AllowOnce
+                } else {
+                    PermissionDecision::Deny
+                };
+                let request_id =
+                    self.pending_schedule_confirmations
+                        .iter()
+                        .find_map(|(request_id, pending)| {
+                            (pending.schedule_id == schedule_id && pending.run_id == run_id)
+                                .then_some(request_id.clone())
+                        });
+                let resolved = if let Some(request_id) = request_id {
+                    self.resolve_permission(request_id, decision).await;
+                    true
+                } else {
+                    false
+                };
+                if reply.send(Ok(resolved)).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        "schedule confirmation reply dropped (UI closed the window)"
+                    );
                 }
                 true
             }
@@ -3395,6 +3432,23 @@ impl TurnActor {
                     reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
                 )]
                 let _ = reply.send(result);
+                self.notify_scheduler();
+                true
+            }
+            EneCommand::UpdateSchedule { id, new, reply } => {
+                let result = match &self.concrete_store {
+                    Some(store) => store
+                        .update_schedule(id, &new, (self.scheduler_clock)())
+                        .await
+                        .map_err(EneRuntimeError::from),
+                    None => Err(EneRuntimeError::StoreRequired),
+                };
+                if reply.send(result).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        "schedule update reply dropped (UI closed the window)"
+                    );
+                }
                 self.notify_scheduler();
                 true
             }
@@ -4370,13 +4424,274 @@ impl TurnActor {
 
     /// Publishes the current config to the mailbox-free shared state.
     ///
-    /// Called after every in-place config mutation (`UpdateFeatureSettings`,
-    /// `UpdateProactiveSettings`) so [`crate::EneHandle::config`] stays
-    /// consistent with the actor's authoritative copy. Read-only sharing:
-    /// only the actor writes, and only under a write lock.
+    /// Called after every config mutation ([`EneCommand::ApplySettings`],
+    /// character swaps) so [`crate::EneHandle::config`] stays consistent with
+    /// the actor's authoritative copy. Read-only sharing: only the actor
+    /// writes, and only under a write lock.
     fn sync_shared_config(&self) {
         let cfg = Arc::new(self.config.clone());
         *self.shared.config.write() = cfg;
+    }
+
+    /// Applies a unified settings draft: diff against the live config, write
+    /// changed sections, react per section, and report impact.
+    ///
+    /// On a section-write failure the config is rolled back to the pre-apply
+    /// copy and an error is returned; the UI can then re-sync its draft from
+    /// the persisted values.
+    async fn apply_settings(
+        &mut self,
+        request: crate::settings::SettingsApplyRequest,
+    ) -> Result<crate::settings::SettingsApplyResult, EneRuntimeError> {
+        if request
+            .base_revision
+            .is_some_and(|base| base != self.settings_revision)
+        {
+            tracing::warn!(
+                component = "TurnActor",
+                base = request.base_revision,
+                current = self.settings_revision,
+                "rejecting stale settings draft; the UI must re-sync"
+            );
+            return Ok(crate::settings::SettingsApplyResult {
+                revision: request.revision,
+                current_revision: self.settings_revision,
+                conflicted: true,
+                applied_sections: std::collections::BTreeSet::new(),
+                impact: crate::settings::SettingsImpact::default(),
+                errors: Vec::new(),
+            });
+        }
+        let prev = self.config.clone();
+        let changed = crate::settings::changed_sections(&prev, &request.config);
+        let mut applied = std::collections::BTreeSet::new();
+        let mut errors = Vec::new();
+
+        for key in &changed {
+            let write = match key.as_str() {
+                "character" => {
+                    self.config.character.clone_from(&request.config.character);
+                    Ok(())
+                }
+                "user_name" => {
+                    self.config.user_name.clone_from(&request.config.user_name);
+                    Ok(())
+                }
+                "runtime_rules" => {
+                    self.config
+                        .runtime_rules
+                        .clone_from(&request.config.runtime_rules);
+                    Ok(())
+                }
+                "user_persona" => {
+                    self.config
+                        .user_persona
+                        .clone_from(&request.config.user_persona);
+                    Ok(())
+                }
+                section => {
+                    if let Some(value) = request.config.section_value(section) {
+                        self.config.set_section_value(section, value)
+                    } else {
+                        self.config.remove_section(section);
+                        Ok(())
+                    }
+                }
+            };
+            match write {
+                Ok(()) => {
+                    applied.insert(key.clone());
+                }
+                Err(e) => errors.push(format!("{key}: {e}")),
+            }
+        }
+
+        if !errors.is_empty() {
+            self.config = prev;
+            self.sync_shared_config();
+            return Err(EneRuntimeError::Config(
+                ene_config::EneConfigError::GenericConfigError(format!(
+                    "Failed to apply settings sections: {}",
+                    errors.join("; ")
+                )),
+            ));
+        }
+
+        let mut impact = crate::settings::SettingsImpact::default();
+        let prompt_fields_changed = changed.iter().any(|key| {
+            matches!(
+                key.as_str(),
+                "character" | "user_name" | "runtime_rules" | "user_persona"
+            )
+        });
+        if changed.contains("mind") || changed.contains("ai") || prompt_fields_changed {
+            impact.runtime_reload = true;
+            self.abort_proactive_decision();
+            self.abort_proactive_resolution();
+        }
+        if changed.contains("ai") {
+            self.rebuild_tts_provider().await;
+        }
+        if changed.contains("rag") {
+            // Rebuild the tool-RAG indexer from the fresh section so
+            // selection options, embeddings, and the enabled flag take
+            // effect without a restart.
+            let embedder = self.session.memory.embedding_provider.clone();
+            let concrete_store = self.concrete_store.clone();
+            self.tool_rag = match embedder {
+                Some(embedder) => match init_tool_rag(&self.config, &embedder, concrete_store) {
+                    Ok(rag) => rag,
+                    Err(e) => {
+                        tracing::warn!(
+                            component = "TurnActor",
+                            error = %e,
+                            "failed to rebuild tool RAG after settings apply"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            };
+            impact.runtime_reload = true;
+        }
+        if changed.contains("tools") {
+            self.task_caps = self
+                .config
+                .get_section::<crate::task_config::ToolRuntimeConfig>()
+                .unwrap_or_default();
+            impact.runtime_reload = true;
+        }
+        if changed.contains("store") {
+            impact.runtime_reload = true;
+            let prev_store = prev
+                .get_section::<ene_store::StoreConfig>()
+                .unwrap_or_default();
+            let next_store = request
+                .config
+                .get_section::<ene_store::StoreConfig>()
+                .unwrap_or_default();
+            // The SQLite connection is bound at bootstrap; flipping the
+            // store on/off or switching between file and in-memory cannot be
+            // re-bound live.
+            if prev_store.enabled != next_store.enabled
+                || prev_store.in_memory != next_store.in_memory
+            {
+                impact.app_restart = true;
+            }
+        }
+        if changed.contains("plugins") {
+            let prev_plugins = prev
+                .get_section::<ene_plugin_host::PluginConfig>()
+                .unwrap_or_default();
+            let next_plugins = request
+                .config
+                .get_section::<ene_plugin_host::PluginConfig>()
+                .unwrap_or_default();
+            // MCP servers connect only at host start, so any change (add,
+            // remove, transport edit, enable toggle) needs the same full
+            // reconfigure as an enable-set change.
+            if plugin_enable_set_changed(&prev_plugins, &next_plugins)
+                || prev_plugins.mcp_servers != next_plugins.mcp_servers
+            {
+                impact.plugin_restart = true;
+                self.spawn_reconfigure_plugin_host();
+            } else {
+                let updates = plugin_config_blob_updates(&prev_plugins, &next_plugins);
+                if !updates.is_empty() {
+                    impact.runtime_reload = true;
+                    self.spawn_push_plugin_configs(updates);
+                }
+            }
+        }
+
+        self.sync_shared_config();
+        self.settings_revision = self.settings_revision.saturating_add(1);
+        Ok(crate::settings::SettingsApplyResult {
+            revision: request.revision,
+            current_revision: self.settings_revision,
+            conflicted: false,
+            applied_sections: applied,
+            impact,
+            errors,
+        })
+    }
+
+    /// Resolves a pending permission request, including schedule-run
+    /// confirmations that ride the same `PermissionRequired` path.
+    async fn resolve_permission(&mut self, request_id: RequestId, decision: PermissionDecision) {
+        let mut guard = self.pending_permissions.lock().await;
+        if let Some(tx) = guard.remove(&request_id) {
+            // A oneshot `Sender<PermissionDecision>::send` error is `Copy`
+            // (it's just the unsent value), so `drop()` would itself trip
+            // `clippy::dropping_copy_types`; a dropped receiver just means
+            // the caller stopped waiting.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+            )]
+            let _ = tx.send(decision);
+        }
+        drop(guard);
+        if let Some(pending) = self.pending_schedule_confirmations.remove(&request_id) {
+            pending.timeout.cancel();
+            match decision {
+                PermissionDecision::AllowOnce | PermissionDecision::AllowSession => {
+                    self.begin_approved_scheduled_run(pending).await;
+                }
+                PermissionDecision::Deny => {
+                    self.finish_scheduled_run(
+                        pending.schedule_id,
+                        pending.run_id,
+                        ScheduleRunStatus::Denied,
+                        None,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    /// Fetches settings snapshots for every configured plugin.
+    async fn plugin_snapshots(&self) -> Vec<ene_plugin_host::PluginSettingsSnapshot> {
+        let config = self.config.clone();
+        let mut host = self.plugin_host.lock().await;
+        match host.as_mut() {
+            Some(manager) => manager.settings_snapshots(&config).await,
+            None => Vec::new(),
+        }
+    }
+
+    /// Fetches dynamic config options from one plugin (empty when the plugin
+    /// is not connected or does not advertise `ListConfigOptions`).
+    async fn list_plugin_config_options(
+        &self,
+        plugin: &str,
+        path: &str,
+    ) -> Result<Vec<ene_plugin_proto::ConfigOption>, EneRuntimeError> {
+        let mut host = self.plugin_host.lock().await;
+        match host.as_mut() {
+            Some(manager) => manager
+                .list_config_options(plugin, path)
+                .await
+                .map_err(Into::into),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Validates a plugin config value through the plugin's own validator.
+    async fn validate_plugin_config(
+        &self,
+        plugin: &str,
+        value: &serde_json::Value,
+    ) -> Result<Vec<ene_plugin_proto::ConfigFieldError>, EneRuntimeError> {
+        let mut host = self.plugin_host.lock().await;
+        match host.as_mut() {
+            Some(manager) => manager
+                .validate_config(plugin, value)
+                .await
+                .map_err(Into::into),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Start a new session when the user returns after a long idle period.

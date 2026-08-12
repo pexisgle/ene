@@ -1,21 +1,12 @@
 //! Permission Center settings page.
 //!
-//! Surfaces the two halves of the tool-permission model:
-//!
-//! * **Pending approvals** — destructive operations the actor is
-//!   currently blocked on (accumulated from
-//!   [`crate::event::ai::AiPermissionRequested`] into
-//!   [`crate::settings::UiState::permission_requests`]). Each row offers
-//!   Approve (once) / Approve (session) / Deny, which forward a
-//!   [`ene_runtime::PermissionDecision`] through the [`AiBridge`].
-//! * **Granted scopes** — standing session-wide grants fetched from the
-//!   actor via [`AiBridge::list_permissions_blocking`], each revocable,
+//! * **Pending approvals** — destructive operations the actor is blocked on
+//!   (from [`crate::event::ai::AiPermissionRequested`] into
+//!   [`crate::settings::UiState::permission_requests`]); each row offers
+//!   Approve (once) / Approve (session) / Deny.
+//! * **Granted scopes** — standing session-wide grants, loaded
+//!   asynchronously (never blocking the render thread), each revocable,
 //!   plus a "reset all" action.
-//!
-//! The page mirrors the data-fetch pattern of [`super::page_memory`]:
-//! blocking calls run on the UI thread through the bridge's tokio
-//! handle, results are cached on [`UiStateComponent`], and a status
-//! line reports the outcome of the last operation.
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
@@ -27,15 +18,23 @@ use crate::ai_bridge::AiBridge;
 use crate::component::ui::UiStateComponent;
 use crate::settings::PendingPermission;
 use crate::settings_ui::components::{danger_button, empty_state, section_card, setting_row};
+use crate::settings_ui::input::{AsyncData, SettingsInputState};
 
-pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    // Load the grants the first time the page is shown so the list is
-    // not empty behind a manual refresh.
-    if world
-        .get::<UiStateComponent>(ui_entity)
-        .is_some_and(|s| s.0.permission_grants.is_empty())
-    {
-        refresh_grants(ai, world, ui_entity, false);
+pub fn render(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+) {
+    input.permissions.poll();
+    if !input.permissions.started() {
+        input.permissions.start(ai.fetch_permissions());
+    }
+    input.permission_action.poll();
+    if let Some(message) = input.permission_action.data.take() {
+        ui.label(message);
+        input.permissions = AsyncData::new();
     }
 
     ui.vertical(|ui| {
@@ -43,27 +42,24 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
             ui,
             "permissions-pending",
             &fl!(crate::i18n::loader(), "permissions-pending"),
-            |ui| render_pending(ui, ai, world, ui_entity),
+            |ui| render_pending(ui, ai, input, world, ui_entity),
         );
         section_card(
             ui,
             "permissions-grants",
             &fl!(crate::i18n::loader(), "permissions-granted"),
-            |ui| render_granted(ui, ai, world, ui_entity),
+            |ui| render_granted(ui, ai, input),
         );
     });
-
-    if let Some(message) = world
-        .get::<UiStateComponent>(ui_entity)
-        .and_then(|s| s.0.permission_message.clone())
-    {
-        ui.add_space(6.0);
-        ui.label(message);
-    }
 }
 
-/// Pending-approval section: one group per outstanding request.
-fn render_pending(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
+fn render_pending(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+) {
     let pending = world
         .get::<UiStateComponent>(ui_entity)
         .map(|s| s.0.permission_requests.clone())
@@ -83,7 +79,7 @@ fn render_pending(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_e
         .max_height(220.0)
         .show(ui, |ui| {
             for request in &pending {
-                render_pending_row(ui, ai, world, ui_entity, request);
+                render_pending_row(ui, ai, input, world, ui_entity, request);
                 ui.add_space(4.0);
             }
         });
@@ -92,6 +88,7 @@ fn render_pending(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_e
 fn render_pending_row(
     ui: &mut egui::Ui,
     ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
     world: &mut World,
     ui_entity: Entity,
     request: &PendingPermission,
@@ -124,6 +121,7 @@ fn render_pending_row(
                 {
                     decide(
                         ai,
+                        input,
                         world,
                         ui_entity,
                         request.request_id.clone(),
@@ -136,6 +134,7 @@ fn render_pending_row(
                 {
                     decide(
                         ai,
+                        input,
                         world,
                         ui_entity,
                         request.request_id.clone(),
@@ -148,6 +147,7 @@ fn render_pending_row(
                 {
                     decide(
                         ai,
+                        input,
                         world,
                         ui_entity,
                         request.request_id.clone(),
@@ -158,9 +158,80 @@ fn render_pending_row(
         });
 }
 
+/// Forward a decision (a non-blocking channel send), drop the request from
+/// the pending list, and refresh the granted scopes asynchronously.
+fn decide(
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+    request_id: RequestId,
+    decision: PermissionDecision,
+) {
+    let result = ai.answer_permission(request_id.clone(), decision);
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state
+            .0
+            .permission_requests
+            .retain(|p| p.request_id != request_id);
+    }
+    if let Err(error) = result {
+        start_action_message(input, error.to_string());
+    }
+    input.permissions = AsyncData::new();
+}
+
+fn revoke(ai: &Arc<AiBridge>, input: &mut SettingsInputState, id: u64) {
+    input.permissions = AsyncData::new();
+    let receiver = ai.apply_revoke_permission(id);
+    input.permission_action = AsyncData::new();
+    input.permission_action.start(spawn_message(
+        ai,
+        receiver,
+        fl!(crate::i18n::loader(), "permissions-revoke-ok"),
+        fl!(crate::i18n::loader(), "permissions-revoke-error"),
+    ));
+}
+
+fn reset_all(ai: &Arc<AiBridge>, input: &mut SettingsInputState) {
+    input.permissions = AsyncData::new();
+    let receiver = ai.apply_reset_permissions();
+    input.permission_action = AsyncData::new();
+    input.permission_action.start(spawn_message(
+        ai,
+        receiver,
+        fl!(crate::i18n::loader(), "permissions-reset-ok"),
+        fl!(crate::i18n::loader(), "permissions-reset-error"),
+    ));
+}
+
+fn start_action_message(input: &mut SettingsInputState, message: String) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if tx.send(message).is_err() {
+        tracing::debug!(component = "PermissionsPage", "action message dropped");
+    }
+    input.permission_action = AsyncData::new();
+    input.permission_action.start(rx);
+}
+
+fn spawn_message<T: std::fmt::Display + Send + 'static>(
+    ai: &AiBridge,
+    receiver: tokio::sync::oneshot::Receiver<Result<T, String>>,
+    ok_label: String,
+    error_label: String,
+) -> tokio::sync::oneshot::Receiver<String> {
+    ai.spawn_fetch(async move {
+        match receiver.await {
+            Ok(Ok(_)) => ok_label,
+            Ok(Err(error)) => format!("{error_label}: {error}"),
+            Err(_) => error_label,
+        }
+    })
+}
+
 /// Granted-scope section: refreshable table with per-row revoke and a
-/// reset-all action.
-fn render_granted(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
+/// reset-all action. The list is fetched asynchronously.
+fn render_granted(ui: &mut egui::Ui, ai: &Arc<AiBridge>, input: &mut SettingsInputState) {
     setting_row(
         ui,
         "permissions_refresh_row",
@@ -171,16 +242,27 @@ fn render_granted(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_e
                 .button(fl!(crate::i18n::loader(), "permissions-refresh"))
                 .clicked()
             {
-                refresh_grants(ai, world, ui_entity, true);
+                input.permissions = AsyncData::new();
             }
         },
     );
 
-    let grants = world
-        .get::<UiStateComponent>(ui_entity)
-        .map(|s| s.0.permission_grants.clone())
-        .unwrap_or_default();
+    if input.permissions.loading() {
+        ui.weak(fl!(crate::i18n::loader(), "permissions-loading"));
+        return;
+    }
+    if let Some(error) = input.permissions.error.clone() {
+        ui.colored_label(egui::Color32::LIGHT_RED, error);
+        if ui
+            .small_button(fl!(crate::i18n::loader(), "permissions-retry"))
+            .clicked()
+        {
+            input.permissions = AsyncData::new();
+        }
+        return;
+    }
 
+    let grants = input.permissions.data.clone().unwrap_or_default();
     if grants.is_empty() {
         empty_state(
             ui,
@@ -189,7 +271,7 @@ fn render_granted(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_e
         );
     } else {
         if danger_button(ui, &fl!(crate::i18n::loader(), "permissions-reset-all")).clicked() {
-            reset_all(ai, world, ui_entity);
+            reset_all(ai, input);
         }
         ui.add_space(4.0);
         egui::ScrollArea::vertical()
@@ -197,7 +279,7 @@ fn render_granted(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_e
             .max_height(280.0)
             .show(ui, |ui| {
                 for grant in &grants {
-                    render_grant_row(ui, ai, world, ui_entity, grant);
+                    render_grant_row(ui, ai, input, grant);
                     ui.add_space(4.0);
                 }
             });
@@ -207,8 +289,7 @@ fn render_granted(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_e
 fn render_grant_row(
     ui: &mut egui::Ui,
     ai: &Arc<AiBridge>,
-    world: &mut World,
-    ui_entity: Entity,
+    input: &mut SettingsInputState,
     grant: &PermissionScope,
 ) {
     egui::Frame::group(ui.style())
@@ -236,83 +317,9 @@ fn render_grant_row(
                 .button(fl!(crate::i18n::loader(), "permissions-revoke"))
                 .clicked()
             {
-                revoke(ai, world, ui_entity, grant.id);
+                revoke(ai, input, grant.id);
             }
         });
-}
-
-/// Forward a decision, drop the request from the pending list, then
-/// refresh the granted scopes (an `AllowSession` decision creates one).
-fn decide(
-    ai: &Arc<AiBridge>,
-    world: &mut World,
-    ui_entity: Entity,
-    request_id: RequestId,
-    decision: PermissionDecision,
-) {
-    let result = ai.answer_permission(request_id.clone(), decision);
-    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        state
-            .0
-            .permission_requests
-            .retain(|p| p.request_id != request_id);
-    }
-    set_message(world, ui_entity, result);
-    refresh_grants(ai, world, ui_entity, false);
-}
-
-fn revoke(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity, id: u64) {
-    let result = ai.revoke_permission_blocking(id).map(|_| ());
-    set_message(world, ui_entity, result);
-    refresh_grants(ai, world, ui_entity, false);
-}
-
-fn reset_all(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
-    let result = ai.reset_all_permissions_blocking().map(|_| ());
-    set_message(world, ui_entity, result);
-    refresh_grants(ai, world, ui_entity, false);
-}
-
-/// Re-fetch the standing grants from the actor. When `announce` is
-/// `true` (manual refresh) a success message is shown; silent
-/// refreshes after a decision/revocation leave the action's own
-/// message in place.
-fn refresh_grants(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity, announce: bool) {
-    match ai.list_permissions_blocking() {
-        Ok(grants) => {
-            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-                state.0.permission_grants = grants;
-                if announce {
-                    state.0.permission_message =
-                        Some(fl!(crate::i18n::loader(), "permissions-refresh-ok"));
-                }
-            }
-        }
-        Err(error) => {
-            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-                state.0.permission_message = Some(format!(
-                    "{}: {error}",
-                    fl!(crate::i18n::loader(), "permissions-refresh-error")
-                ));
-            }
-        }
-    }
-}
-
-fn set_message(
-    world: &mut World,
-    ui_entity: Entity,
-    result: Result<(), crate::ai_bridge::AiBridgeError>,
-) {
-    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        state.0.permission_message = Some(match result {
-            Ok(()) => fl!(crate::i18n::loader(), "permissions-action-ok"),
-            Err(error) => format!(
-                "{}: {error}",
-                fl!(crate::i18n::loader(), "permissions-action-error")
-            ),
-        });
-    }
 }
 
 fn grant_type_label(grant_type: GrantType) -> String {
@@ -324,9 +331,8 @@ fn grant_type_label(grant_type: GrantType) -> String {
 }
 
 fn field_label(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.add(
-        egui::Label::new(format!("{label}: {value}"))
-            .wrap()
-            .selectable(true),
-    );
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.monospace(value);
+    });
 }

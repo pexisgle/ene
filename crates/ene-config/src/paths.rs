@@ -148,7 +148,21 @@ pub fn user_plugins_dir() -> PathBuf {
 
 /// Temporary socket directory for plugins.
 pub fn plugin_socket_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("{APP_ID}.plugins"))
+    socket_dir_for(&std::env::temp_dir())
+}
+
+fn socket_dir_for(temp: &Path) -> PathBuf {
+    let preferred = temp.join(format!("{APP_ID}.plugins"));
+    #[cfg(unix)]
+    {
+        // Unix sockets fail to bind once the path exceeds SUN_LEN (108 on
+        // Linux, 104 on macOS); long TMPDIR values (nested sandbox homes)
+        // must not break the plugin host, so fall back to /tmp for sockets.
+        if preferred.as_os_str().len() > 70 {
+            return PathBuf::from("/tmp").join(format!("{APP_ID}.plugins"));
+        }
+    }
+    preferred
 }
 
 /// Gets the path to the character-specific settings file
@@ -171,4 +185,24 @@ pub fn character_dir(character_name: &str) -> PathBuf {
 /// `character_dir` for an explicit base assets directory.
 pub fn character_dir_in(base: &Path, character_name: &str) -> PathBuf {
     base.join("characters").join(character_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_temp_dir_is_used_as_is() {
+        let dir = socket_dir_for(Path::new("/tmp"));
+        assert_eq!(dir, PathBuf::from("/tmp/dev.pexisgle.ene.plugins"));
+    }
+
+    #[test]
+    fn long_temp_dir_falls_back_to_short_socket_path() {
+        let long = Path::new("/home/someone/.local/state/very/long/temp/path");
+        let dir = socket_dir_for(long);
+        assert!(dir.as_os_str().len() <= 70, "socket dir too long: {dir:?}");
+        #[cfg(unix)]
+        assert_eq!(dir, PathBuf::from("/tmp/dev.pexisgle.ene.plugins"));
+    }
 }

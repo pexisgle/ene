@@ -57,6 +57,19 @@ by Git.
 automatically on load (`ene-config` migrations). There is no migration
 backward — the file is upgraded in place.
 
+The desktop settings UI edits through a draft: changes are validated against
+the registered schemas, persisted atomically, and pushed to the runtime,
+which diffs them against its live config and reports the actual impact
+(immediate / hot-reload / plugin-restart / app-restart). A failed runtime
+apply rolls the persisted config back, and a draft based on a stale runtime
+revision is rejected with a conflict so concurrent writers never overwrite
+each other silently. `ai.local_models` is derived from the
+`plugins.list.local-llm` / `llama-server` profiles at apply time — edit
+profiles, never the derived map. Plugin configs (`plugins.list.<name>`
+`config` / `profiles`) are edited with the plugin's own JSON Schema, with
+`x-ene-ui` field metadata and `x-ene-profiles-schema` extensions; unknown
+keys are preserved.
+
 ## Top-level keys
 
 | Key | Type | Default | Meaning |

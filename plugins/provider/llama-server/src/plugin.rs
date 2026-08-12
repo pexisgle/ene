@@ -65,33 +65,50 @@ impl ene_plugin::ConfigurablePlugin for LlamaServerPlugin {
     fn config_schema(&self) -> Option<Value> {
         Some(serde_json::json!({
             "type": "object",
+            "x-ene-profiles-schema": {
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "GGUF download URL" },
+                    "model_path": { "type": "string", "description": "Local GGUF path (skips download when non-empty)" },
+                    "quantization": { "type": "string", "description": "Quantization tag, e.g. q4_k_m" },
+                    "gpu_layers": { "type": "integer", "minimum": 0, "description": "GPU offload layers (0 = CPU only)" },
+                    "context_size": { "type": "integer", "minimum": 1, "description": "Context window in tokens" },
+                    "dimensions": { "type": "integer", "minimum": 1, "description": "Embedding dimensions for embedding-capable models" }
+                }
+            },
             "properties": {
                 "server_path": {
                     "type": "string",
-                    "description": "Path to the llama-server executable (default: beside the plugin binary, then PATH)"
+                    "description": "Path to the llama-server executable (default: beside the plugin binary, then PATH)",
+                    "x-ene-ui": { "group": "server", "order": 0, "impact": "plugin_restart" }
                 },
                 "server_args": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Extra command-line arguments passed to llama-server"
+                    "description": "Extra command-line arguments passed to llama-server",
+                    "x-ene-ui": { "group": "server", "order": 1, "impact": "plugin_restart" }
                 },
                 "startup_timeout_secs": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "How long to wait for llama-server /health after spawning"
+                    "description": "How long to wait for llama-server /health after spawning",
+                    "x-ene-ui": { "group": "server", "order": 2, "impact": "plugin_restart" }
                 },
                 "mmproj_url": {
                     "type": "string",
-                    "description": "HTTPS URL for the multimodal projector (mmproj) GGUF"
+                    "description": "HTTPS URL for the multimodal projector (mmproj) GGUF",
+                    "x-ene-ui": { "group": "multimodal", "order": 1, "impact": "plugin_restart" }
                 },
                 "mmproj_path": {
                     "type": "string",
-                    "description": "Optional filesystem path for mmproj (skips download when non-empty)"
+                    "description": "Optional filesystem path for mmproj (skips download when non-empty)",
+                    "x-ene-ui": { "group": "multimodal", "order": 2, "impact": "plugin_restart" }
                 },
                 "acceleration": {
                     "type": "string",
                     "enum": ["auto", "cpu", "vulkan", "cuda"],
-                    "description": "Preferred acceleration backend for llama-server"
+                    "description": "Preferred acceleration backend for llama-server",
+                    "x-ene-ui": { "order": 3, "impact": "plugin_restart" }
                 }
             }
         }))
