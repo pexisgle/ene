@@ -313,13 +313,21 @@ fn load_schedule_into_form(ui: &mut egui::Ui, schedule: &ene_core::Schedule) {
         );
         match &schedule.action {
             ene_core::ScheduleAction::Tool { name, arguments } => {
+                data.insert_temp(egui::Id::new("schedules_add_is_prompt"), false);
+                data.insert_temp(egui::Id::new("schedules_add_prompt"), String::new());
                 data.insert_temp(egui::Id::new("schedules_add_tool"), name.clone());
                 data.insert_temp(
                     egui::Id::new("schedules_add_arguments"),
                     serde_json::to_string_pretty(arguments).unwrap_or_else(|_| "{}".to_string()),
                 );
             }
-            ene_core::ScheduleAction::Prompt { .. } => {}
+            ene_core::ScheduleAction::Prompt { text, allow_tools } => {
+                data.insert_temp(egui::Id::new("schedules_add_is_prompt"), true);
+                data.insert_temp(egui::Id::new("schedules_add_prompt"), text.clone());
+                data.insert_temp(egui::Id::new("schedules_add_allow_tools"), *allow_tools);
+                data.insert_temp(egui::Id::new("schedules_add_tool"), String::new());
+                data.insert_temp(egui::Id::new("schedules_add_arguments"), "{}".to_string());
+            }
         }
         data.insert_temp(
             egui::Id::new("schedules_add_confirmation"),
@@ -354,6 +362,18 @@ fn render_add_form(ui: &mut egui::Ui, ai: &Arc<AiBridge>, input: &mut SettingsIn
             let mut tool = ui.data_mut(|data| {
                 data.get_temp::<String>(egui::Id::new("schedules_add_tool"))
                     .unwrap_or_default()
+            });
+            let mut prompt = ui.data_mut(|data| {
+                data.get_temp::<String>(egui::Id::new("schedules_add_prompt"))
+                    .unwrap_or_default()
+            });
+            let prompt_mode = ui.data_mut(|data| {
+                data.get_temp::<bool>(egui::Id::new("schedules_add_is_prompt"))
+                    .unwrap_or(false)
+            });
+            let mut allow_tools = ui.data_mut(|data| {
+                data.get_temp::<bool>(egui::Id::new("schedules_add_allow_tools"))
+                    .unwrap_or(false)
             });
             let mut arguments = ui.data_mut(|data| {
                 data.get_temp::<String>(egui::Id::new("schedules_add_arguments"))
@@ -450,38 +470,75 @@ fn render_add_form(ui: &mut egui::Ui, ai: &Arc<AiBridge>, input: &mut SettingsIn
                     });
                 }
             });
-            ui.horizontal(|ui| {
-                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "schedules-tool"));
-                if ui
-                    .add(egui::TextEdit::singleline(&mut tool).desired_width(200.0))
-                    .changed()
-                {
-                    ui.data_mut(|data| {
-                        data.insert_temp(egui::Id::new("schedules_add_tool"), tool.clone());
-                    });
-                }
-            });
-            ui.horizontal(|ui| {
+            if prompt_mode {
                 ui.label(i18n_embed_fl::fl!(
                     crate::i18n::loader(),
-                    "schedules-arguments"
+                    "schedules-prompt"
                 ));
                 if ui
-                    .add(egui::TextEdit::singleline(&mut arguments).desired_width(240.0))
+                    .add(
+                        egui::TextEdit::multiline(&mut prompt)
+                            .desired_rows(4)
+                            .desired_width(280.0),
+                    )
                     .changed()
                 {
                     ui.data_mut(|data| {
-                        data.insert_temp(
-                            egui::Id::new("schedules_add_arguments"),
-                            arguments.clone(),
-                        );
+                        data.insert_temp(egui::Id::new("schedules_add_prompt"), prompt.clone());
                     });
                 }
-            });
-            ui.checkbox(
-                &mut confirmation,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "schedules-confirmation"),
-            );
+                if ui
+                    .checkbox(
+                        &mut allow_tools,
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "schedules-allow-tools"),
+                    )
+                    .changed()
+                {
+                    ui.data_mut(|data| {
+                        data.insert_temp(egui::Id::new("schedules_add_allow_tools"), allow_tools);
+                    });
+                }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "schedules-tool"));
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut tool).desired_width(200.0))
+                        .changed()
+                    {
+                        ui.data_mut(|data| {
+                            data.insert_temp(egui::Id::new("schedules_add_tool"), tool.clone());
+                        });
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "schedules-arguments"
+                    ));
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut arguments).desired_width(240.0))
+                        .changed()
+                    {
+                        ui.data_mut(|data| {
+                            data.insert_temp(
+                                egui::Id::new("schedules_add_arguments"),
+                                arguments.clone(),
+                            );
+                        });
+                    }
+                });
+            }
+            if ui
+                .checkbox(
+                    &mut confirmation,
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "schedules-confirmation"),
+                )
+                .changed()
+            {
+                ui.data_mut(|data| {
+                    data.insert_temp(egui::Id::new("schedules_add_confirmation"), confirmation);
+                });
+            }
 
             ui.horizontal(|ui| {
                 if input.schedule_editing.is_some()
@@ -521,6 +578,9 @@ fn render_add_form(ui: &mut egui::Ui, ai: &Arc<AiBridge>, input: &mut SettingsIn
                         &interval,
                         &arguments,
                         &tool,
+                        &prompt,
+                        prompt_mode,
+                        allow_tools,
                         &timezone,
                         confirmation,
                     ) {
@@ -589,6 +649,9 @@ fn parse_schedule_input(
     interval: &str,
     arguments: &str,
     tool: &str,
+    prompt: &str,
+    prompt_mode: bool,
+    allow_tools: bool,
     timezone: &str,
     confirmation: bool,
 ) -> Result<ene_core::NewSchedule, String> {
@@ -598,19 +661,34 @@ fn parse_schedule_input(
             "schedules-empty-name"
         ));
     }
-    let parsed_arguments: serde_json::Value =
-        serde_json::from_str(arguments.trim()).map_err(|e| {
-            format!(
-                "{}: {e}",
-                i18n_embed_fl::fl!(crate::i18n::loader(), "schedules-invalid-json")
-            )
-        })?;
-    if tool.trim().is_empty() {
-        return Err(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "schedules-tool-required"
-        ));
-    }
+    let action = if prompt_mode {
+        if prompt.trim().is_empty() {
+            return Err(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "schedules-prompt-required"
+            ));
+        }
+        ene_core::ScheduleAction::Prompt {
+            text: prompt.trim().to_string(),
+            allow_tools,
+        }
+    } else {
+        if tool.trim().is_empty() {
+            return Err(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "schedules-tool-required"
+            ));
+        }
+        ene_core::ScheduleAction::Tool {
+            name: tool.trim().to_string(),
+            arguments: serde_json::from_str(arguments.trim()).map_err(|e| {
+                format!(
+                    "{}: {e}",
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "schedules-invalid-json")
+                )
+            })?,
+        }
+    };
     let interval_secs = if kind == "interval" {
         match interval.trim().parse::<i64>() {
             Ok(value) if value > 0 => Some(value),
@@ -668,10 +746,7 @@ fn parse_schedule_input(
         cron_expr,
         interval_secs,
         start_at,
-        action: ene_core::ScheduleAction::Tool {
-            name: tool.trim().to_string(),
-            arguments: parsed_arguments,
-        },
+        action,
         confirmation: if confirmation {
             ene_core::ScheduleConfirmation::Confirm
         } else {
@@ -720,8 +795,19 @@ mod tests {
     #[test]
     fn invalid_json_is_rejected_not_coerced() {
         let (name, kind, cron, interval, _args, tool, tz, confirm) = valid_input();
-        let result =
-            parse_schedule_input(name, kind, cron, interval, "{not json", tool, tz, confirm);
+        let result = parse_schedule_input(
+            name,
+            kind,
+            cron,
+            interval,
+            "{not json",
+            tool,
+            "",
+            false,
+            false,
+            tz,
+            confirm,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("JSON"));
     }
@@ -730,38 +816,107 @@ mod tests {
     fn empty_name_is_rejected() {
         let (_, kind, cron, interval, args, tool, tz, confirm) = valid_input();
         assert!(
-            parse_schedule_input("   ", kind, cron, interval, args, tool, tz, confirm).is_err()
+            parse_schedule_input(
+                "   ", kind, cron, interval, args, tool, "", false, false, tz, confirm
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn non_positive_interval_is_rejected() {
         let (name, _, _, _, args, tool, tz, confirm) = valid_input();
-        assert!(parse_schedule_input(name, "interval", "", "0", args, tool, tz, confirm).is_err());
-        assert!(parse_schedule_input(name, "interval", "", "-5", args, tool, tz, confirm).is_err());
+        assert!(
+            parse_schedule_input(
+                name, "interval", "", "0", args, tool, "", false, false, tz, confirm
+            )
+            .is_err()
+        );
+        assert!(
+            parse_schedule_input(
+                name, "interval", "", "-5", args, tool, "", false, false, tz, confirm
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn unknown_kind_and_missing_cron_are_rejected() {
         let (name, _, _, _, args, tool, tz, confirm) = valid_input();
-        assert!(parse_schedule_input(name, "weekly", "", "3600", args, tool, tz, confirm).is_err());
-        assert!(parse_schedule_input(name, "cron", "", "", args, tool, tz, confirm).is_err());
         assert!(
-            parse_schedule_input(name, "cron", "* * * * *", "", args, tool, tz, confirm).is_ok()
+            parse_schedule_input(
+                name, "weekly", "", "3600", args, tool, "", false, false, tz, confirm
+            )
+            .is_err()
+        );
+        assert!(
+            parse_schedule_input(
+                name, "cron", "", "", args, tool, "", false, false, tz, confirm
+            )
+            .is_err()
+        );
+        assert!(
+            parse_schedule_input(
+                name,
+                "cron",
+                "* * * * *",
+                "",
+                args,
+                tool,
+                "",
+                false,
+                false,
+                tz,
+                confirm
+            )
+            .is_ok()
         );
     }
 
     #[test]
     fn valid_interval_input_parses_with_local_timezone_fallback() {
         let (name, _, _, _, args, tool, _, confirm) = valid_input();
-        let schedule = parse_schedule_input(name, "interval", "", "60", args, tool, "", confirm)
-            .expect("valid input");
+        let schedule = parse_schedule_input(
+            name, "interval", "", "60", args, tool, "", false, false, "", confirm,
+        )
+        .expect("valid input");
         assert_eq!(schedule.name, "daily");
         assert_eq!(schedule.kind, ene_core::ScheduleKind::Interval);
         assert_eq!(schedule.interval_secs, Some(60));
         assert!(
             !schedule.timezone.is_empty(),
             "empty timezone falls back to the local IANA zone"
+        );
+    }
+
+    #[test]
+    fn prompt_mode_requires_text_and_preserves_allow_tools() {
+        let (name, _, _, _, args, _tool, tz, confirm) = valid_input();
+        let rejected = parse_schedule_input(
+            name, "interval", "", "60", args, "", "   ", true, true, tz, confirm,
+        );
+        assert!(rejected.is_err(), "an empty prompt must be rejected");
+
+        let schedule = parse_schedule_input(
+            name,
+            "interval",
+            "",
+            "60",
+            args,
+            "",
+            "summarize the day",
+            true,
+            true,
+            tz,
+            confirm,
+        )
+        .expect("valid prompt input");
+        assert_eq!(
+            schedule.action,
+            ene_core::ScheduleAction::Prompt {
+                text: "summarize the day".to_string(),
+                allow_tools: true,
+            }
         );
     }
 }
