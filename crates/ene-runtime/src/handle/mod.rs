@@ -1573,9 +1573,9 @@ impl EneHandle {
     ///
     /// The actor diffs the proposed config against its live copy, writes the
     /// changed sections, reacts per section (proactive abort, TTS provider
-    /// rebuild, plugin-host reconfigure when the enable set changed), and
-    /// returns the actual impact. The returned revision echoes the request
-    /// revision so the caller can detect a stale apply.
+    /// rebuild, plugin-host reconfigure when the enable set or MCP servers
+    /// changed), and returns the actual impact. The returned revision echoes
+    /// the request revision so the caller can detect a stale apply.
     pub async fn apply_settings(
         &self,
         request: crate::settings::SettingsApplyRequest,

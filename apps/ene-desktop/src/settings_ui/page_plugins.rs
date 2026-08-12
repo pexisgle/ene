@@ -42,6 +42,7 @@ pub fn render(
             .clicked()
         {
             input.plugin_snapshots = AsyncData::new();
+            input.mcp_statuses = AsyncData::new();
         }
     });
     ui.weak(i18n_embed_fl::fl!(

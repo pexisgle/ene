@@ -64,7 +64,7 @@ const fn default_max_temp_mb() -> u64 {
 }
 
 /// Per-plugin OS sandbox settings.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct SandboxEntryConfig {
     /// Whether the OS sandbox is applied to this plugin.

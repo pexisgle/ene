@@ -413,9 +413,10 @@ pub enum EneCommand {
     /// Replaces the previous `UpdateProactiveSettings` /
     /// `UpdateFeatureSettings` split: the actor diffs the proposed config
     /// against its live copy, writes the changed sections, reacts per section
-    /// (proactive abort, TTS provider rebuild, plugin-host reconfigure), and
-    /// reports the actual impact through the reply channel. The revision is
-    /// echoed back so the UI can detect a stale apply.
+    /// (proactive abort, TTS provider rebuild, plugin-host reconfigure on
+    /// enable-set or MCP-server changes), and reports the actual impact
+    /// through the reply channel. The revision is echoed back so the UI can
+    /// detect a stale apply.
     ApplySettings {
         /// Boxed payload to keep [`EneCommand`] small.
         request: Box<crate::settings::SettingsApplyRequest>,

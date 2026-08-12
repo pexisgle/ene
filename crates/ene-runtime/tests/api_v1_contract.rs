@@ -668,6 +668,50 @@ async fn stale_draft_is_rejected_and_config_is_untouched() {
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
+/// An MCP-server change cannot hot-reload; the apply must report a plugin
+/// restart so the UI warns instead of claiming immediate success.
+#[tokio::test]
+async fn mcp_server_changes_report_plugin_restart() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open initializes handle");
+
+    let mut proposed = handle.config().as_ref().clone();
+    let mut plugins = proposed
+        .get_section::<ene_plugin_host::PluginConfig>()
+        .expect("plugins section present");
+    plugins.mcp_servers.push(ene_plugin_host::McpServerConfig {
+        name: "test-server".to_string(),
+        enabled: true,
+        transport: ene_plugin_host::McpTransport::Stdio {
+            command: "echo".to_string(),
+            args: Vec::new(),
+        },
+        env_passthrough: Vec::new(),
+        sandbox: None,
+    });
+    proposed
+        .set_section(&plugins)
+        .expect("plugins section merges");
+
+    let result = handle
+        .apply_settings(ene_runtime::SettingsApplyRequest {
+            revision: 3,
+            base_revision: Some(0),
+            config: proposed,
+        })
+        .await
+        .expect("apply succeeds");
+
+    assert!(!result.conflicted);
+    assert!(
+        result.impact.plugin_restart,
+        "an MCP server change requires a plugin-host restart: {result:?}"
+    );
+
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+}
+
 /// `EneHandle::history()` is the dedicated mailbox-based history read:
 /// large payload, so it stays off the mailbox-free shared state, but it must
 /// still round-trip through the actor and return the session's entries.

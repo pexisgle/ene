@@ -4587,7 +4587,12 @@ impl TurnActor {
                 .config
                 .get_section::<ene_plugin_host::PluginConfig>()
                 .unwrap_or_default();
-            if plugin_enable_set_changed(&prev_plugins, &next_plugins) {
+            // MCP servers connect only at host start, so any change (add,
+            // remove, transport edit, enable toggle) needs the same full
+            // reconfigure as an enable-set change.
+            if plugin_enable_set_changed(&prev_plugins, &next_plugins)
+                || prev_plugins.mcp_servers != next_plugins.mcp_servers
+            {
                 impact.plugin_restart = true;
                 self.spawn_reconfigure_plugin_host();
             } else {
