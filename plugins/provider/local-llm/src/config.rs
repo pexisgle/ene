@@ -25,6 +25,16 @@ static PLUGIN_PROFILES: Mutex<Option<Value>> = Mutex::new(None);
 /// model into the new configuration's cache.
 static CONFIG_GENERATION: OnceLock<AtomicU64> = OnceLock::new();
 
+/// Serializes test-time config mutations against the model-cache tests.
+///
+/// A `set_config`/`set_profiles` from a concurrently running test bumps the
+/// global generation; landing while the latch-based load test runs would
+/// suppress that test's cache insert, make a second caller re-load, and
+/// deadlock it on the started-signal channel. Production config pushes are
+/// single-threaded and never take this lock.
+#[cfg(test)]
+pub(crate) static CONFIG_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
 /// Default context window for a profile that omits `context_size`.
 ///
 /// Matches `ene_ai::LocalModelDef`'s default. The v2→v3 migration mirrors
@@ -159,6 +169,10 @@ impl Profile {
 /// Stores the config blob delivered by [`crate::plugin::LocalLlmPlugin`]'s
 /// `ConfigurablePlugin::set_config`.
 pub(crate) fn set_config(config: &Value) {
+    #[cfg(test)]
+    let _mutation_guard = CONFIG_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
     super::models::config_changed();
 }
@@ -166,6 +180,10 @@ pub(crate) fn set_config(config: &Value) {
 /// Stores the profile map delivered by
 /// [`crate::plugin::LocalLlmPlugin`]'s `ConfigurablePlugin::set_profiles`.
 pub(crate) fn set_profiles(profiles: &Value) {
+    #[cfg(test)]
+    let _mutation_guard = CONFIG_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     *PLUGIN_PROFILES
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some(profiles.clone());
