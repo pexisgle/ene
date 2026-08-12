@@ -511,24 +511,35 @@ fn string_form(
             .iter()
             .map(|v| v.as_str().unwrap_or_default().to_string())
             .collect();
-        let current = value.as_str().unwrap_or_default();
-        let mut selected = labels
+        let current = value.as_str().unwrap_or_default().to_string();
+        // A stored value outside the current enum (schema updated, value
+        // stale) stays visible and untouched until the user picks a new
+        // option; auto-replacing it on render would silently edit config.
+        let mut options = labels;
+        if !current.is_empty() && !options.iter().any(|option| option == &current) {
+            options.insert(0, current.clone());
+        }
+        let mut selected = options
             .iter()
-            .position(|label| label == current)
+            .position(|option| option == &current)
             .unwrap_or(0);
         let mut changed = false;
+        let mut clicked: Option<usize> = None;
         egui::ComboBox::from_id_salt(("schema_enum", path))
-            .selected_text(labels.get(selected).map_or("—", String::as_str))
+            .selected_text(options.get(selected).map_or("—", String::as_str))
             .show_ui(ui, |ui| {
-                for (index, label) in labels.iter().enumerate() {
-                    if ui.selectable_label(index == selected, label).clicked() {
+                for (index, option) in options.iter().enumerate() {
+                    if ui.selectable_label(index == selected, option).clicked() {
                         selected = index;
+                        clicked = Some(index);
                     }
                 }
             });
-        let new_value = labels.get(selected).map_or_else(String::new, Clone::clone);
-        if new_value != value.as_str().unwrap_or_default() {
-            *value = serde_json::Value::String(new_value);
+        if let Some(index) = clicked
+            && let Some(option) = options.get(index)
+            && option != &current
+        {
+            *value = serde_json::Value::String(option.clone());
             changed = true;
         }
         return changed;
@@ -539,24 +550,44 @@ fn string_form(
         && let Some(entries) = options.and_then(|map| map.get(path))
         && !entries.is_empty()
     {
-        let labels: Vec<&str> = entries.iter().map(|(label, _)| label.as_str()).collect();
-        let current = value.as_str().unwrap_or_default();
-        let mut selected = entries
+        let current = value.as_str().unwrap_or_default().to_string();
+        // Same out-of-list preservation as the enum branch above: a stored
+        // value the plugin no longer offers is shown as-is and only changes
+        // when the user picks another option.
+        let mut display: Vec<(String, String)> = entries.clone();
+        if !current.is_empty()
+            && !display
+                .iter()
+                .any(|(_, option_value)| option_value == &current)
+        {
+            display.insert(0, (current.clone(), current.clone()));
+        }
+        let mut selected = display
             .iter()
-            .position(|(_, option_value)| option_value == current)
+            .position(|(_, option_value)| option_value == &current)
             .unwrap_or(0);
         let mut changed = false;
+        let mut clicked: Option<usize> = None;
         egui::ComboBox::from_id_salt(("schema_options", path))
-            .selected_text(labels.get(selected).copied().unwrap_or("—"))
+            .selected_text(
+                display
+                    .get(selected)
+                    .map_or("—", |(label, _)| label.as_str()),
+            )
             .show_ui(ui, |ui| {
-                for (index, label) in labels.iter().enumerate() {
-                    if ui.selectable_label(index == selected, *label).clicked() {
+                for (index, (label, _)) in display.iter().enumerate() {
+                    if ui
+                        .selectable_label(index == selected, label.as_str())
+                        .clicked()
+                    {
                         selected = index;
+                        clicked = Some(index);
                     }
                 }
             });
-        if let Some((_, option_value)) = entries.get(selected)
-            && option_value != current
+        if let Some(index) = clicked
+            && let Some((_, option_value)) = display.get(index)
+            && option_value != &current
         {
             *value = serde_json::Value::String(option_value.clone());
             changed = true;
