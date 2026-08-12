@@ -102,8 +102,8 @@
     },
     "stt": {
       "provider": "whisper",
-      "model": "",
-      "language": ""
+      "model": "ggml-medium.bin",
+      "language": "ja"
     },
     "vad": {
       "provider": "none"
