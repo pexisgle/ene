@@ -316,6 +316,9 @@ impl Default for CharacterState {
 // grows unwieldy.
 pub struct UiState {
     pub settings_window_visible: bool,
+    /// A window close was requested while the settings draft held pending
+    /// edits; the close is deferred until the discard dialog resolves.
+    pub settings_close_requested: bool,
     /// Page the settings window should jump to when it next
     /// becomes visible. `Some(_)` is set by the per-action
     /// consumer systems and consumed by the runtime on the next

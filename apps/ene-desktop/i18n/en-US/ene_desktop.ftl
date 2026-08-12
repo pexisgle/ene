@@ -716,6 +716,10 @@ settings-apply-ok = Applied ({ $impact })
 settings-apply-failed = Apply failed
 settings-apply-conflict = Your draft was based on older settings; it was re-synced and not applied. Review and apply again.
 settings-applied-sections = Applied sections
+settings-discard-title = Discard settings changes?
+settings-discard-body = Pending settings changes have not been applied and will be lost.
+settings-discard-close = Discard and close
+settings-keep-editing = Keep editing
 impact-immediate = immediate
 impact-runtime-reload = hot-reload
 impact-plugin-restart = plugin restart required
@@ -854,6 +858,8 @@ schedules-confirmation = Ask for confirmation before each run
 schedules-invalid-json = Invalid JSON arguments
 schedules-invalid-interval = Interval must be a positive number of seconds
 schedules-prompt = prompt
+schedules-prompt-required = The prompt text must not be empty
+schedules-allow-tools = Allow the run to call tools
 
 # Settings search
 settings-search-placeholder = Search settings…

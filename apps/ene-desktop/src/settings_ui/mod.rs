@@ -1130,6 +1130,74 @@ impl SettingsUi {
             world,
             ui_entity,
         );
+        self.render_settings_close_dialog(ui, settings, world, ui_entity);
+    }
+
+    /// Confirms a window close while the draft holds pending edits: the
+    /// runtime defers the hide and sets `settings_close_requested`, and this
+    /// modal lets the user discard (which clears the draft and lets the
+    /// deferred close complete) or keep editing.
+    fn render_settings_close_dialog(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &CharacterSettings,
+        world: &mut World,
+        ui_entity: Entity,
+    ) {
+        let pending = world
+            .get::<crate::component::ui::UiStateComponent>(ui_entity)
+            .is_some_and(|state| state.0.settings_close_requested);
+        if !pending {
+            return;
+        }
+        let mut discard = false;
+        let mut keep_editing = false;
+        egui::Modal::new(egui::Id::new("settings-close-discard-modal")).show(ui.ctx(), |ui| {
+            ui.set_min_width(280.0);
+            ui.heading(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "settings-discard-title"
+            ));
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "settings-discard-body"
+            ));
+            ui.horizontal(|ui| {
+                if ui
+                    .button(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "settings-discard-close"
+                    ))
+                    .clicked()
+                {
+                    discard = true;
+                }
+                if ui
+                    .button(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "settings-keep-editing"
+                    ))
+                    .clicked()
+                {
+                    keep_editing = true;
+                }
+            });
+        });
+        if discard {
+            // Discarding clears the draft; the runtime's per-frame close
+            // check then completes the deferred hide.
+            self.discard_pending(settings);
+            if let Some(mut state) =
+                world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+            {
+                state.0.settings_close_requested = true;
+            }
+        } else if keep_editing
+            && let Some(mut state) =
+                world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+        {
+            state.0.settings_close_requested = false;
+        }
     }
 
     fn render_apply_bar(
@@ -1374,7 +1442,15 @@ impl SettingsUi {
                     page_character_editor::render(ui, settings, ai, world, ui_entity);
                 }
                 PageKind::General => {
-                    page_graphics::render(ui, settings, &mut self.animation, ai, world, ui_entity);
+                    page_graphics::render(
+                        ui,
+                        settings,
+                        &mut self.draft,
+                        &mut self.animation,
+                        ai,
+                        world,
+                        ui_entity,
+                    );
                     page_accessibility::render(ui, settings);
                 }
                 PageKind::Ai => page_ai::render(

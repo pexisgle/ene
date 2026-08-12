@@ -716,6 +716,10 @@ settings-apply-ok = 適用しました（{ $impact }）
 settings-apply-failed = 適用に失敗しました
 settings-apply-conflict = 下書きが古い設定に基づいていました。再同期して適用しなかったため、内容を確認してもう一度適用してください。
 settings-applied-sections = 適用したセクション
+settings-discard-title = 設定の変更を破棄しますか？
+settings-discard-body = 未適用の設定変更は失われます。
+settings-discard-close = 破棄して閉じる
+settings-keep-editing = 編集を続ける
 impact-immediate = 即時反映
 impact-runtime-reload = ホットリロード
 impact-plugin-restart = プラグイン再起動が必要
@@ -854,6 +858,8 @@ schedules-confirmation = 実行前に確認を求める
 schedules-invalid-json = 引数が有効な JSON ではありません
 schedules-invalid-interval = 間隔は正の秒数で指定してください
 schedules-prompt = プロンプト
+schedules-prompt-required = プロンプト本文を入力してください
+schedules-allow-tools = 実行時にツールの使用を許可
 
 # 設定検索
 settings-search-placeholder = 設定を検索…
