@@ -177,7 +177,8 @@ impl MemoryStore {
         Ok(result.rows_affected > 0)
     }
 
-    /// Update an active commitment's description and due label in-place.
+    /// Update an active commitment's description, due label, and parsed due
+    /// datetime in-place.
     ///
     /// Only succeeds when the row exists and is `Active`. Returns `Ok(false)`
     /// when the row does not exist or is no longer active.
@@ -189,6 +190,7 @@ impl MemoryStore {
         id: i64,
         description: &str,
         due_label: Option<&str>,
+        due_at: Option<DateTime<Utc>>,
     ) -> Result<bool, EneMemoryError> {
         use sea_orm::sea_query::Expr;
         use sea_orm::{EntityTrait, QueryFilter};
@@ -203,6 +205,7 @@ impl MemoryStore {
                 entities::commitments::Column::DueLabel,
                 Expr::value(due_label.map(ToOwned::to_owned)),
             )
+            .col_expr(entities::commitments::Column::DueAt, Expr::value(due_at))
             .col_expr(entities::commitments::Column::UpdatedAt, Expr::value(now))
             .filter(entities::commitments::Column::Id.eq(id))
             .filter(

@@ -430,6 +430,7 @@ impl MemoryPort for InMemoryMemoryPort {
         _id: i64,
         _description: &str,
         _due_label: Option<&str>,
+        _due_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<bool, MemoryPortError> {
         Ok(false)
     }

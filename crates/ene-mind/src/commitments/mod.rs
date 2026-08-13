@@ -28,6 +28,10 @@ use crate::memory_writer::candidate::MemoryCandidate;
 use crate::memory_writer::{AppliedDecision, ArbiterContext, MemoryArbiter};
 use crate::title_match::{TitleMatchMode, TitleMatcher};
 
+mod due;
+
+pub use due::parse_due_at;
+
 /// Companion Commitment Ledger: promises, tasks, follow-ups.
 ///
 /// # No in-memory cache
@@ -145,12 +149,17 @@ impl CommitmentLedger {
                 let due_changed =
                     existing.due_label.as_deref() != candidate.commitment_due.as_deref();
                 if content_changed || due_changed {
+                    let due_at = candidate
+                        .commitment_due
+                        .as_deref()
+                        .and_then(|due| parse_due_at(chrono::Utc::now(), due));
                     if let Some(id) = existing.id {
                         store
                             .supersede_commitment(
                                 id,
                                 &candidate.content,
                                 candidate.commitment_due.as_deref(),
+                                due_at,
                             )
                             .await
                             .map_err(CognitionError::MemoryPort)?;
@@ -163,6 +172,7 @@ impl CommitmentLedger {
                         let row = &mut active[idx];
                         row.description.clone_from(&candidate.content);
                         row.due_label.clone_from(&candidate.commitment_due);
+                        row.due_at = due_at;
                         inserted.push(id);
                     }
                 } else {
@@ -175,13 +185,18 @@ impl CommitmentLedger {
                 continue;
             }
 
+            let due_at = candidate
+                .commitment_due
+                .as_deref()
+                .and_then(|due| parse_due_at(chrono::Utc::now(), due));
+
             let new_item = NewCommitment {
                 character_id: ctx.character_id.to_string(),
                 user_id: ctx.user_id.to_string(),
                 title: candidate.title.clone(),
                 description: candidate.content.clone(),
                 status: CommitmentStatus::Active,
-                due_at: None,
+                due_at,
                 due_label: candidate.commitment_due.clone(),
             };
 
@@ -398,6 +413,11 @@ fn inserted_commitment(
     candidate: &MemoryCandidate,
 ) -> Commitment {
     let now = chrono::Utc::now();
+    let due_at = candidate
+        .commitment_due
+        .as_deref()
+        .and_then(|due| parse_due_at(chrono::Utc::now(), due));
+
     Commitment {
         id: Some(id),
         character_id: ctx.character_id.to_string(),
@@ -405,7 +425,7 @@ fn inserted_commitment(
         title: candidate.title.clone(),
         description: candidate.content.clone(),
         status: CommitmentStatus::Active,
-        due_at: None,
+        due_at,
         due_label: candidate.commitment_due.clone(),
         created_at: now,
         updated_at: now,
@@ -534,6 +554,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_parses_due_label_into_due_at() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut candidate = commitment_candidate(0.9);
+        candidate.commitment_due = Some("tomorrow at 15:00".to_string());
+        let ids = CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &[candidate])
+            .await
+            .unwrap();
+
+        let row = store.get_commitment(ids[0]).await.unwrap().unwrap();
+        let due_at = row.due_at.expect("parseable due label must set due_at");
+        let now = chrono::Utc::now();
+        assert!(due_at > now, "due must be in the future, got {due_at}");
+        assert!(
+            due_at < now + chrono::Duration::days(2),
+            "due must be within two days, got {due_at}"
+        );
+        assert_eq!(row.due_label.as_deref(), Some("tomorrow at 15:00"));
+    }
+
+    #[tokio::test]
+    async fn apply_keeps_due_at_none_for_unparseable_label() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut candidate = commitment_candidate(0.9);
+        candidate.commitment_due = Some("sometime later".to_string());
+        let ids = CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &[candidate])
+            .await
+            .unwrap();
+
+        let row = store.get_commitment(ids[0]).await.unwrap().unwrap();
+        assert!(row.due_at.is_none());
+        assert_eq!(row.due_label.as_deref(), Some("sometime later"));
+    }
+
+    #[tokio::test]
     async fn apply_skips_duplicate_title() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let candidates = [commitment_candidate(0.9)];
@@ -580,6 +634,10 @@ mod tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].description, "Let's discuss the UI design instead");
         assert_eq!(active[0].due_label.as_deref(), Some("Tomorrow"));
+        assert!(
+            active[0].due_at.is_some(),
+            "supersede must re-parse the new due label"
+        );
     }
 
     #[tokio::test]
@@ -620,6 +678,10 @@ mod tests {
             "rescheduling must not duplicate the commitment"
         );
         assert_eq!(active[0].due_label.as_deref(), Some("Next week"));
+        assert!(
+            active[0].due_at.is_some(),
+            "reschedule must re-parse the new due label"
+        );
     }
 
     #[tokio::test]
