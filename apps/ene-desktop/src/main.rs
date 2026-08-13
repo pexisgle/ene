@@ -43,6 +43,7 @@ mod character_state;
 mod chat_state;
 mod chat_ui;
 mod component;
+mod egui_shell;
 mod event;
 mod events;
 mod gpu;

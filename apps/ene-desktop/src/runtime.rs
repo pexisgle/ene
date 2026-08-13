@@ -6,7 +6,6 @@
 //!
 //! Redraws from `about_to_wait` instead of `RedrawRequested` to avoid
 //! winit 0.30's double-fire on Windows.
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,8 +38,6 @@ const CHARACTER_AUTO_FIT_MARGIN: f32 = 0.9;
 /// Number of frames to defer GPU texture freeing. Must match the
 /// `desired_maximum_frame_latency` to avoid use-after-free on textures
 /// that are still referenced by in-flight frames.
-const TEXTURE_FREE_RING_DEPTH: usize = 3;
-
 /// Top-level runtime. One per process.
 pub struct Runtime {
     state: AppState,
@@ -915,7 +912,8 @@ impl Runtime {
             Ok(()) => {}
             Err(e) => match e {
                 AcquireError::Reconfigure => {
-                    cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
+                    let size = cw.window.inner_size();
+                    cw.reconfigure(&self.state.gpu.device, size);
                 }
                 AcquireError::Timeout => {}
                 AcquireError::Fatal => event_loop.exit(),
@@ -1103,7 +1101,8 @@ impl Runtime {
                 Ok(()) => {}
                 Err(e) => match e {
                     AcquireError::Reconfigure => {
-                        uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
+                        let size = uw.window.inner_size();
+                        uw.reconfigure(&self.state.gpu.device, size);
                     }
                     AcquireError::Timeout => {}
                     AcquireError::Fatal => {
@@ -1864,7 +1863,8 @@ impl Runtime {
             return;
         }
 
-        let response = uw.egui_state.on_window_event(&uw.window, &event);
+        let window = Arc::clone(&uw.window);
+        let response = uw.egui_state.on_window_event(&window, &event);
         if response.repaint {
             uw.window.request_redraw();
         }
@@ -1873,7 +1873,8 @@ impl Runtime {
         }
         match event {
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
+                let size = uw.window.inner_size();
+                uw.reconfigure(&self.state.gpu.device, size);
                 uw.window.request_redraw();
             }
             WindowEvent::KeyboardInput { .. } => {
@@ -1896,7 +1897,8 @@ impl Runtime {
             return;
         }
 
-        let response = cw.egui_state.on_window_event(&cw.window, &event);
+        let window = Arc::clone(&cw.window);
+        let response = cw.egui_state.on_window_event(&window, &event);
         if response.repaint {
             cw.window.request_redraw();
         }
@@ -1905,7 +1907,8 @@ impl Runtime {
         }
         match event {
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
+                let size = cw.window.inner_size();
+                cw.reconfigure(&self.state.gpu.device, size);
                 cw.window.request_redraw();
             }
             WindowEvent::KeyboardInput { .. } => {
@@ -2326,14 +2329,8 @@ impl CharacterWindow {
 }
 
 struct UiWindow {
-    window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
-    egui_ctx: egui::Context,
-    egui_state: egui_winit::State,
-    egui_renderer: egui_wgpu::Renderer,
+    shell: crate::egui_shell::EguiWindowShell,
     settings_ui: SettingsUi,
-    textures_to_free: VecDeque<Vec<egui::TextureId>>,
 }
 
 impl UiWindow {
@@ -2344,63 +2341,12 @@ impl UiWindow {
         device: &wgpu::Device,
         size: PhysicalSize<u32>,
     ) -> Result<Self, WindowSurfaceError> {
-        let surface = instance
-            .create_surface(window.clone())
-            .map_err(|e| WindowSurfaceError::CreateSurface(e.to_string()))?;
-
-        let caps = surface.get_capabilities(adapter);
-        let format = *caps
-            .formats
-            .iter()
-            .find(|f| !f.is_srgb())
-            .unwrap_or(&caps.formats[0]);
-        let alpha_mode = caps.alpha_modes[0];
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(device, &config);
-
-        let egui_ctx = egui::Context::default();
-        crate::settings_ui::apply_egui_fonts(&egui_ctx);
-        let viewport_id = egui::ViewportId::ROOT;
-        let egui_state = egui_winit::State::new(
-            egui_ctx.clone(),
-            viewport_id,
-            &window,
-            Some(window.scale_factor() as f32),
-            None,
-            Some(device.limits().max_texture_dimension_2d as usize),
-        );
-        let egui_renderer =
-            egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default());
-
+        let shell =
+            crate::egui_shell::EguiWindowShell::new(window, instance, adapter, device, size)?;
         Ok(Self {
-            window,
-            surface,
-            config,
-            egui_ctx,
-            egui_state,
-            egui_renderer,
+            shell,
             settings_ui: SettingsUi::new(),
-            textures_to_free: VecDeque::from(vec![Vec::new(); TEXTURE_FREE_RING_DEPTH]),
         })
-    }
-
-    fn reconfigure(&mut self, device: &wgpu::Device, new_size: PhysicalSize<u32>) {
-        if new_size.width == 0 || new_size.height == 0 {
-            return;
-        }
-        self.config.width = new_size.width;
-        self.config.height = new_size.height;
-        self.surface.configure(device, &self.config);
     }
 
     fn render_frame(
@@ -2413,108 +2359,24 @@ impl UiWindow {
         ui_entity: bevy_ecs::entity::Entity,
         now_secs: f64,
     ) -> Result<(), AcquireError> {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Err(AcquireError::Timeout);
-            }
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                return Err(AcquireError::Reconfigure);
-            }
-            wgpu::CurrentSurfaceTexture::Validation => return Err(AcquireError::Fatal),
-        };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let Self { shell, settings_ui } = self;
+        shell.render_frame(device, queue, egui::Id::new("settings_panel"), |ui| {
+            settings_ui.render(ui, settings, ai, world, ui_entity, now_secs);
+        })
+    }
+}
 
-        let raw_input = self.egui_state.take_egui_input(&self.window);
-        self.egui_ctx.begin_pass(raw_input);
-        crate::theme::apply_egui_visuals(&self.egui_ctx);
+impl std::ops::Deref for UiWindow {
+    type Target = crate::egui_shell::EguiWindowShell;
 
-        let mut panel_ui = egui::Ui::new(
-            self.egui_ctx.clone(),
-            egui::Id::new("settings_panel"),
-            egui::UiBuilder::new()
-                .layer_id(egui::LayerId::background())
-                .max_rect(self.egui_ctx.content_rect()),
-        );
-        panel_ui.set_clip_rect(self.egui_ctx.content_rect());
+    fn deref(&self) -> &Self::Target {
+        &self.shell
+    }
+}
 
-        egui::CentralPanel::default().show(&mut panel_ui, |ui| {
-            self.settings_ui
-                .render(ui, settings, ai, world, ui_entity, now_secs);
-        });
-
-        let full_output = self.egui_ctx.end_pass();
-        let platform_output = full_output.platform_output;
-        self.egui_state
-            .handle_platform_output(&self.window, platform_output);
-
-        let tris = self
-            .egui_ctx
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
-
-        for (id, image_delta) in &full_output.textures_delta.set {
-            self.egui_renderer
-                .update_texture(device, queue, *id, image_delta);
-        }
-
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-        let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [self.config.width, self.config.height],
-            pixels_per_point: self.window.scale_factor() as f32,
-        };
-
-        let user_cmds = self.egui_renderer.update_buffers(
-            device,
-            queue,
-            &mut encoder,
-            &tris,
-            &screen_descriptor,
-        );
-
-        {
-            let mut rp = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: None,
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                })
-                .forget_lifetime();
-
-            self.egui_renderer
-                .render(&mut rp, &tris, &screen_descriptor);
-        }
-
-        queue.submit(
-            user_cmds
-                .into_iter()
-                .chain(std::iter::once(encoder.finish())),
-        );
-
-        let to_free_now = self.textures_to_free.pop_front().unwrap_or_default();
-        for id in to_free_now {
-            self.egui_renderer.free_texture(&id);
-        }
-        self.textures_to_free
-            .push_back(full_output.textures_delta.free);
-
-        frame.present();
-        Ok(())
+impl std::ops::DerefMut for UiWindow {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.shell
     }
 }
 
