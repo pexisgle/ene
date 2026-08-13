@@ -1,6 +1,6 @@
 //! Voice settings page — Text-to-Speech (TTS), Speech-to-Text (STT), and Microphone/VAD configuration.
 
-use super::components::{section_card, setting_row, slider_row};
+use super::components::{section_card, setting_row, slider_row, warning_box};
 use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
 use super::widgets::editable_combo;
@@ -107,6 +107,68 @@ fn stt_model_choices(current: &str) -> Vec<(String, String)> {
         choices.insert(0, (current.to_string(), current.to_string()));
     }
     choices
+}
+
+/// Fills provider-appropriate model/voice/language when the TTS provider
+/// changes; unknown providers reset to empty so values from the previous
+/// provider never leak into the new one.
+fn apply_tts_provider_defaults(
+    tts: &mut ene_ai::TtsConfig,
+    input: &mut SettingsInputState,
+    provider: &str,
+) {
+    let (model, voice, language) = match provider {
+        "kokoro" => (
+            "kokoro-v1_0.onnx".to_string(),
+            "af_heart".to_string(),
+            "ja".to_string(),
+        ),
+        "openai_tts" => ("tts-1".to_string(), "alloy".to_string(), "ja".to_string()),
+        _ => (String::new(), String::new(), String::new()),
+    };
+    tts.model.clone_from(&model);
+    tts.voice.clone_from(&voice);
+    tts.language.clone_from(&language);
+    input.tts_model = model;
+    input.tts_voice = voice;
+    input.tts_language = language;
+}
+
+/// Same as [`apply_tts_provider_defaults`] for the STT provider.
+fn apply_stt_provider_defaults(
+    stt: &mut ene_ai::SttConfig,
+    input: &mut SettingsInputState,
+    provider: &str,
+) {
+    let (model, language) = match provider {
+        "whisper" => ("ggml-medium.bin".to_string(), "ja".to_string()),
+        _ => (String::new(), String::new()),
+    };
+    stt.model.clone_from(&model);
+    stt.language.clone_from(&language);
+    input.stt_model = model;
+    input.stt_language = language;
+}
+
+/// Warns when the configured provider is not registered by any running
+/// plugin; the selection stays visible but cannot take effect until the
+/// plugin is enabled on the Tools & Plugins page.
+fn provider_missing_hint(
+    ui: &mut egui::Ui,
+    provider: &str,
+    catalog: Option<&[String]>,
+    catalog_loaded: bool,
+) {
+    if catalog_loaded
+        && !provider.is_empty()
+        && provider != "none"
+        && catalog.is_none_or(|kinds| !kinds.iter().any(|kind| kind == provider))
+    {
+        warning_box(
+            ui,
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-provider-not-running"),
+        );
+    }
 }
 
 pub fn render(
@@ -238,9 +300,22 @@ pub fn render(
                             let provider = input.tts_provider.trim().to_string();
                             if provider != ai_cfg.tts.provider {
                                 ai_cfg.tts.provider.clone_from(&provider);
+                                apply_tts_provider_defaults(&mut ai_cfg.tts, input, &provider);
                                 changed = true;
                             }
                         }
+                        provider_missing_hint(
+                            ui,
+                            &input.tts_provider,
+                            input
+                                .provider_catalog
+                                .data
+                                .clone()
+                                .flatten()
+                                .as_ref()
+                                .map(|catalog| catalog.tts.as_slice()),
+                            input.provider_catalog.data.is_some(),
+                        );
                     },
                 );
 
@@ -404,9 +479,22 @@ pub fn render(
                             let provider = input.stt_provider.trim().to_string();
                             if provider != ai_cfg.stt.provider {
                                 ai_cfg.stt.provider.clone_from(&provider);
+                                apply_stt_provider_defaults(&mut ai_cfg.stt, input, &provider);
                                 changed = true;
                             }
                         }
+                        provider_missing_hint(
+                            ui,
+                            &input.stt_provider,
+                            input
+                                .provider_catalog
+                                .data
+                                .clone()
+                                .flatten()
+                                .as_ref()
+                                .map(|catalog| catalog.stt.as_slice()),
+                            input.provider_catalog.data.is_some(),
+                        );
                     },
                 );
                 if ai_cfg.stt.provider != "none" && !ai_cfg.stt.provider.is_empty() {
@@ -537,6 +625,43 @@ pub fn render(
                     settings.set_vad_threshold(vad_threshold);
                     changed = true;
                 }
+
+                #[cfg(feature = "voice")]
+                {
+                    // Display the live capture state (a dead thread after a
+                    // device unplug shows as disabled even though the config
+                    // flag is set); writes still go to the persisted config.
+                    let mut enabled = world
+                        .get_resource::<crate::resource::beat_sync::BeatSyncRuntime>()
+                        .is_some_and(crate::resource::beat_sync::BeatSyncRuntime::is_running);
+                    if super::components::toggle_row(
+                        ui,
+                        "voice_beat_sync",
+                        &i18n_embed_fl::fl!(crate::i18n::loader(), "beat-sync-enabled"),
+                        &i18n_embed_fl::fl!(crate::i18n::loader(), "beat-sync-hint"),
+                        &mut enabled,
+                    ) {
+                        settings.set_beat_sync_enabled(enabled);
+                        settings.mark_dirty();
+                        if let Err(e) = crate::audio::set_beat_sync_enabled(
+                            world,
+                            ai,
+                            enabled,
+                            settings.beat_sync_device(),
+                        ) {
+                            tracing::warn!(
+                                component = "BeatSync",
+                                error = %e,
+                                "beat sync toggle failed"
+                            );
+                            // Roll the persisted setting back so a failed
+                            // start (no loopback device, unsupported format)
+                            // does not leave the feature enabled forever.
+                            settings.set_beat_sync_enabled(!enabled);
+                            settings.mark_dirty();
+                        }
+                    }
+                }
             },
         );
     });
@@ -555,5 +680,44 @@ pub fn render(
     #[cfg(not(feature = "voice"))]
     {
         let _ = mic_device_changed;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tts_provider_switch_fills_presets_and_resets_unknown() {
+        let mut tts = ene_ai::TtsConfig::default();
+        let mut input = SettingsInputState::new();
+        input.tts_model = "kokoro-v1_0.onnx".to_string();
+        input.tts_voice = "af_heart".to_string();
+        input.tts_language = "ja".to_string();
+
+        apply_tts_provider_defaults(&mut tts, &mut input, "openai_tts");
+        assert_eq!(tts.model, "tts-1");
+        assert_eq!(tts.voice, "alloy");
+        assert_eq!(input.tts_model, "tts-1");
+        assert_eq!(input.tts_voice, "alloy");
+
+        apply_tts_provider_defaults(&mut tts, &mut input, "edge-tts");
+        assert!(tts.model.is_empty());
+        assert!(input.tts_voice.is_empty());
+    }
+
+    #[test]
+    fn stt_provider_switch_fills_whisper_defaults() {
+        let mut stt = ene_ai::SttConfig::default();
+        let mut input = SettingsInputState::new();
+
+        apply_stt_provider_defaults(&mut stt, &mut input, "whisper");
+        assert_eq!(stt.model, "ggml-medium.bin");
+        assert_eq!(stt.language, "ja");
+        assert_eq!(input.stt_model, "ggml-medium.bin");
+
+        apply_stt_provider_defaults(&mut stt, &mut input, "custom");
+        assert!(stt.model.is_empty());
+        assert!(input.stt_language.is_empty());
     }
 }

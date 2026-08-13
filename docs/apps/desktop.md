@@ -51,7 +51,7 @@ correctly with long Japanese text.
 
 | Category | Pages |
 |---|---|
-| Settings | Overview, General, Character & User, AI & Models, Voice & Audio, Behavior, Memory & Storage, Security & Downloads, Plugins, Advanced |
+| Settings | Overview, General, Character & User, AI & Models, Voice & Audio, Behavior, Memory & Storage, Security & Downloads, Tools & Plugins, Advanced |
 | Management | Character Card Editor, Memories, Sessions, Schedules, Permissions, Connectors, Diagnostics |
 
 | Page | What it edits |
@@ -62,11 +62,11 @@ correctly with long Japanese text.
 | Character Card Editor | Edit the active card's fields (see [Character editor](../guides/character-editor.md)) |
 | AI & Models | Providers, task models, retry/fallback, provider health, and API keys (masked) |
 | Voice & Audio | TTS, STT, microphone/VAD selection, and voice tuning |
-| Behavior | Voice, proactive, mind, and tool capability toggles |
+| Behavior | Mind, emotion, and proactive speech behavior toggles |
 | Memory & Storage | Memory enablement, approval workflow, retention limits, store integrity |
 | Memories | Browse/search/pending/commitments tabs plus the full typed-memory ledger (edit, pin, approve, reject) |
 | Schedules | Scheduled tool runs: create, enable, delete, run history |
-| Plugins | Plugin center: detected/configured/MCP plugins, schema-driven config and profiles, credentials, security posture, dynamic options, validation |
+| Tools & Plugins | Tool and provider lists with a per-tool detail view (actions, schema-driven config, profiles, security), MCP servers, runtime limits, detected-but-unconfigured binaries, validation |
 | Advanced | Every remaining `settings.json` field, searchable and schema-driven |
 | Sessions | List, search, import, export, and archive sessions |
 | Permissions | Standing tool-permission grants, revoke/reset |
@@ -94,20 +94,25 @@ rejected with a conflict, and a failed runtime apply rolls the persisted
 config back. Stored secrets (API keys, plugin configs/profiles/credentials,
 MCP auth headers) never live in UI state: the draft holds redacted
 placeholders that are merged back from the store at apply time, and the
-plugin center receives host-redacted snapshots. List, search, and status
+Tools & Plugins page receives host-redacted snapshots. List, search, and status
 fetches across the settings and management pages run on the bridge runtime
 and are polled asynchronously, so the render thread never blocks on IPC.
 
-### Plugin center
+### Tools & Plugins
 
-Plugins, MCP servers, and detected-but-unconfigured binaries all appear in
-one place. Each plugin card shows health, kind, capabilities, manifest
-facts, and an effective-security summary (approval modes, emergency stop, fs
-grants, sandbox, DB quota); config and profiles are edited through the
-plugin's own JSON Schema (typed controls with a raw-JSON fallback, unknown
-keys preserved). Plugins that advertise dynamic config answer the *Fetch
-options* button, and *Validate config* runs the plugin's own validator.
-`x-ene-ui` metadata (group/order/control/advanced/impact/options_path) and
+Tool activation and per-plugin settings live on one page. A General section
+holds the plugin-system master switch, the Tool RAG toggle, and runtime
+limits; Tools / Providers / MCP tabs then group the configured entries.
+Tools and providers list each entry with health and an enable toggle;
+opening one shows a kind-specific detail view with capabilities, manifest
+facts, actions, config and profiles edited through the plugin's own JSON
+Schema (typed controls with a raw-JSON fallback, unknown keys preserved),
+and a Security section grouping sandbox, fs grants, DB quota, credentials,
+and approval overrides. The effective-security summary (approval modes,
+emergency stop, fs grants, sandbox, DB quota) is shown there too. Plugins
+that advertise dynamic config answer the *Fetch options* button, and
+*Validate config* runs the plugin's own validator. `x-ene-ui` metadata
+(group/order/control/advanced/impact/options_path) and
 `x-ene-profiles-schema` drive the forms.
 
 ### Appearance

@@ -1,23 +1,27 @@
-//! Plugin center: configured, detected-but-unconfigured, and MCP plugins in
-//! one place.
+//! Tools & Plugins page: tool activation and per-plugin settings in one
+//! place.
 //!
-//! Each configured `plugins.list` entry gets a card with health, kind,
-//! capabilities, manifest facts, a schema-driven config form (with dynamic
-//! options bound to `x-ene-ui.options_path` fields), profile editing, plugin
-//! validation against the *draft* value, editable entry settings
-//! (sandbox / fs grants / credentials / quotas), per-plugin approval
-//! overrides, and family-specific sections for known built-ins. Everything
-//! lands on the [`SettingsDraft`]; the window-level Apply bar pushes it
-//! through validation and the runtime apply pipeline.
+//! A "General" section holds the master switches and runtime limits, then
+//! Tools / Providers / MCP tabs list the configured `plugins.list` entries.
+//! Opening a tool or provider shows a kind-specific detail view: actions,
+//! a schema-driven config form (with dynamic options bound to
+//! `x-ene-ui.options_path` fields), profile editing, plugin validation
+//! against the *draft* value, and a Security section grouping sandbox /
+//! fs grants / quotas / credentials / approval overrides. Everything lands
+//! on the [`SettingsDraft`]; the window-level Apply bar pushes it through
+//! validation and the runtime apply pipeline.
 
 use crate::ai_bridge::AiBridge;
-use crate::settings::CharacterSettings;
+use crate::component::ui::UiStateComponent;
+use crate::settings::{CharacterSettings, PluginPageMode};
+use bevy_ecs::entity::Entity;
+use bevy_ecs::world::World;
 
-use super::components;
+use super::components::{self, BadgeTone, status_badge};
 use super::draft::{FieldImpact, SettingsDraft};
 use super::input::{AsyncData, SettingsInputState};
 use super::schema_form::{SchemaFormOptions, profiles_schema, schema_object_form};
-use ene_plugin_host::PluginSettingsSnapshot;
+use ene_plugin_host::{PluginHealthState, PluginSettingsSnapshot};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,6 +30,62 @@ use std::sync::Arc;
 /// base URL + token without requiring a user-chosen entity.
 const HOMEASSISTANT_PROBE_ENTITY: &str = "sun.sun";
 
+/// Built-in tool plugin ids; a stopped entry advertises no capabilities, so
+/// its snapshot kind is "unknown" until the plugin runs.
+const KNOWN_TOOL_IDS: &[&str] = &[
+    "app",
+    "browser",
+    "calc",
+    "calendar",
+    "counter",
+    "fs",
+    "geo",
+    "git",
+    "homeassistant",
+    "random",
+    "utility",
+    "web",
+];
+
+/// Built-in provider plugin ids; same purpose as [`KNOWN_TOOL_IDS`].
+const KNOWN_PROVIDER_IDS: &[&str] = &[
+    "anthropic",
+    "edge-tts",
+    "elevenlabs",
+    "kokoro",
+    "llama-cpp",
+    "llama-server",
+    "local-llm",
+    "onnx",
+    "openai",
+    "openai-tts",
+    "voicevox",
+    "whisper",
+];
+
+/// The plugin's kind, falling back to the built-in id tables while the
+/// entry is stopped (no connection, so capabilities are not advertised).
+fn effective_kind(snapshot: &PluginSettingsSnapshot) -> &str {
+    if snapshot.kind != "unknown" {
+        return &snapshot.kind;
+    }
+    if KNOWN_TOOL_IDS.contains(&snapshot.id.as_str()) {
+        "tool"
+    } else if KNOWN_PROVIDER_IDS.contains(&snapshot.id.as_str()) {
+        "provider"
+    } else {
+        "unknown"
+    }
+}
+
+fn is_tool_kind(kind: &str) -> bool {
+    matches!(kind, "tool" | "hybrid" | "unknown")
+}
+
+fn is_provider_kind(kind: &str) -> bool {
+    matches!(kind, "provider" | "hybrid")
+}
+
 /// Renders the plugin center page.
 pub fn render(
     ui: &mut egui::Ui,
@@ -33,10 +93,11 @@ pub fn render(
     draft: &mut SettingsDraft,
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
     plugin_focus: Option<&str>,
 ) {
     ui.horizontal(|ui| {
-        ui.heading(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-title"));
         if ui
             .small_button(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-refresh"))
             .clicked()
@@ -68,141 +129,357 @@ pub fn render(
         }
     }
 
-    let mut plugins = draft.section::<ene_plugin_host::PluginConfig>();
-    let mut plugins_changed = false;
-
-    if toggle_row(
-        ui,
-        &i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-master-enable"),
-        &i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-master-enable-hint"),
-        &mut plugins.enabled,
-    ) {
-        plugins_changed = true;
-    }
-
-    ui.separator();
-    ui.label(i18n_embed_fl::fl!(
-        crate::i18n::loader(),
-        "plugins-runtime-title"
-    ));
-    ui.horizontal(|ui| {
-        let mut max_concurrent = plugins.max_concurrent;
-        ui.label(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "plugins-max-concurrent"
-        ));
-        if ui
-            .add(egui::DragValue::new(&mut max_concurrent).range(1..=64))
-            .changed()
-        {
-            plugins.max_concurrent = max_concurrent;
-            plugins_changed = true;
+    let mut snapshots = input.plugin_snapshots.data.clone().unwrap_or_default();
+    // Entries present in the draft but not yet in the runtime config (e.g.
+    // just added from the discovered list) get placeholder snapshots so the
+    // add is visible before Apply starts the plugin.
+    let draft_plugins = draft.section::<ene_plugin_host::PluginConfig>();
+    for (name, entry) in &draft_plugins.list {
+        if !snapshots.iter().any(|snapshot| &snapshot.id == name) {
+            snapshots.push(placeholder_snapshot(name, entry));
         }
-    });
-    ui.horizontal(|ui| {
-        let mut max_rounds = plugins.max_rounds;
-        ui.label(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "plugins-max-rounds"
-        ));
-        if ui
-            .add(egui::DragValue::new(&mut max_rounds).range(1..=64))
-            .changed()
+    }
+    snapshots.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // One-shot search navigation: open the detail view on the tab that
+    // owns the focused plugin before the tab content renders.
+    if let Some(focus) = plugin_focus {
+        apply_plugin_focus(world, ui_entity, focus);
+        components::request_section_focus(ui.ctx(), "plugins-detail");
+    }
+
+    let mut mode = plugin_mode(world, ui_entity);
+    let selected = {
+        let current = plugin_selected(world, ui_entity);
+        // Only drop the selection once a snapshot fetch has completed; a
+        // search hit can land before the page's first fetch finishes.
+        if input.plugin_snapshots.data.is_some()
+            && current
+                .as_ref()
+                .is_some_and(|id| !snapshots.iter().any(|s| &s.id == id))
         {
-            plugins.max_rounds = max_rounds;
-            plugins_changed = true;
+            clear_plugin_selected(world, ui_entity);
+            None
+        } else {
+            current
         }
-    });
-    ui.horizontal(|ui| {
-        let mut timeout_ms = plugins.timeout_ms;
-        ui.label(i18n_embed_fl::fl!(
-            crate::i18n::loader(),
-            "plugins-timeout-ms"
-        ));
-        if ui
-            .add(egui::DragValue::new(&mut timeout_ms).range(100..=3_600_000))
-            .changed()
-        {
-            plugins.timeout_ms = timeout_ms;
-            plugins_changed = true;
+    };
+    // Keep the active tab consistent with the selected plugin's kind, so a
+    // search focus whose snapshots were not loaded yet lands on the right
+    // tab as soon as they arrive. The MCP tab has no detail view, so any
+    // stale selection is dropped instead.
+    match mode {
+        PluginPageMode::Mcp => {
+            if selected.is_some() {
+                clear_plugin_selected(world, ui_entity);
+            }
         }
-    });
-
-    if plugins_changed {
-        draft.set_section(&plugins);
+        PluginPageMode::Tools | PluginPageMode::Providers => {
+            if let Some(id) = selected.as_deref()
+                && let Some(snapshot) = snapshots.iter().find(|snapshot| snapshot.id == id)
+            {
+                let expected = match effective_kind(snapshot) {
+                    "provider" => PluginPageMode::Providers,
+                    _ => PluginPageMode::Tools,
+                };
+                if mode != expected {
+                    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                        state.0.plugin_page_mode = expected;
+                    }
+                    mode = expected;
+                }
+            }
+        }
     }
 
-    ui.separator();
-    ui.label(i18n_embed_fl::fl!(
-        crate::i18n::loader(),
-        "plugins-list-title"
-    ));
+    render_general(ui, draft);
+    render_tabs(ui, world, ui_entity, mode);
 
-    let snapshots = input.plugin_snapshots.data.clone().unwrap_or_default();
-    if snapshots.is_empty() && !input.plugin_snapshots.loading() {
-        ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-none"));
+    let mut removed: Option<String> = None;
+    match mode {
+        PluginPageMode::Tools => {
+            let tools: Vec<&PluginSettingsSnapshot> = snapshots
+                .iter()
+                .filter(|snapshot| is_tool_kind(effective_kind(snapshot)))
+                .collect();
+            render_plugin_section(
+                ui,
+                draft,
+                ai,
+                input,
+                world,
+                ui_entity,
+                &tools,
+                "plugins-tools",
+                "plugins-tab-tools",
+                false,
+                selected.as_deref(),
+                &mut removed,
+            );
+            render_discovered(ui, draft, ai, input);
+        }
+        PluginPageMode::Providers => {
+            let providers: Vec<&PluginSettingsSnapshot> = snapshots
+                .iter()
+                .filter(|snapshot| is_provider_kind(effective_kind(snapshot)))
+                .collect();
+            render_plugin_section(
+                ui,
+                draft,
+                ai,
+                input,
+                world,
+                ui_entity,
+                &providers,
+                "plugins-providers",
+                "plugins-tab-providers",
+                true,
+                selected.as_deref(),
+                &mut removed,
+            );
+        }
+        PluginPageMode::Mcp => render_mcp_section(ui, draft, ai, input),
     }
-    let mut remove_plugin: Option<String> = None;
-    for snapshot in &snapshots {
-        let focused = plugin_focus.is_some_and(|focus| focus == snapshot.id);
-        render_plugin_card(ui, draft, input, snapshot, &mut remove_plugin, ai, focused);
-    }
-    if plugin_focus.is_some() {
-        components::request_section_focus(ui.ctx(), "plugins-list");
-    }
-    if let Some(name) = remove_plugin {
+    if let Some(name) = removed {
         let mut plugins = draft.section::<ene_plugin_host::PluginConfig>();
         plugins.list.remove(&name);
         draft.set_section(&plugins);
         input.plugin_snapshots = AsyncData::new();
+        clear_plugin_selected(world, ui_entity);
     }
-
-    render_discovered(ui, draft, ai, input);
-
-    ui.separator();
-    render_mcp_section(ui, draft, ai, input);
 }
 
-fn render_plugin_card(
+/// Master switches and runtime limits shared by every tab.
+fn render_general(ui: &mut egui::Ui, draft: &mut SettingsDraft) {
+    let mut plugins = draft.section::<ene_plugin_host::PluginConfig>();
+    let mut rag = draft.section::<ene_rag::ToolRagConfig>();
+    let mut plugins_changed = false;
+    let mut rag_changed = false;
+    components::section_card(
+        ui,
+        "plugins-general",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-general-title"),
+        |ui| {
+            if toggle_row(
+                ui,
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-master-enable"),
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-master-enable-hint"),
+                &mut plugins.enabled,
+            ) {
+                plugins_changed = true;
+            }
+            if toggle_row(
+                ui,
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "enable-tool-rag"),
+                "",
+                &mut rag.enabled,
+            ) {
+                rag_changed = true;
+            }
+
+            ui.add_space(6.0);
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "plugins-runtime-title"
+            ));
+            ui.horizontal(|ui| {
+                let mut max_concurrent = plugins.max_concurrent;
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "plugins-max-concurrent"
+                ));
+                if ui
+                    .add(egui::DragValue::new(&mut max_concurrent).range(1..=64))
+                    .changed()
+                {
+                    plugins.max_concurrent = max_concurrent;
+                    plugins_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                let mut max_rounds = plugins.max_rounds;
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "plugins-max-rounds"
+                ));
+                if ui
+                    .add(egui::DragValue::new(&mut max_rounds).range(1..=64))
+                    .changed()
+                {
+                    plugins.max_rounds = max_rounds;
+                    plugins_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                let mut timeout_ms = plugins.timeout_ms;
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "plugins-timeout-ms"
+                ));
+                if ui
+                    .add(egui::DragValue::new(&mut timeout_ms).range(100..=3_600_000))
+                    .changed()
+                {
+                    plugins.timeout_ms = timeout_ms;
+                    plugins_changed = true;
+                }
+            });
+        },
+    );
+    if plugins_changed {
+        draft.set_section(&plugins);
+    }
+    if rag_changed {
+        draft.set_section(&rag);
+    }
+}
+
+fn render_tabs(ui: &mut egui::Ui, world: &mut World, ui_entity: Entity, mode: PluginPageMode) {
+    let mut next: Option<PluginPageMode> = None;
+    ui.horizontal(|ui| {
+        for (tab, key) in [
+            (PluginPageMode::Tools, "plugins-tab-tools"),
+            (PluginPageMode::Providers, "plugins-tab-providers"),
+            (PluginPageMode::Mcp, "plugins-tab-mcp"),
+        ] {
+            if ui
+                .selectable_label(mode == tab, crate::i18n::loader().get(key))
+                .clicked()
+            {
+                next = Some(tab);
+            }
+        }
+    });
+    if let Some(tab) = next
+        && let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity)
+    {
+        if state.0.plugin_page_mode != tab {
+            state.0.plugin_selected = None;
+        }
+        state.0.plugin_page_mode = tab;
+    }
+}
+
+/// List or detail view for one tab: the selected plugin renders its
+/// kind-specific detail, everything else renders the row list.
+fn render_plugin_section(
     ui: &mut egui::Ui,
     draft: &mut SettingsDraft,
-    input: &mut SettingsInputState,
-    snapshot: &PluginSettingsSnapshot,
-    remove: &mut Option<String>,
     ai: &Arc<AiBridge>,
-    focused: bool,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+    filtered: &[&PluginSettingsSnapshot],
+    list_section: &str,
+    tab_title_key: &str,
+    provider_tab: bool,
+    selected: Option<&str>,
+    removed: &mut Option<String>,
 ) {
-    let health_code = snapshot.health.code();
-    let health_color = match snapshot.health {
-        ene_plugin_host::PluginHealthState::Running => egui::Color32::from_rgb(0x4c, 0xaf, 0x50),
-        ene_plugin_host::PluginHealthState::Disabled => egui::Color32::from_rgb(0xf4, 0x43, 0x36),
-        ene_plugin_host::PluginHealthState::RequirementsUnmet => {
-            egui::Color32::from_rgb(0xff, 0x98, 0x00)
-        }
-        ene_plugin_host::PluginHealthState::Stopped => egui::Color32::GRAY,
+    let Some(snapshot) = selected.and_then(|id| filtered.iter().find(|snapshot| snapshot.id == id))
+    else {
+        components::section_card(
+            ui,
+            list_section,
+            &crate::i18n::loader().get(tab_title_key),
+            |ui| render_plugin_list(ui, draft, world, ui_entity, filtered, selected),
+        );
+        return;
     };
-    let enabled_key = format!("plugins.list.{}.enable", snapshot.id);
-    let mut enabled = draft
-        .editing()
-        .get_path(&enabled_key)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(snapshot.enabled);
+    components::section_card(ui, "plugins-detail", &plugin_row_label(snapshot), |ui| {
+        *removed = render_plugin_detail(
+            ui,
+            draft,
+            ai,
+            input,
+            world,
+            ui_entity,
+            snapshot,
+            provider_tab,
+        );
+    });
+}
 
-    let health_label = crate::i18n::loader().get(&format!("plugins-health-{health_code}"));
-    egui::CollapsingHeader::new(format!(
-        "{} · {} · {}",
-        snapshot.id, snapshot.kind, health_label
-    ))
-    .id_salt(("plugin_card", snapshot.id.as_str()))
-    .default_open(focused || snapshot.id == "local-llm" || snapshot.id == "llama-server")
-    .show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-enabled"));
+fn render_plugin_list(
+    ui: &mut egui::Ui,
+    draft: &mut SettingsDraft,
+    world: &mut World,
+    ui_entity: Entity,
+    filtered: &[&PluginSettingsSnapshot],
+    selected: Option<&str>,
+) {
+    if filtered.is_empty() {
+        ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-none"));
+        return;
+    }
+    for snapshot in filtered {
+        let enabled_key = format!("plugins.list.{}.enable", snapshot.id);
+        let mut enabled = draft
+            .editing()
+            .get_path(&enabled_key)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(snapshot.enabled);
+        let id = snapshot.id.clone();
+        ui.horizontal_wrapped(|ui| {
             if ui.checkbox(&mut enabled, "").changed() {
                 draft.set_path(&enabled_key, serde_json::Value::Bool(enabled));
             }
-            ui.colored_label(health_color, health_code);
+            if ui
+                .selectable_label(selected == Some(id.as_str()), plugin_row_label(snapshot))
+                .clicked()
+            {
+                select_plugin(world, ui_entity, id.clone());
+            }
+            render_health_badge(ui, snapshot);
+            if !snapshot.actions.is_empty() {
+                ui.weak(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "plugins-actions-count",
+                    count = snapshot.actions.len()
+                ));
+            }
         });
+    }
+}
+
+fn render_plugin_detail(
+    ui: &mut egui::Ui,
+    draft: &mut SettingsDraft,
+    ai: &Arc<AiBridge>,
+    input: &mut SettingsInputState,
+    world: &mut World,
+    ui_entity: Entity,
+    snapshot: &PluginSettingsSnapshot,
+    provider_tab: bool,
+) -> Option<String> {
+    let mut removed = None;
+    ui.horizontal(|ui| {
+        if ui
+            .small_button(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "plugins-back-to-list"
+            ))
+            .clicked()
+        {
+            clear_plugin_selected(world, ui_entity);
+        }
+    });
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        status_badge(ui, &plugin_kind_label(snapshot), BadgeTone::Neutral);
+        render_health_badge(ui, snapshot);
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-enabled"));
+        let enabled_key = format!("plugins.list.{}.enable", snapshot.id);
+        let mut enabled = draft
+            .editing()
+            .get_path(&enabled_key)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(snapshot.enabled);
+        if ui.checkbox(&mut enabled, "").changed() {
+            draft.set_path(&enabled_key, serde_json::Value::Bool(enabled));
+        }
         ui.weak(format!(
             "{}: {}",
             i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-impact"),
@@ -212,22 +489,185 @@ fn render_plugin_card(
                 FieldImpact::Immediate.code()
             }
         ));
-
-        render_capabilities(ui, snapshot);
-        render_manifest(ui, snapshot);
-        render_builtin_section(ui, ai, input, snapshot);
-
-        let schema_path = format!("plugins.list.{}.config", snapshot.id);
-        let mut config_value = draft
-            .editing()
-            .get_path(&schema_path)
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-        if let Some(schema) = &snapshot.schema {
-            let options = fetch_options(ui, ai, input, snapshot, schema);
-            egui::CollapsingHeader::new(i18n_embed_fl::fl!(
+        if ui
+            .small_button(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-remove"))
+            .on_hover_text(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
-                "plugins-config"
+                "plugins-remove-hint"
             ))
+            .clicked()
+        {
+            removed = Some(snapshot.id.clone());
+        }
+    });
+    ui.add_space(4.0);
+
+    render_capabilities(ui, snapshot);
+    render_manifest(ui, snapshot);
+    render_builtin_hints(ui, ai, input, snapshot);
+
+    if provider_tab {
+        render_profiles(ui, draft, snapshot);
+        render_config(ui, ai, draft, input, snapshot);
+        render_credentials_editor(ui, draft, snapshot);
+        render_security(ui, draft, snapshot, false);
+    } else {
+        render_action_list(ui, snapshot);
+        render_config(ui, ai, draft, input, snapshot);
+        render_profiles(ui, draft, snapshot);
+        render_security(ui, draft, snapshot, true);
+    }
+    removed
+}
+
+fn render_health_badge(ui: &mut egui::Ui, snapshot: &PluginSettingsSnapshot) {
+    let (label, tone) = match snapshot.health {
+        PluginHealthState::Running => (
+            i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-health-running"),
+            BadgeTone::Ok,
+        ),
+        PluginHealthState::Disabled => (
+            i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-health-disabled"),
+            BadgeTone::Error,
+        ),
+        PluginHealthState::RequirementsUnmet => (
+            i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-health-requirements_unmet"),
+            BadgeTone::Warn,
+        ),
+        PluginHealthState::Stopped => (
+            i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-health-stopped"),
+            BadgeTone::Neutral,
+        ),
+    };
+    status_badge(ui, &label, tone);
+}
+
+fn plugin_kind_label(snapshot: &PluginSettingsSnapshot) -> String {
+    match effective_kind(snapshot) {
+        "tool" => i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-kind-tool"),
+        "provider" => i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-kind-provider"),
+        "hybrid" => i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-kind-hybrid"),
+        _ => i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-kind-unknown"),
+    }
+}
+
+fn plugin_row_label(snapshot: &PluginSettingsSnapshot) -> String {
+    let display = plugin_display_name(snapshot);
+    if display == snapshot.id {
+        snapshot.id.clone()
+    } else {
+        format!("{display} ({})", snapshot.id)
+    }
+}
+
+fn plugin_display_name(snapshot: &PluginSettingsSnapshot) -> String {
+    match effective_kind(snapshot) {
+        "tool" | "hybrid" => tool_display_name(&snapshot.id).to_string(),
+        _ => snapshot.id.clone(),
+    }
+}
+
+/// Minimal snapshot for a draft-only `plugins.list` entry: the runtime has
+/// not started it yet, so there is no connection, schema, or capability
+/// data to show.
+fn placeholder_snapshot(id: &str, entry: &ene_plugin_host::PluginEntry) -> PluginSettingsSnapshot {
+    let kind = if KNOWN_TOOL_IDS.contains(&id) {
+        "tool"
+    } else if KNOWN_PROVIDER_IDS.contains(&id) {
+        "provider"
+    } else {
+        "unknown"
+    };
+    PluginSettingsSnapshot {
+        id: id.to_string(),
+        kind: kind.to_string(),
+        enabled: entry.enable,
+        health: PluginHealthState::Stopped,
+        capabilities: ene_plugin_proto::PluginCapabilities::default(),
+        actions: Vec::new(),
+        manifest: ene_plugin_host::PluginManifestSummary {
+            key_id: None,
+            signed: false,
+            checksum: None,
+        },
+        schema: None,
+        schema_version: 0,
+        supports_dynamic_config: false,
+        supports_validate_config: false,
+        config: None,
+        profiles: None,
+        credentials: Vec::new(),
+        effective_security: ene_plugin_host::EffectiveSecurity::default(),
+    }
+}
+
+fn tool_display_name(name: &str) -> &str {
+    match name {
+        "app" => "App",
+        "browser" => "Browser",
+        "calc" => "Calculator",
+        "calendar" => "Calendar",
+        "fs" => "Filesystem",
+        "random" => "Random",
+        "geo" => "Geo",
+        "git" => "Git",
+        "homeassistant" => "Home Assistant",
+        "utility" => "Utility",
+        "web" => "Web",
+        other => other,
+    }
+}
+
+fn plugin_mode(world: &World, ui_entity: Entity) -> PluginPageMode {
+    world
+        .get::<UiStateComponent>(ui_entity)
+        .map_or(PluginPageMode::default(), |state| state.0.plugin_page_mode)
+}
+
+fn plugin_selected(world: &World, ui_entity: Entity) -> Option<String> {
+    world
+        .get::<UiStateComponent>(ui_entity)
+        .and_then(|state| state.0.plugin_selected.clone())
+}
+
+fn select_plugin(world: &mut World, ui_entity: Entity, id: String) {
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.plugin_selected = Some(id);
+    }
+}
+
+fn clear_plugin_selected(world: &mut World, ui_entity: Entity) {
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.plugin_selected = None;
+    }
+}
+
+fn apply_plugin_focus(world: &mut World, ui_entity: Entity, focus: &str) {
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.plugin_selected = Some(focus.to_string());
+        if state.0.plugin_page_mode == PluginPageMode::Mcp {
+            state.0.plugin_page_mode = PluginPageMode::Tools;
+        }
+    }
+}
+
+/// Schema-driven config form with draft validation; falls back to the raw
+/// JSON editor when the plugin advertises no schema.
+fn render_config(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    draft: &mut SettingsDraft,
+    input: &mut SettingsInputState,
+    snapshot: &PluginSettingsSnapshot,
+) {
+    let schema_path = format!("plugins.list.{}.config", snapshot.id);
+    let mut config_value = draft
+        .editing()
+        .get_path(&schema_path)
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(schema) = &snapshot.schema {
+        let options = fetch_options(ui, ai, input, snapshot, schema);
+        egui::CollapsingHeader::new(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-config"))
             .id_salt(("plugin_config", snapshot.id.as_str()))
             .default_open(
                 !config_value
@@ -251,19 +691,16 @@ fn render_plugin_card(
                 }
                 render_draft_validation(ui, ai, draft, input, snapshot);
             });
-        } else if config_value
-            .as_object()
-            .is_none_or(serde_json::Map::is_empty)
-        {
-            ui.weak(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "plugins-no-config-needed"
-            ));
-        } else {
-            egui::CollapsingHeader::new(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "plugins-config"
-            ))
+    } else if config_value
+        .as_object()
+        .is_none_or(serde_json::Map::is_empty)
+    {
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "plugins-no-config-needed"
+        ));
+    } else {
+        egui::CollapsingHeader::new(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-config"))
             .id_salt(("plugin_config_raw", snapshot.id.as_str()))
             .show(ui, |ui| {
                 if super::schema_form::raw_json_form(
@@ -276,26 +713,31 @@ fn render_plugin_card(
                     draft.set_path(&schema_path, config_value);
                 }
             });
-        }
+    }
+}
 
-        render_profiles(ui, draft, snapshot);
-        render_entry_settings(ui, draft, snapshot);
-        render_credentials_editor(ui, draft, snapshot);
-        render_approvals_editor(ui, draft, snapshot);
+/// Security grouping: effective posture, entry settings, and per-plugin
+/// approvals. Credentials join the group for tools; providers keep them as
+/// a standalone section next to their config.
+fn render_security(
+    ui: &mut egui::Ui,
+    draft: &mut SettingsDraft,
+    snapshot: &PluginSettingsSnapshot,
+    include_credentials: bool,
+) {
+    egui::CollapsingHeader::new(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "plugins-security"
+    ))
+    .id_salt(("plugin_security", snapshot.id.as_str()))
+    .show(ui, |ui| {
         render_effective_security(ui, snapshot);
-
-        if ui
-            .small_button(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-remove"))
-            .on_hover_text(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "plugins-remove-hint"
-            ))
-            .clicked()
-        {
-            *remove = Some(snapshot.id.clone());
+        render_entry_settings(ui, draft, snapshot);
+        if include_credentials {
+            render_credentials_editor(ui, draft, snapshot);
         }
+        render_approvals_editor(ui, draft, snapshot);
     });
-    ui.add_space(4.0);
 }
 
 /// Runs the plugin's own validator against the *draft* config value (not the
@@ -482,9 +924,9 @@ fn render_manifest(ui: &mut egui::Ui, snapshot: &PluginSettingsSnapshot) {
     }
 }
 
-/// Family-specific sections for known built-in plugins. Falls back to the
-/// generic schema form for everything else.
-fn render_builtin_section(
+/// Family-specific hints for known built-in plugins: profile guidance,
+/// account hints, advertised voices/models, and connectivity checks.
+fn render_builtin_hints(
     ui: &mut egui::Ui,
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
@@ -542,16 +984,8 @@ fn render_builtin_section(
                 crate::i18n::loader(),
                 "plugins-fs-grants-hint"
             ));
-            render_action_list(ui, snapshot);
         }
-        "browser" => {
-            render_action_list(ui, snapshot);
-        }
-        _ => {
-            if !snapshot.actions.is_empty() {
-                render_action_list(ui, snapshot);
-            }
-        }
+        _ => {}
     }
 }
 
@@ -1012,46 +1446,39 @@ fn render_approvals_editor(
 
 fn render_effective_security(ui: &mut egui::Ui, snapshot: &PluginSettingsSnapshot) {
     let security = &snapshot.effective_security;
-    egui::CollapsingHeader::new(i18n_embed_fl::fl!(
-        crate::i18n::loader(),
-        "plugins-security"
-    ))
-    .id_salt(("plugin_security", snapshot.id.as_str()))
-    .show(ui, |ui| {
-        if security.emergency_stop {
-            ui.colored_label(
-                egui::Color32::LIGHT_RED,
-                i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-emergency-stop"),
-            );
+    if security.emergency_stop {
+        ui.colored_label(
+            egui::Color32::LIGHT_RED,
+            i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-emergency-stop"),
+        );
+    }
+    for (category, mode) in &security.approvals {
+        ui.label(format!("{category}: {mode}"));
+    }
+    if !security.fs_grants.is_empty() {
+        for grant in &security.fs_grants {
+            ui.label(format!(
+                "{} → {} ({}{})",
+                grant.slot,
+                grant.path,
+                if grant.read { "r" } else { "" },
+                if grant.write { "w" } else { "" }
+            ));
         }
-        for (category, mode) in &security.approvals {
-            ui.label(format!("{category}: {mode}"));
-        }
-        if !security.fs_grants.is_empty() {
-            for grant in &security.fs_grants {
-                ui.label(format!(
-                    "{} → {} ({}{})",
-                    grant.slot,
-                    grant.path,
-                    if grant.read { "r" } else { "" },
-                    if grant.write { "w" } else { "" }
-                ));
-            }
-        }
-        ui.label(format!(
-            "{}: {}",
-            i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-sandbox"),
-            security.sandbox_enabled
-        ));
-        ui.label(format!(
-            "{}: {}",
-            i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-db-quota"),
-            security.db_quota_mb.map_or_else(
-                || i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-unbounded"),
-                |mb| format!("{mb} MiB")
-            )
-        ));
-    });
+    }
+    ui.label(format!(
+        "{}: {}",
+        i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-sandbox"),
+        security.sandbox_enabled
+    ));
+    ui.label(format!(
+        "{}: {}",
+        i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-db-quota"),
+        security.db_quota_mb.map_or_else(
+            || i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-unbounded"),
+            |mb| format!("{mb} MiB")
+        )
+    ));
 }
 
 /// Detected-but-unconfigured plugin binaries: one-click Add inserts a
@@ -1072,6 +1499,17 @@ fn render_discovered(
     if discovered.is_empty() {
         return;
     }
+    // Draft additions are already listed as placeholder rows; keep them out
+    // of the discovered section until Apply moves them into the runtime
+    // config (which is what the discovery fetch reads).
+    let draft_plugins = draft.section::<ene_plugin_host::PluginConfig>();
+    let pending: Vec<&String> = discovered
+        .iter()
+        .filter(|name| !draft_plugins.list.contains_key(*name))
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
     ui.separator();
     components::section_card(
         ui,
@@ -1079,9 +1517,9 @@ fn render_discovered(
         &i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-discovered-title"),
         |ui| {
             let mut add: Option<String> = None;
-            for name in &discovered {
+            for name in pending {
                 ui.horizontal(|ui| {
-                    ui.label(name);
+                    ui.label(name.as_str());
                     ui.weak(i18n_embed_fl::fl!(
                         crate::i18n::loader(),
                         "plugins-discovered-hint"
@@ -1312,4 +1750,64 @@ fn toggle_row(ui: &mut egui::Ui, label: &str, hint: &str, value: &mut bool) -> b
         }
     });
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(id: &str, kind: &str) -> PluginSettingsSnapshot {
+        PluginSettingsSnapshot {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            enabled: true,
+            health: PluginHealthState::Stopped,
+            capabilities: ene_plugin_proto::PluginCapabilities::default(),
+            actions: Vec::new(),
+            manifest: ene_plugin_host::PluginManifestSummary {
+                key_id: None,
+                signed: false,
+                checksum: None,
+            },
+            schema: None,
+            schema_version: 0,
+            supports_dynamic_config: false,
+            supports_validate_config: false,
+            config: None,
+            profiles: None,
+            credentials: Vec::new(),
+            effective_security: ene_plugin_host::EffectiveSecurity::default(),
+        }
+    }
+
+    #[test]
+    fn stopped_builtins_classify_by_id() {
+        assert_eq!(effective_kind(&snapshot("fs", "unknown")), "tool");
+        assert_eq!(effective_kind(&snapshot("whisper", "unknown")), "provider");
+        assert_eq!(effective_kind(&snapshot("custom", "unknown")), "unknown");
+        assert_eq!(effective_kind(&snapshot("fs", "tool")), "tool");
+        assert_eq!(
+            effective_kind(&snapshot("anthropic", "provider")),
+            "provider"
+        );
+    }
+
+    #[test]
+    fn every_kind_lands_on_a_tab() {
+        assert!(is_tool_kind(effective_kind(&snapshot("fs", "unknown"))));
+        assert!(!is_provider_kind(effective_kind(&snapshot(
+            "fs", "unknown"
+        ))));
+        assert!(is_provider_kind(effective_kind(&snapshot(
+            "whisper", "unknown"
+        ))));
+        assert!(!is_tool_kind(effective_kind(&snapshot(
+            "whisper", "unknown"
+        ))));
+        assert!(is_tool_kind(effective_kind(&snapshot("custom", "unknown"))));
+        assert!(is_tool_kind(effective_kind(&snapshot("browser", "hybrid"))));
+        assert!(is_provider_kind(effective_kind(&snapshot(
+            "browser", "hybrid"
+        ))));
+    }
 }

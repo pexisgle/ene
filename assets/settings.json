@@ -1,5 +1,442 @@
 {
   "$schema": "./schema/settings.schema.json",
+  "tools": {
+    "enabled": true,
+    "list": {
+      "app": {
+        "enable": true
+      },
+      "browser": {
+        "enable": true
+      },
+      "calc": {
+        "enable": true
+      },
+      "fs": {
+        "enable": true
+      },
+      "geo": {
+        "enable": true
+      },
+      "random": {
+        "enable": true
+      },
+      "git": {
+        "enable": true
+      },
+      "homeassistant": {
+        "base_url": "http://homeassistant.local:8123",
+        "enable": true,
+        "token": ""
+      },
+      "utility": {
+        "enable": true
+      },
+      "web": {
+        "enable": true
+      }
+    },
+    "mcp_servers": []
+  },
+  "plugins": {
+    "list": {
+      "web": {
+        "credentials": {
+          "exa_api_key": "",
+          "tavily_api_key": ""
+        },
+        "enable": true,
+        "checksum": "a650d7fc1ff1ec3416eef5e52f7cd15dd5ddeb0224daa000cd3b9e6ef2a085cd",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": []
+      },
+      "llama-cpp": {
+        "config": {
+          "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
+          "acceleration": "auto"
+        },
+        "profiles": {
+          "gemma-4-e2b": {
+            "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+            "gpu_layers": "auto",
+            "context_size": 16384
+          },
+          "gemma-4-e4b": {
+            "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
+            "gpu_layers": "auto",
+            "context_size": 16384
+          },
+          "jina-v5-small": {
+            "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+            "quantization": "F16",
+            "gpu_layers": "auto",
+            "context_size": 2048,
+            "dimensions": 1024
+          }
+        },
+        "enable": true,
+        "checksum": "0d3f246d7b58a5dccb2bdbdea1c167c8cf644b8ead5485d9de80fcefb82d9881",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "llama-server": {
+        "config": {
+          "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
+          "acceleration": "auto"
+        },
+        "profiles": {
+          "gemma-4-e2b": {
+            "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+            "gpu_layers": "auto",
+            "context_size": 16384,
+            "quantization": "F16"
+          },
+          "gemma-4-e4b": {
+            "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
+            "gpu_layers": "auto",
+            "context_size": 16384,
+            "quantization": "F16"
+          },
+          "jina-v5-small": {
+            "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+            "quantization": "F16",
+            "gpu_layers": "auto",
+            "context_size": 2048,
+            "dimensions": 1024
+          }
+        },
+        "enable": true,
+        "checksum": "ef1291bd40625c83602e2d7f60ae7cd0203cb3d96d48d0915917994dfbe428ec",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "anthropic": {
+        "enable": true,
+        "checksum": "1a6c4dddc5992bbf1dcce1d454823782c268115616aea6e91ba99ff7a8cba093",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "app": {
+        "enable": true,
+        "checksum": "3708dfc6d88e1fd103e98271647825fb1302e26837c3d9fb80ffef729348b848",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "browser": {
+        "enable": true,
+        "checksum": "b170a261edf4ba765c969756e39564b2ecdc3545e2830b054c943b04c6f62c78",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "calc": {
+        "enable": true,
+        "checksum": "675d8e8ef0b6f48e46bb66c7243c6dbb74e6c537a3ad4688651047e114b636b8",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "calendar": {
+        "enable": true,
+        "checksum": "1a0a26105aa2af60989b49f23885c811f42d69528a87ef0f9ef7530af7754ade",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "counter": {
+        "enable": true,
+        "checksum": "4bf934c6c2b90187af3f131391d8c9f1bbc2dc0d49d52fb088123a3bf5bc3216",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "edge-tts": {
+        "enable": true,
+        "checksum": "38db2b7639f42cd76b1594ccef25ff1cea8a4ce77ff142062a421919aa5b46e7",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "elevenlabs": {
+        "enable": true,
+        "checksum": "d7864df355ad0b4f93a5878269d6f5aa69b8eb47d8852e99c1198d010b40e7b8",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "fs": {
+        "enable": true,
+        "checksum": "eb40e28a6133c1fd820154325ff0c70bbfa3fe3a3bc2cd82d9140d37147c2db4",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "geo": {
+        "enable": true,
+        "checksum": "2bb32b9d341999958c4c58e37f9f6db14dd84a8d6ab8f5defb7aa65090f4773a",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "git": {
+        "enable": true,
+        "checksum": "eac83f95fecf9246f1e0eba6bdbce4d64cae2acca39ecbc1e9f54147009e4746",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "homeassistant": {
+        "enable": true,
+        "checksum": "8550b7ad1d3a0ab3e3f6686ee324b01515581dcfe08996f8076ee1f86e3c54c7",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "kokoro": {
+        "enable": true,
+        "checksum": "8cfe202aeb4a61c4f144e34d2f8d1be2ad72b7a20a99e4bf37e77beb623ec2e0",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "onnx": {
+        "enable": true,
+        "checksum": "29ff4cedce78eaecd48dd557372f54e7b2bf696285ec7ddaef17a9709cc87ce2",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "openai": {
+        "enable": true,
+        "checksum": "c3fa0d2bbfaa5cf4b7602864cf4ef156683e18477002eaae0f110e84c4159be7",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "openai-tts": {
+        "enable": true,
+        "checksum": "45601d5afc7d6560c5ee408a922daf3942c03753bf4ba57fd6fad8e72cfe6ad4",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "random": {
+        "enable": true,
+        "checksum": "4a873cf65b845175e15c51569c093765016f31e9804e273ac915a0638e940435",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "utility": {
+        "enable": true,
+        "checksum": "e369de311010ea1cde8e5849bba2984451325b22debcf1d5cbe92c16876f88aa",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "voicevox": {
+        "enable": true,
+        "checksum": "ecea4f0c450e8aba3286970b769ecbb24616042edaef98694e0ae6c50b13fe87",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      },
+      "whisper": {
+        "enable": true,
+        "checksum": "6d46767a2be5ea50cea4b0c6bf1736b11bbea2d743b268644aa4f0722604efdc",
+        "env_passthrough": [],
+        "db_quota_mb": 256,
+        "config": null,
+        "profiles": {},
+        "manifest": null,
+        "sandbox": null,
+        "fs_grants": [],
+        "credentials": {}
+      }
+    },
+    "enabled": true,
+    "max_concurrent": 8,
+    "max_rounds": 10,
+    "timeout_ms": 60000,
+    "permission_prompt_timeout_ms": 300000,
+    "user_input_prompt_timeout_ms": 600000,
+    "parallel_tool_calls_max": 4,
+    "health_interval_ms": 30000,
+    "handshake_timeout_ms": 10000,
+    "mcp_allow_insecure_urls": false,
+    "mcp_servers": [],
+    "resource_classes": [],
+    "approval": {
+      "categories": {
+        "fs_read": "ask",
+        "fs_create": "ask",
+        "fs_modify": "ask",
+        "fs_delete": "ask",
+        "fixed_origin_network": "ask",
+        "dynamic_https": "ask",
+        "http": "ask",
+        "lan": "ask",
+        "loopback": "ask",
+        "web_file_save": "ask",
+        "plugin_install": "ask",
+        "plugin_update": "ask",
+        "sidecar_install": "ask",
+        "sidecar_update": "ask",
+        "model_install": "ask",
+        "model_update": "ask",
+        "process_spawn": "ask",
+        "shell": "ask",
+        "browser": "ask",
+        "platform": "ask",
+        "credential_use": "ask"
+      },
+      "emergency_stop": false,
+      "high_risk_confirmed": false
+    },
+    "plugin_approval": {},
+    "trusted_publishers": [],
+    "audit_log_path": null,
+    "sandbox": {
+      "enabled": false,
+      "landlock": true,
+      "seccomp": true,
+      "no_new_privs": true,
+      "network_namespace": false,
+      "cgroup": false,
+      "job_object": true,
+      "allowed_read_paths": [],
+      "allowed_write_paths": [],
+      "max_fds": 1024,
+      "max_memory_mb": 0,
+      "max_file_size_mb": 0,
+      "max_temp_mb": 1024
+    },
+    "artifact": {
+      "enabled": false,
+      "catalog_url": null,
+      "catalog_keys": [],
+      "root_dir": null,
+      "max_bytes": 8589934592,
+      "refresh_hours": 6,
+      "timeout_ms": 60000,
+      "max_redirects": 5
+    },
+    "download": {
+      "max_bytes": 268435456,
+      "max_redirects": 5,
+      "auto_save": null
+    }
+  },
   "version": 6,
   "character": "Alicia",
   "user_name": "User",
@@ -111,7 +548,7 @@
   },
   "desktop": {
     "graphics": {
-      "quality": "medium"
+      "quality": "high"
     },
     "language": "ja",
     "mic_device": null,
@@ -210,105 +647,5 @@
   },
   "store": {
     "enabled": true
-  },
-  "tools": {
-    "enabled": true,
-    "list": {
-      "app": {
-        "enable": true
-      },
-      "browser": {
-        "enable": true
-      },
-      "calc": {
-        "enable": true
-      },
-      "fs": {
-        "enable": true
-      },
-      "geo": {
-        "enable": true
-      },
-      "random": {
-        "enable": true
-      },
-      "git": {
-        "enable": true
-      },
-      "homeassistant": {
-        "base_url": "http://homeassistant.local:8123",
-        "enable": true,
-        "token": ""
-      },
-      "utility": {
-        "enable": true
-      },
-      "web": {
-        "enable": true
-      }
-    },
-    "mcp_servers": []
-  },
-  "plugins": {
-    "list": {
-      "web": {
-        "credentials": {
-          "exa_api_key": "",
-          "tavily_api_key": ""
-        }
-      },
-      "llama-cpp": {
-        "config": {
-          "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
-          "acceleration": "auto"
-        },
-        "profiles": {
-          "gemma-4-e2b": {
-            "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
-            "gpu_layers": "auto",
-            "context_size": 16384
-          },
-          "gemma-4-e4b": {
-            "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
-            "gpu_layers": "auto",
-            "context_size": 16384
-          },
-          "jina-v5-small": {
-            "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
-            "quantization": "F16",
-            "gpu_layers": "auto",
-            "context_size": 2048,
-            "dimensions": 1024
-          }
-        }
-      },
-      "llama-server": {
-        "config": {
-          "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
-          "acceleration": "auto"
-        },
-        "profiles": {
-          "gemma-4-e2b": {
-            "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
-            "gpu_layers": "auto",
-            "context_size": 16384,
-            "quantization": "F16"
-          },
-          "gemma-4-e4b": {
-            "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
-            "gpu_layers": "auto",
-            "context_size": 16384,
-            "quantization": "F16"
-          },
-          "jina-v5-small": {
-            "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
-            "quantization": "F16",
-            "gpu_layers": "auto",
-            "context_size": 2048,
-            "dimensions": 1024
-          }
-        }
-      }
-    }
   }
 }

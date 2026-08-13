@@ -377,6 +377,10 @@ pub struct UiState {
     /// once the user answers it from the Permission Center page.
     pub permission_requests: Vec<PendingPermission>,
     pub connector_selected: Option<ene_connector::ConnectorId>,
+    /// Selected tab on the Tools & Plugins page.
+    pub plugin_page_mode: PluginPageMode,
+    /// Plugin whose detail view is open on the Tools & Plugins page.
+    pub plugin_selected: Option<String>,
     pub session_search_query: String,
     pub session_import_path: String,
     /// Whether archived sessions are included in the list.
@@ -641,6 +645,15 @@ pub enum MemoryPageMode {
     RecallSearch,
     PendingApproval,
     Commitments,
+}
+
+/// Tab mode for the Tools & Plugins page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PluginPageMode {
+    #[default]
+    Tools,
+    Providers,
+    Mcp,
 }
 
 /// Filter for commitment list display.
