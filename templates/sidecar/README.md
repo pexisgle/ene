@@ -19,10 +19,15 @@ with no server surface and one job at a time (e.g. an ONNX VAD).
 
 ## What the template provides
 
+- `src/sidecar/config.rs` — the `SidecarConfig` shape the lifecycle needs
+  (server path, startup timeout, model profiles). Merge it into the plugin's
+  own config type (or re-export it from `crate::config`).
 - `src/sidecar/lifecycle.rs` — spawn → health-check → timeout kill → Drop
-  kill, with a spawn lock so concurrent requests cannot start two engines.
+  kill, with a spawn lock so concurrent requests cannot start two engines,
+  plus binary resolution (config `server_path` → bundled plugins dir →
+  `PATH`).
 - `src/sidecar/preset.rs` — writing an engine preset/config file into a
-  per-process work directory.
+  per-process work directory (generic JSON keyed by profile name).
 - `new-sidecar.sh` — copies the module into `plugins/provider/<name>/src/`
   with placeholder names replaced.
 - `Cargo.toml` — the dependency block the provider crate needs.
@@ -42,13 +47,14 @@ already exist). Then:
 1. Declare `mod sidecar;` in `src/main.rs` (or the module that owns the
    provider).
 2. Add the dependency block from `Cargo.toml` to the plugin's manifest.
-3. Implement the engine-specific parts:
-   - binary resolution (`resolve_binary`: explicit config path → host-injected
-     artifact path → bundled plugins dir → `PATH`),
+3. Merge `sidecar::config::SidecarConfig` into the plugin's config type (the
+   lifecycle and preset writer read `server_path`, `startup_timeout_secs`,
+   and `profiles`).
+4. Adapt the engine-specific parts:
    - the health probe (`GET /health`-style check against the engine's API),
    - preset serialization (`preset.rs`),
    - the client that talks to the engine over loopback HTTP.
-4. Walk `CHECKLIST.md` before enabling the plugin by default.
+5. Walk `CHECKLIST.md` before enabling the plugin by default.
 
 ## Sandbox notes
 

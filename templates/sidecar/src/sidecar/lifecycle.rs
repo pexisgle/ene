@@ -11,7 +11,8 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::config::SidecarConfig; // TODO: point at the plugin's config type.
+use super::config::SidecarConfig;
+use super::preset;
 
 /// How often startup re-probes the health endpoint while the engine boots.
 pub const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -45,7 +46,7 @@ impl SidecarState {
 }
 
 static SIDECAR: LazyLock<Mutex<Option<Arc<SidecarState>>>> = LazyLock::new(|| Mutex::new(None));
-static SPAWN_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(AsyncMutex::new);
+static SPAWN_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 
 /// Serializes spawns so concurrent requests cannot start two engines.
 pub async fn ensure_sidecar(
@@ -63,10 +64,10 @@ pub async fn ensure_sidecar(
     let work_dir = sidecar_work_dir();
     drop(std::fs::remove_dir_all(&work_dir));
     std::fs::create_dir_all(&work_dir)?;
-    let presets_path = preset::write_presets(&work_dir, config)?; // TODO: implement.
+    let presets_path = preset::write_presets(&work_dir, config)?;
     let port = pick_free_port()?;
     let api_key = random_api_key();
-    let binary = resolve_binary(config)?; // TODO: config → artifact → bundled → PATH.
+    let binary = resolve_binary(config)?;
     let mut child = Command::new(&binary)
         .args([
             "--host",
@@ -75,6 +76,13 @@ pub async fn ensure_sidecar(
             &port.to_string(),
             "--api-key",
             &api_key,
+            // Engine-specific hook: the reference engine (llama-server)
+            // consumes the preset file via `--models-preset`. Engines with a
+            // different flag (or none) adapt this line.
+            "--models-preset",
+            presets_path
+                .to_str()
+                .ok_or_else(|| "sidecar preset path is not valid UTF-8".to_string())?,
         ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -163,6 +171,43 @@ pub fn sidecar_work_dir() -> PathBuf {
         .join("__SIDECAR_NAME__")
 }
 
+/// Resolves the engine binary: explicit config `server_path` → bundled
+/// plugins directory → `PATH`. Never downloads a binary; catalog-managed
+/// engines arrive as a host-injected `server_path`.
+pub fn resolve_binary(
+    config: &SidecarConfig,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(path) = config
+        .server_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err(format!(
+                "configured __SIDECAR_NAME__ path does not exist: {}",
+                path.display()
+            )
+            .into());
+        }
+        return Ok(path);
+    }
+    let bundled = ene_config::builtin_plugins_dir().join(sidecar_binary_name());
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
+    Ok(PathBuf::from(sidecar_binary_name()))
+}
+
+fn sidecar_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "__SIDECAR_NAME__.exe"
+    } else {
+        "__SIDECAR_NAME__"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +223,29 @@ mod tests {
         let key = random_api_key();
         assert_eq!(key.len(), 32);
         assert!(key.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn resolve_binary_prefers_config_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("engine");
+        std::fs::write(&binary, b"#!/bin/sh").expect("write fixture");
+        let config = SidecarConfig {
+            server_path: Some(binary.to_string_lossy().into_owned()),
+            ..SidecarConfig::default()
+        };
+        assert_eq!(
+            resolve_binary(&config).expect("resolves").file_name(),
+            Some(std::ffi::OsStr::new("engine"))
+        );
+    }
+
+    #[test]
+    fn resolve_binary_rejects_missing_config_path() {
+        let config = SidecarConfig {
+            server_path: Some("/nonexistent/engine".to_string()),
+            ..SidecarConfig::default()
+        };
+        assert!(resolve_binary(&config).is_err());
     }
 }
