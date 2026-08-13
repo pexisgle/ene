@@ -11,8 +11,9 @@
 //! - [`super::diff_gate`] skips redundant vision inference when the screen
 //!   fingerprints have not changed significantly, returning the cached
 //!   summary instead.
-//! - [`super::ocr`] flags code / terminal windows and exposes the OCR
-//!   text-hint hook that a future local OCR backend can fill.
+//! - [`super::ocr`] flags code / terminal windows; code-like focus regions
+//!   get a verbatim transcription pass against the local vision model whose
+//!   text rides along to the summary prompt as an `ocr_text` hint.
 
 use std::time::{Duration, Instant};
 
@@ -144,19 +145,7 @@ impl ScreenSummaryProvider {
         captured: &CapturedScreen,
         composite: &DynamicImage,
     ) -> Result<String, ene_runtime::PublicApiError> {
-        // OCR text-hint hook: a future local OCR backend fills this in; the
-        // hints ride along to the vision prompt once available.
-        let ocr_hint = captured
-            .roi
-            .as_ref()
-            .and_then(super::ocr::extract_text_hints);
-        if let Some(hints) = ocr_hint.as_deref() {
-            tracing::debug!(
-                component = "ProactiveObserve",
-                chars = hints.chars().count(),
-                "Extracted text hints from focus region"
-            );
-        }
+        let ocr_hint = self.ocr_text_hint(captured).await;
         let rgb = composite.to_rgb8();
         let (width, height) = rgb.dimensions();
         self.handle
@@ -173,6 +162,45 @@ impl ScreenSummaryProvider {
                 },
             )
             .await
+    }
+
+    /// Verbatim transcription of the focus region, for code-like windows
+    /// only. Best-effort: any failure just skips the `ocr_text` hint.
+    async fn ocr_text_hint(&self, captured: &CapturedScreen) -> Option<String> {
+        if !captured.is_code_like {
+            return None;
+        }
+        let roi = captured.roi.as_ref()?;
+        let rgb = roi.to_rgb8();
+        let (width, height) = rgb.dimensions();
+        match self
+            .handle
+            .vision()
+            .read_screen_text(width, height, rgb.into_raw())
+            .await
+        {
+            Ok(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    None
+                } else {
+                    tracing::debug!(
+                        component = "ProactiveObserve",
+                        chars = text.chars().count(),
+                        "Extracted text hints from focus region"
+                    );
+                    Some(text.to_string())
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    component = "ProactiveObserve",
+                    error = %e,
+                    "Screen OCR unavailable; summarizing without text hints"
+                );
+                None
+            }
+        }
     }
 }
 

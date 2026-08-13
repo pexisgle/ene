@@ -1275,6 +1275,7 @@ impl TurnActor {
     /// requests during the loading window cannot exhaust `bg_command_cap`.
     fn prepare_vision_summary(
         &mut self,
+        task: crate::vision::VisionTask,
         app_label: String,
         hints: crate::vision::ScreenSummaryHints,
         reply: oneshot::Sender<Result<VisionPrepared, crate::public_api::PublicApiError>>,
@@ -1300,7 +1301,7 @@ impl TurnActor {
 
         // Fast path: handles already loaded — complete synchronously.
         if let Some(handles) = self.proactive_llm.get() {
-            let result = finish_vision_prep(handles, &prompt_language, &app_label, &hints);
+            let result = finish_vision_prep(handles, &prompt_language, task, &app_label, &hints);
             if result.is_ok() {
                 // Mint a fresh cancel token for this request; a new user turn
                 // cancels and replaces `self.vision_cancel` (see `EneCommand::Run`),
@@ -1367,11 +1368,12 @@ impl TurnActor {
                     return;
                 }
                 if let Some(handles) = cell.get() {
-                    let result = finish_vision_prep(handles, &prompt_language, &app_label, &hints)
-                        .map(|mut vp| {
-                            vp.cancel = cancel;
-                            vp
-                        });
+                    let result =
+                        finish_vision_prep(handles, &prompt_language, task, &app_label, &hints)
+                            .map(|mut vp| {
+                                vp.cancel = cancel;
+                                vp
+                            });
                     slow_path_active.store(false, Ordering::Release);
                     drop(reply.send(result));
                     return;
@@ -2996,11 +2998,12 @@ impl TurnActor {
                 true
             }
             EneCommand::PrepareVisionSummary {
+                task,
                 app_label,
                 hints,
                 reply,
             } => {
-                self.prepare_vision_summary(app_label, hints, reply);
+                self.prepare_vision_summary(task, app_label, hints, reply);
                 true
             }
             EneCommand::StashProactiveScreenImage { data_uri } => {
@@ -5032,6 +5035,7 @@ impl TurnActor {
 fn finish_vision_prep(
     handles: &crate::proactive_llm::ProactiveLlmHandles,
     prompt_language: &str,
+    task: crate::vision::VisionTask,
     app_label: &str,
     hints: &crate::vision::ScreenSummaryHints,
 ) -> Result<VisionPrepared, crate::public_api::PublicApiError> {
@@ -5047,13 +5051,22 @@ fn finish_vision_prep(
     };
 
     let prompts = ene_config::PromptLibrary::load(prompt_language);
-    let system = prompts.proactive().screen_summary_system.trim().to_string();
-    let user = prompts.proactive().render_screen_summary_user(
-        app_label,
-        hints.roi_composited,
-        hints.code_window,
-        hints.ocr_text.as_deref(),
-    );
+    let proactive = prompts.proactive();
+    let (system, user) = match task {
+        crate::vision::VisionTask::Summarize => (
+            proactive.screen_summary_system.trim().to_string(),
+            proactive.render_screen_summary_user(
+                app_label,
+                hints.roi_composited,
+                hints.code_window,
+                hints.ocr_text.as_deref(),
+            ),
+        ),
+        crate::vision::VisionTask::ReadText => (
+            proactive.screen_ocr_system.trim().to_string(),
+            proactive.screen_ocr_user.trim().to_string(),
+        ),
+    };
     Ok(VisionPrepared {
         local,
         system,

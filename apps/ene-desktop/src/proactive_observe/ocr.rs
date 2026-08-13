@@ -1,12 +1,11 @@
 //! Lightweight heuristics for detecting code / terminal windows and
 //! extracting rough text hints from captured screen regions.
 //!
-//! This module does **not** perform full OCR. The `is_code_window` function is
-//! a cheap window-title/class-based filter that lets the observer signal to the
-//! vision model that it is looking at code-like content. Full offline OCR
-//! (e.g. via Tesseract or a local OCR model) would go here in a future iteration.
-
-use image::DynamicImage;
+//! This module does **not** perform OCR itself. The `is_code_window` function
+//! is a cheap window-title/class-based filter that decides whether the
+//! observer pays for a verbatim transcription pass: code-like windows get a
+//! `read_screen_text` call against the local vision model, and the resulting
+//! text rides along to the summary prompt as an `ocr_text` hint.
 
 /// Determine whether the active window *likely* contains code or structured
 /// terminal output by checking the window title and class against a list of
@@ -48,20 +47,6 @@ pub fn is_code_window(window_title: &str, window_class: &str) -> bool {
     code_indicators.iter().any(|ind| lower.contains(ind))
 }
 
-/// Extract ASCII text-line hints from a raw RGB image (simplified heuristic).
-///
-/// This is a **placeholder** for future local OCR integration. The current
-/// implementation always returns `None`, indicating that no text could be
-/// extracted. When integrated with a local OCR engine (e.g. Tesseract, a
-/// small ONNX model, or the built-in Gemma vision model with a "read this
-/// text" prompt), this function would return extracted text lines.
-///
-/// The function signature is stabilised so callers can be written today and
-/// filled in later.
-pub fn extract_text_hints(_img: &DynamicImage) -> Option<String> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,11 +79,5 @@ mod tests {
     fn rejects_media_player() {
         assert!(!is_code_window("Spotify", "spotify"));
         assert!(!is_code_window("VLC media player", "vlc"));
-    }
-
-    #[test]
-    fn extract_text_placeholder_returns_none() {
-        let img = DynamicImage::new_rgba8(100, 100);
-        assert!(extract_text_hints(&img).is_none());
     }
 }

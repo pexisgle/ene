@@ -1294,6 +1294,8 @@ mod tests {
             screen_summary_layout_note: String::new(),
             screen_summary_code_note: String::new(),
             screen_summary_ocr_note: String::new(),
+            screen_ocr_system: String::new(),
+            screen_ocr_user: String::new(),
         };
         ensure_confirmation_note(&mut prompts, "en");
         assert!(

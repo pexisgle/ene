@@ -513,6 +513,8 @@ pub enum EneCommand {
     /// rendered prompts so [`crate::vision::VisionHandle`] can run the
     /// actual inference outside the actor. See [`crate::vision`] module docs.
     PrepareVisionSummary {
+        /// Which vision task the prepared session serves.
+        task: crate::vision::VisionTask,
         /// Privacy-safe OS app label (may be empty).
         app_label: String,
         /// Non-image context hints for the summary prompt (layout, window

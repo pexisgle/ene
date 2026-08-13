@@ -463,6 +463,10 @@ pub struct ProactivePrompts {
     pub screen_summary_code_note: String,
     /// Template wrapping raw OCR text from the focus region (`{ocr_text}`).
     pub screen_summary_ocr_note: String,
+    /// System prompt for verbatim screen-text transcription (OCR).
+    pub screen_ocr_system: String,
+    /// User prompt for verbatim screen-text transcription (OCR).
+    pub screen_ocr_user: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -501,6 +505,10 @@ struct RawProactivePrompts {
     screen_summary_code_note_path: String,
     #[serde(default = "default_proactive_screen_summary_ocr_note_path")]
     screen_summary_ocr_note_path: String,
+    #[serde(default = "default_proactive_screen_ocr_system_path")]
+    screen_ocr_system_path: String,
+    #[serde(default = "default_proactive_screen_ocr_user_path")]
+    screen_ocr_user_path: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -563,6 +571,14 @@ fn default_proactive_screen_summary_code_note_path() -> String {
 
 fn default_proactive_screen_summary_ocr_note_path() -> String {
     "en/proactive/screen_summary_ocr_note.md".into()
+}
+
+fn default_proactive_screen_ocr_system_path() -> String {
+    "en/proactive/screen_ocr_system.md".into()
+}
+
+fn default_proactive_screen_ocr_user_path() -> String {
+    "en/proactive/screen_ocr_user.md".into()
 }
 
 fn default_compression_system_path() -> String {
@@ -913,6 +929,20 @@ macro_rules! embedded_pack {
                     "/proactive/screen_summary_ocr_note.md"
                 ))
                 .to_string(),
+                screen_ocr_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/screen_ocr_system.md"
+                ))
+                .to_string(),
+                screen_ocr_user: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/screen_ocr_user.md"
+                ))
+                .to_string(),
             },
             compression: CompressionPrompts {
                 system: include_str!(concat!(
@@ -1111,6 +1141,8 @@ mod tests {
         assert!(!lib.summarizer().system.is_empty());
         assert!(!lib.proactive().decision_system.is_empty());
         assert!(!lib.proactive().screen_summary_system.is_empty());
+        assert!(!lib.proactive().screen_ocr_system.is_empty());
+        assert!(!lib.proactive().screen_ocr_user.is_empty());
     }
 
     #[test]

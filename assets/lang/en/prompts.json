@@ -58,7 +58,9 @@
     "screen_summary_user": "OS application label (privacy-safe; may be empty or imprecise): {app_label}\n\n{context_notes}Describe what is visible on this screen using the system contract. Ground every claim in visible UI.\n",
     "screen_summary_layout_note": "This frame shows the window at 50% scale on the left and a 100%-scale close-up around the cursor on the right of the dark separator bar; quote fine text from the close-up.\n",
     "screen_summary_code_note": "The active window appears to be a code editor or terminal; prefer quoting visible code, errors, and command output.\n",
-    "screen_summary_ocr_note": "Raw OCR text extracted from the focus region (may be noisy or empty):\n{ocr_text}\n"
+    "screen_summary_ocr_note": "Raw OCR text extracted from the focus region (may be noisy or empty):\n{ocr_text}\n",
+    "screen_ocr_system": "## Role\nYou are a screen-text transcription engine for a desktop companion AI.\n\n## Task\nTranscribe the visible text in the provided image verbatim.\n\n## Output contract\n- Output only the transcribed text, preserving line breaks.\n- No JSON, no markdown, no bullet markers, no commentary, no greetings.\n- Keep the original language; do not translate or paraphrase.\n- Skip unreadable or truncated glyphs rather than guessing.\n- Never invent text that is not visible.\n",
+    "screen_ocr_user": "Transcribe all readable text in this image exactly as shown, preserving line breaks.\n"
   },
   "compression": {
     "system": "You compress conversation history for a desktop AI companion named {character_name}.\nSummarize the following {level_label} excerpt in 2-4 sentences.\nDo NOT rewrite character identity, system instructions, or personality.\nFocus on events, topics, and emotional beats.\nRespond with plain text only — no JSON, no markdown fences.\n"

@@ -41,6 +41,15 @@ use tokio_util::sync::CancellationToken;
 /// or below this limit (see `ene-desktop`'s `MAX_COMPOSITE_PIXELS` test).
 pub const MAX_PIXELS: u64 = 1920 * 1080;
 
+/// Which vision task a prepared session serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisionTask {
+    /// Summarize the screen with app-label / layout / OCR context hints.
+    Summarize,
+    /// Transcribe visible text verbatim (screen OCR).
+    ReadText,
+}
+
 /// Result of a successful [`EneCommand::PrepareVisionSummary`] round trip:
 /// everything [`VisionHandle::summarize_screen_image`] needs to run the
 /// actual vision inference outside the actor.
@@ -107,16 +116,9 @@ impl VisionHandle {
         hints: ScreenSummaryHints,
     ) -> Result<String, PublicApiError> {
         validate_rgb(width, height, &rgb)?;
-
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::PrepareVisionSummary {
-                app_label,
-                hints,
-                reply,
-            })
-            .map_err(|_| PublicApiError::ActorDead)?;
-        let prepared = rx.await.map_err(|_| PublicApiError::ActorDead)??;
+        let prepared = self
+            .prepare(VisionTask::Summarize, app_label, hints)
+            .await?;
 
         // Encode once: the same data URI feeds the stash and the inference
         // message (a 1080p frame takes ~100 ms to encode).
@@ -142,6 +144,57 @@ impl VisionHandle {
                     e.to_string()
                 },
             })
+    }
+
+    /// Transcribe the visible text in a screen region via the local vision
+    /// model. Best-effort screen OCR: returns the raw transcription, which
+    /// callers may treat as a hint (the summary prompt carries it as
+    /// `ocr_text` context rather than depending on it).
+    pub async fn read_screen_text(
+        &self,
+        width: u32,
+        height: u32,
+        rgb: Vec<u8>,
+    ) -> Result<String, PublicApiError> {
+        validate_rgb(width, height, &rgb)?;
+        let prepared = self
+            .prepare(
+                VisionTask::ReadText,
+                String::new(),
+                ScreenSummaryHints::default(),
+            )
+            .await?;
+
+        let data_uri = crate::proactive::rgb_to_jpeg_data_uri(width, height, &rgb)
+            .map_err(|e| PublicApiError::Internal { message: e })?;
+        let messages = build_vision_messages(prepared.system, prepared.user, data_uri);
+        drain_vision_summary(prepared.local.as_ref(), &messages, &prepared.cancel)
+            .await
+            .map_err(|e| PublicApiError::Internal {
+                message: if matches!(e, ene_ai::error::LlmProviderError::Cancelled) {
+                    "screen OCR cancelled".to_string()
+                } else {
+                    e.to_string()
+                },
+            })
+    }
+
+    async fn prepare(
+        &self,
+        task: VisionTask,
+        app_label: String,
+        hints: ScreenSummaryHints,
+    ) -> Result<VisionPrepared, PublicApiError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::PrepareVisionSummary {
+                task,
+                app_label,
+                hints,
+                reply,
+            })
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)?
     }
 }
 
