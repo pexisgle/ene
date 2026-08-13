@@ -48,7 +48,7 @@ pub struct ResolvedLocalModel {
     /// Preferred acceleration backend.
     pub acceleration: crate::config::ProactiveAcceleration,
     /// GPU layer offload setting.
-    pub gpu_layers: String,
+    pub gpu_layers: crate::config::GpuLayers,
     /// Context size for decision workloads.
     pub context_size: u32,
     /// Real embedding dimensionality, when the model backs `tasks.embedding`
@@ -74,7 +74,7 @@ impl ResolvedLocalModel {
             mmproj_path: llama_cpp.mmproj_path,
             quantization: def.quantization.clone(),
             acceleration: llama_cpp.acceleration,
-            gpu_layers: def.gpu_layers.clone(),
+            gpu_layers: def.gpu_layers,
             context_size: def.context_size,
             dimensions: def.dimensions,
         }

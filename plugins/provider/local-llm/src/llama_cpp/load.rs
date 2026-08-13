@@ -28,7 +28,7 @@ pub(crate) struct LoadSpec {
     pub model_path: PathBuf,
     pub mmproj_path: Option<PathBuf>,
     pub acceleration: ProactiveAcceleration,
-    pub gpu_layers: String,
+    pub gpu_layers: ene_ai::GpuLayers,
     pub context_size: u32,
 }
 
@@ -57,9 +57,9 @@ impl LoadSpec {
 /// compiled via Cargo features (`vulkan` / `cuda`) plus main GPU index 0.
 pub(crate) fn resolve_gpu_offload(
     acceleration: ProactiveAcceleration,
-    gpu_layers: &str,
+    gpu_layers: ene_ai::GpuLayers,
 ) -> Result<GpuOffload, LlmProviderError> {
-    let layers = parse_gpu_layers(gpu_layers);
+    let layers = gpu_layers.n_layers();
     match acceleration {
         ProactiveAcceleration::Cpu => Ok(GpuOffload {
             n_gpu_layers: 0,
@@ -116,21 +116,12 @@ pub(crate) fn resolve_gpu_offload(
 /// crate's docs on `ResourceRegistry` for why sharing that one class across
 /// independently-constructed engines is exactly the point).
 pub(crate) fn resource_class_for(spec: &LoadSpec) -> Result<ResourceClass, LlmProviderError> {
-    let offload = resolve_gpu_offload(spec.acceleration, &spec.gpu_layers)?;
+    let offload = resolve_gpu_offload(spec.acceleration, spec.gpu_layers)?;
     Ok(if offload.use_main_gpu {
         ResourceClass::Gpu { device: 0 }
     } else {
         ResourceClass::Cpu
     })
-}
-
-fn parse_gpu_layers(raw: &str) -> u32 {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
-        999
-    } else {
-        trimmed.parse().unwrap_or(999)
-    }
 }
 
 /// Owned loaded model + optional multimodal projector context.
@@ -144,7 +135,7 @@ pub(crate) struct LoadedModel {
 
 impl LoadedModel {
     pub(crate) fn load(spec: &LoadSpec) -> Result<Self, LlmProviderError> {
-        let offload = resolve_gpu_offload(spec.acceleration, &spec.gpu_layers)?;
+        let offload = resolve_gpu_offload(spec.acceleration, spec.gpu_layers)?;
         with_backend(|backend| {
             load_with_backend(
                 backend,

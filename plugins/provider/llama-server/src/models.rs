@@ -135,7 +135,7 @@ async fn resolve_weights(
         mmproj_path: config.mmproj_path.clone().unwrap_or_default(),
         quantization: profile.quantization().to_string(),
         acceleration: config.acceleration()?,
-        gpu_layers: profile.gpu_layers().to_string(),
+        gpu_layers: profile.gpu_layers(),
         context_size: profile.context_size(),
         dimensions: profile.dimensions(),
     };
@@ -159,7 +159,7 @@ async fn resolve_mmproj(config: &HostConfig) -> Result<Option<PathBuf>, PluginEr
         mmproj_path: config.mmproj_path.clone().unwrap_or_default(),
         quantization: String::new(),
         acceleration: config.acceleration()?,
-        gpu_layers: String::new(),
+        gpu_layers: ene_ai::GpuLayers::Auto,
         context_size: 0,
         dimensions: None,
     };

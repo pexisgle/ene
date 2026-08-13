@@ -190,6 +190,94 @@ fn typo_tolerance(kind: &str, candidate: &str) -> usize {
     if max_len <= 8 { 1 } else { 2 }
 }
 
+/// GPU layer offload for a local GGUF model.
+///
+/// `"auto"` defers to the engine backend (all layers when a GPU backend is
+/// compiled in); an explicit count pins the offload. Deserialization accepts
+/// `"auto"`, an integer, or a numeric string, and rejects anything else at
+/// the config boundary instead of silently falling back at load time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, schemars::JsonSchema)]
+#[schemars(crate = "::ene_config::schemars")]
+pub enum GpuLayers {
+    /// Offload every layer the compiled backend supports.
+    #[default]
+    Auto,
+    /// Explicit number of layers to offload (0 = CPU only).
+    Layers(u32),
+}
+
+impl GpuLayers {
+    /// Layer count to hand to the engine; `Auto` means "all layers" (the
+    /// llama.cpp convention of `999`).
+    #[must_use]
+    pub const fn n_layers(self) -> u32 {
+        match self {
+            Self::Auto => 999,
+            Self::Layers(n) => n,
+        }
+    }
+
+    /// Parses a config value: empty or case-insensitive `"auto"` → [`Self::Auto`],
+    /// otherwise a non-negative integer (or integer string) → [`Self::Layers`].
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+            Some(Self::Auto)
+        } else {
+            trimmed.parse::<u32>().ok().map(Self::Layers)
+        }
+    }
+}
+
+impl std::fmt::Display for GpuLayers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Layers(n) => write!(f, "{n}"),
+        }
+    }
+}
+
+impl serde::Serialize for GpuLayers {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for GpuLayers {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = GpuLayers;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("\"auto\" or a non-negative integer (or integer string)")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                GpuLayers::parse(value)
+                    .ok_or_else(|| E::custom(format!("invalid gpu_layers: {value:?}")))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                u32::try_from(value)
+                    .map(Self::Value::Layers)
+                    .map_err(|_| E::custom(format!("gpu_layers out of range: {value}")))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                u32::try_from(value)
+                    .map(Self::Value::Layers)
+                    .map_err(|_| E::custom(format!("gpu_layers out of range: {value}")))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 /// Named local GGUF model entry under [`AiConfig::local_models`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
@@ -212,11 +300,9 @@ pub struct LocalModelDef {
     /// Explicit filesystem path override (skips download when non-empty).
     #[serde(default = "default_string")]
     pub model_path: String,
-    /// GPU layer offload: `"auto"` or an integer string (e.g. `"33"`).
-    // TODO: Replace `String` with an `AutoOrU32` enum to catch misconfiguration
-    // at the config boundary instead of silently falling back at load time.
+    /// GPU layer offload: `"auto"` or an explicit layer count.
     #[serde(default = "default_gpu_layers")]
-    pub gpu_layers: String,
+    pub gpu_layers: GpuLayers,
     /// Context window for this model, in tokens.
     ///
     /// Sized to hold the full main-conversation prompt when the model backs a
@@ -257,8 +343,8 @@ fn default_local_quantization() -> String {
     "F16".to_string()
 }
 
-fn default_gpu_layers() -> String {
-    "auto".to_string()
+fn default_gpu_layers() -> GpuLayers {
+    GpuLayers::Auto
 }
 
 /// Default context window for a local model, in tokens.
@@ -545,6 +631,70 @@ ene_config::define_config!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_layers_serde_roundtrips() {
+        for (raw, expected, serialized) in [
+            (
+                serde_json::json!("auto"),
+                GpuLayers::Auto,
+                serde_json::json!("auto"),
+            ),
+            (
+                serde_json::json!("AUTO"),
+                GpuLayers::Auto,
+                serde_json::json!("auto"),
+            ),
+            (
+                serde_json::json!(""),
+                GpuLayers::Auto,
+                serde_json::json!("auto"),
+            ),
+            (
+                serde_json::json!("33"),
+                GpuLayers::Layers(33),
+                serde_json::json!("33"),
+            ),
+            (
+                serde_json::json!(33),
+                GpuLayers::Layers(33),
+                serde_json::json!("33"),
+            ),
+            (
+                serde_json::json!(0),
+                GpuLayers::Layers(0),
+                serde_json::json!("0"),
+            ),
+        ] {
+            let parsed: GpuLayers = serde_json::from_value(raw.clone()).expect("parses");
+            assert_eq!(parsed, expected);
+            assert_eq!(
+                serde_json::to_value(parsed).expect("serializes"),
+                serialized
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_layers_rejects_misconfiguration() {
+        for raw in [
+            serde_json::json!("bogus"),
+            serde_json::json!("-1"),
+            serde_json::json!(1.5),
+        ] {
+            assert!(
+                serde_json::from_value::<GpuLayers>(raw).is_err(),
+                "misconfiguration must fail at the config boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_layers_n_layers_matches_engine_convention() {
+        assert_eq!(GpuLayers::Auto.n_layers(), 999);
+        assert_eq!(GpuLayers::Layers(33).n_layers(), 33);
+        assert_eq!(GpuLayers::default(), GpuLayers::Auto);
+    }
     use crate::resolve::{ResolvedEmbedding, resolve_base_url};
 
     fn test_config() -> AiConfig {
