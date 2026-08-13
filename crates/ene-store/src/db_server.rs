@@ -1,9 +1,8 @@
 //! Per-tool DB IPC server using SeaORM.
 //!
-//! Listens on a Unix socket (standalone / tests) or serves an already-
-//! authenticated stream handed off by the multiplexed
-//! [`crate::host_service::HostServiceServer`], and dispatches
-//! [`DbRequest`] messages against the shared `memory.db`.
+//! Serves already-authenticated DB IPC streams handed off by the multiplexed
+//! [`crate::host_service::HostServiceServer`], and dispatches [`DbRequest`]
+//! messages against the shared `memory.db`.
 //!
 //! ## Security model
 //!
@@ -41,7 +40,6 @@
 //!   plugin author must reconcile the difference.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::entities::tool_schemas;
@@ -49,10 +47,7 @@ use ene_plugin_db::{
     DbBatchOpResult, DbColumn, DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema,
     DbTable, DbType, DbValue, DbWriteOp, Row,
 };
-use ene_plugin_proto::{
-    HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId, HostServiceRequest,
-    HostServiceResponse, write_host_service_response,
-};
+use ene_plugin_proto::HOST_SERVICE_MAX_MESSAGE_SIZE;
 use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, ExprTrait, Statement,
@@ -157,138 +152,17 @@ impl DbServerError {
     }
 }
 
-/// Per-tool DB IPC server.
-pub struct DbIpcServer {
-    db: DatabaseConnection,
-    socket_path: PathBuf,
-    tool_name: String,
-    prefix: String,
-    /// Pre-shared auth token required on the very first request of
-    /// every connection in standalone [`Self::run`] mode. Production
-    /// traffic authenticates via the host-service `Open` gate instead.
-    auth_token: String,
-    /// Per-plugin storage quota in bytes, derived from
-    /// `plugins.list.<name>.db_quota_mb`. `None` disables
-    /// enforcement (unbounded storage).
-    quota_bytes: Option<u64>,
-}
+/// Serves authenticated DB IPC streams.
+///
+/// Stateless namespace: every connection is authenticated by the
+/// host-service `Open` gate before it reaches these helpers.
+pub struct DbIpcServer;
 
 impl DbIpcServer {
-    /// Creates a new server for the given tool.
-    ///
-    /// `db` must be a sea-orm database connection that is already
-    /// open, has had its PRAGMAs applied, and has had migrations run.
-    /// The caller is responsible for providing a connection from
-    /// the same pool that `MemoryStore` uses.
-    ///
-    /// `quota_bytes` caps how much of the shared `memory.db` this
-    /// tool's tables may occupy; `None` disables enforcement.
-    pub const fn new(
-        db: DatabaseConnection,
-        socket_path: PathBuf,
-        tool_name: String,
-        prefix: String,
-        auth_token: String,
-        quota_bytes: Option<u64>,
-    ) -> Self {
-        Self {
-            db,
-            socket_path,
-            tool_name,
-            prefix,
-            auth_token,
-            quota_bytes,
-        }
-    }
-
-    /// Runs the server, listening for connections and handling requests.
-    pub async fn run(self) -> Result<(), DbServerError> {
-        // On Unix, remove any stale socket file from a previous run
-        // before binding. Named pipes are kernel objects, not
-        // filesystem objects, so this step is a no-op on Windows.
-        #[cfg(unix)]
-        if self.socket_path.exists() {
-            tokio::fs::remove_file(&self.socket_path).await?;
-        }
-
-        let mut listener = ene_plugin_proto::transport::IpcListener::bind(&self.socket_path)?;
-
-        // Restrict the unix socket to the owning user. Without this
-        // chmod the socket in /tmp is world-connectable, allowing any
-        // local process to connect and issue DeclareSchema on the tool's
-        // behalf — a privilege escalation. Named pipes use a
-        // per-handle ACL instead, which the kernel sets when we bind.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            if let Err(e) = std::fs::set_permissions(&self.socket_path, perms) {
-                return Err(DbServerError::Internal(format!(
-                    "failed to chmod DB socket to 0o600: {e}"
-                )));
-            }
-        }
-
-        info!(
-            tool = %self.tool_name,
-            socket = %self.socket_path.display(),
-            "DB IPC server listening"
-        );
-
-        #[expect(
-            clippy::infinite_loop,
-            reason = "DB IPC accept loop runs until the server task is cancelled"
-        )]
-        loop {
-            // Continue the accept loop on transient accept
-            // errors (EMFILE, ENFILE, EINTR, ...). A
-            // permanent kill of the DB server on a single
-            // resource-exhaustion event would leave the
-            // tool offline until the next reconfigure.
-            // The errors that *do* terminate the server
-            // (broken listener, socket removed, etc.) are
-            // surfaced via the original `?` on the
-            // `accept()` call only after we have logged
-            // and backed off, so a single transient
-            // failure does not silently break the tool.
-            let stream = match listener.accept().await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    error!(
-                        tool = %self.tool_name,
-                        error = %e,
-                        "DB IPC accept failed; backing off and continuing"
-                    );
-                    // Exponential backoff capped at 5s: a transient accept
-                    // failure must not kill the server task.
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    continue;
-                }
-            };
-            debug!(tool = %self.tool_name, "Accepted DB IPC connection");
-
-            let db = self.db.clone();
-            let tool_name = self.tool_name.clone();
-            let prefix = self.prefix.clone();
-            let auth_token = self.auth_token.clone();
-            let quota_bytes = self.quota_bytes;
-
-            tokio::spawn(async move {
-                if let Err(e) =
-                    Self::handle_connection(stream, db, tool_name, prefix, auth_token, quota_bytes)
-                        .await
-                {
-                    error!(error = %e, "DB IPC connection error");
-                }
-            });
-        }
-    }
-
     /// Serves an already-authenticated DB IPC stream.
     ///
     /// Used by the multiplexed host-service acceptor after
-    /// [`HostServiceRequest::Open`] succeeds, and by the standalone
-    /// [`Self::run`] path after a legacy or Open handshake.
+    /// [`HostServiceRequest::Open`] succeeds.
     pub(crate) async fn serve_authenticated_connection(
         mut stream: ene_plugin_proto::transport::IpcStream,
         db: DatabaseConnection,
@@ -378,130 +252,6 @@ impl DbIpcServer {
         }
 
         Ok(())
-    }
-
-    /// Standalone accept-path auth: first framed message may be a host-service
-    /// [`HostServiceRequest::Open`] (service `db`) or a legacy
-    /// [`DbRequest::Handshake`]. Production traffic uses
-    /// [`crate::host_service::HostServiceServer`] instead.
-    async fn handle_connection(
-        mut stream: ene_plugin_proto::transport::IpcStream,
-        db: DatabaseConnection,
-        tool_name: String,
-        prefix: String,
-        auth_token: String,
-        quota_bytes: Option<u64>,
-    ) -> Result<(), DbServerError> {
-        let mut len_buf = [0u8; 4];
-        match stream.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                debug!(tool = %tool_name, "DB IPC connection closed before auth");
-                return Ok(());
-            }
-            Err(e) => return Err(DbServerError::Io(e)),
-        }
-        let Ok(msg_len) = usize::try_from(u32::from_le_bytes(len_buf)) else {
-            return Err(DbServerError::Internal(
-                "message length overflow on this platform".to_string(),
-            ));
-        };
-        if msg_len > HOST_SERVICE_MAX_MESSAGE_SIZE {
-            return Err(DbServerError::Internal(format!(
-                "message too large: {msg_len}"
-            )));
-        }
-
-        let mut msg_buf = vec![0u8; msg_len];
-        stream.read_exact(&mut msg_buf).await?;
-
-        if let Ok(HostServiceRequest::Open { service, token }) = serde_json::from_slice(&msg_buf) {
-            if service != HostServiceId::Db {
-                warn!(
-                    tool = %tool_name,
-                    ?service,
-                    "standalone DB IPC Open for unimplemented service"
-                );
-                write_host_service_response(
-                    &mut stream,
-                    &HostServiceResponse::Error {
-                        code: HostServiceErrorCode::UnknownService,
-                        message: format!("service {service:?} is not implemented"),
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
-            if token != auth_token {
-                warn!(tool = %tool_name, "standalone DB IPC Open rejected: bad token");
-                write_host_service_response(
-                    &mut stream,
-                    &HostServiceResponse::Error {
-                        code: HostServiceErrorCode::AuthRejected,
-                        message: "Invalid auth token".to_string(),
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
-            write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await?;
-            return Self::serve_authenticated_connection(
-                stream,
-                db,
-                tool_name,
-                prefix,
-                quota_bytes,
-            )
-            .await;
-        }
-
-        let request: DbRequest = match serde_json::from_slice(&msg_buf) {
-            Ok(req) => req,
-            Err(e) => {
-                warn!(tool = %tool_name, error = %e, "Invalid JSON in DB auth message");
-                let response = DbResponse::Error {
-                    code: DbErrorCode::Internal,
-                    message: format!("Invalid JSON: {e}"),
-                };
-                Self::send_response(&mut stream, &response).await?;
-                return Ok(());
-            }
-        };
-
-        match request {
-            DbRequest::Handshake { token } if token == auth_token => {
-                Self::send_response(&mut stream, &DbResponse::HandshakeAck).await?;
-                Self::serve_authenticated_connection(stream, db, tool_name, prefix, quota_bytes)
-                    .await
-            }
-            DbRequest::Handshake { .. } => {
-                warn!(tool = %tool_name, "DB IPC handshake failed: bad token");
-                Self::send_response(
-                    &mut stream,
-                    &DbResponse::Error {
-                        code: DbErrorCode::PermissionDenied,
-                        message: "Invalid auth token".to_string(),
-                    },
-                )
-                .await?;
-                Ok(())
-            }
-            _ => {
-                warn!(
-                    tool = %tool_name,
-                    "DB IPC request before handshake; closing"
-                );
-                Self::send_response(
-                    &mut stream,
-                    &DbResponse::Error {
-                        code: DbErrorCode::PermissionDenied,
-                        message: "Handshake required".to_string(),
-                    },
-                )
-                .await?;
-                Ok(())
-            }
-        }
     }
 
     pub(crate) async fn send_response(
@@ -675,13 +425,6 @@ impl DbIpcServer {
             }
             DbRequest::Ping => DbResponse::Pong,
             DbRequest::Shutdown => DbResponse::Ack,
-            // The handshake is intercepted in `handle_connection`
-            // before reaching this dispatch; reaching it here means
-            // a second handshake was sent, which we reject.
-            DbRequest::Handshake { .. } => DbResponse::Error {
-                code: DbErrorCode::PermissionDenied,
-                message: "Handshake already completed".to_string(),
-            },
         }
     }
 

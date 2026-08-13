@@ -11,14 +11,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ene_plugin_db::{DbErrorCode, DbRequest, DbResponse};
 use ene_plugin_proto::{
-    CapabilityServiceHandler, HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId,
-    HostServiceRequest, HostServiceResponse, SharedBrokerHandler, read_framed_json,
+    CapabilityServiceHandler, HostServiceErrorCode, HostServiceId, HostServiceRequest,
+    HostServiceResponse, SharedBrokerHandler, read_framed_json, read_host_service_request,
     write_framed_json, write_host_service_response,
 };
 use sea_orm::DatabaseConnection;
-use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, warn};
 
 use crate::db_server::{DbIpcServer, DbServerError};
@@ -190,138 +188,108 @@ impl HostServiceServer {
         broker: Option<SharedBrokerHandler>,
         failed_opens: Arc<Mutex<OpenFailureTracker>>,
     ) -> Result<(), DbServerError> {
-        // Read the first frame manually so a legacy `DbRequest::Handshake`
-        // can be recognized after `HostServiceRequest::Open` deserialization
-        // fails (the frame is consumed either way).
-        let Some(frame) = read_first_frame(&mut stream).await? else {
-            debug!("Host service connection closed before Open");
+        let request = match read_host_service_request(&mut stream).await {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                debug!("Host service connection closed before Open");
+                return Ok(());
+            }
+            Err(_) => {
+                warn!("Host service connection sent an unrecognized first frame");
+                return Ok(());
+            }
+        };
+        // The request type has a single `Open` variant; anything else failed
+        // to deserialize above and was already rejected.
+        let HostServiceRequest::Open { service, token } = request;
+
+        match service {
+            HostServiceId::Db => {}
+            HostServiceId::Capability => {
+                let Some(handler) = capability else {
+                    warn!(?service, "Host service Open for unimplemented service");
+                    write_host_service_response(
+                        &mut stream,
+                        &HostServiceResponse::Error {
+                            code: HostServiceErrorCode::UnknownService,
+                            message: format!("service {service:?} is not implemented"),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                };
+                let Some(reg) = db_plugins.get(&token).cloned() else {
+                    Self::log_rejected_open(
+                        &failed_opens,
+                        "Host service Open rejected: unknown token",
+                    );
+                    write_host_service_response(
+                        &mut stream,
+                        &HostServiceResponse::Error {
+                            code: HostServiceErrorCode::AuthRejected,
+                            message: "Invalid auth token".to_string(),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                };
+                write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await?;
+                if let Err(e) = handler.serve(stream, reg.tool_name).await {
+                    error!(error = %e, "Capability service session error");
+                }
+                return Ok(());
+            }
+            HostServiceId::Assets | HostServiceId::Credential => {
+                // Credential is a v8 broker passenger; Assets remains
+                // reserved/unimplemented.
+                if service == HostServiceId::Credential {
+                    Self::open_broker_session(stream, db_plugins, broker, failed_opens, token)
+                        .await?;
+                } else {
+                    warn!(?service, "Host service Open for unimplemented service");
+                    write_host_service_response(
+                        &mut stream,
+                        &HostServiceResponse::Error {
+                            code: HostServiceErrorCode::UnknownService,
+                            message: format!("service {service:?} is not implemented"),
+                        },
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+            HostServiceId::Artifact
+            | HostServiceId::File
+            | HostServiceId::Network
+            | HostServiceId::Process
+            | HostServiceId::Platform => {
+                Self::open_broker_session(stream, db_plugins, broker, failed_opens, token).await?;
+                return Ok(());
+            }
+        }
+
+        let Some(reg) = db_plugins.get(&token).cloned() else {
+            Self::log_rejected_open(&failed_opens, "Host service Open rejected: unknown token");
+            write_host_service_response(
+                &mut stream,
+                &HostServiceResponse::Error {
+                    code: HostServiceErrorCode::AuthRejected,
+                    message: "Invalid auth token".to_string(),
+                },
+            )
+            .await?;
             return Ok(());
         };
 
-        // New-protocol Open.
-        if let Ok(HostServiceRequest::Open { service, token }) = serde_json::from_slice(&frame) {
-            match service {
-                HostServiceId::Db => {}
-                HostServiceId::Capability => {
-                    let Some(handler) = capability else {
-                        warn!(?service, "Host service Open for unimplemented service");
-                        write_host_service_response(
-                            &mut stream,
-                            &HostServiceResponse::Error {
-                                code: HostServiceErrorCode::UnknownService,
-                                message: format!("service {service:?} is not implemented"),
-                            },
-                        )
-                        .await?;
-                        return Ok(());
-                    };
-                    let Some(reg) = db_plugins.get(&token).cloned() else {
-                        Self::log_rejected_open(
-                            &failed_opens,
-                            "Host service Open rejected: unknown token",
-                        );
-                        write_host_service_response(
-                            &mut stream,
-                            &HostServiceResponse::Error {
-                                code: HostServiceErrorCode::AuthRejected,
-                                message: "Invalid auth token".to_string(),
-                            },
-                        )
-                        .await?;
-                        return Ok(());
-                    };
-                    write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await?;
-                    if let Err(e) = handler.serve(stream, reg.tool_name).await {
-                        error!(error = %e, "Capability service session error");
-                    }
-                    return Ok(());
-                }
-                HostServiceId::Assets | HostServiceId::Credential => {
-                    // Credential is a v8 broker passenger; Assets remains
-                    // reserved/unimplemented.
-                    if service == HostServiceId::Credential {
-                        Self::open_broker_session(stream, db_plugins, broker, failed_opens, token)
-                            .await?;
-                    } else {
-                        warn!(?service, "Host service Open for unimplemented service");
-                        write_host_service_response(
-                            &mut stream,
-                            &HostServiceResponse::Error {
-                                code: HostServiceErrorCode::UnknownService,
-                                message: format!("service {service:?} is not implemented"),
-                            },
-                        )
-                        .await?;
-                    }
-                    return Ok(());
-                }
-                HostServiceId::Artifact
-                | HostServiceId::File
-                | HostServiceId::Network
-                | HostServiceId::Process
-                | HostServiceId::Platform => {
-                    Self::open_broker_session(stream, db_plugins, broker, failed_opens, token)
-                        .await?;
-                    return Ok(());
-                }
-            }
-
-            let Some(reg) = db_plugins.get(&token).cloned() else {
-                Self::log_rejected_open(&failed_opens, "Host service Open rejected: unknown token");
-                write_host_service_response(
-                    &mut stream,
-                    &HostServiceResponse::Error {
-                        code: HostServiceErrorCode::AuthRejected,
-                        message: "Invalid auth token".to_string(),
-                    },
-                )
-                .await?;
-                return Ok(());
-            };
-
-            write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await?;
-            return DbIpcServer::serve_authenticated_connection(
-                stream,
-                db,
-                reg.tool_name,
-                reg.prefix,
-                reg.quota_bytes,
-            )
-            .await;
-        }
-
-        // Legacy `DbRequest::Handshake`: the sandbox `db_socket` alias points
-        // old plugin binaries at this shared socket, so route their handshake
-        // through the same token → registration map.
-        if let Ok(DbRequest::Handshake { token }) = serde_json::from_slice(&frame) {
-            let Some(reg) = db_plugins.get(&token).cloned() else {
-                Self::log_rejected_open(
-                    &failed_opens,
-                    "Host service legacy handshake rejected: unknown token",
-                );
-                DbIpcServer::send_response(
-                    &mut stream,
-                    &DbResponse::Error {
-                        code: DbErrorCode::PermissionDenied,
-                        message: "Invalid auth token".to_string(),
-                    },
-                )
-                .await?;
-                return Ok(());
-            };
-            DbIpcServer::send_response(&mut stream, &DbResponse::HandshakeAck).await?;
-            return DbIpcServer::serve_authenticated_connection(
-                stream,
-                db,
-                reg.tool_name,
-                reg.prefix,
-                reg.quota_bytes,
-            )
-            .await;
-        }
-
-        warn!("Host service connection sent an unrecognized first frame");
-        Ok(())
+        write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await?;
+        DbIpcServer::serve_authenticated_connection(
+            stream,
+            db,
+            reg.tool_name,
+            reg.prefix,
+            reg.quota_bytes,
+        )
+        .await
     }
 
     /// Opens a v8 broker session: authenticates the token, acknowledges, and
@@ -411,32 +379,6 @@ impl ene_plugin_proto::BrokerSink for StreamSink<'_> {
     }
 }
 
-/// Reads one length-prefixed frame from a new host-service connection,
-/// returning `None` when the peer closes before sending anything.
-async fn read_first_frame(
-    stream: &mut ene_plugin_proto::transport::IpcStream,
-) -> Result<Option<Vec<u8>>, DbServerError> {
-    let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(DbServerError::Io(e)),
-    }
-    let Ok(msg_len) = usize::try_from(u32::from_le_bytes(len_buf)) else {
-        return Err(DbServerError::Internal(
-            "message length overflow on this platform".to_string(),
-        ));
-    };
-    if msg_len > HOST_SERVICE_MAX_MESSAGE_SIZE {
-        return Err(DbServerError::Internal(format!(
-            "message too large: {msg_len}"
-        )));
-    }
-    let mut msg_buf = vec![0u8; msg_len];
-    stream.read_exact(&mut msg_buf).await?;
-    Ok(Some(msg_buf))
-}
-
 /// Socket path for the shared host-service endpoint.
 pub fn host_service_socket_path() -> PathBuf {
     #[cfg(unix)]
@@ -457,7 +399,11 @@ pub fn host_service_socket_path() -> PathBuf {
 mod tests {
     use super::*;
     use ene_plugin_db::{DbRequest, DbResponse};
-    use ene_plugin_proto::transport::{IpcStream, cleanup_path};
+    use ene_plugin_proto::{
+        read_host_service_response,
+        transport::{IpcStream, cleanup_path},
+        write_host_service_request,
+    };
     use sea_orm::Database;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -500,7 +446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_handshake_routes_to_registered_plugin() {
+    async fn open_db_service_serves_authenticated_requests() {
         let socket = std::env::temp_dir().join(format!("ene-hs-test-{}", std::process::id()));
         let db = Database::connect("sqlite::memory:").await.expect("open db");
         let server = HostServiceServer::new(db, socket.clone(), test_registration("ene-db-good"));
@@ -508,25 +454,31 @@ mod tests {
         wait_for_socket(&socket).await;
 
         let mut client = IpcStream::connect(&socket).await.expect("connect");
-        write_framed(
+        write_host_service_request(
             &mut client,
-            &DbRequest::Handshake {
+            &HostServiceRequest::Open {
+                service: HostServiceId::Db,
                 token: "ene-db-good".into(),
             },
         )
-        .await;
-        let resp = read_framed(&mut client).await;
+        .await
+        .expect("write open");
+        let resp = read_host_service_response(&mut client)
+            .await
+            .expect("read open ack")
+            .expect("open response");
+        assert!(matches!(resp, HostServiceResponse::OpenAck));
+
         write_framed(&mut client, &DbRequest::Ping).await;
         let pong = read_framed(&mut client).await;
 
         server_task.abort();
         cleanup_path(&socket);
-        assert!(matches!(resp, DbResponse::HandshakeAck));
         assert!(matches!(pong, DbResponse::Pong));
     }
 
     #[tokio::test]
-    async fn legacy_handshake_rejects_unknown_token() {
+    async fn open_db_service_rejects_unknown_token() {
         let socket = std::env::temp_dir().join(format!("ene-hs-test2-{}", std::process::id()));
         let db = Database::connect("sqlite::memory:").await.expect("open db");
         let server = HostServiceServer::new(db, socket.clone(), test_registration("ene-db-good"));
@@ -534,23 +486,56 @@ mod tests {
         wait_for_socket(&socket).await;
 
         let mut client = IpcStream::connect(&socket).await.expect("connect");
-        write_framed(
+        write_host_service_request(
             &mut client,
-            &DbRequest::Handshake {
+            &HostServiceRequest::Open {
+                service: HostServiceId::Db,
                 token: "ene-db-bad".into(),
             },
         )
-        .await;
-        let resp = read_framed(&mut client).await;
+        .await
+        .expect("write open");
+        let resp = read_host_service_response(&mut client)
+            .await
+            .expect("read rejection")
+            .expect("rejection response");
 
         server_task.abort();
         cleanup_path(&socket);
         assert!(matches!(
             resp,
-            DbResponse::Error {
-                code: DbErrorCode::PermissionDenied,
+            HostServiceResponse::Error {
+                code: HostServiceErrorCode::AuthRejected,
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn legacy_handshake_frame_is_rejected_and_closed() {
+        // A legacy `DbRequest::Handshake` frame (raw JSON, the variant is
+        // gone) must not authenticate: the server closes the connection
+        // without a response.
+        let socket = std::env::temp_dir().join(format!("ene-hs-test3-{}", std::process::id()));
+        let db = Database::connect("sqlite::memory:").await.expect("open db");
+        let server = HostServiceServer::new(db, socket.clone(), test_registration("ene-db-good"));
+        let server_task = tokio::spawn(server.run());
+        wait_for_socket(&socket).await;
+
+        let mut client = IpcStream::connect(&socket).await.expect("connect");
+        let json = br#"{"Handshake":{"token":"ene-db-good"}}"#;
+        client
+            .write_all(&(json.len() as u32).to_le_bytes())
+            .await
+            .expect("write len");
+        client.write_all(json).await.expect("write body");
+        client.flush().await.expect("flush");
+
+        let mut len_buf = [0u8; 4];
+        let closed = client.read_exact(&mut len_buf).await.is_err();
+
+        server_task.abort();
+        cleanup_path(&socket);
+        assert!(closed, "legacy handshake must not receive a response");
     }
 }

@@ -9,16 +9,6 @@ use std::collections::BTreeMap;
 /// Requests sent from the tool's `DbClient` to the host-service `db` passenger.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum DbRequest {
-    /// Legacy standalone-server authentication.
-    ///
-    /// Production clients authenticate via the host-service `Open` gate
-    /// before sending any [`DbRequest`]. This variant remains for the
-    /// standalone `DbIpcServer::run` accept path used in tests.
-    // TODO: drop DbIpcServer::run and DbRequest::Handshake once no shipped plugin binary reads sandbox.db_socket
-    Handshake {
-        /// Pre-shared auth token issued by the host for this plugin.
-        token: String,
-    },
     /// Declare the tool's database schema (tables and indexes).
     DeclareSchema(DbSchema),
     /// Insert a row into a table.
@@ -141,8 +131,6 @@ pub enum DbWriteOp {
 /// Responses sent from the DB IPC server back to the tool's `DbClient`.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum DbResponse {
-    /// Handshake accepted; the connection is now authenticated.
-    HandshakeAck,
     /// Schema was accepted and tables/indexes were created.
     SchemaAccepted {
         /// Names of created tables.
