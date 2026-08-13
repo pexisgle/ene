@@ -13,8 +13,7 @@ use crate::event::{
         BeatPulse, CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
         PendingCandidatesCount,
     },
-    input::{KeyboardKey, PointerButton, PointerMoved},
-    lifecycle::{TickGtk, WindowCloseRequested, WindowResized},
+    lifecycle::{TickGtk, WindowCloseRequested},
     settings::OpenSettings,
     ui_action::SettingsActionEvent,
 };
@@ -89,10 +88,6 @@ pub fn build_app(
         tx: event_tx,
         rx: event_rx,
     });
-    app.add_message::<PointerMoved>();
-    app.add_message::<PointerButton>();
-    app.add_message::<KeyboardKey>();
-    app.add_message::<WindowResized>();
     app.add_message::<WindowCloseRequested>();
     app.add_message::<AiTextDelta>();
     app.add_message::<AiStreamFinished>();

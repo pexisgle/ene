@@ -5,7 +5,6 @@
 //! consumer systems read.
 pub mod ai;
 pub mod chat;
-pub mod input;
 pub mod lifecycle;
 pub mod settings;
 pub mod ui_action;
