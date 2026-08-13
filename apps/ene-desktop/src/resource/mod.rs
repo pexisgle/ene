@@ -35,5 +35,6 @@ pub mod frame_state;
 pub mod motion_layer;
 pub mod physics;
 pub mod platform_state;
+pub mod startup;
 pub mod tokio;
 pub mod tray;
