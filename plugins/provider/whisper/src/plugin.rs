@@ -145,6 +145,30 @@ impl ene_plugin::ConfigurablePlugin for WhisperPlugin {
                     "type": "string",
                     "description": "whisper.cpp GGUF model file path (defaults to the shared models cache; ai.stt.model is used as a path fallback)",
                     "x-ene-ui": { "order": 0, "impact": "plugin_restart" }
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["auto", "sidecar", "in-process"],
+                    "default": "auto",
+                    "description": "Engine mode: auto uses the whisper-server sidecar when a server binary is configured, otherwise the in-process engine",
+                    "x-ene-ui": { "order": 1, "impact": "plugin_restart" }
+                },
+                "server_path": {
+                    "type": "string",
+                    "description": "Path to the whisper-server executable (host-injected from the artifact catalog when installed)",
+                    "x-ene-ui": { "order": 2, "impact": "plugin_restart" }
+                },
+                "server_args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Extra command-line arguments passed to whisper-server",
+                    "x-ene-ui": { "order": 3, "impact": "plugin_restart" }
+                },
+                "startup_timeout_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "How long to wait for whisper-server /health after spawning",
+                    "x-ene-ui": { "order": 4, "impact": "plugin_restart" }
                 }
             }
         }))
@@ -194,6 +218,15 @@ impl SttPlugin for WhisperPlugin {
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .map(str::to_string);
+        if config.wants_sidecar() {
+            let model_path = config.resolve_model_path(&request_model);
+            let state = crate::server::ensure_sidecar(&config, &model_path).await?;
+            let result = crate::server::transcribe(&state, audio_data, language.as_deref()).await?;
+            return Ok(PluginTranscription {
+                text: result.text,
+                language: result.language,
+            });
+        }
         let provider = self.engine(&config, request_model, language).await?;
         let decoded = wav::decode_wav(&audio_data)?;
         provider

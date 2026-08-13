@@ -271,6 +271,8 @@ async fn resolve_weights(
     let local = ResolvedLocalModel {
         name: model.to_string(),
         url: profile.url().unwrap_or_default().to_string(),
+        artifact_id: profile.artifact_id().unwrap_or_default().to_string(),
+        artifact_version: profile.artifact_version().unwrap_or_default().to_string(),
         model_path: profile.model_path().unwrap_or_default().to_string(),
         mmproj_url: config.mmproj_url.clone().unwrap_or_default(),
         mmproj_path: config.mmproj_path.clone().unwrap_or_default(),
@@ -305,6 +307,8 @@ async fn resolve_mmproj(config: &HostConfig) -> Result<Option<PathBuf>, PluginEr
     let local = ResolvedLocalModel {
         name: String::new(),
         url: String::new(),
+        artifact_id: String::new(),
+        artifact_version: String::new(),
         model_path: String::new(),
         mmproj_url: config.mmproj_url.clone().unwrap_or_default(),
         mmproj_path: config.mmproj_path.clone().unwrap_or_default(),

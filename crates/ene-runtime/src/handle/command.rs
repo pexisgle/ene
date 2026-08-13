@@ -428,6 +428,32 @@ pub enum EneCommand {
         /// Reply channel carrying the snapshots.
         reply: oneshot::Sender<Vec<ene_plugin_host::PluginSettingsSnapshot>>,
     },
+    /// Fetch the host-side artifact snapshot (Engines page).
+    GetArtifactSnapshot {
+        /// Reply channel carrying the snapshot.
+        reply: oneshot::Sender<Vec<ene_plugin_host::ArtifactSnapshot>>,
+    },
+    /// Install or update an artifact from the signed catalog (Engines page).
+    InstallArtifact {
+        /// Artifact id from the catalog.
+        artifact_id: String,
+        /// Optional version pin; `None` installs the catalog default.
+        version: Option<String>,
+        /// Reply channel carrying the installed artifact view.
+        reply: oneshot::Sender<Result<ene_plugin_host::InstalledArtifactView, String>>,
+    },
+    /// Roll an artifact back one generation (Engines page).
+    RollbackArtifact {
+        /// Artifact id from the catalog.
+        artifact_id: String,
+        /// Reply channel carrying the rolled-back artifact view.
+        reply: oneshot::Sender<Result<ene_plugin_host::InstalledArtifactView, String>>,
+    },
+    /// Force-refresh the signed catalog (Engines page).
+    RefreshCatalog {
+        /// Reply channel carrying the new catalog version.
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
     /// Fetch dynamic config options for one plugin config path
     /// (plugin-center wiring of `ListConfigOptions`).
     ListPluginConfigOptions {

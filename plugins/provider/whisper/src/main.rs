@@ -6,6 +6,7 @@
 
 mod config;
 mod plugin;
+mod server;
 mod wav;
 
 use plugin::WhisperPlugin;

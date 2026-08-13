@@ -168,6 +168,15 @@ differ sharply (ONNX Runtime is `load-dynamic` and needs no compilation; llama.c
 whisper.cpp are cmake C++ builds that also cross-compile to mingw), so bundling forces every
 user of one onto the build cost of the other.
 
+Sidecar pattern: provider plugins that run a local engine as a child process
+(`llama-server`, `voicevox` managed mode, `whisper` sidecar mode) follow
+`templates/sidecar` — spawn on a loopback port, health-poll with a timeout,
+kill on `Drop`/config change, and resolve the binary as config path →
+host-injected CAS artifact path → bundled plugins dir → `PATH`. Catalog-managed
+binaries and model weights are injected by the host into the delivered config
+(`server_path` / `model_path`); plugins must never download binaries from
+arbitrary URLs. The Engines settings page is the management surface for these.
+
 IPC starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v7, length-prefixed frames). The
 host advertises a range via `VersionRange::host_supported()` and keeps N-1 compatibility, so
 `PLUGIN_IPC_MIN_SUPPORTED_VERSION = PLUGIN_IPC_PROTOCOL_VERSION - 1`. Prefer adding

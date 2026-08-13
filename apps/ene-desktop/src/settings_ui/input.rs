@@ -125,6 +125,24 @@ pub struct SettingsInputState {
     /// center page (and Overview / search), refreshed on window open and by
     /// the page's refresh button.
     pub plugin_snapshots: AsyncData<Vec<ene_plugin_host::PluginSettingsSnapshot>>,
+    /// Asynchronously cached host-side artifact snapshot for the Engines
+    /// page (installed sidecars/models plus catalog targets).
+    pub artifact_snapshot: AsyncData<Vec<ene_plugin_host::ArtifactSnapshot>>,
+    /// In-flight artifact installs/updates, keyed by artifact id.
+    pub artifact_installs: std::collections::HashMap<
+        String,
+        tokio::sync::oneshot::Receiver<Result<ene_plugin_host::InstalledArtifactView, String>>,
+    >,
+    /// In-flight artifact rollbacks, keyed by artifact id.
+    pub artifact_rollbacks: std::collections::HashMap<
+        String,
+        tokio::sync::oneshot::Receiver<Result<ene_plugin_host::InstalledArtifactView, String>>,
+    >,
+    /// In-flight catalog refresh.
+    pub catalog_refresh: Option<tokio::sync::oneshot::Receiver<Result<u64, String>>>,
+    /// Two-step delete arms for model files on the Engines page
+    /// (`plugin|model` → armed).
+    pub model_delete_arm: std::collections::HashMap<String, bool>,
     /// Asynchronously cached schedule list for the Schedules page.
     pub schedules: AsyncData<Vec<ene_core::Schedule>>,
     /// Asynchronously cached run history for the currently selected

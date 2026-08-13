@@ -197,6 +197,15 @@ fn typo_tolerance(kind: &str, candidate: &str) -> usize {
 pub struct LocalModelDef {
     /// HTTPS URL for the GGUF weights (downloaded on first use).
     pub url: String,
+    /// Catalog artifact id for the weights. When set, the host installs the
+    /// model through the signed artifact catalog and injects the verified
+    /// CAS path as `model_path`; the URL path is then skipped.
+    #[serde(default)]
+    pub artifact_id: String,
+    /// Optional catalog version pin (e.g. `=1.2.0`, `>=1.0`). Empty means
+    /// "whatever the catalog currently offers".
+    #[serde(default)]
+    pub artifact_version: String,
     /// Quantization label (e.g. `"F16"`, `"Q4_0"`).
     #[serde(default = "default_local_quantization")]
     pub quantization: String,
@@ -233,6 +242,8 @@ impl Default for LocalModelDef {
     fn default() -> Self {
         Self {
             url: default_string(),
+            artifact_id: default_string(),
+            artifact_version: default_string(),
             quantization: default_local_quantization(),
             model_path: default_string(),
             gpu_layers: default_gpu_layers(),

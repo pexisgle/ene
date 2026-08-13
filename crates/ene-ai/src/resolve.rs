@@ -32,6 +32,11 @@ pub struct ResolvedLocalModel {
     pub name: String,
     /// HTTPS download URL.
     pub url: String,
+    /// Catalog artifact id for the weights, when the model is managed
+    /// through the signed artifact catalog (see [`LocalModelDef`]).
+    pub artifact_id: String,
+    /// Optional catalog version pin.
+    pub artifact_version: String,
     /// Optional filesystem path override.
     pub model_path: String,
     /// Optional multimodal projector download URL.
@@ -62,6 +67,8 @@ impl ResolvedLocalModel {
         Self {
             name: name.to_string(),
             url: def.url.clone(),
+            artifact_id: def.artifact_id.clone(),
+            artifact_version: def.artifact_version.clone(),
             model_path: def.model_path.clone(),
             mmproj_url: llama_cpp.mmproj_url,
             mmproj_path: llama_cpp.mmproj_path,

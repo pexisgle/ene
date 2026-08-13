@@ -516,6 +516,16 @@ pub fn local_model_defs_from_plugins(
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or_default()
                             .to_string(),
+                        artifact_id: object
+                            .get("artifact_id")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        artifact_version: object
+                            .get("artifact_version")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
                         quantization: object
                             .get("quantization")
                             .and_then(serde_json::Value::as_str)

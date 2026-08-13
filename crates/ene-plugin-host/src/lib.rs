@@ -48,8 +48,13 @@
 
 /// Host-side per-ResourceClass admission control for provider requests.
 pub mod admission;
+/// Host-side artifact state for handshake injection and the Engines page.
+pub mod artifact_state;
 /// Host-mediated broker channel (protocol v8).
 pub mod broker;
+pub use artifact_state::{
+    ArtifactSnapshot, ArtifactState, CatalogTargetView, InstalledArtifactView, sidecar_ids_for,
+};
 pub use broker::ApprovalResponder;
 pub use broker::BrokerHub;
 pub use ene_approval::{ALL_CATEGORIES, ApprovalCategory, ApprovalMode};

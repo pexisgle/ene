@@ -15,6 +15,7 @@ pub mod page_character;
 pub mod page_character_editor;
 pub mod page_connectors;
 pub mod page_debug;
+pub mod page_engines;
 pub mod page_features;
 pub mod page_graphics;
 pub mod page_memory;
@@ -66,6 +67,9 @@ pub enum PageKind {
     Schedules,
     /// Plugin center: detected / configured / MCP.
     Plugins,
+    /// Local inference engines: sidecars, binaries, models, and catalog
+    /// management in one place.
+    Engines,
     /// Generic schema leaf editor for everything without a dedicated page.
     Advanced,
     /// Diagnostics: runtime/AI/voice/plugin health and debug overlays.
@@ -110,7 +114,7 @@ pub struct SectionAlias {
 }
 
 impl PageKind {
-    pub const ALL: [PageKind; 17] = [
+    pub const ALL: [PageKind; 18] = [
         PageKind::Overview,
         PageKind::General,
         PageKind::Character,
@@ -126,6 +130,7 @@ impl PageKind {
         PageKind::Connectors,
         PageKind::Schedules,
         PageKind::Plugins,
+        PageKind::Engines,
         PageKind::Advanced,
         PageKind::Diagnostics,
     ];
@@ -280,14 +285,12 @@ impl PageKind {
                 aliases: &[
                     "proactive",
                     "mind",
-                    "tools",
-                    "capability",
                     "emotion",
                     "quiet",
                     "privacy",
                     "session",
                 ],
-                sections: &["features-capabilities", "features-mind", "features-tools"],
+                sections: &["features-mind"],
                 section_aliases: &[],
             },
             PageKind::Memory => &PageMeta {
@@ -387,26 +390,47 @@ impl PageKind {
             },
             PageKind::Plugins => &PageMeta {
                 category: PageCategory::Settings,
-                title_key: "plugins",
-                description_key: "page-plugins-description",
+                title_key: "tools-and-plugins",
+                description_key: "page-tools-and-plugins-description",
                 aliases: &[
                     "mcp",
                     "tool",
                     "provider",
+                    "tools",
                     "sandbox",
                     "credential",
                     "schema",
                     "plugin",
+                    "actions",
                     "llama",
                     "whisper",
                     "kokoro",
                 ],
                 sections: &[
-                    "plugins-runtime",
-                    "plugins-list",
-                    "plugins-discovered",
+                    "plugins-general",
+                    "plugins-tools",
+                    "plugins-providers",
                     "plugins-mcp",
+                    "plugins-discovered",
                 ],
+                section_aliases: &[],
+            },
+            PageKind::Engines => &PageMeta {
+                category: PageCategory::Management,
+                title_key: "engines",
+                description_key: "page-engines-description",
+                aliases: &[
+                    "sidecar",
+                    "engine",
+                    "inference",
+                    "llama-server",
+                    "voicevox",
+                    "whisper",
+                    "catalog",
+                    "artifact-install",
+                    "model-files",
+                ],
+                sections: &["engines-catalog", "engines-list"],
                 section_aliases: &[],
             },
             PageKind::Advanced => &PageMeta {
@@ -534,7 +558,10 @@ fn compute_search(
                 page: PageKind::Plugins,
                 section: None,
                 title: snapshot.id.clone(),
-                detail: i18n_embed_fl::fl!(crate::i18n::loader(), "page-plugins-description"),
+                detail: i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "page-tools-and-plugins-description"
+                ),
                 filter: None,
                 plugin_focus: Some(snapshot.id.clone()),
                 rank: 4,
@@ -661,11 +688,25 @@ fn memory_mode_for_section(section: &str) -> Option<crate::settings::MemoryPageM
     }
 }
 
+fn plugin_mode_for_section(section: &str) -> Option<crate::settings::PluginPageMode> {
+    match section {
+        "plugins-tools" => Some(crate::settings::PluginPageMode::Tools),
+        "plugins-providers" => Some(crate::settings::PluginPageMode::Providers),
+        "plugins-mcp" => Some(crate::settings::PluginPageMode::Mcp),
+        _ => None,
+    }
+}
+
 fn prepare_section_focus(world: &mut World, ui_entity: Entity, section: &str) {
     if let Some(mode) = memory_mode_for_section(section)
         && let Some(mut state) = world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
     {
         state.0.memory_journal_mode = mode;
+    }
+    if let Some(mode) = plugin_mode_for_section(section)
+        && let Some(mut state) = world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+    {
+        state.0.plugin_page_mode = mode;
     }
 }
 
@@ -1466,16 +1507,7 @@ impl SettingsUi {
                 PageKind::Voice => {
                     page_voice::render(ui, settings, &mut self.draft, ai, &mut self.input, world);
                 }
-                PageKind::Features => {
-                    page_features::render(
-                        ui,
-                        settings,
-                        &mut self.draft,
-                        ai,
-                        &mut self.input,
-                        world,
-                    );
-                }
+                PageKind::Features => page_features::render(ui, &mut self.draft),
                 PageKind::Memory => page_memory::render_config(ui, settings, &mut self.draft),
                 PageKind::Memories => {
                     page_memory::render_journal(ui, ai, world, ui_entity);
@@ -1501,8 +1533,13 @@ impl SettingsUi {
                         &mut self.draft,
                         ai,
                         &mut self.input,
+                        world,
+                        ui_entity,
                         plugin_focus.as_deref(),
                     );
+                }
+                PageKind::Engines => {
+                    page_engines::render(ui, &mut self.draft, ai, &mut self.input);
                 }
                 PageKind::Advanced => page_advanced::render(ui, &mut self.draft, reveal_advanced),
                 PageKind::Diagnostics => {
@@ -1631,7 +1668,7 @@ mod tests {
 
     #[test]
     fn every_page_is_unique_and_has_one_category() {
-        assert_eq!(PageKind::ALL.len(), 17);
+        assert_eq!(PageKind::ALL.len(), 18);
         for (index, page) in PageKind::ALL.iter().enumerate() {
             assert!(PageKind::ALL[index + 1..].iter().all(|other| other != page));
         }
@@ -1641,7 +1678,7 @@ mod tests {
                 .filter(|page| page.meta().category == category)
                 .count()
         });
-        assert_eq!(counts, [10, 7]);
+        assert_eq!(counts, [10, 8]);
         assert_eq!(counts.into_iter().sum::<usize>(), PageKind::ALL.len());
     }
 

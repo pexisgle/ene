@@ -536,6 +536,42 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.plugin_snapshots().await })
     }
 
+    /// Starts an asynchronous host-side artifact snapshot fetch (Engines
+    /// page; never blocks the render loop).
+    pub fn fetch_artifact_snapshot(
+        &self,
+    ) -> tokio::sync::oneshot::Receiver<Vec<ene_plugin_host::ArtifactSnapshot>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.artifact_snapshot().await })
+    }
+
+    /// Starts an asynchronous artifact install/update.
+    pub fn install_artifact(
+        &self,
+        artifact_id: String,
+        version: Option<String>,
+    ) -> tokio::sync::oneshot::Receiver<Result<ene_plugin_host::InstalledArtifactView, String>>
+    {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.install_artifact(&artifact_id, version).await })
+    }
+
+    /// Starts an asynchronous artifact rollback.
+    pub fn rollback_artifact(
+        &self,
+        artifact_id: String,
+    ) -> tokio::sync::oneshot::Receiver<Result<ene_plugin_host::InstalledArtifactView, String>>
+    {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.rollback_artifact(&artifact_id).await })
+    }
+
+    /// Starts an asynchronous catalog refresh.
+    pub fn refresh_catalog(&self) -> tokio::sync::oneshot::Receiver<Result<u64, String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.refresh_catalog().await })
+    }
+
     /// Starts an asynchronous fetch of detected-but-unconfigured plugin
     /// binaries.
     pub fn fetch_discovered_plugins(&self) -> tokio::sync::oneshot::Receiver<Vec<String>> {

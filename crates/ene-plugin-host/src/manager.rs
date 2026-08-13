@@ -21,6 +21,9 @@ use tokio::sync::{Mutex, mpsc};
 use sha2::Digest;
 
 use crate::admission::ResourceClassAdmission;
+use crate::artifact_state::{
+    ArtifactSnapshot, ArtifactState, InstalledArtifactView, sidecar_ids_for,
+};
 use crate::capability_registry::{
     CapabilityDeclaration, CapabilityRegistry, evaluate_capability_gate,
 };
@@ -416,6 +419,7 @@ pub(crate) fn build_plugin_sandbox(
     config: &crate::config::SandboxEntryConfig,
     fs_grants: &[crate::config::FsGrantConfig],
     temp_dir: &std::path::Path,
+    artifact_read_paths: &[PathBuf],
 ) -> Option<ene_sandbox::SandboxSpec> {
     if !config.enabled {
         return None;
@@ -432,6 +436,9 @@ pub(crate) fn build_plugin_sandbox(
         }
     }
     allowed_read.push(ene_config::assets_dir().to_path_buf());
+    // Catalog-managed sidecar binaries and model weights live under the CAS
+    // root; plugins must be able to read (never write) them.
+    allowed_read.extend(artifact_read_paths.iter().cloned());
     #[cfg(unix)]
     {
         let plugin_socket_dir = ene_config::plugin_socket_dir();
@@ -1017,6 +1024,22 @@ pub struct PluginHostManager {
     /// When true (default), Drop will attempt a best-effort graceful shutdown
     /// by killing child processes with a brief wait for reaping.
     shutdown_on_drop: bool,
+    /// Host-side artifact services (signed catalog + CAS). `None` when the
+    /// artifact system is disabled or not configured.
+    artifact: Option<ArtifactState>,
+    /// Raw delivered config/profiles per plugin plus the sidecar artifact
+    /// ids used for injection; re-injected after artifact installs/rollbacks.
+    delivered: std::sync::Mutex<HashMap<String, DeliveredConfig>>,
+}
+
+/// Raw handshake blobs for one plugin, kept for re-injection after artifact
+/// changes. Injection only fills empty slots, so the stored values can be
+/// re-injected idempotently.
+#[derive(Clone)]
+struct DeliveredConfig {
+    raw_config: Option<serde_json::Value>,
+    raw_profiles: Option<serde_json::Value>,
+    sidecars: Vec<String>,
 }
 
 impl Drop for PluginHostManager {
@@ -1086,11 +1109,19 @@ impl PluginHostManager {
                 health_tasks: Vec::new(),
                 health_rx: None,
                 shutdown_on_drop: true,
+                artifact: None,
+                delivered: std::sync::Mutex::new(HashMap::new()),
             });
         }
 
         let (health_tx, health_rx) = mpsc::unbounded_channel::<PluginHealthEvent>();
         let manifest_store = ManifestStore::new(&plugin_config.trusted_publishers);
+        // Host-side artifact services (None when the artifact system is
+        // inactive); used for sidecar/model path injection and the Engines
+        // page state.
+        let artifact = ArtifactState::from_config(&plugin_config.artifact);
+        let delivered: std::sync::Mutex<HashMap<String, DeliveredConfig>> =
+            std::sync::Mutex::new(HashMap::new());
 
         let mut supervised: Vec<Arc<Mutex<SupervisedPlugin>>> = Vec::new();
         let mut connections: Vec<Arc<IpcPluginConnection>> = Vec::new();
@@ -1141,6 +1172,35 @@ impl PluginHostManager {
         // TOFU checksums to persist after startup completes.
         let mut checksums_to_record: HashMap<String, String> = HashMap::new();
 
+        // Hash every eligible plugin binary up front on blocking threads.
+        // A debug-built plugin can take seconds to hash, so doing it inline
+        // on the async runtime would stall startup serially; running all
+        // hashes concurrently caps the wait at the largest binary instead of
+        // the sum. The eligibility filters must mirror the pass-1 loop below
+        // so every plugin it starts has a handle here.
+        let mut checksums: HashMap<
+            String,
+            tokio::task::JoinHandle<Result<Option<String>, PluginHostError>>,
+        > = HashMap::new();
+        for (name, entry) in &plugin_config.list {
+            if !entry.enable || !is_valid_plugin_name(name) {
+                continue;
+            }
+            let name = name.clone();
+            let expected_checksum = entry.checksum.clone();
+            checksums.insert(
+                name.clone(),
+                tokio::task::spawn_blocking(move || {
+                    let binary_path =
+                        find_plugin_binary(&name).ok_or_else(|| PluginHostError::SpawnFailed {
+                            name: name.clone(),
+                            reason: "binary not found".to_string(),
+                        })?;
+                    verify_and_record_checksum(&name, &binary_path, expected_checksum.as_deref())
+                }),
+            );
+        }
+
         // Pass 1: handshake every plugin and collect its declarations. Tool
         // and provider registration is deferred to pass 2 so the capability
         // gate can decide which plugins are registered at all.
@@ -1167,18 +1227,61 @@ impl PluginHostManager {
                 continue;
             }
 
+            let checksum = match checksums.remove(name) {
+                Some(handle) => match handle.await {
+                    Ok(outcome) => outcome,
+                    Err(e) => Err(PluginHostError::ExecutionFailed {
+                        message: format!("plugin checksum task failed: {e}"),
+                    }),
+                },
+                // Unreachable: the precompute pass above filters exactly like
+                // this loop. Stay panic-free regardless.
+                None => continue,
+            };
+
             let sandbox_grants = sandbox_fs_grants(name, entry, &manifest_store);
+            // Resolve the plugin's manifest (signed entry or builtin) so the
+            // artifact injection knows which sidecars the plugin may use.
+            let manifest = match &entry.manifest {
+                Some(signed) => manifest_store.verify(signed, name).ok(),
+                None => builtin_manifest(name),
+            };
+            let sidecars = sidecar_ids_for(name, manifest.as_ref());
+            let raw_config = entry.delivered_config(name);
+            let raw_profiles = entry.delivered_profiles();
+            let mut config = raw_config.clone();
+            let mut profiles = raw_profiles.clone();
+            if let Some(state) = &artifact {
+                state.inject(&sidecars, &mut config, &mut profiles);
+            }
+            delivered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    name.clone(),
+                    DeliveredConfig {
+                        raw_config,
+                        raw_profiles,
+                        sidecars,
+                    },
+                );
+            let artifact_read_paths: Vec<PathBuf> = artifact
+                .as_ref()
+                .map(|state| vec![state.cas_root()])
+                .unwrap_or_default();
             match Self::start_plugin(
                 name,
-                entry.delivered_config(name),
-                entry.delivered_profiles(),
+                config,
+                profiles,
                 entry.checksum.clone(),
+                checksum,
                 entry.env_passthrough.clone(),
                 &entry
                     .sandbox
                     .clone()
                     .unwrap_or_else(|| plugin_config.sandbox.clone()),
                 &sandbox_grants,
+                &artifact_read_paths,
                 db_tokens.get(name).cloned(),
                 Duration::from_millis(plugin_config.handshake_timeout_ms),
                 plugin_config.max_concurrent,
@@ -1640,6 +1743,8 @@ impl PluginHostManager {
             health_tasks,
             health_rx: Some(health_rx),
             shutdown_on_drop: true,
+            artifact,
+            delivered,
         };
         for (plugin, schema) in credential_schemas {
             manager.register_credential_schema(&plugin, schema.as_ref());
@@ -1893,6 +1998,18 @@ impl PluginHostManager {
                         outcome = ?outcome,
                         "SetConfig delivered"
                     );
+                    // Store the delivered blobs as the new re-injection
+                    // baseline (injection is idempotent: it only fills empty
+                    // slots).
+                    if let Some(delivered) = self
+                        .delivered
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get_mut(name)
+                    {
+                        delivered.raw_config.clone_from(config);
+                        delivered.raw_profiles.clone_from(profiles);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1900,6 +2017,105 @@ impl PluginHostManager {
                         plugin = %name,
                         error = %e,
                         "Failed to push SetConfig to live plugin"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Snapshot of installed/catalog artifacts for the Engines page.
+    ///
+    /// Uses the cached catalog when fresh; a first call fetches it
+    /// best-effort. Empty when the artifact system is not configured.
+    pub async fn artifact_snapshot(&self) -> Vec<ArtifactSnapshot> {
+        match &self.artifact {
+            Some(state) => state.snapshot().await,
+            None => Vec::new(),
+        }
+    }
+
+    /// Installs or updates an artifact from the signed catalog, then pushes
+    /// re-injected config to live plugins.
+    pub async fn install_artifact(
+        &self,
+        id: &str,
+        version: Option<&str>,
+    ) -> Result<InstalledArtifactView, String> {
+        let state = self
+            .artifact
+            .as_ref()
+            .ok_or_else(|| "artifact system is not configured".to_string())?;
+        let view = state.install(id, version).await?;
+        self.push_artifact_configs().await;
+        Ok(view)
+    }
+
+    /// Rolls an artifact back one generation and pushes re-injected config.
+    pub async fn rollback_artifact(&self, id: &str) -> Result<InstalledArtifactView, String> {
+        let state = self
+            .artifact
+            .as_ref()
+            .ok_or_else(|| "artifact system is not configured".to_string())?;
+        let view = state.rollback(id)?;
+        self.push_artifact_configs().await;
+        Ok(view)
+    }
+
+    /// Force-refreshes the signed catalog and returns its version.
+    pub async fn refresh_catalog(&self) -> Result<u64, String> {
+        let state = self
+            .artifact
+            .as_ref()
+            .ok_or_else(|| "artifact system is not configured".to_string())?;
+        state.refresh_catalog().await
+    }
+
+    /// Re-runs artifact injection over the stored raw blobs and pushes the
+    /// result to live connections whose delivered config changed.
+    async fn push_artifact_configs(&self) {
+        let Some(state) = &self.artifact else {
+            return;
+        };
+        for (name, conn) in self.names.iter().zip(self.connections.iter()) {
+            let Some(delivered) = self
+                .delivered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(name)
+                .cloned()
+            else {
+                continue;
+            };
+            let mut config = delivered.raw_config.clone();
+            let mut profiles = delivered.raw_profiles.clone();
+            state.inject(&delivered.sidecars, &mut config, &mut profiles);
+            if config == delivered.raw_config && profiles == delivered.raw_profiles {
+                continue;
+            }
+            match conn.set_config(config.clone(), profiles.clone()).await {
+                Ok(outcome) => {
+                    tracing::debug!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        outcome = ?outcome,
+                        "Re-injected artifact paths after artifact change"
+                    );
+                    if let Some(delivered) = self
+                        .delivered
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get_mut(name)
+                    {
+                        delivered.raw_config.clone_from(&config);
+                        delivered.raw_profiles.clone_from(&profiles);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        error = %e,
+                        "Failed to push re-injected artifact config"
                     );
                 }
             }
@@ -2151,9 +2367,11 @@ impl PluginHostManager {
         plugin_config: Option<serde_json::Value>,
         plugin_profiles: Option<serde_json::Value>,
         expected_checksum: Option<String>,
+        checksum: Result<Option<String>, PluginHostError>,
         env_passthrough: Vec<String>,
         sandbox_cfg: &crate::config::SandboxEntryConfig,
         fs_grants: &[crate::config::FsGrantConfig],
+        artifact_read_paths: &[PathBuf],
         db_token: Option<String>,
         handshake_timeout: Duration,
         max_concurrent: usize,
@@ -2170,10 +2388,10 @@ impl PluginHostManager {
             reason: "binary not found".to_string(),
         })?;
 
-        // Verify binary checksum. When no checksum is configured, compute
-        // and return it for trust-on-first-use recording.
-        let tofu_checksum =
-            verify_and_record_checksum(name, &binary_path, expected_checksum.as_deref())?;
+        // Checksum outcome from the parallel precompute pass: `Ok(None)` is a
+        // verified binary, `Ok(Some(hex))` a trust-on-first-use checksum to
+        // persist, `Err` a failed verification.
+        let tofu_checksum = checksum?;
 
         let socket_path: PathBuf = {
             #[cfg(unix)]
@@ -2230,7 +2448,14 @@ impl PluginHostManager {
         })?;
         sandbox.plugin_temp_dir = Some(temp_dir.to_string_lossy().into_owned());
 
-        let spec = build_plugin_sandbox(name, &binary_path, sandbox_cfg, fs_grants, &temp_dir);
+        let spec = build_plugin_sandbox(
+            name,
+            &binary_path,
+            sandbox_cfg,
+            fs_grants,
+            &temp_dir,
+            artifact_read_paths,
+        );
         let mut command = build_plugin_command(&binary_path, &socket_path, &env_passthrough);
         command
             .env("ENE_PLUGIN_TMPDIR", &temp_dir)
@@ -2342,6 +2567,8 @@ impl PluginHostManager {
             health_tasks: Vec::new(),
             health_rx: None,
             shutdown_on_drop: false,
+            artifact: None,
+            delivered: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }

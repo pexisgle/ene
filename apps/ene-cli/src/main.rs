@@ -16,6 +16,7 @@
     expect(clippy::expect_used, reason = "unit tests use expect for assertions")
 )]
 
+mod catalog;
 mod cli;
 mod commands;
 mod config;

@@ -213,6 +213,60 @@ included in `config`. For example, web search keys use
 `plugins.list.web.credentials.exa_api_key` and
 `plugins.list.web.credentials.tavily_api_key`. See [Plugins & MCP](concepts/plugins-and-mcp.md).
 
+Local model profiles (`plugins.list.local-llm` / `llama-server` `profiles`)
+accept two optional catalog fields in addition to `url` / `model_path`:
+
+```json
+{
+  "plugins": {
+    "list": {
+      "llama-server": {
+        "profiles": {
+          "gemma-4-e2b": {
+            "artifact_id": "models/gemma-4-e2b",
+            "artifact_version": "=1.2.0",
+            "url": "https://..."
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+When `artifact_id` is set and the signed artifact catalog
+(`plugins.artifact`) is active, the host installs the model through the
+catalog (SHA-256 verified, versioned, one-generation rollback) and injects
+the verified CAS path as `model_path` in the config delivered to the plugin;
+the `url` path is then skipped. Sidecar binaries work the same way: the host
+injects `server_path` into `plugins.list.llama-server.config` /
+`plugins.list.whisper.config` when the plugin's sidecar artifact is
+installed. User-configured values always win over injected ones.
+
+### `plugins.artifact` — signed distribution catalog
+
+```json
+{
+  "plugins": {
+    "artifact": {
+      "enabled": true,
+      "catalog_url": "https://cdn.example/ene/catalog.json",
+      "catalog_keys": [
+        { "key_id": "0123456789abcdef", "public_key_hex": "<64 hex chars>" }
+      ]
+    }
+  }
+}
+```
+
+The catalog is a single signed JSON document produced by
+`ene catalog build` / `ene catalog update` (see
+`scripts/publish-catalog.sh`). It is verified (Ed25519 signature, expiry,
+rollback) at startup, on the refresh interval, and on manual refresh from
+the Engines settings page. Install, update, and rollback of sidecars and
+models happen from the Engines page (`SidecarInstall` / `ModelInstall` etc.
+approval categories).
+
 ## `desktop.*` — desktop app
 
 | Key | Default | Meaning |

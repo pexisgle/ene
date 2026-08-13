@@ -112,7 +112,7 @@ once_cell = "1"
 parking_lot = "0.12"
 
 # ── Sandbox / Security ──
-ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8", "rand_core"] }
 landlock = "0.4"
 libc = "0.2"
 seccompiler = "0.5"
@@ -246,6 +246,9 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.rapier3d]
+opt-level = 2
+
+[profile.dev.package.sha2]
 opt-level = 2
 
 [profile.dev.package.wgpu]

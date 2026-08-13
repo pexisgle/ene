@@ -1,0 +1,10 @@
+# Dependency block for a sidecar-enabled provider plugin. Copy the entries
+# your engine actually uses into the plugin's [dependencies].
+[dependencies]
+tokio = { workspace = true, features = ["process", "time", "sync", "macros", "rt-multi-thread"] }
+reqwest = { workspace = true, default-features = false, features = ["rustls-no-provider"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+rand = { workspace = true }

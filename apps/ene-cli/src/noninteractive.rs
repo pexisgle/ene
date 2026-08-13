@@ -14,7 +14,9 @@ use ene_runtime::{
 };
 use serde::Serialize;
 
-use crate::cli::{CharactersAction, Command, MemoryAction, SessionAction, StoreAction, ToolAction};
+use crate::cli::{
+    CatalogAction, CharactersAction, Command, MemoryAction, SessionAction, StoreAction, ToolAction,
+};
 use crate::context::AppContext;
 use crate::output::{
     self, EXIT_OK, EXIT_RUNTIME, ErrorCode, OutputError, OutputFormat, PerfCue, StreamEvent,
@@ -44,6 +46,7 @@ pub async fn execute(cmd: &Command, ctx: &mut AppContext) -> i32 {
         Command::Memory { action, json } => memory_command(ctx, action, *json).await,
         Command::Doctor { json } => doctor_command(ctx, *json).await,
         Command::Store { action, json } => store_command(ctx, action, *json).await,
+        Command::Catalog { action, json } => catalog_command(action, *json),
     };
 
     match result {
@@ -64,7 +67,8 @@ pub async fn execute(cmd: &Command, ctx: &mut AppContext) -> i32 {
                 | Command::Characters { json, .. }
                 | Command::Memory { json, .. }
                 | Command::Doctor { json }
-                | Command::Store { json, .. } => {
+                | Command::Store { json, .. }
+                | Command::Catalog { json, .. } => {
                     if *json {
                         OutputFormat::Json
                     } else {
@@ -76,6 +80,12 @@ pub async fn execute(cmd: &Command, ctx: &mut AppContext) -> i32 {
             e.exit_code()
         }
     }
+}
+
+/// Runs a `catalog` subcommand without touching the runtime (pure
+/// publisher-side tooling: key generation, signing, and verification).
+fn catalog_command(action: &CatalogAction, json: bool) -> Result<i32, OutputError> {
+    crate::catalog::run(action, json)
 }
 
 fn emit_error(err: &OutputError, format: OutputFormat) {

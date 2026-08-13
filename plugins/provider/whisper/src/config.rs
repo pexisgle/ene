@@ -17,6 +17,59 @@ use serde_json::Value;
 pub struct WhisperConfig {
     /// Explicit whisper GGUF model file path.
     pub model_path: Option<String>,
+    /// Engine mode: `auto` (sidecar when a server binary is configured,
+    /// otherwise in-process), `sidecar` (require the whisper-server child),
+    /// or `in-process` (never spawn a child).
+    pub mode: Option<String>,
+    /// Path to the `whisper-server` executable (host-injected when a
+    /// catalog-managed sidecar artifact is installed).
+    pub server_path: Option<String>,
+    /// Extra command-line arguments passed to the sidecar on spawn.
+    pub server_args: Vec<String>,
+    /// How long to wait for the sidecar health check after spawning.
+    pub startup_timeout_secs: Option<u64>,
+}
+
+/// Effective engine mode after resolving the `mode` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineMode {
+    /// Use the sidecar when a server path is configured; fall back to the
+    /// in-process engine otherwise.
+    Auto,
+    /// Always transcribe through the whisper-server sidecar.
+    Sidecar,
+    /// Always use the in-process whisper.cpp engine.
+    InProcess,
+}
+
+impl WhisperConfig {
+    /// Sidecar startup timeout in seconds (minimum 1).
+    #[must_use]
+    pub fn startup_timeout_secs(&self) -> u64 {
+        self.startup_timeout_secs.unwrap_or(60).max(1)
+    }
+
+    /// Resolves the configured engine mode.
+    #[must_use]
+    pub fn mode(&self) -> EngineMode {
+        match self.mode.as_deref().map_or("auto", str::trim) {
+            "sidecar" => EngineMode::Sidecar,
+            "in-process" | "in_process" | "inprocess" => EngineMode::InProcess,
+            _ => EngineMode::Auto,
+        }
+    }
+
+    /// Whether this config wants the sidecar engine: explicit `sidecar`, or
+    /// `auto` with a server path configured (the host injects one when a
+    /// catalog-managed sidecar artifact is installed).
+    #[must_use]
+    pub fn wants_sidecar(&self) -> bool {
+        match self.mode() {
+            EngineMode::Sidecar => true,
+            EngineMode::InProcess => false,
+            EngineMode::Auto => non_empty(self.server_path.as_deref()).is_some(),
+        }
+    }
 }
 
 impl WhisperConfig {
@@ -59,6 +112,7 @@ mod tests {
     fn model_path_precedence() {
         let config = WhisperConfig {
             model_path: Some("/data/whisper.gguf".into()),
+            ..WhisperConfig::default()
         };
         assert_eq!(
             config.resolve_model_path("small.gguf"),

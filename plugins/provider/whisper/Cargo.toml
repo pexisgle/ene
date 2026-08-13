@@ -16,7 +16,9 @@ ene-config = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+reqwest = { workspace = true, features = ["multipart", "rustls-no-provider"] }
+rustls = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "sync"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 

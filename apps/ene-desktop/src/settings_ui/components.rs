@@ -63,7 +63,7 @@ fn focus_accent(ui: &Ui) -> Color32 {
     }
 }
 
-pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 55] = [
+pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 56] = [
     ("character-model", "section-character-model"),
     ("character-transform", "section-character-transform"),
     ("character-expressions", "section-character-expressions"),
@@ -86,9 +86,7 @@ pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 55] = [
     ("voice-tts", "audio-tts-section"),
     ("voice-stt", "audio-stt-section"),
     ("voice-mic", "audio-mic-section"),
-    ("features-capabilities", "section-features-capabilities"),
     ("features-mind", "features-mind"),
-    ("features-tools", "features-tools"),
     ("accessibility-overlays", "section-accessibility-overlays"),
     ("memory-browse", "memory-page-tab-browse"),
     ("memory-recall", "memory-page-tab-recall"),
@@ -99,6 +97,8 @@ pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 55] = [
     ("permissions-pending", "permissions-pending"),
     ("permissions-grants", "permissions-granted"),
     ("approvals-policy", "approvals-title"),
+    ("engines-catalog", "engines-catalog"),
+    ("engines-list", "engines-list"),
     ("connectors-list", "connectors-list"),
     ("connectors-detail", "connectors-status-title"),
     ("sessions-list", "sessions-list-title"),
@@ -117,8 +117,9 @@ pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 55] = [
     ("memory-config", "memory-config-storage"),
     ("memory-approval", "memory-config-approval"),
     ("memory-limits", "memory-config-limits"),
-    ("plugins-runtime", "plugins-runtime-title"),
-    ("plugins-list", "plugins-list-title"),
+    ("plugins-general", "plugins-general-title"),
+    ("plugins-tools", "plugins-tab-tools"),
+    ("plugins-providers", "plugins-tab-providers"),
     ("plugins-mcp", "plugins-mcp-title"),
     ("plugins-discovered", "plugins-discovered-title"),
     ("advanced-sections", "advanced-sections"),

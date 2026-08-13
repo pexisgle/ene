@@ -114,6 +114,7 @@ impl McpToolRegistry {
                 config,
                 &[],
                 &temp_dir,
+                &[],
             )
         });
         #[cfg(not(target_os = "linux"))]

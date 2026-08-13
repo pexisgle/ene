@@ -111,6 +111,8 @@ pub(crate) fn declared_resource_class(acceleration: ProactiveAcceleration) -> Re
 #[serde(rename_all = "snake_case", default)]
 pub(crate) struct Profile {
     pub(crate) url: Option<String>,
+    pub(crate) artifact_id: Option<String>,
+    pub(crate) artifact_version: Option<String>,
     pub(crate) quantization: Option<String>,
     pub(crate) model_path: Option<String>,
     pub(crate) gpu_layers: Option<String>,
@@ -133,6 +135,22 @@ impl Profile {
             .as_deref()
             .map(str::trim)
             .filter(|url| !url.is_empty())
+    }
+
+    /// Catalog artifact id for the weights, when catalog-managed.
+    pub(crate) fn artifact_id(&self) -> Option<&str> {
+        self.artifact_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+
+    /// Optional catalog version pin.
+    pub(crate) fn artifact_version(&self) -> Option<&str> {
+        self.artifact_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
     }
 
     /// Quantization label (e.g. `"F16"`, `"Q4_0"`).

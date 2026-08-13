@@ -17,7 +17,11 @@ ene-card = { workspace = true }
 ene-store = { workspace = true }
 ene-rag = { workspace = true }
 ene-plugin-host = { workspace = true }
+ene-artifact = { workspace = true }
 ene-util = { workspace = true }
+rand_core = { version = "0.6", features = ["getrandom"] }
+hex = { workspace = true }
+ed25519-dalek = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["signal", "fs"] }
 tokio-stream = { workspace = true }

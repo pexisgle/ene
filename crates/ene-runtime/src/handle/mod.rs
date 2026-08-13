@@ -1603,6 +1603,75 @@ impl EneHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Host-side artifact snapshot for the Engines page.
+    pub async fn artifact_snapshot(&self) -> Vec<ene_plugin_host::ArtifactSnapshot> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::GetArtifactSnapshot { reply: tx })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Installs or updates an artifact from the signed catalog.
+    pub async fn install_artifact(
+        &self,
+        artifact_id: &str,
+        version: Option<String>,
+    ) -> Result<ene_plugin_host::InstalledArtifactView, String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::InstallArtifact {
+                artifact_id: artifact_id.to_string(),
+                version,
+                reply: tx,
+            })
+            .is_err()
+        {
+            return Err("runtime is not running".to_string());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("runtime reply dropped".to_string()))
+    }
+
+    /// Rolls an artifact back one generation.
+    pub async fn rollback_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<ene_plugin_host::InstalledArtifactView, String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::RollbackArtifact {
+                artifact_id: artifact_id.to_string(),
+                reply: tx,
+            })
+            .is_err()
+        {
+            return Err("runtime is not running".to_string());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("runtime reply dropped".to_string()))
+    }
+
+    /// Force-refreshes the signed catalog and returns its version.
+    pub async fn refresh_catalog(&self) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::RefreshCatalog { reply: tx })
+            .is_err()
+        {
+            return Err("runtime is not running".to_string());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("runtime reply dropped".to_string()))
+    }
+
     /// Fetch dynamic config options for one plugin config path.
     pub async fn list_plugin_config_options(
         &self,

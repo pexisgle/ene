@@ -2890,6 +2890,52 @@ impl TurnActor {
                 }
                 true
             }
+            EneCommand::GetArtifactSnapshot { reply } => {
+                let snapshot = self.artifact_snapshot().await;
+                if reply.send(snapshot).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        "artifact snapshot reply dropped (UI closed the window)"
+                    );
+                }
+                true
+            }
+            EneCommand::InstallArtifact {
+                artifact_id,
+                version,
+                reply,
+            } => {
+                let result = self
+                    .install_artifact(&artifact_id, version.as_deref())
+                    .await;
+                if reply.send(result).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        "artifact install reply dropped (UI closed the window)"
+                    );
+                }
+                true
+            }
+            EneCommand::RollbackArtifact { artifact_id, reply } => {
+                let result = self.rollback_artifact(&artifact_id).await;
+                if reply.send(result).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        "artifact rollback reply dropped (UI closed the window)"
+                    );
+                }
+                true
+            }
+            EneCommand::RefreshCatalog { reply } => {
+                let result = self.refresh_catalog().await;
+                if reply.send(result).is_err() {
+                    tracing::debug!(
+                        component = "TurnActor",
+                        "catalog refresh reply dropped (UI closed the window)"
+                    );
+                }
+                true
+            }
             EneCommand::ListPluginConfigOptions {
                 plugin,
                 path,
@@ -4658,6 +4704,51 @@ impl TurnActor {
         match host.as_mut() {
             Some(manager) => manager.settings_snapshots(&config).await,
             None => Vec::new(),
+        }
+    }
+
+    /// Host-side artifact snapshot for the Engines page (empty when the
+    /// artifact system is not configured).
+    async fn artifact_snapshot(&self) -> Vec<ene_plugin_host::ArtifactSnapshot> {
+        let mut host = self.plugin_host.lock().await;
+        match host.as_mut() {
+            Some(manager) => manager.artifact_snapshot().await,
+            None => Vec::new(),
+        }
+    }
+
+    /// Installs or updates an artifact, then pushes re-injected config to
+    /// live plugins.
+    async fn install_artifact(
+        &self,
+        artifact_id: &str,
+        version: Option<&str>,
+    ) -> Result<ene_plugin_host::InstalledArtifactView, String> {
+        let mut host = self.plugin_host.lock().await;
+        match host.as_mut() {
+            Some(manager) => manager.install_artifact(artifact_id, version).await,
+            None => Err("plugin host is not running".to_string()),
+        }
+    }
+
+    /// Rolls an artifact back one generation.
+    async fn rollback_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<ene_plugin_host::InstalledArtifactView, String> {
+        let mut host = self.plugin_host.lock().await;
+        match host.as_mut() {
+            Some(manager) => manager.rollback_artifact(artifact_id).await,
+            None => Err("plugin host is not running".to_string()),
+        }
+    }
+
+    /// Force-refreshes the signed catalog.
+    async fn refresh_catalog(&self) -> Result<u64, String> {
+        let mut host = self.plugin_host.lock().await;
+        match host.as_mut() {
+            Some(manager) => manager.refresh_catalog().await,
+            None => Err("plugin host is not running".to_string()),
         }
     }
 

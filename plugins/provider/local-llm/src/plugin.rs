@@ -73,6 +73,8 @@ impl ene_plugin::ConfigurablePlugin for LocalLlmPlugin {
                 "type": "object",
                 "properties": {
                     "url": { "type": "string", "description": "GGUF download URL" },
+                    "artifact_id": { "type": "string", "description": "Catalog artifact id for catalog-managed weights (host injects the verified CAS path as model_path)" },
+                    "artifact_version": { "type": "string", "description": "Optional catalog version pin, e.g. =1.2.0 (empty = catalog default)" },
                     "model_path": { "type": "string", "description": "Local GGUF path (skips download when non-empty)" },
                     "quantization": { "type": "string", "description": "Quantization tag, e.g. q4_k_m" },
                     "gpu_layers": { "type": "integer", "minimum": 0, "description": "GPU offload layers (0 = CPU only)" },

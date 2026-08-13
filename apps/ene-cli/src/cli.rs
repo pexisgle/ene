@@ -108,6 +108,16 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
+    /// Build, sign, and verify signed artifact catalogs (publisher side).
+    Catalog {
+        /// Catalog subcommand.
+        #[command(subcommand)]
+        action: CatalogAction,
+
+        /// Emit machine-readable JSON on stdout.
+        #[arg(long, global = true)]
+        json: bool,
+    },
 }
 
 /// `tool` subcommands.
@@ -221,4 +231,73 @@ pub enum StoreAction {
     },
     /// Run `PRAGMA integrity_check` on the open database.
     Integrity,
+}
+
+/// `catalog` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum CatalogAction {
+    /// Generate a fresh Ed25519 key pair for signing catalogs.
+    Keygen {
+        /// Directory to write `key-id.txt`, `private.hex`, and `public.hex`.
+        #[arg(long, value_name = "DIR")]
+        out_dir: std::path::PathBuf,
+    },
+    /// Build and sign a catalog from a spec file.
+    Build {
+        /// Catalog spec JSON (see `scripts/publish-catalog.sh` for the shape).
+        #[arg(long, value_name = "SPEC")]
+        spec: std::path::PathBuf,
+        /// Key id written into the signed catalog.
+        #[arg(long, value_name = "ID")]
+        key_id: String,
+        /// Hex-encoded Ed25519 private key.
+        #[arg(long, value_name = "HEX")]
+        key_hex: String,
+        /// Override the catalog version (defaults to the spec's `version`).
+        #[arg(long, value_name = "N")]
+        version: Option<u64>,
+        /// Validity window in hours from now (used when the spec has no
+        /// `expires_at_ms`).
+        #[arg(long, default_value_t = 24 * 30, value_name = "HOURS")]
+        expires_hours: u64,
+        /// Output catalog JSON path.
+        #[arg(long, value_name = "OUT")]
+        out: std::path::PathBuf,
+    },
+    /// Bump an existing catalog's version (re-signing it).
+    Update {
+        /// Existing signed catalog JSON.
+        #[arg(long, value_name = "CATALOG")]
+        catalog: std::path::PathBuf,
+        /// Key id written into the signed catalog.
+        #[arg(long, value_name = "ID")]
+        key_id: String,
+        /// Hex-encoded Ed25519 private key.
+        #[arg(long, value_name = "HEX")]
+        key_hex: String,
+        /// Explicit version instead of the previous version + 1.
+        #[arg(long, value_name = "N")]
+        version: Option<u64>,
+        /// Extend the validity window to this many hours from now.
+        #[arg(long, value_name = "HOURS")]
+        expires_hours: Option<u64>,
+        /// Output catalog JSON path (defaults to the input path).
+        #[arg(long, value_name = "OUT")]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Verify a catalog's signature, expiry, and rollback safety.
+    Verify {
+        /// Signed catalog JSON to verify.
+        #[arg(long, value_name = "CATALOG")]
+        catalog: std::path::PathBuf,
+        /// Key id the catalog claims to be signed with.
+        #[arg(long, value_name = "ID")]
+        key_id: String,
+        /// Hex-encoded Ed25519 public key.
+        #[arg(long, value_name = "HEX")]
+        key_hex: String,
+        /// Optional installer `state.json` used for rollback checks.
+        #[arg(long, value_name = "STATE")]
+        state: Option<std::path::PathBuf>,
+    },
 }
