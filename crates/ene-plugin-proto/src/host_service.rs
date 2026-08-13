@@ -19,8 +19,6 @@ pub const HOST_SERVICE_MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 pub enum HostServiceId {
     /// Typed CRUD against the host `memory.db` (`ene-plugin-db`).
     Db,
-    /// Reserved: host-mediated asset provisioning (not yet implemented).
-    Assets,
     /// Host-mediated capability calls (`ene-plugin-proto::capability_service`).
     Capability,
     /// Credential retrieval through the `Credential` broker (protocol v8+).
