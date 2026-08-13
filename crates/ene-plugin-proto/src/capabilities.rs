@@ -2,7 +2,7 @@
 //!
 //! A plugin advertises its capabilities during the handshake so the host
 //! can route tool registrations, LLM provider factories, and future
-//! TTS/STT providers appropriately.
+//! TTS/STT provider factories appropriately.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -16,7 +16,8 @@ use thiserror::Error;
 ///
 /// - `tools` → merged into the composite tool registry
 /// - `llm_providers` → registered as `LlmProviderFactory` entries
-/// - `tts_providers` / `stt_providers` → reserved for future use
+/// - `tts_providers` / `stt_providers` → registered as TTS / STT provider
+///   factories
 /// - dynamic-config flags → gate `ListConfigOptions` / `ValidateConfig` /
 ///   `MigrateConfig` (protocol v5+) so older v5 binaries that lack those
 ///   variants are never sent them
@@ -39,11 +40,11 @@ pub struct PluginCapabilities {
     #[serde(default)]
     pub embed_providers: Vec<String>,
 
-    /// TTS providers (reserved for future use).
+    /// TTS providers served by this plugin (`SynthesizeSpeech`).
     #[serde(default)]
     pub tts_providers: Vec<TtsProviderSpec>,
 
-    /// STT providers (reserved for future use).
+    /// STT providers served by this plugin (`Transcribe`).
     #[serde(default)]
     pub stt_providers: Vec<SttProviderSpec>,
 
@@ -412,7 +413,7 @@ pub struct LlmProviderSpec {
     pub resource_class: ResourceClass,
 }
 
-/// Specification of a TTS provider (reserved for future use).
+/// Specification of a TTS provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TtsProviderSpec {
     /// Provider kind identifier (e.g. `"openai_tts"`, `"voicevox"`).
@@ -435,7 +436,7 @@ pub struct TtsProviderSpec {
     pub concurrency: ConcurrencyHint,
 }
 
-/// Specification of an STT provider (reserved for future use).
+/// Specification of an STT provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SttProviderSpec {
     /// Provider kind identifier (e.g. `"whisper"`, `"openai_stt"`).
