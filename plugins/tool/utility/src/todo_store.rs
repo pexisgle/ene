@@ -516,7 +516,6 @@ mod tests {
 
         fn handle_request(&mut self, req: &DbRequest) -> DbResponse {
             match req {
-                DbRequest::Handshake { .. } => DbResponse::HandshakeAck,
                 DbRequest::DeclareSchema(_) => DbResponse::SchemaAccepted {
                     tables: vec!["utility_todo_items".to_string()],
                     indexes: Vec::new(),

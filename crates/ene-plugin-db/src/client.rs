@@ -27,7 +27,7 @@ pub enum DbError {
     /// The connection was closed by the server.
     #[error("connection closed")]
     ConnectionClosed,
-    /// The server rejected the auth token presented on Handshake.
+    /// The server rejected the auth token presented on host-service Open.
     #[error("auth rejected [{code}]: {message}")]
     Auth {
         /// The error code from the server.

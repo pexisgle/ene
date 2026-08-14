@@ -35,7 +35,6 @@ impl MockDb {
 
     pub fn handle_request(&mut self, req: &DbRequest) -> DbResponse {
         match req {
-            DbRequest::Handshake { .. } => DbResponse::HandshakeAck,
             DbRequest::DeclareSchema(_) => DbResponse::SchemaAccepted {
                 tables: vec![
                     "calendar_accounts".to_string(),
