@@ -55,7 +55,7 @@ Provide models and voice engines:
 | `whisper` | `whisper` | STT (whisper.cpp) |
 | `kokoro` | `kokoro` | Local TTS (Kokoro ONNX) |
 | `edge-tts` | `edge-tts` | Cloud TTS (Microsoft Edge) |
-| `elevenlabs` | `elevenlabs` | Cloud TTS (ElevenLabs WebSocket) |
+| `elevenlabs` | `elevenlabs` | Cloud TTS (ElevenLabs REST, broker-mediated) |
 | `openai-tts` | `openai_tts` | Cloud TTS (OpenAI) |
 | `voicevox` | `voicevox` | TTS via a VOICEVOX engine (auto-start supported) |
 

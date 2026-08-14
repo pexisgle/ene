@@ -238,10 +238,11 @@ pub struct AutoSaveConfig {
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // Pure computation plugins carry no filesystem, network, or process
     // needs, so the OS sandbox is safe to enforce for them from day one.
-    // Broker-migrated built-ins (`web`, `fs`, `openai`) are sandboxed too:
-    // every OS-touching operation they perform goes through the host
-    // (see `docs/concepts/sandbox-and-approvals.md`). Remaining built-ins
-    // stay unsandboxed until their broker migration lands.
+    // Broker-migrated built-ins (`web`, `fs`, `openai`, `openai-tts`,
+    // `elevenlabs`, `geo`, `calc`) are sandboxed too: every OS-touching
+    // operation they perform goes through the host (see
+    // `docs/concepts/sandbox-and-approvals.md`). Remaining built-ins stay
+    // unsandboxed until their broker migration lands.
     let sandboxed_pure = PluginEntry {
         sandbox: Some(SandboxEntryConfig {
             enabled: true,
@@ -268,7 +269,16 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     .map(|name| (name.to_string(), PluginEntry::default()))
     .collect();
 
-    for name in ["calc", "counter", "random", "web", "fs"] {
+    for name in [
+        "calc",
+        "counter",
+        "random",
+        "web",
+        "fs",
+        "geo",
+        "openai-tts",
+        "elevenlabs",
+    ] {
         list.insert(name.to_string(), sandboxed_pure.clone());
     }
 
@@ -303,13 +313,19 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
         },
     );
 
-    // The OpenAI Speech API TTS provider plugin authenticates with the same
-    // OPENAI_API_KEY credential and honors the same base URL override as the
-    // openai plugin.
+    // The OpenAI Speech API TTS provider plugin authenticates through
+    // broker credential injection (the host resolves the key from the
+    // plugin config blob or OPENAI_API_KEY and injects it at request
+    // time), so only OPENAI_BASE_URL is forwarded for the plugin-side
+    // base-URL fallback.
     list.insert(
         "openai-tts".to_string(),
         PluginEntry {
-            env_passthrough: vec!["OPENAI_API_KEY".to_string(), "OPENAI_BASE_URL".to_string()],
+            sandbox: Some(SandboxEntryConfig {
+                enabled: true,
+                ..SandboxEntryConfig::default()
+            }),
+            env_passthrough: vec!["OPENAI_BASE_URL".to_string()],
             ..PluginEntry::default()
         },
     );
@@ -355,15 +371,18 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // `ai.tts.provider = "edge-tts"` selects it.
     list.insert("edge-tts".to_string(), PluginEntry::default());
 
-    // The ElevenLabs TTS provider plugin needs ELEVENLABS_API_KEY forwarded
-    // from the host environment; without it the provider cannot authenticate.
+    // The ElevenLabs TTS provider plugin authenticates through broker
+    // credential injection (the host resolves the key from the plugin
+    // config blob or ELEVENLABS_API_KEY and injects it as `xi-api-key` at
+    // request time), so only ELEVENLABS_BASE_URL is forwarded.
     list.insert(
         "elevenlabs".to_string(),
         PluginEntry {
-            env_passthrough: vec![
-                "ELEVENLABS_API_KEY".to_string(),
-                "ELEVENLABS_BASE_URL".to_string(),
-            ],
+            sandbox: Some(SandboxEntryConfig {
+                enabled: true,
+                ..SandboxEntryConfig::default()
+            }),
+            env_passthrough: vec!["ELEVENLABS_BASE_URL".to_string()],
             ..PluginEntry::default()
         },
     );
