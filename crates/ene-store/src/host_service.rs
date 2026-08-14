@@ -239,26 +239,8 @@ impl HostServiceServer {
                 }
                 return Ok(());
             }
-            HostServiceId::Assets | HostServiceId::Credential => {
-                // Credential is a v8 broker passenger; Assets remains
-                // reserved/unimplemented.
-                if service == HostServiceId::Credential {
-                    Self::open_broker_session(stream, db_plugins, broker, failed_opens, token)
-                        .await?;
-                } else {
-                    warn!(?service, "Host service Open for unimplemented service");
-                    write_host_service_response(
-                        &mut stream,
-                        &HostServiceResponse::Error {
-                            code: HostServiceErrorCode::UnknownService,
-                            message: format!("service {service:?} is not implemented"),
-                        },
-                    )
-                    .await?;
-                }
-                return Ok(());
-            }
             HostServiceId::Artifact
+            | HostServiceId::Credential
             | HostServiceId::File
             | HostServiceId::Network
             | HostServiceId::Process
