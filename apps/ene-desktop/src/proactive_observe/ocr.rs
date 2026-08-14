@@ -9,10 +9,12 @@
 
 /// Determine whether the active window *likely* contains code or structured
 /// terminal output by checking the window title and class against a list of
-/// known developer-tool substrings.
+/// known developer-tool indicators.
 ///
+/// Indicators match whole title/class words only, so ambiguous substrings
+/// such as `ide` in "Video" or `log` in "Login" do not pay for an OCR pass.
 /// Returns `true` when the combined `window_title` and `window_class` text
-/// contain any of the known code/terminal indicators.
+/// contains any of the known code/terminal indicators as a word.
 ///
 /// # Example
 ///
@@ -33,7 +35,9 @@ pub fn is_code_window(window_title: &str, window_class: &str) -> bool {
         "nvim",
         "emacs",
         "vscode",
+        "xcode",
         "intellij",
+        "windowsterminal",
         "ide",
         "bash",
         "zsh",
@@ -44,7 +48,11 @@ pub fn is_code_window(window_title: &str, window_class: &str) -> bool {
         "diff",
         "log",
     ];
-    code_indicators.iter().any(|ind| lower.contains(ind))
+    code_indicators.iter().any(|ind| {
+        lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|tok| tok == *ind)
+    })
 }
 
 #[cfg(test)]
@@ -79,5 +87,12 @@ mod tests {
     fn rejects_media_player() {
         assert!(!is_code_window("Spotify", "spotify"));
         assert!(!is_code_window("VLC media player", "vlc"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_substring_false_positives() {
+        assert!(!is_code_window("Video Player", ""));
+        assert!(!is_code_window("Login Manager", ""));
+        assert!(!is_code_window("Video", "mpv"));
     }
 }
