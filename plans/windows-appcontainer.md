@@ -46,11 +46,23 @@ resume、kill-on-close）のみ。AppContainer は未配線。
 
 - コマンドライン: `get_program()` + `get_args()` を
   `CommandLineToArgvW` 互換ルールでクォートして結合
-- 環境ブロック: `get_envs()` から UTF-16 の `"K=V\0"` 連結 + 末尾 `\0\0`
+- 環境ブロック: `get_envs()` は明示的な上書き・削除のみを返し、親から
+  継承された環境（`PATH` など）を含まない。stable Rust では
+  `env_clear()` 未呼び出しの環境と区別できないため、`Command` の環境
+  セマンティクスを保つには、`env_clear()` 済みなら空ブロック、未クリア
+  なら `std::env::vars_os()` で継承環境を取得してから `get_envs()` の
+  上書き・削除を適用する方針が必要。ブロックは UTF-16 の
+  `"K=V\0"` 連結 + 末尾 `\0\0` とし、`CREATE_UNICODE_ENVIRONMENT` を立てる。
+  Win32 は環境ブロックに大文字小文字を無視した昇順ソートと
+  `=C:` 形式のドライブカレントディレクトリエントリの保持を要求するため、
+  両方を満たすこと。
 - カレントディレクトリ: `get_current_dir()`
-- 標準入出力: `STARTF_USESTDHANDLES` + `GetStdHandle` の3つ
-  （`bInheritHandles = FALSE` でも STARTF_USESTDHANDLES 指定時は引き継がれる。
-  現状 std spawn がハンドル継承している挙動を維持するため）
+- 標準入出力: `STARTF_USESTDHANDLES` + `GetStdHandle` の3つ。
+  `bInheritHandles = FALSE` のままでは STARTF_USESTDHANDLES を指定しても
+  ハンドルは継承されないため、`bInheritHandles = TRUE` にし、3つの
+  ハンドルを inheritable にする。マルチスレッドホストで全ハンドルが
+  漏れるのを防ぐには `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` で継承セットを
+  3つに制限する。
 
 ### 2.3 名前付きパイプの ACL（必須）
 
