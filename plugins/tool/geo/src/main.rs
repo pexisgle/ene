@@ -20,10 +20,10 @@
 
 /// Action modules for each tool.
 pub mod action;
-/// Host-mediated network broker session.
-pub mod broker;
 /// Permission gate for privacy-relevant lookups.
 pub mod approval;
+/// Host-mediated network broker session.
+pub mod broker;
 /// Shared error type for parse, format, and validation failures.
 pub mod error;
 /// Tool lifecycle and provider integration.

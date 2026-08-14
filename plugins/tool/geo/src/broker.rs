@@ -49,7 +49,6 @@ impl Default for GeoBroker {
 }
 
 impl GeoBroker {
-
     /// Captures the broker socket and auth token from the host sandbox
     /// config (protocol v8).
     pub fn configure(&self, sandbox: &SandboxConfigData) {
@@ -81,11 +80,9 @@ impl GeoBroker {
             .await
             .map_err(|e| ToolError::execution_failed(format!("broker request failed: {e}")))?;
         match response {
-            ene_plugin_broker::BrokerResponse::NetworkFetchOk {
-                status,
-                body,
-                ..
-            } => Ok(FetchOutcome { status, body }),
+            ene_plugin_broker::BrokerResponse::NetworkFetchOk { status, body, .. } => {
+                Ok(FetchOutcome { status, body })
+            }
             other => Err(ToolError::execution_failed(format!(
                 "unexpected broker response: {other:?}"
             ))),
@@ -152,10 +149,7 @@ pub(crate) mod tests {
         /// A `200 OK` response with a fixed-length body.
         #[must_use]
         pub fn ok(body: Vec<u8>) -> Self {
-            Self {
-                status: 200,
-                body,
-            }
+            Self { status: 200, body }
         }
     }
 
@@ -164,9 +158,7 @@ pub(crate) mod tests {
     /// socket.
     pub struct MockBroker {
         socket: std::path::PathBuf,
-        responses: std::sync::Arc<
-            std::sync::Mutex<std::collections::VecDeque<MockResponse>>,
-        >,
+        responses: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<MockResponse>>>,
         _dir: tempfile::TempDir,
     }
 
@@ -210,11 +202,7 @@ pub(crate) mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        broker()
-            .client
-            .lock()
-            .await
-            .take();
+        broker().client.lock().await.take();
         broker().configure(&SandboxConfigData {
             broker_socket: Some(mock.socket.to_string_lossy().into_owned()),
             db_auth_token: Some("tok".to_string()),
@@ -224,9 +212,7 @@ pub(crate) mod tests {
 
     async fn run_server(
         socket: std::path::PathBuf,
-        responses: std::sync::Arc<
-            std::sync::Mutex<std::collections::VecDeque<MockResponse>>,
-        >,
+        responses: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<MockResponse>>>,
     ) {
         let listener = tokio::net::UnixListener::bind(&socket).expect("mock bind");
         let (mut stream, _) = listener.accept().await.expect("mock accept");
@@ -245,9 +231,7 @@ pub(crate) mod tests {
             .await
             .expect("mock ack");
         loop {
-            let Ok(Some(_request)) =
-                read_framed_json::<_, BrokerRequest>(&mut stream).await
-            else {
+            let Ok(Some(_request)) = read_framed_json::<_, BrokerRequest>(&mut stream).await else {
                 return;
             };
             let response = responses

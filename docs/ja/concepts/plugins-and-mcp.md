@@ -55,7 +55,7 @@ web・カレンダー・…）と AI プロバイダー（OpenAI・Anthropic・�
 | `whisper` | `whisper` | STT（whisper.cpp） |
 | `kokoro` | `kokoro` | ローカル TTS（Kokoro ONNX） |
 | `edge-tts` | `edge-tts` | クラウド TTS（Microsoft Edge） |
-| `elevenlabs` | `elevenlabs` | クラウド TTS（ElevenLabs WebSocket） |
+| `elevenlabs` | `elevenlabs` | クラウド TTS（ElevenLabs REST、Broker 経由） |
 | `openai-tts` | `openai_tts` | クラウド TTS（OpenAI） |
 | `voicevox` | `voicevox` | VOICEVOX エンジンによる TTS（自動起動対応） |
 

@@ -22,6 +22,8 @@
 
 /// Action modules for each tool.
 pub mod action;
+/// Host-mediated network broker session.
+pub mod broker;
 /// Tool lifecycle and provider integration.
 pub mod provider;
 

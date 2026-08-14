@@ -431,6 +431,7 @@ pub fn builtin_manifest(name: &str) -> Option<PluginManifest> {
             permissions: permissions(&[
                 (ApprovalCategory::FixedOriginNetwork, ApprovalMode::Allow),
                 (ApprovalCategory::DynamicHttps, ApprovalMode::Allow),
+                (ApprovalCategory::CredentialUse, ApprovalMode::Allow),
             ]),
             host_services: vec!["network".into()],
             ..base("elevenlabs")

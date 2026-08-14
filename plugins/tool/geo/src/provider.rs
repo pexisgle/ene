@@ -25,7 +25,6 @@ impl GeoState {
     pub fn gate(&self) -> &ApprovalGate {
         &self.gate
     }
-
 }
 
 impl Default for GeoState {

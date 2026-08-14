@@ -156,13 +156,18 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_json_rejects_oversized_bodies() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The broker mock answers with a body over the plugin's cap.
         let mock = crate::broker::tests::MockBroker::spawn();
         crate::broker::tests::configure_test_broker(&mock).await;
         mock.push(crate::broker::tests::MockResponse::ok(vec![
             0u8;
-            MAX_BODY_BYTES.saturating_add(1)
+            MAX_BODY_BYTES
+                .saturating_add(
+                    1
+                )
         ]));
         let err = fetch_json("https://wttr.in/?format=j1", "wttr.in")
             .await
@@ -172,10 +177,14 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_json_accepts_small_bodies() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mock = crate::broker::tests::MockBroker::spawn();
         crate::broker::tests::configure_test_broker(&mock).await;
-        mock.push(crate::broker::tests::MockResponse::ok(br#"{"ok":true}"#.to_vec()));
+        mock.push(crate::broker::tests::MockResponse::ok(
+            br#"{"ok":true}"#.to_vec(),
+        ));
         let body = fetch_json("https://wttr.in/?format=j1", "wttr.in")
             .await
             .unwrap();
