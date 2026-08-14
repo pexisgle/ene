@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::config::SidecarConfig;
+use super::config::{SidecarConfig, SidecarProfiles};
 use super::preset;
 
 /// How often startup re-probes the health endpoint while the engine boots.
@@ -51,6 +51,7 @@ static SPAWN_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new((
 /// Serializes spawns so concurrent requests cannot start two engines.
 pub async fn ensure_sidecar(
     config: &SidecarConfig,
+    profiles: &SidecarProfiles,
 ) -> Result<Arc<SidecarState>, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(state) = current_sidecar() {
         return Ok(state);
@@ -64,7 +65,7 @@ pub async fn ensure_sidecar(
     let work_dir = sidecar_work_dir();
     drop(std::fs::remove_dir_all(&work_dir));
     std::fs::create_dir_all(&work_dir)?;
-    let presets_path = preset::write_presets(&work_dir, config)?;
+    let presets_path = preset::write_presets(&work_dir, profiles)?;
     let port = pick_free_port()?;
     let api_key = random_api_key();
     let binary = resolve_binary(config)?;

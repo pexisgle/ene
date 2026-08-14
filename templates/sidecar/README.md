@@ -20,8 +20,10 @@ with no server surface and one job at a time (e.g. an ONNX VAD).
 ## What the template provides
 
 - `src/sidecar/config.rs` — the `SidecarConfig` shape the lifecycle needs
-  (server path, startup timeout, model profiles). Merge it into the plugin's
-  own config type (or re-export it from `crate::config`).
+  (server path, startup timeout) plus `SidecarProfiles`, the per-model
+  profile map the host delivers separately via `set_profiles` (keyed by
+  profile name). Merge them into the plugin's own config type (or re-export
+  them from `crate::config`).
 - `src/sidecar/lifecycle.rs` — spawn → health-check → timeout kill → Drop
   kill, with a spawn lock so concurrent requests cannot start two engines,
   plus binary resolution (config `server_path` → bundled plugins dir →
@@ -47,9 +49,10 @@ already exist). Then:
 1. Declare `mod sidecar;` in `src/main.rs` (or the module that owns the
    provider).
 2. Add the dependency block from `Cargo.toml` to the plugin's manifest.
-3. Merge `sidecar::config::SidecarConfig` into the plugin's config type (the
-   lifecycle and preset writer read `server_path`, `startup_timeout_secs`,
-   and `profiles`).
+3. Merge `sidecar::config::SidecarConfig` into the plugin's config type and
+   implement `ConfigurablePlugin` so `set_config` feeds `SidecarConfig` while
+   `set_profiles` feeds `SidecarProfiles` (the lifecycle and preset writer
+   read both).
 4. Adapt the engine-specific parts:
    - the health probe (`GET /health`-style check against the engine's API),
    - preset serialization (`preset.rs`),

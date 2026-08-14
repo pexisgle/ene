@@ -7,17 +7,17 @@
 
 use std::path::Path;
 
-use super::config::SidecarConfig;
+use super::config::SidecarProfiles;
 
 /// Writes the engine preset file and returns its path.
 pub fn write_presets(
     work_dir: &Path,
-    config: &SidecarConfig,
+    profiles: &SidecarProfiles,
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let presets: serde_json::Map<String, serde_json::Value> = config
-        .profiles
+    let presets: serde_json::Map<String, serde_json::Value> = profiles
+        .0
         .iter()
-        .map(|profile| {
+        .map(|(name, profile)| {
             let mut entry = serde_json::Map::new();
             entry.insert(
                 "model_path".to_string(),
@@ -33,7 +33,7 @@ pub fn write_presets(
                     serde_json::json!(context_size),
                 );
             }
-            (profile.name.clone(), serde_json::Value::Object(entry))
+            (name.clone(), serde_json::Value::Object(entry))
         })
         .collect();
     let path = work_dir.join("preset.json");
@@ -49,18 +49,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writes_presets_from_profiles() {
+    fn writes_presets_from_host_profiles_map() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let config = SidecarConfig {
-            profiles: vec![crate::sidecar::config::SidecarProfile {
-                name: "chat".to_string(),
-                model_path: "/data/chat.gguf".to_string(),
-                gpu_layers: "auto".to_string(),
-                context_size: Some(4096),
-            }],
-            ..SidecarConfig::default()
-        };
-        let path = write_presets(dir.path(), &config).expect("presets");
+        let profiles: crate::sidecar::config::SidecarProfiles =
+            serde_json::from_value(serde_json::json!({
+            "chat": {
+                "model_path": "/data/chat.gguf",
+                "gpu_layers": "auto",
+                "context_size": 4096,
+            }
+        }))
+            .expect("set_profiles shape");
+        let path = write_presets(dir.path(), &profiles).expect("presets");
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).expect("read")).expect("parse");
         assert_eq!(json["chat"]["model_path"], "/data/chat.gguf");
