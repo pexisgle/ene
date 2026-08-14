@@ -149,10 +149,17 @@ impl CommitmentLedger {
                 let due_changed =
                     existing.due_label.as_deref() != candidate.commitment_due.as_deref();
                 if content_changed || due_changed {
-                    let due_at = candidate
-                        .commitment_due
-                        .as_deref()
-                        .and_then(|due| parse_due_at(chrono::Utc::now(), due));
+                    // A content-only update must keep the original deadline:
+                    // re-parsing the unchanged relative label would re-anchor
+                    // it to the new `Utc::now()`.
+                    let due_at = if due_changed {
+                        candidate
+                            .commitment_due
+                            .as_deref()
+                            .and_then(|due| parse_due_at(chrono::Utc::now(), due))
+                    } else {
+                        existing.due_at
+                    };
                     if let Some(id) = existing.id {
                         store
                             .supersede_commitment(
@@ -681,6 +688,42 @@ mod tests {
         assert!(
             active[0].due_at.is_some(),
             "reschedule must re-parse the new due label"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_content_only_update_keeps_relative_deadline() {
+        // A content-only supersede must not re-parse the unchanged relative
+        // due label: re-parsing would re-anchor "in 3 days" to the new now
+        // and silently extend the deadline.
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let mut candidate = commitment_candidate(0.9);
+        candidate.commitment_due = Some("in 3 days".to_string());
+        let ids1 = CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &[candidate])
+            .await
+            .unwrap();
+        let before = store.get_commitment(ids1[0]).await.unwrap().unwrap();
+        let due_before = before.due_at.expect("relative label must set due_at");
+
+        let mut updated = commitment_candidate(0.9);
+        updated.content = "Let's discuss the UI design instead".to_string();
+        updated.commitment_due = Some("in 3 days".to_string());
+        let ids2 = CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &[updated])
+            .await
+            .unwrap();
+        assert_eq!(
+            ids2[0], ids1[0],
+            "content update must supersede the same row"
+        );
+
+        let after = store.get_commitment(ids2[0]).await.unwrap().unwrap();
+        assert_eq!(after.description, "Let's discuss the UI design instead");
+        assert_eq!(after.due_label.as_deref(), Some("in 3 days"));
+        assert_eq!(
+            after.due_at,
+            Some(due_before),
+            "content-only update must not re-anchor the relative deadline"
         );
     }
 
