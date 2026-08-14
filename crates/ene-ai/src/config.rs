@@ -253,7 +253,7 @@ impl schemars::JsonSchema for GpuLayers {
                 {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": u32::MAX as u64
+                    "maximum": u64::from(u32::MAX)
                 }
             ]
         })
