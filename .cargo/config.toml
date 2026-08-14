@@ -1,6 +1,13 @@
 [future-incompat-report]
 frequency = "never"
 
+[env]
+# The bundled SQLite (libsqlite3-sys) is compiled without the math-extension
+# by default; the memory store's natural-decay UPDATE uses `exp()`. The flake
+# shell sets the same flag; keeping it here makes plain `cargo test` builds
+# behave identically.
+LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_MATH_FUNCTIONS"
+
 [build]
 rustc-wrapper = "sccache"
 
