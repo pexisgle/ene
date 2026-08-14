@@ -23,7 +23,6 @@ use crate::resource::platform_state::resources::{
 use crate::resource::tray::GtkReady;
 use crate::schedule::AppSet;
 use crate::system::platform::click_through::apply_linux_click_through_system;
-use crate::system::platform::cursor::update_cursor_state_system;
 #[cfg(target_os = "linux")]
 use crate::system::platform::gtk_pump::tick_gtk_system;
 use crate::system::platform::should_render_debug::{
@@ -71,7 +70,6 @@ impl Plugin for PlatformPlugin {
             Update,
             (
                 should_render_debug_system.in_set(AppSet::Input),
-                update_cursor_state_system.in_set(AppSet::Input),
                 apply_linux_click_through_system.in_set(AppSet::Settings),
             )
                 .chain(),

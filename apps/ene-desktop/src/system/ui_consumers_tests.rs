@@ -1,6 +1,5 @@
 //! Tests for platform / tray / AI consumer systems.
 
-use bevy_app::App;
 use bevy_ecs::prelude::*;
 
 use crate::component::chat::{ChatStateComponent, ChatUiBundle, ChatWindow};
@@ -10,18 +9,14 @@ use crate::event::ai::{
     CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
 };
 use crate::event::chat::OpenChat;
-use crate::event::input::PointerMoved;
 use crate::event::settings::OpenSettings;
 use crate::events::AppEvent;
-use crate::plugin::platform_plugin::PlatformPlugin;
-use crate::resource::cursor_state::CursorState;
 use crate::resource::emotion_pipeline::EmotionPipelineState;
 use crate::resource::event_channels::EventChannels;
 use crate::resource::exit::ExitRequested;
 use crate::settings::QuestionDraft;
 use crate::settings_ui::PageKind;
 use crate::system::event_pump::pump_legacy_events;
-use crate::system::platform::cursor::update_cursor_state_system;
 use crate::system::ui_consumers::{
     apply_ai_permission_system, apply_ai_stream_finished_system, apply_ai_text_deltas_system,
     apply_ai_user_input_system, open_chat_system, open_settings_system,
@@ -53,7 +48,6 @@ fn init_messages(world: &mut World) {
     world.init_resource::<Messages<ExpressionCommand>>();
     world.init_resource::<Messages<CancelCommand>>();
     world.init_resource::<Messages<EmoteToken>>();
-    world.init_resource::<Messages<PointerMoved>>();
     world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
 }
 
@@ -292,25 +286,6 @@ fn emote_token_emits_message_via_pump() {
     let events: Vec<_> = cursor.read(&*messages).collect();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].0, "happy");
-}
-
-#[test]
-fn platform_plugin_provides_cursor_state_and_pointer_moved_is_reserved() {
-    let mut app = App::new();
-    app.add_plugins(PlatformPlugin);
-    app.init_resource::<Messages<PointerMoved>>();
-    assert!(app.world().get_resource::<CursorState>().is_some());
-
-    app.world_mut().write_message(PointerMoved {
-        logical_x: 120.0,
-        logical_y: 240.0,
-    });
-    let mut schedule = Schedule::default();
-    schedule.add_systems(update_cursor_state_system);
-    schedule.run(app.world_mut());
-
-    assert!(app.world().resource::<CursorState>().physical.is_none());
-    assert_eq!(app.world().resource::<Messages<PointerMoved>>().len(), 1);
 }
 
 #[test]
