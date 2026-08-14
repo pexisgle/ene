@@ -35,9 +35,6 @@ use device_query::DeviceQuery;
 /// model's normalized bounds so it is not flush against the viewport edges.
 const CHARACTER_AUTO_FIT_MARGIN: f32 = 0.9;
 
-/// Number of frames to defer GPU texture freeing. Must match the
-/// `desired_maximum_frame_latency` to avoid use-after-free on textures
-/// that are still referenced by in-flight frames.
 /// Top-level runtime. One per process.
 pub struct Runtime {
     state: AppState,

@@ -15,7 +15,9 @@ use crate::acquire_error::AcquireError;
 use crate::gpu::WindowSurfaceError;
 
 /// How many frames a freed egui texture id stays in the ring before the
-/// renderer actually drops it (the GPU may still reference it).
+/// renderer actually drops it (the GPU may still reference it). The depth
+/// must exceed `desired_maximum_frame_latency` so no in-flight frame can
+/// outlive a texture it still references.
 pub const TEXTURE_FREE_RING_DEPTH: usize = 3;
 
 /// A wgpu surface plus a complete egui context, input state, and renderer.
