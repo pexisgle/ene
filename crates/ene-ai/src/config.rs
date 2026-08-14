@@ -196,8 +196,7 @@ fn typo_tolerance(kind: &str, candidate: &str) -> usize {
 /// compiled in); an explicit count pins the offload. Deserialization accepts
 /// `"auto"`, an integer, or a numeric string, and rejects anything else at
 /// the config boundary instead of silently falling back at load time.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, schemars::JsonSchema)]
-#[schemars(crate = "::ene_config::schemars")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum GpuLayers {
     /// Offload every layer the compiled backend supports.
     #[default]
@@ -236,6 +235,28 @@ impl std::fmt::Display for GpuLayers {
             Self::Auto => f.write_str("auto"),
             Self::Layers(n) => write!(f, "{n}"),
         }
+    }
+}
+
+impl schemars::JsonSchema for GpuLayers {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("GpuLayers")
+    }
+
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "oneOf": [
+                {
+                    "type": "string",
+                    "pattern": "(?i)^auto$|^[0-9]+$"
+                },
+                {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": u32::MAX as u64
+                }
+            ]
+        })
     }
 }
 
@@ -695,6 +716,26 @@ mod tests {
         assert_eq!(GpuLayers::Layers(33).n_layers(), 33);
         assert_eq!(GpuLayers::default(), GpuLayers::Auto);
     }
+
+    #[test]
+    fn gpu_layers_schema_matches_wire_representation() {
+        // The schema drives config validation/UI and must accept exactly the
+        // values the custom serde accepts: "auto" (any case), integer
+        // strings, and non-negative integers.
+        let schema = schemars::schema_for!(GpuLayers);
+        let json = serde_json::to_value(schema).expect("schema serializes");
+        let one_of = json["oneOf"].as_array().expect("schema must be oneOf");
+
+        let string = &one_of[0];
+        assert_eq!(string["type"], "string");
+        assert_eq!(string["pattern"], "(?i)^auto$|^[0-9]+$");
+
+        let integer = &one_of[1];
+        assert_eq!(integer["type"], "integer");
+        assert_eq!(integer["minimum"], 0.0);
+        assert_eq!(integer["maximum"], f64::from(u32::MAX));
+    }
+
     use crate::resolve::{ResolvedEmbedding, resolve_base_url};
 
     fn test_config() -> AiConfig {
