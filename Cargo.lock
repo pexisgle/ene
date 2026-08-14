@@ -3307,13 +3307,15 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ene-plugin",
+ "ene-plugin-broker",
+ "ene-plugin-proto",
  "hound",
+ "parking_lot",
  "rand 0.10.2",
- "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
- "tokio-stream",
  "tracing",
  "tracing-subscriber",
 ]

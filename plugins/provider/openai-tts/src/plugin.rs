@@ -8,8 +8,7 @@ use serde_json::{Value, json};
 
 use crate::client;
 use crate::config::{
-    DEFAULT_SAMPLE_RATE, MAX_SAMPLE_RATE, OpenAiTtsConfig, SUPPORTED_VOICES, resolve_api_key,
-    resolve_base_url,
+    DEFAULT_SAMPLE_RATE, MAX_SAMPLE_RATE, OpenAiTtsConfig, SUPPORTED_VOICES, resolve_base_url,
 };
 
 /// Character limit for the `input` field imposed by the Speech API.
@@ -48,8 +47,14 @@ impl ene_plugin::ConfigurablePlugin for OpenAiTtsPlugin {
         *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
     }
 
+    /// Captures the broker socket/token so every request is host-mediated.
+    fn set_sandbox(&self, sandbox: &ene_plugin_proto::SandboxConfigData) {
+        crate::broker::configure_broker(sandbox);
+    }
+
     /// Advertises the config schema; `api_key` is marked `x-ene-secret: true`
-    /// so the host masks/redacts it.
+    /// so the host masks/redacts it. The key itself is unused by the plugin:
+    /// the host injects it into broker requests by key name.
     fn config_schema(&self) -> Option<Value> {
         Some(json!({
             "type": "object",
@@ -149,8 +154,7 @@ impl TtsPlugin for OpenAiTtsPlugin {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let api_key = resolve_api_key(host_config.as_ref(), &config)?;
         let base_url = resolve_base_url(host_config.as_ref(), &config);
-        client::synthesize(&parsed, &api_key, &base_url, &text, &voice).await
+        client::synthesize(&parsed, &base_url, &text, &voice).await
     }
 }
