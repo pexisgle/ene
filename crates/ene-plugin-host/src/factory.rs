@@ -225,10 +225,7 @@ pub(crate) fn is_broker_credential_kind(kind: &str) -> bool {
 /// `{"source": "inline"|"env"|"auto"}` contract the provider plugins used
 /// before broker credential injection. The host resolves the value so the
 /// plugin only ever names the key; `None` means no key is configured.
-pub(crate) fn resolve_blob_api_key(
-    kind: &str,
-    config: &serde_json::Value,
-) -> Option<String> {
+pub(crate) fn resolve_blob_api_key(kind: &str, config: &serde_json::Value) -> Option<String> {
     let default_env = match kind {
         "openai" | "openai-tts" => "OPENAI_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
@@ -262,7 +259,9 @@ pub(crate) fn resolve_blob_api_key(
                 }
                 // "auto" (or an unrecognized source) falls back to the
                 // kind's default environment variable.
-                _ => std::env::var(default_env).ok().filter(|key| !key.is_empty()),
+                _ => std::env::var(default_env)
+                    .ok()
+                    .filter(|key| !key.is_empty()),
             }
         }
         _ => None,

@@ -1,22 +1,17 @@
-//! `ElevenLabs` REST client: request building, bounded streaming reads,
-//! typed error mapping, and shared retry helpers for both transports.
+//! `ElevenLabs` REST client: request building, retries, and typed error
+//! mapping over the host-mediated network broker.
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use ene_plugin::{PluginError, ProviderErrorKind};
-use reqwest::StatusCode;
+use ene_plugin_broker::HttpMethod;
 use serde::Serialize;
-use tokio_stream::StreamExt;
 
+use crate::broker::broker;
 use crate::config::{ElevenLabsConfig, VoiceSettings};
 use crate::pcm;
 use crate::wav;
 
-/// Timeout for establishing an HTTP connection.
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Total timeout for a single synthesis request (covers streamed bodies).
-pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 /// Retry budget for transient upstream failures (transient statuses /
 /// network); the host TTS consumer never retries, so the plugin absorbs
 /// them like the openai plugin does.
@@ -34,9 +29,6 @@ pub(crate) const MAX_PCM_BYTES: usize = 32 * 1024 * 1024 - 44;
 /// Cap on error-response bodies; only a snippet is surfaced anyway.
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
-/// Shared HTTP client, built once with timeouts and reused for all requests.
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
 /// `/stream` request body. `output_format` is a query parameter; the API
 /// then streams headerless 16-bit mono LE PCM at the requested rate.
 #[derive(Serialize)]
@@ -52,17 +44,16 @@ struct SpeechRequest<'a> {
 ///
 /// Returns a provider error for transport failures and non-success statuses
 /// (401/403 → `Auth`, 429 → `RateLimit`), and a typed `Truncated` error when
-/// the streamed PCM ends mid-sample. Transient failures (network, 408/429,
+/// the returned PCM ends mid-sample. Transient failures (network, 408/429,
 /// 5xx) are retried with jittered backoff, honoring the upstream
-/// `Retry-After`.
+/// `Retry-After`. The host injects the `"api_key"` credential as
+/// `xi-api-key`.
 pub async fn synthesize_rest(
     config: &ElevenLabsConfig,
-    api_key: &str,
     base_url: &str,
     text: &str,
     voice_id: &str,
 ) -> Result<Vec<u8>, PluginError> {
-    let client = http_client()?;
     let url = format!(
         "{}/text-to-speech/{voice_id}/stream?output_format=pcm_{}",
         base_url.trim_end_matches('/'),
@@ -76,20 +67,29 @@ pub async fn synthesize_rest(
 
     let mut attempt: u32 = 0;
     loop {
-        let sent = client
-            .post(&url)
-            .header("xi-api-key", api_key)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(&body)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+        let payload = serde_json::to_vec(&body)
+            .map_err(|e| PluginError::provider(format!("failed to serialize request: {e}")))?;
+        let sent = broker()
+            .fetch(
+                HttpMethod::Post,
+                &url,
+                vec![("Content-Type".to_string(), "application/json".to_string())],
+                Some("api_key"),
+                Some("xi-api-key"),
+                Some(payload),
+            )
             .await;
 
         let err = match sent {
             Ok(response) => {
-                let status = response.status();
-                if status.is_success() {
-                    let audio = read_body_bounded(response, MAX_PCM_BYTES).await?;
+                let status = response.status;
+                if (200..300).contains(&status) {
+                    let audio = response.body;
+                    if audio.len() > MAX_PCM_BYTES {
+                        return Err(PluginError::provider(format!(
+                            "elevenlabs response exceeds the {MAX_PCM_BYTES}-byte limit"
+                        )));
+                    }
                     if audio.is_empty() {
                         return Err(PluginError::provider(
                             "elevenlabs returned an empty audio response",
@@ -98,37 +98,31 @@ pub async fn synthesize_rest(
                     pcm::validate_pcm(&audio)?;
                     return wav::wrap_pcm(&audio, config.sample_rate);
                 }
-                let retry_after = retry_after_secs(response.headers());
-                let body = match read_body_bounded(response, MAX_ERROR_BODY_BYTES).await {
-                    Ok(body) => body,
-                    // An unreadable error body must not turn a 429 into a
-                    // terminal failure: the retry budget is what matters.
-                    Err(_) if status.as_u16() == 429 => Vec::new(),
-                    Err(e) => {
-                        return Err(PluginError::provider(format!(
-                            "failed to read error response: {e}"
-                        )));
-                    }
-                };
+                let retry_after = retry_after_secs(&response.headers);
+                let body: Vec<u8> = response
+                    .body
+                    .into_iter()
+                    .take(MAX_ERROR_BODY_BYTES)
+                    .collect();
                 UpstreamError::Http {
-                    status: status.as_u16(),
+                    status,
                     body,
                     retry_after,
                 }
             }
-            Err(e) => UpstreamError::Network(format!("elevenlabs request failed: {e}")),
+            Err(e) => UpstreamError::Network(format!("broker request failed: {e}")),
         };
 
         let next = attempt.saturating_add(1);
         if !err.is_retryable() || next >= MAX_ATTEMPTS {
-            return Err(err.into_plugin_error(api_key));
+            return Err(err.into_plugin_error());
         }
         let delay = retry_delay(err.retry_after(), attempt);
         tracing::warn!(
             component = "ene-plugin-elevenlabs",
             attempt = next,
             delay_ms = delay.as_millis() as u64,
-            error = %err.into_plugin_error(api_key),
+            error = %err.into_plugin_error(),
             "retryable upstream failure; backing off"
         );
         tokio::time::sleep(delay).await;
@@ -136,31 +130,13 @@ pub async fn synthesize_rest(
     }
 }
 
-fn http_client() -> Result<&'static reqwest::Client, PluginError> {
-    if let Some(client) = HTTP_CLIENT.get() {
-        return Ok(client);
-    }
-    let client = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()
-        .map_err(|e| PluginError::provider(format!("failed to build HTTP client: {e}")))?;
-    // A racing task may have initialized first; either client is equivalent.
-    drop(HTTP_CLIENT.set(client));
-    HTTP_CLIENT
-        .get()
-        .ok_or_else(|| PluginError::provider("HTTP client initialization failed"))
-}
-
 /// Maps a non-success status to a typed provider error, with the upstream
-/// body truncated to a snippet. The snippet is scrubbed of the API key, so
-/// a misbehaving endpoint that echoes request headers back cannot leak it
-/// through errors or logs.
-pub(crate) fn map_http_error(status: StatusCode, body: &[u8], api_key: &str) -> PluginError {
+/// body truncated to a snippet.
+fn map_http_error(status: u16, body: &[u8]) -> PluginError {
     let snippet =
         parse_error_message(body).unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
-    let snippet = mask_key(&snippet, api_key);
     let snippet: String = snippet.chars().take(280).collect();
-    match status.as_u16() {
+    match status {
         401 | 403 => PluginError::provider_typed(
             ProviderErrorKind::Auth,
             format!("authentication failed: {snippet}"),
@@ -169,18 +145,8 @@ pub(crate) fn map_http_error(status: StatusCode, body: &[u8], api_key: &str) -> 
             ProviderErrorKind::RateLimit,
             format!("rate limited: {snippet}"),
         ),
-        _ => PluginError::provider(format!("HTTP {}: {snippet}", status.as_u16())),
+        _ => PluginError::provider(format!("HTTP {status}: {snippet}")),
     }
-}
-
-/// Replaces every occurrence of `key` with `***`, so upstream text that
-/// echoes the credential cannot leak it through error messages or logs.
-#[must_use]
-pub(crate) fn mask_key(message: &str, key: &str) -> String {
-    if key.is_empty() {
-        return message.to_string();
-    }
-    message.replace(key, "***")
 }
 
 /// Extracts a readable message from an `ElevenLabs` error body. The API wraps
@@ -209,7 +175,7 @@ fn parse_error_message(body: &[u8]) -> Option<String> {
 }
 
 /// An upstream failure before mapping to [`PluginError`]. Transport failures
-/// and HTTP 429 are retryable; everything else is terminal.
+/// and transient HTTP statuses are retryable; everything else is terminal.
 enum UpstreamError {
     /// Transport-level failure (DNS, connect, timeout, mid-read).
     Network(String),
@@ -241,16 +207,11 @@ impl UpstreamError {
         }
     }
 
-    /// Maps to a typed [`PluginError`] (see [`map_http_error`]); the API key
-    /// is scrubbed from every message.
-    fn into_plugin_error(self, api_key: &str) -> PluginError {
+    /// Maps to a typed [`PluginError`] (see [`map_http_error`]).
+    fn into_plugin_error(self) -> PluginError {
         match self {
-            Self::Network(message) => PluginError::provider(mask_key(&message, api_key)),
-            Self::Http { status, body, .. } => map_http_error(
-                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                &body,
-                api_key,
-            ),
+            Self::Network(message) => PluginError::provider(message),
+            Self::Http { status, body, .. } => map_http_error(status, &body),
         }
     }
 }
@@ -264,10 +225,11 @@ pub(crate) fn is_transient_status(status: u16) -> bool {
 
 /// Parses a `Retry-After` response header, in either of the RFC 9110 forms:
 /// integer seconds or an HTTP-date.
-pub(crate) fn retry_after_secs(headers: &http::HeaderMap) -> Option<u64> {
+pub(crate) fn retry_after_secs(headers: &[(String, String)]) -> Option<u64> {
     let value = headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())?
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("retry-after"))
+        .map(|(_, value)| value.as_str())?
         .trim();
     if let Ok(secs) = value.parse::<u64>() {
         return Some(secs);
@@ -304,34 +266,4 @@ pub(crate) fn backoff_delay(retry_index: u32) -> Duration {
         rand::random_range(0..=capped)
     };
     Duration::from_millis(jittered)
-}
-
-/// Reads a response body into memory, rejecting payloads over `limit`
-/// (checked against `Content-Length` upfront and against the accumulated
-/// stream while reading, so a lying or chunked upstream cannot OOM the
-/// plugin).
-pub(crate) async fn read_body_bounded(
-    response: reqwest::Response,
-    limit: usize,
-) -> Result<Vec<u8>, PluginError> {
-    if let Some(length) = response.content_length()
-        && length > limit as u64
-    {
-        return Err(PluginError::provider(format!(
-            "elevenlabs response too large: {length} bytes exceeds the {limit}-byte limit"
-        )));
-    }
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk =
-            chunk.map_err(|e| PluginError::provider(format!("failed to read response: {e}")))?;
-        body.extend_from_slice(&chunk);
-        if body.len() > limit {
-            return Err(PluginError::provider(format!(
-                "elevenlabs response exceeds the {limit}-byte limit"
-            )));
-        }
-    }
-    Ok(body)
 }

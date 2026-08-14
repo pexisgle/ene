@@ -12,26 +12,13 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 24_000;
 /// PCM sample rates the API offers. The API rejects other `pcm_*` rates,
 /// so the config is validated against this set rather than clamped.
 pub const SUPPORTED_SAMPLE_RATES: &[u32] = &[16_000, 24_000, 44_100];
-/// Default API base URL; WebSocket mode swaps the scheme of this value.
+/// Default API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io/v1";
-/// Character limit of the REST `/stream` endpoint (the lowest across
-/// `ElevenLabs` models; the WS endpoint re-chunks but shares the same bound).
+/// Character limit of the `/stream` endpoint (the lowest across
+/// `ElevenLabs` models).
 pub const MAX_INPUT_CHARS: usize = 5_000;
-/// Default environment variable consulted when no key is configured.
-pub const API_KEY_ENV: &str = "ELEVENLABS_API_KEY";
 /// Default environment variable consulted when no base URL is configured.
 pub const BASE_URL_ENV: &str = "ELEVENLABS_BASE_URL";
-
-/// Transport used for a synthesis request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Mode {
-    /// `POST /text-to-speech/{voice_id}/stream` (whole-text, chunked audio).
-    #[default]
-    Rest,
-    /// `stream-input` WebSocket (bidirectional, base64 audio frames).
-    Ws,
-}
 
 /// Voice synthesis settings accepted by the `ElevenLabs` API.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -75,15 +62,12 @@ impl VoiceSettings {
 
 /// Settings for the `ElevenLabs` TTS provider.
 ///
-/// `api_key` is deliberately not part of the struct: it is resolved per
-/// request from the host-delivered blob, the request config, or the
-/// `ELEVENLABS_API_KEY` environment variable (see [`resolve_api_key`]) so
-/// the secret never round-trips through a typed value.
+/// `api_key` is deliberately not part of the struct: the host resolves it
+/// into the credential store and injects it at request time, so the secret
+/// never round-trips through the plugin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct ElevenLabsConfig {
-    /// Transport: `rest` (default) or `ws`.
-    pub mode: Mode,
     /// `ElevenLabs` model ID (e.g. `eleven_multilingual_v2`).
     pub model_id: String,
     /// Default voice ID; a per-request voice overrides it. `ElevenLabs`
@@ -102,7 +86,6 @@ pub struct ElevenLabsConfig {
 impl Default for ElevenLabsConfig {
     fn default() -> Self {
         Self {
-            mode: Mode::Rest,
             model_id: DEFAULT_MODEL.to_string(),
             voice_id: String::new(),
             sample_rate: DEFAULT_SAMPLE_RATE,
@@ -200,35 +183,6 @@ pub fn validate_voice_id(voice_id: &str) -> Result<(), PluginError> {
     Ok(())
 }
 
-/// Resolves the effective API key: the host-delivered blob
-/// (`plugins.list.elevenlabs.config`, via `set_config`) wins, then the
-/// per-request config, then the `ELEVENLABS_API_KEY` environment variable.
-///
-/// # Errors
-///
-/// Returns a provider error when no key is configured anywhere.
-pub fn resolve_api_key(host_config: Option<&Value>, config: &Value) -> Result<String, PluginError> {
-    if let Some(key) = host_config
-        .and_then(|cfg| cfg.get("api_key"))
-        .and_then(resolve_key_value)
-    {
-        return Ok(key);
-    }
-    if let Some(key) = config.get("api_key").and_then(resolve_key_value) {
-        return Ok(key);
-    }
-    std::env::var(API_KEY_ENV)
-        .ok()
-        .map(|key| key.trim().to_string())
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| {
-            PluginError::provider(
-                "no API key found: set plugins.list.elevenlabs.config.api_key \
-                 or ELEVENLABS_API_KEY",
-            )
-        })
-}
-
 /// Resolves the effective API base URL with the same precedence as the key:
 /// host blob, request config, `ELEVENLABS_BASE_URL`, then the API default.
 #[must_use]
@@ -252,41 +206,6 @@ pub fn resolve_base_url(host_config: Option<&Value>, config: &Value) -> String {
         )
 }
 
-/// Reads an `api_key` value in either plain-string or
-/// `{source: inline|env|auto}` descriptor form.
-fn resolve_key_value(value: &Value) -> Option<String> {
-    match value {
-        Value::String(key) if !key.trim().is_empty() => Some(key.trim().to_string()),
-        Value::Object(obj) => {
-            let source = obj.get("source").and_then(Value::as_str).unwrap_or("auto");
-            match source {
-                "inline" => obj
-                    .get("inline")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|key| !key.is_empty())
-                    .map(str::to_string),
-                "env" => {
-                    let var_name = obj
-                        .get("env")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or(API_KEY_ENV);
-                    std::env::var(var_name)
-                        .ok()
-                        .map(|key| key.trim().to_string())
-                        .filter(|key| !key.is_empty())
-                }
-                // "auto" (or an unrecognized source) falls through to the
-                // caller's process-env fallback.
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -299,7 +218,6 @@ mod tests {
     #[test]
     fn empty_config_uses_defaults() {
         let cfg = ElevenLabsConfig::from_value(&json!({})).expect("empty config parses");
-        assert_eq!(cfg.mode, Mode::Rest);
         assert_eq!(cfg.model_id, DEFAULT_MODEL);
         assert!(cfg.voice_id.is_empty());
         assert_eq!(cfg.sample_rate, DEFAULT_SAMPLE_RATE);
@@ -310,7 +228,6 @@ mod tests {
     #[test]
     fn parses_all_fields_and_ignores_unknown() {
         let cfg = ElevenLabsConfig::from_value(&json!({
-            "mode": "ws",
             "model_id": "eleven_turbo_v2_5",
             "voice_id": "21m00Tcm4TlvDq8ikWAM",
             "sample_rate": 44_100,
@@ -324,7 +241,6 @@ mod tests {
             "future_key": "preserved"
         }))
         .expect("config parses");
-        assert_eq!(cfg.mode, Mode::Ws);
         assert_eq!(cfg.model_id, "eleven_turbo_v2_5");
         assert_eq!(cfg.voice_id, "21m00Tcm4TlvDq8ikWAM");
         assert_eq!(cfg.sample_rate, 44_100);
@@ -340,13 +256,6 @@ mod tests {
         let err = ElevenLabsConfig::from_value(&json!({"sample_rate": "fast"}))
             .expect_err("wrong type rejected");
         assert!(err.to_string().contains("provider"));
-    }
-
-    #[test]
-    fn rejects_unknown_mode() {
-        let err = ElevenLabsConfig::from_value(&json!({"mode": "grpc"}))
-            .expect_err("unknown mode rejected");
-        assert!(err.to_string().contains("rest"));
     }
 
     #[test]

@@ -304,10 +304,7 @@ async fn oversized_error_body_is_bounded() {
     let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let mock = MockSpeechServer::spawn().expect("mock server");
     configure_broker(&mock).await;
-    mock.push(MockResponse::with_status(
-        500,
-        b"boom-".repeat(20_000),
-    ));
+    mock.push(MockResponse::with_status(500, b"boom-".repeat(20_000)));
 
     let err = test_plugin()
         .synthesize(
