@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use ene_plugin_broker::HttpMethod;
 use ene_plugin::{PluginError, ProviderErrorKind};
+use ene_plugin_broker::HttpMethod;
 use serde::Serialize;
 
 use crate::broker::broker;
@@ -98,7 +98,11 @@ pub async fn synthesize(
                     return wav::wrap_pcm(&audio, config.sample_rate);
                 }
                 let retry_after = retry_after_secs(&response.headers);
-                let body: Vec<u8> = response.body.into_iter().take(MAX_ERROR_BODY_BYTES).collect();
+                let body: Vec<u8> = response
+                    .body
+                    .into_iter()
+                    .take(MAX_ERROR_BODY_BYTES)
+                    .collect();
                 UpstreamError::Http {
                     status,
                     body,

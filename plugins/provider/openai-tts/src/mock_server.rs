@@ -125,7 +125,10 @@ impl MockSpeechServer {
 
     /// Queues a response for the next request.
     pub fn push(&self, response: MockResponse) {
-        self.responses.lock().expect("response queue").push_back(response);
+        self.responses
+            .lock()
+            .expect("response queue")
+            .push_back(response);
     }
 }
 
