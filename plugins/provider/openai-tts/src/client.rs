@@ -1,22 +1,17 @@
-//! `OpenAI Speech API` HTTP client: request building, bounded streaming
-//! reads, and typed error mapping.
+//! `OpenAI Speech API` client: request building, retries, and typed error
+//! mapping over the host-mediated network broker.
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
+use ene_plugin_broker::HttpMethod;
 use ene_plugin::{PluginError, ProviderErrorKind};
-use reqwest::StatusCode;
 use serde::Serialize;
-use tokio_stream::StreamExt;
 
+use crate::broker::broker;
 use crate::config::OpenAiTtsConfig;
 use crate::pcm;
 use crate::wav;
 
-/// Timeout for establishing an HTTP connection.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Total timeout for a single synthesis request (covers streamed bodies).
-const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 /// Retry budget for transient upstream failures (429 / network); the host
 /// TTS consumer never retries, so the plugin absorbs them like the openai
 /// plugin does.
@@ -34,9 +29,6 @@ pub(crate) const MAX_PCM_BYTES: usize = 32 * 1024 * 1024 - 44;
 /// Cap on error-response bodies; only a snippet is surfaced anyway.
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
-/// Shared HTTP client, built once with timeouts and reused for all requests.
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
 /// Speech API request body. `response_format` is fixed to `pcm`: the API
 /// then streams headerless 24 kHz 16-bit mono LE PCM.
 #[derive(Serialize)]
@@ -48,22 +40,21 @@ struct SpeechRequest<'a> {
     speed: f32,
 }
 
-/// Synthesizes `text` and returns the raw PCM bytes.
+/// Synthesizes `text` and returns WAV bytes.
 ///
 /// # Errors
 ///
 /// Returns a provider error for transport failures and non-success statuses
 /// (401/403 → `Auth`, 429 → `RateLimit`), and a typed `Truncated` error when
-/// the streamed PCM ends mid-sample. Transient failures (network, 429) are
-/// retried with jittered backoff, honoring the upstream `Retry-After`.
+/// the returned PCM ends mid-sample. Transient failures (network, 429) are
+/// retried with jittered backoff, honoring the upstream `Retry-After`. The
+/// host injects the `"api_key"` credential as `Authorization: Bearer`.
 pub async fn synthesize(
     config: &OpenAiTtsConfig,
-    api_key: &str,
     base_url: &str,
     text: &str,
     voice: &str,
 ) -> Result<Vec<u8>, PluginError> {
-    let client = http_client()?;
     let url = format!("{}/audio/speech", base_url.trim_end_matches('/'));
     let body = SpeechRequest {
         model: &config.model,
@@ -75,20 +66,29 @@ pub async fn synthesize(
 
     let mut attempt: u32 = 0;
     loop {
-        let sent = client
-            .post(&url)
-            .bearer_auth(api_key)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(&body)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+        let payload = serde_json::to_vec(&body)
+            .map_err(|e| PluginError::provider(format!("failed to serialize request: {e}")))?;
+        let sent = broker()
+            .fetch(
+                HttpMethod::Post,
+                &url,
+                vec![("Content-Type".to_string(), "application/json".to_string())],
+                Some("api_key"),
+                None,
+                Some(payload),
+            )
             .await;
 
         let err = match sent {
             Ok(response) => {
-                let status = response.status();
-                if status.is_success() {
-                    let audio = read_body_bounded(response, MAX_PCM_BYTES).await?;
+                let status = response.status;
+                if (200..300).contains(&status) {
+                    let audio = response.body;
+                    if audio.len() > MAX_PCM_BYTES {
+                        return Err(PluginError::provider(format!(
+                            "speech response exceeds the {MAX_PCM_BYTES}-byte limit"
+                        )));
+                    }
                     if audio.is_empty() {
                         return Err(PluginError::provider(
                             "speech API returned an empty audio response",
@@ -97,19 +97,15 @@ pub async fn synthesize(
                     pcm::validate_pcm(&audio)?;
                     return wav::wrap_pcm(&audio, config.sample_rate);
                 }
-                let retry_after = retry_after_secs(&response);
-                let body = read_body_bounded(response, MAX_ERROR_BODY_BYTES)
-                    .await
-                    .map_err(|e| {
-                        PluginError::provider(format!("failed to read error response: {e}"))
-                    })?;
+                let retry_after = retry_after_secs(&response.headers);
+                let body: Vec<u8> = response.body.into_iter().take(MAX_ERROR_BODY_BYTES).collect();
                 UpstreamError::Http {
-                    status: status.as_u16(),
+                    status,
                     body,
                     retry_after,
                 }
             }
-            Err(e) => UpstreamError::Network(format!("speech request failed: {e}")),
+            Err(e) => UpstreamError::Network(format!("broker request failed: {e}")),
         };
 
         let next = attempt.saturating_add(1);
@@ -136,27 +132,12 @@ pub async fn synthesize(
     }
 }
 
-fn http_client() -> Result<&'static reqwest::Client, PluginError> {
-    if let Some(client) = HTTP_CLIENT.get() {
-        return Ok(client);
-    }
-    let client = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()
-        .map_err(|e| PluginError::provider(format!("failed to build HTTP client: {e}")))?;
-    // A racing task may have initialized first; either client is equivalent.
-    drop(HTTP_CLIENT.set(client));
-    HTTP_CLIENT
-        .get()
-        .ok_or_else(|| PluginError::provider("HTTP client initialization failed"))
-}
-
 /// Maps a non-success status to a typed provider error, with the upstream
 /// body truncated to a snippet. The API key never appears here: only the
 /// status and response body are echoed.
-fn map_http_error(status: StatusCode, body: &[u8]) -> PluginError {
+fn map_http_error(status: u16, body: &[u8]) -> PluginError {
     let snippet: String = String::from_utf8_lossy(body).chars().take(280).collect();
-    match status.as_u16() {
+    match status {
         401 | 403 => PluginError::provider_typed(
             ProviderErrorKind::Auth,
             format!("authentication failed: {snippet}"),
@@ -165,7 +146,7 @@ fn map_http_error(status: StatusCode, body: &[u8]) -> PluginError {
             ProviderErrorKind::RateLimit,
             format!("rate limited: {snippet}"),
         ),
-        _ => PluginError::provider(format!("HTTP {}: {snippet}", status.as_u16())),
+        _ => PluginError::provider(format!("HTTP {status}: {snippet}")),
     }
 }
 
@@ -195,21 +176,17 @@ impl UpstreamError {
     fn into_plugin_error(self) -> PluginError {
         match self {
             Self::Network(message) => PluginError::provider(message),
-            Self::Http { status, body, .. } => map_http_error(
-                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                &body,
-            ),
+            Self::Http { status, body, .. } => map_http_error(status, &body),
         }
     }
 }
 
 /// Parses a `Retry-After` response header (seconds) if present and valid.
-fn retry_after_secs(response: &reqwest::Response) -> Option<u64> {
-    response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
+fn retry_after_secs(headers: &[(String, String)]) -> Option<u64> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
 }
 
 /// Jittered exponential backoff for retry attempt `retry_index` (0-indexed).
@@ -223,34 +200,4 @@ fn backoff_delay(retry_index: u32) -> Duration {
         rand::random_range(0..=capped)
     };
     Duration::from_millis(jittered)
-}
-
-/// Reads a response body into memory, rejecting payloads over `limit`
-/// (checked against `Content-Length` upfront and against the accumulated
-/// stream while reading, so a lying or chunked upstream cannot OOM the
-/// plugin).
-async fn read_body_bounded(
-    response: reqwest::Response,
-    limit: usize,
-) -> Result<Vec<u8>, PluginError> {
-    if let Some(length) = response.content_length()
-        && length > limit as u64
-    {
-        return Err(PluginError::provider(format!(
-            "speech response too large: {length} bytes exceeds the {limit}-byte limit"
-        )));
-    }
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|e| PluginError::provider(format!("failed to read speech response: {e}")))?;
-        body.extend_from_slice(&chunk);
-        if body.len() > limit {
-            return Err(PluginError::provider(format!(
-                "speech response exceeds the {limit}-byte limit"
-            )));
-        }
-    }
-    Ok(body)
 }

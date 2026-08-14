@@ -218,7 +218,55 @@ pub(crate) fn build_provider_config(
 /// (`NetworkFetch.credential`) and therefore never receive the API key in
 /// their provider config.
 pub(crate) fn is_broker_credential_kind(kind: &str) -> bool {
-    matches!(kind, "openai" | "anthropic")
+    matches!(kind, "openai" | "openai-tts" | "anthropic" | "elevenlabs")
+}
+
+/// Resolves an `api_key` from a plugin config blob per the
+/// `{"source": "inline"|"env"|"auto"}` contract the provider plugins used
+/// before broker credential injection. The host resolves the value so the
+/// plugin only ever names the key; `None` means no key is configured.
+pub(crate) fn resolve_blob_api_key(
+    kind: &str,
+    config: &serde_json::Value,
+) -> Option<String> {
+    let default_env = match kind {
+        "openai" | "openai-tts" => "OPENAI_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "elevenlabs" => "ELEVENLABS_API_KEY",
+        _ => return None,
+    };
+    match config.get("api_key") {
+        Some(serde_json::Value::String(key)) if !key.trim().is_empty() => {
+            Some(key.trim().to_string())
+        }
+        Some(serde_json::Value::Object(obj)) => {
+            let source = obj
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("auto");
+            match source {
+                "inline" => obj
+                    .get("inline")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_string),
+                "env" => {
+                    let var_name = obj
+                        .get("env")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(default_env);
+                    std::env::var(var_name).ok().filter(|key| !key.is_empty())
+                }
+                // "auto" (or an unrecognized source) falls back to the
+                // kind's default environment variable.
+                _ => std::env::var(default_env).ok().filter(|key| !key.is_empty()),
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Applies per-task overrides onto the provider config forwarded to a plugin.
@@ -334,8 +382,34 @@ mod tests {
             "anthropic must be treated as a broker-credential kind"
         );
         assert!(
-            !is_broker_credential_kind("elevenlabs"),
+            !is_broker_credential_kind("edge-tts"),
             "non-migrated kinds still receive the key"
+        );
+    }
+
+    /// The blob resolver covers every migrated kind and honors the
+    /// `{"source": ...}` contract without touching the plugin.
+    #[test]
+    fn resolve_blob_api_key_supports_plain_and_descriptor_shapes() {
+        assert_eq!(
+            resolve_blob_api_key("openai-tts", &serde_json::json!({"api_key": "sk-tts"})),
+            Some("sk-tts".to_string())
+        );
+        assert_eq!(
+            resolve_blob_api_key(
+                "elevenlabs",
+                &serde_json::json!({"api_key": {"source": "inline", "inline": "xi-1"}})
+            ),
+            Some("xi-1".to_string())
+        );
+        assert_eq!(
+            resolve_blob_api_key("anthropic", &serde_json::json!({})),
+            None
+        );
+        assert_eq!(
+            resolve_blob_api_key("web", &serde_json::json!({"api_key": "ignored"})),
+            None,
+            "non-credential kinds are not resolved"
         );
     }
 

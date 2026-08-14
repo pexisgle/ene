@@ -485,7 +485,7 @@ impl PluginEntry {
     /// Warns when the delivered object contains host-reserved keys
     /// (`enable`, `checksum`) that would confuse plugin authors.
     pub fn delivered_config(&self, plugin_name: &str) -> Option<serde_json::Value> {
-        let config = if self.extra.is_empty() {
+        let mut config = if self.extra.is_empty() {
             Some(self.config.clone())
                 .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()))
         } else {
@@ -516,6 +516,15 @@ impl PluginEntry {
             }
             Some(serde_json::Value::Object(folded))
         };
+        // Broker-credential kinds never receive the API key in their config
+        // blob: the host resolves it into the credential store and injects
+        // it at request time (see `factory::resolve_blob_api_key`).
+        if crate::factory::is_broker_credential_kind(plugin_name)
+            && let Some(blob) = &mut config
+            && let Some(obj) = blob.as_object_mut()
+        {
+            obj.remove("api_key");
+        }
         if let Some(ref blob) = config {
             warn_reserved_config_keys(plugin_name, blob);
         }

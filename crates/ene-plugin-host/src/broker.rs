@@ -211,6 +211,24 @@ fn seed_provider_credentials(
                 .or_insert_with(|| key.clone());
         }
     }
+    // Provider kinds without an `ai.providers` entry (TTS plugins) keep
+    // their key in the plugin config blob; resolve it host-side so the
+    // plugin only ever names it. An explicit `plugins.list.<name>.
+    // credentials` entry still wins.
+    for (name, entry) in &plugin_config.list {
+        if !crate::factory::is_broker_credential_kind(name) {
+            continue;
+        }
+        let Some(key) = crate::factory::resolve_blob_api_key(name, &entry.config) else {
+            continue;
+        };
+        if let Some(state) = plugins.get_mut(name) {
+            state
+                .credentials
+                .entry("api_key".to_string())
+                .or_insert(key);
+        }
+    }
 }
 
 fn build_plugin_state(
