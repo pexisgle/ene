@@ -80,7 +80,7 @@ impl LocationAction {
             .check(GEO_LOCATION, "geo:ip-location", &description)?;
 
         let url = build_location_url(self.ip.as_deref())?;
-        let body = fetch_json(self.state.client(), url, "ipapi.co").await?;
+        let body = fetch_json(url.as_str(), "ipapi.co").await?;
         let parsed: LocationResponse = serde_json::from_str(&body)
             .map_err(|e| ToolError::execution_failed(format!("Invalid ipapi.co response: {e}")))?;
         format_location(&parsed).map_err(ToolError::from)
@@ -88,7 +88,7 @@ impl LocationAction {
 }
 
 /// Builds the ipapi.co request URL.
-fn build_location_url(ip: Option<&str>) -> Result<reqwest::Url, GeoError> {
+fn build_location_url(ip: Option<&str>) -> Result<url::Url, GeoError> {
     let base = if let Some(ip) = ip {
         let parsed: IpAddr = ip
             .parse()
@@ -97,7 +97,7 @@ fn build_location_url(ip: Option<&str>) -> Result<reqwest::Url, GeoError> {
     } else {
         "https://ipapi.co/json/".to_string()
     };
-    let url = reqwest::Url::parse(&base)
+    let url = url::Url::parse(&base)
         .map_err(|e| GeoError::Internal(format!("invalid ipapi.co URL: {e}")))?;
     Ok(url)
 }

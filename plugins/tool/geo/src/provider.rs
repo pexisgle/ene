@@ -9,43 +9,14 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct GeoState {
     gate: Arc<ApprovalGate>,
-    client: Arc<reqwest::Client>,
 }
 
 impl GeoState {
     /// Creates a new `GeoState`.
-    #[expect(
-        clippy::expect_used,
-        reason = "the reqwest client is built from constant configuration, so build cannot fail"
-    )]
     #[must_use]
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .user_agent("EneGeo/0.1")
-            // The tools only trust their fixed API hosts; a cross-host
-            // redirect would forward the request and its query parameters
-            // to an upstream-controlled host, so redirects stay on the
-            // original host.
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                let same_host = match (
-                    attempt.previous().last().and_then(|url| url.host_str()),
-                    attempt.url().host_str(),
-                ) {
-                    (Some(previous), Some(next)) => previous == next,
-                    _ => false,
-                };
-                if same_host {
-                    attempt.follow()
-                } else {
-                    attempt.stop()
-                }
-            }))
-            .build()
-            .expect("reqwest client builder should not fail");
         Self {
             gate: Arc::new(ApprovalGate::new()),
-            client: Arc::new(client),
         }
     }
 
@@ -55,11 +26,6 @@ impl GeoState {
         &self.gate
     }
 
-    /// Returns the shared HTTP client.
-    #[must_use]
-    pub fn client(&self) -> &reqwest::Client {
-        &self.client
-    }
 }
 
 impl Default for GeoState {
@@ -95,6 +61,7 @@ impl GeoToolProvider {
         let allow_state = state.clone();
         let revoke_state = state;
         let inner = ActionSetProvider::new(actions)
+            .with_sandbox_hook(crate::broker::configure_broker)
             .with_set_call_context_hook(move |conv_id, turn_id| {
                 context_state.gate().on_call_context(conv_id, turn_id);
             })

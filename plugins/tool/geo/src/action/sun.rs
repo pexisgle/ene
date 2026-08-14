@@ -116,7 +116,7 @@ impl SunAction {
             None => chrono::Utc::now().format("%Y-%m-%d").to_string(),
         };
         let url = build_sun_url(self.latitude, self.longitude, &date, self.tzid.as_deref())?;
-        let body = fetch_json(self.state.client(), url, "sunrise-sunset.org").await?;
+        let body = fetch_json(url.as_str(), "sunrise-sunset.org").await?;
         let parsed: SunResponse = serde_json::from_str(&body).map_err(|e| {
             ToolError::execution_failed(format!("Invalid sunrise-sunset.org response: {e}"))
         })?;
@@ -134,7 +134,7 @@ fn build_sun_url(
     longitude: f64,
     date: &str,
     tzid: Option<&str>,
-) -> Result<reqwest::Url, GeoError> {
+) -> Result<url::Url, GeoError> {
     validate_latitude(latitude)?;
     validate_longitude(longitude)?;
     validate_date(date)?;
@@ -142,7 +142,7 @@ fn build_sun_url(
         validate_tzid(tzid)?;
     }
 
-    let mut url = reqwest::Url::parse("https://api.sunrise-sunset.org/json")
+    let mut url = url::Url::parse("https://api.sunrise-sunset.org/json")
         .map_err(|e| GeoError::Internal(format!("invalid sunrise-sunset.org URL: {e}")))?;
     url.query_pairs_mut()
         .append_pair("lat", &latitude.to_string())
