@@ -239,10 +239,11 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // Pure computation plugins carry no filesystem, network, or process
     // needs, so the OS sandbox is safe to enforce for them from day one.
     // Broker-migrated built-ins (`web`, `fs`, `openai`, `openai-tts`,
-    // `elevenlabs`, `geo`, `calc`) are sandboxed too: every OS-touching
-    // operation they perform goes through the host (see
-    // `docs/concepts/sandbox-and-approvals.md`). Remaining built-ins stay
-    // unsandboxed until their broker migration lands.
+    // `elevenlabs`, `geo`, `calc`) are sandboxed too, as is `utility`,
+    // whose actions are pure computation plus host-mediated Db/timer
+    // channels: every OS-touching operation they perform goes through the
+    // host (see `docs/concepts/sandbox-and-approvals.md`). Remaining
+    // built-ins stay unsandboxed until their broker migration lands.
     let sandboxed_pure = PluginEntry {
         sandbox: Some(SandboxEntryConfig {
             enabled: true,
@@ -276,6 +277,7 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
         "web",
         "fs",
         "geo",
+        "utility",
         "openai-tts",
         "elevenlabs",
     ] {

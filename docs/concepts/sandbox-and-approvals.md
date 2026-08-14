@@ -54,16 +54,17 @@ Per-plugin sandbox settings live at `plugins.list.<name>.sandbox`; the
 global default is `plugins.sandbox`. Pure computation built-ins (`calc`,
 `counter`, `random`) ship **sandboxed by default**, as do the
 broker-migrated built-ins `web`, `fs`, `openai`, `anthropic`,
-`openai-tts`, `elevenlabs`, `geo`, and `calc`: `web` talks through the
-`Network` broker (SSRF and redirect handling moved host-side), `fs` routes
-all user-file I/O and shell execution through the `File` / `Process`
-brokers — its tools keep absolute-path arguments, which the host resolves
-against the configured grants (`plugins.list.<name>.fs_grants`) by
-canonical containment — and the provider/network plugins mediate every API
-request through the `Network` broker with the API key injected host-side by
-name (see [Credential injection](#credential-injection)). Remaining
-built-ins default to disabled until their migration to the broker channel
-lands. Enabled plugins refuse to start when the kernel cannot enforce the
+`openai-tts`, `elevenlabs`, `geo`, `calc`, and `utility` (pure computation
+plus host-mediated Db/timer channels): `web` talks through the `Network`
+broker (SSRF and redirect handling moved host-side), `fs` routes all
+user-file I/O and shell execution through the `File` / `Process` brokers —
+its tools keep absolute-path arguments, which the host resolves against
+the configured grants (`plugins.list.<name>.fs_grants`) by canonical
+containment — and the provider/network plugins mediate every API request
+through the `Network` broker with the API key injected host-side by name
+(see [Credential injection](#credential-injection)). Remaining built-ins
+default to disabled until their migration to the broker channel lands.
+Enabled plugins refuse to start when the kernel cannot enforce the
 requested layers.
 
 ## Broker channel (protocol v8)
