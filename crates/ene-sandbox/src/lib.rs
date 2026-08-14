@@ -14,7 +14,7 @@
 //! syscall filtering), rlimits, and — when the host can obtain them — cgroup
 //! v2 and a network namespace. On Windows it composes a Job Object with
 //! process/memory/CPU limits and kill-on-close (restricted-token /
-//! AppContainer hardening is the documented next step, see `windows`).
+//! `AppContainer` hardening is the documented next step, see `windows`).
 //!
 //! Every requirement is fail-closed: if a requirement is enabled and cannot
 //! be initialized, the child is never exec'd and the spawn fails.
