@@ -28,7 +28,7 @@ Windows では有効化されたプラグインは **Job Object**(終了時 kill
 
 すべての層は fail-closed です。必須の層を初期化できなければプラグインは起動しません。特権が必要な層(cgroup・ネットワーク名前空間)は既定で無効で、提供できるホストでのみ明示的に有効化します。
 
-プラグイン別のサンドボックス設定は `plugins.list.<name>.sandbox`、全体の既定は `plugins.sandbox` にあります。純粋な計算系の同梱プラグイン(`calc`・`counter`・`random`)と、Broker 移行済みの同梱プラグイン `web`・`fs`・`git`・`openai`・`anthropic`・`openai-tts`・`elevenlabs`・`geo`・`utility` は既定で**有効**です。残りの同梱プラグインは Broker チャネルへの移行が完了するまで既定で無効です。有効化した場合、カーネルが要求層を適用できないと起動を拒否します。
+プラグイン別のサンドボックス設定は `plugins.list.<name>.sandbox`、全体の既定は `plugins.sandbox` にあります。純粋な計算系の同梱プラグイン(`calc`・`counter`・`random`)と、Broker 移行済みの同梱プラグイン `web`・`fs`・`git`・`edge-tts`・`openai`・`anthropic`・`openai-tts`・`elevenlabs`・`geo`・`utility` は既定で**有効**です。残りの同梱プラグインは Broker チャネルへの移行が完了するまで既定で無効です。有効化した場合、カーネルが要求層を適用できないと起動を拒否します。
 
 `web` プラグインは `Network` Broker 経由で通信しています(SSRF・リダイレクト処理はホスト側へ移行済み)。`fs` プラグインはユーザーファイルの読み書きと shell 実行をすべて `File` / `Process` Broker 経由に移行済みです。ツールの引数は絶対パスのままで、ホストが `plugins.list.<name>.fs_grants` の許可フォルダに正規化パスが含まれるかで解決します。`openai`・`anthropic` プラグインは全 API リクエストを `Network` Broker 経由で行い、API キーはホストが通信時に注入します(下記「資格情報の注入」参照)。
 
@@ -44,6 +44,7 @@ Windows では有効化されたプラグインは **Job Object**(終了時 kill
 | `credential` | ホスト管理の資格情報。監査ログにはキー名のみ記録 |
 | `artifact` | 署名 Catalog の解決・インストール・1 世代ロールバック |
 | `platform` | 時刻・ロケール・外部 URL を開く |
+| `websocket` | `ws://` / `wss://` セッション(接続時に origin 承認・SSRF アドレス固定・資格情報注入) |
 | `db` / `capability` | 既存の型付き DB CRUD とプラグイン間呼び出し |
 
 ID は認証トークンに固定されるため、プラグインが他のプラグインのセッションを開くことはできません。プラグイン側は `ene-plugin-broker` クライアントで、ホスト側は `ene-plugin-host` で実装されています。

@@ -33,6 +33,8 @@ pub enum HostServiceId {
     Process,
     /// Platform capabilities through the `Platform` broker.
     Platform,
+    /// Host-mediated WebSocket sessions (protocol v8+).
+    WebSocket,
 }
 
 /// Requests sent on a new host-service connection before a service session

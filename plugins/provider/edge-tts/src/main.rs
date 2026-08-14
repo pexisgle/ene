@@ -4,7 +4,16 @@
 //! unified plugin system. Talks to Microsoft's free, keyless Edge Read
 //! Aloud WebSocket endpoint and returns WAV audio over the plugin IPC.
 
+#![cfg_attr(
+    test,
+    expect(
+        clippy::await_holding_lock,
+        reason = "tests serialize the shared broker with a std mutex across awaits"
+    )
+)]
+
 mod audio;
+mod broker;
 mod client;
 mod config;
 mod error;
@@ -19,12 +28,6 @@ use plugin::EdgeTtsPlugin;
 
 #[tokio::main]
 async fn main() {
-    // tokio-tungstenite's rustls backend leaves the crypto provider
-    // selection to the application; ring is the workspace's provider.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .unwrap_or_default();
-
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

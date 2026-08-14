@@ -482,6 +482,27 @@ pub trait BrokerHandler: Send + Sync {
         let response = self.handle(plugin, request).await;
         sink.write(&response).await
     }
+
+    /// Serves a `WebSocket` passenger session on `stream`.
+    ///
+    /// The host-service server has already authenticated the plugin and
+    /// written `OpenAck`; the first frame on the stream is
+    /// [`WebSocketRequest::Open`](crate::ws::WebSocketRequest::Open). The
+    /// default rejects the session.
+    async fn serve_ws(
+        &self,
+        _plugin: &str,
+        mut stream: crate::transport::IpcStream,
+    ) -> std::io::Result<()> {
+        crate::host_service::write_framed_json(
+            &mut stream,
+            &crate::ws::WebSocketResponse::Error {
+                status: None,
+                message: "WebSocket passenger is not implemented by this handler".to_string(),
+            },
+        )
+        .await
+    }
 }
 
 /// Frame sink for streaming broker responses (the host-service session

@@ -98,6 +98,7 @@ async fn synthesize_with_endpoint(
     addr: &SocketAddr,
     text: &str,
 ) -> Result<Vec<u8>, ene_plugin::PluginError> {
+    let _serial = crate::broker::tests::with_broker().await;
     let config = json!({"endpoint_url": format!("ws://{addr}"), "max_retries": 3});
     tokio::time::timeout(
         Duration::from_secs(10),

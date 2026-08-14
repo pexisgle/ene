@@ -51,37 +51,57 @@ pub trait ApprovalResponder: Send + Sync {
 /// Fail-closed error used inside the hub; converted to
 /// [`BrokerResponse::Error`] at the boundary.
 #[derive(Debug)]
-struct BrokerError {
-    code: BrokerErrorCode,
-    message: String,
+pub(crate) struct BrokerError {
+    /// Structured error code.
+    pub(crate) code: BrokerErrorCode,
+    /// Human-readable detail.
+    pub(crate) message: String,
+    /// HTTP status when the failure came from an HTTP handshake.
+    pub(crate) http_status: Option<u16>,
 }
 
 impl BrokerError {
-    fn new(code: BrokerErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: BrokerErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
+            http_status: None,
         }
     }
 
-    fn denied(message: impl Into<String>) -> Self {
+    pub(crate) fn denied(message: impl Into<String>) -> Self {
         Self::new(BrokerErrorCode::Denied, message)
+    }
+
+    /// Builds an error carrying an HTTP status (e.g. a WebSocket
+    /// handshake rejection) so the plugin can map it without parsing text.
+    pub(crate) fn with_http_status(
+        code: BrokerErrorCode,
+        message: impl Into<String>,
+        status: u16,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            http_status: Some(status),
+        }
     }
 }
 
 /// One plugin's broker state: verified manifest, grants, credentials, and
 /// live spawned processes.
-struct PluginState {
+pub(crate) struct PluginState {
     manifest: Option<PluginManifest>,
     digest: Option<String>,
     fs_grants: Vec<FsGrant>,
-    credentials: BTreeMap<String, String>,
+    pub(crate) credentials: BTreeMap<String, String>,
     processes: Mutex<HashMap<u32, String>>,
 }
 
 /// Host-side broker hub.
 pub struct BrokerHub {
-    plugins: HashMap<String, PluginState>,
+    pub(crate) plugins: HashMap<String, PluginState>,
+    pub(crate) ssrf: parking_lot::RwLock<SsrfPolicy>,
     global: ApprovalPolicy,
     plugin_approval: std::collections::BTreeMap<String, PluginApprovalPolicy>,
     audit: Option<AuditLog>,
@@ -161,6 +181,7 @@ impl BrokerHub {
         };
         let hub = Arc::new(Self {
             plugins,
+            ssrf: parking_lot::RwLock::new(SsrfPolicy::production()),
             global: plugin_config.approval.clone(),
             plugin_approval: plugin_config.plugin_approval.clone(),
             audit,
@@ -180,6 +201,14 @@ impl BrokerHub {
     ) -> Arc<Self> {
         *self.responder.write() = Some(responder);
         Arc::clone(self)
+    }
+
+    /// Test-only: relaxes the SSRF guard to allow loopback connections so
+    /// end-to-end tests can reach local servers. Production hubs keep the
+    /// strict policy.
+    #[doc(hidden)]
+    pub fn allow_loopback_for_tests(&self) {
+        self.ssrf.write().allow_loopback = true;
     }
 }
 
@@ -424,6 +453,14 @@ impl BrokerHandler for BrokerHub {
             Err(e) => sink.write(&BrokerResponse::error(e.code, e.message)).await,
         }
     }
+
+    async fn serve_ws(
+        &self,
+        plugin: &str,
+        stream: ene_plugin_proto::transport::IpcStream,
+    ) -> std::io::Result<()> {
+        crate::BrokerHub::serve_ws_session(self, plugin, stream).await
+    }
 }
 
 impl BrokerHub {
@@ -565,7 +602,7 @@ impl BrokerHub {
         }
     }
 
-    fn require_service(state: &PluginState, service: &str) -> Result<(), BrokerError> {
+    pub(crate) fn require_service(state: &PluginState, service: &str) -> Result<(), BrokerError> {
         let declared = state
             .manifest
             .as_ref()
@@ -580,7 +617,7 @@ impl BrokerHub {
         }
     }
 
-    async fn approve(
+    pub(crate) async fn approve(
         &self,
         plugin: &str,
         state: &PluginState,
@@ -1194,7 +1231,7 @@ impl BrokerHub {
         let origin = normalized_origin(&parsed);
         let category = Self::origin_category(state, &origin, &scheme)?;
         self.approve(plugin, state, category, &origin).await?;
-        let ssrf = SsrfPolicy::production();
+        let ssrf = self.ssrf.read().clone();
         let ips = ssrf
             .resolve_allowed(host)
             .await
@@ -1455,7 +1492,7 @@ impl BrokerHub {
         ))
     }
 
-    fn origin_category(
+    pub(crate) fn origin_category(
         state: &PluginState,
         origin: &str,
         scheme: &str,
@@ -1523,7 +1560,7 @@ struct FetchHop {
     request: reqwest::Request,
 }
 
-fn is_forbidden_request_header(key: &str) -> bool {
+pub(crate) fn is_forbidden_request_header(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
         "authorization" | "cookie" | "proxy-authorization" | "host"
@@ -1540,6 +1577,7 @@ fn is_forbidden_response_header(key: &str) -> bool {
 /// SSRF guard: blocks loopback, private, link-local, cloud-metadata, and
 /// reserved addresses, and re-checks every resolved address before connect
 /// (DNS-rebinding protection).
+#[derive(Clone)]
 pub struct SsrfPolicy {
     allow_loopback: bool,
 }
