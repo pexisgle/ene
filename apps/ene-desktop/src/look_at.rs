@@ -1,9 +1,10 @@
 //! Cursor → smoothed world target for the head-look-at system.
 //!
 //! The smoothed world target is stored in [`LookAtState`]; the
-//! runtime exposes it to the renderer. Skinning (future work) will
-//! use it to drive humanoid bone rotations; for now the value is
-//! fed to the orthographic camera so a subtle pan tracks the cursor.
+//! runtime evaluates it into per-bone rotations (bone-type models) or
+//! expression morphs (expression-type models) via
+//! [`CharacterRenderer::update_look_at`](crate::character::CharacterRenderer::update_look_at),
+//! and also feeds the orthographic camera so a subtle pan tracks the cursor.
 //!
 //! All numbers are fixed so screenshots and regression tests stay
 //! comparable: smoothing speed `7.0`,
