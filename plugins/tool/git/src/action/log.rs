@@ -1,10 +1,12 @@
-use crate::error::from_git2;
-use crate::output::{LogEntry, LogOutput, Person, format_time, short_oid, to_json};
+use crate::output::{LogEntry, LogOutput, Person, short_oid, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
-use git2::{Commit, Sort};
 
 const MAX_BODY_CHARS: usize = 4096;
+/// Field separator (`%x00`) and record separator (`%x1e`) for the log
+/// format below.
+const FIELD_SEP: char = '\u{0}';
+const RECORD_SEP: char = '\u{1e}';
 
 /// Lists the commit history of a git repository.
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
@@ -52,66 +54,82 @@ impl LogAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.log")?;
+        let repo = scope.resolve_repo(self.path.as_deref(), "git.log").await?;
+        let workdir = repo.workdir.to_string_lossy().into_owned();
         let max_count = usize::try_from(self.max_count.unwrap_or(30))
             .unwrap_or(30)
             .clamp(1, 100);
 
-        let mut walk = repo.revwalk().map_err(from_git2)?;
-        let branch = if let Some(name) = &self.branch {
-            let commit = repo
-                .revparse_single(name)
-                .map_err(from_git2)?
-                .peel_to_commit()
-                .map_err(from_git2)?;
-            walk.push(commit.id()).map_err(from_git2)?;
-            Some(name.clone())
-        } else {
-            walk.push_head().map_err(super::common::map_head_error)?;
-            super::common::head_info(&repo).0
+        let branch = match &self.branch {
+            Some(name) => Some(name.clone()),
+            None => super::common::head_info(&workdir).await.0,
         };
-        walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
-            .map_err(from_git2)?;
-
-        let mut entries: Vec<LogEntry> = Vec::new();
-        for oid in walk.take(max_count) {
-            let commit = repo
-                .find_commit(oid.map_err(from_git2)?)
-                .map_err(from_git2)?;
-            entries.push(log_entry(&commit));
+        let format = "%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s%x00%b%x1e";
+        let max_count_arg = format!("-n {max_count}");
+        let format_arg = format!("--format={format}");
+        let mut args: Vec<&str> = vec!["log", &max_count_arg, &format_arg];
+        if let Some(name) = &self.branch {
+            args.push(name);
         }
+        let run = crate::broker::broker().run_git(&workdir, &args).await?;
+        if !run.ok() {
+            return Err(super::common::no_commits_or(&run));
+        }
+        let entries = parse_log(&run.stdout);
 
         to_json(&LogOutput {
-            repo: workdir.display().to_string(),
+            repo: workdir,
             branch,
             entries,
         })
     }
 }
 
-fn log_entry(commit: &Commit<'_>) -> LogEntry {
-    LogEntry {
-        oid: commit.id().to_string(),
-        short_oid: short_oid(commit.id()),
-        subject: commit
-            .summary()
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .to_string(),
-        body: commit.body().ok().flatten().map(truncate_body),
-        author: person(&commit.author()),
-        committer: person(&commit.committer()),
-        parents: commit.parent_ids().map(|id| id.to_string()).collect(),
-    }
+/// Parses the `--format` output into log entries.
+fn parse_log(output: &str) -> Vec<LogEntry> {
+    output
+        .split(RECORD_SEP)
+        .filter_map(|record| {
+            let record = record.trim();
+            (!record.is_empty()).then(|| parse_record(record)).flatten()
+        })
+        .collect()
 }
 
-fn person(sig: &git2::Signature<'_>) -> Person {
-    Person {
-        name: sig.name().unwrap_or_default().to_string(),
-        email: sig.email().unwrap_or_default().to_string(),
-        time: format_time(sig.when()),
-    }
+fn parse_record(record: &str) -> Option<LogEntry> {
+    let mut fields = record.split(FIELD_SEP);
+    let oid = fields.next()?.to_string();
+    let parents = fields
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let author = Person {
+        name: fields.next().unwrap_or_default().to_string(),
+        email: fields.next().unwrap_or_default().to_string(),
+        // `%aI` is strict ISO 8601 with the original offset (RFC3339).
+        time: fields.next().unwrap_or_default().to_string(),
+    };
+    let committer = Person {
+        name: fields.next().unwrap_or_default().to_string(),
+        email: fields.next().unwrap_or_default().to_string(),
+        time: fields.next().unwrap_or_default().to_string(),
+    };
+    let subject = fields.next().unwrap_or_default().to_string();
+    let body = fields
+        .next()
+        .map(truncate_body)
+        .filter(|body| !body.is_empty());
+    Some(LogEntry {
+        oid: oid.clone(),
+        short_oid: short_oid(&oid),
+        subject,
+        body,
+        author,
+        committer,
+        parents,
+    })
 }
 
 fn truncate_body(body: &str) -> String {
@@ -159,6 +177,7 @@ mod tests {
 
     #[tokio::test]
     async fn commits_are_newest_first_with_dates_and_parents() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         let first = fixture.commit_all("first commit");
@@ -180,6 +199,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_count_limits_entries() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
@@ -193,6 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn branch_argument_selects_the_walk_root() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
@@ -205,6 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_repository_is_an_error() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         let result = action(&fixture, None, None).run().await;
         let err = result.unwrap_err().to_string();

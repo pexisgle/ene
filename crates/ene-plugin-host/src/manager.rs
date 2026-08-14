@@ -2447,6 +2447,28 @@ impl PluginHostManager {
             reason: format!("failed to create plugin temp dir: {e}"),
         })?;
         sandbox.plugin_temp_dir = Some(temp_dir.to_string_lossy().into_owned());
+        // Deliver the grant paths in the sandbox data too, so plugin-side
+        // scope checks (e.g. the git plugin's RepoScope) mirror the host's
+        // enforcement instead of defaulting to an empty allowlist.
+        for grant in fs_grants {
+            let path = PathBuf::from(&grant.path);
+            if grant.read {
+                sandbox
+                    .allowed_directories
+                    .push(path.to_string_lossy().into_owned());
+            }
+            if grant.write {
+                sandbox
+                    .writable_directories
+                    .push(path.to_string_lossy().into_owned());
+            }
+        }
+        for path in &sandbox_cfg.allowed_read_paths {
+            sandbox.allowed_directories.push(path.clone());
+        }
+        for path in &sandbox_cfg.allowed_write_paths {
+            sandbox.writable_directories.push(path.clone());
+        }
 
         let spec = build_plugin_sandbox(
             name,

@@ -32,6 +32,7 @@ impl GitToolProvider {
 
         let inner = ActionSetProvider::new(actions)
             .with_sandbox_hook(move |data: &SandboxConfigData| {
+                crate::broker::configure_broker(data);
                 let new_scope = Arc::new(RepoScope::new(data.clone()));
                 let mut guard = set_sandbox
                     .write()

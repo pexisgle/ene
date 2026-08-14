@@ -3,21 +3,20 @@
 //! Plugin binary providing read-only git repository inspection tools:
 //! status, diff, log, branch, remote, and blame.
 #![warn(missing_docs)]
-#![expect(
-    clippy::unused_async,
-    reason = "tool IPC handlers are async for uniform provider dispatch; git2 calls are synchronous"
-)]
 #![cfg_attr(
     test,
     expect(
         clippy::unwrap_used,
         clippy::expect_used,
+        clippy::await_holding_lock,
         reason = "unit tests use unwrap/expect for concise failure paths"
     )
 )]
 
 /// Action modules for each git tool.
 pub mod action;
+/// Host-mediated process broker session.
+pub mod broker;
 /// Shared error type and `ToolError` mapping.
 pub mod error;
 /// JSON output structs and date formatting.

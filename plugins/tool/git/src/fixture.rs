@@ -4,6 +4,20 @@ use git2::{IndexAddOption, Oid, Repository};
 use std::path::Path;
 use std::sync::Arc;
 
+/// Acquires the shared broker and points it at a fresh mock that executes
+/// real `git` invocations. The returned guard serializes tests that touch
+/// the process-wide broker; the mock is intentionally leaked so its socket
+/// path outlives the lazily established session.
+pub(crate) async fn with_broker() -> std::sync::MutexGuard<'static, ()> {
+    let guard = crate::broker::tests::TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mock = crate::broker::tests::MockGitBroker::spawn();
+    crate::broker::tests::configure_test_broker(&mock).await;
+    let _ = Box::leak(Box::new(mock));
+    guard
+}
+
 /// A scope whose only allowed directory is `path`.
 pub(crate) fn scope_allowing(path: &str) -> RepoScope {
     let data = SandboxConfigData {

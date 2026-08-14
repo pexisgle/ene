@@ -1,8 +1,6 @@
-use crate::error::from_git2;
 use crate::output::{DiffOutput, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
-use git2::{DiffFormat, DiffOptions};
 
 const MAX_PATCH_CHARS: usize = 1_000_000;
 
@@ -66,33 +64,31 @@ impl DiffAction {
         let wants_text = format != "stat";
 
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.diff")?;
+        let repo = scope.resolve_repo(self.path.as_deref(), "git.diff").await?;
+        let workdir = repo.workdir.to_string_lossy().into_owned();
         if let Some(filter) = &self.path_filter {
             scope.validate_relative_path(filter)?;
         }
 
-        let mut opts = DiffOptions::new();
-        if let Some(filter) = &self.path_filter {
-            opts.pathspec(filter);
+        let broker = crate::broker::broker();
+        let mut base_args: Vec<&str> = vec!["diff"];
+        if self.staged {
+            base_args.push("--cached");
         }
-        let index = repo.index().map_err(from_git2)?;
-        let head_tree = repo
-            .head()
-            .ok()
-            .map(|head| head.peel_to_tree().map_err(from_git2))
-            .transpose()?;
-        let diff = if self.staged {
-            repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut opts))
-                .map_err(from_git2)?
-        } else {
-            repo.diff_index_to_workdir(Some(&index), Some(&mut opts))
-                .map_err(from_git2)?
-        };
-
-        let stats = diff.stats().map_err(from_git2)?;
-        let files_changed = stats.files_changed();
-        let insertions = stats.insertions();
-        let deletions = stats.deletions();
+        let mut numstat_args: Vec<&str> = base_args.clone();
+        numstat_args.push("--numstat");
+        let pathspec: Vec<String> = self
+            .path_filter
+            .as_deref()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        numstat_args.extend(pathspec.iter().map(String::as_str));
+        let numstat = broker.run_git(&workdir, &numstat_args).await?;
+        if !numstat.ok() {
+            return Err(crate::sandbox::git_run_error(&numstat));
+        }
+        let (files_changed, insertions, deletions) = sum_numstat(&numstat.stdout);
         let summary = format!(
             "{files_changed} {} changed, {insertions} {}(+), {deletions} {}(-)",
             plural(files_changed, "file", "files"),
@@ -100,13 +96,28 @@ impl DiffAction {
             plural(deletions, "deletion", "deletions"),
         );
         let (patch, truncated) = if wants_text {
-            print_patch(&diff)?
+            let mut patch_args: Vec<&str> = Vec::new();
+            patch_args.extend(base_args.iter().copied());
+            patch_args.extend(pathspec.iter().map(String::as_str));
+            let patch_run = broker.run_git(&workdir, &patch_args).await?;
+            if !patch_run.ok() {
+                return Err(crate::sandbox::git_run_error(&patch_run));
+            }
+            let text = patch_run.stdout;
+            if text.is_empty() {
+                (None, false)
+            } else if text.chars().count() > MAX_PATCH_CHARS {
+                let head: String = text.chars().take(MAX_PATCH_CHARS).collect();
+                (Some(format!("{head}\n... (patch truncated)")), true)
+            } else {
+                (Some(text), false)
+            }
         } else {
             (None, false)
         };
 
         to_json(&DiffOutput {
-            repo: workdir.display().to_string(),
+            repo: workdir,
             staged: self.staged,
             files_changed,
             insertions,
@@ -118,47 +129,29 @@ impl DiffAction {
     }
 }
 
-/// Renders the diff as unified patch text, stopping at the output cap.
-fn print_patch(diff: &git2::Diff<'_>) -> Result<(Option<String>, bool), ToolError> {
-    let mut buf = String::new();
-    let mut truncated = false;
-    diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
-        if truncated || buf.len() >= MAX_PATCH_CHARS {
-            truncated = true;
-            return false;
+/// Sums `git diff --numstat` output into (files, insertions, deletions).
+/// Binary entries (`-`) contribute zero line counts but count as a file.
+fn sum_numstat(output: &str) -> (usize, usize, usize) {
+    let mut files = 0_usize;
+    let mut insertions = 0_usize;
+    let mut deletions = 0_usize;
+    for line in output.lines() {
+        let mut columns = line.split('\t');
+        let Some(added) = columns.next() else {
+            continue;
+        };
+        let Some(removed) = columns.next() else {
+            continue;
+        };
+        files = files.saturating_add(1);
+        if added != "-" {
+            insertions = insertions.saturating_add(added.parse().unwrap_or(0));
         }
-        let origin = line.origin();
-        let content = String::from_utf8_lossy(line.content());
-        match origin {
-            ' ' | '+' | '-' => {
-                let remaining = MAX_PATCH_CHARS.saturating_sub(buf.len());
-                let addition = format!("{origin}{content}");
-                if addition.len() > remaining {
-                    buf.push_str(&String::from_utf8_lossy(&addition.as_bytes()[..remaining]));
-                    truncated = true;
-                    return false;
-                }
-                buf.push_str(&addition);
-            }
-            _ => {
-                let remaining = MAX_PATCH_CHARS.saturating_sub(buf.len());
-                if content.len() > remaining {
-                    buf.push_str(&String::from_utf8_lossy(&content.as_bytes()[..remaining]));
-                    truncated = true;
-                    return false;
-                }
-                buf.push_str(&content);
-            }
+        if removed != "-" {
+            deletions = deletions.saturating_add(removed.parse().unwrap_or(0));
         }
-        true
-    })
-    .map_err(from_git2)?;
-    let patch = if buf.is_empty() {
-        None
-    } else {
-        (!truncated).then_some(buf)
-    };
-    Ok((patch, truncated))
+    }
+    (files, insertions, deletions)
 }
 
 const fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
@@ -188,6 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn unstaged_diff_contains_patch_text() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
@@ -210,6 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn staged_diff_requires_staged_flag() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
@@ -228,6 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn stat_format_omits_patch() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
@@ -249,6 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn clean_repo_yields_empty_diff() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
@@ -261,6 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_format_is_rejected() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         let result = action(&fixture, false, Some("nope"), None).run().await;
         assert!(result.is_err());
@@ -268,6 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn traversal_filter_is_rejected() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");

@@ -1,4 +1,3 @@
-use crate::error::from_git2;
 use crate::output::{RemoteEntry, RemoteOutput, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
@@ -40,32 +39,62 @@ impl RemoteAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.remote")?;
+        let repo = scope
+            .resolve_repo(self.path.as_deref(), "git.remote")
+            .await?;
+        let workdir = repo.workdir.to_string_lossy().into_owned();
 
-        let mut remotes: Vec<RemoteEntry> = Vec::new();
-        let remote_names = repo.remotes().map_err(from_git2)?;
-        for name in &remote_names {
-            let Some(name) = name.map_err(from_git2)? else {
-                continue;
-            };
-            let remote = repo.find_remote(name).map_err(from_git2)?;
-            remotes.push(RemoteEntry {
-                name: name.to_string(),
-                fetch_url: redact_remote_url_bytes(remote.url_bytes()),
-                push_url: remote.pushurl_bytes().and_then(redact_remote_url_bytes),
-            });
+        let run = crate::broker::broker()
+            .run_git(&workdir, &["remote", "-v"])
+            .await?;
+        if !run.ok() {
+            return Err(crate::sandbox::git_run_error(&run));
         }
+        let mut remotes = parse_remotes(&run.stdout);
         remotes.sort_by(|a, b| a.name.cmp(&b.name));
 
         to_json(&RemoteOutput {
-            repo: workdir.display().to_string(),
+            repo: workdir,
             remotes,
         })
     }
 }
 
-fn redact_remote_url_bytes(url: &[u8]) -> Option<String> {
-    (!url.is_empty()).then(|| redact_remote_url(&String::from_utf8_lossy(url)))
+/// Parses `git remote -v` lines (`name\turl (fetch)` / `(push)`).
+fn parse_remotes(output: &str) -> Vec<RemoteEntry> {
+    let mut remotes: Vec<RemoteEntry> = Vec::new();
+    for line in output.lines() {
+        let mut columns = line.splitn(2, '\t');
+        let Some(name) = columns.next() else {
+            continue;
+        };
+        let Some(url_and_kind) = columns.next() else {
+            continue;
+        };
+        let Some((url, kind)) = url_and_kind.rsplit_once(' ') else {
+            continue;
+        };
+        let fetch = kind.contains("(fetch)");
+        if url.is_empty() {
+            continue;
+        }
+        let url = redact_remote_url(url);
+        match remotes.iter_mut().find(|entry| entry.name == name) {
+            Some(entry) => {
+                if fetch {
+                    entry.fetch_url = Some(url);
+                } else {
+                    entry.push_url = Some(url);
+                }
+            }
+            None => remotes.push(RemoteEntry {
+                name: name.to_string(),
+                fetch_url: fetch.then(|| url.clone()),
+                push_url: (!fetch).then_some(url),
+            }),
+        }
+    }
+    remotes
 }
 
 fn redact_remote_url(url: &str) -> String {
@@ -89,6 +118,7 @@ mod tests {
 
     #[tokio::test]
     async fn lists_configured_remotes() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
@@ -109,6 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn repo_without_remotes_is_empty() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");

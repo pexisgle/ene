@@ -1,14 +1,33 @@
-use chrono::Offset;
 use ene_plugin_proto::ToolError;
 use serde::Serialize;
 
-/// Formats a libgit2 timestamp as RFC3339, preserving the commit's offset.
-pub fn format_time(time: git2::Time) -> String {
-    let offset_seconds = time.offset_minutes().saturating_mul(60);
-    let offset = chrono::FixedOffset::east_opt(offset_seconds).unwrap_or_else(|| chrono::Utc.fix());
-    let dt = chrono::DateTime::from_timestamp(time.seconds(), 0)
+/// Formats a Unix timestamp plus an RFC 822-style offset (`+0900`) as
+/// RFC3339, preserving the commit's offset.
+pub fn format_time(unix_seconds: i64, offset: &str) -> String {
+    let offset_minutes: i32 = parse_tz_offset(offset);
+    let offset_seconds = offset_minutes.saturating_mul(60);
+    let dt = chrono::DateTime::from_timestamp(unix_seconds, 0)
         .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH);
-    dt.with_timezone(&offset).to_rfc3339()
+    match chrono::FixedOffset::east_opt(offset_seconds) {
+        Some(offset) => dt.with_timezone(&offset).to_rfc3339(),
+        None => dt.with_timezone(&chrono::Utc).to_rfc3339(),
+    }
+}
+
+/// Parses `+HHMM` / `-HHMM` into minutes east of UTC.
+fn parse_tz_offset(raw: &str) -> i32 {
+    let raw = raw.trim();
+    if raw.len() != 5 {
+        return 0;
+    }
+    let (sign, digits) = raw.split_at(1);
+    let hours: i32 = digits[..2].parse().unwrap_or(0);
+    let minutes: i32 = digits[2..].parse().unwrap_or(0);
+    let total = hours.saturating_mul(60).saturating_add(minutes);
+    match sign {
+        "-" => -total,
+        _ => total,
+    }
 }
 
 /// One file's status entry.
@@ -193,7 +212,7 @@ pub fn to_json<T: Serialize>(value: &T) -> Result<String, ToolError> {
         .map_err(|e| ToolError::internal(format!("failed to serialize tool output: {e}")))
 }
 
-/// Formats a 7-character abbreviated oid from the raw 20 bytes.
-pub fn short_oid(oid: git2::Oid) -> String {
-    oid.to_string().chars().take(7).collect()
+/// Formats a 7-character abbreviated oid from a full hex oid.
+pub fn short_oid(oid: &str) -> String {
+    oid.chars().take(7).collect()
 }
