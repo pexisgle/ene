@@ -68,9 +68,7 @@ pub async fn write(path: &Path, content: &str, sandbox: &Sandbox) -> Result<Stri
     side_effects = "FileSystem { mutates: true }"
 )]
 pub struct FsWriteAction {
-    /// Absolute path to the file to write.
     file_path: String,
-    /// Content to write to the file.
     content: String,
 
     #[tool(skip)]

@@ -64,7 +64,6 @@ pub fn import_character_file(src: &Path) -> Result<ImportedCharacter, EneConfigE
     import_character_file_in(src, paths::assets_dir())
 }
 
-/// `import_character_file` for an explicit base assets directory.
 pub(crate) fn import_character_file_in(
     src: &Path,
     assets_dir: &Path,
@@ -130,7 +129,6 @@ pub(crate) fn load_card_from_bytes(bytes: &[u8]) -> Result<CharacterCardV3, EneC
     parse_card_bytes(bytes, None)
 }
 
-/// `load_card_from_bytes` plus locale layering and normalization.
 pub(crate) fn load_card_from_bytes_localized(
     bytes: &[u8],
     code: &str,
@@ -232,8 +230,6 @@ fn read_sidecar_diff(card_dir: Option<&Path>, code: &str) -> Option<LocalizedCha
         }
     }
 }
-
-// ── PNG cards ──
 
 /// Extracts the card JSON from a PNG `ccv3` (V3) or `chara` (V2) chunk.
 ///
@@ -403,9 +399,6 @@ fn decode_chunk_json(payload: &[u8]) -> Result<serde_json::Value, EneConfigError
     serde_json::from_str(&json).map_err(EneConfigError::JsonError)
 }
 
-// ── CHARX cards ──
-
-/// Reads the root `card.json` from a CHARX zip.
 fn charx_card_json(bytes: &[u8]) -> Result<serde_json::Value, EneConfigError> {
     charx_card_json_localized(bytes, None).map(|(card, _)| card)
 }
@@ -521,8 +514,6 @@ fn is_drive_prefix(component: &str) -> bool {
         && component.as_bytes()[0].is_ascii_alphabetic()
         && component.as_bytes()[1] == b':'
 }
-
-// ── Import ──
 
 fn import_png(
     bytes: &[u8],

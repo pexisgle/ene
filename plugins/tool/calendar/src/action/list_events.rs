@@ -17,7 +17,6 @@ fn default_state() -> Arc<CalendarState> {
     keywords_primary = "calendar, event, list, schedule, agenda, appointments",
     side_effects = "ReadOnly"
 )]
-/// Action to list events of a calendar.
 pub struct ListEventsAction {
     /// Id of the calendar returned by ``calendar.list_calendars``.
     calendar_id: String,
@@ -37,7 +36,6 @@ pub struct ListEventsAction {
 }
 
 impl ListEventsAction {
-    /// Creates a new `ListEventsAction`.
     #[must_use]
     pub const fn new(state: Arc<CalendarState>) -> Self {
         Self {

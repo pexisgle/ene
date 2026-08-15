@@ -31,14 +31,12 @@ pub struct ArtifactProgress {
     pub stage: InstallStage,
 }
 
-/// Outcome of a completed download.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadOutcome {
     /// Final URL after redirects.
     pub final_url: String,
     /// Server `ETag`, when the final response carried one.
     pub etag: Option<String>,
-    /// Bytes written to the destination.
     pub bytes: u64,
 }
 

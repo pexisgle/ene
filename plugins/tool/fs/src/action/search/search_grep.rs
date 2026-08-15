@@ -7,10 +7,8 @@ use std::path::Path;
 const MAX_LINE_CHARS: usize = 2000;
 const MAX_CAPTURE_CHARS: usize = 200;
 
-/// Rendering options for [`grep_search`].
 #[derive(Debug, Clone)]
 pub struct GrepOptions {
-    /// Match case-insensitively.
     pub case_insensitive: bool,
     /// Prefix each match with its 1-based line number.
     pub line_numbers: bool,
@@ -31,7 +29,6 @@ impl Default for GrepOptions {
     }
 }
 
-/// A single rendered line of a grep result: either a match or context.
 enum Entry {
     Match {
         line: usize,
@@ -298,7 +295,6 @@ const fn default_true() -> bool {
     side_effects = "ReadOnly"
 )]
 pub struct FsGrepAction {
-    /// Regex pattern to search for.
     pattern: String,
     /// Base directory or file to search in (defaults to cwd).
     #[serde(default)]
@@ -306,7 +302,6 @@ pub struct FsGrepAction {
     /// File glob filter (e.g. '*.rs'; one pattern per call, '{a,b}' brace expansion is not supported).
     #[serde(default)]
     include: Option<String>,
-    /// Match case-insensitively.
     #[serde(default)]
     case_insensitive: bool,
     /// Prefix each match with its 1-based line number.

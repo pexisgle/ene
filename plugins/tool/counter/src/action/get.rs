@@ -2,7 +2,6 @@ use crate::provider::CounterState;
 use ene_plugin::prelude::*;
 use std::sync::Arc;
 
-/// Returns the current counter value for the session.
 #[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "counter",
@@ -20,7 +19,6 @@ pub struct GetAction {
 }
 
 impl GetAction {
-    /// Creates a new `GetAction`.
     #[must_use]
     pub const fn new(state: Arc<CounterState>) -> Self {
         Self { state }

@@ -19,7 +19,6 @@ fn default_state() -> Arc<CalendarState> {
     keywords_primary = "calendar, cancel, delete, remove, event, appointment",
     side_effects = "Network { external: false }"
 )]
-/// Action to cancel (remove) an event.
 pub struct CancelEventAction {
     /// Id of the calendar returned by ``calendar.list_calendars``.
     calendar_id: String,
@@ -32,7 +31,6 @@ pub struct CancelEventAction {
 }
 
 impl CancelEventAction {
-    /// Creates a new `CancelEventAction`.
     #[must_use]
     pub const fn new(state: Arc<CalendarState>) -> Self {
         Self {

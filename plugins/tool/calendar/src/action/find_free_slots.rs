@@ -18,7 +18,6 @@ fn default_state() -> Arc<CalendarState> {
     keywords_primary = "calendar, free, available, slot, schedule, meeting, find",
     side_effects = "ReadOnly"
 )]
-/// Action to find free slots in a calendar.
 pub struct FindFreeSlotsAction {
     /// Id of the calendar returned by ``calendar.list_calendars``.
     calendar_id: String,
@@ -35,7 +34,6 @@ pub struct FindFreeSlotsAction {
 }
 
 impl FindFreeSlotsAction {
-    /// Creates a new `FindFreeSlotsAction`.
     #[must_use]
     pub const fn new(state: Arc<CalendarState>) -> Self {
         Self {

@@ -58,11 +58,8 @@ impl Rect {
         self.w <= 0 || self.h <= 0
     }
 
-    /// Clamp a rectangle to fit within a `window_w` × `window_h`
-    /// box. Origins are clipped to `(0, 0)`; the rectangle keeps
-    /// whatever size remains. Used by the F9 debug overlay to keep
-    /// the wireframe inside the window even when the OS input
-    /// region overflows.
+    /// Used by the F9 debug overlay to keep the wireframe inside
+    /// the window even when the OS input region overflows.
     pub fn clamp_to(&self, window_w: i32, window_h: i32) -> Self {
         let min_x = self.x.max(0);
         let min_y = self.y.max(0);
@@ -89,7 +86,6 @@ impl From<Rect> for (i32, i32, i32, i32) {
     }
 }
 
-/// Cached click-through policy.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum InputRegionState {
     /// The whole surface accepts input.
@@ -102,8 +98,7 @@ pub enum InputRegionState {
     Rectangles(Vec<Rect>),
 }
 
-/// Owned stand-alone Wayland connection + cached click-through
-/// policy. `Send + Sync` (only the `WlCompositor` proxy and cached
+/// `Send + Sync` (only the `WlCompositor` proxy and cached
 /// state cross threads) so the runtime wraps it in `Arc<Mutex<…>>`.
 pub struct WaylandInputRegionContext {
     /// Owned connection to the Wayland display. Separate from
@@ -143,8 +138,8 @@ impl WaylandInputRegionContext {
 }
 
 impl WaylandInputRegionContext {
-    /// Probe the winit window's raw handles. Returns `None` on
-    /// non-Wayland displays and when `wl_compositor` cannot be bound.
+    /// Returns `None` on non-Wayland displays and when `wl_compositor`
+    /// cannot be bound.
     pub fn try_new<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> Option<Arc<Mutex<Self>>> {
         let display_handle = window.display_handle().ok()?.as_raw();
         let window_handle = window.window_handle().ok()?.as_raw();
@@ -174,8 +169,7 @@ impl WaylandInputRegionContext {
         let qh = event_queue.handle();
         let display = connection.display();
 
-        // Send the registry request and round-trip once to
-        // populate the `AppData::compositor` field.
+        // Round-trip once to populate the `AppData::compositor` field.
         let _registry = display.get_registry(&qh, ());
         let mut app_data = AppData::default();
         if event_queue.roundtrip(&mut app_data).is_err() {
@@ -189,7 +183,6 @@ impl WaylandInputRegionContext {
             return None;
         }
 
-        // Recover the winit window's wl_surface proxy.
         let raw_surface_ptr = wl_window_handle.surface.as_ptr();
         // SAFETY: `raw_surface_ptr` comes from winit's Wayland window handle,
         // which guarantees it is a valid wl_surface proxy.
@@ -212,9 +205,8 @@ impl WaylandInputRegionContext {
         })))
     }
 
-    /// Replace the cached policy with a rectangle list. An empty
-    /// list is kept distinct from `Full` so `apply_to_surface` can
-    /// choose between the "null region" call and the "empty region"
+    /// An empty list is kept distinct from `Full` so `apply_to_surface`
+    /// can choose between the "null region" call and the "empty region"
     /// call.
     pub fn set_rects(&mut self, rects: Vec<Rect>) {
         self.state = if rects.is_empty() {
@@ -282,9 +274,6 @@ impl WaylandInputRegionContext {
             }
             InputRegionState::Rectangles(rects) => {
                 if rects.is_empty() {
-                    // An empty region is the "click-through
-                    // everywhere" signal — the whole surface
-                    // becomes transparent to pointer events.
                     let region = compositor.create_region(qh, ());
                     surface.set_input_region(Some(&region));
                 } else {
@@ -309,8 +298,6 @@ impl WaylandInputRegionContext {
         }
     }
 
-    /// Create a stand-alone `wl_surface` via the bound
-    /// `wl_compositor`. Returns `None` if the compositor is not bound.
     #[expect(
         dead_code,
         reason = "Wayland surface helper retained for future input-region tests"
@@ -321,8 +308,8 @@ impl WaylandInputRegionContext {
     }
 }
 
-/// Event dispatch state. Carries the `wl_compositor` proxy once
-/// the registry round-trip reports the global.
+/// Carries the `wl_compositor` proxy once the registry round-trip
+/// reports the global.
 #[derive(Default)]
 struct AppData {
     compositor: Option<WlCompositor>,

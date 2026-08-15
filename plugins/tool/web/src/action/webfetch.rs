@@ -53,7 +53,6 @@ fn html_to_plain_text(html: &str) -> String {
         }
     }
 
-    // Prefer <body> content; fall back to the full document.
     let text: String = if let Ok(sel) = Selector::parse("body")
         && let Some(body) = document.select(&sel).next()
     {

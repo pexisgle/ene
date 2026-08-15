@@ -53,12 +53,9 @@ const VAD_CHUNK_SAMPLES: usize = 512;
 #[cfg(feature = "silero-vad")]
 const STATE_LEN: usize = 128;
 
-/// Number of consecutive inference failures before [`SileroVadEngine`]
-/// escalates to a hard error.
 #[cfg(feature = "silero-vad")]
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
-/// Local Silero VAD voice activity detection engine.
 #[cfg(feature = "silero-vad")]
 pub struct SileroVadEngine {
     session: ort::session::Session,
@@ -68,7 +65,6 @@ pub struct SileroVadEngine {
     c: Vec<f32>,
     threshold: f32,
     speaking: bool,
-    /// Count of consecutive inference failures.
     consecutive_failures: u32,
 }
 
@@ -181,8 +177,6 @@ impl VadEngine for SileroVadEngine {
     }
 
     fn process_chunk(&mut self, pcm: &[f32]) -> Result<VadEvent, AudioProviderError> {
-        // Enforce the frame-size contract: Silero requires exactly 512
-        // samples per step.
         if pcm.len() != self.frame_size() {
             return Err(AudioProviderError::Provider(format!(
                 "Silero VAD expects {} samples per chunk, got {}",

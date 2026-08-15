@@ -11,7 +11,6 @@ use ene_plugin::prelude::*;
     side_effects = "System { privileged: true }"
 )]
 pub struct ClipboardWriteAction {
-    /// Text to write to clipboard.
     text: String,
 }
 

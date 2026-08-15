@@ -49,10 +49,6 @@ pub struct AppliedEmotion {
     pub weight: f32,
 }
 
-/// Tick the emotion pipeline: pop newly-arrived commands, track
-/// the active emotion, and compute the current weight using a
-/// hold + fade schedule.
-///
 /// `now_secs` is the current wall-clock seconds-since-epoch as
 /// used by every producer of [`EmotionCommand`]
 /// (`page_character.rs`, widgets.rs, the AI bridge). Keeping the
@@ -60,31 +56,16 @@ pub struct AppliedEmotion {
 /// and consumer must agree on is "monotonic seconds since
 /// startup", which is trivial to provide via `Instant::now()`.
 ///
-/// Algorithm (single active emotion, last write wins on a name
-/// change):
-///
-/// 1. Pop the next `EmotionCommand` if `now_secs >= target_time`.
-///    The popped command becomes the new `active` with
-///    `hold_until_secs = target_time + hold_secs` and
-///    `weight` = the command's target weight.
-/// 2. If no command arrived, advance the active emotion's
-///    weight:
-///     * during the hold window (`now_secs < hold_until_secs`):
-///       keep `weight` at the command's target.
-///     * during the fade-out (`hold_until_secs <= now_secs <
-///       hold_until_secs + FADE_SECS`): ramp linearly from
-///       target to 0.
-///     * after fade: `active` is cleared and the function
-///       returns `weight = 0.0`.
+/// A single active emotion is kept, with the last write winning
+/// on a name change.
 pub fn tick_emotions(state: &mut EmotionPipelineState, now_secs: f64) -> AppliedEmotion {
     let mut result = AppliedEmotion {
         name: String::new(),
         weight: 0.0,
     };
 
-    // Borrow the front to inspect the target time, then pop and
-    // process it. The `front` borrow must end before `pop_front`
-    // (which needs `&mut self`) can run.
+    // The `front` borrow must end before `pop_front` (which needs
+    // `&mut self`) can run.
     loop {
         let target_time = match state.pending.front() {
             Some(front) if front.target_time <= now_secs => front.target_time,
@@ -163,8 +144,8 @@ mod tests {
     fn hold_window_keeps_weight() {
         let mut state = EmotionPipelineState::default();
         state.pending.push_back(cmd("happy", 0.0, 2.0, 1.0));
-        tick_emotions(&mut state, 0.0); // consume
-        let applied = tick_emotions(&mut state, 1.0); // 1s in
+        tick_emotions(&mut state, 0.0);
+        let applied = tick_emotions(&mut state, 1.0);
         assert_eq!(applied.name, "happy");
         assert_eq!(applied.weight, 1.0);
     }
@@ -173,7 +154,6 @@ mod tests {
     fn fade_after_hold_window() {
         let mut state = EmotionPipelineState::default();
         state.pending.push_back(cmd("happy", 0.0, 1.0, 1.0));
-        tick_emotions(&mut state, 0.0); // hold_until = 1.0
         // Halfway through the 0.3s fade (t=1.15): weight ~ 0.5.
         let applied = tick_emotions(&mut state, 1.15);
         assert_eq!(applied.name, "happy");
@@ -188,7 +168,6 @@ mod tests {
     fn fade_completes_and_clears_active() {
         let mut state = EmotionPipelineState::default();
         state.pending.push_back(cmd("happy", 0.0, 0.0, 1.0));
-        tick_emotions(&mut state, 0.0); // hold_until = 0.0; immediately in fade
         let applied = tick_emotions(&mut state, 0.5); // 0.5s past hold_until > 0.3 fade
         assert_eq!(applied.weight, 0.0);
         assert!(state.active.is_none());

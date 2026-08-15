@@ -21,7 +21,6 @@
 
 use sea_orm_migration::prelude::*;
 
-/// Cleans orphans, deduplicates, and indexes `memory_embeddings`.
 pub struct EmbeddingsCleanupIndexMigration;
 
 impl MigrationName for EmbeddingsCleanupIndexMigration {

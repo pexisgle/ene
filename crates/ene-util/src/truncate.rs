@@ -1,16 +1,11 @@
-//! Smart content truncation helpers.
-
 use std::collections::VecDeque;
 
-/// Helper struct for high-performance and detailed string truncation.
 pub struct Truncate;
 
-/// Result of a truncation operation, indicating whether content was actually cut.
 #[derive(Debug, Clone)]
 pub struct TruncateResult {
     /// The truncated (or original) text content.
     pub content: String,
-    /// Whether the content was actually truncated.
     pub truncated: bool,
 }
 
@@ -94,7 +89,6 @@ impl Truncate {
         }
     }
 
-    /// Truncation from the tail direction
     pub fn tail(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult {
         let lines: Vec<&str> = text.lines().collect();
         let total_bytes = text.len();

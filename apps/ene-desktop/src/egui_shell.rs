@@ -1,5 +1,3 @@
-//! Shared wgpu + egui window shell.
-//!
 //! Surface creation, egui state/renderer lifecycle, the texture-free
 //! ring-buffer, and frame acquisition are identical for every egui window
 //! in the app (settings, chat). Each window owns a [`EguiWindowShell`] plus
@@ -20,7 +18,6 @@ use crate::gpu::WindowSurfaceError;
 /// outlive a texture it still references.
 pub const TEXTURE_FREE_RING_DEPTH: usize = 3;
 
-/// A wgpu surface plus a complete egui context, input state, and renderer.
 pub struct EguiWindowShell {
     pub window: Arc<Window>,
     pub surface: wgpu::Surface<'static>,
@@ -32,7 +29,6 @@ pub struct EguiWindowShell {
 }
 
 impl EguiWindowShell {
-    /// Creates the surface and egui state/renderer for `window`.
     pub fn new(
         window: Arc<Window>,
         instance: &wgpu::Instance,
@@ -89,7 +85,6 @@ impl EguiWindowShell {
         })
     }
 
-    /// Reconfigures the surface after a resize / DPI change.
     pub fn reconfigure(&mut self, device: &wgpu::Device, new_size: PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
@@ -99,9 +94,6 @@ impl EguiWindowShell {
         self.surface.configure(device, &self.config);
     }
 
-    /// Runs one egui frame: acquires the surface texture, drives the pass
-    /// lifecycle, paints `panel_ui` into a centered panel, submits the
-    /// render pass, and frees textures after the ring-buffer delay.
     pub fn render_frame(
         &mut self,
         device: &wgpu::Device,

@@ -12,10 +12,8 @@ use ene_plugin_proto::{HostServiceId, PluginError, SandboxConfigData};
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
-/// One mediated HTTP response body.
 #[derive(Debug)]
 pub struct FetchOutcome {
-    /// HTTP status.
     pub status: u16,
     /// Response headers (authorization-like headers are stripped by the
     /// host unless the host itself injected them).
@@ -36,7 +34,6 @@ pub struct OpenAiTtsBroker {
 }
 
 impl OpenAiTtsBroker {
-    /// A broker with no connection configuration yet.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -61,7 +58,6 @@ impl OpenAiTtsBroker {
         *self.client.lock().await = None;
     }
 
-    /// Sends one request and returns the response.
     pub async fn fetch(
         &self,
         method: HttpMethod,
@@ -107,7 +103,6 @@ impl OpenAiTtsBroker {
         }
     }
 
-    /// Opens the broker session on first use.
     async fn session(
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, Option<BrokerClient>>, PluginError> {
@@ -138,12 +133,10 @@ impl OpenAiTtsBroker {
 /// `set_sandbox` before any request runs.
 static BROKER_ARC: std::sync::OnceLock<Arc<OpenAiTtsBroker>> = std::sync::OnceLock::new();
 
-/// Returns the shared broker, initializing the handle on first use.
 pub(crate) fn broker() -> Arc<OpenAiTtsBroker> {
     Arc::clone(BROKER_ARC.get_or_init(|| Arc::new(OpenAiTtsBroker::new())))
 }
 
-/// Configures the shared broker from the host sandbox data.
 pub(crate) fn configure_broker(sandbox: &SandboxConfigData) {
     broker().configure(sandbox);
 }

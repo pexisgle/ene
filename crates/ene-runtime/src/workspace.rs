@@ -142,7 +142,6 @@ pub struct WorkspaceIndexer {
 }
 
 impl WorkspaceIndexer {
-    /// Creates an indexer over the given persistence port and embedder.
     pub fn new(
         store: Arc<dyn WorkspaceDocumentPort>,
         embedder: Arc<dyn EmbeddingProvider>,
@@ -284,7 +283,6 @@ impl WorkspaceIndexer {
             }
         }
 
-        // Embed files that are new or whose hash/model changed.
         let mut indexed = 0u64;
         let mut unchanged = 0u64;
         for (path, file) in &state.files {
@@ -916,7 +914,6 @@ impl WorkspaceHandle {
             .map_err(|_| crate::public_api::PublicApiError::ActorDead)
     }
 
-    /// Current index + sync status.
     pub async fn status(&self) -> Result<WorkspaceStatusView, crate::public_api::PublicApiError> {
         use crate::handle::EneCommand;
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -927,7 +924,6 @@ impl WorkspaceHandle {
             .map_err(|_| crate::public_api::PublicApiError::ActorDead)
     }
 
-    /// Search the permitted workspace folders.
     pub async fn search(
         &self,
         query: String,

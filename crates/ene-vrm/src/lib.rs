@@ -29,7 +29,6 @@
 //! `#[doc(hidden)]` to keep the rendered API docs focused, even though their types remain `pub`
 //! (some are unavoidably part of other supported types' public fields).
 
-#![warn(missing_docs)]
 #![expect(
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
@@ -68,7 +67,6 @@ pub mod model;
 pub mod mtoon;
 pub mod node_constraint;
 pub mod post_process;
-/// Curated "Supported API" re-exports — see the crate-level module map above.
 pub mod prelude;
 pub mod renderer;
 pub mod spring_bone;

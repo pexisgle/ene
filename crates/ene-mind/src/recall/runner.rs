@@ -1,5 +1,3 @@
-//! End-to-end hybrid recall execution for the cognitive runtime.
-
 use chrono::Utc;
 use ene_core::MemoryPort;
 
@@ -15,23 +13,17 @@ use crate::recall::{
     RecallPlannerOptions, RecallResultMapper, RecallTurn, RecalledMemory,
 };
 
-/// Input for executing hybrid typed-memory recall.
 pub struct ExecuteRecallInput<'a> {
-    /// Memory store handle (behind the `MemoryPort` abstraction).
+    /// Behind the `MemoryPort` abstraction.
     pub store: &'a dyn MemoryPort,
     /// Character card name.
     pub character_id: &'a str,
     /// User name / id for scoping.
     pub user_id: &'a str,
-    /// Current user message.
     pub user_input: &'a str,
-    /// Recent conversation turns for planning.
     pub recent_turns: &'a [RecallTurn<'a>],
-    /// Query embedding vector.
     pub query_embedding: &'a [f32],
-    /// Embedding model name.
     pub embedding_model: &'a str,
-    /// Loaded affect state (optional).
     pub affect: Option<&'a ene_core::AffectState>,
     /// L1 recall cache; `None` falls back to L2 for every query.
     pub cache: Option<&'a MemoryRecallCache>,
@@ -39,7 +31,6 @@ pub struct ExecuteRecallInput<'a> {
     pub session_id: &'a str,
 }
 
-/// Execute hybrid typed recall and return plan + recalled memories.
 pub async fn execute_hybrid_recall(
     config: &MindConfig,
     input: &ExecuteRecallInput<'_>,
@@ -129,7 +120,6 @@ pub async fn execute_hybrid_recall(
     Ok((plan, recalled))
 }
 
-/// Load active commitments through the L1 cache when present, else L2.
 async fn list_active_commitments(
     input: &ExecuteRecallInput<'_>,
 ) -> Result<Vec<ene_core::Commitment>, ene_core::MemoryPortError> {
@@ -148,9 +138,6 @@ async fn list_active_commitments(
     }
 }
 
-/// Load reflection memories and apply their boost/penalty to scored recall
-/// candidates, closing the self-reflection feedback loop.
-///
 /// Reflections are a scoring signal, not recall results — the search query
 /// already excludes [`ene_core::MemoryKind::Reflection`], so this loads them
 /// through a dedicated path and adjusts the hybrid totals in place. The
@@ -211,9 +198,6 @@ async fn apply_reflection_to_scored(
     );
 }
 
-/// Bump access counters for the memories that were actually injected into the
-/// prompt.
-///
 /// The bump is gated on `injected_ids` — the subset of recalled memories that
 /// survived budget packing and were composed into the message packet — rather
 /// than on "ranked high in search". Bumping every recalled memory would
@@ -489,7 +473,6 @@ mod tests {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let embedding = [1.0, 0.0, 0.0, 0.0];
 
-        // A normal memory that the reflection strategy names.
         let normal = NewMemoryItem {
             scope: MemoryScope::Character,
             character_id: "Ene".into(),
@@ -513,7 +496,6 @@ mod tests {
         };
         insert_with_embedding(&store, &normal, &embedding).await;
 
-        // A reflection memory naming "warm greeting" as a successful strategy.
         let reflection = NewMemoryItem {
             kind: MemoryKind::Reflection,
             title: "Successful strategies".into(),
@@ -550,7 +532,6 @@ mod tests {
             .await
             .expect("recall");
 
-        // The reflection memory is a scoring signal, never a recall result.
         assert!(
             recalled
                 .iter()
@@ -558,7 +539,6 @@ mod tests {
             "reflection memories must not surface as ordinary recall results"
         );
 
-        // The matching normal memory carries the reflection boost.
         let boosted = recalled
             .iter()
             .find(|m| m.item.title == "warm greeting")
@@ -574,7 +554,6 @@ mod tests {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let embedding = [1.0, 0.0, 0.0, 0.0];
 
-        // A normal memory that the reflection names as a strategy to avoid.
         let normal = NewMemoryItem {
             scope: MemoryScope::Character,
             character_id: "Ene".into(),
@@ -598,7 +577,6 @@ mod tests {
         };
         insert_with_embedding(&store, &normal, &embedding).await;
 
-        // A reflection memory naming "long monologue" as a strategy to avoid.
         let reflection = NewMemoryItem {
             kind: MemoryKind::Reflection,
             title: "Strategies to avoid".into(),

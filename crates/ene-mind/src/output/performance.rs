@@ -7,12 +7,10 @@
 use super::types::ExpressionSource;
 pub use ene_card::MotionLayer;
 
-/// Origin of a [`PerformanceCue`] batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CueSource {
     /// Mapped from current affect state (PAD dimensions).
     Affect,
-    /// LLM marker / expression proposal.
     Llm,
     /// Previous expression held due to hysteresis.
     Hysteresis,
@@ -43,14 +41,12 @@ impl From<ExpressionSource> for CueSource {
     }
 }
 
-/// Kind of a [`PerformanceCue`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PerfKind {
     /// Expression / emotion blend-shape.
     Expression,
     /// Motion / animation playback.
     Motion,
-    /// Look-at target directive.
     LookAt,
     /// Cancel a running expression or motion.
     Cancel,
@@ -61,10 +57,8 @@ pub const DEFAULT_EXPRESSION_WEIGHT: f32 = 1.0;
 /// Default expression hold when a cue omits `hold` (seconds).
 pub const DEFAULT_EXPRESSION_HOLD_SECS: f64 = 4.0;
 
-/// A single presentation cue (expression / motion / look-at / cancel).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerformanceCue {
-    /// Cue kind.
     pub kind: PerfKind,
     /// Cue name (expression name, motion name, look-at target, or cancel scope).
     pub name: String,
@@ -82,7 +76,6 @@ pub struct PerformanceCue {
 }
 
 impl PerformanceCue {
-    /// Creates a cue from an expression or emotion name.
     pub fn expression(name: impl Into<String>) -> Self {
         Self {
             kind: PerfKind::Expression,
@@ -94,7 +87,6 @@ impl PerformanceCue {
         }
     }
 
-    /// Creates an expression cue with explicit weight and hold.
     pub fn expression_with(name: impl Into<String>, weight: f32, hold_secs: f64) -> Self {
         Self {
             kind: PerfKind::Expression,
@@ -106,7 +98,6 @@ impl PerformanceCue {
         }
     }
 
-    /// Creates a motion cue.
     pub fn motion(name: impl Into<String>, layer: Option<MotionLayer>) -> Self {
         Self {
             kind: PerfKind::Motion,
@@ -118,7 +109,6 @@ impl PerformanceCue {
         }
     }
 
-    /// Creates a look-at cue.
     pub fn look_at(target: impl Into<String>) -> Self {
         Self {
             kind: PerfKind::LookAt,
@@ -130,7 +120,6 @@ impl PerformanceCue {
         }
     }
 
-    /// Creates a cancel cue.
     pub fn cancel(scope: impl Into<String>) -> Self {
         Self {
             kind: PerfKind::Cancel,

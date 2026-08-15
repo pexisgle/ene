@@ -1,5 +1,3 @@
-//! Exit signalling.
-//!
 //! Set by winit's `ApplicationHandler::about_to_wait` after observing
 //! a `WindowEvent::CloseRequested` or an [`crate::events::AppEvent::Quit`].
 //! Consumed by the runtime to call `event_loop.exit()`.

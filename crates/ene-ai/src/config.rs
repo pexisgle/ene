@@ -64,7 +64,6 @@ pub const BUILTIN_PROVIDER_KINDS: &[&str] = &[
 ene_config::define_config!(
     AiConfig,
     "api_key",
-    /// Configuration for API key retrieval.
     pub struct ApiKeyConfig {
         /// Key source: `"inline"` or `"env"`.
         pub source: String = "env".to_string(),
@@ -91,9 +90,7 @@ ene_config::define_label_enum!(
         Auto => "auto",
         /// Force Vulkan (AMD RADV / cross-vendor Vulkan).
         Vulkan => "vulkan",
-        /// Force CUDA.
         Cuda => "cuda",
-        /// CPU only.
         Cpu => "cpu",
     }
 );
@@ -118,7 +115,6 @@ pub struct AiProviderDef {
     /// default, for `openai_compatible`).
     #[serde(default = "default_string")]
     pub base_url: String,
-    /// API key configuration.
     #[serde(default)]
     pub api_key: ApiKeyConfig,
     /// Explicit context-window override in tokens.
@@ -160,8 +156,6 @@ impl Default for AiProviderDef {
     }
 }
 
-/// True when `kind` is a built-in provider backend recognized without a
-/// plugin (one of [`BUILTIN_PROVIDER_KINDS`]).
 #[must_use]
 pub fn is_builtin_kind(kind: &str) -> bool {
     BUILTIN_PROVIDER_KINDS.contains(&kind)
@@ -333,7 +327,6 @@ pub struct LocalModelDef {
     /// Explicit filesystem path override (skips download when non-empty).
     #[serde(default = "default_string")]
     pub model_path: String,
-    /// GPU layer offload: `"auto"` or an explicit layer count.
     #[serde(default = "default_gpu_layers")]
     pub gpu_layers: GpuLayers,
     /// Context window for this model, in tokens.
@@ -450,9 +443,7 @@ impl Default for TaskRef {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct AiTasksConfig {
-    /// Main conversation chat model.
     pub chat: TaskRef,
-    /// Embedding model.
     pub embedding: TaskRef,
     /// Optional lightweight classifier (falls back to chat).
     pub classifier: Option<TaskRef>,
@@ -539,7 +530,6 @@ impl Default for SttConfig {
     }
 }
 
-/// VAD (voice activity detection) engine configuration.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -583,7 +573,6 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
-    /// Convert to the runtime [`crate::retry::RetryPolicy`].
     #[must_use]
     pub fn to_policy(&self) -> crate::retry::RetryPolicy {
         crate::retry::RetryPolicy {
@@ -632,23 +621,15 @@ ene_config::define_config!(
     "ai",
     /// AI provider registry and per-task routing.
     pub struct AiConfig {
-        /// Named local GGUF model registry.
         pub local_models: BTreeMap<String, LocalModelDef> = BTreeMap::new(),
         /// Plugin id serving [`LOCAL_PROVIDER`] (see [`LOCAL_ENGINE_CHOICES`]).
         pub local_engine: String = DEFAULT_LOCAL_ENGINE.to_string(),
-        /// Named cloud provider definitions.
         pub providers: BTreeMap<String, AiProviderDef> = default_providers(),
-        /// Task → provider/model routing.
         pub tasks: AiTasksConfig,
-        /// Retry / backoff policy for transient provider failures.
         pub retry: RetryConfig,
-/// Provider health-check and failover policy.
         pub fallback: FallbackConfig,
-        /// TTS (text-to-speech) provider settings.
         pub tts: TtsConfig,
-        /// STT (speech-to-text) provider settings.
         pub stt: SttConfig,
-        /// VAD (voice activity detection) engine settings.
         pub vad: VadConfig,
     }
 );

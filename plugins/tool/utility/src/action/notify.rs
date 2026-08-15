@@ -12,12 +12,9 @@ use std::sync::Arc;
     keywords_primary = "notify, notification, alert, remind, popup",
     background_capable
 )]
-/// Action to send a desktop notification.
 pub struct NotifySendAction {
-    /// Notification title.
     #[arg(min_length = 1)]
     title: String,
-    /// Notification body text.
     message: String,
 }
 

@@ -73,9 +73,6 @@ struct RegistryState {
     semaphores: HashMap<ResourceClass, Arc<Semaphore>>,
 }
 
-/// Process-wide registry mapping each distinct [`ResourceClass`] to one
-/// shared [`tokio::sync::Semaphore`].
-///
 /// A zero-sized handle type; all state lives in a process-global
 /// [`OnceLock`]. There is intentionally one registry per process, not one
 /// per [`crate::engine_adapter::llm::LocalLlmEngine`]/etc. instance — sharing
@@ -89,8 +86,6 @@ impl ResourceRegistry {
         STATE.get_or_init(|| Mutex::new(RegistryState::default()))
     }
 
-    /// Overrides the permit count for one or more resource classes.
-    ///
     /// Only takes effect for a class whose semaphore has not been created
     /// yet (i.e. no engine using that class has called [`Self::acquire`]).
     /// Call this once at process startup, before spawning any engine, for
@@ -113,9 +108,6 @@ impl ResourceRegistry {
         }
     }
 
-    /// Returns the shared semaphore for `class`, creating it on first use
-    /// with the configured override (see [`Self::configure_all`]) or
-    /// [`default_permits`] otherwise.
     #[must_use]
     pub fn semaphore(class: ResourceClass) -> Arc<Semaphore> {
         let mut state = Self::state().lock();

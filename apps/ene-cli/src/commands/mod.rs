@@ -37,15 +37,13 @@ pub enum CliError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutcome {
-    /// The REPL should continue to the next prompt.
     Continue,
-    /// The REPL should shut down the actor and exit with the given code.
     Exit(i32),
 }
 
 #[async_trait]
 pub trait CliCommand: Send + Sync {
-    /// The name of the command, starting with a slash, e.g. "/card"
+    /// Command names start with a slash, e.g. "/card".
     fn name(&self) -> &'static str;
 
     fn description(&self) -> &'static str;
@@ -55,7 +53,7 @@ pub trait CliCommand: Send + Sync {
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError>;
 }
 
-/// Static registry containing all CLI command implementations except `/quit`
+/// All CLI command implementations except `/quit`.
 pub static COMMANDS: &[&dyn CliCommand] = &[
     &clear::ClearCommand as &dyn CliCommand,
     &affect::AffectCommand as &dyn CliCommand,
@@ -80,7 +78,6 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &workspace::WorkspaceCommand as &dyn CliCommand,
 ];
 
-/// Maximum time the REPL will wait for the actor to drain on shutdown.
 pub const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub async fn execute(input: &str, ctx: &mut AppContext) -> CommandOutcome {

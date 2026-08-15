@@ -1,22 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-/// Unique identifier for a permission request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(String);
 
 impl RequestId {
-    /// Wraps the given string value.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
-    /// Borrows the inner string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Consumes self and returns the inner string.
     pub fn into_inner(self) -> String {
         self.0
     }
@@ -48,13 +44,11 @@ impl From<&str> for RequestId {
 pub struct TurnId(String);
 
 impl TurnId {
-    /// Allocates a fresh turn id.
     #[must_use]
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4().to_string())
     }
 
-    /// Borrows the inner string.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -85,7 +79,6 @@ impl From<&str> for TurnId {
     }
 }
 
-/// Who initiated a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOrigin {

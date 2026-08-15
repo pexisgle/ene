@@ -8,7 +8,6 @@ const PROMPT_PREVIEW_CHARS: usize = 500;
 const USER_INPUT_LOG_CHARS: usize = 200;
 const RAW_CONTENT_PREVIEW_CHARS: usize = 200;
 
-/// Inputs for [`log_empty_response_if_needed`].
 pub struct EmptyResponseContext<'a> {
     pub pipeline: &'static str,
     pub config: &'a EneConfig,

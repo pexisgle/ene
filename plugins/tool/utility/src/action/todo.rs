@@ -41,7 +41,6 @@ fn default_state() -> Arc<UtilityState> {
     keywords_primary = "todo, task, track, plan, checklist",
     side_effects = "Idempotent"
 )]
-/// Action to list all todos in the current session.
 pub struct TodoListAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
@@ -49,7 +48,6 @@ pub struct TodoListAction {
 }
 
 impl TodoListAction {
-    /// Creates a new `TodoListAction`.
     #[must_use]
     pub const fn new(state: Arc<UtilityState>) -> Self {
         Self { state }
@@ -86,14 +84,12 @@ impl TodoListAction {
     keywords_primary = "todo, task, track, plan, checklist",
     side_effects = "Idempotent"
 )]
-/// Action to add a new todo.
 pub struct TodoAddAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
     state: Arc<UtilityState>,
     /// Brief description of the task.
     content: String,
-    /// Priority level.
     #[arg(enum_values = "high, medium, low")]
     priority: String,
     /// Optional id of an existing todo to nest this under. Omit for a
@@ -103,7 +99,6 @@ pub struct TodoAddAction {
 }
 
 impl TodoAddAction {
-    /// Creates a new `TodoAddAction`.
     #[must_use]
     pub const fn new(state: Arc<UtilityState>) -> Self {
         Self {
@@ -135,12 +130,10 @@ impl TodoAddAction {
     keywords_primary = "todo, task, track, plan, checklist",
     side_effects = "Idempotent"
 )]
-/// Action to update an existing todo's fields.
 pub struct TodoUpdateAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
     state: Arc<UtilityState>,
-    /// Id of the todo to update.
     id: i64,
     /// New content (omit to keep).
     #[serde(default)]
@@ -175,7 +168,6 @@ where
 }
 
 impl TodoUpdateAction {
-    /// Creates a new `TodoUpdateAction`.
     #[must_use]
     pub const fn new(state: Arc<UtilityState>) -> Self {
         Self {
@@ -216,7 +208,6 @@ impl TodoUpdateAction {
     keywords_primary = "todo, task, track, plan, checklist",
     side_effects = "Idempotent"
 )]
-/// Action to mark a todo and all its sub-tasks as completed.
 pub struct TodoCompleteAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
@@ -226,7 +217,6 @@ pub struct TodoCompleteAction {
 }
 
 impl TodoCompleteAction {
-    /// Creates a new `TodoCompleteAction`.
     #[must_use]
     pub const fn new(state: Arc<UtilityState>) -> Self {
         Self { state, id: 0 }
@@ -257,17 +247,14 @@ impl TodoCompleteAction {
     keywords_primary = "todo, task, track, plan, checklist",
     side_effects = "Idempotent"
 )]
-/// Action to soft-delete a todo by marking it as cancelled.
 pub struct TodoDeleteAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
     state: Arc<UtilityState>,
-    /// Id of the todo to cancel.
     id: i64,
 }
 
 impl TodoDeleteAction {
-    /// Creates a new `TodoDeleteAction`.
     #[must_use]
     pub const fn new(state: Arc<UtilityState>) -> Self {
         Self { state, id: 0 }

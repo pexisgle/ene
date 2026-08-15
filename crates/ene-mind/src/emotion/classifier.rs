@@ -1,5 +1,3 @@
-//! LLM-based affect classifier.
-
 use ene_ai::{LlmMessage, LlmProvider, UserMessagePart};
 use ene_config::PromptLibrary;
 use thiserror::Error;
@@ -12,7 +10,6 @@ pub(crate) const DEFAULT_CLASSIFIER_TIMEOUT_SECS: u64 = 30;
 
 const STREAM_FALLBACK_MAX_TOKENS: u32 = 512;
 
-/// Errors from the affect classifier.
 #[derive(Debug, Error)]
 pub enum ClassifierError {
     /// Provider transport or API failure.
@@ -37,7 +34,6 @@ pub enum ClassifierError {
     EmptyResponse,
 }
 
-/// How the classifier reaches the LLM backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClassifierTransport {
     NonStreaming,
@@ -78,10 +74,6 @@ pub async fn classify_for_config(
                 let ai_cfg = config.get_section::<ene_ai::AiConfig>().map_err(|e| {
                     ClassifierError::Config(format!("Failed to parse AI config: {e}"))
                 })?;
-                // Route the classifier task (falling back to the chat task)
-                // through the plugin-backed provider registry, honoring the
-                // model override and the token cap like the previous
-                // resolved-settings path did.
                 let mut task = ai_cfg
                     .tasks
                     .classifier
@@ -120,7 +112,6 @@ pub async fn classify_for_config(
     .map_err(Into::into)
 }
 
-/// Map a classifier error to a short failure-reason label for logging.
 pub const fn classify_failure_reason(error: &CognitionError) -> &'static str {
     match error {
         CognitionError::Classifier(classifier_error) => classifier_failure_reason(classifier_error),

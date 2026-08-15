@@ -63,13 +63,10 @@ pub struct WebSearchAction {
     #[tool(skip)]
     #[serde(skip)]
     broker: Arc<WebBroker>,
-    /// The search query.
     query: String,
-    /// Search backend to use. Defaults to duckduckgo.
     #[arg(enum_values = "arxiv, duckduckgo, exa, tavily", default = "duckduckgo")]
     #[serde(default)]
     backend: Option<String>,
-    /// Maximum number of results (default 5, max 10).
     #[arg(minimum = 1, maximum = 10, default = "5")]
     #[serde(default)]
     limit: Option<u32>,

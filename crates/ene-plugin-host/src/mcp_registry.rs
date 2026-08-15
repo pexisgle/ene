@@ -38,33 +38,24 @@ use tokio::process::Command;
 /// the server is unresponsive — so HTTP liveness requires an actual `ping` RPC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpTransportKind {
-    /// Spawned child process over stdio.
     Stdio,
-    /// Remote endpoint over streamable HTTP.
     Http,
 }
 
-/// Liveness status of one MCP server connection, for the plugin center.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerStatus {
-    /// Server name.
     pub name: String,
-    /// Transport kind.
     pub transport: McpTransportKind,
     /// Whether the transport channel is alive. For HTTP servers this is
     /// only a torn-down-channel signal; a full liveness check needs a ping.
     pub alive: bool,
 }
 
-/// Represents a connection to an MCP server.
 pub struct McpServerConnection {
-    /// The server name.
     pub name: String,
-    /// The MCP client peer.
     pub client: Arc<rmcp::Peer<rmcp::RoleClient>>,
-    /// Tools provided by this server.
     pub tools: Vec<ToolSpec>,
-    /// Transport used to reach this server (drives liveness strategy).
+    /// Determines the liveness strategy used.
     pub transport: McpTransportKind,
 }
 
@@ -80,19 +71,16 @@ impl McpServerConnection {
     }
 }
 
-/// Registry for MCP server connections and their tools.
 #[derive(Default)]
 pub struct McpToolRegistry {
     servers: Arc<parking_lot::RwLock<Vec<McpServerConnection>>>,
 }
 
 impl McpToolRegistry {
-    /// Creates a new empty MCP tool registry.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Connects to an MCP server via stdio transport.
     pub async fn connect_stdio(
         &self,
         name: &str,
@@ -188,8 +176,6 @@ impl McpToolRegistry {
         Ok(())
     }
 
-    /// Connects to an MCP server via HTTP (SSE) transport.
-    ///
     /// The URL is validated for SSRF protection before any connection is
     /// attempted (see [`validate_http_url`]). `allow_insecure_urls` is the
     /// `plugins.mcp_allow_insecure_urls` opt-in: when `false` (the default)
@@ -284,7 +270,6 @@ impl McpToolRegistry {
         Ok(())
     }
 
-    /// Discover available tools from the MCP server.
     pub fn discover_tools(&self) -> Result<Vec<ToolSpec>, PluginHostError> {
         let tools = self
             .servers
@@ -295,8 +280,6 @@ impl McpToolRegistry {
         Ok(tools)
     }
 
-    /// Map an MCP tool to an Ene `ToolSpec`.
-    ///
     /// # Errors
     /// Returns [`PluginHostError::McpInvalidName`] when the constructed
     /// `mcp.<server>.<tool>` name is not a valid [`ToolName`].
@@ -317,15 +300,12 @@ impl McpToolRegistry {
         ))
     }
 
-    /// Disconnect from all MCP servers.
     pub fn disconnect(&self) -> Result<(), PluginHostError> {
         let mut servers = self.servers.write();
         servers.clear();
         Ok(())
     }
 
-    /// Ping each connected server for liveness.
-    ///
     /// Checks transport liveness via the underlying rmcp peer. A closed
     /// transport indicates the server process has exited or the connection
     /// was terminated. For HTTP servers, an actual `ping` RPC is issued.
@@ -399,7 +379,6 @@ impl McpToolRegistry {
         }
     }
 
-    /// Liveness status of this registry's single server connection.
     #[must_use]
     pub fn status(&self) -> Option<McpServerStatus> {
         let servers = self.servers.read();
@@ -505,22 +484,18 @@ fn validate_http_url(url: &str, allow_insecure: bool) -> Result<(), String> {
 fn reject_ip(ip: std::net::IpAddr, allow_insecure: bool) -> Result<(), String> {
     match ip {
         std::net::IpAddr::V4(ipv4) => {
-            // Refuse link-local (169.254.0.0/16) — always, incl. metadata.
             if ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254 {
                 return Err(
                     "link-local addresses (169.254.0.0/16, incl. cloud metadata) are not allowed"
                         .to_string(),
                 );
             }
-            // Refuse unspecified (0.0.0.0) — always: on Linux a connect to it
-            // lands on localhost, bypassing the loopback default-deny.
             if ipv4.is_unspecified() {
                 return Err(
                     "unspecified address (0.0.0.0) is not allowed; it connects to localhost"
                         .to_string(),
                 );
             }
-            // Refuse loopback (127.0.0.0/8) unless explicitly opted in.
             if ipv4.is_loopback() && !allow_insecure {
                 return Err("loopback addresses (127.0.0.0/8) are not allowed; set \
                      plugins.mcp_allow_insecure_urls = true for local development"
@@ -528,17 +503,14 @@ fn reject_ip(ip: std::net::IpAddr, allow_insecure: bool) -> Result<(), String> {
             }
         }
         std::net::IpAddr::V6(ipv6) => {
-            // Refuse link-local (fe80::/10) — always.
             if ipv6.segments()[0] & 0xffc0 == 0xfe80 {
                 return Err("link-local addresses (fe80::/10) are not allowed".to_string());
             }
-            // Refuse unspecified (::) — always.
             if ipv6.is_unspecified() {
                 return Err(
                     "unspecified address (::) is not allowed; it connects to localhost".to_string(),
                 );
             }
-            // Refuse loopback (::1) unless explicitly opted in.
             if ipv6.is_loopback() && !allow_insecure {
                 return Err("loopback address (::1) is not allowed; set \
                      plugins.mcp_allow_insecure_urls = true for local development"
@@ -697,8 +669,6 @@ mod tests {
         let result = registry.ping().await;
         assert!(result.is_err());
     }
-
-    // ── SSRF URL validation ────────────────────────────────────────
 
     #[test]
     fn https_url_is_accepted() {

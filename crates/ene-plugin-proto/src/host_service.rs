@@ -10,10 +10,8 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Maximum framed message size on the host-service channel (64 MiB).
 pub const HOST_SERVICE_MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
-/// Identifies a service multiplexed on the host-service socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostServiceId {
@@ -47,28 +45,22 @@ pub enum HostServiceRequest {
     /// [`HostServiceResponse::OpenAck`], the stream speaks only that
     /// service's protocol.
     Open {
-        /// Service to open.
         service: HostServiceId,
         /// Pre-shared token issued by the host for this plugin.
         token: String,
     },
 }
 
-/// Responses to [`HostServiceRequest`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostServiceResponse {
     /// The service session is open; subsequent frames use the service protocol.
     OpenAck,
-    /// The open request was rejected.
     Error {
-        /// Structured error code.
         code: HostServiceErrorCode,
-        /// Human-readable detail.
         message: String,
     },
 }
 
-/// Structured errors for host-service open failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostServiceErrorCode {
@@ -80,7 +72,6 @@ pub enum HostServiceErrorCode {
     Internal,
 }
 
-/// Writes a length-prefixed JSON [`HostServiceRequest`].
 pub async fn write_host_service_request<W: AsyncWrite + Unpin>(
     writer: &mut W,
     request: &HostServiceRequest,
@@ -88,14 +79,12 @@ pub async fn write_host_service_request<W: AsyncWrite + Unpin>(
     write_framed_json(writer, request).await
 }
 
-/// Reads a length-prefixed JSON [`HostServiceRequest`].
 pub async fn read_host_service_request<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> std::io::Result<Option<HostServiceRequest>> {
     read_framed_json(reader).await
 }
 
-/// Writes a length-prefixed JSON [`HostServiceResponse`].
 pub async fn write_host_service_response<W: AsyncWrite + Unpin>(
     writer: &mut W,
     response: &HostServiceResponse,
@@ -103,14 +92,13 @@ pub async fn write_host_service_response<W: AsyncWrite + Unpin>(
     write_framed_json(writer, response).await
 }
 
-/// Reads a length-prefixed JSON [`HostServiceResponse`].
 pub async fn read_host_service_response<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> std::io::Result<Option<HostServiceResponse>> {
     read_framed_json(reader).await
 }
 
-/// Writes a length-prefixed JSON value (shared broker framing).
+/// Shared broker framing.
 pub async fn write_framed_json<W, T>(writer: &mut W, value: &T) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -134,8 +122,7 @@ where
     Ok(())
 }
 
-/// Reads a length-prefixed JSON value (shared broker framing); `Ok(None)`
-/// at a clean EOF.
+/// `Ok(None)` at a clean EOF.
 pub async fn read_framed_json<R, T>(reader: &mut R) -> std::io::Result<Option<T>>
 where
     R: AsyncRead + Unpin,

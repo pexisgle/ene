@@ -1,5 +1,5 @@
-/// Sandbox initialization errors. All are fatal for the child: the plugin
-/// never starts when a required layer cannot be applied.
+/// All are fatal for the child: the plugin never starts when a required
+/// layer cannot be applied.
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
     /// The Linux kernel lacks the required feature.
@@ -16,12 +16,7 @@ pub enum SandboxError {
     Io(#[from] std::io::Error),
     /// Windows API failure.
     #[error("Windows error {code} (0x{code:08X}): {message}")]
-    Windows {
-        /// Win32 error code.
-        code: u32,
-        /// Operation that failed.
-        message: String,
-    },
+    Windows { code: u32, message: String },
     /// The sandbox spec is internally inconsistent.
     #[error("invalid sandbox spec: {0}")]
     InvalidSpec(String),

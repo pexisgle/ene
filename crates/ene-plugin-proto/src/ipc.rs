@@ -19,11 +19,8 @@ use crate::wire::WireFormat;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Maximum allowed IPC message size in bytes (64 MB).
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
-/// Negotiated IPC protocol version range.
-///
 /// The host sends the range it supports; the plugin responds with the range
 /// it supports. The negotiated version is the highest number that falls within
 /// both ranges, chosen by the plugin and reported in the ack. If the ranges do
@@ -37,10 +34,6 @@ pub struct VersionRange {
 }
 
 impl VersionRange {
-    /// Returns the highest protocol version supported by both `self` and
-    /// `other` (i.e. `min(max_a, max_b)`), or `None` when the ranges do not
-    /// overlap.
-    ///
     /// Choosing the highest common version lets a newer peer take advantage of
     /// its latest features whenever the other side also supports them, while
     /// still agreeing on a lower version for partial overlap.
@@ -50,14 +43,10 @@ impl VersionRange {
         (highest_common >= lowest_common).then_some(highest_common)
     }
 
-    /// Returns whether `version` falls within this range (inclusive).
     pub const fn contains(&self, version: u32) -> bool {
         version >= self.min && version <= self.max
     }
 
-    /// Returns the range of protocol versions the host advertises during the
-    /// handshake: `[PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION]`.
-    ///
     /// The host is the side responsible for maintaining backward
     /// compatibility (N-1 support policy — see the module docs), so it is
     /// the only side that should construct a multi-version range. A plugin
@@ -152,7 +141,6 @@ pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 8;
 /// host has moved on to a newer protocol version.
 pub const PLUGIN_IPC_MIN_SUPPORTED_VERSION: u32 = PLUGIN_IPC_PROTOCOL_VERSION - 1;
 
-/// Default audio format used when none is specified.
 fn default_audio_format() -> String {
     "wav".to_string()
 }
@@ -164,11 +152,8 @@ fn default_audio_format() -> String {
 /// buckets options (e.g. VOICEVOX speaker style families).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfigOption {
-    /// Value written into the config when this option is selected.
     pub value: serde_json::Value,
-    /// Human-readable label for UI presentation.
     pub label: String,
-    /// Optional grouping key for UI sections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
 }
@@ -179,7 +164,6 @@ pub struct ConfigOption {
 pub struct ConfigFieldError {
     /// JSON-pointer-style path to the offending field (e.g. `"mmproj_path"`).
     pub field_path: String,
-    /// Human-readable error message suitable for form display.
     pub message: String,
 }
 
@@ -191,22 +175,16 @@ pub enum PluginIpcRequest {
     /// range it supports; the plugin negotiates and reports the chosen version
     /// in the ack.
     Handshake {
-        /// Host's supported protocol version range.
         version: VersionRange,
-        /// Sandbox configuration to apply.
         #[serde(default)]
         sandbox: SandboxConfigData,
-        /// Plugin-specific configuration JSON.
         plugin_config: Option<serde_json::Value>,
-        /// Per-profile plugin configuration JSON (`plugins.list.<name>.profiles`).
-        ///
         /// Opaque to the host: profile selection is plugin-owned (a single
         /// plugin can need different settings per model/profile). Absent for
         /// older hosts; `#[serde(default)]` keeps the wire ABI stable.
         #[serde(default)]
         plugin_profiles: Option<serde_json::Value>,
     },
-    /// Graceful shutdown.
     Shutdown,
     /// Liveness probe. The plugin must reply with [`PluginIpcResponse::Pong`].
     ///
@@ -214,63 +192,44 @@ pub enum PluginIpcRequest {
     /// the `Pong` with the originating probe. Older plugins that omit
     /// the field still interoperate because it is `#[serde(default)]`.
     Ping {
-        /// Unique request identifier for correlating the `Pong`.
         #[serde(default)]
         request_id: String,
     },
-    /// Request the plugin's config JSON Schema.
     GetConfigSchema {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
     },
-    /// List all available tool specs.
     ListTools {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
     },
-    /// Execute a tool by name with JSON arguments.
     CallTool {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
-        /// Tool name to call.
         name: String,
-        /// JSON-encoded arguments.
         arguments: String,
         /// When `true`, request deferred (background) execution.
         #[serde(default)]
         deferred: bool,
-        /// Per-call context (conversation + turn identifiers).
-        ///
         /// Supersedes the deprecated `SetCallContext` message. When present,
         /// the context applies to this single tool call only and does not
         /// persist for subsequent calls.
         #[serde(default)]
         context: Option<CallContext>,
     },
-    /// Set the call context (conversation + turn identifiers).
     SetCallContext {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
-        /// Conversation-level identifier.
         conversation_id: String,
-        /// Turn-level identifier within the conversation.
         turn_id: String,
     },
-    /// Poll the status of a deferred (background) task by id.
     PollDeferred {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
         /// The `task_id` returned by a prior [`PluginIpcResponse::DeferredAccepted`].
         task_id: String,
     },
-    /// Cancel an in-progress chat stream.
     CancelStream {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
         /// The `request_id` of the `CreateChatStream` to cancel.
@@ -283,14 +242,11 @@ pub enum PluginIpcRequest {
     /// [`PluginIpcResponse::ConfigApplied`]. Every peer in the host's N-1
     /// window (v5+) knows this variant, so the live push always applies.
     SetConfig {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
         /// Plugin-specific configuration JSON (same payload as Handshake
         /// `plugin_config`).
         config: serde_json::Value,
-        /// Per-profile plugin configuration JSON.
-        ///
         /// `None` means profiles were cleared on the host and the live plugin
         /// must replace any previously stored map (typically with `{}`).
         #[serde(default)]
@@ -303,7 +259,6 @@ pub enum PluginIpcRequest {
     /// sends this only when
     /// [`PluginCapabilities::supports_list_config_options`] is set.
     ListConfigOptions {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
         /// Dot/JSON-pointer style path within the plugin config
@@ -316,10 +271,8 @@ pub enum PluginIpcRequest {
     /// this only when [`PluginCapabilities::supports_validate_config`] is set;
     /// otherwise it falls back to local JSON Schema validation.
     ValidateConfig {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
-        /// Candidate configuration JSON to validate.
         value: serde_json::Value,
     },
     /// Ask the plugin to migrate a stored config blob (protocol v5+,
@@ -330,70 +283,46 @@ pub enum PluginIpcRequest {
     /// sends this only when [`PluginCapabilities::supports_migrate_config`]
     /// is set; otherwise migration is skipped.
     MigrateConfig {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
         /// Version the stored blob was written under.
         from_version: u32,
-        /// Stored configuration JSON to migrate.
         value: serde_json::Value,
     },
-    /// Cancel a deferred (background) task by id.
     CancelDeferred {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
-        /// The `task_id` of the background task to cancel.
         task_id: String,
     },
-    /// Approve a pending permission request.
     ApprovePermission {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
-        /// ID of the permission request to approve.
         #[serde(default)]
         permission_request_id: String,
     },
-    /// Register a session-wide permission allow pattern.
     AllowPattern {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
-        /// Action pattern (e.g. `"filesystem_write"`).
         action: String,
-        /// Target glob pattern.
         target_pattern: String,
     },
-    /// Revoke a previously granted session-wide permission allow pattern.
     RevokePattern {
-        /// Unique request identifier for correlating the response.
         #[serde(default)]
         request_id: String,
-        /// Action pattern to revoke.
         action: String,
-        /// Target glob pattern to revoke.
         target_pattern: String,
     },
-    /// Create a streaming chat completion.
-    ///
     /// The plugin responds with N × [`PluginIpcResponse::StreamChunk`]
     /// followed by a terminal [`PluginIpcResponse::StreamEnd`] or
     /// [`PluginIpcResponse::StreamError`], all carrying the same `request_id`.
     CreateChatStream {
-        /// Unique request identifier for correlating stream responses.
         request_id: String,
-        /// Provider kind (e.g. `"anthropic"`).
         provider_kind: String,
-        /// Provider-specific configuration JSON (API keys, base URL, etc.).
         provider_config: serde_json::Value,
-        /// Model identifier.
         model: String,
-        /// Maximum tokens to generate.
         max_tokens: Option<u32>,
         /// Chat messages in provider-agnostic JSON format.
         messages: Vec<serde_json::Value>,
-        /// Tool definitions available for the model to call.
         #[serde(default)]
         tools: Vec<serde_json::Value>,
     },
@@ -401,36 +330,24 @@ pub enum PluginIpcRequest {
     ///
     /// The plugin responds with [`PluginIpcResponse::ChatCompletionResult`].
     ChatCompletion {
-        /// Unique request identifier.
         request_id: String,
-        /// Provider kind (e.g. `"anthropic"`).
         provider_kind: String,
-        /// Provider-specific configuration JSON.
         provider_config: serde_json::Value,
-        /// Model identifier.
         model: String,
-        /// Maximum tokens to generate.
         max_tokens: Option<u32>,
         /// Chat messages in provider-agnostic JSON format.
         messages: Vec<serde_json::Value>,
-        /// Optional JSON Schema for structured output.
         json_schema: Option<serde_json::Value>,
     },
     /// Synthesize speech from text.
     ///
     /// The plugin responds with [`PluginIpcResponse::SpeechResult`].
     SynthesizeSpeech {
-        /// Unique request identifier.
         request_id: String,
-        /// Provider kind (e.g. `"voicevox"`).
         provider_kind: String,
-        /// Provider-specific configuration JSON.
         provider_config: serde_json::Value,
-        /// Text to synthesize.
         text: String,
-        /// Voice name.
         voice: String,
-        /// Output audio format (e.g. `"wav"`).
         #[serde(default = "default_audio_format")]
         format: String,
     },
@@ -438,15 +355,10 @@ pub enum PluginIpcRequest {
     ///
     /// The plugin responds with [`PluginIpcResponse::TranscriptionResult`].
     TranscribeAudio {
-        /// Unique request identifier.
         request_id: String,
-        /// Provider kind (e.g. `"whisper"`).
         provider_kind: String,
-        /// Provider-specific configuration JSON.
         provider_config: serde_json::Value,
-        /// Base64-encoded audio data.
         audio_base64: String,
-        /// Input audio format (e.g. `"wav"`).
         #[serde(default = "default_audio_format")]
         format: String,
     },
@@ -459,11 +371,8 @@ pub enum PluginIpcRequest {
     /// lifetime of that instance. `reset` (sent with an empty `pcm`) clears
     /// the session's state, mirroring `VadEngine::reset`.
     ProcessVadChunk {
-        /// Unique request identifier.
         request_id: String,
-        /// Engine kind (e.g. `"silero"`).
         provider_kind: String,
-        /// Provider-specific configuration JSON.
         provider_config: serde_json::Value,
         /// Opaque session identifier correlating chunks to one engine state.
         session_id: String,
@@ -477,17 +386,12 @@ pub enum PluginIpcRequest {
     ///
     /// The plugin responds with [`PluginIpcResponse::EmbedBatchResult`].
     EmbedBatch {
-        /// Unique request identifier.
         request_id: String,
-        /// Provider kind (e.g. `"openai"`).
         provider_kind: String,
-        /// Provider-specific configuration JSON.
         provider_config: serde_json::Value,
-        /// Embedding model identifier.
         model: String,
         /// Desired embedding dimensions (provider may ignore).
         dimensions: Option<u32>,
-        /// Text items to embed.
         items: Vec<String>,
     },
     /// Mediated call to a capability this plugin provides.
@@ -496,9 +400,7 @@ pub enum PluginIpcRequest {
     /// authenticating it; the plugin responds with
     /// [`PluginIpcResponse::CapabilityCallResult`].
     CapabilityCall {
-        /// Unique request identifier for correlating the response.
         request_id: String,
-        /// The capability call to execute.
         call: CapabilityCall,
     },
 }
@@ -506,32 +408,22 @@ pub enum PluginIpcRequest {
 /// Plugin IPC response — plugin → host.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PluginIpcResponse {
-    /// Handshake acknowledgment with negotiated version and capabilities.
     HandshakeAck {
-        /// Agreed protocol version.
         version: u32,
-        /// Capabilities advertised by this plugin.
         capabilities: PluginCapabilities,
     },
-    /// Acknowledgment (for `ApprovePermission`, `AllowPattern`, etc.).
     Ack {
-        /// Request identifier correlating this ack to the originating request.
         #[serde(default)]
         request_id: String,
     },
-    /// Reply to a [`PluginIpcRequest::Ping`] liveness probe.
-    ///
     /// Echoes the originating probe's `request_id` so the host's single reader
     /// task can correlate it. Older plugins that emit a bare `Pong`
     /// still interoperate because the field is `#[serde(default)]`.
     Pong {
-        /// Request identifier correlating this pong to the originating `Ping`.
         #[serde(default)]
         request_id: String,
     },
-    /// The plugin's config JSON Schema.
     ConfigSchema {
-        /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
         /// The schema, or `None` if not provided.
@@ -542,37 +434,26 @@ pub enum PluginIpcResponse {
         #[serde(default)]
         config_version: u32,
     },
-    /// Acknowledgment that a [`PluginIpcRequest::SetConfig`] was applied.
     ConfigApplied {
-        /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
     },
-    /// Dynamic options for a config path.
     ConfigOptions {
-        /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
-        /// Available options for the requested path.
         options: Vec<ConfigOption>,
     },
-    /// Result of plugin-delegated config validation.
-    ///
     /// An empty `errors` list means the value is valid.
     ConfigValidated {
-        /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
         /// Field-level errors; empty means success.
         #[serde(default)]
         errors: Vec<ConfigFieldError>,
     },
-    /// Result of a config migration.
     ConfigMigrated {
-        /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
-        /// Migrated configuration JSON.
         value: serde_json::Value,
         /// Version the migrated blob now corresponds to.
         #[serde(default)]
@@ -587,66 +468,44 @@ pub enum PluginIpcResponse {
     ConfigSchemaChanged {
         /// The updated schema, or `None` if the plugin cleared it.
         schema: Option<serde_json::Value>,
-        /// Updated config schema version after the change.
         #[serde(default)]
         config_version: u32,
     },
-    /// Error response.
     Error {
-        /// Request identifier correlating this error to the originating request.
         #[serde(default)]
         request_id: String,
-        /// Error description.
         message: String,
     },
-    /// List of tool specs.
     Tools {
-        /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
-        /// The structured tool specs.
         tools: Vec<ToolSpec>,
     },
-    /// Result of a tool call.
     CallResult {
-        /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
-        /// The structured result, or an error.
         result: Result<ToolResult, ToolError>,
     },
-    /// Acknowledgment of a deferred (background) tool call.
     DeferredAccepted {
-        /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
-        /// Unique identifier for the queued background task.
         task_id: String,
     },
-    /// Status of a deferred (background) task.
     DeferredStatus {
-        /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
-        /// The polled task id.
         task_id: String,
-        /// Current status of the task.
         status: DeferredStatus,
     },
     /// Push notification: a deferred background task has completed.
     DeferredCompleted {
         /// The `task_id` from the original `DeferredAccepted`.
         task_id: String,
-        /// Result of the deferred execution.
         result: Result<ToolResult, ToolError>,
     },
-    /// A streaming chunk for an in-progress chat stream.
-    ///
     /// Multiple chunks are sent per `request_id`, each carrying incremental
     /// text and/or tool-call deltas.
     StreamChunk {
-        /// Request identifier correlating this chunk to the originating
-        /// [`PluginIpcRequest::CreateChatStream`].
         request_id: String,
         /// Incremental text content (may be empty if only tool calls advance).
         #[serde(default)]
@@ -662,21 +521,15 @@ pub enum PluginIpcResponse {
     },
     /// Terminal message indicating a stream completed successfully.
     StreamEnd {
-        /// Request identifier for the completed stream.
         request_id: String,
     },
     /// Terminal message indicating a stream failed.
     StreamError {
-        /// Request identifier for the failed stream.
         request_id: String,
-        /// Human-readable error description.
         message: String,
     },
-    /// Result of a non-streaming chat completion.
     ChatCompletionResult {
-        /// Request identifier.
         request_id: String,
-        /// The generated content.
         content: String,
         /// Token usage reported by the provider, if any. `None` when
         /// the provider does not report usage (the host then falls back to a
@@ -685,48 +538,31 @@ pub enum PluginIpcResponse {
         #[serde(default)]
         usage: Option<TokenUsage>,
     },
-    /// Result of speech synthesis.
     SpeechResult {
-        /// Request identifier correlating this response to the originating
-        /// [`PluginIpcRequest::SynthesizeSpeech`].
         request_id: String,
-        /// Base64-encoded audio data.
         audio_base64: String,
         /// Audio format (matches request format).
         format: String,
     },
-    /// Result of speech transcription.
     TranscriptionResult {
-        /// Request identifier correlating this response to the originating
-        /// [`PluginIpcRequest::TranscribeAudio`].
         request_id: String,
-        /// Transcribed text.
         text: String,
         /// Detected language code (e.g. `"ja"`, `"en"`), when the plugin
         /// knows it. Older plugins omit the field and deserialize to `None`.
         #[serde(default)]
         language: Option<String>,
     },
-    /// Result of one [`PluginIpcRequest::ProcessVadChunk`] step.
     VadChunkResult {
-        /// Request identifier correlating this response to the originating
-        /// [`PluginIpcRequest::ProcessVadChunk`].
         request_id: String,
-        /// Voice activity event for the processed chunk.
         event: VadEvent,
     },
-    /// Result of a batch embedding request.
     EmbedBatchResult {
-        /// Request identifier.
         request_id: String,
         /// Embedding vectors, one per input item.
         embeddings: Vec<Vec<f32>>,
     },
-    /// Result of a mediated [`PluginIpcRequest::CapabilityCall`].
     CapabilityCallResult {
-        /// Unique request identifier correlating to the originating request.
         request_id: String,
-        /// The provider's JSON result or a typed capability error.
         result: CapabilityCallResult,
     },
 }
@@ -738,19 +574,12 @@ pub enum PluginIpcResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VadEvent {
-    /// Speech just started.
     SpeechStart,
-    /// Speech is continuing.
     SpeechContinue,
-    /// Speech just ended.
     SpeechEnd,
-    /// No speech detected.
     Silence,
 }
 
-/// Reads a [`PluginIpcRequest`] as a 4-byte LE length-prefixed payload in
-/// `format`.
-///
 /// Returns `Ok(None)` on `UnexpectedEof`, indicating connection closed.
 pub async fn read_plugin_request<R: AsyncReadExt + Unpin>(
     reader: &mut R,
@@ -779,9 +608,6 @@ pub async fn read_plugin_request<R: AsyncReadExt + Unpin>(
     Ok(Some(req))
 }
 
-/// Writes a [`PluginIpcRequest`] as a 4-byte LE length-prefixed payload in
-/// `format`.
-///
 /// # Errors
 ///
 /// Returns [`PluginError::Protocol`] if the serialized message exceeds
@@ -808,9 +634,6 @@ pub async fn write_plugin_request<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-/// Reads a [`PluginIpcResponse`] as a 4-byte LE length-prefixed payload in
-/// `format`.
-///
 /// Returns `Ok(None)` on `UnexpectedEof`, indicating connection closed.
 ///
 /// # Correlation
@@ -847,9 +670,6 @@ pub async fn read_plugin_response<R: AsyncReadExt + Unpin>(
     Ok(Some(resp))
 }
 
-/// Writes a [`PluginIpcResponse`] as a 4-byte LE length-prefixed payload in
-/// `format`.
-///
 /// # Errors
 ///
 /// Returns [`PluginError::Protocol`] if the serialized message exceeds

@@ -1,15 +1,7 @@
-//! Drag-to-move for the character window.
-//!
-//! Coordinates cursor input, projects 2D screen positions into 3D world space,
-//! and updates the character position. Supports click-through logic by integrating
-//! with collision detection.
 use glam::{Mat4, Vec2, Vec3};
 
-/// Per-window drag state. `None` = idle, `Some(_)` = dragging.
 #[derive(Debug, Default, Clone)]
 pub struct CharacterDragState {
-    /// Last cursor world position during an active drag. `None` when
-    /// the user is not currently dragging the character.
     pub last_cursor_world_pos: Option<Vec2>,
 }
 
@@ -78,7 +70,6 @@ pub fn transformed_aabb_bounds(
     (min, max)
 }
 
-/// Fast slab test against an axis-aligned bounding box.
 #[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
 pub fn ray_intersects_aabb(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> bool {
     let eps = 1e-6;
@@ -164,10 +155,6 @@ pub const fn on_press_or_release(
     }
 }
 
-/// Apply the per-frame drag delta: when the user is dragging, integrate
-/// `(cursor_world_pos - last_cursor_world_pos).extend(0.0)` into
-/// `character_position` and update the stored origin.
-///
 /// Returns the delta to add to `character_position`, or `None` when
 /// the cursor hasn't moved (or when the user isn't dragging).
 pub fn tick(state: &mut CharacterDragState, cursor_world_2d: Option<Vec2>) -> Option<Vec3> {
@@ -243,21 +230,18 @@ mod tests {
 
     #[test]
     fn ray_intersects_aabb_hits_and_misses() {
-        // Ray from (0, 1, 5) along -Z through the box at z=[-0.3, 0.3]
         assert!(ray_intersects_aabb(
             Vec3::new(0.0, 1.0, 5.0),
             Vec3::new(0.0, 0.0, -1.0),
             Vec3::from(AABB_MIN),
             Vec3::from(AABB_MAX),
         ));
-        // Ray from (10, 1, 5) misses in X
         assert!(!ray_intersects_aabb(
             Vec3::new(10.0, 1.0, 5.0),
             Vec3::new(0.0, 0.0, -1.0),
             Vec3::from(AABB_MIN),
             Vec3::from(AABB_MAX),
         ));
-        // Ray parallel to Y axis at X=10, passes the X slab
         assert!(!ray_intersects_aabb(
             Vec3::new(10.0, 0.0, 0.0),
             Vec3::new(0.0, 1.0, 0.0),
@@ -330,7 +314,6 @@ mod tests {
             last_cursor_world_pos: Some(Vec2::new(0.5, 0.5)),
         };
         assert_eq!(tick(&mut s, Some(Vec2::new(0.5, 0.5))), None);
-        // Origin must not have been updated.
         assert_eq!(s.last_cursor_world_pos, Some(Vec2::new(0.5, 0.5)));
     }
 

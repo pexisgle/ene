@@ -43,7 +43,7 @@ impl fmt::Display for GateRejectReason {
     }
 }
 
-/// Evaluate deterministic gates. `Ok(())` means the LLM may be called.
+/// `Ok(())` means the LLM may be called.
 pub fn evaluate_deterministic_gates(
     config: &ProactiveConfig,
     context: &ProactiveContext,
@@ -385,7 +385,6 @@ mod tests {
             Err(GateRejectReason::ManualPause)
         );
 
-        // Outside quiet hours the pause still suppresses.
         ctx.quiet_hours = crate::proactive::QuietHoursEval::inactive();
         assert_eq!(
             evaluate_deterministic_gates(&config, &ctx),
@@ -422,7 +421,6 @@ mod tests {
             Err(GateRejectReason::QuietHours)
         );
 
-        // Outside the window the gates pass.
         ctx.quiet_hours = crate::proactive::QuietHoursEval::inactive();
         assert_eq!(evaluate_deterministic_gates(&config, &ctx), Ok(()));
     }
@@ -456,7 +454,6 @@ mod tests {
         };
         assert_eq!(evaluate_deterministic_gates(&config, &ctx), Ok(()));
 
-        // Outside the window the gate also passes.
         ctx.quiet_hours = crate::proactive::QuietHoursEval::inactive();
         assert_eq!(evaluate_deterministic_gates(&config, &ctx), Ok(()));
     }

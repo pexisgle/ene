@@ -1,5 +1,3 @@
-//! Tool registry trait, composite registry, and deferred call types.
-
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -272,13 +270,11 @@ impl CompositeToolRegistry {
         }
     }
 
-    /// Write-locks state and calls `f` with a mutable reference to `CompositeState`.
     fn with_state_mut<R>(&self, f: impl FnOnce(&mut CompositeState) -> R) -> R {
         let mut guard = self.state.write();
         f(&mut guard)
     }
 
-    /// Resolves the owning sub-registry for a tool name.
     fn registry_for(&self, name: &str) -> Result<Arc<dyn ToolRegistry>, PluginHostError> {
         let guard = self.state.read();
         let Some(&idx) = guard.tool_index.get(name) else {
@@ -1040,8 +1036,6 @@ mod tests {
         let composite =
             CompositeToolRegistry::try_new(vec![Arc::new(mock1), Arc::new(mock2)]).unwrap();
 
-        // The request originated from tool "b", owned by the second registry;
-        // only that registry should receive the approval.
         composite.approve_permission_for("b", "req-routed").await;
 
         assert!(approvals1.lock().unwrap().is_empty());

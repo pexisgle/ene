@@ -14,15 +14,12 @@
 //! normal `camera_forward` (world space).
 use glam::{Vec2, Vec3};
 
-/// Look-at state. Owned by `CharacterRenderer` so it survives
-/// across frames.
+/// Owned by `CharacterRenderer` so it survives across frames.
 #[derive(Debug, Default, Clone)]
 pub struct LookAtState {
-    /// Smoothed world target. `None` until the first cursor sample
-    /// is processed.
+    /// `None` until the first cursor sample is processed.
     pub smoothed_world_target: Option<Vec3>,
-    /// Last cursor position in window-logical pixels. Mirrored from
-    /// `winit::event::CursorMoved::position` for debugging.
+    /// Mirrored from `winit::event::CursorMoved::position` for debugging.
     pub last_cursor_logical: Option<Vec2>,
 }
 
@@ -41,24 +38,17 @@ pub fn head_world_for(pivot: Vec3) -> Vec3 {
     pivot + Vec3::new(0.0, HEAD_OFFSET_Y, 0.0)
 }
 
-/// Convert a cursor position in window-logical pixels to normalized
+/// Converts a cursor position in window-logical pixels to normalized
 /// device coordinates, with the Y axis flipped (winit's origin is
-/// top-left, NDC's origin is bottom-left). Thin re-export of
-/// [`ene_vrm::pixel_to_ndc`] so internal callers can keep using the
-/// `cursor_logical_to_ndc` name.
+/// top-left, NDC's origin is bottom-left).
 pub fn cursor_logical_to_ndc(cursor: Vec2, viewport: (u32, u32)) -> Vec2 {
     ene_vrm::pixel_to_ndc(cursor.x, cursor.y, viewport)
 }
 
-/// Neutral head-look target (straight ahead of the head).
 pub fn neutral_target(head_world: Vec3) -> Vec3 {
     head_world + Vec3::new(0.0, 0.0, NEUTRAL_TARGET_Z)
 }
 
-/// Compute the smoothed world target the character should look at.
-///
-/// `state` is updated in place. Returns the new smoothed target.
-///
 /// `smoothing` is the per-frame exponential-smoothing rate (in
 /// `1/seconds`). The VRM 1.0 spec does not declare a smoothing
 /// value, so callers pass
@@ -100,8 +90,7 @@ pub fn compute_world_target(
     smoothed
 }
 
-/// Per-bone body-tracking weights and limits, derived from the
-/// `look_at_strength` slider.
+/// Derived from the `look_at_strength` slider.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BodyTracking {
     pub head_weight: f32,

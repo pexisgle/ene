@@ -1,5 +1,3 @@
-//! Local GGUF provider plugin: chat streaming, completion, and embeddings.
-//!
 //! Implements [`ConfigurablePlugin`] (mmproj / acceleration config and
 //! per-model profiles), [`LlmPlugin`] (streaming and non-streaming chat on
 //! [`LocalLlamaCppProvider`](crate::local_llm::LocalLlamaCppProvider),
@@ -32,8 +30,6 @@ use crate::models;
 /// call on timeout cancels the job cooperatively via `caller_gone`.
 const DECISION_COMPLETION_TIMEOUT_SECS: u64 = 20;
 
-/// Local GGUF inference provider plugin (llama.cpp).
-///
 /// The static capability data (`llm_spec()` / `LLM_PROVIDER_KIND` /
 /// `provides()`) is generated from the `#[provider(...)]` attribute; the
 /// async handlers below load models lazily per profile key.
@@ -51,18 +47,15 @@ const DECISION_COMPLETION_TIMEOUT_SECS: u64 = 20;
 pub(crate) struct LocalLlmPlugin;
 
 impl ene_plugin::ConfigurablePlugin for LocalLlmPlugin {
-    /// Receives the plugin configuration blob from the host at handshake
-    /// time (`plugins.list.llama-cpp.config`).
     fn set_config(&self, config: &Value) {
         config::set_config(config);
     }
 
-    /// Receives the per-model profile map (`plugins.list.llama-cpp.profiles`).
     fn set_profiles(&self, profiles: &Value) {
         config::set_profiles(profiles);
     }
 
-    /// Advertises the config schema. Profile shape (`url` / `quantization` /
+    /// Profile shape (`url` / `quantization` /
     /// `model_path` / `gpu_layers` / optional `context_size` per model) is
     /// delivered via `set_profiles` and documented in `docs/configuration.md`;
     /// the host treats profiles as opaque.
@@ -442,8 +435,6 @@ mod tests {
         };
         assert_eq!(version, PLUGIN_IPC_PROTOCOL_VERSION);
 
-        // Capability declaration: kind `"local"` provider spec + embedding
-        // kind + the Slice A `provides` contract.
         assert_eq!(capabilities.llm_providers.len(), 1);
         let spec = &capabilities.llm_providers[0];
         assert_eq!(spec.kind, "local");
@@ -561,7 +552,6 @@ mod tests {
             ]
         );
 
-        // The resource class follows the delivered acceleration config.
         super::config::set_config(&serde_json::json!({"acceleration": "vulkan"}));
         let spec = super::LocalLlmPlugin.llm_capabilities();
         assert_eq!(

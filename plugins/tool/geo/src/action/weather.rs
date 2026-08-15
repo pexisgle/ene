@@ -77,7 +77,6 @@ struct WeatherValue {
     keywords_primary = "weather, temperature, forecast, humidity, wind, rain, conditions",
     side_effects = "Network { external: true }"
 )]
-/// Action to get current weather conditions.
 pub struct WeatherAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
@@ -88,7 +87,6 @@ pub struct WeatherAction {
 }
 
 impl WeatherAction {
-    /// Creates a new `WeatherAction` with the given shared state.
     #[must_use]
     pub fn new(state: Arc<GeoState>) -> Self {
         Self {
@@ -117,8 +115,8 @@ impl WeatherAction {
     }
 }
 
-/// Builds the wttr.in request URL, percent-encoding the location path
-/// segment and requesting the `j1` JSON format.
+/// Percent-encodes the location path segment and requests the `j1` JSON
+/// format.
 fn build_weather_url(location: Option<&str>) -> Result<url::Url, GeoError> {
     if let Some(location) = location
         && location.trim().is_empty()

@@ -52,7 +52,6 @@ struct RunningTask {
 
 #[derive(Default)]
 struct State {
-    /// `task_id` → running task.
     running: HashMap<String, RunningTask>,
     /// Timer name → `task_id`, for `utility.timer_stop` by name.
     timer_names: HashMap<String, String>,
@@ -65,7 +64,6 @@ struct State {
     finished: VecDeque<(String, Instant)>,
 }
 
-/// Outcome of stopping a timer by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimerStopOutcome {
     /// The timer was running and has been cancelled.
@@ -85,8 +83,6 @@ pub enum TimerStopOutcome {
     },
 }
 
-/// Records a terminal status for one `poll_deferred`, evicting the oldest
-/// unconsumed entry when the bound is exceeded.
 fn insert_terminal(state: &mut State, task_id: String, name: String, status: DeferredStatus) {
     state.terminal.insert(task_id.clone(), (name, status));
     state.terminal_order.push_back(task_id);
@@ -97,7 +93,6 @@ fn insert_terminal(state: &mut State, task_id: String, name: String, status: Def
     }
 }
 
-/// Extracts a human-readable message from a `catch_unwind` payload.
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -108,16 +103,13 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// A running timer as reported by [`TaskRegistry::list`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RunningTimerInfo {
-    /// Timer name.
     pub name: String,
     /// Whole seconds until the timer fires.
     pub remaining_seconds: u64,
 }
 
-/// Background task registry shared by the deferred utility actions.
 pub struct TaskRegistry {
     notifier: Notifier,
     state: Mutex<State>,
@@ -130,7 +122,7 @@ impl std::fmt::Debug for TaskRegistry {
 }
 
 impl TaskRegistry {
-    /// Creates a registry that shows desktop notifications via `notify-rust`.
+    /// Shows desktop notifications via `notify-rust`.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -166,9 +158,6 @@ impl TaskRegistry {
         .unwrap_or_else(|payload| Err(format!("notifier panicked: {}", panic_message(&payload))))
     }
 
-    /// Starts a countdown timer that fires a desktop notification after
-    /// `duration`, and returns its `task_id`.
-    ///
     /// Starting a timer with a name that is already running cancels the
     /// previous one first (the host is told it was cancelled), so the
     /// same name always denotes exactly one timer.
@@ -239,8 +228,7 @@ impl TaskRegistry {
         Ok(task_id)
     }
 
-    /// Sends a desktop notification in the background and returns its
-    /// `task_id`. The task completes as soon as the notification is shown.
+    /// The task completes as soon as the notification is shown.
     pub fn start_notify(self: &Arc<Self>, title: &str, body: &str) -> Result<String, ToolError> {
         if title.trim().is_empty() {
             return Err(ToolError::InvalidArguments {
@@ -276,7 +264,6 @@ impl TaskRegistry {
         Ok(task_id)
     }
 
-    /// Cancels the timer with the given name.
     pub fn stop_timer(&self, name: &str) -> TimerStopOutcome {
         let mut state = self.state.lock();
         if let Some(task_id) = state.timer_names.remove(name)
@@ -303,9 +290,6 @@ impl TaskRegistry {
         }
     }
 
-    /// Cancels a task by its `task_id` (host-driven cancellation).
-    ///
-    /// Returns `false` when no such task is known.
     pub fn cancel(&self, task_id: &str) -> bool {
         let mut state = self.state.lock();
         let Some(task) = state.running.remove(task_id) else {
@@ -328,8 +312,6 @@ impl TaskRegistry {
         true
     }
 
-    /// Returns running timers (with seconds remaining) and the names of
-    /// finished ones, for `utility.timer_stop` without a name.
     pub fn list(&self) -> (Vec<RunningTimerInfo>, Vec<String>) {
         let state = self.state.lock();
         let now = Instant::now();
@@ -351,8 +333,6 @@ impl TaskRegistry {
         (running, finished)
     }
 
-    /// Reports the status of a task by `task_id` for one host poll.
-    ///
     /// Terminal statuses (completed/cancelled/failed) are returned once and
     /// then forgotten, matching the host's single-poll consumption.
     pub fn poll(&self, task_id: &str) -> DeferredStatus {
@@ -454,7 +434,6 @@ mod tests {
                 result: ToolResult::text("Timer 'pasta' finished after 0 seconds.")
             }
         );
-        // Terminal statuses are one-shot.
         assert_eq!(registry.poll(&task_id), DeferredStatus::Unknown);
     }
 

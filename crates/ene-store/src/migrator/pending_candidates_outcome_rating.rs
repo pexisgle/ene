@@ -8,7 +8,6 @@
 
 use sea_orm_migration::prelude::*;
 
-/// Adds the `outcome_rating` column to `pending_candidates`.
 pub struct PendingCandidatesOutcomeRatingMigration;
 
 impl MigrationName for PendingCandidatesOutcomeRatingMigration {

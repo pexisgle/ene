@@ -3,7 +3,6 @@
 //! Plugin binary providing calendar operations: per-calendar read/write
 //! permissions, event listing/creation/update/cancellation, and free-slot
 //! search — all with write confirmation and privacy-preserving logging.
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(
@@ -13,19 +12,12 @@
     )
 )]
 
-/// Action modules for each calendar operation.
 pub mod action;
-/// Approval gate for write operations.
 pub mod approval;
-/// Calendar tool lifecycle and provider integration.
 pub mod provider;
-/// Calendar provider abstraction layer.
 pub mod registry;
-/// DB schema declaration for calendar tables.
 pub mod schema;
-/// Shared state for the calendar actions.
 pub mod state;
-/// DB-backed calendar store.
 pub mod store;
 #[cfg(test)]
 mod test_db;

@@ -39,9 +39,6 @@ pub struct IpcTtsProviderFactory {
 }
 
 impl IpcTtsProviderFactory {
-    /// Creates a new factory for the given provider kind, sharing the
-    /// plugin connection.
-    ///
     /// `concurrency` is the [`ConcurrencyHint`] the plugin declared for this
     /// provider kind during the handshake (or the safe serial default if it
     /// declared none).

@@ -52,7 +52,6 @@ const EMBEDDING_MODEL_FALLBACK: &[&str] = &[
     "text-embedding-3-large",
     "text-embedding-ada-002",
 ];
-/// Common embedding vector sizes offered as one-click choices.
 const EMBEDDING_DIMENSION_CHOICES: &[&str] = &["512", "768", "1024", "1536", "3072"];
 
 fn ensure_local_embedding_provider(ai: &mut AiConfig, draft: &mut SettingsDraft, engine: &str) {
@@ -134,12 +133,6 @@ fn is_local_engine(value: &str) -> bool {
     ene_ai::LOCAL_ENGINE_CHOICES.contains(&value)
 }
 
-/// Chat model candidates for the current chat provider.
-///
-/// Local providers list registered GGUF models; cloud providers use the
-/// cached `/models` catalog (when fetched) plus the static fallback. The
-/// currently configured model is always included so an out-of-catalog value
-/// stays selectable and visible.
 fn local_profile_names(draft: &SettingsDraft) -> Vec<String> {
     let plugins = draft.section::<ene_plugin_host::PluginConfig>();
     let mut names: Vec<String> = ["llama-cpp", "local-llm", "llama-server"]
@@ -213,8 +206,6 @@ fn embedding_model_choices(
     choices
 }
 
-/// Re-sync the editable provider buffers to the currently selected chat
-/// provider's definition after a provider switch.
 fn sync_provider_buffers(input: &mut SettingsInputState, ai: &AiConfig) {
     if let Some(def) = ai.providers.get(&ai.tasks.chat.provider) {
         input.ai_base_url.clone_from(&def.base_url);

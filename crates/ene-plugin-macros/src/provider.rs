@@ -45,7 +45,6 @@ use crate::attr::{parse_flag, path_ident_str};
 
 use ene_plugin_proto::{CapabilityRef, CapabilityRequirement};
 
-/// Which provider trait a derive expands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderKind {
     Llm,
@@ -55,7 +54,6 @@ pub(crate) enum ProviderKind {
 }
 
 impl ProviderKind {
-    /// Inherent const name generated on the plugin struct.
     fn const_name(self) -> &'static str {
         match self {
             Self::Llm => "LLM_PROVIDER_KIND",
@@ -65,7 +63,6 @@ impl ProviderKind {
         }
     }
 
-    /// Inherent static spec constructor generated on the plugin struct.
     fn spec_method_name(self) -> &'static str {
         match self {
             Self::Llm => "llm_spec",
@@ -76,8 +73,6 @@ impl ProviderKind {
     }
 }
 
-/// Parsed contents of the single `#[provider(...)]` attribute.
-///
 /// The parser accepts the union of all keys so one attribute can feed a
 /// compound provider (`#[derive(LlmPlugin, TtsPlugin)]`); `kind` is shared by
 /// every provider derive on the struct.
@@ -191,9 +186,6 @@ fn split_list(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Validates a comma-separated capability declaration list against the wire
-/// grammar, returning the split items.
-///
 /// The generated `provides()` / `requires()` methods re-parse these literals
 /// at runtime; validating here turns a typo into a compile error instead of
 /// a startup panic in the plugin process.

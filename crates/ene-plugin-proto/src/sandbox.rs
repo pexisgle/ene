@@ -31,11 +31,9 @@ const fn default_max_shell_output_lines() -> usize {
     2000
 }
 
-/// Serializable sandbox configuration data (POD).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", default)]
 pub struct SandboxConfigData {
-    /// Whether the sandbox is enabled.
     pub enabled: bool,
     /// Directories allowed for read access.
     pub allowed_directories: Vec<String>,
@@ -43,15 +41,10 @@ pub struct SandboxConfigData {
     pub writable_directories: Vec<String>,
     /// Regex patterns for blocked shell commands.
     pub blocked_commands: Vec<String>,
-    /// Maximum bytes per read operation.
     pub max_read_bytes: usize,
-    /// Maximum bytes per write operation.
     pub max_write_bytes: usize,
-    /// Shell command timeout in milliseconds.
     pub shell_timeout_ms: u64,
-    /// Maximum bytes in shell output.
     pub max_shell_output_bytes: usize,
-    /// Maximum lines in shell output.
     pub max_shell_output_lines: usize,
     /// Path to the shared host-service socket. Plugin binaries open this
     /// socket and select a passenger service (currently `db`) with

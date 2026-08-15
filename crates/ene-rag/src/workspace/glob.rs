@@ -1,5 +1,3 @@
-//! Glob matching for ignore rules, backed by `globset`.
-//!
 //! Supports `*` (within a path segment), `?` (single char within a segment),
 //! and `**` (across segments). A pattern without `/` matches the basename
 //! only (e.g. `*.gguf`); a trailing `/**` also matches the directory itself
@@ -7,7 +5,7 @@
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
-/// Whether `path` (relative to a scan root, `/`-separated) matches `pattern`.
+/// `path` is relative to a scan root and `/`-separated.
 pub fn glob_matches(pattern: &str, path: &str) -> bool {
     build_matcher(pattern).is_some_and(|matcher| matcher.is_match(path))
 }
@@ -27,7 +25,6 @@ fn build_matcher(pattern: &str) -> Option<GlobSet> {
         format!("**/{pattern}")
     };
     builder.add(build_glob(&normalized)?);
-    // A trailing `/**` matches the directory itself as well as its contents.
     if let Some(prefix) = normalized.strip_suffix("/**")
         && !prefix.is_empty()
     {

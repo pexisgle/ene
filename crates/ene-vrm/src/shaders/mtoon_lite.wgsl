@@ -16,8 +16,7 @@
 // `expression.rs`). The vertex shader early-outs when
 // `target_count == 0u` so primitives without morphs pay no cost.
 //
-// Outline / rim / matcap / emission / shading-shift all live in
-// follow-up PRs (the full MToon material model).
+// Outline / rim / matcap / emission / shading-shift are not implemented.
 
 struct VsIn {
     @location(0) position: vec3<f32>,

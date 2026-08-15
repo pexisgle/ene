@@ -36,7 +36,6 @@ pub struct DebugState {
     pub debug_renderer: Option<ene_vrm::DebugRenderer>,
 }
 
-/// Container for the winit runtime.
 pub struct AppState {
     pub gpu: GpuContext,
     pub settings: CharacterSettings,
@@ -251,7 +250,6 @@ impl AppState {
         }
     }
 
-    /// Forward a one-shot user input string into the AI bridge.
     #[expect(
         dead_code,
         reason = "transitional AI bridge entry point for external callers"
@@ -262,7 +260,6 @@ impl AppState {
         }
     }
 
-    /// Persist current runtime state.
     pub fn save(&self) {
         if let Err(e) = self.settings.save() {
             tracing::warn!("[Config] Failed to save config: {e}");
@@ -298,8 +295,6 @@ impl AppState {
         q.iter(self.app.world()).next()
     }
 
-    /// Borrow the bevy `World` mutably for UI render / action
-    /// dispatch sites.
     #[expect(dead_code, reason = "Inline-resolved in runtime.rs")]
     pub fn ui_bevy_world(&mut self) -> &mut bevy_ecs::world::World {
         self.app.world_mut()
@@ -311,10 +306,6 @@ impl AppState {
     pub fn ui_bevy_state_mut(
         &mut self,
     ) -> bevy_ecs::change_detection::Mut<'_, crate::component::ui::UiStateComponent> {
-        // Both lookups are pre-conditions the caller must satisfy: the UI
-        // entity is spawned by the first `app.update()` and the component
-        // is inserted at spawn time. Violating either is a programmer bug
-        // and panicking with a clear message is the right behaviour.
         #[expect(
             clippy::expect_used,
             reason = "UI entity is spawned by app.update() and carries UiStateComponent; violation is a programmer bug"
@@ -365,13 +356,7 @@ impl AppState {
         f(&mut res.world)
     }
 
-    /// Borrow the per-UI-entity [`UiStateComponent`](crate::component::ui::UiStateComponent)
-    /// immutably.
     pub fn ui_bevy_state(&mut self) -> &crate::component::ui::UiStateComponent {
-        // Both lookups are pre-conditions the caller must satisfy: the UI
-        // entity is spawned by the first `app.update()` and the component
-        // is inserted at spawn time. Violating either is a programmer bug
-        // and panicking with a clear message is the right behaviour.
         #[expect(
             clippy::expect_used,
             reason = "UI entity is spawned by app.update() and carries UiStateComponent; violation is a programmer bug"
@@ -427,7 +412,6 @@ impl AppState {
             .expect("ChatStateComponent not on chat entity")
     }
 
-    /// Reconcile the chat message list from the actor history snapshot.
     pub fn reconcile_chat_history_if_needed(&mut self) {
         let Some(entity) = self.chat_bevy_entity() else {
             return;

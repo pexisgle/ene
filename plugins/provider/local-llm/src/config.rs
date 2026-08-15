@@ -1,5 +1,3 @@
-//! Host-delivered config and per-model profiles for the local GGUF provider.
-
 use std::sync::{Mutex, OnceLock, PoisonError, atomic::AtomicU64};
 
 use ene_ai::config::ProactiveAcceleration;
@@ -56,7 +54,6 @@ pub(crate) struct HostConfig {
 }
 
 impl HostConfig {
-    /// The effective acceleration backend, defaulting to `auto`.
     pub(crate) fn acceleration(&self) -> Result<ProactiveAcceleration, PluginError> {
         match self.acceleration.as_deref().map_or("auto", str::trim) {
             "" | "auto" => Ok(ProactiveAcceleration::Auto),
@@ -70,9 +67,6 @@ impl HostConfig {
     }
 }
 
-/// The [`ResourceClass`] this plugin's provider jobs contend on, derived from
-/// the configured acceleration preference and the compiled GPU backend.
-///
 /// The wire declaration is per provider kind, while the actual offload is
 /// per model profile (`gpu_layers`); this maps the configured *intent* and
 /// errs toward `Gpu` — a profile forced to CPU under a GPU acceleration
@@ -117,7 +111,6 @@ pub(crate) struct Profile {
 }
 
 impl Profile {
-    /// Non-empty `model_path` override, if any.
     pub(crate) fn model_path(&self) -> Option<&str> {
         self.model_path
             .as_deref()
@@ -125,7 +118,6 @@ impl Profile {
             .filter(|path| !path.is_empty())
     }
 
-    /// Non-empty download URL, if any.
     pub(crate) fn url(&self) -> Option<&str> {
         self.url
             .as_deref()
@@ -158,7 +150,6 @@ impl Profile {
             .unwrap_or(DEFAULT_QUANTIZATION)
     }
 
-    /// GPU layer offload, defaulting to `auto`.
     pub(crate) fn gpu_layers(&self) -> ene_ai::GpuLayers {
         self.gpu_layers.unwrap_or_default()
     }
@@ -176,8 +167,6 @@ impl Profile {
     }
 }
 
-/// Stores the config blob delivered by [`crate::plugin::LocalLlmPlugin`]'s
-/// `ConfigurablePlugin::set_config`.
 pub(crate) fn set_config(config: &Value) {
     #[cfg(test)]
     let _mutation_guard = CONFIG_MUTATION_LOCK
@@ -187,8 +176,6 @@ pub(crate) fn set_config(config: &Value) {
     super::models::config_changed();
 }
 
-/// Stores the profile map delivered by
-/// [`crate::plugin::LocalLlmPlugin`]'s `ConfigurablePlugin::set_profiles`.
 pub(crate) fn set_profiles(profiles: &Value) {
     #[cfg(test)]
     let _mutation_guard = CONFIG_MUTATION_LOCK
@@ -200,15 +187,12 @@ pub(crate) fn set_profiles(profiles: &Value) {
     super::models::config_changed();
 }
 
-/// Returns the current host-configuration generation.
 pub(crate) fn generation() -> u64 {
     CONFIG_GENERATION
         .get_or_init(|| AtomicU64::new(0))
         .load(std::sync::atomic::Ordering::Acquire)
 }
 
-/// Advances the host-configuration generation while model-cache locks are
-/// held by [`super::models::config_changed`].
 pub(crate) fn advance_generation() {
     CONFIG_GENERATION
         .get_or_init(|| AtomicU64::new(0))
@@ -230,7 +214,6 @@ pub(crate) fn current_config() -> Result<HostConfig, PluginError> {
         .map_err(|e| PluginError::provider(format!("invalid plugin config: {e}")))
 }
 
-/// Looks up and parses the profile for `model` (a `local_models` key).
 pub(crate) fn profile_for(model: &str) -> Result<Profile, PluginError> {
     let profiles = PLUGIN_PROFILES
         .lock()

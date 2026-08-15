@@ -1,5 +1,3 @@
-//! Plugin configuration (`plugins.list.elevenlabs.config`).
-
 use ene_plugin::PluginError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,7 +10,6 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 24_000;
 /// PCM sample rates the API offers. The API rejects other `pcm_*` rates,
 /// so the config is validated against this set rather than clamped.
 pub const SUPPORTED_SAMPLE_RATES: &[u32] = &[16_000, 24_000, 44_100];
-/// Default API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io/v1";
 /// Character limit of the `/stream` endpoint (the lowest across
 /// `ElevenLabs` models).
@@ -20,7 +17,6 @@ pub const MAX_INPUT_CHARS: usize = 5_000;
 /// Default environment variable consulted when no base URL is configured.
 pub const BASE_URL_ENV: &str = "ELEVENLABS_BASE_URL";
 
-/// Voice synthesis settings accepted by the `ElevenLabs` API.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct VoiceSettings {
@@ -30,7 +26,6 @@ pub struct VoiceSettings {
     pub similarity_boost: f32,
     /// Style exaggeration (0.0–1.0; `style` is only supported by some models).
     pub style: f32,
-    /// Whether to boost the voice's natural characteristics.
     pub use_speaker_boost: bool,
 }
 
@@ -68,7 +63,6 @@ impl VoiceSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct ElevenLabsConfig {
-    /// `ElevenLabs` model ID (e.g. `eleven_multilingual_v2`).
     pub model_id: String,
     /// Default voice ID; a per-request voice overrides it. `ElevenLabs`
     /// voices are user-specific, so there is no closed list to validate

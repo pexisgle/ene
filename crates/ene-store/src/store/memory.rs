@@ -1,5 +1,3 @@
-//! Typed-memory, memory-embedding, memory-span, and pending-write queries.
-
 use super::{
     EneMemoryError, MemoryStore, NaturalDecayReport, NewMemorySpan, embedding_to_bytes,
     validate_embedding,
@@ -10,8 +8,6 @@ use ene_core::{ActiveSceneSummaryRow, PendingMemoryWrite, PendingMemoryWriteStat
 use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 
-/// Memory statuses eligible for hybrid recall: `active`, `faded`, and `disputed`.
-///
 /// Archived / superseded / user-deleted memories are excluded from recall
 /// unless a caller explicitly opts in (see `list_typed_memories`).
 const RECALLABLE_STATUSES: [&str; 3] = [
@@ -20,8 +16,6 @@ const RECALLABLE_STATUSES: [&str; 3] = [
     crate::MemoryStatus::Disputed.as_str(),
 ];
 
-/// Builds the user-visibility filter for typed-memory queries.
-///
 /// A memory is visible to `user_id` when it is owned by that user **or**
 /// has no owner (empty `user_id`), so shared / character-level memories
 /// remain recallable across users.
@@ -72,8 +66,6 @@ pub(crate) fn natural_decay_score_sql(anchor_sql: &str) -> String {
     )
 }
 
-/// Strip the trailing `ene:tags` metadata footer from memory content.
-///
 /// The memory arbiter appends `\n\n<!-- ene:tags {"tags":[...]} -->` at
 /// write time. This footer is internal metadata and must not leak into
 /// LLM prompts or recall scoring. Stripping at the model-to-item
@@ -93,7 +85,6 @@ pub(super) fn strip_tags_footer(content: &str) -> &str {
     }
 }
 
-/// Convert a typed memory model row to a [`crate::MemoryItem`].
 #[expect(
     clippy::unnecessary_wraps,
     reason = "store helper signature returns Result for uniform error propagation"
@@ -212,12 +203,8 @@ async fn list_session_ids_for_card_on_conn<C: ConnectionTrait>(
 }
 
 impl MemoryStore {
-    // ── Pending memory writes ───────────────────────────────────────────────
-
-    /// Default maximum retry attempts for a deferred memory write.
     pub const PENDING_MEMORY_WRITE_MAX_ATTEMPTS: i32 = 5;
 
-    /// Enqueue a failed deferred memory write for later retry.
     pub async fn enqueue_pending_memory_write(
         &self,
         character_id: &str,
@@ -249,7 +236,6 @@ impl MemoryStore {
         Ok(res.id)
     }
 
-    /// List pending / permanent memory-write rows for a character.
     pub async fn list_pending_memory_writes(
         &self,
         character_id: &str,
@@ -267,7 +253,6 @@ impl MemoryStore {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    /// Count pending (retryable) and permanent failed memory writes.
     pub async fn count_pending_memory_writes(
         &self,
         character_id: &str,
@@ -288,8 +273,6 @@ impl MemoryStore {
         Ok((pending, permanent))
     }
 
-    /// Force pending rows for a character to be due immediately.
-    ///
     /// Used by `/memory retry` so the operator can drain the queue without
     /// waiting for exponential backoff.
     pub async fn schedule_pending_memory_writes_now(
@@ -348,7 +331,6 @@ impl MemoryStore {
         Ok(out)
     }
 
-    /// Mark a pending memory write as successfully applied and delete it.
     pub async fn complete_pending_memory_write(&self, id: i64) -> Result<(), EneMemoryError> {
         use entities::pending_memory_writes::Entity;
         use sea_orm::EntityTrait;
@@ -357,7 +339,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Record another failed attempt; may transition to permanent.
     pub async fn fail_pending_memory_write(
         &self,
         id: i64,
@@ -399,9 +380,6 @@ impl MemoryStore {
         Ok(updated.into())
     }
 
-    // ── Typed Memory CRUD ───────────────────────────────────────────────────
-
-    /// Insert a new typed memory item and return its assigned ID.
     pub async fn insert_typed_memory(
         &self,
         item: &crate::NewMemoryItem,
@@ -441,7 +419,6 @@ impl MemoryStore {
         Ok(res.id)
     }
 
-    /// Persist a memory-outcome evaluation and return its assigned ID.
     pub async fn record_memory_outcome(
         &self,
         outcome: &crate::MemoryOutcome,
@@ -464,8 +441,6 @@ impl MemoryStore {
         Ok(res.id)
     }
 
-    /// List outcome evaluations for a character, newest first.
-    ///
     /// `since` bounds the window to records created after the given instant
     /// (strictly); `None` lists every record. Results are capped at `limit`.
     pub async fn list_memory_outcomes(
@@ -491,9 +466,6 @@ impl MemoryStore {
         Ok(models.into_iter().map(model_to_memory_outcome).collect())
     }
 
-    /// Delete outcome evaluations by id (character-scoped), returning the
-    /// number of rows removed.
-    ///
     /// The reflection pass calls this after aggregating a window so consumed
     /// evaluations do not accumulate or get aggregated twice.
     pub async fn delete_memory_outcomes(
@@ -511,7 +483,6 @@ impl MemoryStore {
         Ok(res.rows_affected as usize)
     }
 
-    /// Retrieve a typed memory item by its ID.
     pub async fn get_typed_memory(
         &self,
         id: i64,
@@ -525,9 +496,6 @@ impl MemoryStore {
         }
     }
 
-    /// List typed memories for a character, optionally filtered by kind, user,
-    /// and status.
-    ///
     /// `user_id` keeps rows owned by that user plus character-level rows that
     /// carry no user id; `status` restricts to a single lifecycle state. Both
     /// filters run in the query, so a newest-first `limit` window cannot be
@@ -614,7 +582,6 @@ impl MemoryStore {
         Ok(tools)
     }
 
-    /// Count typed memories for a character, optionally filtered by kind.
     pub async fn count_typed_memories(
         &self,
         character_id: &str,
@@ -632,7 +599,6 @@ impl MemoryStore {
         Ok(query.count(&self.db).await? as i64)
     }
 
-    /// List active typed memories whose `source_ref` starts with `prefix`.
     pub async fn list_typed_memories_by_source_prefix(
         &self,
         character_id: &str,
@@ -658,7 +624,6 @@ impl MemoryStore {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    /// Returns whether an active typed memory exists for `character_id` + `source_ref`.
     pub async fn typed_memory_exists_by_source_ref(
         &self,
         character_id: &str,
@@ -670,7 +635,6 @@ impl MemoryStore {
             .is_some())
     }
 
-    /// Returns the active typed memory for `character_id` + `source_ref`, if any.
     pub async fn get_active_typed_memory_by_source_ref(
         &self,
         character_id: &str,
@@ -694,7 +658,6 @@ impl MemoryStore {
         }
     }
 
-    /// Archive active typed memories under `prefixes` whose `source_ref` is not kept.
     pub async fn archive_typed_memories_by_source_prefixes(
         &self,
         character_id: &str,
@@ -732,8 +695,6 @@ impl MemoryStore {
         Ok(archived)
     }
 
-    /// Gather typed-memory candidates for explainable hybrid scoring.
-    ///
     /// Sole public typed-memory gather entry. Collects candidates from optional
     /// vector similarity (when `query.embedding` is `Some`), lexical token
     /// matches, a limited recent fallback, and active commitments, then
@@ -927,8 +888,6 @@ impl MemoryStore {
         .await
     }
 
-    /// Vector similarity search with configurable recallable statuses.
-    ///
     /// Uses the `vec0` ANN index (`vec_memory_embeddings`) for candidate
     /// retrieval, then joins back to `typed_memories` for status and
     /// user-visibility filtering.
@@ -1223,7 +1182,6 @@ impl MemoryStore {
             .collect()
     }
 
-    /// List typed memories eligible for hybrid recall (`active`, `faded`, `disputed`).
     pub async fn list_recallable_typed_memories(
         &self,
         character_id: &str,
@@ -1252,7 +1210,6 @@ impl MemoryStore {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    /// Fetch typed memories linked to commitment ledger rows.
     async fn get_typed_memories_by_commitment_ids(
         &self,
         commitment_ids: &[i64],
@@ -1274,7 +1231,6 @@ impl MemoryStore {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    /// List recallable typed memories whose title or content matches query tokens.
     async fn list_lexical_typed_memory_candidates(
         &self,
         query_text: &str,
@@ -1391,7 +1347,6 @@ impl MemoryStore {
         Ok(new_id)
     }
 
-    /// Bump the access count and last-accessed timestamp for a typed memory.
     pub async fn bump_typed_memory_access(&self, id: i64) -> Result<bool, EneMemoryError> {
         use sea_orm::ExprTrait;
 
@@ -1482,7 +1437,6 @@ impl MemoryStore {
             .await
     }
 
-    /// List typed memories for the memory journal with user/scope and status filters.
     pub async fn list_journal_memories(
         &self,
         options: &crate::MemoryJournalListOptions<'_>,
@@ -1545,8 +1499,6 @@ impl MemoryStore {
         Ok(true)
     }
 
-    /// Apply a user edit to a persisted typed memory in place.
-    ///
     /// Updates the user-editable fields (title, content, kind, confidence) and
     /// recomputes the ownership scope from the edited kind via
     /// [`super::canonical_scope_for_kind`]. The owner follows the scope:
@@ -1628,8 +1580,6 @@ impl MemoryStore {
         Ok(result.rows_affected > 0)
     }
 
-    /// Set the salience (importance weight) of a typed memory.
-    ///
     /// The value is clamped into `0.0..=1.0` via [`crate::MemorySalience::new`];
     /// returns `Ok(false)` when no row with `id` exists.
     pub async fn set_memory_salience(
@@ -1656,7 +1606,6 @@ impl MemoryStore {
         Ok(result.rows_affected > 0)
     }
 
-    /// List typed memories eligible for natural decay processing.
     pub async fn list_memories_for_decay(
         &self,
         character_id: &str,
@@ -1691,8 +1640,6 @@ impl MemoryStore {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    /// Apply natural decay transitions for recallable memories in a scope.
-    ///
     /// Uses a single SQL `UPDATE` per transition edge (active→faded, faded→archived)
     /// so the pass scales to the full table without a `BATCH_LIMIT`.
     ///
@@ -1775,7 +1722,6 @@ impl MemoryStore {
         })
     }
 
-    /// Backdate typed memory timestamps for integration tests.
     #[doc(hidden)]
     pub async fn test_backdate_typed_memory(
         &self,
@@ -1801,7 +1747,6 @@ impl MemoryStore {
         Ok(true)
     }
 
-    /// Store a content embedding for a typed memory item.
     pub async fn upsert_memory_embedding(
         &self,
         memory_item_id: i64,
@@ -1842,9 +1787,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    // ── Memory Spans ────────────────────────────────────────────────────────
-
-    /// Distinct session IDs that have conversation logs for a character card.
     pub async fn list_session_ids_for_card(
         &self,
         card_name: &str,
@@ -1852,7 +1794,6 @@ impl MemoryStore {
         list_session_ids_for_card_on_conn(&self.db, card_name).await
     }
 
-    /// Returns true when a memory span already exists for the session turn.
     pub async fn memory_span_exists(
         &self,
         session_id: &str,
@@ -1868,7 +1809,6 @@ impl MemoryStore {
         Ok(count > 0)
     }
 
-    /// Insert a memory span row.
     pub async fn insert_memory_span(&self, span: &NewMemorySpan) -> Result<i64, EneMemoryError> {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
@@ -1886,7 +1826,6 @@ impl MemoryStore {
         Ok(res.id)
     }
 
-    /// List memory spans for a session ordered by turn start.
     pub async fn list_memory_spans_by_session(
         &self,
         session_id: &str,
@@ -1912,7 +1851,6 @@ impl MemoryStore {
             .collect())
     }
 
-    /// List memory spans for a session filtered by compression level.
     pub async fn list_memory_spans_by_session_and_level(
         &self,
         session_id: &str,
@@ -1940,7 +1878,6 @@ impl MemoryStore {
             .collect())
     }
 
-    /// Return the latest scene-level compressed summary for a session.
     pub async fn get_active_scene_summary(
         &self,
         session_id: &str,
@@ -1968,7 +1905,6 @@ impl MemoryStore {
         }))
     }
 
-    /// Update the compressed summary for an existing span.
     pub async fn update_span_summary(
         &self,
         span_id: i64,

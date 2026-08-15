@@ -16,14 +16,12 @@ use ene_connector::identity::CredentialId;
 use parking_lot::RwLock;
 use serde_json::Value;
 
-/// Registered credential declarations keyed by plugin name.
 #[derive(Debug, Default)]
 pub struct CredentialRegistry {
     declarations: RwLock<HashMap<String, Vec<CredentialDeclaration>>>,
 }
 
 impl CredentialRegistry {
-    /// Creates an empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -52,10 +50,6 @@ impl CredentialRegistry {
         self.register(plugin, parse.declarations);
     }
 
-    /// Records `declarations` for `plugin`, replacing any previous entry.
-    ///
-    /// Idempotent: re-registering the same plugin (e.g. after a schema
-    /// re-parse) simply overwrites.
     pub fn register(&self, plugin: &str, declarations: Vec<CredentialDeclaration>) {
         self.declarations
             .write()
@@ -73,8 +67,6 @@ impl CredentialRegistry {
             .unwrap_or_default()
     }
 
-    /// Resolves whether `plugin` may access credential `id`, per the
-    /// declarations registered for it.
     #[must_use]
     pub fn resolve_scope(&self, plugin: &str, id: &CredentialId) -> ScopeDecision {
         let declared = self.declarations(plugin);

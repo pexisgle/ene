@@ -1,9 +1,4 @@
-//! Physics plugin: bridges [`crate::physics::PhysicsWorld`] into
-//! the bevy ECS.
-//!
-//! Registers the [`PhysicsWorldResource`], attaches the per-entity
-//! rapier handle components in `Startup`, and steps the physics
-//! world once per frame.
+//! Bridges [`crate::physics::PhysicsWorld`] into the bevy ECS.
 
 use bevy_app::prelude::{App, Plugin, Startup, Update};
 use bevy_ecs::schedule::IntoScheduleConfigs;
@@ -12,8 +7,6 @@ use crate::resource::physics::PhysicsWorldResource;
 use crate::schedule::AppSet;
 use crate::system::physics::{attach_bone_colliders_system, step_physics_system};
 
-/// Plugin that populates the per-entity rapier handle components
-/// and steps the physics world once per frame.
 pub struct PhysicsPlugin;
 
 impl Plugin for PhysicsPlugin {

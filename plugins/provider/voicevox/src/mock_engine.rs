@@ -28,7 +28,6 @@ pub const EXAMPLE_AUDIO_QUERY: &str = r#"{
 /// A request the fake engine received, for test assertions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordedRequest {
-    /// HTTP method.
     pub method: String,
     /// Request target (path + query string).
     pub path: String,
@@ -36,7 +35,6 @@ pub struct RecordedRequest {
     pub body: String,
 }
 
-/// Handle to an in-process fake engine.
 pub struct MockEngineHandle {
     /// Base URL the engine is serving on.
     pub url: String,

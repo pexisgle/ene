@@ -569,8 +569,6 @@ fn compute_search(
                 rank: 4,
             });
         }
-        // Plugin action search: tool names + descriptions, navigating to
-        // the owning plugin card.
         for action in &snapshot.actions {
             if action.name.to_lowercase().contains(&query)
                 || action.description.to_lowercase().contains(&query)
@@ -587,9 +585,8 @@ fn compute_search(
             }
         }
     }
-    // Schema-leaf search: every registered settings schema contributes its
-    // dotted paths and leaf titles/descriptions. Selecting one navigates to
-    // the Advanced page with the filter pre-applied.
+    // Selecting one navigates to the Advanced page with the filter
+    // pre-applied.
     for (section_key, entry) in
         ene_config::config::registered_schemas_for(ene_config::ConfigTarget::Settings)
     {
@@ -622,8 +619,6 @@ fn compute_search(
     hits
 }
 
-/// Walks a settings schema, collecting `(dotted_path, title, description)`
-/// for every leaf property.
 fn collect_schema_leaves(
     schema: &serde_json::Value,
     prefix: &str,
@@ -719,7 +714,7 @@ pub struct SettingsUi {
     /// Draft holding every pending settings edit; pages write here and the
     /// apply bar pushes it through validation → persist → runtime apply.
     pub draft: draft::SettingsDraft,
-    /// Outcome of the last draft apply, shown as a banner until dismissed.
+    /// Shown as a banner until dismissed.
     pub apply_feedback: Option<ApplyFeedback>,
     /// In-flight async apply preparation (validation + secret merge).
     apply_prepare: input::AsyncData<apply::ApplyPrepare>,
@@ -844,8 +839,6 @@ impl SettingsUi {
                 });
                 return;
             }
-            // Persist synchronously (fast file write), then start the actor
-            // round-trip asynchronously.
             let original = settings.config();
             self.apply_original = Some(original.clone());
             match apply::begin_finalize(settings, &self.draft, ai.as_ref(), prepare.proposed) {
@@ -917,7 +910,6 @@ impl SettingsUi {
         }
     }
 
-    /// Discards every pending edit back to the persisted config.
     pub fn discard_pending(&mut self, settings: &CharacterSettings) {
         self.draft.resync(settings.config());
         self.apply_feedback = None;
@@ -1097,7 +1089,6 @@ impl SettingsUi {
             self.current_page = PageKind::Ai;
         }
 
-        // Consume a one-shot page focus request from tray / onboarding.
         if let Some(mut state) = world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
             && let Some(page) = state.0.focused_page.take()
         {
@@ -1158,8 +1149,6 @@ impl SettingsUi {
             self.current_page = page;
         }
 
-        // Draft apply bar: feedback banner + Apply/Discard controls whenever
-        // any page has pending edits.
         self.render_apply_bar(ui, settings, ai);
 
         // Rendered last so it floats above every page: a close, app exit,

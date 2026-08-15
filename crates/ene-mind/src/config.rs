@@ -1,21 +1,8 @@
-//! Configuration for the Ene mind runtime.
-//!
-//! Defines `MindConfig` and its sub-sections for context management,
-//! memory, emotion, and character processing.
-
 use ene_config::schemars;
-
-// ────────────────────────────────────────────
-// Top-level MindConfig — registered under "mind" key in settings.json
-// ────────────────────────────────────────────
 
 ene_config::define_config!(
     settings,
     "mind",
-    /// Configuration for the Ene mind runtime.
-    ///
-    /// Controls context budget, memory extraction/retention, emotion processing,
-    /// character compilation, and proactive companion speech.
     pub struct MindConfig {
         /// App-wide language for cognitive prompts and deterministic patterns
         /// (`en` or `ja`). Empty (the default) resolves to the system locale
@@ -23,12 +10,10 @@ ene_config::define_config!(
         /// `context.compression_language`) inherit the resolved value.
         pub language: String,
 
-        /// Context and token budget management.
         #[serde(skip_deserializing, default, skip_serializing)]
         #[schemars(skip)]
         pub context: ContextConfig,
 
-        /// Memory extraction, search, and retention settings.
         #[serde(skip_deserializing, default, skip_serializing)]
         #[schemars(skip)]
         pub memory: MindMemoryConfig,
@@ -37,31 +22,23 @@ ene_config::define_config!(
         /// `mind.memory` stays code-defaulted (see `MindMemoryConfig`).
         pub memory_limits: MindMemoryLimitsConfig,
 
-        /// Memory approval-workflow policy.
         pub memory_approval: MemoryApprovalConfig,
 
-        /// Emotion and expression processing settings.
         pub emotion: EmotionConfig,
 
-        /// Character card compilation settings.
         #[serde(skip_deserializing, default, skip_serializing)]
         #[schemars(skip)]
         pub character: CharacterMemoryConfig,
 
-        /// Proactive companion speech policy.
         pub proactive: ProactiveConfig,
 
-        /// Topic-boundary detection policy.
         pub topic_boundary: TopicBoundaryConfig,
 
-        /// Session lifecycle settings.
         pub session: SessionConfig,
     }
 );
 
 impl MindConfig {
-    /// Effective app-wide language: explicit [`MindConfig::language`] when
-    /// set, else the system-locale default.
     pub fn resolved_language(&self) -> &str {
         if self.language.is_empty() {
             ene_config::system_language()
@@ -71,8 +48,7 @@ impl MindConfig {
     }
 
     /// Effective language for the affect classifier and cognitive output
-    /// contract prompts: the per-task override when set, else the app-wide
-    /// [`MindConfig::resolved_language`].
+    /// contract prompts.
     pub fn resolved_classifier_language(&self) -> &str {
         if self.emotion.classifier_language.is_empty() {
             self.resolved_language()
@@ -81,8 +57,6 @@ impl MindConfig {
         }
     }
 
-    /// Effective language for compression summarization: the per-task
-    /// override when set, else the app-wide [`MindConfig::resolved_language`].
     pub fn resolved_compression_language(&self) -> &str {
         if self.context.compression_language.is_empty() {
             self.resolved_language()
@@ -102,24 +76,16 @@ impl MindConfig {
     }
 }
 
-// ────────────────────────────────────────────
-// Sub-sections
-// ────────────────────────────────────────────
-
-/// Context window, compression triggers, and rolling summarization.
-///
-/// Per-section token budgets were removed in #370: prompt packing now fills
-/// the model's effective context window in priority order rather than
-/// allocating fixed sub-budgets. The only window-related knob here is
-/// `max_prompt_tokens`, an optional operator cap on the prompt window.
+/// Prompt packing fills the model's effective context window in priority
+/// order rather than allocating fixed sub-budgets. The only window-related
+/// knob here is `max_prompt_tokens`, an optional operator cap on the prompt
+/// window.
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
 )]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ContextConfig {
-    /// Optional operator cap on the prompt window, in tokens.
-    ///
     /// When set, combined with the model's advertised window as
     /// `min(advertised, max_prompt_tokens)` when computing the effective
     /// context window, so it can only ever *shrink* a model's
@@ -127,25 +93,18 @@ pub struct ContextConfig {
     /// auto-follows the model's advertised window. Packing then fills that
     /// window in priority order rather than against per-section sub-budgets.
     pub max_prompt_tokens: Option<usize>,
-    /// Number of recent conversation turns to include in the prompt.
     pub recent_turns: usize,
-    /// Turn count threshold before scene-level compression runs.
     pub scene_turn_threshold: usize,
-    /// History token estimate at or above which window-pressure compression
-    /// runs. This is the secondary, token-based safety net that
+    /// This is the secondary, token-based safety net that
     /// complements the primary topic-boundary trigger: when a single topic
     /// runs long without a detected boundary, the oldest span is compressed
     /// once the retained history reaches this many estimated tokens. Replaces
     /// the former message-count ratio heuristic.
     pub context_pressure_tokens: usize,
-    /// Number of scene spans before chapter rollup.
     pub chapter_span_threshold: usize,
-    /// Number of chapter spans before arc rollup.
     pub arc_span_threshold: usize,
-    /// Timeout in seconds for a single compression summarization call.
     pub compression_timeout_secs: u64,
-    /// Prompt library language for compression summarizer. Empty (the
-    /// default) inherits [`MindConfig::language`].
+    /// Empty (the default) inherits [`MindConfig::language`].
     pub compression_language: String,
 }
 
@@ -164,34 +123,23 @@ impl Default for ContextConfig {
     }
 }
 
-/// Memory extraction, search, and lifecycle settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct MindMemoryConfig {
     /// Half-life in days for lifecycle decay score and recall recency scoring.
     pub default_forgetting_half_life_days: f64,
-    /// Half-life in days for the access-boost recency decay used in hybrid
-    /// recall scoring.
-    ///
     /// Access history fades on this timescale so old accesses stop boosting a
     /// memory's recall score. Defaults to [`ene_rag::ACCESS_BOOST_HALF_LIFE_DAYS`]
     /// (14.0), shorter than the typical content-forgetting half-life.
     pub access_boost_half_life_days: f64,
-    /// Score below which an active memory transitions to faded.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub fade_threshold: f32,
-    /// Score below which a faded memory transitions to archived.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub archive_threshold: f32,
-    /// Minimum confidence threshold for persisting a memory. This is a
-    /// probability, so values outside `0.0..=1.0` are clamped on load
-    /// (issue #95 confidence range guard).
+    /// Values outside `0.0..=1.0` are clamped on load.
     #[serde(deserialize_with = "deserialize_unit_interval")]
     pub min_confidence_to_persist: f64,
-    /// Minimum confidence margin by which an incoming candidate must exceed an
-    /// existing contradictory memory to *supersede* (replace) it.
-    ///
     /// One of the four arbiter thresholds (with [`Self::min_confidence_to_persist`],
     /// [`Self::semantic_similarity_threshold`], and [`Self::dispute_confidence_gap`]).
     /// When the candidate's confidence exceeds the existing memory's by at least
@@ -199,42 +147,28 @@ pub struct MindMemoryConfig {
     /// through to dispute / user-confirmation handling.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub supersede_confidence_delta: f32,
-    /// Cosine similarity at or above which two memories are treated as semantic
-    /// duplicates during deduplication.
-    ///
     /// This value is strongly dependent on the embedding model's similarity
     /// distribution, so it should be re-tuned when the embedding provider is
-    /// swapped (the provider layer is designed for exactly that, #318).
+    /// swapped.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub semantic_similarity_threshold: f32,
-    /// Confidence gap below which a contradictory candidate marks the existing
-    /// memory as *disputed* rather than superseding it or escalating to user
-    /// confirmation.
-    ///
     /// When the candidate's confidence is within this gap of the existing
     /// memory's (i.e. `candidate − existing > -dispute_confidence_gap`) the
     /// existing memory is flagged disputed; a larger shortfall defers the
     /// decision to user confirmation.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub dispute_confidence_gap: f32,
-    /// Character bigram Jaccard threshold for a relaxed `source_quote` match.
-    ///
     /// When normalized substring matching fails, the arbiter compares character
     /// bigrams between the quote and turn text. A score at or above this value
     /// accepts the quote but applies [`Self::source_quote_ngram_confidence_penalty`].
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub source_quote_ngram_threshold: f32,
-    /// Confidence subtracted when a `source_quote` passes only via the n-gram
-    /// fallback.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub source_quote_ngram_confidence_penalty: f32,
-    /// Timeout in seconds for a single LLM memory-extraction call. When the
+    /// When the
     /// provider does not respond within this budget the extraction fails and
-    /// the pipeline falls back to deterministic candidates (issue #66).
+    /// the pipeline falls back to deterministic candidates.
     pub extraction_timeout_secs: u64,
-    /// Minimum title-embedding cosine similarity for the arbiter to treat two
-    /// memories as sharing a contradiction key.
-    ///
     /// Kind-specific contradiction checks (`Preference`, `UserProfile`,
     /// `Semantic`, `Relationship`, and `Commitment` — see
     /// [`MemoryKind::is_contradiction_kind`](ene_core::MemoryKind::is_contradiction_kind))
@@ -250,18 +184,12 @@ pub struct MindMemoryConfig {
     /// embedding path.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub contradiction_title_similarity_threshold: f32,
-    /// Tool-result grounding and guardrail settings.
     pub tool_grounding: ToolGroundingConfig,
-    /// Maximum number of typed memories requested by recall planning.
     pub recall_result_limit: usize,
-    /// Minimum vector similarity for cognitive recall candidates.
-    ///
     /// Distinct from `journal_similarity_threshold` — recall uses a more
     /// lenient similarity gate (default 0.35 vs 0.45 for journal) paired with
     /// the same hybrid score floor (default 0.10 for both).
     pub recall_similarity_threshold: f32,
-    /// Minimum hybrid score required for cognitive recall results.
-    ///
     /// Distinct from `journal_min_score` — the recall path uses a slightly
     /// stricter cutoff (default 0.10 vs 0.05 for journal) to favor
     /// high-quality memories for LLM context injection. The hybrid formula
@@ -273,27 +201,17 @@ pub struct MindMemoryConfig {
     /// MMR relevance-vs-diversity tradeoff in `[0.0, 1.0]`; higher favors relevance.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub mmr_lambda: f32,
-    /// Lexical similarity threshold for duplicate cluster merging.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub mmr_duplicate_cluster_threshold: f32,
-    /// Minimum recalled slots reserved for semantic memories.
     pub mmr_min_slots_semantic: usize,
-    /// Minimum recalled slots reserved for episodic memories.
     pub mmr_min_slots_episodic: usize,
-    /// Minimum recalled slots reserved for user profile memories.
     pub mmr_min_slots_user_profile: usize,
-    /// Minimum recalled slots reserved for commitment memories.
     pub mmr_min_slots_commitment: usize,
-    /// Bonus added to MMR score when a candidate introduces a new recall source.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub mmr_source_diversity_bonus: f32,
     /// Hybrid scoring component weights (product defaults live here; store only applies them).
     pub hybrid_weights: ene_core::HybridSearchWeights,
-    /// Score boost when a candidate is sourced from an active commitment.
     pub commitment_boost: f32,
-    /// Minimum title embedding similarity for the commitment ledger to treat two
-    /// commitments as the same one.
-    ///
     /// The ledger matches incoming commitment candidates against active rows by
     /// comparing the cosine similarity of their **title embeddings**. A candidate
     /// whose title is at least this similar to an existing active commitment
@@ -304,10 +222,7 @@ pub struct MindMemoryConfig {
     /// title equality, so this threshold only applies on the embedding path.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub commitment_title_similarity_threshold: f32,
-    /// Maximum pure-recent fallback candidates gathered during hybrid search.
     pub recent_fallback_limit: usize,
-    /// Maximum unconfirmed pending candidates that compete in recall.
-    ///
     /// Candidates the arbiter deferred with `AskConfirmationLater` sit
     /// in the user-approval queue rather than the typed-memory table, so the
     /// store's gather cannot surface them. Recall loads the live `pending`
@@ -318,60 +233,42 @@ pub struct MindMemoryConfig {
     /// pending-candidate recall entirely (the settings-screen review list is
     /// unaffected).
     pub recall_pending_candidate_limit: usize,
-    /// Candidate pool size multiplier base for journal / diagnostics search.
     pub journal_candidate_pool_size: usize,
-    /// Minimum vector similarity for journal / diagnostics search.
-    ///
     /// Distinct from `recall_similarity_threshold` — journal search is
     /// user-facing and uses a stricter similarity gate (default 0.45 vs 0.35
     /// for recall) while accepting the same hybrid score floor (default 0.10
     /// for both).
     pub journal_similarity_threshold: f32,
-    /// Minimum hybrid score for journal / diagnostics search.
-    ///
     /// Distinct from `recall_min_score`. The journal defaults to the same
     /// floor (0.10) so user-facing search returns broad results; the cognitive
     /// recall path can raise it per-character if needed.
     pub journal_min_score: f32,
-    /// Self-reflection pipeline configuration.
     #[serde(default)]
     pub reflection: ReflectionConfig,
-    /// Pending memory-candidate retention policy.
     #[serde(default)]
     pub pending_candidate_retention: PendingCandidateRetentionConfig,
 }
 
-/// Tool-result grounding and guardrail settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ToolGroundingConfig {
-    /// Enable grounding tool call results into cognitive memory.
     pub enabled: bool,
-    /// Maximum characters kept for each tool summary stored in memory.
     pub max_summary_chars: usize,
-    /// Persist successful tool calls as procedure memories.
-    ///
     /// Default `false`: lasting value is decided by the post-turn LLM
     /// extractor. Enable only as a deterministic fallback when LLM extraction
     /// is disabled or returns nothing.
     pub persist_success_procedure: bool,
-    /// Persist failed tool calls as reflection memories.
-    ///
     /// Used as a fallback when LLM extraction does not own the turn; the LLM
     /// path may still choose to persist important failures itself.
     pub persist_failure_reflection: bool,
-    /// Persist concise user-visible tool outcomes as episodic memories.
-    ///
     /// Default `false` for the same reason as [`Self::persist_success_procedure`].
     pub persist_user_visible_episodic: bool,
-    /// Minimum confidence for tool-derived candidates.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub min_confidence: f32,
 }
 
-/// Clamp a deserialized confidence into the closed unit interval
-/// `0.0..=1.0`. Out-of-range user config values are clamped rather
+/// Out-of-range user config values are clamped rather
 /// than rejected so a bad hand-edit degrades gracefully instead of
 /// failing the boot path.
 fn deserialize_unit_interval<'de, D>(deserializer: D) -> Result<f64, D::Error>
@@ -382,8 +279,6 @@ where
     Ok(f64::deserialize(deserializer)?.clamp(0.0, 1.0))
 }
 
-/// Clamp a finite value into the closed unit interval `0.0..=1.0`.
-///
 /// Non-finite input is rejected by the caller rather than mapped to a value —
 /// see [`deserialize_unit_interval_f32`] for why no substitute is safe.
 fn clamp_unit_interval_f32(value: f32) -> f32 {
@@ -462,8 +357,6 @@ impl Default for MindMemoryConfig {
     }
 }
 
-/// Operator-tunable memory limits exposed in settings.
-///
 /// Only these fields are configurable; the rest of memory behavior is
 /// code-defaulted to keep the settings surface small and validated.
 #[derive(
@@ -472,8 +365,6 @@ impl Default for MindMemoryConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct MindMemoryLimitsConfig {
-    /// Maximum active ledger rows loaded for in-process title matching.
-    ///
     /// Each apply batch lists up to this many active commitments and runs
     /// embedding (or exact) title matching over that slice. The default
     /// (4096) is far above any plausible concurrent active-commitment count
@@ -496,8 +387,6 @@ impl Default for MindMemoryLimitsConfig {
     }
 }
 
-/// Memory approval-workflow policy.
-///
 /// Registered as the `mind.memory_approval` settings section (env override:
 /// `ENE_MIND__MEMORY_APPROVAL__REQUIRE_APPROVAL`) so the pre-save approval
 /// switch is operator-configurable without re-exposing the deliberately
@@ -508,9 +397,6 @@ impl Default for MindMemoryLimitsConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct MemoryApprovalConfig {
-    /// Require explicit user approval before extracted candidates are
-    /// persisted to typed memory.
-    ///
     /// When `true`, candidates that would otherwise be persisted or
     /// supersede an existing memory are parked in the pending-candidate
     /// queue instead, and unapproved candidates are excluded from normal
@@ -522,8 +408,6 @@ pub struct MemoryApprovalConfig {
     pub require_approval: bool,
 }
 
-/// Retention policy for the pending memory-candidate approval queue.
-///
 /// Candidates now persist to the `pending_candidates` table so they survive
 /// restarts; without a policy that table would grow without bound. Both limits
 /// are enforced together on the post-turn forgetting sweep
@@ -534,16 +418,12 @@ pub struct MemoryApprovalConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct PendingCandidateRetentionConfig {
-    /// Auto-expire candidates older than this many days (`Faded`-equivalent).
-    ///
     /// Applies to candidates of **every status, including unanswered
     /// (`pending`) ones**: a candidate left unreviewed past this age is
     /// dropped so the queue cannot grow without bound even when the count cap
     /// is disabled, and a resolved candidate older than this has no further UI
     /// value anyway. `0` disables age expiry.
     pub max_age_days: u32,
-    /// Maximum pending (unresolved) candidates kept per character per user.
-    ///
     /// When the live queue exceeds this cap the oldest overflow is dropped.
     /// The cap is scoped to the acting user (plus character-shared rows), so
     /// on a multi-user database one user's overflow cannot evict another
@@ -575,20 +455,14 @@ impl Default for ToolGroundingConfig {
     }
 }
 
-/// Self-reflection pipeline configuration.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ReflectionConfig {
-    /// Enable the self-reflection pipeline.
     pub enabled: bool,
-    /// Minimum number of turns between reflection generation passes.
     pub interval_turns: usize,
-    /// Minimum number of recorded outcomes required to trigger reflection.
     pub min_outcomes: usize,
-    /// Score multiplier applied to memories matching successful strategies.
     pub success_boost: f32,
-    /// Score multiplier applied to memories matching strategies to avoid.
     pub failure_penalty: f32,
 }
 
@@ -604,14 +478,11 @@ impl Default for ReflectionConfig {
     }
 }
 
-/// Emotion engine and expression arbitration settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct EmotionConfig {
-    /// Enable emotion processing.
     pub enabled: bool,
-    /// Half-life in minutes for affect decay.
     #[serde(
         skip_deserializing,
         default = "default_decay_half_life_minutes",
@@ -619,7 +490,6 @@ pub struct EmotionConfig {
     )]
     #[schemars(skip)]
     pub decay_half_life_minutes: f64,
-    /// Minimum seconds between expression changes (hysteresis).
     #[serde(
         skip_deserializing,
         default = "default_expression_hysteresis_seconds",
@@ -627,7 +497,6 @@ pub struct EmotionConfig {
     )]
     #[schemars(skip)]
     pub expression_hysteresis_seconds: f64,
-    /// Allow the LLM to propose expression tokens.
     #[serde(
         skip_deserializing,
         default = "default_llm_can_propose_expression",
@@ -635,7 +504,6 @@ pub struct EmotionConfig {
     )]
     #[schemars(skip)]
     pub llm_can_propose_expression: bool,
-    /// Timeout in seconds for a single LLM affect-classifier call.
     #[serde(
         skip_deserializing,
         default = "default_classifier_timeout_secs",
@@ -643,7 +511,6 @@ pub struct EmotionConfig {
     )]
     #[schemars(skip)]
     pub classifier_timeout_secs: u64,
-    /// Minimum classifier confidence to apply LLM affect deltas.
     #[serde(
         skip_deserializing,
         default = "default_classifier_min_confidence",
@@ -651,8 +518,7 @@ pub struct EmotionConfig {
     )]
     #[schemars(skip)]
     pub classifier_min_confidence: f32,
-    /// Prompt library language for affect classifier and cognitive output
-    /// contract. Empty (the default) inherits [`MindConfig::language`].
+    /// Empty (the default) inherits [`MindConfig::language`].
     pub classifier_language: String,
 }
 
@@ -690,8 +556,6 @@ const fn default_classifier_min_confidence() -> f32 {
     0.5
 }
 
-/// Character card compilation settings.
-///
 /// The Identity Kernel budget is no longer a fixed setting: it is derived from
 /// the model's available context window at compile time, so there are
 /// currently no user-facing fields here. The section is retained as the home
@@ -704,8 +568,6 @@ const fn default_classifier_min_confidence() -> f32 {
 #[derive(Default)]
 pub struct CharacterMemoryConfig {}
 
-/// Session lifecycle policy.
-///
 /// Automatic splits are limited to inactivity timeouts and manual requests.
 /// Topic changes are handled by compression, not session splits.
 #[derive(
@@ -727,8 +589,6 @@ impl Default for SessionConfig {
     }
 }
 
-/// Topic-boundary detection policy.
-///
 /// Detection maintains a topic **centroid** (an exponentially weighted moving
 /// average of the embeddings belonging to the current topic) and scores each
 /// completed turn with a composite of the cosine distance from the centroid,
@@ -740,18 +600,12 @@ impl Default for SessionConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct TopicBoundaryConfig {
-    /// Master switch for topic-boundary detection.
     pub enabled: bool,
-    /// Composite score (`0.0..=1.0`) at or above which a turn is flagged as a
-    /// topic boundary. Session splitting is expected to use a higher threshold
+    /// Session splitting is expected to use a higher threshold
     /// than compression.
     pub boundary_threshold: f32,
-    /// Weight of the centroid-distance term in the composite score.
     pub weight_centroid: f32,
-    /// Weight of the silence term in the composite score.
     pub weight_silence: f32,
-    /// Weight of the topic-length (turn-count) term in the composite score.
-    ///
     /// Invariant: this must stay **below** `boundary_threshold`. The topic-length
     /// factor saturates at `1.0` once a topic reaches `max_topic_turns`, so a
     /// weight at or above the threshold would fire a boundary on its own —
@@ -793,8 +647,6 @@ impl Default for TopicBoundaryConfig {
     }
 }
 
-/// Intermediate deserialize shape for [`TopicBoundaryConfig`].
-///
 /// Applies unit-interval clamping per field, then
 /// [`From<TopicBoundaryConfigDe>`] enforces
 /// `weight_topic_length < boundary_threshold`.
@@ -911,7 +763,6 @@ pub enum WindowTitleLevel {
     FullTitle,
 }
 
-/// Input sources for proactive speech decisions.
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
 )]
@@ -953,20 +804,16 @@ impl Default for ProactiveSourcesConfig {
 }
 
 impl ProactiveSourcesConfig {
-    /// Returns true when at least one source is enabled.
     #[must_use]
     pub const fn any_enabled(&self) -> bool {
         self.conversation || self.activity || self.screen_summary || self.memory
     }
 }
 
-/// Decision confidence threshold for proactive speech.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ProactiveDecisionConfig {
-    /// Minimum confidence required before generation starts.
-    ///
     /// When `confirmation_enabled` is set, the effective gate is this value
     /// minus [`CONFIRMATION_CONFIDENCE_OFFSET`] — see
     /// [`ProactiveConfig::effective_decision_min_confidence`] — so borderline
@@ -992,8 +839,6 @@ impl Default for ProactiveDecisionConfig {
     }
 }
 
-/// Weekday enable flags for quiet hours.
-///
 /// Weekday names are stable English contract keys (`monday`..`sunday`), not
 /// display strings; the settings UI localizes them.
 #[derive(
@@ -1002,24 +847,16 @@ impl Default for ProactiveDecisionConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct QuietHoursDaysConfig {
-    /// Monday.
     pub monday: bool,
-    /// Tuesday.
     pub tuesday: bool,
-    /// Wednesday.
     pub wednesday: bool,
-    /// Thursday.
     pub thursday: bool,
-    /// Friday.
     pub friday: bool,
-    /// Saturday.
     pub saturday: bool,
-    /// Sunday.
     pub sunday: bool,
 }
 
 impl QuietHoursDaysConfig {
-    /// True when at least one weekday is enabled.
     #[must_use]
     pub const fn any(&self) -> bool {
         self.monday
@@ -1031,7 +868,6 @@ impl QuietHoursDaysConfig {
             || self.sunday
     }
 
-    /// Whether the given weekday is enabled.
     #[must_use]
     pub fn contains(&self, weekday: chrono::Weekday) -> bool {
         match weekday {
@@ -1053,9 +889,7 @@ impl QuietHoursDaysConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct QuietHoursTimeConfig {
-    /// Hour of day (0..=23).
     pub hour: u8,
-    /// Minute of hour (0..=59).
     pub minute: u8,
 }
 
@@ -1077,7 +911,6 @@ impl QuietHoursTimeConfig {
     }
 }
 
-/// Output channels suppressed during quiet hours.
 #[derive(
     Debug, Clone, Copy, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
 )]
@@ -1104,7 +937,6 @@ impl Default for QuietHoursSuppressConfig {
     }
 }
 
-/// What happens to speech suppressed by quiet hours.
 #[derive(
     Debug,
     Clone,
@@ -1157,11 +989,8 @@ impl std::fmt::Display for QuietHoursPolicy {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct QuietHoursConfig {
-    /// Master switch for quiet hours.
     pub enabled: bool,
-    /// IANA timezone name; empty resolves to the system local timezone.
     pub timezone: String,
-    /// Weekdays the window applies to.
     pub days: QuietHoursDaysConfig,
     /// Window start (inclusive), local wall time.
     pub start: QuietHoursTimeConfig,
@@ -1170,9 +999,7 @@ pub struct QuietHoursConfig {
     /// following morning, gated by the start day's weekday. Equal to `start`
     /// is an empty window.
     pub end: QuietHoursTimeConfig,
-    /// Output channels suppressed while the window is active.
     pub suppress: QuietHoursSuppressConfig,
-    /// Disposition of speech suppressed by the `decisions` channel.
     pub policy: QuietHoursPolicy,
 }
 
@@ -1210,16 +1037,13 @@ impl Default for QuietHoursConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ProactiveConfig {
-    /// Master switch for proactive companion speech.
     pub enabled: bool,
-    /// Observation / decision tick interval in seconds.
     #[serde(deserialize_with = "deserialize_positive_u64")]
     pub interval_seconds: u64,
     /// Suppress decisions until this many seconds after the last user input.
     pub min_idle_seconds: u64,
     /// Suppress further proactive speech after a proactive utterance.
     pub cooldown_seconds: u64,
-    /// Maximum proactive utterances per conversation session.
     #[serde(
         skip_deserializing,
         default = "default_max_turns_per_session",
@@ -1227,7 +1051,6 @@ pub struct ProactiveConfig {
     )]
     #[schemars(skip)]
     pub max_turns_per_session: usize,
-    /// Timeout for the lightweight decision call.
     #[serde(
         skip_deserializing,
         default = "default_decision_timeout_seconds",
@@ -1235,7 +1058,6 @@ pub struct ProactiveConfig {
     )]
     #[schemars(skip)]
     pub decision_timeout_seconds: u64,
-    /// Timeout for high-quality proactive generation.
     #[serde(
         skip_deserializing,
         default = "default_generation_timeout_seconds",
@@ -1243,9 +1065,7 @@ pub struct ProactiveConfig {
     )]
     #[schemars(skip)]
     pub generation_timeout_seconds: u64,
-    /// Per-source enable flags.
     pub sources: ProactiveSourcesConfig,
-    /// Decision confidence gate.
     #[serde(skip_deserializing, default, skip_serializing)]
     #[schemars(skip)]
     pub decision: ProactiveDecisionConfig,
@@ -1256,11 +1076,9 @@ pub struct ProactiveConfig {
     /// When enabled, [`Self::effective_decision_min_confidence`] lowers the
     /// decision threshold so borderline candidates reach the main model.
     pub confirmation_enabled: bool,
-    /// When true, proactive generation may select tools (default false).
     #[serde(skip_deserializing, default, skip_serializing)]
     #[schemars(skip)]
     pub allow_tools: bool,
-    /// Max characters of conversation history included in the decision prompt.
     #[serde(
         skip_deserializing,
         default = "default_max_conversation_chars",
@@ -1268,7 +1086,6 @@ pub struct ProactiveConfig {
     )]
     #[schemars(skip)]
     pub max_conversation_chars: usize,
-    /// Max characters of activity snapshot text.
     #[serde(
         skip_deserializing,
         default = "default_max_activity_chars",
@@ -1276,7 +1093,6 @@ pub struct ProactiveConfig {
     )]
     #[schemars(skip)]
     pub max_activity_chars: usize,
-    /// Max characters of screen summary text.
     #[serde(
         skip_deserializing,
         default = "default_max_screen_summary_chars",
@@ -1284,7 +1100,6 @@ pub struct ProactiveConfig {
     )]
     #[schemars(skip)]
     pub max_screen_summary_chars: usize,
-    /// Maximum user memory one-liners injected into the decision context.
     #[serde(
         skip_deserializing,
         default = "default_max_memory_notes",
@@ -1302,13 +1117,10 @@ pub struct ProactiveConfig {
     /// and the other gates. Takes priority over quiet hours and clears any
     /// pending quiet-hours catch-up queue.
     pub paused: bool,
-    /// Quiet-hours suppression policy (see [`QuietHoursConfig`]).
     #[serde(default)]
     pub quiet_hours: QuietHoursConfig,
-    /// Proactive confirmation of old pending memory candidates.
     #[serde(default)]
     pub pending_confirmation: PendingConfirmationConfig,
-    /// Structured time-series world state memory (see [`WorldStateConfig`]).
     #[serde(default)]
     pub world_state: WorldStateConfig,
 }
@@ -1330,19 +1142,16 @@ pub struct ProactiveConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct WorldStateConfig {
-    /// Master switch for world-state memory.
     pub enabled: bool,
     /// Ring capacity: the newest snapshots are kept, the oldest dropped.
     #[serde(deserialize_with = "deserialize_positive_usize")]
     pub max_snapshots: usize,
-    /// Minimum snapshots before the trend summary and its gate apply.
     #[serde(deserialize_with = "deserialize_positive_usize")]
     pub min_snapshots_for_trend: usize,
     /// Latest idle value below this many seconds counts as "engaged" (only
     /// when the host measures OS idle).
     #[serde(deserialize_with = "deserialize_positive_u64")]
     pub engaged_idle_seconds: u64,
-    /// Number of recent snapshots counted for the window-change trend.
     #[serde(deserialize_with = "deserialize_positive_usize")]
     pub change_window: usize,
 }
@@ -1398,16 +1207,13 @@ impl Default for ProactiveConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct PendingConfirmationConfig {
-    /// Enable proactive confirmation of old pending candidates.
     pub enabled: bool,
     /// Minimum candidate age (days since creation) before it may be asked
     /// about. `0` asks as soon as a candidate exists.
     pub min_age_days: u32,
-    /// Minimum candidate confidence (0.0..=1.0) before it may be asked about.
     /// Out-of-range values are clamped on load.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub min_confidence: f32,
-    /// Minimum days between confirmation attempts of the same candidate.
     /// `0` allows re-asking immediately after a delivered question; without
     /// this backoff an unclear reply would re-arm the candidate on the next
     /// eligible tick and nag the user.
@@ -1426,8 +1232,6 @@ impl Default for PendingConfirmationConfig {
 }
 
 impl ProactiveConfig {
-    /// The decision confidence gate actually applied.
-    ///
     /// With `confirmation_enabled` the threshold is lowered by
     /// [`CONFIRMATION_CONFIDENCE_OFFSET`] (never below zero) so the decision
     /// model acts as a recall stage; without it the configured value applies.
@@ -1448,18 +1252,12 @@ impl ProactiveConfig {
 /// sooner than the next poll tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProactiveIntervalIssue {
-    /// `min_idle_seconds` is shorter than `interval_seconds`.
     MinIdle {
-        /// Configured minimum idle seconds.
         min_idle_seconds: u64,
-        /// Configured poll interval seconds.
         interval_seconds: u64,
     },
-    /// `cooldown_seconds` is shorter than `interval_seconds`.
     Cooldown {
-        /// Configured cooldown seconds.
         cooldown_seconds: u64,
-        /// Configured poll interval seconds.
         interval_seconds: u64,
     },
 }
@@ -1500,17 +1298,12 @@ impl ProactiveIntervalIssue {
     }
 }
 
-/// Validate that proactive idle / cooldown thresholds are not shorter than
-/// the poll interval.
-///
 /// A shorter threshold is not rejected: operators may intentionally poll
 /// infrequently while keeping a low gate. Speech still cannot fire sooner
 /// than the next tick, so the caller should warn. When `enabled` is false
 /// the thresholds are never exercised, so validation is skipped entirely.
 #[must_use]
 pub fn validate_proactive_intervals(config: &ProactiveConfig) -> Vec<ProactiveIntervalIssue> {
-    // Proactive speech is disabled: the thresholds can never be exercised,
-    // so timing relationships cannot matter.
     if !config.enabled {
         return Vec::new();
     }
@@ -1530,9 +1323,6 @@ pub fn validate_proactive_intervals(config: &ProactiveConfig) -> Vec<ProactiveIn
     issues
 }
 
-/// Emit a `tracing::warn!` for each proactive timing threshold shorter than
-/// the poll interval.
-///
 /// Convenience wrapper over [`validate_proactive_intervals`] for startup
 /// paths that only need the side effect. Emits nothing while proactive
 /// speech is disabled.
@@ -1610,7 +1400,7 @@ mod tests {
 
     /// Out-of-range `min_confidence_to_persist` values from a
     /// hand-edited config are clamped into `0.0..=1.0` on load rather
-    /// than accepted verbatim (issue #95 confidence range guard).
+    /// than accepted verbatim.
     #[test]
     fn min_confidence_out_of_range_is_clamped() {
         let high: MindMemoryConfig =
@@ -1671,8 +1461,8 @@ mod tests {
         assert!(low.commitment_title_similarity_threshold < f32::EPSILON);
     }
 
-    /// The three arbiter thresholds added in #352 clamp out-of-range config
-    /// values into `0.0..=1.0` on load, matching `min_confidence_to_persist`.
+    /// The three arbiter thresholds clamp out-of-range config values into
+    /// `0.0..=1.0` on load, matching `min_confidence_to_persist`.
     #[test]
     fn arbiter_thresholds_out_of_range_are_clamped() {
         let high: MindMemoryConfig = serde_json::from_str(
@@ -2043,7 +1833,6 @@ mod tests {
                 < f64::EPSILON
         );
 
-        // The effective gate never goes below zero.
         let mut low = default;
         low.decision.min_confidence = 0.1;
         low.confirmation_enabled = true;

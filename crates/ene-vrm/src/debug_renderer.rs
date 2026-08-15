@@ -28,15 +28,11 @@ const SHADER_SOURCE: &str = include_str!("shaders/debug_line.wgsl");
 #[doc(hidden)]
 pub const DEFAULT_LINE_CAPACITY: usize = 8_192;
 
-/// Number of longitude (meridian) lines per wireframe
-/// sphere. Higher values smooth the silhouette at the cost
-/// of more vertices.
+/// Higher values smooth the silhouette at the cost of more vertices.
 pub const SPHERE_LONGITUDES: usize = 16;
 
-/// Number of latitude (parallel) lines per wireframe
-/// sphere, **not counting the equator**. The equator is
-/// always drawn (it's a latitude too), so the total
-/// latitude line count is `SPHERE_LATITUDES + 1`.
+/// Not counting the equator: the equator is always drawn (it's a latitude
+/// too), so the total latitude line count is `SPHERE_LATITUDES + 1`.
 pub const SPHERE_LATITUDES: usize = 8;
 
 /// Half-edge length (in world units) of the cross drawn at
@@ -44,21 +40,15 @@ pub const SPHERE_LATITUDES: usize = 8;
 /// a marker but large enough to be picked out at 640×480.
 pub const CROSS_HALF_EXTENT: f32 = 0.05;
 
-/// Vertex layout consumed by the line shader.
-///
 /// Hidden from the "Supported API" docs — an internal GPU vertex format; hosts build
 /// [`DebugLine`]s and never touch this type directly.
 #[doc(hidden)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DebugVertex {
-    /// World-space position of this endpoint of the line
-    /// segment. The vertex shader transforms it by
-    /// `view_proj` to clip space.
+    /// World-space position of this endpoint of the line segment.
     pub pos: [f32; 3],
-    /// Linear-space RGBA color of this endpoint. The
-    /// fragment shader emits it directly (premultiplied
-    /// alpha compositing on the way out).
+    /// Linear-space RGBA, premultiplied-alpha composited on the way out.
     pub color: [f32; 4],
 }
 
@@ -75,7 +65,6 @@ impl DebugVertex {
     };
 }
 
-/// One line segment in the debug overlay.
 #[derive(Debug, Clone, Copy)]
 pub struct DebugLine {
     /// First endpoint, in world space.
@@ -87,7 +76,6 @@ pub struct DebugLine {
 }
 
 impl DebugLine {
-    /// Two vertices (one per endpoint) with the same color.
     fn vertices(self) -> [DebugVertex; 2] {
         [
             DebugVertex {
@@ -102,9 +90,7 @@ impl DebugLine {
     }
 }
 
-/// Push the wireframe of a sphere centred at `center`
-/// with the given `radius` into `out`. The sphere is
-/// composed of `SPHERE_LONGITUDES` meridians plus
+/// The sphere is composed of `SPHERE_LONGITUDES` meridians plus
 /// `SPHERE_LATITUDES + 1` latitude rings, each broken into
 /// `SPHERE_LONGITUDES` segments. All lines share `color`.
 pub fn sphere_wireframe_lines_into(
@@ -155,8 +141,7 @@ pub fn sphere_wireframe_lines_into(
     }
 }
 
-/// Push the wireframe of a Y-axis capsule into `out`. The
-/// capsule is a cylinder of `half_height` capped by two
+/// The capsule is a cylinder of `half_height` capped by two
 /// hemispheres of `radius`. Wireframe elements:
 ///
 /// - top cap (a circle of `radius` at y = +`half_height`),
@@ -190,9 +175,7 @@ pub fn capsule_wireframe_lines_into(
     let top = center + y_axis * half_height;
     let bottom = center - y_axis * half_height;
 
-    // Two caps (top and bottom) drawn as `SPHERE_LONGITUDES`
-    // segments each. The caps lie in the plane
-    // perpendicular to the capsule's +Y axis.
+    // The caps lie in the plane perpendicular to the capsule's +Y axis.
     for i in 0..SPHERE_LONGITUDES {
         let t0 = (i as f32 / SPHERE_LONGITUDES as f32) * std::f32::consts::TAU;
         let t1 = ((i + 1) as f32 / SPHERE_LONGITUDES as f32) * std::f32::consts::TAU;
@@ -229,9 +212,8 @@ pub fn capsule_wireframe_lines_into(
     }
 }
 
-/// Push a 3-segment cross (X, Y, Z) at `center` into
-/// `out`. Used to mark the raycast hit point so the
-/// precise impact location is obvious.
+/// Used to mark the raycast hit point so the precise impact location is
+/// obvious.
 pub fn cross_lines(
     center: glam::Vec3,
     half_extent: f32,
@@ -282,10 +264,9 @@ pub struct DebugRenderer {
 }
 
 impl DebugRenderer {
-    /// Build a new debug renderer for the given surface
-    /// format. The depth format is fixed at `Depth32Float`
-    /// to match the main VRM pass; mixing depth formats
-    /// would cause the GPU to reject the depth attachment.
+    /// The depth format is fixed at `Depth32Float` to match the main VRM
+    /// pass; mixing depth formats would cause the GPU to reject the depth
+    /// attachment.
     #[must_use]
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -395,31 +376,24 @@ impl DebugRenderer {
         }
     }
 
-    /// Drop every line accumulated so far.
     pub fn clear(&mut self) {
         self.lines.clear();
     }
 
-    /// Number of lines currently buffered (not yet flushed
-    /// to the GPU).
     pub const fn line_count(&self) -> usize {
         self.lines.len()
     }
 
-    /// Push a single line segment.
     pub fn push_line(&mut self, line: DebugLine) {
         self.lines.push(line);
     }
 
-    /// Push a wireframe sphere at `center` with `radius`.
     pub fn push_sphere_wireframe(&mut self, center: glam::Vec3, radius: f32, color: glam::Vec4) {
         sphere_wireframe_lines_into(center, radius, color, &mut self.lines);
     }
 
-    /// Push a wireframe Y-axis capsule. `orientation`
-    /// rotates the capsule's local +Y to the world
-    /// direction the bone's "toward-child" axis points in
-    /// (identity for trunk bones).
+    /// `orientation` rotates the capsule's local +Y to the world direction
+    /// the bone's "toward-child" axis points in (identity for trunk bones).
     pub fn push_capsule_wireframe(
         &mut self,
         center: glam::Vec3,
@@ -438,18 +412,15 @@ impl DebugRenderer {
         );
     }
 
-    /// Push a 3-segment cross (X, Y, Z) at `center`. The
-    /// cross is drawn at the raycast hit point to make the
-    /// precise impact location obvious.
+    /// The cross is drawn at the raycast hit point to make the precise
+    /// impact location obvious.
     pub fn push_cross(&mut self, center: glam::Vec3, half_extent: f32, color: glam::Vec4) {
         cross_lines(center, half_extent, color, &mut self.lines);
     }
 
-    /// Draw the accumulated lines into `view` and submit
-    /// the resulting command buffer. The depth attachment
-    /// is `LoadOp::Load` (preserves the model's depth); the
-    /// pipeline's `CompareFunction::Always` depth test draws
-    /// the wires on top of the model.
+    /// The depth attachment is `LoadOp::Load` (preserves the model's depth);
+    /// the pipeline's `CompareFunction::Always` depth test draws the wires
+    /// on top of the model.
     ///
     /// `camera_uniform` is uploaded to the camera binding
     /// every frame so the debug lines transform with the
@@ -539,16 +510,9 @@ impl DebugRenderer {
 #[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
 mod tests {
     use super::*;
-    /// Each sphere consists of `SPHERE_LONGITUDES` meridians
-    /// (each split into `SPHERE_LONGITUDES` straight
-    /// segments) plus `SPHERE_LATITUDES + 1` latitude rings
-    /// (each split into `SPHERE_LONGITUDES` segments).
     const SPHERE_LINE_COUNT: usize =
         SPHERE_LONGITUDES * SPHERE_LONGITUDES + (SPHERE_LATITUDES + 1) * SPHERE_LONGITUDES;
 
-    /// A sphere at the origin with radius 1 must have
-    /// every vertex on the surface of the unit sphere
-    /// (|p|^2 ∈ [1, 1 + ε]).
     #[test]
     fn sphere_wireframe_lines_lie_on_unit_sphere() {
         let center = glam::Vec3::ZERO;
@@ -566,8 +530,6 @@ mod tests {
         }
     }
 
-    /// A sphere at `c` with radius `r` should have all
-    /// vertices on the surface `|p - c|^2 = r^2`.
     #[test]
     fn sphere_wireframe_lines_translate_and_scale() {
         let center = glam::Vec3::new(1.0, -2.0, 3.0);
@@ -585,8 +547,6 @@ mod tests {
         }
     }
 
-    /// `cross_lines` always produces exactly three line
-    /// segments (X / Y / Z), one per world axis.
     #[test]
     fn cross_lines_produces_three_segments_one_per_axis() {
         let mut out = Vec::new();
@@ -606,9 +566,6 @@ mod tests {
         assert!(axes_hit.iter().all(|h| *h), "cross must hit all three axes");
     }
 
-    /// `DebugLine::vertices` must produce two vertices
-    /// with the same color and positions matching the
-    /// line's endpoints.
     #[test]
     fn debug_line_vertices_match_endpoints() {
         let line = DebugLine {
@@ -623,9 +580,8 @@ mod tests {
         assert_eq!(vs[1].color, [0.1, 0.2, 0.3, 0.4]);
     }
 
-    /// `DebugVertex` must be `Pod` and `Zeroable` (the
-    /// `bytemuck` derives guarantee this at compile
-    /// time); just confirm the size is 28 bytes.
+    /// The `bytemuck` derives guarantee `Pod`/`Zeroable` at compile time;
+    /// this test only pins the layout size.
     #[test]
     fn debug_vertex_is_28_bytes() {
         assert_eq!(std::mem::size_of::<DebugVertex>(), 28);

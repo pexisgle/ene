@@ -27,7 +27,6 @@ pub struct PluginCapabilities {
     #[serde(default)]
     pub tools: usize,
 
-    /// LLM providers exposed by this plugin.
     #[serde(default)]
     pub llm_providers: Vec<LlmProviderSpec>,
 
@@ -135,11 +134,6 @@ pub struct PluginCapabilities {
 pub struct CapabilityRef(String);
 
 impl CapabilityRef {
-    /// Parses and validates a `name@major` capability reference.
-    ///
-    /// # Errors
-    /// Returns [`CapabilityParseError`] when the string is not a valid
-    /// `name@major` reference.
     pub fn parse(raw: &str) -> Result<Self, CapabilityParseError> {
         let (name, major) = raw
             .split_once('@')
@@ -153,14 +147,11 @@ impl CapabilityRef {
         Ok(Self(raw.to_string()))
     }
 
-    /// Returns the raw `name@major` string.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Returns the capability name (the part before `@`).
-    ///
     /// `None` only for a string that was deserialized without validation —
     /// values constructed via [`Self::parse`] always have one.
     #[must_use]
@@ -168,8 +159,6 @@ impl CapabilityRef {
         self.0.split_once('@').map(|(name, _)| name)
     }
 
-    /// Returns the major version (the part after `@`).
-    ///
     /// `None` only for a string that was deserialized without validation —
     /// values constructed via [`Self::parse`] always have one.
     #[must_use]
@@ -219,11 +208,6 @@ impl fmt::Display for CapabilityRef {
 pub struct CapabilityRequirement(String);
 
 impl CapabilityRequirement {
-    /// Parses and validates a `name@[^]major[?]` capability requirement.
-    ///
-    /// # Errors
-    /// Returns [`CapabilityParseError`] when the string is not a valid
-    /// requirement.
     pub fn parse(raw: &str) -> Result<Self, CapabilityParseError> {
         let without_soft = raw.strip_suffix('?').unwrap_or(raw);
         let (name, rest) = without_soft
@@ -239,14 +223,11 @@ impl CapabilityRequirement {
         Ok(Self(raw.to_string()))
     }
 
-    /// Returns the raw `name@[^]major[?]` string.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Returns the capability name (the part before `@`).
-    ///
     /// `None` only for a string that was deserialized without validation.
     #[must_use]
     pub fn name(&self) -> Option<&str> {
@@ -257,8 +238,6 @@ impl CapabilityRequirement {
             .map(|(name, _)| name)
     }
 
-    /// Returns the required major version.
-    ///
     /// `None` only for a string that was deserialized without validation.
     #[must_use]
     pub fn major(&self) -> Option<u32> {
@@ -311,13 +290,10 @@ impl fmt::Display for CapabilityRequirement {
 /// Errors from parsing [`CapabilityRef`] / [`CapabilityRequirement`] strings.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CapabilityParseError {
-    /// The string has no `@` separating name and version.
     #[error("capability must be `name@version`, got `{0}`")]
     InvalidRef(String),
-    /// The name violates the `[a-z0-9-]` segment / `/`-joined shape.
     #[error("capability name `{0}` must be lowercase `[a-z0-9-]` segments joined by `/`")]
     InvalidName(String),
-    /// The version is not a decimal integer without leading zeros.
     #[error("capability version `{0}` must be a non-negative integer without leading zeros")]
     InvalidMajor(String),
 }
@@ -364,21 +340,17 @@ fn parse_major(raw: &str) -> Option<u32> {
     raw.parse().ok()
 }
 
-/// Specification of an LLM provider exposed by a plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmProviderSpec {
     /// Provider kind identifier (e.g. `"anthropic"`, `"openai"`).
     pub kind: String,
 
-    /// Model identifiers this provider supports.
     #[serde(default)]
     pub supported_models: Vec<String>,
 
-    /// Whether this provider supports streaming responses.
     #[serde(default)]
     pub supports_streaming: bool,
 
-    /// Whether this provider supports vision (image) inputs.
     #[serde(default)]
     pub supports_vision: bool,
 
@@ -413,13 +385,11 @@ pub struct LlmProviderSpec {
     pub resource_class: ResourceClass,
 }
 
-/// Specification of a TTS provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TtsProviderSpec {
     /// Provider kind identifier (e.g. `"openai_tts"`, `"voicevox"`).
     pub kind: String,
 
-    /// Supported voice names.
     #[serde(default)]
     pub voices: Vec<String>,
 
@@ -436,13 +406,11 @@ pub struct TtsProviderSpec {
     pub concurrency: ConcurrencyHint,
 }
 
-/// Specification of an STT provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SttProviderSpec {
     /// Provider kind identifier (e.g. `"whisper"`, `"openai_stt"`).
     pub kind: String,
 
-    /// Supported model identifiers.
     #[serde(default)]
     pub models: Vec<String>,
 
@@ -529,17 +497,12 @@ fn default_vad_sample_rate() -> u32 {
 /// serial default — no protocol version bump required.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConcurrencyHint {
-    /// Max jobs this provider can run at once.
     pub max_in_flight: u32,
     /// Extra jobs to queue before rejecting.
     pub queue_depth: u32,
 }
 
 impl Default for ConcurrencyHint {
-    /// Serial execution, shallow queue: `max_in_flight: 1, queue_depth: 2`.
-    ///
-    /// See the type-level docs for why this conservative default — not a
-    /// permissive one — is the load-bearing choice here.
     fn default() -> Self {
         Self {
             max_in_flight: 1,
@@ -946,10 +909,7 @@ pub enum ResourceClass {
     /// CUDA/Vulkan device selection. A real, meaningful identity: two
     /// engines that declare the same device index genuinely do contend on
     /// that one physical device.
-    Gpu {
-        /// Device index.
-        device: u32,
-    },
+    Gpu { device: u32 },
     /// CPU-bound inference. Shared by every CPU-bound engine — see the
     /// type-level docs for why this carries no field.
     Cpu,
@@ -1022,12 +982,10 @@ mod resource_class_tests {
             hash_of(ResourceClass::Gpu { device: 0 }),
             hash_of(ResourceClass::Gpu { device: 0 })
         );
-        // Distinct device indices are distinct resources.
         assert_ne!(
             ResourceClass::Gpu { device: 0 },
             ResourceClass::Gpu { device: 1 }
         );
-        // `Cpu` carries no field: every `Cpu` is the one shared value.
         assert_eq!(ResourceClass::Cpu, ResourceClass::Cpu);
         assert_ne!(ResourceClass::Cpu, ResourceClass::Gpu { device: 0 });
     }

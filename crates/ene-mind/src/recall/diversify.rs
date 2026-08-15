@@ -19,27 +19,21 @@ use crate::config::MindMemoryConfig;
 
 use super::plan::RecallPlan;
 
-/// Runtime options controlling MMR diversification behavior.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MemoryDiversifyOptions {
     /// MMR relevance-vs-diversity tradeoff in `[0.0, 1.0]`.
     pub lambda: f32,
     /// Lexical similarity threshold for duplicate cluster merging.
     pub duplicate_cluster_threshold: f32,
-    /// Minimum slots reserved for semantic memories.
     pub min_slots_semantic: usize,
-    /// Minimum slots reserved for episodic memories.
     pub min_slots_episodic: usize,
-    /// Minimum slots reserved for user profile memories.
     pub min_slots_user_profile: usize,
-    /// Minimum slots reserved for commitment memories.
     pub min_slots_commitment: usize,
     /// Bonus added when a candidate introduces a new recall source type.
     pub source_diversity_bonus: f32,
 }
 
 impl MemoryDiversifyOptions {
-    /// Build options from mind memory config.
     pub const fn from_config(config: &MindMemoryConfig) -> Self {
         Self {
             lambda: config.mmr_lambda.clamp(0.0, 1.0),
@@ -71,12 +65,10 @@ impl MemoryDiversifyOptions {
     }
 }
 
-/// Deterministic MMR diversification pipeline for recall candidates.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemoryDiversifyPipeline;
 
 impl MemoryDiversifyPipeline {
-    /// Diversify hybrid-search candidates using MMR and kind quotas.
     pub fn diversify(
         candidates: Vec<ScoredMemory>,
         plan: &RecallPlan,

@@ -31,8 +31,6 @@ use tracing::Instrument;
 /// Maximum sentence buffer length before forcing a TTS flush (chars).
 const TTS_MAX_BUFFER_CHARS: usize = 100;
 
-/// Sends a synthesized audio chunk on the dedicated bounded audio channel.
-///
 /// Back-pressure policy: a full channel means the playback consumer is
 /// falling behind, so non-final chunks are dropped with a warning rather
 /// than stalling the TTS pipeline (and, transitively, the turn). The
@@ -75,8 +73,6 @@ async fn send_audio_chunk(audio_tx: &tokio::sync::mpsc::Sender<AudioChunk>, chun
     }
 }
 
-/// Finds the index just past the first sentence boundary in `buf`.
-///
 /// A boundary is:
 /// - A CJK sentence-ending punctuation character (`。！？`, U+3002 / U+FF01 /
 ///   U+FF1F) unconditionally — Japanese text has no trailing whitespace after
@@ -100,7 +96,6 @@ fn find_tts_sentence_boundary(buf: &str, char_count: usize) -> Option<usize> {
                 let end = chars.get(i + 1).map_or(buf.len(), |&(offset, _)| offset);
                 return Some(end);
             }
-            // ASCII punctuation: boundary only at end or before whitespace.
             '.' | '!' | '?' => {
                 let next = chars.get(i + 1).map(|&(_, c)| c);
                 if next.is_none_or(char::is_whitespace) {
@@ -114,9 +109,6 @@ fn find_tts_sentence_boundary(buf: &str, char_count: usize) -> Option<usize> {
     None
 }
 
-/// Drains the pending marker cues whose text offset falls before the flushed
-/// sentence's end (`range_end`), leaving the rest for the next sentence.
-///
 /// The pending list is ordered by offset (markers arrive in stream order), so
 /// the claimed prefix is exactly the cues belonging to the flushed sentence.
 /// A marker between two sentences (offset equal to the previous sentence's
@@ -160,9 +152,6 @@ fn absorb_timed_marker(
     }
 }
 
-/// A sentence dispatched to the TTS worker together with the expression cues
-/// that fall inside its clean-text range.
-///
 /// The cues ride on the sentence's first PCM chunk so the playback consumer
 /// can switch the expression when that sentence's audio starts playing.
 struct TtsSentence {
@@ -248,8 +237,6 @@ fn finish_cancelled(
     )
 }
 
-/// Spawn deferred memory work for an interrupted (barge-in / cancelled) turn.
-///
 /// Tags the turn as `interrupted` and includes the partial `spoken_text` so
 /// downstream memory extraction can distinguish partial episodes.
 fn spawn_interrupted_memory_work(
@@ -296,10 +283,9 @@ fn spawn_interrupted_memory_work(
     drop(memory_writer_tx.send(handle));
 }
 
-/// Mutates `messages` in-place for a proactive turn: strips trailing empty
-/// user messages, injects the companion directive as a system message, and
-/// appends a synthetic user prompt (with optional screenshot) so the chat
-/// API always ends with a user-role message.
+/// Strips trailing empty user messages, injects the companion directive as
+/// a system message, and appends a synthetic user prompt (with optional
+/// screenshot) so the chat API always ends with a user-role message.
 fn apply_proactive_prompt(
     messages: &mut Vec<LlmMessage>,
     directive: Option<&str>,
@@ -337,7 +323,6 @@ fn apply_proactive_prompt(
     messages.push(LlmMessage::User { parts });
 }
 
-/// Run the streaming loop using the cognitive runtime lifecycle.
 pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let StreamContext {
         config,
@@ -447,7 +432,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let post_history_phi =
         build_cognitive_output_contract(&card, &prompts, mind.emotion.enabled, &user_name);
 
-    // Phase A: query embedding || CCv3 sync (when hash mismatches).
     emit_diag(
         &diag_tx,
         DiagnosticEvent::PipelinePhase {
@@ -590,7 +574,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         session.memory.ccv3_memory_hash = Some(hash);
     }
 
-    // Phase B: recall || tools || style examples || scene summary.
     emit_diag(
         &diag_tx,
         DiagnosticEvent::PipelinePhase {
@@ -781,7 +764,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         );
     }
 
-    // Phase C: affect persist || prompt pack (with prefetched style/scene).
     emit_diag(
         &diag_tx,
         DiagnosticEvent::PipelinePhase {
@@ -1710,7 +1692,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
 mod tests {
     use super::*;
 
-    /// Helper: char count for the incremental-tracking tests.
     fn char_count(buf: &str) -> usize {
         buf.chars().count()
     }
@@ -1905,7 +1886,6 @@ mod tests {
         assert!(timed_cues.is_empty());
         assert!(expr_cancelled);
         assert!(suppressed);
-        // Later expression markers are blocked.
         absorb_timed_marker(
             &PerformanceCue::expression("sad"),
             true,

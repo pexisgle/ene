@@ -1,9 +1,7 @@
 use thiserror::Error;
 
-/// Error types for the ene AI core subsystem.
 #[derive(Error, Debug)]
 pub enum EneRuntimeError {
-    /// No character card has been loaded.
     #[error("Character card not loaded")]
     NoCharacterCard,
     /// LLM or embedding provider failure.
@@ -27,16 +25,13 @@ pub enum EneRuntimeError {
     /// Workspace document index error.
     #[error(transparent)]
     Workspace(#[from] crate::workspace::WorkspaceIndexError),
-    /// Task channel closed.
     #[error("Task channel closed")]
     ChannelClosed,
-    /// A required mind-streaming dependency is unavailable.
     #[error("Mind streaming prerequisite missing: {0}")]
     MindPrerequisite(&'static str),
     /// Bootstrap misconfiguration or internal failure.
     #[error("Bootstrap error: {0}")]
     Bootstrap(String),
-    /// The scheduler needs the memory store, which is disabled.
     #[error("The scheduler requires the memory store (`store.enabled`)")]
     StoreRequired,
     /// The actor rejected admission of a new background task because its

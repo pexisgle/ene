@@ -19,7 +19,6 @@ pub enum CounterStoreError {
     #[error("DB auth token is required: the DB server rejects unauthenticated connections")]
     MissingAuthToken,
 
-    /// A row returned from the DB is missing a required column.
     #[error("corrupt row: missing or invalid column '{0}'")]
     CorruptRow(String),
 }
@@ -42,7 +41,6 @@ pub trait CounterStore: Send + Sync {
     /// Increments the value for `session_id` and returns the new value.
     async fn increment(&self, session_id: &str) -> Result<i64, CounterStoreError>;
 
-    /// Removes all counter rows.
     async fn reset(&self) -> Result<(), CounterStoreError>;
 }
 

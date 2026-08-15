@@ -1,5 +1,3 @@
-//! Integration tests for HTML-to-Markdown conversion and extraction utilities.
-
 use ene_util::html::{extract_html, extract_markdown, html_to_markdown};
 
 #[test]

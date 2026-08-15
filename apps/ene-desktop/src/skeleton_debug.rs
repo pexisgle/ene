@@ -10,15 +10,12 @@
 use ene_vrm::VrmModel;
 use ene_vrm::debug_renderer::DebugLine;
 
-/// Bone / spring-bone overlay colour. Solid red.
 const BONE_COLOR: glam::Vec4 = glam::Vec4::new(1.0, 0.0, 0.0, 1.0);
 
 /// Half-extent of the leaf-bone cross, as a fraction of the
 /// character's actual scale.
 const LEAF_CROSS_EXTENT: f32 = 0.01;
 
-/// Append humanoid bone and spring-bone debug lines for `model`.
-///
 /// `character_position` and `actual_scale` place the rig in world
 /// space; the model's own centre and normalize scale are read from
 /// `model` so raw vertex positions land at their rendered location.

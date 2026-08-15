@@ -62,7 +62,6 @@ impl ConfigStore {
         })
     }
 
-    /// Creates a store from an already-loaded [`EneConfig`].
     pub fn from_config(config: EneConfig) -> Self {
         Self {
             config: RwLock::new(config),
@@ -70,25 +69,20 @@ impl ConfigStore {
         }
     }
 
-    /// Returns a clone of the current global config.
     pub fn config(&self) -> EneConfig {
         self.config.read().clone()
     }
 
-    /// Gives mutable access to the global config.
-    /// Automatically marks the store as dirty after the closure runs.
     pub fn with_config_mut(&self, f: impl FnOnce(&mut EneConfig)) {
         f(&mut self.config.write());
         self.global_dirty.store(true, Ordering::Release);
     }
 
-    /// Replaces the entire global config and marks dirty.
     pub fn set_config(&self, config: EneConfig) {
         *self.config.write() = config;
         self.global_dirty.store(true, Ordering::Release);
     }
 
-    /// Reads a typed section from the global config.
     pub fn get_section<T>(&self) -> T
     where
         T: serde::de::DeserializeOwned + Default + crate::HasConfigKey,
@@ -96,7 +90,6 @@ impl ConfigStore {
         self.config.read().get_section::<T>().unwrap_or_default()
     }
 
-    /// Writes a typed section into the global config and marks dirty.
     pub fn set_section<T>(&self, section: &T)
     where
         T: serde::Serialize + crate::HasConfigKey,
@@ -124,19 +117,16 @@ impl ConfigStore {
         Ok(false)
     }
 
-    /// Forces a save of the global config regardless of dirty state.
     pub fn flush(&self) -> Result<(), EneConfigError> {
         self.global_dirty.store(true, Ordering::Release);
         self.flush_if_dirty()?;
         Ok(())
     }
 
-    /// Returns `true` if the global config has unsaved changes.
     pub fn is_dirty(&self) -> bool {
         self.global_dirty.load(Ordering::Acquire)
     }
 
-    /// Marks the global config as dirty without modifying it.
     /// Use when the caller knows the in-memory state has diverged
     /// from disk and will call [`flush_if_dirty`] on the next cycle.
     pub fn mark_dirty(&self) {

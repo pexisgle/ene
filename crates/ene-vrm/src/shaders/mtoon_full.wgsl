@@ -160,7 +160,6 @@ fn compute_uv_animation(uv: vec2<f32>) -> vec2<f32> {
 fn vs_main(in: VsIn, @builtin(vertex_index) vidx: u32) -> VsOut {
     var out: VsOut;
 
-    // GPU skinning
     var skinned_pos = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     skinned_pos = skinned_pos + in.weights.x * skin_matrices[in.joints.x] * vec4<f32>(in.position, 1.0);
     skinned_pos = skinned_pos + in.weights.y * skin_matrices[in.joints.y] * vec4<f32>(in.position, 1.0);
@@ -169,7 +168,6 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vidx: u32) -> VsOut {
 
     var world_pos = model.model * skinned_pos;
 
-    // Morph targets
     if (morph_meta.target_count > 0u) {
         var morph_delta = vec3<f32>(0.0);
         for (var t: u32 = 0u; t < morph_meta.target_count; t = t + 1u) {
@@ -192,7 +190,6 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vidx: u32) -> VsOut {
     return out;
 }
 
-// Toon shading: linearstep(-1 + toony, 1 - toony, ndotl + shift)
 fn toon_shade(ndotl: f32) -> f32 {
     let toony = mtoon.lighting_params.x;
     let shift = mtoon.shade_color_and_shift.w;
@@ -212,25 +209,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let v = normalize(in.view_dir);
     let light_dir = normalize(vec3<f32>(0.3, 0.8, 0.5));
 
-    // UV animation (scroll / rotation / mask). Done in the
-    // fragment stage because the mask is a texture sample,
-    // which WGSL forbids in the vertex stage.
+    // Done in the fragment stage because the mask is a texture
+    // sample, which WGSL forbids in the vertex stage.
     let uv = compute_uv_animation(in.uv);
 
-    // Base color
     var base = textureSample(base_color_tex, base_color_smp, uv);
 
-    // Shade multiply texture
     if has_flag(flags, FLAG_SHADE_MULTIPLY) {
         let shade_tex = textureSample(shade_multiply_tex, shade_multiply_smp, uv);
         base = base * shade_tex;
     }
 
-    // Toon shading
     let ndotl = dot(n, light_dir);
     let shade_factor = toon_shade(ndotl);
 
-    // Shading shift texture
     var shift_add = 0.0;
     if has_flag(flags, FLAG_SHADING_SHIFT) {
         let shift_tex = textureSample(shading_shift_tex, shading_shift_smp, uv);
@@ -238,17 +230,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let shaded = clamp(shade_factor + shift_add, 0.0, 1.0);
 
-    // Mix base color with shade color
     let shade_color = mtoon.shade_color_and_shift.xyz;
     let lit_color = mix(shade_color, vec3<f32>(1.0), shaded);
     var color = base.rgb * lit_color;
 
-    // GI equalization (simple: blend between shaded and flat)
     let gi_eq = mtoon.lighting_params.y;
     let flat = vec3<f32>(1.0);
     color = mix(color, base.rgb * flat, gi_eq * (1.0 - shaded));
 
-    // Emission
     if has_flag(flags, FLAG_EMISSIVE) {
         let emis_tex = textureSample(emissive_tex, emissive_smp, uv);
         let emis = mtoon.emissive_and_matcap_r.xyz * emis_tex.rgb;
@@ -257,14 +246,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color = color + mtoon.emissive_and_matcap_r.xyz;
     }
 
-    // MatCap
     if has_flag(flags, FLAG_MATCAP) {
         let matcap_factor = vec3<f32>(
             mtoon.emissive_and_matcap_r.w,
             mtoon.matcap_gb_and_rim_r.x,
             mtoon.matcap_gb_and_rim_r.y,
         );
-        // Build a view-aligned basis for matcap UV
         let world_view_x = normalize(vec3<f32>(v.z, 0.0, -v.x));
         let world_view_y = cross(v, world_view_x);
         let matcap_uv = vec2<f32>(dot(world_view_x, n), dot(world_view_y, n)) * 0.495 + vec2<f32>(0.5);
@@ -272,7 +259,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color = color + matcap_factor * matcap_sample.rgb;
     }
 
-    // Parametric rim
     let rim_color = vec3<f32>(
         mtoon.matcap_gb_and_rim_r.z,
         mtoon.matcap_gb_and_rim_r.w,
@@ -284,13 +270,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let parametric_rim = pow(clamp(1.0 - ndotv + rim_lift, 0.0, 1.0), fresnel_power);
     var rim = parametric_rim * rim_color;
 
-    // Rim multiply texture
     if has_flag(flags, FLAG_RIM_MULTIPLY) {
         let rim_tex = textureSample(rim_multiply_tex, rim_multiply_smp, uv);
         rim = rim * rim_tex.rgb;
     }
 
-    // Rim lighting mix
     let rim_mix = mtoon.lighting_params.z;
     let lighting = vec3<f32>(shaded);
     rim = rim * mix(vec3<f32>(1.0), lighting, rim_mix);

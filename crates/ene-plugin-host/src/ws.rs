@@ -25,7 +25,6 @@ type WsIo = Either<tokio::net::TcpStream, tokio_rustls::client::TlsStream<tokio:
 /// are a few hundred KiB at most).
 const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
-/// Commands the session loop forwards to the WebSocket relay task.
 enum WsCommand {
     Text(String),
     Binary(Vec<u8>),
@@ -34,8 +33,6 @@ enum WsCommand {
 }
 
 impl BrokerHub {
-    /// Serves a `WebSocket` passenger session: reads the `Open` frame,
-    /// connects, and relays frames until either side closes.
     pub(crate) async fn serve_ws_session(
         &self,
         plugin: &str,
@@ -242,8 +239,6 @@ impl BrokerHub {
         }
     }
 
-    /// Relays frames between the WebSocket and the plugin session until
-    /// either side closes.
     async fn ws_relay(
         ws: WebSocketStream<WsIo>,
         stream: ene_plugin_proto::transport::IpcStream,
@@ -519,8 +514,6 @@ mod tests {
         assert_eq!(BrokerHub::host_authority(&plain), "[::1]");
     }
 
-    /// Full `serve_ws_session` round trip through a local echo server: the
-    /// relay delivers frames both ways.
     #[tokio::test]
     async fn ws_session_relays_through_local_server() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

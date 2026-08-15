@@ -10,7 +10,6 @@ use std::sync::{Arc, RwLock};
 /// instance that is populated by the provider via hooks.
 pub type SandboxRef = Arc<RwLock<Option<Arc<sandbox::Sandbox>>>>;
 
-/// Creates a default (empty) [`SandboxRef`].
 pub fn default_sandbox() -> SandboxRef {
     Arc::new(RwLock::new(None))
 }

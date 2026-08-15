@@ -81,14 +81,12 @@ fn is_cjk(ch: char) -> bool {
     )
 }
 
-/// Flush a pending non-CJK alphanumeric word run as a single token.
 fn flush_word(run: &mut String, tokens: &mut HashSet<String>) {
     if !run.is_empty() {
         tokens.insert(std::mem::take(run));
     }
 }
 
-/// Flush a pending CJK run as overlapping bigrams (or a lone unigram).
 fn flush_cjk(run: &mut Vec<char>, tokens: &mut HashSet<String>) {
     match run.len() {
         0 => {}
@@ -109,8 +107,6 @@ fn flush_cjk(run: &mut Vec<char>, tokens: &mut HashSet<String>) {
     run.clear();
 }
 
-/// Tokenize text for lexical overlap.
-///
 /// Text is NFKC-normalized (folding full-width alphanumerics and half-width
 /// kana into their canonical forms) and lowercased, then split into terms:
 ///
@@ -152,8 +148,6 @@ pub fn tokenize(text: &str) -> HashSet<String> {
     tokens
 }
 
-/// Jaccard similarity between two memory documents (title + content tokens).
-///
 /// Used for duplicate clustering and MMR pairwise diversity.
 pub fn document_lexical_similarity(
     title_a: &str,
@@ -180,7 +174,6 @@ pub fn document_lexical_similarity(
     intersection as f32 / union as f32
 }
 
-/// Jaccard-like overlap between query tokens and document tokens.
 pub fn lexical_overlap_score(query: &str, title: &str, content: &str) -> f32 {
     let query_tokens = tokenize(query);
     if query_tokens.is_empty() {
@@ -197,7 +190,6 @@ pub fn lexical_overlap_score(query: &str, title: &str, content: &str) -> f32 {
     overlap as f32 / query_tokens.len() as f32
 }
 
-/// Match between query affect and memory affect in `[0.0, 1.0]`.
 pub fn emotional_match_score(
     query_affect: Option<AffectAnnotation>,
     item_affect: AffectAnnotation,
@@ -216,7 +208,6 @@ pub fn emotional_match_score(
     }
 }
 
-/// Normalize relationship impact `[-1, 1]` to `[0, 1]`.
 pub fn relationship_score(impact: f32) -> f32 {
     if impact.is_nan() {
         0.5
@@ -255,7 +246,6 @@ pub fn access_boost_score(
     (count_factor * recency).clamp(0.0, 1.0)
 }
 
-/// Penalty for disputed memories.
 pub fn contradiction_penalty(status: MemoryStatus) -> f32 {
     if status == MemoryStatus::Disputed {
         0.30
@@ -264,7 +254,6 @@ pub fn contradiction_penalty(status: MemoryStatus) -> f32 {
     }
 }
 
-/// Penalty for faded or expired memories.
 pub fn stale_penalty(
     status: MemoryStatus,
     now: DateTime<Utc>,
@@ -356,8 +345,6 @@ pub fn penalty_multiplier(contradiction: f32, stale: f32) -> f32 {
     1.0 / (1.0 + contradiction + stale)
 }
 
-/// Compute the hybrid score breakdown for a gathered candidate.
-///
 /// Total is `(relevance × quality_factor + commitment_boost) × penalty_multiplier`,
 /// clamped to be non-negative. Relevance (vector similarity plus lexical overlap)
 /// is the multiplicative base, quality only rescales it, penalties are a
@@ -430,8 +417,6 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
     }
 }
 
-/// Score, filter, sort, and truncate gathered candidates into ranked results.
-///
 /// This is the single post-gather pipeline: score every candidate, drop rows
 /// below `query.min_score`, order by total (then vector similarity, then
 /// recency), and cap at `query.limit`. Time-range filtering is applied here
@@ -482,8 +467,6 @@ pub fn score_and_rank(
     scored
 }
 
-/// Whether a memory's `created_at` falls within the optional time range.
-///
 /// Returns `true` when `range` is `None` (no filter) or when the timestamp is
 /// within the inclusive `[start, end]` bounds. Missing bounds are unbounded.
 pub fn within_time_range(range: Option<&ene_core::TimeRange>, created_at: DateTime<Utc>) -> bool {
@@ -503,7 +486,6 @@ pub fn within_time_range(range: Option<&ene_core::TimeRange>, created_at: DateTi
     true
 }
 
-/// Whether a memory status is eligible for normal hybrid recall.
 pub const fn is_recallable_status(status: MemoryStatus) -> bool {
     matches!(
         status,
@@ -1004,7 +986,6 @@ mod tests {
             },
         );
 
-        // Same multiplicative retention factor regardless of magnitude.
         let strong_retained = strong_disputed.total / strong_clean.total;
         let weak_retained = weak_disputed.total / weak_clean.total;
         assert!((strong_retained - weak_retained).abs() < 1e-4);

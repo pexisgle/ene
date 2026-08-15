@@ -30,7 +30,6 @@ fn parse_tz_offset(raw: &str) -> i32 {
     }
 }
 
-/// One file's status entry.
 #[derive(Debug, Serialize)]
 pub struct StatusFileEntry {
     /// Repository-relative file path.
@@ -39,13 +38,10 @@ pub struct StatusFileEntry {
     pub staged: Option<&'static str>,
     /// Worktree-vs-index change letter (`M`/`D`/`R`/`T`), or `null`.
     pub unstaged: Option<&'static str>,
-    /// Whether the file is untracked.
     pub untracked: bool,
-    /// Whether the file has unresolved merge conflicts.
     pub conflicted: bool,
 }
 
-/// Result of `git.status`.
 #[derive(Debug, Serialize)]
 pub struct StatusOutput {
     /// Absolute working-tree path of the repository.
@@ -54,28 +50,21 @@ pub struct StatusOutput {
     pub branch: Option<String>,
     /// Short `HEAD` oid when the `HEAD` is detached, otherwise `null`.
     pub detached_head: Option<String>,
-    /// Whether the working tree and index are clean.
     pub clean: bool,
-    /// Per-file status entries.
     pub entries: Vec<StatusFileEntry>,
     /// Whether the output was truncated at the entry cap.
     pub truncated: bool,
 }
 
-/// Result of `git.diff`.
 #[derive(Debug, Serialize)]
 pub struct DiffOutput {
     /// Absolute working-tree path of the repository.
     pub repo: String,
     /// Whether the diff compares the index against `HEAD` (staged).
     pub staged: bool,
-    /// Number of files changed.
     pub files_changed: usize,
-    /// Number of added lines.
     pub insertions: usize,
-    /// Number of deleted lines.
     pub deletions: usize,
-    /// Human-readable stat summary.
     pub summary: String,
     /// Unified-diff patch text when requested.
     pub patch: Option<String>,
@@ -83,37 +72,27 @@ pub struct DiffOutput {
     pub truncated: bool,
 }
 
-/// Author or committer of a commit.
 #[derive(Debug, Serialize)]
 pub struct Person {
-    /// Name from the signature.
     pub name: String,
-    /// Email from the signature.
     pub email: String,
     /// RFC3339 timestamp with the original offset.
     pub time: String,
 }
 
-/// One commit in `git.log` output.
 #[derive(Debug, Serialize)]
 pub struct LogEntry {
-    /// Full commit oid.
     pub oid: String,
-    /// 7-character abbreviated oid.
     pub short_oid: String,
     /// First paragraph of the commit message.
     pub subject: String,
     /// Rest of the commit message, or `null`.
     pub body: Option<String>,
-    /// Author signature.
     pub author: Person,
-    /// Committer signature.
     pub committer: Person,
-    /// Full parent oids.
     pub parents: Vec<String>,
 }
 
-/// Result of `git.log`.
 #[derive(Debug, Serialize)]
 pub struct LogOutput {
     /// Absolute working-tree path of the repository.
@@ -124,7 +103,6 @@ pub struct LogOutput {
     pub entries: Vec<LogEntry>,
 }
 
-/// One branch in `git.branch` output.
 #[derive(Debug, Serialize)]
 pub struct BranchEntry {
     /// Branch name (without the `refs/heads/` prefix).
@@ -135,11 +113,9 @@ pub struct BranchEntry {
     pub ahead: Option<usize>,
     /// Commits in the upstream not in this branch, or `null`.
     pub behind: Option<usize>,
-    /// Whether this is the checked-out branch.
     pub current: bool,
 }
 
-/// Result of `git.branch`.
 #[derive(Debug, Serialize)]
 pub struct BranchOutput {
     /// Absolute working-tree path of the repository.
@@ -148,14 +124,11 @@ pub struct BranchOutput {
     pub current: Option<String>,
     /// Short HEAD oid when the HEAD is detached, otherwise `null`.
     pub detached_head: Option<String>,
-    /// Branch entries.
     pub branches: Vec<BranchEntry>,
 }
 
-/// One remote in `git.remote` output.
 #[derive(Debug, Serialize)]
 pub struct RemoteEntry {
-    /// Remote name.
     pub name: String,
     /// Fetch URL, or `null`.
     pub fetch_url: Option<String>,
@@ -163,16 +136,13 @@ pub struct RemoteEntry {
     pub push_url: Option<String>,
 }
 
-/// Result of `git.remote`.
 #[derive(Debug, Serialize)]
 pub struct RemoteOutput {
     /// Absolute working-tree path of the repository.
     pub repo: String,
-    /// Configured remotes.
     pub remotes: Vec<RemoteEntry>,
 }
 
-/// One line of `git.blame` output.
 #[derive(Debug, Serialize)]
 pub struct BlameLine {
     /// 1-based line number in the file.
@@ -181,11 +151,8 @@ pub struct BlameLine {
     pub text: String,
     /// Full oid of the commit that last changed the line.
     pub commit: String,
-    /// 7-character abbreviated oid.
     pub short_commit: String,
-    /// Author name.
     pub author: String,
-    /// Author email.
     pub author_email: String,
     /// RFC3339 author timestamp with the original offset.
     pub author_time: String,
@@ -193,7 +160,6 @@ pub struct BlameLine {
     pub subject: String,
 }
 
-/// Result of `git.blame`.
 #[derive(Debug, Serialize)]
 pub struct BlameOutput {
     /// Absolute working-tree path of the repository.
@@ -206,13 +172,11 @@ pub struct BlameOutput {
     pub truncated: bool,
 }
 
-/// Serializes a tool output struct as pretty-printed JSON.
 pub fn to_json<T: Serialize>(value: &T) -> Result<String, ToolError> {
     serde_json::to_string_pretty(value)
         .map_err(|e| ToolError::internal(format!("failed to serialize tool output: {e}")))
 }
 
-/// Formats a 7-character abbreviated oid from a full hex oid.
 pub fn short_oid(oid: &str) -> String {
     oid.chars().take(7).collect()
 }

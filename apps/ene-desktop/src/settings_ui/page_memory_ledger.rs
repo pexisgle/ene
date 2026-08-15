@@ -1,7 +1,3 @@
-//! Memory Ledger page: interactive table of memories and commitments with
-//! search/filter, salience adjustment, editing, deletion, and commitment
-//! lifecycle controls.
-
 use crate::ai_bridge::AiBridge;
 use crate::component::ui::UiStateComponent;
 use crate::memory_journal::MemoryJournalAction;
@@ -43,7 +39,6 @@ pub fn render(
         do_refresh = true;
     }
 
-    // ── Toolbar ───────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
         if ui
             .button(fl!(crate::i18n::loader(), "memory-ledger-refresh"))
@@ -564,8 +559,6 @@ fn apply_pending(
     }
 }
 
-/// Polls in-flight ledger mutation messages; the first completion surfaces
-/// its message and refreshes the ledger.
 fn poll_ledger_feedback(
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
@@ -809,8 +802,8 @@ fn commitment_status_tone(status: ene_store::CommitmentStatus) -> BadgeTone {
     }
 }
 
-/// Resolve a dynamic key through the Fluent catalog. `fl!` requires a literal
-/// `message_id`, so keys that depend on a row's kind/status go through here.
+/// `fl!` requires a literal `message_id`, so keys that depend on a row's
+/// kind/status go through here.
 fn label_from_key(key: &str) -> String {
     match key {
         "memory-kind-episodic" => fl!(crate::i18n::loader(), "memory-kind-episodic"),

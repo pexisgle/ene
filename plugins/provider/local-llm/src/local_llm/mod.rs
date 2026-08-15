@@ -1,5 +1,3 @@
-//! llama-cpp-4 chat/vision provider for the local inference plugin.
-
 mod model;
 
 use async_trait::async_trait;
@@ -17,7 +15,6 @@ use tokio_stream::Stream;
 use crate::llama_cpp::{LoadSpec, resource_class_for};
 use model::LlamaChatModel;
 
-/// Provider name / engine id, used in tracing and `EngineDescriptor::id`.
 const PROVIDER_NAME: &str = "llama-cpp-local";
 
 /// Number of decision/vision jobs allowed to queue behind the one currently
@@ -40,18 +37,15 @@ const CHAT_QUEUE_DEPTH: usize = 2;
 /// engine (`crate::embedding::provider`).
 const CHAT_STALL_TIMEOUT: Option<Duration> = None;
 
-/// Parameters for loading a local GGUF decision model.
 #[derive(Debug, Clone)]
 pub struct LocalGgufLoadParams {
     /// Absolute or relative path to GGUF weights.
     pub model_path: String,
     /// Optional path to multimodal projector GGUF (vision).
     pub mmproj_path: Option<String>,
-    /// Preferred acceleration backend.
     pub acceleration: ProactiveAcceleration,
     /// GPU layer offload: `auto` or an explicit layer count.
     pub gpu_layers: ene_ai::GpuLayers,
-    /// Context size for inference.
     pub context_size: u32,
     /// Per-request timeout for decision completion. Maps directly onto
     /// [`ene_infer::EngineConfig::job_timeout`] — the *only* timeout in this
@@ -61,8 +55,6 @@ pub struct LocalGgufLoadParams {
     pub request_timeout_seconds: u64,
 }
 
-/// Local chat/vision provider backed by an in-process llama.cpp model.
-///
 /// Wraps a [`StreamingLocalLlmEngine`] (this crate's only consumer of
 /// `ene-ai`'s blanket `LlmProvider` adapters) for ordinary chat completion —
 /// real, token-by-token streaming for [`LlmProvider::create_chat_stream`],
@@ -74,8 +66,6 @@ pub struct LocalLlamaCppProvider {
 }
 
 impl LocalLlamaCppProvider {
-    /// Load GGUF weights from `params` and wrap as an [`LlmProvider`].
-    ///
     /// # Errors
     ///
     /// Returns [`LlmProviderError`] when the model path is invalid or the

@@ -16,7 +16,6 @@ use std::sync::Arc;
 /// metadata or permissions, which the store owns.
 #[async_trait]
 pub trait CalendarProvider: Send + Sync {
-    /// The kind of account this provider serves.
     fn kind(&self) -> CalendarKind;
 
     /// Fetches an account's events within the `[start_ms, end_ms)` window
@@ -31,7 +30,6 @@ pub trait CalendarProvider: Send + Sync {
         include_cancelled: bool,
     ) -> Result<Vec<CalendarEvent>, CalendarStoreError>;
 
-    /// Creates an event in the account and returns it.
     async fn create_event(
         &self,
         store: &CalendarStore,
@@ -48,7 +46,6 @@ pub trait CalendarProvider: Send + Sync {
         changes: &CalendarEventChanges,
     ) -> Result<CalendarEvent, CalendarStoreError>;
 
-    /// Cancels an event, returning the removed event.
     async fn cancel_event(
         &self,
         store: &CalendarStore,
@@ -77,7 +74,6 @@ pub trait CalendarProvider: Send + Sync {
     }
 }
 
-/// Looks up the provider for an account kind.
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {
     providers: Arc<HashMap<String, Arc<dyn CalendarProvider>>>,
@@ -92,7 +88,6 @@ impl ProviderRegistry {
         self.providers = Arc::new(providers);
     }
 
-    /// Resolves the provider for an account kind.
     pub fn resolve(
         &self,
         kind: CalendarKind,
@@ -110,7 +105,6 @@ impl ProviderRegistry {
 pub struct LocalCalendarProvider;
 
 impl LocalCalendarProvider {
-    /// Creates a local provider instance.
     #[must_use]
     pub fn new() -> Self {
         Self

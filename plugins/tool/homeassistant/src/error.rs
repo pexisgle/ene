@@ -6,19 +6,15 @@ use ene_plugin_proto::ToolError;
 /// transport failures directly as [`ToolError`].
 #[derive(Debug, thiserror::Error)]
 pub enum HomeAssistantError {
-    /// An argument failed validation.
     #[error("{0}")]
     InvalidArguments(String),
     /// The plugin has no usable configuration (missing base URL or token).
     #[error("{0}")]
     NotConfigured(String),
-    /// Home Assistant rejected the request.
     #[error("{0}")]
     ApiFailure(String),
-    /// Home Assistant returned a malformed response.
     #[error("{0}")]
     InvalidResponse(String),
-    /// An invariant on the tool side broke.
     #[error("{0}")]
     Internal(String),
 }

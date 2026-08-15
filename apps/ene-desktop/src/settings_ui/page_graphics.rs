@@ -1,6 +1,3 @@
-//! Graphics settings page.
-//!
-//! Quality preset, UI language, and the app-wide color theme.
 use super::components::section_card;
 use super::draft::SettingsDraft;
 use crate::settings::{

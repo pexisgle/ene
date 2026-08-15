@@ -1,5 +1,3 @@
-//! Linux display-server integration state.
-//!
 //! The per-handle Linux display-server state lives in bevy
 //! [`Resource`]s (one `Resource` per handle). The winit
 //! runtime inserts these resources in `Runtime::resumed` and the

@@ -2,7 +2,6 @@ use ene_config::ConfigStore;
 use ene_runtime::{EneHandle, EneRuntimeError, StoreConfig, open_ready};
 use std::path::Path;
 
-/// Startup overrides sourced from CLI flags.
 #[derive(Debug, Default)]
 pub struct InitOptions {
     pub config_path: Option<std::path::PathBuf>,

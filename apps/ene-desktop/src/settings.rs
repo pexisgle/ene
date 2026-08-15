@@ -12,8 +12,6 @@ use ene_config::serde::{Deserialize, Serialize};
 use glam::Vec3;
 use parking_lot::RwLock;
 
-// ── Persisted section ──
-
 ene_config::define_label_enum!(
     pub enum ShadowQuality {
         Low => "Low" => 1_024,
@@ -54,7 +52,6 @@ pub struct GraphicsResolved {
 }
 
 impl GraphicsQuality {
-    /// Maps a quality preset to concrete renderer settings.
     #[must_use]
     pub const fn resolved(self) -> GraphicsResolved {
         match self {
@@ -196,8 +193,6 @@ const fn default_enabled() -> bool {
 
 pub use GraphicsSection as GraphicsSettings;
 
-// ── Defaults & cycle choices ──
-
 pub const DEFAULT_CHARACTER_NAME: &str = "Alicia";
 pub use ene_card::{DEFAULT_VRM_PATH, DEFAULT_VRMA_PATH};
 #[expect(
@@ -253,8 +248,6 @@ fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize) -> 
     choices[next]
 }
 
-// ── CLI parsing ──
-
 /// Read optional VRM and VRMA overrides from the first two CLI
 /// arguments.
 pub fn read_cli_paths() -> (String, String) {
@@ -267,11 +260,7 @@ pub fn read_cli_paths() -> (String, String) {
     (vrm, vrma)
 }
 
-// ── Discovered character entries ──
-
 pub type CharacterEntry = ene_card::CharacterEntry;
-
-// ── Runtime state shapes (not persisted as JSON) ──
 
 #[derive(Clone, Debug)]
 pub struct CharacterState {
@@ -377,9 +366,7 @@ pub struct UiState {
     /// once the user answers it from the Permission Center page.
     pub permission_requests: Vec<PendingPermission>,
     pub connector_selected: Option<ene_connector::ConnectorId>,
-    /// Selected tab on the Tools & Plugins page.
     pub plugin_page_mode: PluginPageMode,
-    /// Plugin whose detail view is open on the Tools & Plugins page.
     pub plugin_selected: Option<String>,
     pub session_search_query: String,
     pub session_import_path: String,
@@ -397,13 +384,11 @@ pub struct UiState {
     pub reconnect_requested: bool,
     pub fatal_startup_dismissed: bool,
 
-    // ── Spotlight quick launcher ──
     /// Whether the spotlight (Alt+Space) command palette is visible.
     pub spotlight_visible: bool,
     pub spotlight_input: String,
     pub spotlight_selection: usize,
 
-    // ── Floating caption overlay ──
     pub caption_visible: bool,
     pub caption_text: String,
     /// Top-left position (logical points) of the caption window, or
@@ -414,7 +399,6 @@ pub struct UiState {
     /// Ignored on Wayland, which has no window-level support.
     pub caption_pinned: Option<bool>,
 
-    // ── Character card editor ──
     /// Whether the editor has loaded the on-disk card into the buffers
     /// at least once since the page was opened.
     pub character_editor_loaded: bool,
@@ -504,7 +488,6 @@ impl UiState {
         self.character_editor_locale_diffs.clear();
     }
 
-    /// Whether any discard dialog is currently pending.
     #[must_use]
     pub fn editor_dialog_pending(&self) -> bool {
         self.character_editor_close_requested
@@ -538,13 +521,10 @@ pub struct EditorIssue {
     /// JSON-pointer-style field path (e.g. `data.assets[0].uri`), or the
     /// card file name for read/parse failures.
     pub location: String,
-    /// Localized human-readable description.
     pub message: String,
-    /// Whether this finding blocks saving.
     pub severity: EditorSeverity,
 }
 
-/// A single session message search hit shown on the sessions page.
 #[derive(Clone, Debug)]
 pub struct SessionSearchRow {
     pub session_id: String,
@@ -572,15 +552,11 @@ pub struct PendingUserInput {
 /// Inline edit draft for a pending memory candidate in the journal UI.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MemoryCandidateDraft {
-    /// Candidate row being edited.
     pub id: i64,
-    /// Draft title.
     pub title: String,
-    /// Draft content.
     pub content: String,
     /// Draft kind as string (validated against `MemoryKind` on save).
     pub kind: String,
-    /// Draft confidence.
     pub confidence: f32,
 }
 
@@ -614,18 +590,13 @@ pub struct MemoryJournalRecallRow {
     pub score_summary: String,
 }
 
-/// In-progress edit of a ledger memory row.
 #[derive(Clone, Debug)]
 pub struct MemoryLedgerDraft {
-    /// Typed-memory row id.
     pub id: i64,
-    /// Edited title.
     pub title: String,
-    /// Edited content.
     pub content: String,
     /// Edited kind (`snake_case` string).
     pub kind: String,
-    /// Edited confidence.
     pub confidence: f32,
 }
 
@@ -637,7 +608,6 @@ pub struct MemoryJournalAffect {
     pub trust: f32,
 }
 
-/// Tab mode for the memory journal page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemoryPageMode {
     #[default]
@@ -647,7 +617,6 @@ pub enum MemoryPageMode {
     Commitments,
 }
 
-/// Tab mode for the Tools & Plugins page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PluginPageMode {
     #[default]
@@ -656,7 +625,6 @@ pub enum PluginPageMode {
     Mcp,
 }
 
-/// Filter for commitment list display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommitmentFilter {
     #[default]
@@ -665,8 +633,6 @@ pub enum CommitmentFilter {
     Completed,
     Cancelled,
 }
-
-// ── Top-level settings (the runtime's single source of truth) ──
 
 pub struct CharacterSettings {
     pub assets_dir: PathBuf,
@@ -687,8 +653,6 @@ impl std::fmt::Debug for CharacterSettings {
 }
 
 impl CharacterSettings {
-    /// Build the initial settings: discover characters on disk,
-    /// load the persisted JSON, clamp runtime values.
     pub fn discover(assets_dir: &Path, default_vrm: &str) -> Self {
         let mut characters = ene_card::discover_characters(assets_dir);
         if characters.is_empty() {
@@ -819,9 +783,6 @@ impl CharacterSettings {
         self.set_graphics(GraphicsSettings { quality: clamped });
     }
 
-    // ── Config accessors (read from / write through the store) ──
-
-    /// Returns a snapshot of the current global config.
     pub fn config(&self) -> ene_config::EneConfig {
         self.store.read().config()
     }
@@ -830,12 +791,10 @@ impl CharacterSettings {
         self.store.read().config()
     }
 
-    /// Replace the whole global config (draft-apply path).
     pub fn set_config(&self, config: ene_config::EneConfig) {
         self.store.read().set_config(config);
     }
 
-    /// Get a typed section from the global config.
     pub fn config_section<T>(&self) -> T
     where
         T: serde::de::DeserializeOwned + Default + ene_config::HasConfigKey,
@@ -843,7 +802,6 @@ impl CharacterSettings {
         self.store.read().get_section::<T>()
     }
 
-    /// Write a typed section into the global config.
     pub fn set_config_section<T>(&self, section: &T)
     where
         T: serde::Serialize + ene_config::HasConfigKey,
@@ -851,7 +809,6 @@ impl CharacterSettings {
         self.store.read().set_section(section);
     }
 
-    /// Mutate the global config.
     pub fn with_config_mut(&self, f: impl FnOnce(&mut ene_config::EneConfig)) {
         self.store.read().with_config_mut(f);
     }
@@ -875,8 +832,6 @@ impl CharacterSettings {
             ));
         });
     }
-
-    // ── Desktop-section accessors ─────────────────────────────────
 
     pub fn graphics(&self) -> GraphicsSettings {
         self.config_section::<DesktopSection>().graphics

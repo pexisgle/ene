@@ -1,8 +1,5 @@
-//! Sessions management page.
-//!
-//! Lists, searches, imports, exports, and archives sessions. All actor
-//! round-trips run on the bridge runtime through [`AsyncData`] receivers;
-//! the render thread only polls receivers and renders results.
+//! All actor round-trips run on the bridge runtime through [`AsyncData`]
+//! receivers; the render thread only polls receivers and renders results.
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
@@ -17,11 +14,8 @@ use crate::settings_ui::components::{
 };
 use crate::settings_ui::input::{AsyncData, SettingsInputState};
 
-/// Maximum number of sessions listed in one fetch.
 const LIST_LIMIT: usize = 50;
-/// Maximum number of search hits shown for one query.
 const SEARCH_LIMIT: usize = 20;
-/// Maximum characters shown for a search-hit message body.
 const CONTENT_PREVIEW_LEN: usize = 120;
 
 pub fn render(
@@ -200,7 +194,6 @@ fn render_list(
         },
     );
 
-    // Toggling "show archived" re-fetches with the new flag.
     let mut show_archived = world
         .get::<UiStateComponent>(ui_entity)
         .is_some_and(|s| s.0.session_show_archived);

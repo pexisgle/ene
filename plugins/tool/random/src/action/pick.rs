@@ -1,7 +1,6 @@
 use crate::error::RandomError;
 use ene_plugin::prelude::*;
 
-/// Picks a random element from a list.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "random",
@@ -23,7 +22,6 @@ impl PickAction {
     }
 }
 
-/// Samples one element uniformly from `options`.
 fn pick(options: &[String]) -> Result<String, RandomError> {
     if options.is_empty() {
         return Err(RandomError::EmptyOptions);

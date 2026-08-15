@@ -20,14 +20,11 @@ pub type PluginOptionsMap = std::collections::BTreeMap<String, Vec<(String, Stri
 #[derive(Debug)]
 pub struct AsyncData<T> {
     receiver: Option<tokio::sync::oneshot::Receiver<T>>,
-    /// Last successfully fetched value, if any.
     pub data: Option<T>,
-    /// Fetch failure message, if any.
     pub error: Option<String>,
 }
 
 impl<T> AsyncData<T> {
-    /// Creates an idle fetch slot.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -37,8 +34,7 @@ impl<T> AsyncData<T> {
         }
     }
 
-    /// Starts tracking an in-flight fetch. A request is only accepted when
-    /// nothing is already in flight or cached.
+    /// A request is only accepted when nothing is already in flight or cached.
     pub fn start(&mut self, receiver: tokio::sync::oneshot::Receiver<T>) {
         if self.receiver.is_none() && self.data.is_none() {
             self.receiver = Some(receiver);
@@ -46,8 +42,6 @@ impl<T> AsyncData<T> {
         }
     }
 
-    /// Starts a replacement fetch while keeping the last value for display.
-    ///
     /// Used by live-updating views (artifact progress) that must render the
     /// most recent snapshot while the next fetch is in flight.
     pub fn refresh(&mut self, receiver: tokio::sync::oneshot::Receiver<T>) {
@@ -57,15 +51,14 @@ impl<T> AsyncData<T> {
         }
     }
 
-    /// Re-runs a fetch with the latest input, discarding any cached value
-    /// or error (used by re-validate / reload buttons).
+    /// Discards any cached value or error; used by re-validate / reload
+    /// buttons.
     pub fn restart(&mut self, receiver: tokio::sync::oneshot::Receiver<T>) {
         self.receiver = Some(receiver);
         self.data = None;
         self.error = None;
     }
 
-    /// Drains a completed fetch (non-blocking).
     pub fn poll(&mut self) {
         let Some(receiver) = &mut self.receiver else {
             return;
@@ -84,14 +77,12 @@ impl<T> AsyncData<T> {
         }
     }
 
-    /// Whether a fetch is in flight.
     #[must_use]
     pub const fn loading(&self) -> bool {
         self.receiver.is_some()
     }
 
-    /// Whether a fetch has ever been requested (used for first-render
-    /// lazy loading).
+    /// Used for first-render lazy loading.
     #[must_use]
     pub const fn started(&self) -> bool {
         self.receiver.is_some() || self.data.is_some() || self.error.is_some()
@@ -131,7 +122,6 @@ pub struct SettingsInputState {
     /// Cached `/models` catalog per provider key, fetched on demand by the
     /// AI page's refresh button.
     pub model_catalog: BTreeMap<String, Vec<String>>,
-    /// Last `/models` fetch error message, if any.
     pub model_fetch_error: Option<String>,
     /// Asynchronously cached plugin settings snapshots for the plugin
     /// center page (and Overview / search), refreshed on window open and by
@@ -140,24 +130,21 @@ pub struct SettingsInputState {
     /// Asynchronously cached host-side artifact snapshot for the Engines
     /// page (installed sidecars/models plus catalog targets).
     pub artifact_snapshot: AsyncData<Vec<ene_plugin_host::ArtifactSnapshot>>,
-    /// In-flight artifact installs/updates, keyed by artifact id.
+    /// Keyed by artifact id.
     pub artifact_installs: std::collections::HashMap<
         String,
         tokio::sync::oneshot::Receiver<Result<ene_plugin_host::InstalledArtifactView, String>>,
     >,
-    /// In-flight artifact rollbacks, keyed by artifact id.
+    /// Keyed by artifact id.
     pub artifact_rollbacks: std::collections::HashMap<
         String,
         tokio::sync::oneshot::Receiver<Result<ene_plugin_host::InstalledArtifactView, String>>,
     >,
-    /// In-flight artifact removals, keyed by artifact id.
     pub artifact_uninstalls:
         std::collections::HashMap<String, tokio::sync::oneshot::Receiver<Result<(), String>>>,
-    /// In-flight cancel requests for artifact installs, keyed by artifact id.
     pub artifact_cancels:
         std::collections::HashMap<String, tokio::sync::oneshot::Receiver<Result<(), String>>>,
-    /// Live download progress of in-flight artifact installs (polled every
-    /// frame while an install is running).
+    /// Polled every frame while an install is running.
     pub artifact_progress:
         AsyncData<std::collections::BTreeMap<String, Option<ene_plugin_host::ArtifactProgress>>>,
     /// Last error per artifact operation (install/rollback/uninstall),
@@ -166,12 +153,10 @@ pub struct SettingsInputState {
     /// Two-step confirmation arms for destructive artifact actions
     /// (`artifact_id|action` → armed).
     pub artifact_arm: std::collections::BTreeMap<String, bool>,
-    /// In-flight catalog refresh.
     pub catalog_refresh: Option<tokio::sync::oneshot::Receiver<Result<u64, String>>>,
     /// Two-step delete arms for model files on the Engines page
     /// (`plugin|model` → armed).
     pub model_delete_arm: std::collections::HashMap<String, bool>,
-    /// Asynchronously cached schedule list for the Schedules page.
     pub schedules: AsyncData<Vec<ene_core::Schedule>>,
     /// Asynchronously cached run history for the currently selected
     /// schedule.
@@ -198,39 +183,29 @@ pub struct SettingsInputState {
     /// Dynamic `ListConfigOptions` results per plugin, keyed by the field's
     /// dotted config path.
     pub plugin_options: std::collections::BTreeMap<String, AsyncData<PluginOptionsMap>>,
-    /// Asynchronous plugin `ValidateConfig` results per plugin.
     pub plugin_validation: std::collections::BTreeMap<String, AsyncData<Vec<String>>>,
     /// Standing permission grants (Permission Center page).
     pub permissions: AsyncData<Vec<ene_runtime::PermissionScope>>,
     /// Message from the last permission mutation (revoke / reset).
     pub permission_action: AsyncData<String>,
-    /// Registered connector summaries (Connectors page).
     pub connectors: AsyncData<Vec<ene_connector::ConnectorSummary>>,
     /// Status + grants of the selected connector.
     pub connector_detail: AsyncData<(
         Option<ene_connector::ConnectorStatus>,
         Vec<ene_connector::PermissionGrant>,
     )>,
-    /// In-flight connector connectivity check result.
     pub connector_check: AsyncData<Result<ene_connector::HealthStatus, String>>,
-    /// Session metadata rows (Sessions page).
     pub sessions: AsyncData<Vec<ene_runtime::PublicSessionMeta>>,
-    /// Session message search results.
     pub session_search: AsyncData<Vec<(String, ene_runtime::PublicExportedMessage)>>,
-    /// In-flight session mutation result message.
     pub session_message: AsyncData<String>,
-    /// Provider catalog for the Voice page.
     pub provider_catalog: AsyncData<Option<ene_runtime::ProviderCatalog>>,
-    /// `/models` fetch result for the AI page.
     pub model_list: AsyncData<Vec<String>>,
-    /// API key test-connection result for the AI page.
     pub api_test: AsyncData<Result<(), String>>,
     /// Direct tool-call test results per plugin (e.g. Home Assistant
     /// connectivity).
     pub plugin_tool_test: std::collections::BTreeMap<String, AsyncData<String>>,
     /// In-flight memory-ledger mutation messages (polled each frame).
     pub ledger_pending: Vec<tokio::sync::oneshot::Receiver<String>>,
-    /// MCP server liveness statuses (plugin center).
     pub mcp_statuses: AsyncData<Vec<ene_plugin_host::McpServerStatus>>,
 }
 
@@ -246,9 +221,6 @@ impl SettingsInputState {
         }
     }
 
-    /// Mirror the on-disk `CharacterSettings` into the editable
-    /// text buffers. Called when the settings window becomes
-    /// visible.
     pub fn sync_from_settings(
         &mut self,
         settings: &CharacterSettings,

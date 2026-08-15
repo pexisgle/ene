@@ -1,6 +1,3 @@
-//! Line-based document chunking with heading and line-range metadata.
-
-/// Chunking parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkOptions {
     /// Target character budget per chunk; chunks are emitted once accumulated
@@ -14,14 +11,12 @@ pub struct ChunkOptions {
     pub max_chunks_per_file: usize,
 }
 
-/// One chunk with its citation metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentChunk {
     /// Zero-based position within the document.
     pub chunk_index: u32,
     /// Nearest heading at chunk start (empty when none was found).
     pub heading: String,
-    /// Chunk text.
     pub content: String,
     /// First line of the chunk (1-based, inclusive).
     pub start_line: u32,
@@ -29,7 +24,6 @@ pub struct DocumentChunk {
     pub end_line: u32,
 }
 
-/// Chunking result for one document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkedDocument {
     /// The chunks, in document order.
@@ -195,7 +189,6 @@ pub fn chunk_document(
     ChunkedDocument { chunks, truncated }
 }
 
-/// Splits a single over-long line into character-budgeted segments.
 fn split_long_line(line: &str, max_chars: usize) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::with_capacity(max_chars);
@@ -211,7 +204,6 @@ fn split_long_line(line: &str, max_chars: usize) -> Vec<String> {
     segments
 }
 
-/// Returns the Markdown ATX heading text for a line, if any.
 fn atx_heading(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
     let level = trimmed.bytes().take_while(|b| *b == b'#').count();

@@ -1,6 +1,5 @@
 use ene_plugin::prelude::*;
 
-/// Generates a random UUID (version 4).
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "random",

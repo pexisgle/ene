@@ -25,8 +25,6 @@ pub fn decision_schema_object() -> Value {
     })
 }
 
-/// Parse model output into a normalized [`ProactiveDecision`].
-///
 /// Unknown fields are ignored. Invalid / missing values fail closed toward silence.
 #[must_use]
 pub fn parse_decision_json(raw: &str) -> ProactiveDecision {

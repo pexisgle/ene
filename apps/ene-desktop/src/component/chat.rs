@@ -1,5 +1,3 @@
-//! ECS components for the dedicated chat window.
-
 use bevy_ecs::prelude::*;
 
 use crate::chat_state::ChatState;

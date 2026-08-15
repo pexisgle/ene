@@ -46,29 +46,21 @@ pub enum SettingsAction {
     CharacterPosYUp,
     CharacterPosZDown,
     CharacterPosZUp,
-    /// Snap `character_position` back to the world origin. Triggered
-    /// by the "Reset Position" button on the Character settings
+    /// Triggered by the "Reset Position" button on the Character settings
     /// page; lets the user recover from a model dragged off-screen
     /// without restarting the app.
     ResetCharacterPosition,
-    /// Toggle the per-bone collider wireframe + raycast hit-point
-    /// overlay. Bound to the F3 hotkey and the "Show raycast
-    /// colliders (debug)" checkbox on the Character page.
+    /// Bound to the F3 hotkey and the "Show raycast colliders (debug)"
+    /// checkbox on the Character page.
     ToggleColliderDebug,
     ToggleInputRegionDebug,
-    /// Load the character card at `path` into the editor buffers
-    /// (Character Card editor page).
     LoadCharacterCard {
         path: String,
     },
-    /// Write the editor buffers back to the character card at `path`
-    /// (Character Card editor page).
     SaveCharacterCard {
         path: String,
         assets_dir: String,
     },
-    /// Validate the editor buffers without writing to disk
-    /// (Character Card editor page).
     ValidateCharacterCard {
         card_path: String,
         assets_dir: String,
@@ -232,8 +224,7 @@ fn apply_character_selection(
     true
 }
 
-/// Load the character card at `path` into the editor buffers on
-/// [`UiState`]. On read/parse failure the error is surfaced through
+/// On read/parse failure the error is surfaced through
 /// `character_editor_validation_errors` and the loaded flag stays
 /// `false` so the page can retry.
 fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
@@ -292,8 +283,6 @@ fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
     }
 }
 
-/// Write the editor buffers back to the character card at `path`.
-///
 /// The existing on-disk card is read first so that extensions, assets, and
 /// other fields the editor does not expose are preserved. An unreadable or
 /// unparseable existing card aborts the save with the reason surfaced
@@ -368,8 +357,7 @@ fn save_character_card(path: &str, assets_dir: &str, world: &mut World, ui_entit
     }
 }
 
-/// Validate the editor buffers without touching disk, populating
-/// `character_editor_validation_errors`.
+/// Populates `character_editor_validation_errors` without touching disk.
 fn validate_character_card(
     card_path: &str,
     assets_dir: &str,
@@ -401,8 +389,6 @@ fn set_editor_errors(world: &mut World, ui_entity: Entity, errors: Vec<EditorIss
     }
 }
 
-/// Applies the discard dialog's "discard" choice to the editor state.
-///
 /// Returns `true` when a deferred character switch must still be applied to
 /// settings (the caller releases the world borrow first). The close and
 /// app-exit intents keep their request flags so the runtime completes them
@@ -421,9 +407,8 @@ pub(crate) fn apply_discard_decision(state: &mut UiState) -> bool {
     false
 }
 
-/// Records a deferred character switch when the editor holds unsaved
-/// changes. Returns `true` when the switch must wait for the discard dialog;
-/// the caller then skips `select_character`.
+/// Returns `true` when the switch must wait for the discard dialog; the
+/// caller then skips `select_character`.
 pub(crate) fn defer_character_switch_if_unsaved(
     target: usize,
     world: &mut World,
@@ -441,8 +426,8 @@ pub(crate) fn defer_character_switch_if_unsaved(
     false
 }
 
-/// Applies a character switch that the discard dialog confirmed, then drops
-/// the editor buffers so the page reloads for the newly selected character.
+/// Drops the editor buffers so the page reloads for the newly selected
+/// character.
 pub(crate) fn confirm_pending_character_switch(
     settings: &mut CharacterSettings,
     emotion_queue: Option<&mut EmotionQueue>,
@@ -462,10 +447,10 @@ pub(crate) fn confirm_pending_character_switch(
     }
 }
 
-/// Reads the card at `path` for editing. A missing file starts from a
-/// default card (both load and save support creating a brand-new card);
-/// any other read or parse failure is surfaced as an issue and returns
-/// `None` so the caller aborts instead of rewriting the card.
+/// A missing file starts from a default card (both load and save support
+/// creating a brand-new card); any other read or parse failure is surfaced
+/// as an issue and returns `None` so the caller aborts instead of rewriting
+/// the card.
 fn read_editable_card(
     path: &Path,
     world: &mut World,
@@ -514,10 +499,9 @@ fn read_editable_card(
     }
 }
 
-/// Applies every editor buffer to `card`. Fields the editor does not expose
-/// (assets, expressions, unknown `data` keys) come from the on-disk card and
-/// are preserved; `None` structured buffers leave the matching card section
-/// untouched.
+/// Fields the editor does not expose (assets, expressions, unknown `data`
+/// keys) come from the on-disk card and are preserved; `None` structured
+/// buffers leave the matching card section untouched.
 fn build_card_from_buffers(snapshot: &UiState, mut card: CharacterCardV3) -> CharacterCardV3 {
     card.data.name.clone_from(&snapshot.character_editor_name);
     card.data
@@ -562,9 +546,8 @@ fn build_card_from_buffers(snapshot: &UiState, mut card: CharacterCardV3) -> Cha
     card
 }
 
-/// Semantic + asset validation of the assembled card. Every finding carries
-/// the field path it refers to; `Error` findings block saving, `Warning`
-/// findings are informational.
+/// Every finding carries the field path it refers to; `Error` findings block
+/// saving, `Warning` findings are informational.
 fn validate_card(card: &CharacterCardV3, card_dir: &Path, assets_dir: &Path) -> Vec<EditorIssue> {
     let mut issues = Vec::new();
     if card.data.name.trim().is_empty() {
@@ -801,9 +784,8 @@ fn validate_card(card: &CharacterCardV3, card_dir: &Path, assets_dir: &Path) -> 
     issues
 }
 
-/// Copies the pre-save card to `<name>.bak` once. The first backup is never
-/// overwritten, so after repeated saves it still holds the pre-edit original
-/// and a buggy rewrite stays recoverable.
+/// The first backup is never overwritten, so after repeated saves it still
+/// holds the pre-edit original and a buggy rewrite stays recoverable.
 fn backup_card(path: &Path) -> Result<(), std::io::Error> {
     if !path.exists() {
         return Ok(());
@@ -842,18 +824,17 @@ fn sidecar_diffs(card_path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Whether a motion path can escape the character folder: absolute paths and
-/// `..` traversal components are both rejected.
+/// Absolute paths and `..` traversal components are both rejected.
 fn escapes_card_dir(path: &str) -> bool {
     Path::new(path).is_absolute() || path.split(['/', '\\']).any(|component| component == "..")
 }
 
-/// `true` when the path names a regular file without going through symlinks.
+/// Does not follow symlinks.
 fn is_regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
-/// The card file's own name, used as the issue location for file-level errors.
+/// Used as the issue location for file-level errors.
 fn card_file_label(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),
@@ -959,11 +940,8 @@ pub(crate) fn path_row(ui: &mut egui::Ui, path: &mut String, text_width: f32) ->
     changed
 }
 
-/// Push the per-character default expression into the
-/// `EmotionQueue` if both a non-`None` expression and a queue
-/// handle are available. Centralising this branch keeps the
-/// character-cycle arm in [`apply_action`] symmetric for `Prev`
-/// and `Next`.
+/// Centralising this branch keeps the character-cycle arm in
+/// [`apply_action`] symmetric for `Prev` and `Next`.
 fn push_default_expression(
     default_expression: Option<String>,
     emotion_queue: Option<&mut EmotionQueue>,
@@ -1125,8 +1103,6 @@ mod tests {
         );
     }
 
-    /// A missing card (brand-new character) still saves
-    /// from a default card — creating the file — without erroring.
     #[test]
     fn save_creates_card_when_file_missing() {
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -1147,8 +1123,6 @@ mod tests {
         assert_eq!(card.data.name, "Brand New");
     }
 
-    /// An unreadable existing card (not missing, but
-    /// failing I/O) must abort the save and surface the read error.
     #[test]
     fn save_aborts_on_unreadable_existing_card() {
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -1167,9 +1141,6 @@ mod tests {
         );
     }
 
-    /// An edit-and-save round-trip must keep top-level
-    /// `data` fields from other apps (e.g. `vendor_field`) while applying the
-    /// editor changes.
     #[test]
     fn save_preserves_unknown_top_level_fields() {
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -1360,7 +1331,6 @@ mod tests {
         );
     }
 
-    /// The pre-save card is backed up once; repeated saves keep the original.
     #[test]
     fn save_backs_up_original_once() {
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -1388,7 +1358,6 @@ mod tests {
         );
     }
 
-    /// A motion path with `..` traversal is rejected as unsafe.
     #[test]
     fn validate_rejects_motion_path_traversal() {
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -1417,8 +1386,6 @@ mod tests {
         );
     }
 
-    /// Load → edit → save must round-trip lorebook entries and the motion
-    /// catalog without dropping fields the editor does not expose.
     #[test]
     fn save_preserves_lorebook_and_motion_catalog() {
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -1589,8 +1556,6 @@ mod tests {
         assert!((state.model_scale - 1.75).abs() < 1e-6);
     }
 
-    /// Unsaved edits defer the switch to the discard dialog; confirming
-    /// applies the selection and drops the buffers so the page reloads.
     #[test]
     fn character_switch_defers_until_discard_confirmed() {
         let mut settings = test_settings(&["Alicia", "Blanc"]);
@@ -1624,8 +1589,6 @@ mod tests {
         assert!(state.0.character_editor_pending_character.is_none());
     }
 
-    /// "Keep editing" cancels the deferred switch and keeps both the buffers
-    /// and the current selection.
     #[test]
     fn character_switch_cancel_keeps_edits_and_selection() {
         let settings = test_settings(&["Alicia", "Blanc"]);
@@ -1677,7 +1640,6 @@ mod tests {
         assert!(state.character_editor_close_requested);
     }
 
-    /// Discarding a reload resets the buffers so the page reloads from disk.
     #[test]
     fn discard_decision_reload_resets_buffers() {
         let mut state = UiState {
@@ -1708,7 +1670,6 @@ mod tests {
         assert_eq!(state.character_editor_pending_character, Some(2));
     }
 
-    /// Absolute motion paths are rejected just like `..` traversal.
     #[test]
     fn validate_rejects_absolute_motion_path() {
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -1819,7 +1780,6 @@ mod tests {
         );
     }
 
-    /// A missing declared VRMA warns but does not block the save.
     #[test]
     fn missing_declared_vrma_warns_but_saves() {
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");

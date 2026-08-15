@@ -8,7 +8,6 @@
 
 use sea_orm_migration::prelude::*;
 
-/// Adds the `memory_outcomes` table.
 pub struct MemoryOutcomesMigration;
 
 impl MigrationName for MemoryOutcomesMigration {

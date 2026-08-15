@@ -1,5 +1,3 @@
-//! Chat window egui rendering.
-
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;

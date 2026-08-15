@@ -50,22 +50,15 @@ macro_rules! row {
 /// A dynamically-typed database value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DbValue {
-    /// SQL NULL.
     Null,
-    /// Boolean value.
     Bool(bool),
-    /// 64-bit signed integer.
     Int(i64),
-    /// 64-bit floating point.
     Float(f64),
-    /// UTF-8 text string.
     Text(String),
-    /// Binary blob.
     Blob(Vec<u8>),
 }
 
 impl DbValue {
-    /// Returns the contained integer if this value is [`Int`](Self::Int).
     pub const fn as_i64(&self) -> Option<i64> {
         match self {
             Self::Int(v) => Some(*v),
@@ -73,7 +66,6 @@ impl DbValue {
         }
     }
 
-    /// Returns the contained text if this value is [`Text`](Self::Text).
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::Text(v) => Some(v),
@@ -81,7 +73,6 @@ impl DbValue {
         }
     }
 
-    /// Returns the contained boolean if this value is [`Bool`](Self::Bool).
     pub const fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(v) => Some(*v),
@@ -89,7 +80,6 @@ impl DbValue {
         }
     }
 
-    /// Returns the contained float if this value is [`Float`](Self::Float).
     pub const fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Float(v) => Some(*v),
@@ -97,7 +87,6 @@ impl DbValue {
         }
     }
 
-    /// Returns the contained bytes if this value is [`Blob`](Self::Blob).
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Blob(v) => Some(v),
@@ -172,82 +161,50 @@ impl std::fmt::Display for DbValue {
 pub enum DbFilter {
     /// Matches all rows.
     Always,
-    /// Logical AND of multiple filters.
     And(Vec<Self>),
-    /// Logical OR of multiple filters.
     Or(Vec<Self>),
-    /// Logical NOT of a filter.
     Not(Box<Self>),
-    /// Column equals value.
     Eq {
-        /// Column name.
         column: String,
-        /// Value to compare.
         value: DbValue,
     },
-    /// Column not equals value.
     Ne {
-        /// Column name.
         column: String,
-        /// Value to compare.
         value: DbValue,
     },
-    /// Column less than value.
     Lt {
-        /// Column name.
         column: String,
-        /// Value to compare.
         value: DbValue,
     },
-    /// Column less than or equal to value.
     Le {
-        /// Column name.
         column: String,
-        /// Value to compare.
         value: DbValue,
     },
-    /// Column greater than value.
     Gt {
-        /// Column name.
         column: String,
-        /// Value to compare.
         value: DbValue,
     },
-    /// Column greater than or equal to value.
     Ge {
-        /// Column name.
         column: String,
-        /// Value to compare.
         value: DbValue,
     },
-    /// Column value is in the given list.
     In {
-        /// Column name.
         column: String,
-        /// Values to match against.
         values: Vec<DbValue>,
     },
-    /// Column matches a LIKE pattern.
     Like {
-        /// Column name.
         column: String,
-        /// LIKE pattern string.
         pattern: String,
     },
-    /// Column is NULL.
     IsNull {
-        /// Column name.
         column: String,
     },
-    /// Column is not NULL.
     IsNotNull {
-        /// Column name.
         column: String,
     },
 }
 
 impl DbFilter {
-    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     pub fn eq(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Eq {
             column: column.into(),
@@ -255,7 +212,6 @@ impl DbFilter {
         }
     }
 
-    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     pub fn ne(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Ne {
             column: column.into(),
@@ -263,7 +219,6 @@ impl DbFilter {
         }
     }
 
-    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     pub fn lt(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Lt {
             column: column.into(),
@@ -271,7 +226,6 @@ impl DbFilter {
         }
     }
 
-    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     pub fn le(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Le {
             column: column.into(),
@@ -279,7 +233,6 @@ impl DbFilter {
         }
     }
 
-    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     pub fn gt(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Gt {
             column: column.into(),
@@ -287,7 +240,6 @@ impl DbFilter {
         }
     }
 
-    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     pub fn ge(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Ge {
             column: column.into(),
@@ -295,21 +247,18 @@ impl DbFilter {
         }
     }
 
-    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     pub fn is_null(column: impl Into<String>) -> Self {
         Self::IsNull {
             column: column.into(),
         }
     }
 
-    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     pub fn is_not_null(column: impl Into<String>) -> Self {
         Self::IsNotNull {
             column: column.into(),
         }
     }
 
-    /// Creates an `IN` filter matching `column` against the given values.
     pub fn in_list(
         column: impl Into<String>,
         values: impl IntoIterator<Item = impl Into<DbValue>>,
@@ -320,7 +269,6 @@ impl DbFilter {
         }
     }
 
-    /// Creates a `LIKE` filter matching `column` against the given pattern.
     pub fn like(column: impl Into<String>, pattern: impl Into<String>) -> Self {
         Self::Like {
             column: column.into(),
@@ -374,8 +322,6 @@ impl DbFilter {
         }
     }
 
-    /// Returns the set of column names referenced by this filter.
-    ///
     /// Duplicates are removed and names are returned in sorted order.
     pub fn columns_referenced(&self) -> BTreeSet<&str> {
         let mut cols = BTreeSet::new();
@@ -411,23 +357,18 @@ impl DbFilter {
 /// Sort direction for ORDER BY clauses.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DbOrderDirection {
-    /// Ascending order.
     Asc,
-    /// Descending order.
     Desc,
 }
 
 /// An ORDER BY clause element.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbOrderBy {
-    /// Column name to sort by.
     pub column: String,
-    /// Sort direction.
     pub direction: DbOrderDirection,
 }
 
 impl DbOrderBy {
-    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     pub fn asc(column: impl Into<String>) -> Self {
         Self {
             column: column.into(),
@@ -435,7 +376,6 @@ impl DbOrderBy {
         }
     }
 
-    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     pub fn desc(column: impl Into<String>) -> Self {
         Self {
             column: column.into(),
@@ -447,37 +387,27 @@ impl DbOrderBy {
 /// `SQLite` column type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum DbType {
-    /// 64-bit signed integer.
     Integer,
-    /// 64-bit IEEE floating point.
     Real,
-    /// UTF-8 text string.
     #[default]
     Text,
-    /// Binary blob.
     Blob,
-    /// Boolean (stored as INTEGER 0/1).
+    /// Stored as INTEGER 0/1.
     Boolean,
 }
 
 /// Column definition for schema declaration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DbColumn {
-    /// Column name.
     pub name: String,
-    /// Column type.
     #[serde(default)]
     pub ty: DbType,
-    /// Whether the column allows NULL.
     #[serde(default)]
     pub nullable: bool,
-    /// Whether this column is a primary key.
     #[serde(default)]
     pub primary_key: bool,
-    /// Whether this column auto-increments.
     #[serde(default)]
     pub auto_increment: bool,
-    /// Whether this column has a UNIQUE constraint.
     #[serde(default)]
     pub unique: bool,
     /// Default value expression (as SQL literal).
@@ -490,7 +420,6 @@ pub struct DbColumn {
 pub struct DbTable {
     /// Table name (must start with the tool's prefix).
     pub name: String,
-    /// Column definitions.
     #[serde(default)]
     pub columns: Vec<DbColumn>,
 }
@@ -498,14 +427,10 @@ pub struct DbTable {
 /// Index definition for schema declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DbIndex {
-    /// Index name.
     pub name: String,
-    /// Table name this index belongs to.
     pub table: String,
-    /// Column names included in the index.
     #[serde(default)]
     pub columns: Vec<String>,
-    /// Whether this is a unique index.
     #[serde(default)]
     pub unique: bool,
 }
@@ -515,10 +440,8 @@ pub struct DbIndex {
 pub struct DbSchema {
     /// Tool prefix (e.g., "fs_", "utility_"). All table names must start with this.
     pub prefix: String,
-    /// Table definitions.
     #[serde(default)]
     pub tables: Vec<DbTable>,
-    /// Index definitions.
     #[serde(default)]
     pub indexes: Vec<DbIndex>,
 }

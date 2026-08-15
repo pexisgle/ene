@@ -20,9 +20,7 @@ mod imp {
         LastAppliedInputRects, LastInputSource, MaskCapture,
     };
 
-    /// Refresh the [`LastAppliedInputRects`] / [`LastInputSource`]
-    /// resources from the latest `MaskCapture` snapshot. Cheap to
-    /// run every frame (no GPU work, just a `lock` + walk).
+    /// Cheap to run every frame (no GPU work, just a `lock` + walk).
     pub fn refresh_input_region_system(
         mask: Option<Res<MaskCapture>>,
         mut last_rects: ResMut<LastAppliedInputRects>,

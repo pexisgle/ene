@@ -65,9 +65,6 @@ where
     );
 }
 
-/// The worker-thread side of one streaming job's channel, handed to
-/// [`crate::StreamingLocalModel::run_streaming`] as `sink`.
-///
 /// Generic directly over the chunk (`C`) and model-error (`E`) types rather
 /// than over the whole `M: StreamingLocalModel`, so code that only produces
 /// chunks (e.g. a model's own token-sampling loop) does not need to name the
@@ -128,9 +125,6 @@ impl<C: Send + 'static, E: std::error::Error + Send + 'static> ChunkSink<C, E> {
     }
 }
 
-/// The async-side handle for one streaming job, returned by
-/// [`crate::EngineHandle::submit_stream`].
-///
 /// Dropping this — including a dropped `tokio::time::timeout`/`select!`
 /// race, exactly like [`crate::EngineHandle::submit`]'s own reply future —
 /// cancels the job's `caller_gone` token via the held [`DropGuard`], which
@@ -152,8 +146,6 @@ impl<C: Send + 'static, E: std::error::Error + Send + 'static> ChunkReceiver<C, 
         }
     }
 
-    /// Awaits the next chunk, the terminal error (if any), or `None` once
-    /// the stream has ended.
     pub async fn recv(&mut self) -> Option<Result<C, EngineError<E>>> {
         self.rx.recv().await
     }

@@ -28,7 +28,7 @@ use ene_runtime::EneHandle;
 /// Brief backoff after capture/vision failure (avoids hammering portals).
 const FAIL_BACKOFF: Duration = Duration::from_secs(5);
 
-/// Host screen summarizer (local Gemma + mmproj via runtime actor).
+/// Backed by local Gemma + mmproj in the runtime actor.
 pub struct ScreenSummaryProvider {
     handle: EneHandle,
     last_failure_at: Mutex<Option<Instant>>,
@@ -252,7 +252,6 @@ mod tests {
         let cached = gate.check(&fp, None, "app").expect("cache hit");
         assert_eq!(truncate(cached, 32).chars().count(), 32);
         assert_eq!(truncate(cached, 64).chars().count(), 64);
-        // The cache itself is never shortened by a hit.
         assert_eq!(cached.chars().count(), long.chars().count());
     }
 }

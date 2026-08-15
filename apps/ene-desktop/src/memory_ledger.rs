@@ -1,9 +1,6 @@
-//! Memory Ledger presenter: table row model, filters, and kind distribution.
-
 use chrono::{DateTime, Duration, Utc};
 use ene_store::{MemoryItem, MemoryKind, MemoryStatus};
 
-/// Created-date filter for the ledger table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CreatedWithinFilter {
     #[default]
@@ -25,28 +22,20 @@ impl CreatedWithinFilter {
     }
 }
 
-/// A memory row rendered by the ledger table.
 #[derive(Debug, Clone)]
 pub struct MemoryLedgerRow {
     /// Database primary key.
     pub id: i64,
-    /// Short title or label.
     pub title: String,
     /// Full memory content (draft source for the edit dialog).
     pub content: String,
-    /// Content preview (truncated).
     pub content_preview: String,
-    /// Memory kind (the category tag).
     pub kind: MemoryKind,
-    /// Lifecycle status.
     pub status: MemoryStatus,
     /// Ownership scope string (`character` / `user` / `shared`).
     pub scope: String,
-    /// When the memory was created.
     pub created_at: DateTime<Utc>,
-    /// Salience / importance weight.
     pub salience: f32,
-    /// Confidence score.
     pub confidence: f32,
     /// Pinned memories are exempt from natural decay.
     pub pinned: bool,
@@ -70,7 +59,6 @@ impl MemoryLedgerPresenter {
         MemoryKind::Reflection,
     ];
 
-    /// Build a ledger row from a typed memory item.
     pub fn row_from_item(item: &MemoryItem) -> MemoryLedgerRow {
         MemoryLedgerRow {
             id: item.id.unwrap_or_default(),
@@ -87,8 +75,6 @@ impl MemoryLedgerPresenter {
         }
     }
 
-    /// Apply the ledger's text search and kind / status / created filters.
-    ///
     /// Search matches the lowercased title and full content; the created
     /// filter is anchored at `now`.
     pub fn filter_rows(
@@ -126,7 +112,7 @@ impl MemoryLedgerPresenter {
             .collect()
     }
 
-    /// Count ledger rows per kind, most frequent first (ties by kind name).
+    /// Rows are ordered most frequent first, ties broken by kind name.
     pub fn kind_distribution(rows: &[MemoryLedgerRow]) -> Vec<(MemoryKind, usize)> {
         let mut counts: Vec<(MemoryKind, usize)> = Vec::new();
         for row in rows {
@@ -170,7 +156,6 @@ impl MemoryLedgerPresenter {
     }
 }
 
-/// Truncate a long text to a display preview with an ellipsis.
 fn truncate_content(content: &str, max_chars: usize) -> String {
     if content.chars().count() <= max_chars {
         return content.to_string();

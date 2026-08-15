@@ -24,7 +24,6 @@ mod tests;
 use crate::store::{CalendarStoreError, parse_rfc3339_ms};
 use ene_plugin::prelude::*;
 
-/// Serializes a value into the tool result payload.
 fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, ToolError> {
     serde_json::to_string_pretty(value)
         .map_err(|e| ToolError::internal(format!("json serialization failed: {e}")))
@@ -59,7 +58,6 @@ fn store_err(e: &CalendarStoreError) -> ToolError {
     }
 }
 
-/// Parses an optional RFC3339 argument into epoch milliseconds.
 fn parse_bound(value: Option<&str>) -> Result<Option<i64>, ToolError> {
     match value {
         Some(v) if v.trim().is_empty() => Ok(None),

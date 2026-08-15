@@ -1,5 +1,3 @@
-//! Pending deferred memory-write queue.
-//!
 //! Domain DTOs (`PendingMemoryWrite`, `PendingMemoryWriteStatus`) live in
 //! `ene-core`; this module owns only the `SeaORM` entity and the
 //! model-to-DTO conversion.

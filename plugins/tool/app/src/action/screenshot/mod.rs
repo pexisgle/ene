@@ -60,7 +60,6 @@ fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, ToolError> {
     keywords_primary = "screenshot, screen, capture, image"
 )]
 pub struct ScreenshotAction {
-    /// Resize percentage 1-100 (default: 50).
     #[arg(minimum = 1, maximum = 100, default = "50")]
     #[serde(default)]
     scale_percent: Option<u32>,

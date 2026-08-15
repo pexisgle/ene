@@ -2,7 +2,6 @@ use ene_config::EneConfigError;
 use ene_config::{ConfigTarget, HasConfigKey};
 use indexmap::IndexMap;
 
-/// Motion body layer classification.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
@@ -18,7 +17,6 @@ pub enum MotionLayer {
 }
 
 impl MotionLayer {
-    /// Stable display / log label.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Upper => "upper",
@@ -41,16 +39,12 @@ impl MotionLayer {
     }
 }
 
-/// A single motion entry with a display name and relative file path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct MotionEntry {
-    /// Display name for the motion (e.g. `"VRMA_01"`).
     pub name: String,
-    /// Relative path to the motion file (e.g. `"motions/VRMA_01.vrma"`).
     pub path: String,
-    /// Body layer this motion targets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer: Option<MotionLayer>,
     /// Catch-all for vendor motion fields this build does not model.
@@ -58,7 +52,6 @@ pub struct MotionEntry {
     pub extra: IndexMap<String, serde_json::Value>,
 }
 
-/// Structured motion catalog for a character.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, Default)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
@@ -74,20 +67,16 @@ pub struct MotionCatalog {
     pub extra: IndexMap<String, serde_json::Value>,
 }
 
-/// Per-character visual config used by the desktop GUI.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(crate = "crate::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "crate::schemars")]
 pub struct CharacterConfig {
-    /// 3D position of the character model in the scene.
     pub character_position: [f32; 3],
-    /// Scale factor applied to the character model.
     pub model_scale: f32,
     /// How strongly the character looks toward the user (0.0–1.0).
     pub look_at_strength: f32,
     /// Name of the default motion (matches a `MotionEntry.name`).
     pub default_motion: String,
-    /// Name of the default expression (e.g. `"neutral"`).
     pub default_expression: String,
     /// Language code override for this character's card (e.g. `"ja"`).
     /// Empty (the default) inherits the app language; the value is
@@ -217,8 +206,6 @@ mod tests {
         }
     }
 
-    /// Writing a character section must merge its declared fields into the
-    /// existing subtree, preserving unknown sibling sub-keys.
     #[test]
     fn set_section_preserves_unknown_subkeys() {
         let mut config = CharacterConfig::default();

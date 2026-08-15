@@ -1,5 +1,3 @@
-//! Dedicated chat window: a shared [`EguiWindowShell`] plus the chat UI.
-
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 

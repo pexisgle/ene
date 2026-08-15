@@ -1,5 +1,3 @@
-//! # ECS Systems for `ene-desktop`
-//!
 //! Each system is a small, focused function that reads [`Res<T>`] /
 //! [`ResMut<T>`] and / or [`Query`] / [`MessageReader<T>`] parameters
 //! and writes back. The schedule in [`crate::schedule`] controls the

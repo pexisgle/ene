@@ -44,8 +44,6 @@ pub const DECAY_EMOTIONAL_WEIGHT: f32 = 0.3;
 /// Bias paired with [`DECAY_EMOTIONAL_WEIGHT`].
 pub const DECAY_EMOTIONAL_BIAS: f32 = 0.7;
 
-/// Shared half-life exponential-decay kernel in `[0.0, 1.0]`.
-///
 /// Computes `exp(-(ln 2 / half_life_days) * age_days)`. A non-positive or
 /// `NaN` half-life disables decay and returns `1.0`. Negative ages are
 /// clamped to zero (a future anchor scores as brand-new).
@@ -62,14 +60,12 @@ pub fn half_life_decay(age_days: f64, half_life_days: f64) -> f32 {
     (-lambda * age_days).exp() as f32
 }
 
-/// Age in days of `anchor` relative to `reference` (negative ages clamped to 0).
+/// Negative ages are clamped to 0.
 pub(crate) fn age_in_days(reference: DateTime<Utc>, anchor: DateTime<Utc>) -> f64 {
     let age_secs = reference.signed_duration_since(anchor).num_seconds().max(0) as f64;
     age_secs / 86_400.0
 }
 
-/// Exponential recency score in `[0.0, 1.0]` using half-life decay in days.
-///
 /// Anchor: `last_accessed_at → updated_at`. Used for recall ranking among
 /// recallable rows. This intentionally differs from the forgetting anchor
 /// ([`active_decay_anchor`], which keys off `updated_at` only): recall rewards
@@ -80,7 +76,6 @@ pub fn recency_score(reference: DateTime<Utc>, item: &MemoryItem, half_life_days
     half_life_decay(age_in_days(reference, anchor), half_life_days)
 }
 
-/// Normalize affect magnitude to `[0.0, 1.0]` for decay retention.
 pub fn emotional_impact(affect: AffectAnnotation) -> f32 {
     let dist = affect.valence.hypot(affect.arousal);
     (dist / EMOTIONAL_MAGNITUDE_SCALE).clamp(0.0, 1.0)
@@ -105,8 +100,6 @@ pub fn faded_decay_anchor(item: &MemoryItem) -> DateTime<Utc> {
     item.faded_at.unwrap_or(item.created_at)
 }
 
-/// Compute lifecycle retention score in `[0.0, 1.0]` (higher = retain longer).
-///
 /// Anchor depends on status: faded memories decay from `faded_at`, all others
 /// from the active anchor. Pinned memories always return `1.0` and are exempt
 /// from natural decay transitions.
@@ -130,7 +123,6 @@ pub fn decay_score(item: &MemoryItem, now: DateTime<Utc>, half_life_days: f64) -
     (base * salience_factor * confidence_factor * emotional_factor).clamp(0.0, 1.0)
 }
 
-/// Return the natural-decay target status for a memory, if any.
 pub fn target_status_after_decay(current: MemoryStatus, score: f32) -> Option<MemoryStatus> {
     match current {
         MemoryStatus::Active if score < FADE_THRESHOLD => Some(MemoryStatus::Faded),

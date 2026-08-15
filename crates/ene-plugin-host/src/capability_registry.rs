@@ -40,9 +40,7 @@ impl CapabilityId {
 /// handshake.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PluginCapabilityDeclarations {
-    /// Validated capabilities this plugin provides.
     pub provides: Vec<CapabilityRef>,
-    /// Validated capabilities this plugin requires.
     pub requires: Vec<CapabilityRequirement>,
 }
 
@@ -64,15 +62,11 @@ pub struct CapabilityRegistry {
 }
 
 impl CapabilityRegistry {
-    /// Creates an empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Registers one plugin's handshake declarations, replacing any previous
-    /// entry for the plugin.
-    ///
     /// Invalid entries are warned about individually and dropped — one bad
     /// declaration never fails the plugin's handshake or affects the rest of
     /// its declarations (same per-entry policy as credential declarations).
@@ -114,8 +108,6 @@ impl CapabilityRegistry {
         self.declarations.insert(plugin.to_string(), declarations);
     }
 
-    /// Removes every capability `plugin` provides from the provider index.
-    ///
     /// Used by the startup gate so a plugin disabled for unmet requirements
     /// does not keep satisfying other plugins' requirements.
     pub fn remove_provider(&mut self, plugin: &str) {
@@ -125,8 +117,6 @@ impl CapabilityRegistry {
         });
     }
 
-    /// Resolves `requirement` to the plugin name that provides it, if any.
-    ///
     /// `None` for an unparsable requirement or when no provider is
     /// registered; soft requirements are resolved identically to hard ones —
     /// softness only changes what the caller does with `None`.
@@ -139,8 +129,7 @@ impl CapabilityRegistry {
             .map(String::as_str)
     }
 
-    /// Returns the plugin names providing `name@major`, in deterministic
-    /// (sorted) order.
+    /// Provider names are returned in deterministic (sorted) order.
     #[must_use]
     pub fn providers(&self, name: &str, major: u32) -> Vec<&str> {
         self.providers
@@ -153,21 +142,18 @@ impl CapabilityRegistry {
             })
     }
 
-    /// Returns the declarations registered for `plugin`.
     #[must_use]
     pub fn declarations(&self, plugin: &str) -> Option<&PluginCapabilityDeclarations> {
         self.declarations.get(plugin)
     }
 
-    /// Returns `plugin`'s hard requirements with no provider, in declaration
-    /// order. Soft requirements are never included.
+    /// In declaration order; soft requirements are never included.
     #[must_use]
     pub fn unmet_hard_requirements(&self, plugin: &str) -> Vec<&CapabilityRequirement> {
         self.unmet_requirements(plugin, false)
     }
 
-    /// Returns `plugin`'s soft requirements with no provider, in declaration
-    /// order.
+    /// In declaration order.
     #[must_use]
     pub fn unmet_soft_requirements(&self, plugin: &str) -> Vec<&CapabilityRequirement> {
         self.unmet_requirements(plugin, true)
@@ -187,17 +173,11 @@ impl CapabilityRegistry {
     }
 }
 
-/// The handshake declarations collected from one connected plugin.
 pub struct CapabilityDeclaration {
-    /// Plugin name.
     pub plugin: String,
-    /// The capabilities the plugin advertised during the handshake.
     pub capabilities: PluginCapabilities,
 }
 
-/// Builds the registry from every startup declaration and returns the plugins
-/// whose hard requirements are unmet, computed to a fixpoint.
-///
 /// A plugin disabled for unmet requirements must not count as a provider:
 /// otherwise its consumers would resolve against a plugin that never becomes
 /// available. The gate therefore removes disabled providers and re-evaluates

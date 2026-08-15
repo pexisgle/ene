@@ -35,8 +35,6 @@ for bin in ene-cli ene-desktop "${TOOLS[@]}" "${PLUGINS[@]}"; do
   fi
 done
 
-# ── CLI + built-in tools (.tar.gz) ───────────────────────────────────────────
-
 CLI_ROOT="$DIST_DIR/ene-cli-${VERSION}-linux-x86_64"
 rm -rf "$CLI_ROOT"
 mkdir -p "$CLI_ROOT/tools" "$CLI_ROOT/plugins"
@@ -55,7 +53,6 @@ fi
 tar -czf "$DIST_DIR/ene-cli-${VERSION}-linux-x86_64.tar.gz" -C "$DIST_DIR" "ene-cli-${VERSION}-linux-x86_64"
 rm -rf "$CLI_ROOT"
 
-# ── Desktop (.deb) ───────────────────────────────────────────────────────────
 # Release builds resolve built-in tools from <exe_dir>/tools/ (see ene-config paths).
 
 DEB_ROOT="$DIST_DIR/ene-desktop-deb"

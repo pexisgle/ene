@@ -152,7 +152,6 @@ impl SearchKey {
 }
 
 impl MemoryRecallCache {
-    /// Create an empty cache.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -164,7 +163,6 @@ impl MemoryRecallCache {
         }
     }
 
-    /// Current hit/miss/invalidation counters.
     #[must_use]
     pub fn stats(&self) -> RecallCacheStats {
         RecallCacheStats {

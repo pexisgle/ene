@@ -153,8 +153,6 @@ impl AiBridge {
         Ok(bridge)
     }
 
-    /// Run a future on the bridge runtime with [`BLOCKING_TIMEOUT`].
-    ///
     /// Prevents indefinite UI freezes when the actor is slow or
     /// deadlocked: the future is cancelled after the timeout and a typed
     /// [`AiBridgeError::Timeout`] is returned to the caller.
@@ -167,7 +165,7 @@ impl AiBridge {
             .map_err(|_| AiBridgeError::Timeout(BLOCKING_TIMEOUT.as_secs()))
     }
 
-    /// Send a `Run` command. Also sets the `processing` flag
+    /// Sets the `processing` flag
     /// to `true` so the AI page can disable the chat input until
     /// the actor reports `Terminal`. A failed send
     /// (e.g. Busy or dead actor) immediately clears the flag so a
@@ -201,8 +199,7 @@ impl AiBridge {
         }
     }
 
-    /// Report a detected system-audio beat pulse to the runtime for
-    /// broadcast on the chat bus. Called from the beat-sync capture thread.
+    /// Called from the beat-sync capture thread.
     #[cfg(feature = "voice")]
     pub fn report_beat_pulse(&self, bpm: f32, intensity: f32) {
         if let Err(e) = self.handle.report_beat_pulse(bpm, intensity) {
@@ -228,7 +225,7 @@ impl AiBridge {
         self.active_turn.lock().is_ok_and(|g| g.is_some())
     }
 
-    /// Apply a unified settings draft to the runtime actor. Test-only: the
+    /// Test-only: the
     /// UI path uses [`Self::apply_settings_async`].
     #[cfg(test)]
     pub fn apply_settings_blocking(
@@ -243,7 +240,6 @@ impl AiBridge {
         Ok(self.block_on_timeout(self.handle.apply_settings(request))??)
     }
 
-    /// Starts an asynchronous runtime apply of a settings draft.
     pub fn apply_settings_async(
         &self,
         request: ene_runtime::SettingsApplyRequest,
@@ -261,8 +257,8 @@ impl AiBridge {
                 .map_err(|e| e.to_string())
         })
     }
-    /// Forward a `PermissionDecision` for the request
-    /// currently sitting in `ChatState::pending_permission`.
+    /// The answered request must currently be sitting in
+    /// `ChatState::pending_permission`.
     pub fn answer_permission(
         &self,
         request_id: impl Into<ene_runtime::RequestId>,
@@ -271,8 +267,6 @@ impl AiBridge {
         Ok(self.handle.decide_permission(request_id, decision)?)
     }
 
-    /// Undo the most recent reversible tool operation. Blocks the
-    /// calling thread while the actor answers.
     pub fn undo_blocking(&self) -> Result<ene_runtime::UndoReport, AiBridgeError> {
         Ok(self.block_on_timeout(self.handle.undo())??)
     }
@@ -307,13 +301,13 @@ impl AiBridge {
         Ok(self.block_on_timeout(self.handle.set_greeting(index))??)
     }
 
-    /// The currently loaded character card, if any. Mailbox-free.
+    /// Mailbox-free.
     pub fn character_card(&self) -> Option<std::sync::Arc<ene_card::CharacterCardV3>> {
         self.handle.character_card()
     }
 
-    /// Forward a `UserInputResponse` for the request
-    /// currently sitting in `ChatState::pending_user_input`.
+    /// The answered request must currently be sitting in
+    /// `ChatState::pending_user_input`.
     pub fn answer_user_input(
         &self,
         request_id: impl Into<ene_runtime::RequestId>,
@@ -322,22 +316,18 @@ impl AiBridge {
         Ok(self.handle.submit_user_input(request_id, response)?)
     }
 
-    /// Fetches a fresh actor snapshot on the runtime thread.
     pub fn get_snapshot_blocking(&self) -> Result<ene_runtime::EneStateSnapshot, AiBridgeError> {
         Ok(self.block_on_timeout(self.handle.diagnostics().get_snapshot())??)
     }
 
-    /// Snapshot of cached provider health reports for the AI settings page.
     pub fn provider_health_reports(&self) -> Vec<ene_ai::ProviderHealthReport> {
         self.handle.diagnostics().provider_health_reports()
     }
 
-    /// Snapshot of recent provider fallback events for the AI settings page.
     pub fn provider_fallback_history(&self) -> Vec<ene_ai::FallbackRecord> {
         self.handle.diagnostics().provider_fallback_history()
     }
 
-    /// Refresh memory journal payload (typed memories + affect + commitments).
     pub fn refresh_memory_journal(
         &self,
         limit: usize,
@@ -378,13 +368,10 @@ impl AiBridge {
         })?
     }
 
-    /// Refresh the memory ledger payload (typed memories in every status +
-    /// commitments in every lifecycle state).
     pub fn refresh_memory_ledger(
         &self,
         limit: usize,
     ) -> Result<MemoryLedgerPayload, AiBridgeError> {
-        // Mailbox-free state reads; see `refresh_memory_journal`.
         let character_id = self.handle.card_name();
         let user_id = self.handle.config().user_name.clone();
         let ledger = self.handle.memory_ledger();
@@ -410,13 +397,11 @@ impl AiBridge {
         })?
     }
 
-    /// Run explainable recall search for the journal debug mode.
     pub fn search_memory_journal_recall(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryJournalRecallRow>, AiBridgeError> {
-        // Mailbox-free state reads; see `refresh_memory_journal`.
         let character_id = self.handle.card_name();
         let user_id = self.handle.config().user_name.clone();
         let memory = self.handle.diagnostics().memory().clone();
@@ -447,7 +432,6 @@ impl AiBridge {
         })?
     }
 
-    /// Execute a journal action using the correct store API.
     pub fn execute_journal_action(
         &self,
         id: i64,
@@ -475,14 +459,10 @@ impl AiBridge {
         })?
     }
 
-    // ── Pending candidate approval ──
-
-    /// List pending memory candidates awaiting user approval.
     pub fn fetch_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, AiBridgeError> {
         Ok(self.block_on_timeout(self.handle.candidates().list_pending())??)
     }
 
-    /// Approve a pending memory candidate, persisting it as a typed memory.
     pub fn approve_candidate(&self, id: i64) -> Result<(), AiBridgeError> {
         Ok(self.block_on_timeout(
             self.handle
@@ -491,7 +471,6 @@ impl AiBridge {
         )??)
     }
 
-    /// Starts an asynchronous plugin `ValidateConfig` call.
     pub fn validate_plugin_config_async(
         &self,
         plugin: String,
@@ -508,8 +487,7 @@ impl AiBridge {
                 .collect()
         })
     }
-    /// Spawns `fut` on the bridge runtime and returns a receiver for its
-    /// output. UI code stores the receiver and polls it with `try_recv`
+    /// UI code stores the receiver and polls it with `try_recv`
     /// every frame, so fetching never blocks the render loop.
     pub fn spawn_fetch<T: Send + 'static>(
         &self,
@@ -527,8 +505,6 @@ impl AiBridge {
         rx
     }
 
-    /// Starts an asynchronous plugin-snapshot fetch (never blocks the
-    /// render loop).
     pub fn fetch_plugin_snapshots(
         &self,
     ) -> tokio::sync::oneshot::Receiver<Vec<ene_plugin_host::PluginSettingsSnapshot>> {
@@ -536,8 +512,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.plugin_snapshots().await })
     }
 
-    /// Starts an asynchronous host-side artifact snapshot fetch (Engines
-    /// page; never blocks the render loop).
     pub fn fetch_artifact_snapshot(
         &self,
     ) -> tokio::sync::oneshot::Receiver<Vec<ene_plugin_host::ArtifactSnapshot>> {
@@ -545,7 +519,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.artifact_snapshot().await })
     }
 
-    /// Starts an asynchronous artifact install/update.
     pub fn install_artifact(
         &self,
         artifact_id: String,
@@ -556,7 +529,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.install_artifact(&artifact_id, version).await })
     }
 
-    /// Starts an asynchronous artifact rollback.
     pub fn rollback_artifact(
         &self,
         artifact_id: String,
@@ -566,7 +538,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.rollback_artifact(&artifact_id).await })
     }
 
-    /// Starts an asynchronous artifact removal.
     pub fn uninstall_artifact(
         &self,
         artifact_id: String,
@@ -575,7 +546,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.uninstall_artifact(&artifact_id).await })
     }
 
-    /// Starts an asynchronous cancel of an in-flight artifact install.
     pub fn cancel_artifact_install(
         &self,
         artifact_id: String,
@@ -584,7 +554,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.cancel_artifact_install(&artifact_id).await })
     }
 
-    /// Starts an asynchronous fetch of in-flight artifact progress.
     pub fn fetch_artifact_progress(
         &self,
     ) -> tokio::sync::oneshot::Receiver<
@@ -594,20 +563,16 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.artifact_progress().await })
     }
 
-    /// Starts an asynchronous catalog refresh.
     pub fn refresh_catalog(&self) -> tokio::sync::oneshot::Receiver<Result<u64, String>> {
         let handle = Arc::clone(&self.handle);
         self.spawn_fetch(async move { handle.refresh_catalog().await })
     }
 
-    /// Starts an asynchronous fetch of detected-but-unconfigured plugin
-    /// binaries.
     pub fn fetch_discovered_plugins(&self) -> tokio::sync::oneshot::Receiver<Vec<String>> {
         let handle = Arc::clone(&self.handle);
         self.spawn_fetch(async move { handle.discovered_plugins().await })
     }
 
-    /// Starts an asynchronous MCP server status fetch.
     pub fn fetch_mcp_statuses(
         &self,
     ) -> tokio::sync::oneshot::Receiver<Vec<ene_plugin_host::McpServerStatus>> {
@@ -615,8 +580,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.mcp_statuses().await })
     }
 
-    /// Starts an asynchronous `ListConfigOptions` fetch for one plugin,
-    /// covering every `(field_path, options_path)` pair.
     pub fn fetch_plugin_options(
         &self,
         plugin: String,
@@ -646,9 +609,6 @@ impl AiBridge {
         })
     }
 
-    /// Converts a plugin `ConfigOption` value into the string written into
-    /// the config form: strings stay unquoted, numbers/booleans use their
-    /// JSON representation, and anything else degrades to JSON.
     fn option_value_to_string(value: &serde_json::Value) -> String {
         match value {
             serde_json::Value::String(text) => text.clone(),
@@ -658,13 +618,11 @@ impl AiBridge {
         }
     }
 
-    /// Starts an asynchronous schedule-list fetch.
     pub fn fetch_schedules(&self) -> tokio::sync::oneshot::Receiver<Vec<ene_core::Schedule>> {
         let handle = Arc::clone(&self.handle);
         self.spawn_fetch(async move { handle.list_schedules().await.unwrap_or_default() })
     }
 
-    /// Starts an asynchronous schedule-run-history fetch.
     pub fn fetch_schedule_runs(
         &self,
         schedule_id: i64,
@@ -679,8 +637,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous fetch of the recent run history of every
-    /// schedule (used by the pending-confirmations list).
     pub fn fetch_all_schedule_runs(
         &self,
         limit: u64,
@@ -700,7 +656,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous schedule enable/disable mutation.
     pub fn apply_schedule_enabled(
         &self,
         schedule_id: i64,
@@ -710,7 +665,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.set_schedule_enabled(schedule_id, enabled).await })
     }
 
-    /// Starts an asynchronous schedule deletion.
     pub fn apply_schedule_delete(
         &self,
         schedule_id: i64,
@@ -719,7 +673,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.delete_schedule(schedule_id).await })
     }
 
-    /// Starts an asynchronous schedule creation.
     pub fn apply_schedule_add(
         &self,
         new: ene_core::NewSchedule,
@@ -729,7 +682,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.add_schedule(new).await })
     }
 
-    /// Starts an asynchronous schedule-confirmation resolution.
     pub fn apply_schedule_confirmation(
         &self,
         schedule_id: i64,
@@ -744,7 +696,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous schedule update.
     pub fn apply_schedule_update(
         &self,
         id: i64,
@@ -759,8 +710,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous direct tool call (plugin-center connection
-    /// tests).
     pub fn apply_call_tool(
         &self,
         name: String,
@@ -776,7 +725,7 @@ impl AiBridge {
         })
     }
 
-    /// Starts the async apply-preparation phase: secret merge, schema
+    /// Runs the apply preparation off the UI thread: secret merge, schema
     /// validation, and plugin `ValidateConfig` for dirty plugins. The render
     /// loop polls the receiver; only a clean result is finalized.
     pub fn prepare_apply_async(
@@ -792,7 +741,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous fetch of the standing permission grants.
     pub fn fetch_permissions(
         &self,
     ) -> tokio::sync::oneshot::Receiver<Vec<ene_runtime::PermissionScope>> {
@@ -800,7 +748,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.list_permissions().await.unwrap_or_default() })
     }
 
-    /// Starts an asynchronous permission revocation.
     pub fn apply_revoke_permission(
         &self,
         id: u64,
@@ -814,7 +761,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous reset of every permission grant.
     pub fn apply_reset_permissions(&self) -> tokio::sync::oneshot::Receiver<Result<usize, String>> {
         let handle = Arc::clone(&self.handle);
         self.spawn_fetch(async move {
@@ -825,7 +771,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous connector-list fetch.
     pub fn fetch_connectors(
         &self,
     ) -> tokio::sync::oneshot::Receiver<Vec<ene_connector::ConnectorSummary>> {
@@ -833,7 +778,6 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.connectors().list() })
     }
 
-    /// Starts an asynchronous connector status + grants fetch.
     pub fn fetch_connector_detail(
         &self,
         id: ene_connector::ConnectorId,
@@ -849,7 +793,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous connector connectivity check.
     pub fn apply_connector_check(
         &self,
         id: ene_connector::ConnectorId,
@@ -864,7 +807,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous session-list fetch.
     pub fn fetch_sessions(
         &self,
         include_archived: bool,
@@ -880,7 +822,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous session search.
     pub fn fetch_session_search(
         &self,
         query: String,
@@ -896,7 +837,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous session export.
     pub fn apply_export_session(
         &self,
         session_id: String,
@@ -911,7 +851,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous session import.
     pub fn apply_import_session(
         &self,
         json: String,
@@ -926,7 +865,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous archive toggle.
     pub fn apply_archive_session(
         &self,
         session_id: String,
@@ -942,7 +880,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous provider-catalog fetch.
     pub fn fetch_provider_catalog(
         &self,
     ) -> tokio::sync::oneshot::Receiver<Option<ene_runtime::ProviderCatalog>> {
@@ -950,7 +887,6 @@ impl AiBridge {
         self.spawn_fetch(async move { Some(handle.provider_catalog().await) })
     }
 
-    /// Starts an asynchronous API-key validation against a provider.
     pub fn apply_validate_api_key(
         &self,
         base_url: String,
@@ -963,7 +899,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous typed-memory edit (memory ledger page).
     pub fn apply_memory_edit(
         &self,
         id: i64,
@@ -979,7 +914,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous typed-memory salience adjustment.
     pub fn apply_memory_salience(
         &self,
         id: i64,
@@ -995,7 +929,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous journal action (pin / archive / forget / …).
     pub fn apply_journal_action(
         &self,
         id: i64,
@@ -1033,7 +966,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous commitment completion.
     pub fn apply_complete_commitment(
         &self,
         id: i64,
@@ -1047,7 +979,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous commitment cancellation.
     pub fn apply_cancel_commitment(
         &self,
         id: i64,
@@ -1061,7 +992,6 @@ impl AiBridge {
         })
     }
 
-    /// Starts an asynchronous `/models` fetch for a provider.
     pub fn apply_fetch_model_ids(
         &self,
         base_url: String,
@@ -1074,7 +1004,6 @@ impl AiBridge {
         })
     }
 
-    /// Reject a pending memory candidate.
     pub fn reject_candidate(&self, id: i64) -> Result<(), AiBridgeError> {
         Ok(self.block_on_timeout(
             self.handle
@@ -1083,7 +1012,6 @@ impl AiBridge {
         )??)
     }
 
-    /// Edit a still-pending candidate's user-editable fields.
     pub fn edit_candidate(
         &self,
         id: i64,
@@ -1101,9 +1029,6 @@ impl AiBridge {
         Ok(self.block_on_timeout(self.handle.candidates().history(50))??)
     }
 
-    // ── Commitment management ──
-
-    /// Mark a commitment as done.
     pub fn complete_commitment(&self, id: i64) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
@@ -1114,7 +1039,6 @@ impl AiBridge {
         })?
     }
 
-    /// Mark a commitment as cancelled.
     pub fn cancel_commitment(&self, id: i64) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
@@ -1721,14 +1645,8 @@ mod tests {
     #[cfg(feature = "voice")]
     #[test]
     fn route_audio_tail_after_terminal_not_dropped() {
-        // After `Terminal` clears `active_turn`, the TTS worker still
-        // emits chunks. The audio_turn tracker keeps them flowing
-        // until is_final arrives.
         let mut audio_turn: Option<TurnId> = None;
         let turn = TurnId::new();
-        // First chunk claims the turn; then `Terminal` clears
-        // `active_turn` (not `audio_turn`), so the trailing chunks for the
-        // same turn must still be accepted until the final marker.
         assert!(route_audio_chunk(&mut audio_turn, &turn, false));
         assert!(route_audio_chunk(&mut audio_turn, &turn, false));
         assert!(route_audio_chunk(&mut audio_turn, &turn, false));

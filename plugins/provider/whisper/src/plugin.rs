@@ -1,5 +1,3 @@
-//! Local whisper.cpp STT provider plugin: capabilities, config, transcription.
-
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -52,7 +50,6 @@ struct EngineKey {
     queue_depth = 2,
 )]
 pub struct WhisperPlugin {
-    /// Lazily-built engine, keyed by its resolved config.
     engine: Arc<Mutex<Option<CachedEngine>>>,
     build: EngineBuilder,
     /// Delivered config from `set_config` (handshake / live `SetConfig`),

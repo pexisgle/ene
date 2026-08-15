@@ -49,7 +49,7 @@ fn capability_call_error(e: &PluginError) -> CapabilityCallError {
 }
 
 /// How often an idle connection polls the tool plugin for deferred task
-/// completions to push to the host (Cr-5). Completions are delivered on this
+/// completions to push to the host. Completions are delivered on this
 /// cadence even when no request is in flight, rather than only piggybacking on
 /// the next request/response cycle.
 const DEFERRED_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
@@ -60,17 +60,11 @@ const DEFERRED_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 /// [`EmbedPlugin`], [`TtsPlugin`], [`SttPlugin`], and [`VadPlugin`]; the server routes
 /// incoming IPC requests to the corresponding trait object.
 pub struct PluginDispatch {
-    /// Optional tool plugin implementation.
     pub tool: Option<Arc<dyn ToolPlugin>>,
-    /// Optional LLM plugin implementation.
     pub llm: Option<Arc<dyn LlmPlugin>>,
-    /// Optional embedding plugin implementation.
     pub embed: Option<Arc<dyn EmbedPlugin>>,
-    /// Optional TTS plugin implementation.
     pub tts: Option<Arc<dyn TtsPlugin>>,
-    /// Optional STT plugin implementation.
     pub stt: Option<Arc<dyn SttPlugin>>,
-    /// Optional VAD plugin implementation.
     pub vad: Option<Arc<dyn VadPlugin>>,
     /// Optional capability-call implementation (serves `provides` entries).
     capability: Option<Arc<dyn CapabilityProvider>>,
@@ -83,7 +77,6 @@ pub struct PluginDispatch {
 }
 
 impl PluginDispatch {
-    /// Creates a dispatch table with the given trait implementations.
     pub fn new(
         tool: Option<Arc<dyn ToolPlugin>>,
         llm: Option<Arc<dyn LlmPlugin>>,
@@ -104,8 +97,6 @@ impl PluginDispatch {
         }
     }
 
-    /// Attaches a VAD plugin implementation.
-    ///
     /// VAD arrived after the five-positional-argument constructor, so it is
     /// a builder step rather than a sixth parameter (which would force every
     /// existing plugin binary's entry point to change).
@@ -673,7 +664,7 @@ pub async fn run_plugin_server(dispatch: PluginDispatch) -> Result<(), PluginErr
 /// writer task serializes every outgoing frame received over an internal
 /// channel, so any number of producer tasks (request handlers, chat-stream
 /// tasks, the deferred-completion drainer) can emit responses concurrently
-/// without contending for the socket (Cr-4 / H-12).
+/// without contending for the socket.
 ///
 /// Long-running requests are dispatched in their own spawned tasks while cheap
 /// state mutations are handled inline (see [`connection_read_loop`]), so a slow
@@ -681,11 +672,11 @@ pub async fn run_plugin_server(dispatch: PluginDispatch) -> Result<(), PluginErr
 /// and multiple tool calls can be in flight at once. Each
 /// `CreateChatStream` request is additionally guarded by a [`CancellationToken`]
 /// keyed by its `request_id`; a `CancelStream` request looks up that token and
-/// cancels the stream mid-flight (Cr-4).
+/// cancels the stream mid-flight.
 ///
 /// A periodic drainer pushes [`PluginIpcResponse::DeferredCompleted`] messages
 /// on a timer, so background task completions reach the host even while the
-/// connection is idle instead of piggybacking on the next request (Cr-5).
+/// connection is idle instead of piggybacking on the next request.
 async fn handle_connection(
     dispatch: Arc<PluginDispatch>,
     stream: IpcStream,
@@ -702,11 +693,11 @@ async fn handle_connection(
 
     let writer_task = tokio::spawn(write_loop(write_half, rx, Arc::clone(&negotiated)));
 
-    // In-flight chat streams keyed by request_id, for cancellation (Cr-4).
+    // In-flight chat streams keyed by request_id, for cancellation.
     let streams: Arc<parking_lot::Mutex<HashMap<String, CancellationToken>>> =
         Arc::new(parking_lot::Mutex::new(HashMap::new()));
 
-    // Periodic deferred-completion drainer (Cr-5 idle delivery).
+    // Periodic deferred-completion drainer.
     let drain_task =
         spawn_deferred_drain(Arc::clone(&dispatch), tx.clone(), Arc::clone(&negotiated));
 
@@ -802,7 +793,7 @@ fn spawn_deferred_drain(
 /// long any single one takes: a slow `CallTool` cannot block a `Ping`, and
 /// multiple tool calls can be in flight at once. Responses are sent over
 /// `tx`, whose dedicated writer task serializes the outgoing frames, so
-/// concurrent handlers never interleave bytes on the socket (Cr-4 / H-12).
+/// concurrent handlers never interleave bytes on the socket.
 ///
 /// Cheap *state-mutating* requests (`Handshake`, `SetCallContext`,
 /// `ApprovePermission`, `AllowPattern`, `RevokePattern`) and lightweight
@@ -939,8 +930,6 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 min: PLUGIN_IPC_PROTOCOL_VERSION,
                 max: PLUGIN_IPC_PROTOCOL_VERSION,
             };
-            // Negotiate the highest protocol version supported by both sides.
-            // `negotiate` returns `None` when the ranges do not overlap.
             let Some(negotiated_version) = our_range.negotiate(host_range) else {
                 tracing::error!(
                     component = "PluginServer",
@@ -1451,13 +1440,11 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
     }
 }
 
-/// Base64-encode bytes to a string.
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-/// Base64-decode a string to bytes.
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
@@ -1505,7 +1492,7 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
 /// Runs a `CreateChatStream` request to completion, sending `StreamChunk` /
 /// `StreamEnd` / `StreamError` responses over `tx`.
 ///
-/// The stream is aborted as soon as `cancel` fires (Cr-4): the chunk loop
+/// The stream is aborted as soon as `cancel` fires: the chunk loop
 /// selects between the next stream item and the cancellation token, so a
 /// `CancelStream` request stops the underlying LLM stream promptly rather than
 /// waiting for it to drain.
@@ -1571,7 +1558,7 @@ async fn run_chat_stream(
     loop {
         tokio::select! {
             // `biased` checks cancellation first so a cancel that races with a
-            // ready stream item wins deterministically (Cr-4).
+            // ready stream item wins deterministically.
             biased;
             () = cancel.cancelled() => {
                 tracing::info!(
@@ -1649,7 +1636,6 @@ mod tests {
         TtsProviderSpec, VadEvent, VadProviderSpec, VersionRange,
     };
 
-    /// A mock tool plugin for testing dispatch logic.
     struct MockToolPlugin;
 
     #[async_trait]
@@ -1707,7 +1693,6 @@ mod tests {
             }
         }
 
-        /// Blocks until [`release`](Self::release) is called.
         async fn wait(&self) {
             use std::sync::atomic::Ordering;
             while !self.released.load(Ordering::Acquire) {
@@ -1829,7 +1814,6 @@ mod tests {
         }
     }
 
-    /// A mock LLM plugin for testing dispatch logic.
     struct MockLlmPlugin;
 
     #[async_trait]
@@ -1888,7 +1872,7 @@ mod tests {
     impl ConfigurablePlugin for MockLlmPlugin {}
 
     /// A mock LLM plugin whose stream emits one chunk and then blocks until
-    /// cancelled, used to exercise `CancelStream` (Cr-4).
+    /// cancelled, used to exercise `CancelStream`.
     struct SlowMockLlmPlugin;
 
     #[async_trait]
@@ -1928,7 +1912,6 @@ mod tests {
 
     impl ConfigurablePlugin for SlowMockLlmPlugin {}
 
-    /// A mock TTS plugin for testing dispatch logic.
     struct MockTtsPlugin;
 
     #[async_trait]
@@ -1956,7 +1939,6 @@ mod tests {
 
     impl ConfigurablePlugin for MockTtsPlugin {}
 
-    /// A mock STT plugin for testing dispatch logic.
     struct MockSttPlugin;
 
     #[async_trait]
@@ -1986,7 +1968,6 @@ mod tests {
 
     impl ConfigurablePlugin for MockSttPlugin {}
 
-    /// A mock VAD plugin for testing dispatch logic.
     struct MockVadPlugin;
 
     #[async_trait]
@@ -2018,7 +1999,6 @@ mod tests {
 
     impl ConfigurablePlugin for MockVadPlugin {}
 
-    /// A mock embed plugin for testing dispatch logic.
     struct MockEmbedPlugin;
 
     #[async_trait]
@@ -2266,7 +2246,7 @@ mod tests {
 
     #[tokio::test]
     async fn handshake_delivers_config_and_profiles_to_provider_plugins() {
-        // #313: `set_config` / `set_profiles` must reach provider traits
+        // `set_config` / `set_profiles` must reach provider traits
         // (LLM/embed/TTS/STT), not just the tool trait, so provider plugins
         // can receive their configuration at handshake time.
         let plugin = Arc::new(RecordingLlmPlugin::new());
@@ -2388,7 +2368,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_get_config_schema_from_provider_plugin() {
-        // #313: `GetConfigSchema` must aggregate schemas from provider traits
+        // `GetConfigSchema` must aggregate schemas from provider traits
         // (here: an LLM-only dispatch) rather than returning `None` when no
         // tool plugin is registered.
         let dispatch = PluginDispatch {
@@ -2939,7 +2919,7 @@ mod tests {
     #[tokio::test]
     async fn chat_stream_cancel_aborts_mid_stream() {
         // A pre-cancelled token must stop the stream before any chunk is
-        // emitted and produce a terminal StreamError (Cr-4).
+        // emitted and produce a terminal StreamError.
         let dispatch = make_dispatch(false, true, false);
         let req = PluginIpcRequest::CreateChatStream {
             request_id: "stream-cancel".into(),
@@ -2961,7 +2941,6 @@ mod tests {
             matches!(resp, PluginIpcResponse::StreamError { ref message, .. } if message == "stream cancelled"),
             "expected cancellation StreamError, got {resp:?}"
         );
-        // No chunks should follow the cancellation.
         assert!(rx.try_recv().is_err());
     }
 
@@ -3141,7 +3120,7 @@ mod tests {
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
-    /// Full `CancelStream` round-trip through `handle_connection` (Cr-4).
+    /// Full `CancelStream` round-trip through `handle_connection`.
     ///
     /// A slow stream emits one chunk and then blocks; a `CancelStream` request
     /// must abort it and produce a terminal `StreamError`, while the read loop
@@ -3170,7 +3149,6 @@ mod tests {
 
         let mut client = client;
 
-        // Start a chat stream that will block after the first chunk.
         write_plugin_request(
             &mut client,
             &PluginIpcRequest::CreateChatStream {
@@ -3187,7 +3165,6 @@ mod tests {
         .await
         .expect("write create stream");
 
-        // Read the first (and only) chunk before cancelling.
         let first = read_plugin_response(&mut client, WireFormat::Json)
             .await
             .expect("read")
@@ -3197,7 +3174,6 @@ mod tests {
             "expected partial chunk, got {first:?}"
         );
 
-        // Cancel the in-flight stream.
         write_plugin_request(
             &mut client,
             &PluginIpcRequest::CancelStream {
@@ -3354,7 +3330,6 @@ mod tests {
             .expect("write call");
         }
 
-        // Both calls must reach the plugin and be blocked at the same time.
         wait_for_in_flight(|| plugin.in_flight(), 2).await;
 
         plugin.release();
@@ -3425,7 +3400,6 @@ mod tests {
         .await
         .expect("write call");
 
-        // Wait until the slow call is in flight, then ping.
         wait_for_in_flight(|| plugin.in_flight(), 1).await;
 
         write_plugin_request(
@@ -3498,7 +3472,6 @@ mod tests {
         .await
         .expect("write vad chunk");
 
-        // Wait until the slow chunk is in flight, then ping.
         wait_for_in_flight(|| plugin.in_flight(), 1).await;
 
         write_plugin_request(
@@ -3511,7 +3484,6 @@ mod tests {
         .await
         .expect("write ping");
 
-        // The Pong must arrive while the chunk is still blocked.
         let resp = tokio::time::timeout(
             Duration::from_secs(5),
             read_plugin_response(&mut client, WireFormat::Json),
@@ -3527,7 +3499,6 @@ mod tests {
         assert_eq!(plugin.in_flight(), 1, "VAD chunk must still be blocked");
 
         plugin.release();
-        // The chunk's response follows once released.
         let resp = tokio::time::timeout(
             Duration::from_secs(5),
             read_plugin_response(&mut client, WireFormat::Json),

@@ -48,7 +48,6 @@ fn is_entity_part(part: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// Builds the `Authorization: Bearer …` header for a Home Assistant token.
 pub(crate) fn bearer_header(token: &str) -> Result<HeaderValue, HomeAssistantError> {
     HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
         HomeAssistantError::Internal(
@@ -184,7 +183,6 @@ fn strip_reqwest_url(text: &str) -> String {
     }
 }
 
-/// Caps a free-form API string at [`MAX_FIELD_CHARS`] characters.
 pub(crate) fn truncate(value: &str) -> String {
     if value.chars().count() <= MAX_FIELD_CHARS {
         return value.to_string();

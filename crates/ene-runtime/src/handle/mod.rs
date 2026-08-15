@@ -87,8 +87,6 @@ const AUDIO_CHANNEL_CAPACITY: usize = 64;
 /// much smaller buffer than the chat bus's 1024 is sufficient.
 const LIFECYCLE_CHANNEL_CAPACITY: usize = 64;
 
-/// Error returned by [`EneHandle::shutdown`] when the actor's drain
-/// takes longer than the supplied timeout.
 #[derive(Debug, thiserror::Error)]
 #[error("Actor did not shut down within {0:?}")]
 pub struct ShutdownTimeout(pub std::time::Duration);
@@ -267,25 +265,17 @@ pub(crate) struct SharedSessionState {
 /// of duplicating state.
 #[derive(Clone)]
 pub(crate) struct SharedActorState {
-    /// Current character-card name, kept in sync on every
-    /// `SetCharacter`.
     pub(crate) card_name: Arc<parking_lot::Mutex<String>>,
-    /// Current session id / started-at / turn count, replaced atomically on
-    /// session split and after each recorded turn.
     pub(crate) session: Arc<parking_lot::RwLock<SharedSessionState>>,
     /// Current configuration. `RwLock` (readers hold a shared lock and clone
     /// the `Arc`; the actor swaps it under a write lock) so per-frame reads
     /// never serialize against each other — an "ArcSwap-style" sharing
     /// pattern without the dependency.
     pub(crate) config: Arc<parking_lot::RwLock<Arc<EneConfig>>>,
-    /// Loaded character card, replaced on `SetCharacter`.
     pub(crate) character_card: Arc<parking_lot::Mutex<Option<Arc<CharacterCardV3>>>>,
 }
 
 impl SharedActorState {
-    /// Builds the shared slots from the bootstrap config and session. Called
-    /// once from [`EneHandle::open`]; the actor keeps the slots in sync from
-    /// then on.
     fn new(config: &EneConfig, session: &ConversationSession) -> Self {
         Self {
             card_name: Arc::new(parking_lot::Mutex::new(session.card_name().to_string())),
@@ -382,7 +372,6 @@ pub struct EneHandle {
     host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Read-only session query handle, bypasses the actor mailbox.
     sessions: crate::query::sessions::SessionQueryHandle,
-    /// Connector framework handle (registry + lifecycle operations).
     connectors: crate::connectors::ConnectorHandle,
     /// Pending memory-candidate approval handle. Reads bypass the actor
     /// mailbox; mutations route through it (see
@@ -819,11 +808,6 @@ impl EneHandle {
         let health_bridge_handle = Arc::new(tokio::sync::Mutex::new(health_bridge_handle));
         let host_service_handle = Arc::new(tokio::sync::Mutex::new(host_service_handle));
 
-        // Mailbox-free shared actor state: card name (shared with
-        // `MemoryCandidateHandle` so pending-candidate queries
-        // never need a mailbox round-trip), session id / started-at / turn
-        // count, config, and the loaded card. The actor keeps the slots in
-        // sync at the mutation points; `EneHandle` reads them synchronously.
         let shared = Arc::new(SharedActorState::new(&config, &session));
 
         let sessions = crate::query::sessions::SessionQueryHandle::new(memory_store.clone());
@@ -914,7 +898,6 @@ impl EneHandle {
         })
     }
 
-    /// Subscribe to the chat event stream.
     pub fn subscribe(&self) -> EneEventReceiver {
         EneEventReceiver {
             inner: self.event_tx.subscribe(),
@@ -1177,9 +1160,6 @@ impl EneHandle {
     /// actor that is gone.
     #[must_use = "the returned TurnId is needed for cancellation"]
     pub fn run(&self, input: impl Into<String>) -> Result<TurnId, RunError> {
-        // Dead-actor check first: the command channel closes when the actor
-        // task exits, so a closed channel is the authoritative "actor is
-        // gone" signal and must win over a stale single-flight gate.
         if self.cmd_tx.is_closed() {
             return Err(RunError::ActorDead);
         }
@@ -1352,8 +1332,6 @@ impl EneHandle {
     /// instead of waiting for its next wall-clock sleep to elapse.
     #[doc(hidden)]
     pub fn wake_scheduler(&self) {
-        // The send error is `Copy`, so `drop()` would trip
-        // `clippy::dropping_copy_types`.
         #[expect(
             clippy::let_underscore_must_use,
             reason = "watch send error is Copy; drop() would trip dropping_copy_types"
@@ -1590,7 +1568,6 @@ impl EneHandle {
         rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
-    /// Fetch settings snapshots for every configured plugin (plugin center).
     pub async fn plugin_snapshots(&self) -> Vec<ene_plugin_host::PluginSettingsSnapshot> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1603,7 +1580,6 @@ impl EneHandle {
         rx.await.unwrap_or_default()
     }
 
-    /// Host-side artifact snapshot for the Engines page.
     pub async fn artifact_snapshot(&self) -> Vec<ene_plugin_host::ArtifactSnapshot> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1638,7 +1614,6 @@ impl EneHandle {
             .unwrap_or_else(|_| Err("runtime reply dropped".to_string()))
     }
 
-    /// Removes an installed artifact from the signed catalog.
     pub async fn uninstall_artifact(&self, artifact_id: &str) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1655,7 +1630,6 @@ impl EneHandle {
             .unwrap_or_else(|_| Err("runtime reply dropped".to_string()))
     }
 
-    /// Cancels an in-flight artifact install.
     pub async fn cancel_artifact_install(&self, artifact_id: &str) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1672,7 +1646,6 @@ impl EneHandle {
             .unwrap_or_else(|_| Err("runtime reply dropped".to_string()))
     }
 
-    /// Live progress of every in-flight artifact operation.
     pub async fn artifact_progress(
         &self,
     ) -> std::collections::BTreeMap<String, Option<ene_plugin_host::ArtifactProgress>> {
@@ -1687,7 +1660,6 @@ impl EneHandle {
         rx.await.unwrap_or_default()
     }
 
-    /// Rolls an artifact back one generation.
     pub async fn rollback_artifact(
         &self,
         artifact_id: &str,
@@ -1721,7 +1693,6 @@ impl EneHandle {
             .unwrap_or_else(|_| Err("runtime reply dropped".to_string()))
     }
 
-    /// Fetch dynamic config options for one plugin config path.
     pub async fn list_plugin_config_options(
         &self,
         plugin: &str,
@@ -1738,7 +1709,6 @@ impl EneHandle {
         rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
-    /// Validate a plugin config value through the plugin's own validator.
     pub async fn validate_plugin_config(
         &self,
         plugin: &str,
@@ -2431,7 +2401,7 @@ mod tests {
             "expected RecvError::Lagged after overflowing the chat bus, got {res:?}"
         );
 
-        // Resync step 1: the in-flight turn is still discoverable through the
+        // The in-flight turn is still discoverable through the
         // mailbox-free probe even though its events were dropped.
         assert_eq!(
             handle.active_turn().as_ref(),
@@ -2439,7 +2409,7 @@ mod tests {
             "active_turn() must still report the in-flight turn after a lag"
         );
 
-        // Resync step 2: cancelling it succeeds and makes the actor emit a
+        // Cancelling it succeeds and makes the actor emit a
         // fresh Terminal, releasing the single-flight gate.
         handle
             .cancel(&turn)
@@ -2807,8 +2777,6 @@ mod tests {
             "run() after shutdown must report ActorDead, not a stale Busy"
         );
     }
-
-    // ── Stage 8: bounded actor task admission ──
 
     /// A `ToolRegistry` with no tools, whose `call_tool` always succeeds.
     /// Good enough for admission-cap tests below, which only care about how
@@ -3468,8 +3436,6 @@ mod tests {
                     saw_memory_write = true;
                 }
                 Ok(Err(e)) => panic!("diagnostic channel closed early: {e}"),
-                // An unrelated diagnostic (e.g. TaskRejected) or a poll
-                // timeout: keep scanning until the deadline.
                 Ok(Ok(_)) | Err(_) => {}
             }
         }
@@ -3867,8 +3833,6 @@ mod tests {
         );
     }
 
-    // ── No head-of-line blocking in the command loop ──
-
     /// Regression test: a heavy command whose work has been moved
     /// off the actor loop into `bg_command_tasks` must not block subsequent
     /// commands. A handler awaiting heavy I/O *inline* (GGUF model load,
@@ -3917,8 +3881,6 @@ mod tests {
 
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
-
-    // ── Connector framework ──
 
     /// In-memory mock connector exercising the runtime connector path.
     struct MockConnector {

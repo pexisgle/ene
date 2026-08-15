@@ -1,5 +1,3 @@
-//! Edge-TTS plugin: capabilities and synthesis handler.
-
 use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -11,9 +9,6 @@ use crate::client;
 use crate::config::EdgeTtsConfig;
 use crate::ssml::{chunk_text, escape_xml, sanitize};
 
-/// TTS plugin serving Microsoft Edge Neural Voice over the free, keyless
-/// WebSocket endpoint.
-///
 /// The static capability data (`tts_spec()` / `TTS_PROVIDER_KIND`) is
 /// generated from the `#[provider(...)]` attribute; synthesis is
 /// hand-written.
@@ -50,13 +45,10 @@ impl ene_plugin::ConfigurablePlugin for EdgeTtsPlugin {
         }
     }
 
-    /// Captures the broker socket/token so every connection is
-    /// host-mediated.
     fn set_sandbox(&self, sandbox: &ene_plugin_proto::SandboxConfigData) {
         crate::broker::configure_broker(sandbox);
     }
 
-    /// Advertises the settings surface for `plugins.list.edge-tts.config`.
     /// No API keys are involved: the service is the anonymous Edge Read
     /// Aloud endpoint.
     fn config_schema(&self) -> Option<Value> {

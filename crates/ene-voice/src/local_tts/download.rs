@@ -35,13 +35,11 @@ pub const KOKORO_FALLBACK_VOICES_URL: &str =
 /// constant when the feature is enabled, instead of duplicating it.
 pub const VOICE_DIM: usize = 256;
 
-/// Get the default local path for `kokoro.onnx`.
 #[must_use]
 pub fn default_kokoro_model_path() -> std::path::PathBuf {
     ene_config::models_dir().join("gguf").join("kokoro.onnx")
 }
 
-/// Get the default local path for `voices.bin`.
 #[must_use]
 pub fn default_kokoro_voices_path() -> std::path::PathBuf {
     ene_config::models_dir().join("gguf").join("voices.bin")
@@ -79,8 +77,6 @@ fn voices_validator() -> SizeMultipleValidator {
     SizeMultipleValidator::new("voices-bin", element_bytes, element_bytes)
 }
 
-/// Ensure a file exists at `dest`, downloading it from `url` via the shared
-/// [`ModelFetcher`] if missing or invalid.
 async fn ensure_file_downloaded(
     url: &str,
     dest: &std::path::Path,
@@ -114,22 +110,6 @@ pub async fn ensure_kokoro_files_exist(
     Ok(())
 }
 
-/// Prefetch the Kokoro ONNX model and `voices.bin` files if the AI config's
-/// TTS section selects the local Kokoro provider ([`super::PROVIDER_NAME`]).
-///
-/// Reads its settings from the passed-in config document — the same one the
-/// provider plugin and the in-process fallback factory will later use — so
-/// the prefetched paths agree with the ones the active path resolves. The
-/// kokoro plugin's own config blob (`plugins.list.kokoro.config.model_path`
-/// / `voices_path`) wins, matching the plugin's resolution precedence;
-/// `ai.tts.*` / the `kokoro` profile are used when the plugin config is
-/// absent.
-///
-/// Intended to be called once from the runtime's async bootstrap path,
-/// before any TTS provider is constructed, so `provider::open` never needs
-/// to perform network I/O. A no-op when TTS is disabled or configured for a
-/// different provider (e.g. `"openai"`).
-///
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "unit tests use expect for assertions")]

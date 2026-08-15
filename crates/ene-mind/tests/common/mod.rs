@@ -1,5 +1,3 @@
-//! Shared fixtures for `ene-mind` integration tests.
-
 #![expect(
     clippy::unwrap_used,
     reason = "shared test helper uses unwrap for concise fixture setup"

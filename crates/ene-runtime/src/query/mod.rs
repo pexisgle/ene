@@ -1,5 +1,3 @@
-//! Read-only query handles that bypass the turn-execution actor mailbox.
-//!
 //! Session CRUD and pending-candidate **reads** only ever touch
 //! `MemoryStore` — never the actor's turn-execution state (`active_turn` /
 //! `stream_handle` / `turn_gate`) — so routing them through the single actor

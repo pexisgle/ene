@@ -12,11 +12,9 @@ use enigo::{Button, Direction, Mouse};
     side_effects = "System { privileged: true }"
 )]
 pub struct MouseClickAction {
-    /// Mouse button to click (default: left).
     #[arg(enum_values = "left, right, middle, back, forward")]
     #[serde(default)]
     button: Option<String>,
-    /// Click count (default: 1, use 2 for double-click).
     #[arg(minimum = 1)]
     #[serde(default)]
     count: Option<u32>,

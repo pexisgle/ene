@@ -66,10 +66,8 @@ impl Plugin for CorePlugin {
     }
 }
 
-/// Builds and returns a fully configured [`App`] with the singleton
-/// resources, the [`Message`] queues, and the `EventChannels`
-/// resource inserted. The returned `App` is ready to have its
-/// schedule run from the winit event loop via [`App::update`].
+/// The returned `App` is ready to have its schedule run from the winit event
+/// loop via [`App::update`].
 pub fn build_app(
     tokio: tokio::runtime::Handle,
     event_rx: AppEventReceiver,

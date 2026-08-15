@@ -23,11 +23,8 @@ const SECRET_KEY_NAMES: &[&str] = &[
     "credential_file",
 ];
 
-/// Replacement value written over every redacted secret.
 const REDACTED: &str = "***";
 
-/// Returns `true` when the schema property for `key` declares
-/// `x-ene-secret: true`.
 fn is_secret_marked(schema: Option<&serde_json::Value>, key: &str) -> bool {
     schema
         .and_then(|s| s.get("properties"))
@@ -37,8 +34,6 @@ fn is_secret_marked(schema: Option<&serde_json::Value>, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns `true` when `key` matches a well-known secret name.
-///
 /// Substring matching (case-insensitive) is deliberate: host logging must
 /// fail *safe* — masking a non-secret key is harmless, while a single leaked
 /// API key is not. This catches `api_key`, `apiKey`, `ANTHROPIC_API_KEY`,
@@ -99,8 +94,6 @@ pub fn redact_config(
     }
 }
 
-/// Resolves a `$ref`-only schema node against its own `$defs` /
-/// `definitions`. Non-ref nodes (and unresolvable refs) pass through.
 fn resolve_refs(schema: &serde_json::Value) -> Option<serde_json::Value> {
     let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) else {
         return Some(schema.clone());
@@ -136,7 +129,7 @@ pub fn redact_config_one_of(
     redacted
 }
 
-/// Redacts a config blob without a schema (host logging fallback).
+/// Host logging fallback.
 #[must_use]
 pub fn redact_config_unschematized(config: &serde_json::Value) -> serde_json::Value {
     redact_config(config, None)

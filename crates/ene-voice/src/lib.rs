@@ -9,7 +9,6 @@
 //! only the `local-tts`-gated tests in `local_tts` actually use `.expect(`,
 //! so a crate-level `expect(...)` attribute would go unfulfilled (and fail
 //! `-D warnings`) whenever the crate is checked without that feature.
-#![warn(missing_docs)]
 
 /// Grapheme-to-phoneme conversion for Kokoro TTS.
 pub mod g2p;

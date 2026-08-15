@@ -49,7 +49,6 @@ impl ApprovalPolicy {
             .unwrap_or(ApprovalMode::Ask)
     }
 
-    /// Whether any high-risk category is set to `Allow` at the global level.
     #[must_use]
     pub fn has_high_risk_allow(&self) -> bool {
         self.categories
@@ -90,7 +89,6 @@ impl PluginApprovalPolicy {
             .unwrap_or(ApprovalMode::Inherit)
     }
 
-    /// Whether this plugin override allows any high-risk category.
     #[must_use]
     pub fn has_high_risk_allow(&self) -> bool {
         self.categories
@@ -99,14 +97,10 @@ impl PluginApprovalPolicy {
     }
 }
 
-/// Which rule produced a [`Resolution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolutionReason {
-    /// The emergency stop forced a denial.
     EmergencyStop,
-    /// The per-plugin override decided.
     PluginOverride,
-    /// The global policy decided.
     GlobalPolicy,
     /// No policy entry exists; the fail-safe default applies.
     DefaultAsk,
@@ -125,12 +119,9 @@ impl ResolutionReason {
     }
 }
 
-/// The outcome of resolving one request, including the rule that matched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resolution {
-    /// The effective mode.
     pub mode: ResolvedMode,
-    /// Which layer decided.
     pub reason: ResolutionReason,
     /// Human-readable description of the applied rule (audit-friendly).
     pub rule: &'static str,

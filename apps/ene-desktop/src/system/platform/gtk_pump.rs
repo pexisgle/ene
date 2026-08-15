@@ -1,5 +1,3 @@
-//! GTK pump system.
-//!
 //! Calls the platform-level `tick_gtk` helper on Linux so
 //! the GTK main loop integration the tray uses continues to
 //! process events. On non-Linux builds the function is a

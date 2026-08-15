@@ -117,7 +117,6 @@ pub async fn extract_with_timeout(
     parse_candidates_json(&raw, locale)
 }
 
-/// Formats deterministic pattern hits for the extractor user prompt.
 fn format_pattern_hints(hints: &[MemoryCandidate]) -> String {
     if hints.is_empty() {
         return "(none)".to_string();
@@ -139,7 +138,6 @@ fn format_pattern_hints(hints: &[MemoryCandidate]) -> String {
     out
 }
 
-/// Builds a plain-text conversation block from a `TurnInput`.
 fn build_conversation_text(turn: &TurnInput<'_>) -> String {
     let mut out = String::new();
     if !turn.user_message.is_empty() {
@@ -169,7 +167,6 @@ fn build_conversation_text(turn: &TurnInput<'_>) -> String {
     out
 }
 
-/// Returns the JSON schema for the structured extraction output.
 fn extraction_schema() -> serde_json::Value {
     let kind_description = llm_extractable_kind_description();
     serde_json::json!({
@@ -328,10 +325,6 @@ fn parse_llm_kind(raw_kind: &str) -> MemoryKind {
         "commitment" => MemoryKind::Commitment,
         "procedure" => MemoryKind::Procedure,
         "reflection" => MemoryKind::Reflection,
-        // WorldState is deliberately NOT parseable: it is reserved for
-        // structured time-series world state and not yet generated
-        // anywhere, so the extractor must not produce it. Falling back to
-        // Semantic (with a warning) is the correct degradation for now.
         "worldstate" | "world_state" | "world state" => {
             tracing::warn!(
                 raw_kind = %raw_kind,
@@ -430,7 +423,6 @@ mod tests {
         >,
     >;
 
-    /// Minimal mock provider that returns a fixed response.
     struct MockProvider {
         response: String,
     }
@@ -468,7 +460,6 @@ mod tests {
         }
     }
 
-    /// Provider that always returns a timeout-like error.
     struct TimeoutProvider;
 
     #[async_trait::async_trait]
@@ -499,7 +490,6 @@ mod tests {
         }
     }
 
-    /// Provider that returns non-JSON.
     struct GarbageProvider;
 
     #[async_trait::async_trait]
@@ -982,7 +972,6 @@ mod tests {
         assert_eq!(result[2].kind, MemoryKind::Reflection);
     }
 
-    /// Provider that records the last user message text for hint assertions.
     struct RecordingProvider {
         response: String,
         last_user: std::sync::Mutex<String>,

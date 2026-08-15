@@ -1,5 +1,3 @@
-//! Accessibility settings page — spotlight and caption overlay toggles.
-
 use super::components::{section_card, toggle_row};
 use crate::settings::{CharacterSettings, DesktopSection};
 

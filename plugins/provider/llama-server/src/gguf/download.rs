@@ -17,15 +17,12 @@ use std::path::{Path, PathBuf};
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
 const CACHE_HASH_HEX_LEN: usize = 12;
 
-/// Validates the `GGUF` magic bytes at the start of a file.
 static GGUF_VALIDATOR: MagicBytesValidator = MagicBytesValidator::new("gguf", GGUF_MAGIC);
 
-/// True when `path` exists and starts with the GGUF magic bytes.
 pub async fn file_has_gguf_magic(path: &Path) -> bool {
     GGUF_VALIDATOR.validate(path).await
 }
 
-/// Derive a stable cache filename from an HTTPS URL (`{stem}-{hash12}.gguf`).
 pub fn filename_from_url(url: &str) -> Result<String, LlmProviderError> {
     ene_ai::validate_https_url(url)?;
     let path = ene_ai::model_fetch::strip_url_path(url);
@@ -52,7 +49,6 @@ pub async fn download_gguf(url: &str, dest: &Path) -> Result<(), LlmProviderErro
         .map_err(Into::into)
 }
 
-/// Directory where downloaded GGUF weights are stored.
 pub fn gguf_cache_dir() -> PathBuf {
     ene_config::models_dir().join("gguf")
 }

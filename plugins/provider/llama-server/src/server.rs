@@ -17,13 +17,11 @@ use tokio::process::Command;
 
 use crate::config::{HostConfig, Profile, n_gpu_layers_for};
 
-/// How often startup waits re-probe `/health` while the sidecar boots.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Timeout for the reuse liveness probe and each startup poll.
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 static SIDECAR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// The spawned sidecar child plus the connection details clients need.
 pub(crate) struct SidecarState {
     child: Mutex<Option<tokio::process::Child>>,
     work_dir: PathBuf,
@@ -253,7 +251,6 @@ fn sidecar_binary_name() -> &'static str {
     }
 }
 
-/// Picks a free loopback TCP port by binding and releasing a listener.
 fn pick_free_port() -> Result<u16, PluginError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|e| PluginError::provider(format!("bind loopback port: {e}")))?;

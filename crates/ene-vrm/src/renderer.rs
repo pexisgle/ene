@@ -74,8 +74,6 @@ struct MorphGpu {
     /// render loop to decide whether to re-pack the meta
     /// uniform.
     target_count: u32,
-    /// Cached copy of the primitive's vertex count. Same
-    /// purpose as `target_count`.
     vertex_count: u32,
 }
 
@@ -187,9 +185,7 @@ pub struct VrmRenderer {
     /// load time and never changes, so sorting every frame is
     /// wasted work.
     draw_order: Vec<DrawItem>,
-    /// `MToon` opaque pipeline.
     pipeline_mtoon_opaque: wgpu::RenderPipeline,
-    /// `MToon` transparent pipeline.
     pipeline_mtoon_transparent: wgpu::RenderPipeline,
     /// Mask render pipeline. Compiles against `mask_format` if provided,
     /// otherwise `None`.
@@ -216,7 +212,6 @@ impl VrmRenderer {
             mapped_at_creation: false,
         });
 
-        // Bind group layout entry `(0)` — camera uniform.
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vrm.camera_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -239,7 +234,6 @@ impl VrmRenderer {
             }],
         });
 
-        // Bind group `(1)` — model transform uniform.
         let model_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vrm.model_buf"),
             size: std::mem::size_of::<ModelUniform>() as wgpu::BufferAddress,
@@ -291,8 +285,6 @@ impl VrmRenderer {
                 })
             });
 
-        // Bind group (3): morph targets. The layout is shared by
-        // every per-primitive bind group and the dummy group.
         let morph_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vrm.morph_bgl"),
             entries: &[
@@ -319,12 +311,6 @@ impl VrmRenderer {
             ],
         });
 
-        // Bind group (4) — skin-matrix palette. The
-        // renderer uploads one `mat4x4<f32>` per joint, or a
-        // single `Mat4::IDENTITY` for models without a skin
-        // (the default MeshVertex falls back to
-        // `joints=[0,0,0,0]` + `weights=[1,0,0,0]` so the
-        // skinned shader reduces to `pos`).
         let skin_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vrm.skin_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -339,7 +325,6 @@ impl VrmRenderer {
             }],
         });
 
-        // Bind group (5) — MToon per-material uniform.
         let mtoon_uniform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vrm.mtoon_uniform_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -766,19 +751,8 @@ impl VrmRenderer {
             );
         }
 
-        // Allocate a single dummy bind group used by every
-        // primitive without morph targets. The shader never
-        // reads from the storage buffer because the bound meta
-        // has `target_count = 0`.
         let dummy_morph = build_dummy_morph_gpu(device, queue, &morph_bgl);
 
-        // Build the skin-matrix palette. For models with
-        // a populated `Skeleton` we upload every
-        // `bind_matrices[i]` once (rest pose). For models
-        // without a skin we upload a single `Mat4::IDENTITY`
-        // and the default MeshVertex (`joints = [0,0,0,0]`,
-        // `weights = [1,0,0,0]`) reduces the shader math to
-        // `pos`.
         let skin = build_skin_gpu(device, queue, &skin_bgl, model);
 
         let mut mtoon_uniforms: Vec<Option<MToonUniformGpu>> = Vec::new();
@@ -943,11 +917,6 @@ impl VrmRenderer {
             }
         };
 
-        // Each morph-capable primitive is rendered with its own
-        // pre-built bind group (group 3). The slot index used to
-        // look up weights is the per-primitive local
-        // index — see `upload_morph_meta` for the rationale.
-
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("vrm.pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -983,7 +952,6 @@ impl VrmRenderer {
             .flat_map(|m| m.primitives.iter())
             .collect();
 
-        // Phase 1: opaque + mask (depth write on, no blending).
         for item in self
             .draw_order
             .iter()
@@ -1000,8 +968,7 @@ impl VrmRenderer {
             self.draw_primitive(&mut rp, queue, model, prim, item.linear_index);
         }
 
-        // Phase 2: transparent (depth write off, premultiplied
-        // alpha blending). Drawn in declaration order (which is
+        // Drawn in declaration order (which is
         // roughly back-to-front for most humanoid VRM models);
         // a proper view-Z depth sort is a follow-up.
         for item in self
@@ -1090,7 +1057,6 @@ impl VrmRenderer {
         }
     }
 
-    /// Bind the per-primitive resources and issue a single draw.
     fn draw_primitive(
         &self,
         rp: &mut wgpu::RenderPass,

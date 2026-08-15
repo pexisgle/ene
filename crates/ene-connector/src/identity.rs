@@ -10,8 +10,7 @@ use crate::error::ConnectorError;
 use std::fmt;
 use std::str::FromStr;
 
-/// Returns `true` when `c` is an accepted identifier character
-/// (`[A-Za-z0-9._-]`). Shared by [`ConnectorId`] and [`CredentialId`].
+/// Shared by [`ConnectorId`] and [`CredentialId`].
 const fn valid_id_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-'
 }
@@ -30,8 +29,6 @@ const fn valid_id_char(c: u8) -> bool {
 pub struct ConnectorId(String);
 
 impl ConnectorId {
-    /// Returns `true` when `id` is non-empty, uses only accepted characters,
-    /// and contains at least one `.` namespace separator.
     #[must_use]
     pub fn is_valid(id: &str) -> bool {
         if id.is_empty() {
@@ -44,11 +41,6 @@ impl ConnectorId {
         bytes.contains(&b'.')
     }
 
-    /// Creates a connector id, validating the charset and namespace form.
-    ///
-    /// # Errors
-    /// Returns [`ConnectorError::Internal`] when `id` is empty, contains a
-    /// character outside `[A-Za-z0-9._-]`, or has no `.` separator.
     pub fn try_new(id: impl Into<String>) -> Result<Self, ConnectorError> {
         let s = id.into();
         if Self::is_valid(&s) {
@@ -60,21 +52,16 @@ impl ConnectorId {
         }
     }
 
-    /// Returns the full identifier as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Returns the namespace portion (before the first `.`), or the whole id
-    /// when there is no separator.
     #[must_use]
     pub fn namespace(&self) -> &str {
         self.0.split_once('.').map_or(&self.0, |(ns, _)| ns)
     }
 
-    /// Returns the name portion (after the first `.`), or `""` when there is
-    /// no separator.
     #[must_use]
     pub fn name(&self) -> &str {
         self.0.split_once('.').map_or("", |(_, name)| name)
@@ -100,8 +87,6 @@ impl From<ConnectorId> for String {
     }
 }
 
-/// A stable identifier for a stored credential.
-///
 /// Unlike [`ConnectorId`], a credential id needs no `namespace.name` form:
 /// `anthropic` and `google.calendar` are both valid. Accepted characters are
 /// ASCII alphanumerics plus `.`, `_`, and `-`; the id must not start or end
@@ -113,8 +98,6 @@ impl From<ConnectorId> for String {
 pub struct CredentialId(String);
 
 impl CredentialId {
-    /// Returns `true` when `id` is non-empty, uses only accepted characters,
-    /// and does not start or end with `.`.
     #[must_use]
     pub fn is_valid(id: &str) -> bool {
         !id.is_empty()
@@ -123,11 +106,6 @@ impl CredentialId {
             && id.as_bytes().iter().all(|&b| valid_id_char(b))
     }
 
-    /// Creates a credential id, validating the charset and boundary form.
-    ///
-    /// # Errors
-    /// Returns [`ConnectorError::Internal`] when `id` is empty, contains a
-    /// character outside `[A-Za-z0-9._-]`, or starts or ends with `.`.
     pub fn try_new(id: impl Into<String>) -> Result<Self, ConnectorError> {
         let s = id.into();
         if Self::is_valid(&s) {
@@ -139,7 +117,6 @@ impl CredentialId {
         }
     }
 
-    /// Returns the full identifier as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -165,22 +142,15 @@ impl From<CredentialId> for String {
     }
 }
 
-/// An OAuth permission scope requested by a connector (e.g. `calendar.readonly`).
-///
-/// A thin, validated-by-construction wrapper over the scope string; used when
-/// describing what access a connector needs and when driving an OAuth consent
-/// flow.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct PermissionScope(String);
 
 impl PermissionScope {
-    /// Creates a permission scope from any string.
     #[must_use]
     pub fn new(scope: impl Into<String>) -> Self {
         Self(scope.into())
     }
 
-    /// Returns the scope as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -205,29 +175,20 @@ impl<'a> From<&'a str> for PermissionScope {
     }
 }
 
-/// Human-readable display metadata for a connector.
-///
 /// Intended for configuration UIs: a stable [`ConnectorId`] plus a friendly
 /// `display_name` and optional version/vendor/base-URL/description. It carries
 /// no secrets and no lifecycle state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectorIdentity {
-    /// Stable connector identifier.
     pub id: ConnectorId,
-    /// Human-readable name for display.
     pub display_name: String,
-    /// Optional connector/version string.
     pub version: Option<String>,
-    /// Optional vendor name.
     pub vendor: Option<String>,
-    /// Optional service base URL.
     pub base_url: Option<String>,
-    /// Optional longer description.
     pub description: Option<String>,
 }
 
 impl ConnectorIdentity {
-    /// Creates an identity with a display name and no optional metadata.
     #[must_use]
     pub fn new(id: ConnectorId, display_name: impl Into<String>) -> Self {
         Self {
@@ -240,28 +201,24 @@ impl ConnectorIdentity {
         }
     }
 
-    /// Sets the version metadata.
     #[must_use]
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
         self
     }
 
-    /// Sets the vendor metadata.
     #[must_use]
     pub fn with_vendor(mut self, vendor: impl Into<String>) -> Self {
         self.vendor = Some(vendor.into());
         self
     }
 
-    /// Sets the service base URL metadata.
     #[must_use]
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = Some(url.into());
         self
     }
 
-    /// Sets the description metadata.
     #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());

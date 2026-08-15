@@ -1,12 +1,8 @@
-//! Voice settings page — Text-to-Speech (TTS), Speech-to-Text (STT), and
-//! Microphone/VAD configuration.
-//!
 //! The page edits only the routing fields (`ai.tts.provider`,
 //! `ai.stt.provider`). Every provider-owned value lives in
 //! `plugins.list.<plugin>.config` and is rendered from the plugin's own JSON
 //! Schema via [`provider_form`], so switching providers never mixes fields
 //! from another provider and plugin schemas stay authoritative.
-
 use super::components::{section_card, setting_row, slider_row, warning_box};
 use super::draft::SettingsDraft;
 use super::input::SettingsInputState;

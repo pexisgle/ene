@@ -11,7 +11,7 @@ use std::sync::Arc;
     side_effects = "Browser { mutates_dom: true }"
 )]
 pub struct ClickAction {
-    /// CSS selector for the element to click. Use only when navigate cannot reach the target.
+    /// Use only when navigate cannot reach the target.
     selector: String,
 
     #[tool(skip)]

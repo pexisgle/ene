@@ -6,7 +6,6 @@ use std::path::Path;
 use crate::CharacterCardV3;
 use crate::character_config::CharacterConfig;
 
-/// Generates the JSON representation of the JSON Schema for `character_settings.json`
 pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
     let root_schema = schema_gen.into_root_schema_for::<CharacterConfig>();
@@ -58,15 +57,12 @@ pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&root_schema)
 }
 
-/// Generates the JSON representation of the JSON Schema for character.json (`CharacterCardV3`)
 pub fn generate_character_card_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
     let root_schema = schema_gen.into_root_schema_for::<CharacterCardV3>();
     serde_json::to_string_pretty(&root_schema)
 }
 
-/// Serializes `card` and atomically writes it to `path`.
-///
 /// The counterpart of [`crate::load_character_card`]. The write goes through an
 /// atomic temp-file-and-rename operation so a crash mid-write can never leave
 /// a truncated card behind; host apps must not use a plain `fs::write` here.
@@ -112,8 +108,6 @@ pub fn write_character_schemas(assets_dir: &Path) {
 mod tests {
     use super::*;
 
-    /// `save_character_card` must write a valid, re-loadable card and leave no
-    /// temp-file residue behind — the atomic-write contract for card saves.
     #[test]
     fn save_character_card_writes_valid_card_without_temp_residue() {
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");

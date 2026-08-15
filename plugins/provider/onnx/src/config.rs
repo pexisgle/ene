@@ -11,7 +11,6 @@ use serde_json::Value;
 /// `ai.vad.threshold` default.
 pub const DEFAULT_THRESHOLD: f32 = 0.5;
 
-/// Settings for the local ONNX (Silero VAD) provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct VadConfig {

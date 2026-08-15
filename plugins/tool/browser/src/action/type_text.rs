@@ -13,7 +13,6 @@ use std::sync::Arc;
 pub struct TypeAction {
     /// CSS selector for the target input/textarea element.
     selector: String,
-    /// Text to type into the element.
     text: String,
 
     #[tool(skip)]

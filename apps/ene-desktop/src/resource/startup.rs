@@ -1,5 +1,3 @@
-//! One-shot startup-error resource consumed by `Runtime::new`.
-//!
 //! Written by `AppState::with_channel` when `AiBridge::try_new` fails
 //! and read/consumed in `Runtime::new` to surface a fatal dialog.
 //! A bevy `Resource` bridges the gap between `with_channel` (where the

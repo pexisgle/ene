@@ -1,5 +1,3 @@
-//! Character processing: CCv3 compilation, Identity Kernel, lorebook indexing.
-
 mod authors_note;
 mod compiler;
 mod kernel;
@@ -41,7 +39,6 @@ use crate::config::CharacterMemoryConfig;
 use crate::error::CognitionError;
 use crate::lifecycle::HistoryEntry;
 
-/// Character processing: `CCv3` compilation, lorebook indexing, style retrieval.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CharacterProcessor;
 
@@ -80,7 +77,6 @@ impl CharacterProcessor {
         )
     }
 
-    /// Compile an identity kernel with per-turn roleplay context.
     pub fn compile_kernel_with_context(
         card: &CharacterCardV3,
         user_name: &str,
@@ -119,7 +115,6 @@ impl CharacterProcessor {
         )
     }
 
-    /// Synchronize `CCv3` lorebook and style indices into typed memory.
     pub async fn sync_card_memories(
         store: &dyn MemoryPort,
         embedder: &Arc<dyn EmbeddingProvider>,
@@ -141,7 +136,6 @@ impl CharacterProcessor {
         .await
     }
 
-    /// Select style examples for the current turn.
     pub async fn select_style_examples(
         card: &CharacterCardV3,
         user_name: &str,

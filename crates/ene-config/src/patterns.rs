@@ -43,7 +43,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::prompts::{is_embedded_language, resolve_language_alias};
 
-/// A single forget-detection pattern.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ForgetPattern {
     /// Human-readable name for diagnostics (e.g. `"object_before_keyword"`).
@@ -85,24 +84,17 @@ pub struct PatternPackData {
 /// side simply never infers that intent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntentKeywords {
-    /// Episodic-recall hints (e.g. `"remember"`, `"前回"`).
     pub episodic: Vec<String>,
-    /// Preference-recall hints (e.g. `"i like"`, `"好き"`).
     pub preference: Vec<String>,
-    /// Relationship-recall hints (e.g. `"between us"`, `"友達"`).
     pub relationship: Vec<String>,
-    /// Affective-recall hints (e.g. `"feel"`, `"気持ち"`).
     pub affective: Vec<String>,
-    /// Procedure-recall hints (e.g. `"how to"`, `"やり方"`).
     pub procedure: Vec<String>,
 }
 
-/// Loads and accesses deterministic patterns from a JSON locale file.
 #[derive(Debug, Clone)]
 pub struct PatternLibrary {
     data: PatternPackData,
     lang: String,
-    /// Forget regexes compiled once at load time (see [`Self::load`]).
     compiled: Vec<CompiledForgetPattern>,
 }
 
@@ -110,15 +102,13 @@ pub struct PatternLibrary {
 /// per-turn matcher never recompiles it.
 #[derive(Debug, Clone)]
 pub struct CompiledForgetPattern {
-    /// The parsed pattern metadata.
     pub pattern: ForgetPattern,
-    /// Compiled [`ForgetPattern::regex`].
     pub regex: Regex,
 }
 
 /// Compiles every forget-pattern regex; a pattern whose regex fails to
 /// compile is skipped with a warning so a bad pack entry cannot break
-/// extraction (same semantics as the old per-match compile failure skip).
+/// extraction.
 fn compile_forget_patterns(data: &PatternPackData) -> Vec<CompiledForgetPattern> {
     data.forget_patterns
         .iter()
@@ -252,8 +242,6 @@ impl PatternLibrary {
         }
     }
 
-    /// Reads and parses the runtime pattern pack for `code` from
-    /// `base/lang/{code}/patterns.json`.
     fn load_from_assets(base: &std::path::Path, code: &str) -> Result<Self, crate::EneConfigError> {
         let path = crate::paths::pattern_pack_path_in(base, code);
         let contents = std::fs::read_to_string(&path).map_err(|source| {
@@ -284,29 +272,18 @@ impl PatternLibrary {
         }
     }
 
-    /// Returns the built-in compile-time English defaults.
-    ///
-    /// These are the same patterns shipped in `assets/lang/en/patterns.json`
-    /// but embedded at compile time as a fallback so the application works
-    /// even when assets are missing (e.g. during unit tests or CI).
     pub fn built_in_english() -> Self {
         embedded_pattern_pack!("en")
     }
 
-    /// Returns the built-in compile-time Japanese defaults.
-    ///
-    /// These are the same patterns shipped in `assets/lang/ja/patterns.json`
-    /// but embedded at compile time as a fallback.
     pub fn built_in_japanese() -> Self {
         embedded_pattern_pack!("ja")
     }
 
-    /// Language code (e.g. `"en"` or `"ja"`) for this pattern library instance.
     pub fn lang(&self) -> &str {
         &self.lang
     }
 
-    /// Forget-detection patterns for this language, in match order.
     pub fn forget_patterns(&self) -> &[ForgetPattern] {
         &self.data.forget_patterns
     }
@@ -344,9 +321,6 @@ mod tests {
 
     #[test]
     fn embedded_packs_parse_and_are_complete() {
-        // Language-pack validation: the embedded packs for every
-        // supported language must parse and contain forget patterns and
-        // complete intent-keyword lists.
         for lang in SUPPORTED_LANGUAGES {
             let lib = PatternLibrary::built_in(lang);
             assert_eq!(lib.lang(), *lang);

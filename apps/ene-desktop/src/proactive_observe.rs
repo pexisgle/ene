@@ -70,7 +70,6 @@ impl ProactiveObserveControl {
     }
 }
 
-/// Spawn the observation loop. Returns the control handle.
 pub fn spawn_proactive_observer(
     runtime: &tokio::runtime::Handle,
     handle: EneHandle,
@@ -275,7 +274,6 @@ const TITLE_SEPARATORS: &[char] = &[
     '〈', '〉', '·', '・', '…',
 ];
 
-/// Split a window title into filterable tokens on whitespace and separators.
 fn split_title_tokens(input: &str) -> Vec<&str> {
     input
         .split(|c: char| c.is_whitespace() || TITLE_SEPARATORS.contains(&c))
@@ -399,7 +397,6 @@ mod tests {
 
     #[test]
     fn redact_keeps_single_slash_words() {
-        // A single interior slash is not a path (e.g. "and/or").
         let cleaned = redact_paths("and/or maybe");
         assert!(cleaned.contains("and/or"));
         assert!(cleaned.contains("maybe"));
@@ -508,7 +505,6 @@ mod tests {
 
     #[test]
     fn redact_title_strips_long_digit_runs_only() {
-        // Long interior runs (years, ids) are stripped; short ordinals kept.
         let cleaned = redact_title("report2024final v2 page3");
         assert!(cleaned.contains("reportfinal"));
         assert!(cleaned.contains("v2"));
@@ -519,7 +515,6 @@ mod tests {
     fn looks_like_url_matches_scheme_and_www_only() {
         assert!(looks_like_url("https://example.com/page"));
         assert!(looks_like_url("www.example.com"));
-        // Bare domains are indistinguishable from filenames and must not match.
         assert!(!looks_like_url("report.docx"));
         assert!(!looks_like_url("example.com"));
     }
@@ -543,10 +538,8 @@ mod tests {
         assert_eq!(describe_change(&mut last, "firefox"), "focused firefox");
         assert_eq!(last, "firefox");
 
-        // No change → empty string.
         assert!(describe_change(&mut last, "firefox").is_empty());
 
-        // Switch names both the previous and current focus.
         assert_eq!(
             describe_change(&mut last, "code: main.rs"),
             "switched from firefox to code: main.rs"

@@ -41,7 +41,6 @@ fn default_permits(class: ResourceClass) -> usize {
     }
 }
 
-/// Whether a class is gated without an explicit [`ResourceClassBudget`].
 fn gated_by_default(class: ResourceClass) -> bool {
     matches!(class, ResourceClass::Gpu { .. })
 }

@@ -207,7 +207,6 @@ impl TerminalUi {
         }
     }
 
-    /// Print a full log line on stderr, always above an active prompt.
     pub fn writeln(&self, line: &str) {
         let mut inner = self.inner.lock();
         let prompting = matches!(inner.mode, UiMode::Prompting { .. });
@@ -269,7 +268,7 @@ impl TerminalUi {
         new_lines.len()
     }
 
-    /// Stream LLM text on stderr (same stream as tree / prompt).
+    /// LLM text streams on the same stderr stream as tree rewrites and the prompt.
     pub fn write_stream(&self, delta: &str) {
         if delta.is_empty() {
             return;

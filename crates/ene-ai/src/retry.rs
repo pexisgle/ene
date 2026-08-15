@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-/// Configuration for retry behavior on transient errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Maximum number of attempts (including the initial call).
@@ -11,7 +10,6 @@ pub struct RetryPolicy {
     pub base_delay: Duration,
     /// Maximum delay cap for exponential growth.
     pub max_delay: Duration,
-    /// Per-request timeout.
     pub timeout: Duration,
 }
 
@@ -27,7 +25,6 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Computes the delay before attempt `retry_index` (0-indexed) with full jitter.
     fn delay_for_attempt(&self, retry_index: u32) -> Duration {
         let base_ms = self.base_delay.as_millis() as u64;
         let exp_ms = base_ms.saturating_mul(2u64.saturating_pow(retry_index));
@@ -40,8 +37,6 @@ impl RetryPolicy {
         Duration::from_millis(jittered)
     }
 
-    /// Execute an async closure with retry on retryable errors.
-    ///
     /// The `is_retryable` predicate determines whether a given error warrants
     /// a retry. Non-retryable errors are returned immediately.
     pub async fn run<F, Fut, T, E>(&self, is_retryable: impl Fn(&E) -> bool, f: F) -> Result<T, E>
@@ -53,8 +48,8 @@ impl RetryPolicy {
         self.run_with_retry_after(is_retryable, |_| None, f).await
     }
 
-    /// Execute with an optional `Retry-After` hint (seconds) that overrides
-    /// the computed backoff when present.
+    /// An optional `Retry-After` hint (seconds) overrides the computed
+    /// backoff when present.
     pub async fn run_with_retry_after<F, Fut, T, E>(
         &self,
         is_retryable: impl Fn(&E) -> bool,

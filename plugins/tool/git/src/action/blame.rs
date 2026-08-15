@@ -5,7 +5,6 @@ use ene_plugin::prelude::*;
 
 const MAX_BLAME_LINES: usize = 2000;
 
-/// Shows per-line commit attribution for a file in a git repository.
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[serde(rename_all = "camelCase")]
 #[tool(
@@ -18,7 +17,6 @@ const MAX_BLAME_LINES: usize = 2000;
     side_effects = "ReadOnly"
 )]
 pub struct BlameAction {
-    /// Path to the git repository working tree (default: current directory).
     #[serde(default)]
     #[arg(
         default = ".",
@@ -42,7 +40,6 @@ pub struct BlameAction {
 }
 
 impl BlameAction {
-    /// Creates a blame action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,
@@ -124,7 +121,6 @@ impl BlameAction {
     }
 }
 
-/// Counts the lines of the committed file via `git show` output.
 async fn blob_size_count(
     workdir: &str,
     file: &str,
@@ -141,7 +137,6 @@ async fn blob_size_count(
     Ok(show.stdout.lines().count())
 }
 
-/// Parses `git blame --porcelain` output for the requested line range.
 fn parse_porcelain(output: &str, start: usize, end: usize) -> Vec<BlameLine> {
     let mut lines = Vec::new();
     let mut commit = String::new();

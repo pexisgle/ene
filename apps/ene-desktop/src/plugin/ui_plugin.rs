@@ -34,8 +34,7 @@ impl Plugin for UiPlugin {
     }
 }
 
-/// Spawn the single settings-window entity. The entity is queried
-/// by `SettingsUi::render` (via `runtime.rs`) and by the
+/// The entity is queried by `SettingsUi::render` (via `runtime.rs`) and by the
 /// `apply_settings_action_system` that consumes
 /// `SettingsActionEvent` messages.
 fn spawn_settings_ui_window(mut commands: Commands) {

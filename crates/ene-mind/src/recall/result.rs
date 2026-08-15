@@ -32,10 +32,8 @@ pub enum RecallReason {
     Pinned,
 }
 
-/// A typed memory recalled with an explainable reason and score breakdown.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecalledMemory {
-    /// The recalled memory item.
     pub item: MemoryItem,
     /// Primary reason this memory was surfaced.
     pub reason: RecallReason,
@@ -46,7 +44,6 @@ pub struct RecalledMemory {
 }
 
 impl RecalledMemory {
-    /// Build a recalled memory from a hybrid search result with inferred reason.
     pub fn from_scored(scored: ScoredMemory) -> Self {
         let reason = infer_recall_reason(&scored);
         Self {
@@ -58,7 +55,6 @@ impl RecalledMemory {
     }
 }
 
-/// Convert hybrid search results into explainable recalled memories.
 pub fn explain_scored_memories(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory> {
     scored
         .into_iter()
@@ -66,7 +62,6 @@ pub fn explain_scored_memories(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory>
         .collect()
 }
 
-/// Infer the primary recall reason from hybrid search signals.
 pub fn infer_recall_reason(scored: &ScoredMemory) -> RecallReason {
     let item = &scored.item;
     let breakdown = &scored.breakdown;

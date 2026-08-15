@@ -11,9 +11,7 @@ use std::sync::Arc;
     side_effects = "Browser { mutates_dom: true }"
 )]
 pub struct ScrollAction {
-    /// Horizontal scroll amount in pixels (default: 0).
     scroll_x: Option<i32>,
-    /// Vertical scroll amount in pixels (default: 0).
     scroll_y: Option<i32>,
 
     #[tool(skip)]

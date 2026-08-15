@@ -8,7 +8,6 @@
 
 use chrono::{DateTime, Utc};
 
-/// One indexed file row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceFileRow {
     /// Canonical path of the configured root this file was scanned from.
@@ -28,14 +27,12 @@ pub struct WorkspaceFileRow {
     pub chunk_count: u64,
 }
 
-/// A chunk to persist for one file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewWorkspaceChunk {
     /// Zero-based position within the file.
     pub chunk_index: u32,
     /// Nearest heading at chunk start (empty when the file has none).
     pub heading: String,
-    /// Chunk text.
     pub content: String,
     /// First line of the chunk (1-based, inclusive).
     pub start_line: u32,
@@ -45,7 +42,6 @@ pub struct NewWorkspaceChunk {
     pub embedding: Vec<f32>,
 }
 
-/// A search hit carrying citation metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceChunkHit {
     /// Zero-based chunk position within the file.
@@ -60,13 +56,11 @@ pub struct WorkspaceChunkHit {
     pub start_line: u32,
     /// Last line of the chunk (1-based, inclusive; citation range).
     pub end_line: u32,
-    /// Chunk text.
     pub content: String,
     /// Hybrid relevance score in `[0, 1]`.
     pub similarity: f32,
 }
 
-/// Search request for the workspace document index.
 #[derive(Debug, Clone)]
 pub struct WorkspaceSearchQuery<'a> {
     /// Raw query text used for lexical matching.
@@ -79,22 +73,17 @@ pub struct WorkspaceSearchQuery<'a> {
     /// Canonical paths of the currently permitted roots. **Empty means no
     /// roots are permitted and the search returns nothing** (fail closed).
     pub allowed_roots: &'a [String],
-    /// Maximum number of hits to return.
     pub top_k: usize,
-    /// Minimum hybrid score a hit must reach to be returned.
     pub min_similarity: f32,
 }
 
-/// Persisted index summary (runtime sync state is reported separately).
+/// Runtime sync state is reported separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceIndexStatus {
-    /// Number of indexed files.
     pub indexed_files: u64,
-    /// Number of indexed chunks.
     pub indexed_chunks: u64,
 }
 
-/// Errors raised by the workspace document index backend.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspacePortError {
     /// The backing store rejected or failed an operation.
@@ -146,6 +135,5 @@ pub trait WorkspaceDocumentPort: Send + Sync {
         query: &WorkspaceSearchQuery<'_>,
     ) -> Result<Vec<WorkspaceChunkHit>, WorkspacePortError>;
 
-    /// Indexed file/chunk counts.
     async fn workspace_index_status(&self) -> Result<WorkspaceIndexStatus, WorkspacePortError>;
 }

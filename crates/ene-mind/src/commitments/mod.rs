@@ -59,9 +59,7 @@ pub struct CommitmentLedger;
 /// ledger keeps working without an embedding model.
 #[derive(Clone)]
 pub struct CommitmentSyncContext<'a> {
-    /// Character identifier.
     pub character_id: &'a str,
-    /// User identifier (may be empty).
     pub user_id: &'a str,
     /// Embedding provider for fuzzy title matching. `None` falls back to
     /// exact normalized-title equality.
@@ -143,7 +141,6 @@ impl CommitmentLedger {
 
             if let Some(idx) = Self::find_best_match(&mut matcher, &candidate.title, &active).await
             {
-                // Same commitment exists — supersede (update description/due_label) if content differs.
                 let existing = &active[idx];
                 let content_changed = existing.description != candidate.content;
                 let due_changed =
@@ -225,7 +222,6 @@ impl CommitmentLedger {
         Ok(inserted)
     }
 
-    /// Arbitrate non-commitment candidates; write commitments ledger-first.
     pub async fn arbitrate_apply_and_sync(
         store: &dyn MemoryPort,
         candidates: &[MemoryCandidate],
@@ -267,7 +263,6 @@ impl CommitmentLedger {
             .map_err(CognitionError::MemoryPort)
     }
 
-    /// Map active commitments to lightweight prompt DTOs.
     pub fn active_prompt_candidates(commitments: &[Commitment]) -> Vec<ActiveCommitmentPrompt> {
         commitments
             .iter()
@@ -284,7 +279,6 @@ impl CommitmentLedger {
             .collect()
     }
 
-    /// Mark a commitment as done.
     pub async fn complete(store: &dyn MemoryPort, id: i64) -> Result<bool, CognitionError> {
         store
             .complete_commitment(id)
@@ -292,7 +286,6 @@ impl CommitmentLedger {
             .map_err(CognitionError::MemoryPort)
     }
 
-    /// Mark a commitment as cancelled.
     pub async fn cancel(store: &dyn MemoryPort, id: i64) -> Result<bool, CognitionError> {
         store
             .cancel_commitment(id)
@@ -300,7 +293,6 @@ impl CommitmentLedger {
             .map_err(CognitionError::MemoryPort)
     }
 
-    /// Mark overdue active commitments as stale.
     pub async fn mark_stale_overdue(
         store: &dyn MemoryPort,
         now: chrono::DateTime<chrono::Utc>,
@@ -378,7 +370,6 @@ impl CommitmentLedger {
         best
     }
 }
-/// List active commitments for title matching, warning if the cap is hit.
 async fn list_active_for_match(
     store: &dyn MemoryPort,
     ctx: &CommitmentSyncContext<'_>,
@@ -497,7 +488,6 @@ mod tests {
         }
     }
 
-    /// A sync context wired to the keyword embedder with a fuzzy threshold.
     fn fuzzy_sync_ctx(embedder: &dyn EmbeddingProvider) -> CommitmentSyncContext<'_> {
         CommitmentSyncContext {
             character_id: "ene",
@@ -624,7 +614,6 @@ mod tests {
             .unwrap();
         assert_eq!(ids1.len(), 1);
 
-        // Same title, different content and due_label → supersede
         let mut updated = commitment_candidate(0.9);
         updated.content = "Let's discuss the UI design instead".to_string();
         updated.commitment_due = Some("Tomorrow".to_string());

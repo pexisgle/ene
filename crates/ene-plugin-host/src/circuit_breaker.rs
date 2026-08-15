@@ -8,12 +8,9 @@
 
 use std::time::{Duration, Instant};
 
-/// Default number of consecutive failures before the breaker opens.
 pub const DEFAULT_FAILURE_THRESHOLD: u32 = 5;
-/// Default cooldown while the breaker is open.
 pub const DEFAULT_COOLDOWN: Duration = Duration::from_secs(30);
 
-/// Circuit-breaker state for a single plugin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakerState {
     /// Calls flow through normally.
@@ -22,7 +19,6 @@ pub enum BreakerState {
     Open,
 }
 
-/// Tracks consecutive failures and gates calls with a cooldown window.
 #[derive(Debug, Clone)]
 pub struct CircuitBreaker {
     failure_threshold: u32,
@@ -38,8 +34,6 @@ impl Default for CircuitBreaker {
 }
 
 impl CircuitBreaker {
-    /// Creates a breaker that opens after `failure_threshold` consecutive
-    /// failures and stays open for `cooldown`.
     pub const fn new(failure_threshold: u32, cooldown: Duration) -> Self {
         Self {
             failure_threshold,
@@ -63,12 +57,10 @@ impl CircuitBreaker {
         }
     }
 
-    /// Whether a call should be rejected right now (breaker open).
     pub fn is_open(&mut self) -> bool {
         self.state() == BreakerState::Open
     }
 
-    /// Records a successful call, closing the breaker and clearing failures.
     pub fn record_success(&mut self) {
         self.consecutive_failures = 0;
         self.opened_at = None;
@@ -96,7 +88,6 @@ impl CircuitBreaker {
         false
     }
 
-    /// Current consecutive-failure count.
     pub const fn consecutive_failures(&self) -> u32 {
         self.consecutive_failures
     }

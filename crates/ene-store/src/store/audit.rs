@@ -1,5 +1,3 @@
-//! Audit-log queries.
-
 use super::{EneMemoryError, MemoryStore};
 use crate::entities;
 use chrono::Utc;
@@ -22,7 +20,7 @@ fn audit_row_to_entry(row: entities::audit_log::Model) -> crate::audit::AuditEnt
 }
 
 impl MemoryStore {
-    /// Records a single audited tool call, redacting sensitive arguments.
+    /// Redacts sensitive arguments.
     pub async fn insert_audit_entry(
         &self,
         entry: &crate::audit::NewAuditEntry,
@@ -54,8 +52,6 @@ impl MemoryStore {
         Ok(res.id)
     }
 
-    /// Spawns a fire-and-forget task that records an audited tool call.
-    ///
     /// Errors are logged at the `error` tracing level. Takes an `Arc<Self>`
     /// so the store outlives the spawned task.
     pub fn spawn_insert_audit_entry(store: &Arc<Self>, entry: crate::audit::NewAuditEntry) {
@@ -72,7 +68,6 @@ impl MemoryStore {
         });
     }
 
-    /// Returns the most recent audit entries (newest first).
     pub async fn list_audit_entries(
         &self,
         limit: usize,
@@ -86,7 +81,6 @@ impl MemoryStore {
         Ok(rows.into_iter().map(audit_row_to_entry).collect())
     }
 
-    /// Returns audit entries filtered by tool name (newest first).
     pub async fn list_audit_entries_by_tool(
         &self,
         tool_name: &str,
@@ -102,8 +96,6 @@ impl MemoryStore {
         Ok(rows.into_iter().map(audit_row_to_entry).collect())
     }
 
-    /// Returns audit entries for a single session, oldest first.
-    ///
     /// Rows whose `session_id` is `NULL` (written before the column
     /// existed, or out-of-band diagnostics calls) are never returned, so
     /// a session's export can never leak another session's tool history.

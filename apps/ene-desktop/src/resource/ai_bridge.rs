@@ -1,5 +1,3 @@
-//! AI bridge + processing-flag resources.
-//!
 //! The [`AiBridge`] handle is held in a bevy `Resource` so
 //! per-action UI systems can call `ai.run(input)` via
 //! `Res<AiBridgeResource>`.

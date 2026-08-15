@@ -1,5 +1,3 @@
-//! Character plugin.
-//!
 //! Spawns a single [`CharacterRoot`] entity with every data-only
 //! component at its `Default` value. The actual VRM rendering stays
 //! on [`crate::character::CharacterRenderer`] via `AppState::character`.
@@ -40,8 +38,7 @@ impl Plugin for CharacterPlugin {
     }
 }
 
-/// `Startup` system: spawns the primary character entity with the
-/// default bundle. Idempotent — running it twice is a no-op.
+/// Idempotent — running it twice is a no-op.
 fn spawn_character_entity(mut commands: Commands) {
     commands.spawn(CharacterBundle::default());
 }

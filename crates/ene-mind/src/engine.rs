@@ -28,7 +28,6 @@ use crate::recall::{
     RecallPlannerOptions, RecallResultMapper, WriteTrackingPort, execute_hybrid_recall,
 };
 
-/// Central cognitive engine facade.
 #[expect(
     dead_code,
     reason = "facade fields are constructed and held for sub-component lifecycle; access is through engine methods"
@@ -57,29 +56,23 @@ impl Default for CognitionEngine {
         Self::new()
     }
 }
-/// Outcome of a deferred memory-write task.
 #[derive(Debug, Clone)]
 pub enum MemoryWriteOutcome {
-    /// Write and forgetting completed successfully.
     Ok {
         /// Number of memory candidates deferred to the user-approval queue.
         deferred_candidates: usize,
     },
     /// Write failed; a retry row was enqueued (or marked permanent).
     Failed {
-        /// Human-readable error.
         message: String,
         /// Pending queue id when enqueued.
         pending_id: Option<i64>,
-        /// Whether the failure is permanent.
         permanent: bool,
-        /// Character id for diagnostics.
         character_id: String,
     },
 }
 
 impl CognitionEngine {
-    /// Create a new cognitive engine with default components.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -127,7 +120,6 @@ impl CognitionEngine {
         Ok((report, new_hash))
     }
 
-    /// Pre-turn: load affect, plan recall, execute hybrid search.
     pub async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError> {
         let store = ctx.store.ok_or_else(|| {
             CognitionError::MissingProvider("Memory store required for cognitive path".into())
@@ -487,8 +479,6 @@ impl CognitionEngine {
             .map_err(CognitionError::MemoryPort)
     }
 
-    /// Compose a sectioned prompt packet into LLM messages.
-    ///
     /// Pass [`ComposePrefetch`] fields from a parallel pre-LLM phase to skip
     /// redundant style/scene fetches. Default prefetch fetches them here.
     pub async fn compose_prompt_packet(
@@ -498,7 +488,7 @@ impl CognitionEngine {
         prefetch: ComposePrefetch,
     ) -> Result<ComposedPrompt, CognitionError> {
         // Destructure to move the recalled/commitment vectors into the pack
-        // input without cloning (#review M2). `recall_plan` is no longer needed
+        // input without cloning. `recall_plan` is no longer needed
         // here now that packing budgets against the context window, not recall
         // hints.
         let PreTurnOutput {
@@ -517,7 +507,7 @@ impl CognitionEngine {
             usize::try_from(ene_ai::DEFAULT_CONTEXT_WINDOW).unwrap_or(usize::MAX)
         });
         // Load user persona from global config so the identity kernel can expand
-        // the `{{user_persona}}` CBS macro at compile time (#H-3).
+        // the `{{user_persona}}` CBS macro at compile time.
         let user_persona = ene_config::get_global_config().user_persona;
         // Seed `{{pick}}` from the character+session so a trait chosen once
         // (hair colour, hometown, …) stays fixed across per-turn kernel
@@ -599,7 +589,6 @@ impl CognitionEngine {
             ctx.history.to_vec()
         };
 
-        // Build author's note from character card data if present
         let authors_note = ctx
             .card
             .data
@@ -738,7 +727,6 @@ impl CognitionEngine {
         Ok(ComposedPrompt { messages, meta })
     }
 
-    /// Post-turn: memory extraction, forgetting lifecycle, affect persistence.
     pub async fn after_turn(
         &self,
         store: &dyn MemoryPort,
@@ -749,8 +737,6 @@ impl CognitionEngine {
         MemoryWriter::after_turn(store, config, input, providers).await
     }
 
-    /// Synchronous post-turn finalize: persist affect state only.
-    ///
     /// Load active commitments through the turn's L1 cache when present.
     async fn list_active_commitments_cached(
         ctx: &TurnContext<'_>,
@@ -785,8 +771,6 @@ impl CognitionEngine {
         MemoryWriter::finalize_turn(&tracking, config, input).await
     }
 
-    /// Spawn deferred post-turn memory extraction (LLM + arbiter) and forgetting lifecycle.
-    ///
     /// On failure, enqueues a [`ene_core::PendingMemoryWrite`] for later retry.
     /// Returns the task handle so callers can track or abort it.
     pub fn spawn_deferred_memory_work(
@@ -896,7 +880,6 @@ impl CognitionEngine {
         )
     }
 
-    /// Retry due pending memory writes from the persistent queue.
     pub async fn drain_pending_memory_writes(
         store: &dyn MemoryPort,
         config: &MindConfig,
@@ -972,7 +955,6 @@ impl CognitionEngine {
         }
     }
 
-    /// Resolve the final character expression after an assistant turn.
     pub fn resolve_expression_turn(
         &self,
         config: &MindConfig,
@@ -1019,8 +1001,6 @@ fn build_output_contract(card: &CharacterCardV3, phi: Option<&str>, lang: &str) 
     contract
 }
 
-/// Retrieves workspace document hits for prompt injection.
-///
 /// Best-effort context: a missing root, a stale index, or a store error
 /// degrades to an empty section (logged) instead of failing the turn, so a
 /// broken document index can never block a conversation.
@@ -1115,7 +1095,7 @@ fn pending_to_affect_proposal(
     }
 }
 
-/// Count user messages in a history snapshot (current turn user is already included).
+/// The history snapshot already includes the current turn's user message.
 pub fn count_user_turns(history: &[crate::lifecycle::HistoryEntry]) -> i64 {
     let count = history
         .iter()
@@ -1148,7 +1128,6 @@ pub struct ClassifierAffectSnapshot {
 }
 
 impl ClassifierAffectSnapshot {
-    /// Build a compact snapshot from persistent affect state.
     pub fn from_affect_state(affect: &ene_core::AffectState) -> Self {
         Self {
             valence: affect.valence,
@@ -1159,7 +1138,6 @@ impl ClassifierAffectSnapshot {
         }
     }
 
-    /// Serialize for the classifier user prompt.
     pub fn to_prompt_json(&self) -> String {
         serde_json::json!({
             "valence": self.valence,
@@ -1172,7 +1150,6 @@ impl ClassifierAffectSnapshot {
     }
 }
 
-/// Input bundle for the post-turn affect classifier.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassifierContext {
     /// Affect state at the start of the turn (before this exchange).
@@ -1181,7 +1158,6 @@ pub struct ClassifierContext {
     pub conversation: String,
 }
 
-/// Build classifier input from history, current assistant output, and turn-start affect.
 #[must_use]
 pub fn build_classifier_context(
     history: &[crate::lifecycle::HistoryEntry],

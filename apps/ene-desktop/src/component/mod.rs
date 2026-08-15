@@ -1,5 +1,3 @@
-//! # ECS Components for `ene-desktop`
-//!
 //! Each component holds a small piece of plain data attached to an
 //! entity. The full set is split per concern:
 //!

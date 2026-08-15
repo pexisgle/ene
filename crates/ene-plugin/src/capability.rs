@@ -17,24 +17,19 @@ use ene_plugin_proto::{
 };
 use thiserror::Error;
 
-/// Errors from opening and using a capability host-service session.
 #[derive(Debug, Error)]
 pub enum CapabilityClientError {
-    /// IO or transport error.
     #[error("transport error: {0}")]
     Transport(#[from] std::io::Error),
     /// The server closed the connection before the response.
     #[error("connection closed")]
     ConnectionClosed,
-    /// The server returned an unexpected response variant.
     #[error("unexpected response: {0}")]
     UnexpectedResponse(String),
     /// The host rejected the session `Open` (bad token or unknown service).
     #[error("host service open rejected: {message}")]
     Open {
-        /// The rejection code from the host.
         code: HostServiceErrorCode,
-        /// Human-readable rejection detail.
         message: String,
     },
 }

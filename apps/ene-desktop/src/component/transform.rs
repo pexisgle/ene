@@ -1,5 +1,3 @@
-//! Scene graph transforms.
-//!
 //! Minimal `Transform` / `GlobalTransform` pair used by the
 //! `propagate_transforms` system. Kept as plain-data components so the
 //! entity can be moved without reaching for `physics::Transform`.

@@ -1,6 +1,3 @@
-//! Conversion between the plugin wire format and the OpenAI-compatible JSON
-//! shapes `llama-server` serves.
-
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmMessage, UserMessagePart};
 use ene_plugin::PluginError;

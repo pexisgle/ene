@@ -29,7 +29,6 @@ fn test_config() -> MindConfig {
     config
 }
 
-/// Build a proactive pre-turn context against `store`.
 fn turn_ctx<'a>(
     config: &'a MindConfig,
     card: &'a ene_card::CharacterCardV3,

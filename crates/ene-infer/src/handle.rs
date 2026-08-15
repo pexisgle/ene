@@ -1,5 +1,3 @@
-//! The async handle and its dedicated worker thread.
-
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -38,8 +36,6 @@ type EngineDownNotifier = Box<dyn FnOnce(String) + Send>;
 /// behavior — one dedicated worker thread, one queue, no separate admission
 /// path for streaming work.
 enum JobKind<M: LocalModel> {
-    /// An [`EngineHandle::submit`] job: run to completion, reply once via
-    /// the oneshot channel.
     Oneshot {
         request: M::Request,
         reply: Reply<M>,
@@ -60,8 +56,6 @@ enum JobKind<M: LocalModel> {
     },
 }
 
-/// One unit of work travelling from [`EngineHandle::submit`]/
-/// [`EngineHandle::submit_stream`] to the worker thread.
 struct Job<M: LocalModel> {
     cancel: CancellationToken,
     /// Cancelled by a `DropGuard` living in the caller's own stack frame (or,
@@ -448,8 +442,6 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// Builds a fresh model via `factory`, tolerating both an `Err` return and a
-/// panic from inside `factory` itself.
 fn build_model<M: LocalModel>(
     factory: &(impl Fn() -> Result<M, M::Error> + Send + 'static),
     engine_name: &OnceLock<String>,

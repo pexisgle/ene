@@ -1,5 +1,3 @@
-//! Behavior settings page — mind / emotion toggles and proactive policy.
-//!
 //! Provider, embedding, voice, and tool settings live on their own pages;
 //! this page owns the mind switches and proactive timing / source policy.
 
@@ -426,8 +424,6 @@ fn render_mind(ui: &mut egui::Ui, draft: &mut SettingsDraft) {
     });
 }
 
-/// Window-title capture level combo for the activity source.
-///
 /// Raising the level lets the proactive observer read the focused window's
 /// title; the hint warns that title text is sent to the decision LLM (and to
 /// a cloud provider when one is configured).

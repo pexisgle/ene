@@ -89,11 +89,10 @@ pub struct CharacterCamera(
 /// Per-character look-at state. `strength = 0` disables the effect.
 #[derive(Component, Debug, Default, Clone)]
 pub struct LookAt {
-    /// User-configured strength (0–1). `0` means "no look-at".
+    /// User-configured strength (0–1).
     #[expect(dead_code, reason = "yet to be wired to look-at system")]
     pub strength: f32,
-    /// Smoothed world-space target. Updated each frame by
-    /// `update_look_at`.
+    /// Updated each frame by `update_look_at`.
     #[expect(dead_code, reason = "yet to be wired to look-at system")]
     pub smoothed_world_target: Vec3,
     #[expect(dead_code, reason = "yet to be wired to look-at system")]
@@ -104,7 +103,6 @@ pub struct LookAt {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Vec2Wrapper(pub Vec3);
 
-/// Emotion channel: pending queue + active emotion.
 #[derive(Component, Debug, Default)]
 pub struct EmotionChannel {
     #[expect(dead_code, reason = "yet to be wired to emotion system")]

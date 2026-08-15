@@ -51,9 +51,7 @@ const BACKOFF_MAX_MS: u64 = 5_000;
 /// service sends when the token misses its 5-minute validity window.
 static CLOCK_SKEW_SECS: AtomicI64 = AtomicI64::new(0);
 
-/// Synthesizes every chunk over one connection, reconnecting from the
-/// failed chunk with exponential backoff when a retryable transport error
-/// occurs. The retry budget in `config.max_retries` is shared across all
+/// The retry budget in `config.max_retries` is shared across all
 /// chunks of the request. Returns the concatenated MP3 stream.
 ///
 /// # Errors
@@ -78,9 +76,8 @@ pub async fn synthesize(config: &EdgeTtsConfig, chunks: &[String]) -> Result<Vec
     Ok(mp3)
 }
 
-/// Runs one connection pass starting at `start_index`, appending MP3 bytes
-/// to `mp3`. Returns how many chunks completed. A retryable error leaves
-/// `mp3` truncated to the last chunk boundary so the caller can resume.
+/// A retryable error leaves `mp3` truncated to the last chunk boundary so
+/// the caller can resume.
 async fn synthesize_pass(
     config: &EdgeTtsConfig,
     chunks: &[String],
@@ -109,8 +106,6 @@ async fn synthesize_pass(
     Ok(index - start_index)
 }
 
-/// Connects to the configured endpoint through the host's WebSocket broker
-/// with the browser-mimicking headers.
 async fn connect(config: &EdgeTtsConfig) -> Result<WebSocketSession, EdgeError> {
     let request_id = uuid::Uuid::new_v4().simple().to_string();
     let url = format!(
@@ -179,7 +174,6 @@ fn synthesis_request(ssml: &str) -> String {
     frame
 }
 
-/// Reads frames until `turn.end`, appending MP3 payloads to `audio`.
 async fn collect_audio(ws: &mut WebSocketSession, audio: &mut Vec<u8>) -> Result<(), EdgeError> {
     let mut audio_received = false;
     loop {
@@ -256,8 +250,8 @@ async fn collect_audio(ws: &mut WebSocketSession, audio: &mut Vec<u8>) -> Result
     Ok(())
 }
 
-/// Maps a handshake failure to a typed error. 408/429 (rate limiting) are
-/// transport-level failures and retryable; 403 means the `Sec-MS-GEC` token
+/// 408/429 (rate limiting) are transport-level failures and retryable; 403
+/// means the `Sec-MS-GEC` token
 /// was rejected, so the clock is re-synced from the response `Date` header
 /// and the error is retryable; any other 4xx is a permanent rejection.
 fn classify_connect_error(error: &BrokerClientError) -> EdgeError {

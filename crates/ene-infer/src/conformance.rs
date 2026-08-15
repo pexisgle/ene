@@ -136,8 +136,6 @@ where
     EngineHandle::spawn(move || Ok(factory()), cfg)
 }
 
-/// N concurrent submissions execute one at a time, and once the bounded
-/// queue is full, further submissions get `Busy` immediately.
 async fn concurrency_is_serialized_and_busy_past_capacity<M>(
     factory: impl Fn() -> M + Send + 'static,
 ) where
@@ -217,9 +215,7 @@ async fn concurrency_is_serialized_and_busy_past_capacity<M>(
     );
 }
 
-/// Cancelling mid-job returns `Cancelled` promptly, and the engine accepts
-/// the next job immediately afterward — the regression check for "timeout
-/// doesn't actually stop the worker".
+/// The regression check for "timeout doesn't actually stop the worker".
 async fn cancel_mid_job_returns_promptly_and_engine_stays_available<M>(
     factory: impl Fn() -> M + Send + 'static,
 ) where
@@ -279,8 +275,6 @@ async fn cancel_mid_job_returns_promptly_and_engine_stays_available<M>(
     );
 }
 
-/// Dropping the future awaiting `submit` (the caller going away) must not
-/// wedge the engine: the next submission still succeeds promptly.
 async fn dropped_caller_does_not_wedge_the_engine<M>(factory: impl Fn() -> M + Send + 'static)
 where
     M: LocalModel,
@@ -322,8 +316,8 @@ where
     );
 }
 
-/// A panicking `run` yields `EngineDown` for that job, without poisoning the
-/// engine: the following submission succeeds once the model is rebuilt.
+/// The engine is not poisoned; the following submission succeeds once the
+/// model is rebuilt.
 async fn panicking_run_yields_engine_down_then_recovers<M>(factory: impl Fn() -> M + Send + 'static)
 where
     M: LocalModel,
@@ -355,7 +349,6 @@ where
     );
 }
 
-/// `reset` runs after a cancelled job, not just after successful ones.
 async fn reset_runs_after_a_cancelled_job<M>(factory: impl Fn() -> M + Send + 'static)
 where
     M: LocalModel,
@@ -510,9 +503,9 @@ async fn dropped_stream_consumer_stops_promptly_and_engine_stays_available<M>(
     );
 }
 
-/// A model error partway through a stream surfaces as a terminal `Err` after
-/// the chunks that were already sent, rather than the stream silently
-/// truncating with no explanation.
+/// The model error surfaces as a terminal `Err` after the chunks that were
+/// already sent, rather than the stream silently truncating with no
+/// explanation.
 async fn mid_stream_model_error_surfaces<M>(factory: impl Fn() -> M + Send + 'static)
 where
     M: StreamingLocalModel,
@@ -607,14 +600,9 @@ async fn backpressure_blocks_a_fast_producer_against_a_slow_consumer<M>(
     drop(stream);
 }
 
-// ---------------------------------------------------------------------
-// A trivial in-crate mock model, used both to self-test `run_all` above
-// and by this crate's own unit tests (see `src/tests.rs`). `#[cfg(test)]`
-// because nothing outside test builds ever constructs one — downstream
-// crates bring their own mock for their own engine.
-// ---------------------------------------------------------------------
+// `#[cfg(test)]` because nothing outside test builds ever constructs one —
+// downstream crates bring their own mock for their own engine.
 
-/// A scripted request for [`MockModel`].
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MockRequest {
@@ -683,7 +671,6 @@ impl ConformanceStreamingRequest for MockRequest {
     }
 }
 
-/// [`MockModel`]'s response, reporting the model's own reset counter.
 #[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct MockResponse {
@@ -697,16 +684,12 @@ impl ConformanceResponse for MockResponse {
     }
 }
 
-/// [`MockModel`]'s error, returned when a job stops cooperatively.
+/// Returned when a job stops cooperatively.
 #[cfg(test)]
 #[derive(Debug, thiserror::Error)]
 #[error("mock model stopped cooperatively")]
 pub(crate) struct MockError;
 
-/// A trivial [`LocalModel`] used for this crate's own tests: it busy-waits
-/// for `run_for`, checking [`crate::JobContext::should_stop`] and calling
-/// [`crate::JobContext::tick`] every couple of milliseconds, optionally panicking
-/// instead, and counts how many times [`LocalModel::reset`] has run.
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct MockModel {

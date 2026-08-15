@@ -147,7 +147,6 @@ fn signed_catalog_with_expiry(
     ene_artifact::sign_catalog(&metadata, "test-publisher".to_string(), &key).expect("sign")
 }
 
-/// Serves the current signed catalog JSON over plain HTTP on loopback.
 async fn serve_catalog(
     catalog: std::sync::Arc<parking_lot::Mutex<ene_artifact::SignedCatalog>>,
 ) -> (tokio::task::JoinHandle<()>, String) {
@@ -514,7 +513,6 @@ async fn signed_catalog_refreshes_on_demand_and_rejects_rollback() {
         .await
         .expect("open artifact session");
 
-    // First resolve fetches + verifies the signed catalog.
     let response = artifact
         .request(&BrokerRequest::ArtifactResolve {
             artifact_id: "fs".to_string(),
@@ -549,7 +547,6 @@ async fn signed_catalog_refreshes_on_demand_and_rejects_rollback() {
         other => panic!("unexpected response: {other:?}"),
     }
 
-    // Manual refresh re-fetches and re-verifies.
     let response = artifact
         .request(&BrokerRequest::ArtifactRefresh)
         .await
@@ -679,7 +676,6 @@ async fn file_broker_serves_granted_absolute_paths_and_denies_others() {
         "denial must cite the grant: {response}"
     );
 
-    // Directory listing + recursive delete through the broker.
     let sub = grant.join("sub").join("deep");
     file.request(&BrokerRequest::FileCreateDir {
         path: sub.to_string_lossy().into_owned(),
@@ -720,7 +716,6 @@ async fn websocket_passenger_relays_frames_through_the_host() {
     use futures::{SinkExt as _, StreamExt as _};
     use tokio_tungstenite::tungstenite::Message;
 
-    // Local WebSocket echo server.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");

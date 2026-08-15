@@ -20,7 +20,6 @@ use serde::Deserialize;
     keywords_primary = "echo, repeat"
 )]
 pub struct EchoArgs {
-    /// The text to echo.
     pub text: String,
 }
 
@@ -83,7 +82,6 @@ pub struct StatefulArgs {
     #[tool(skip)]
     #[serde(skip, default)]
     pub session_id: String,
-    /// The value to process.
     pub value: String,
 }
 
@@ -133,7 +131,6 @@ fn tool_action_skip_field_hidden_from_schema() {
     keywords_primary = "greet, hello"
 )]
 pub struct GreetArgs {
-    /// Name to greet.
     pub name: String,
 }
 
@@ -184,10 +181,8 @@ fn tool_action_attr_macro_rag_profile() {
     keywords_primary = "constrained"
 )]
 pub struct ConstrainedArgs {
-    /// Direction to move.
     #[arg(enum_values = "left, right, up, down", default = "up")]
     pub direction: String,
-    /// Number of steps.
     #[arg(minimum = 1, maximum = 100)]
     pub steps: u32,
 }
@@ -259,9 +254,7 @@ fn schema_min_max_applied() {
     keywords_primary = "hidden"
 )]
 pub struct HiddenFieldArgs {
-    /// Visible field.
     pub visible: String,
-    /// Internal field.
     #[arg(hidden)]
     pub internal_state: String,
 }

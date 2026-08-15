@@ -12,7 +12,6 @@ use super::descriptor::EngineDescriptor;
 use super::resource::ResourceRegistry;
 use crate::traits::{AudioProviderError, SttProvider, SttResult};
 
-/// Owned speech-to-text transcription request.
 #[derive(Debug, Clone)]
 pub struct SttTranscribeRequest {
     /// Interleaved mono PCM samples normalized to `[-1.0, 1.0]`.

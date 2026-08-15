@@ -69,7 +69,6 @@ impl From<String> for PluginCompletion {
 /// by a terminal `StreamEnd` or `StreamError`.
 pub type PluginStream = Pin<Box<dyn Stream<Item = Result<PluginStreamChunk, PluginError>> + Send>>;
 
-/// A completed speech-to-text transcription.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PluginTranscription {
     /// Transcribed text.
@@ -79,14 +78,11 @@ pub struct PluginTranscription {
     pub language: Option<String>,
 }
 
-/// Capabilities advertised by a tool plugin.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolPluginCapabilities {
     /// Number of tools this plugin provides.
     pub tool_count: usize,
 }
-
-// ── ConfigurablePlugin (shared by every plugin trait) ─────────────────
 
 /// Shared configuration surface inherited by every plugin trait.
 ///
@@ -139,17 +135,14 @@ pub trait ConfigurablePlugin: Send + Sync {
         0
     }
 
-    /// Advertise support for [`list_config_options`](Self::list_config_options).
     fn supports_list_config_options(&self) -> bool {
         false
     }
 
-    /// Advertise support for [`validate_config`](Self::validate_config).
     fn supports_validate_config(&self) -> bool {
         false
     }
 
-    /// Advertise support for [`migrate_config`](Self::migrate_config).
     fn supports_migrate_config(&self) -> bool {
         false
     }
@@ -196,8 +189,6 @@ pub trait ConfigurablePlugin: Send + Sync {
     }
 }
 
-// ── ToolPlugin ──────────────────────────────────────────────────────────
-
 /// Plugin trait for tool execution.
 ///
 /// Implement this trait to expose tools, deferred execution, permission
@@ -205,7 +196,6 @@ pub trait ConfigurablePlugin: Send + Sync {
 /// plugin can opt into exactly the capabilities it needs.
 #[async_trait]
 pub trait ToolPlugin: ConfigurablePlugin + Send + Sync {
-    /// Returns the tool capabilities advertised during the handshake.
     fn tool_capabilities(&self) -> ToolPluginCapabilities;
 
     /// Executes a tool by name with JSON-encoded arguments and an optional
@@ -244,7 +234,6 @@ pub trait ToolPlugin: ConfigurablePlugin + Send + Sync {
         Ok(())
     }
 
-    /// Returns the tool specs this plugin exposes.
     fn list_tool_specs(&self) -> Vec<ToolSpec> {
         Vec::new()
     }
@@ -273,12 +262,9 @@ pub trait ToolPlugin: ConfigurablePlugin + Send + Sync {
     }
 }
 
-// ── LlmPlugin ──────────────────────────────────────────────────────────
-
 /// Plugin trait for LLM chat completions (streaming and non-streaming).
 #[async_trait]
 pub trait LlmPlugin: ConfigurablePlugin + Send + Sync {
-    /// Returns the LLM provider capabilities advertised during the handshake.
     fn llm_capabilities(&self) -> Vec<LlmProviderSpec>;
 
     /// Creates a streaming chat completion.
@@ -316,8 +302,6 @@ pub trait LlmPlugin: ConfigurablePlugin + Send + Sync {
         Err(PluginError::not_supported("chat_completion"))
     }
 }
-
-// ── EmbedPlugin ─────────────────────────────────────────────────────────
 
 /// Plugin trait for batch embedding computation.
 #[async_trait]
@@ -358,8 +342,6 @@ pub trait EmbedPlugin: ConfigurablePlugin + Send + Sync {
     }
 }
 
-// ── CapabilityProvider ──────────────────────────────────────────────────
-
 /// Plugin trait for serving mediated capability calls from other plugins.
 ///
 /// A plugin that declares capabilities in its `provides` list (via
@@ -389,12 +371,9 @@ pub trait CapabilityProvider: ConfigurablePlugin + Send + Sync {
     }
 }
 
-// ── TtsPlugin ───────────────────────────────────────────────────────────
-
 /// Plugin trait for Text-to-Speech synthesis.
 #[async_trait]
 pub trait TtsPlugin: ConfigurablePlugin + Send + Sync {
-    /// Returns TTS capabilities advertised during the handshake.
     fn tts_capabilities(&self) -> Vec<TtsProviderSpec>;
 
     /// Synthesizes speech from text.
@@ -413,12 +392,9 @@ pub trait TtsPlugin: ConfigurablePlugin + Send + Sync {
     }
 }
 
-// ── SttPlugin ───────────────────────────────────────────────────────────
-
 /// Plugin trait for Speech-to-Text transcription.
 #[async_trait]
 pub trait SttPlugin: ConfigurablePlugin + Send + Sync {
-    /// Returns STT capabilities advertised during the handshake.
     fn stt_capabilities(&self) -> Vec<SttProviderSpec>;
 
     /// Transcribes speech audio to text.
@@ -436,8 +412,6 @@ pub trait SttPlugin: ConfigurablePlugin + Send + Sync {
     }
 }
 
-// ── VadPlugin ───────────────────────────────────────────────────────────
-
 /// Plugin trait for voice activity detection.
 ///
 /// VAD is stateful per session: the host generates a unique `session_id`
@@ -448,7 +422,6 @@ pub trait SttPlugin: ConfigurablePlugin + Send + Sync {
 /// engine state behind a mutex keyed by `session_id`.
 #[async_trait]
 pub trait VadPlugin: ConfigurablePlugin + Send + Sync {
-    /// Returns VAD capabilities advertised during the handshake.
     fn vad_capabilities(&self) -> Vec<VadProviderSpec>;
 
     /// Processes one PCM chunk (or resets a session) and returns the

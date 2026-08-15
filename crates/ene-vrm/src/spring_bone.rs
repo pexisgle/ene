@@ -35,14 +35,12 @@ use serde_json::Value;
 pub const DEFAULT_HIT_RADIUS: f32 = 0.0;
 /// Default stiffness (return-to-rest force).
 pub const DEFAULT_STIFFNESS: f32 = 1.0;
-/// Default gravity power.
 pub const DEFAULT_GRAVITY_POWER: f32 = 0.0;
 /// Default gravity direction (world -Y).
 pub const DEFAULT_GRAVITY_DIR: [f32; 3] = [0.0, -1.0, 0.0];
 /// Default drag force (deceleration, 0..1).
 pub const DEFAULT_DRAG_FORCE: f32 = 0.4;
 
-/// Shape of a collider: sphere or capsule.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum SpringBoneShape {
@@ -71,7 +69,6 @@ pub enum SpringBoneShape {
 pub struct SpringBoneCollider {
     /// glTF node index this collider is attached to.
     pub node: usize,
-    /// Shape of the collider.
     pub shape: SpringBoneShape,
 }
 
@@ -79,7 +76,6 @@ pub struct SpringBoneCollider {
 /// `VRMC_springBone.colliderGroups`.
 #[derive(Clone, Debug)]
 pub struct SpringBoneColliderGroup {
-    /// Optional group name.
     pub name: Option<String>,
     /// Indices into [`SpringBoneProperties::colliders`].
     pub collider_indices: Vec<usize>,
@@ -131,11 +127,8 @@ pub struct SpringBoneChain {
 pub struct SpringBoneProperties {
     /// Spec version string (should be `"1.0"`).
     pub spec_version: String,
-    /// All colliders in the model.
     pub colliders: Vec<SpringBoneCollider>,
-    /// Named collider groups.
     pub collider_groups: Vec<SpringBoneColliderGroup>,
-    /// Spring chains.
     pub springs: Vec<SpringBoneChain>,
 }
 
@@ -324,18 +317,15 @@ fn parse_vec3(v: &Value) -> Option<[f32; 3]> {
 pub struct SpringBoneJointState {
     /// Previous frame's tail position (world or center space).
     pub prev_tail: Vec3,
-    /// Current frame's tail position.
     pub current_tail: Vec3,
     /// Direction from this joint to its child in the joint's
     /// local rest frame.
     pub bone_axis: Vec3,
     /// Length of the bone segment (world or center space).
     pub bone_length: f32,
-    /// Rest rotation of this joint node.
     pub initial_local_rotation: Quat,
 }
 
-/// Per-chain runtime state.
 #[derive(Clone, Debug)]
 pub struct SpringBoneChainState {
     /// Per-joint state, parallel to [`SpringBoneChain::joints`].
@@ -343,9 +333,7 @@ pub struct SpringBoneChainState {
     /// Scratch buffer reused across frames to avoid per-frame
     /// allocation of the full node-position map.
     scratch_positions: HashMap<usize, Vec3>,
-    /// Scratch buffer reused across frames.
     scratch_rotations: HashMap<usize, Quat>,
-    /// Scratch buffer reused across frames.
     scratch_parent_rots: HashMap<usize, Quat>,
 }
 
@@ -361,9 +349,6 @@ pub struct SpringBoneSimulator {
 }
 
 impl SpringBoneSimulator {
-    /// Create a new simulator from the parsed properties and
-    /// the initial node world transforms.
-    ///
     /// `node_world_positions` maps glTF node index to world
     /// position. `node_world_rotations` maps glTF node index to
     /// world rotation. `node_parent_world_rotations` maps glTF
@@ -485,8 +470,6 @@ impl SpringBoneSimulator {
         Self { chains }
     }
 
-    /// Advance the simulation by `dt` seconds.
-    ///
     /// `node_world_positions` and `node_world_rotations` are the
     /// current per-node world transforms. `node_parent_world_rotations`
     /// are the parent's world rotations (identity for roots).
@@ -1062,7 +1045,6 @@ mod tests {
             &collider_rotations,
         );
 
-        // With no gravity and stiffness=1, the joint should stay near rest
         assert!(updated.contains_key(&0));
         let new_rot = updated[&0];
         assert!(new_rot.angle_between(Quat::IDENTITY) < 0.1);

@@ -10,7 +10,6 @@ use ene_connector::declaration::CredentialDeclaration;
 use ene_plugin_proto::PluginCapabilities;
 use std::collections::BTreeMap;
 
-/// Derived health state of a plugin for the settings UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginHealthState {
     /// Enabled and connected to a supervised process.
@@ -36,18 +35,15 @@ impl PluginHealthState {
     }
 }
 
-/// Compact manifest facts shown in the plugin detail pane.
 #[derive(Debug, Clone, Default)]
 pub struct PluginManifestSummary {
     /// Publisher key id that signed the manifest, if any.
     pub key_id: Option<String>,
-    /// Whether the manifest carried a signature at all.
     pub signed: bool,
     /// Configured binary checksum (user-pinned), if any.
     pub checksum: Option<String>,
 }
 
-/// One tool/action the plugin exposes, for search and dedicated sections.
 #[derive(Debug, Clone)]
 pub struct ToolActionInfo {
     /// Fully-qualified tool name (e.g. `fs.read`).
@@ -62,11 +58,9 @@ pub struct ToolActionInfo {
 pub struct EffectiveSecurity {
     /// Resolved approval mode per category, keyed by category code.
     pub approvals: BTreeMap<String, String>,
-    /// Whether the global emergency stop is active.
     pub emergency_stop: bool,
     /// User-approved filesystem grants (logical slot → real path).
     pub fs_grants: Vec<FsGrantConfig>,
-    /// Whether the OS sandbox applies to this plugin.
     pub sandbox_enabled: bool,
     /// DB quota in MiB (`None` = unbounded).
     pub db_quota_mb: Option<u64>,
@@ -83,16 +77,13 @@ pub struct PluginSettingsSnapshot {
     /// Capability-derived kind: `"tool"`, `"provider"`, `"hybrid"`, or
     /// `"unknown"`.
     pub kind: String,
-    /// Whether the entry is enabled in config.
     pub enabled: bool,
-    /// Derived health state.
     pub health: PluginHealthState,
     /// Capabilities advertised at the handshake.
     pub capabilities: PluginCapabilities,
     /// Tool/action names and descriptions advertised by the plugin, empty
     /// for provider-only plugins.
     pub actions: Vec<ToolActionInfo>,
-    /// Manifest facts (signature / checksum).
     pub manifest: PluginManifestSummary,
     /// Latest config schema, `None` when the plugin advertises none.
     pub schema: Option<serde_json::Value>,
@@ -112,12 +103,10 @@ pub struct PluginSettingsSnapshot {
     pub profiles: Option<serde_json::Value>,
     /// Credential declarations parsed from `x-ene-credentials`.
     pub credentials: Vec<CredentialDeclaration>,
-    /// Effective approval / sandbox / quota posture.
     pub effective_security: EffectiveSecurity,
 }
 
 impl PluginSettingsSnapshot {
-    /// Classifies the plugin kind from its advertised capabilities.
     #[must_use]
     pub fn classify_kind(capabilities: &PluginCapabilities) -> &'static str {
         let provides_provider = !capabilities.llm_providers.is_empty()

@@ -15,23 +15,19 @@ use regex::Regex;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-/// End-of-day wall time used for date-only expressions ("tomorrow").
 fn end_of_day() -> NaiveTime {
     NaiveTime::from_hms_opt(23, 59, 0).unwrap_or(NaiveTime::MIN)
 }
 
-/// 12-hour clock, e.g. "3pm", "3 pm", "3:30pm".
 static MERIDIEM_TIME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b")
         .unwrap_or_else(|_| unreachable!("static meridiem regex is valid"))
 });
 
-/// `HH:MM` (24-hour clock), e.g. "15:00", "9:30".
 static CLOCK_TIME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(\d{1,2}):(\d{2})\b").unwrap_or_else(|_| unreachable!("static clock regex"))
 });
 
-/// Japanese clock, e.g. "3時", "15時半", "午後3時".
 static JAPANESE_TIME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(午前|午後)?(\d{1,2})時(半)?")
         .unwrap_or_else(|_| unreachable!("static japanese time regex is valid"))
@@ -84,8 +80,6 @@ pub fn parse_due_at_in(now: DateTime<Utc>, tz: Tz, raw: &str) -> Option<DateTime
     Some(local.with_timezone(&Utc))
 }
 
-/// Lowercases, trims, strips leading "by"/"までに" and trailing punctuation /
-/// "まで", then collapses whitespace.
 fn normalize(raw: &str) -> String {
     let mut text = raw.trim().to_lowercase();
     if let Some(rest) = text.strip_prefix("by ") {
@@ -102,7 +96,6 @@ fn normalize(raw: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Extracts an explicit wall-clock time from `text`, if any.
 fn extract_time(text: &str) -> Option<NaiveTime> {
     if let Some(caps) = MERIDIEM_TIME.captures(text) {
         let mut hour = caps.get(1)?.as_str().parse::<u32>().ok()?;
@@ -135,8 +128,6 @@ fn extract_time(text: &str) -> Option<NaiveTime> {
     None
 }
 
-/// Resolves the calendar date the expression refers to, plus an optional
-/// explicit time. `None` when no term is recognized.
 fn resolve_date_term(
     text: &str,
     local_now: chrono::NaiveDateTime,
@@ -180,8 +171,6 @@ fn resolve_date_term(
                 return Some((shifted, Some(time.unwrap_or_else(|| local_now.time()))));
             }
         };
-        // Without an explicit wall time the whole `now + delta` instant is
-        // kept; with one, the shifted date carries that wall time instead.
         return if let Some(t) = time {
             Some((today + delta, Some(t)))
         } else {
@@ -193,7 +182,6 @@ fn resolve_date_term(
     None
 }
 
-/// Matches "in N days" / "N days from now" / "N日後" style expressions.
 enum DurationKind {
     Day,
     Week,
@@ -242,7 +230,6 @@ fn weekday_term(text: &str, today: chrono::NaiveDate) -> Option<chrono::NaiveDat
         let next = text.contains("next ");
         let mut strict = next && text.contains(name);
         let mut matched = strict || text.contains(name);
-        // Japanese: "X曜日", optionally prefixed with 今週の / 来週の / 次の.
         let ja_name = japanese_weekday(weekday);
         if text.contains(ja_name) {
             matched = true;
@@ -289,7 +276,6 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
 }
 
-/// System IANA timezone name, cached per process.
 fn system_timezone() -> Tz {
     static SYSTEM_TIMEZONE: std::sync::OnceLock<Tz> = std::sync::OnceLock::new();
     *SYSTEM_TIMEZONE.get_or_init(|| {
@@ -349,7 +335,6 @@ mod tests {
 
     #[test]
     fn parses_weekdays() {
-        // 1970-01-01 is a Thursday.
         assert_eq!(parse("friday"), Some(utc(1970, 1, 2, 23, 59)));
         assert_eq!(parse("thursday"), Some(utc(1970, 1, 1, 23, 59)));
         assert_eq!(parse("this friday"), Some(utc(1970, 1, 2, 23, 59)));

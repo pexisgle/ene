@@ -1,5 +1,3 @@
-//! Resolved provider settings from [`AiConfig`] task routing.
-
 use crate::config::{
     AiConfig, AiProviderDef, ApiKeyConfig, LOCAL_PROVIDER, LocalModelDef, TaskRef,
     kind_typo_suggestion,
@@ -15,9 +13,7 @@ use std::time::{Duration, Instant};
 /// Fully resolved OpenAI-compatible chat settings for a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedChat {
-    /// Effective API base URL.
     pub base_url: String,
-    /// Resolved API key.
     pub api_key: String,
     /// Model name (required for cloud chat workloads).
     pub model: String,
@@ -43,11 +39,8 @@ pub struct ResolvedLocalModel {
     pub mmproj_url: String,
     /// Optional multimodal projector filesystem path.
     pub mmproj_path: String,
-    /// Quantization label.
     pub quantization: String,
-    /// Preferred acceleration backend.
     pub acceleration: crate::config::ProactiveAcceleration,
-    /// GPU layer offload setting.
     pub gpu_layers: crate::config::GpuLayers,
     /// Context size for decision workloads.
     pub context_size: u32,
@@ -58,11 +51,10 @@ pub struct ResolvedLocalModel {
 
 impl ResolvedLocalModel {
     pub(crate) fn from_named(name: &str, def: &LocalModelDef) -> Self {
-        // #313: `mmproj_url` / `mmproj_path` / `acceleration` moved out of
-        // `LocalModelDef` into the llama.cpp plugin config
-        // (`plugins.list.llama-cpp.config`). Until the llama.cpp provider
-        // plugin exists, the in-process readers keep working by sourcing them
-        // from the plugin config here at resolve time.
+        // `mmproj_url` / `mmproj_path` / `acceleration` live in the llama.cpp
+        // plugin config (`plugins.list.llama-cpp.config`) rather than
+        // `LocalModelDef`; the in-process readers source them from there at
+        // resolve time until the llama.cpp provider plugin exists.
         let llama_cpp = crate::plugin_config::LlamaCppPluginConfig::global();
         Self {
             name: name.to_string(),
@@ -80,7 +72,6 @@ impl ResolvedLocalModel {
         }
     }
 
-    /// True when an mmproj URL or path is configured.
     #[must_use]
     pub fn has_mmproj(&self) -> bool {
         !self.mmproj_path.trim().is_empty() || !self.mmproj_url.trim().is_empty()
@@ -94,15 +85,10 @@ pub enum ResolvedEmbedding {
     Cloud {
         /// Canonical provider kind (the plugin registry key, e.g. `"openai"`).
         kind: String,
-        /// API base URL.
         base_url: String,
-        /// Resolved API key.
         api_key: String,
-        /// Embedding model name.
         model: String,
-        /// Expected vector dimensions.
         dimensions: usize,
-        /// Optional query prefix for retrieval queries.
         query_prefix: Option<String>,
     },
     /// Local GGUF embedding via llama-cpp-4.
@@ -110,9 +96,6 @@ pub enum ResolvedEmbedding {
 }
 
 impl ResolvedEmbedding {
-    /// Cloud embedding fields, or `None` if this is a local embedding.
-    ///
-    /// `(kind, base_url, api_key, model, dimensions, query_prefix)`.
     #[must_use]
     #[expect(
         clippy::type_complexity,
@@ -139,7 +122,6 @@ impl ResolvedEmbedding {
         }
     }
 
-    /// Local embedding fields, or `None` if this is a cloud embedding.
     #[must_use]
     pub fn local_fields(&self) -> Option<(&str, &str, &str)> {
         match self {
@@ -152,7 +134,6 @@ impl ResolvedEmbedding {
         }
     }
 
-    /// Resolved local model reference.
     #[must_use]
     pub fn as_local(&self) -> Option<&ResolvedLocalModel> {
         match self {
@@ -190,13 +171,9 @@ pub struct ResolvedVad {
 /// Resolved task reference: provider definition plus per-task overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedTaskRef<'a> {
-    /// Provider definition.
     pub provider: &'a AiProviderDef,
-    /// Task model override.
     pub model: Option<&'a str>,
-    /// Task max-tokens override.
     pub max_tokens: Option<u32>,
-    /// Task embedding dimensions override.
     pub dimensions: Option<usize>,
 }
 
@@ -212,18 +189,14 @@ pub struct ChatCandidate {
     pub provider: String,
     /// Canonical provider kind (the plugin registry key, e.g. `"openai"`).
     pub kind: String,
-    /// Effective API base URL.
     pub base_url: String,
-    /// Resolved API key.
     pub api_key: String,
-    /// Model name.
     pub model: String,
     /// Optional completion token cap (`None` = omit on requests).
     pub max_tokens: Option<u32>,
 }
 
 impl ChatCandidate {
-    /// Convert to the resolved chat settings used to build a provider.
     #[must_use]
     pub fn to_resolved(&self) -> ResolvedChat {
         ResolvedChat {
@@ -251,7 +224,6 @@ pub fn resolve_base_url(base_url: &str) -> Result<String, LlmProviderError> {
 }
 
 impl ApiKeyConfig {
-    /// Resolves the API key from the configured source (inline or env).
     #[must_use]
     pub fn resolve_api_key(&self) -> String {
         if self.source.as_str() == "env" {
@@ -286,16 +258,13 @@ pub enum SettingsIssue {
     InvalidBaseUrl {
         /// Provider key in `ai.providers`.
         provider: String,
-        /// Human-readable detail.
         detail: String,
     },
     /// Provider `kind` looks like a typo of a built-in kind.
     SuspiciousKind {
         /// Provider key in `ai.providers`.
         provider: String,
-        /// The configured (suspect) kind value.
         kind: String,
-        /// Suggested built-in kind, if any.
         suggestion: Option<String>,
     },
 }
@@ -362,8 +331,6 @@ pub fn validate_settings(config: &ene_config::EneConfig) -> Vec<SettingsIssue> {
         return Vec::new();
     };
 
-    // Validate every provider's `kind` up front, independent of which provider
-    // the chat task routes to.
     let mut issues = validate_provider_kinds(&ai);
 
     let provider_key = ai.tasks.chat.provider.clone();
@@ -736,27 +703,23 @@ pub fn parse_model_ids(body: &str) -> Result<Vec<String>, crate::error::AiError>
 }
 
 impl AiConfig {
-    /// Whether `name` is the reserved local provider.
     #[must_use]
     pub fn is_local_provider(name: &str) -> bool {
         name == LOCAL_PROVIDER
     }
 
-    /// Look up a named cloud provider definition.
     pub fn get_provider(&self, name: &str) -> Result<&AiProviderDef, LlmProviderError> {
         self.providers
             .get(name)
             .ok_or_else(|| LlmProviderError::Provider(format!("unknown AI provider: {name:?}")))
     }
 
-    /// Look up a named entry in [`AiConfig::local_models`].
     pub fn get_local_model(&self, name: &str) -> Result<&LocalModelDef, LlmProviderError> {
         self.local_models
             .get(name)
             .ok_or_else(|| LlmProviderError::Provider(format!("unknown local model: {name:?}")))
     }
 
-    /// Resolve a local model for a task with `provider: "local"`.
     pub fn resolve_local_model_for_task(
         &self,
         task: &TaskRef,
@@ -780,7 +743,6 @@ impl AiConfig {
         Ok(ResolvedLocalModel::from_named(name, def))
     }
 
-    /// Resolve a [`TaskRef`] to its cloud provider and effective overrides.
     pub fn resolve_task_ref<'a>(
         &'a self,
         task: &'a TaskRef,
@@ -861,7 +823,6 @@ impl AiConfig {
         self.resolve_openai_chat_task(task)
     }
 
-    /// Resolve main conversation chat settings.
     pub fn resolve_chat(&self) -> Result<ResolvedChat, LlmProviderError> {
         self.resolve_chat_task(None)
     }
@@ -966,7 +927,6 @@ impl AiConfig {
         self.tasks.chat.supports_vision
     }
 
-    /// Resolve embedding backend settings for [`AiConfig::tasks`] embedding task.
     pub fn resolve_embedding(&self) -> Result<ResolvedEmbedding, LlmProviderError> {
         if Self::is_local_provider(&self.tasks.embedding.provider) {
             let local = self.resolve_local_model_for_task(&self.tasks.embedding)?;
@@ -1084,8 +1044,6 @@ impl AiConfig {
     }
 }
 
-// ── Provider health monitoring and failover ─────────────────────────────
-//
 // Upstream reachability is probed *through* the provider plugins (a minimal
 // chat ping), so the plugin exercises its own endpoint and reports the
 // outcome over IPC; the host classifies, caches, and routes on the results.
@@ -1095,11 +1053,9 @@ impl AiConfig {
 /// Outcome of a single provider health probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderHealthStatus {
-    /// Provider responded successfully within the timeout.
     Healthy,
     /// Provider responded but with elevated latency (> 2× the median).
     Degraded {
-        /// Measured round-trip latency.
         latency_ms: u64,
     },
     /// Provider rejected the API key (HTTP 401/403).
@@ -1114,7 +1070,6 @@ pub enum ProviderHealthStatus {
         /// (chat-ping probes classify from typed provider errors instead).
         status: u16,
     },
-    /// Health has not been checked yet.
     Unknown,
 }
 
@@ -1148,13 +1103,10 @@ impl ProviderHealthStatus {
 pub struct ProviderHealthReport {
     /// Provider name (key in `ai.providers`).
     pub provider: String,
-    /// Probe outcome.
     pub status: ProviderHealthStatus,
     /// Measured round-trip latency (0 if unreachable).
     pub latency_ms: u64,
-    /// Human-readable error detail, if any.
     pub error: Option<String>,
-    /// When the probe was performed.
     pub checked_at: Instant,
 }
 
@@ -1221,7 +1173,6 @@ pub struct FallbackRecord {
     pub from: String,
     /// Provider that was selected instead.
     pub to: String,
-    /// Reason for the fallback.
     pub reason: String,
     /// When the fallback occurred.
     pub at: Instant,
@@ -1237,13 +1188,10 @@ pub struct ProviderHealthMonitor {
 }
 
 struct MonitorInner {
-    /// Cached health reports keyed by provider name.
     reports: HashMap<String, ProviderHealthReport>,
-    /// How long a cached report is considered fresh.
     ttl: Duration,
     /// Recent fallback events (bounded ring buffer).
     fallback_history: VecDeque<FallbackRecord>,
-    /// Maximum fallback records to retain.
     max_history: usize,
 }
 
@@ -1258,7 +1206,6 @@ impl std::fmt::Debug for ProviderHealthMonitor {
 }
 
 impl ProviderHealthMonitor {
-    /// Create a new monitor with the given cache TTL and history capacity.
     #[must_use]
     pub fn new(ttl: Duration, max_history: usize) -> Self {
         Self {
@@ -1271,15 +1218,11 @@ impl ProviderHealthMonitor {
         }
     }
 
-    /// Record a health probe result, replacing any previous entry.
     pub fn record(&self, report: ProviderHealthReport) {
         let mut inner = self.inner.lock();
         inner.reports.insert(report.provider.clone(), report);
     }
 
-    /// Get the cached health status for a provider, if fresh.
-    ///
-    /// Returns `None` when no report exists or the cached report has expired.
     pub fn get_fresh(&self, provider: &str) -> Option<ProviderHealthReport> {
         let inner = self.inner.lock();
         inner.reports.get(provider).and_then(|r| {
@@ -1291,13 +1234,11 @@ impl ProviderHealthMonitor {
         })
     }
 
-    /// Get the cached health status regardless of freshness.
     pub fn get_any(&self, provider: &str) -> Option<ProviderHealthReport> {
         let inner = self.inner.lock();
         inner.reports.get(provider).cloned()
     }
 
-    /// Record a fallback event.
     pub fn record_fallback(&self, from: &str, to: &str, reason: &str) {
         let mut inner = self.inner.lock();
         if inner.fallback_history.len() >= inner.max_history {
@@ -1317,7 +1258,6 @@ impl ProviderHealthMonitor {
         inner.fallback_history.iter().cloned().collect()
     }
 
-    /// Snapshot of all cached health reports.
     pub fn all_reports(&self) -> Vec<ProviderHealthReport> {
         let inner = self.inner.lock();
         inner.reports.values().cloned().collect()
@@ -1333,7 +1273,6 @@ impl Default for ProviderHealthMonitor {
 /// Result of a failover selection.
 #[derive(Debug, Clone)]
 pub struct FailoverSelection {
-    /// The selected candidate.
     pub candidate: ChatCandidate,
     /// Providers that were tried and skipped before the selection, with reasons.
     pub skipped: Vec<(String, String)>,
@@ -1678,10 +1617,6 @@ mod tests {
         assert_eq!(cfg.advertised_window_for_task(&task), None);
     }
 
-    /// Build an [`AiConfig`] whose chat and proactive tasks both route to a
-    /// local model with the given context size and chat output reserve. The
-    /// proactive reserve is fixed at 2,048 (a typical local companion
-    /// utterance).
     fn local_chat_config(context_size: u32, chat_max_tokens: u32) -> AiConfig {
         let mut cfg = AiConfig::default();
         cfg.local_models.insert(
@@ -1754,7 +1689,6 @@ mod tests {
             "fixture must have no window from either source"
         );
 
-        // Naming the window in config removes the reason to report.
         if let Some(def) = cfg.providers.get_mut("default") {
             def.context_window = Some(200_000);
         }
@@ -1881,7 +1815,6 @@ mod tests {
         assert!(monitor.get_any("default").is_some());
     }
 
-    /// Which typed error the failing probe stub should produce.
     #[derive(Clone, Copy)]
     enum StubFailure {
         Auth,
@@ -1891,7 +1824,6 @@ mod tests {
         Server,
     }
 
-    /// Stub provider whose `chat_completion` fails with a fixed error.
     struct FailingProvider {
         failure: StubFailure,
     }
@@ -1996,7 +1928,6 @@ mod tests {
         }
     }
 
-    /// Stub host serving a fixed set of providers by kind.
     struct StubHost {
         llm: HashMap<String, Arc<dyn LlmProvider>>,
     }
@@ -2161,8 +2092,6 @@ mod tests {
         )
         .await
         .expect("selection");
-        // The cached failure is fresh, so the healthy stub is never probed;
-        // the all-unhealthy fallback still returns the primary.
         assert_eq!(selection.candidate.provider, "primary");
         assert!(!selection.fell_back);
     }

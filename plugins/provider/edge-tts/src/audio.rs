@@ -16,7 +16,6 @@ const WAV_HEADER_BYTES: usize = 68;
 /// while bounding what a misbehaving server can make us buffer.
 pub const MAX_MP3_BYTES: usize = 16 * 1024 * 1024;
 
-/// Decoded mono PCM.
 pub struct DecodedPcm {
     /// Samples normalized to `[-1.0, 1.0]`.
     pub pcm: Vec<f32>,

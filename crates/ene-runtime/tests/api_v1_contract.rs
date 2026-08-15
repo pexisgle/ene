@@ -1,5 +1,3 @@
-//! API v1 contract tests for the ready-handle facade.
-
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -54,11 +52,9 @@ async fn second_run_returns_busy() {
         "expected Busy while turn {turn1} active, got {busy:?}"
     );
 
-    // Free the gate.
     drop(handle.cancel(&turn1));
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
-    // After cancel, a new run should be accepted (may immediately Terminal).
     let turn2 = handle.run("third");
     assert!(
         turn2.is_ok() || matches!(turn2, Err(RunError::Busy)),
@@ -456,8 +452,6 @@ fn public_chat_event_mirrors_terminal_done() {
     assert_eq!(value["turn"], turn.to_string());
 }
 
-// ── mailbox-free lightweight state reads ──
-
 /// The synchronous accessors ([`EneHandle::card_name`],
 /// [`EneHandle::session_id`], [`EneHandle::session_started_at`],
 /// [`EneHandle::turn_count`], [`EneHandle::config`]) must agree with the
@@ -628,7 +622,6 @@ async fn stale_draft_is_rejected_and_config_is_untouched() {
         .expect("first apply succeeds");
     assert!(!first_result.conflicted);
 
-    // The second writer still believes the actor is at revision 0.
     let mut stale = handle.config().as_ref().clone();
     let mut store = stale
         .get_section::<ene_store::StoreConfig>()
@@ -741,7 +734,6 @@ async fn history_returns_actor_history() {
 /// started turn hangs on the per-request timeout instead of completing fast
 /// and releasing the single-flight gate on its own. The caller must hold the
 /// returned listener for as long as the turn should stay in flight.
-/// Stub host serving the hanging chat factory under its custom kind.
 struct StubProviderHost;
 
 #[async_trait::async_trait]

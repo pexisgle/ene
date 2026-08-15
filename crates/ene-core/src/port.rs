@@ -33,7 +33,6 @@ use crate::span::{ActiveSceneSummaryRow, NewMemorySpan};
 /// type; callers in `ene-mind` never see a concrete backend error type.
 #[derive(Debug, Error)]
 pub enum MemoryPortError {
-    /// The backing store rejected or failed an operation.
     #[error("memory port backend error: {0}")]
     Backend(String),
 
@@ -41,12 +40,9 @@ pub enum MemoryPortError {
     #[error("invalid embedding: {0}")]
     InvalidEmbedding(String),
 
-    /// A memory lifecycle status transition is not permitted.
     #[error("invalid memory status transition: {from:?} -> {to:?}")]
     InvalidTransition {
-        /// Current status.
         from: MemoryStatus,
-        /// Requested target status.
         to: MemoryStatus,
     },
 
@@ -62,7 +58,6 @@ pub enum MemoryPortError {
 /// arbiter decisions, forgetting) can be unit-tested without `SQLite`.
 #[async_trait]
 pub trait MemoryPort: Send + Sync {
-    /// Insert a new typed memory item and return its assigned ID.
     async fn insert_typed_memory(&self, item: &NewMemoryItem) -> Result<i64, MemoryPortError>;
 
     /// List typed memories for a character, optionally filtered by kind, user,
@@ -83,7 +78,6 @@ pub trait MemoryPort: Send + Sync {
         offset: usize,
     ) -> Result<Vec<MemoryItem>, MemoryPortError>;
 
-    /// List active typed memories whose `source_ref` starts with `prefix`.
     async fn list_typed_memories_by_source_prefix(
         &self,
         character_id: &str,
@@ -91,7 +85,6 @@ pub trait MemoryPort: Send + Sync {
         limit: usize,
     ) -> Result<Vec<MemoryItem>, MemoryPortError>;
 
-    /// Returns the active typed memory for `character_id` + `source_ref`, if any.
     async fn get_active_typed_memory_by_source_ref(
         &self,
         character_id: &str,
@@ -106,7 +99,6 @@ pub trait MemoryPort: Send + Sync {
         keep_refs: &HashSet<String>,
     ) -> Result<usize, MemoryPortError>;
 
-    /// Persist a memory-outcome evaluation and return its assigned ID.
     async fn record_memory_outcome(&self, outcome: &MemoryOutcome) -> Result<i64, MemoryPortError>;
 
     /// List outcome evaluations for a character, newest first.
@@ -120,8 +112,6 @@ pub trait MemoryPort: Send + Sync {
         limit: usize,
     ) -> Result<Vec<MemoryOutcome>, MemoryPortError>;
 
-    /// Delete outcome evaluations by id (character-scoped), returning the
-    /// number of rows removed.
     async fn delete_memory_outcomes(
         &self,
         character_id: &str,
@@ -153,7 +143,6 @@ pub trait MemoryPort: Send + Sync {
         new_status: MemoryStatus,
     ) -> Result<bool, MemoryPortError>;
 
-    /// Apply natural decay transitions for recallable memories in a scope.
     async fn apply_natural_decay_batch(
         &self,
         character_id: &str,
@@ -164,7 +153,6 @@ pub trait MemoryPort: Send + Sync {
         archive_threshold: f32,
     ) -> Result<NaturalDecayReport, MemoryPortError>;
 
-    /// Store a content embedding for a typed memory item.
     async fn upsert_memory_embedding(
         &self,
         memory_item_id: i64,
@@ -215,7 +203,6 @@ pub trait MemoryPort: Send + Sync {
         status_filter: Option<PendingCandidateStatus>,
     ) -> Result<Vec<PendingCandidate>, MemoryPortError>;
 
-    /// List active commitments for prompt injection (independent of vector recall).
     async fn list_active_commitments(
         &self,
         character_id: &str,
@@ -223,10 +210,8 @@ pub trait MemoryPort: Send + Sync {
         limit: usize,
     ) -> Result<Vec<Commitment>, MemoryPortError>;
 
-    /// Load affect state for a character.
     async fn get_affect_state(&self, character_id: &str) -> Result<AffectState, MemoryPortError>;
 
-    /// Persist affect state.
     async fn upsert_affect_state(&self, affect: &AffectState) -> Result<(), MemoryPortError>;
 
     /// Fetch and consume a pending post-turn classifier proposal.
@@ -236,11 +221,8 @@ pub trait MemoryPort: Send + Sync {
         user_name: &str,
     ) -> Result<Option<PendingAffectProposal>, MemoryPortError>;
 
-    /// Insert a new commitment ledger row and return its assigned ID.
     async fn insert_commitment(&self, new: &NewCommitment) -> Result<i64, MemoryPortError>;
 
-    /// Supersede an active commitment's description, due label, and parsed due
-    /// datetime.
     async fn supersede_commitment(
         &self,
         id: i64,
@@ -249,16 +231,12 @@ pub trait MemoryPort: Send + Sync {
         due_at: Option<DateTime<Utc>>,
     ) -> Result<bool, MemoryPortError>;
 
-    /// Mark a commitment as done.
     async fn complete_commitment(&self, id: i64) -> Result<bool, MemoryPortError>;
 
-    /// Mark a commitment as cancelled.
     async fn cancel_commitment(&self, id: i64) -> Result<bool, MemoryPortError>;
 
-    /// Mark overdue active commitments as stale; returns the count updated.
     async fn mark_stale_commitments(&self, now: DateTime<Utc>) -> Result<usize, MemoryPortError>;
 
-    /// Enqueue a failed memory write for later retry.
     async fn enqueue_pending_memory_write(
         &self,
         character_id: &str,
@@ -267,7 +245,6 @@ pub trait MemoryPort: Send + Sync {
         error_message: String,
     ) -> Result<i64, MemoryPortError>;
 
-    /// Take up to `limit` due pending memory writes.
     async fn take_due_pending_memory_writes(
         &self,
         limit: usize,
@@ -283,16 +260,13 @@ pub trait MemoryPort: Send + Sync {
         error_message: String,
     ) -> Result<PendingMemoryWrite, MemoryPortError>;
 
-    /// Insert a new compressed memory span.
     async fn insert_memory_span(&self, span: &NewMemorySpan) -> Result<i64, MemoryPortError>;
 
-    /// Get the active scene summary for a session.
     async fn get_active_scene_summary(
         &self,
         session_id: &str,
     ) -> Result<Option<ActiveSceneSummaryRow>, MemoryPortError>;
 
-    /// List memory spans for a session at a specific compression level.
     async fn list_memory_spans_by_session_and_level(
         &self,
         session_id: &str,
@@ -315,18 +289,13 @@ pub struct ToolEmbeddingFieldRow {
     pub field_key: String,
     /// Content-derived version hash for cache invalidation.
     pub version_hash: String,
-    /// Embedding model name that produced this vector.
     pub model_name: String,
-    /// The embedding vector.
     pub embedding: Vec<f32>,
-    /// Source text that was embedded.
     pub source_text: String,
 }
 
-/// Error type for [`EmbeddingStorePort`] operations.
 #[derive(Debug, Error)]
 pub enum EmbeddingStorePortError {
-    /// The backing store rejected or failed an operation.
     #[error("embedding store backend error: {0}")]
     Backend(String),
 }
@@ -347,12 +316,10 @@ pub trait EmbeddingStorePort: Send + Sync {
         &self,
     ) -> Result<Vec<(String, String, String, String, String)>, EmbeddingStorePortError>;
 
-    /// Lists all stored tool embeddings with full data (vector + source text).
     async fn list_tool_embedding_fields(
         &self,
     ) -> Result<Vec<ToolEmbeddingFieldRow>, EmbeddingStorePortError>;
 
-    /// Inserts or updates one field's embedding for a tool.
     async fn upsert_tool_embedding_field(
         &self,
         tool_name: &str,
@@ -365,10 +332,8 @@ pub trait EmbeddingStorePort: Send + Sync {
     ) -> Result<(), EmbeddingStorePortError>;
 }
 
-/// Error type for [`ToolFailureSignalPort`] operations.
 #[derive(Debug, Error)]
 pub enum ToolFailureSignalPortError {
-    /// The backing store rejected or failed an operation.
     #[error("tool failure signal backend error: {0}")]
     Backend(String),
 }

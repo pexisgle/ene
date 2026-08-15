@@ -29,77 +29,42 @@ pub enum DbError {
     ConnectionClosed,
     /// The server rejected the auth token presented on host-service Open.
     #[error("auth rejected [{code}]: {message}")]
-    Auth {
-        /// The error code from the server.
-        code: DbErrorCode,
-        /// Human-readable error message.
-        message: String,
-    },
+    Auth { code: DbErrorCode, message: String },
     /// The tool does not have permission to access the requested resource.
     #[error("permission denied: {message}")]
-    PermissionDenied {
-        /// Human-readable error message.
-        message: String,
-    },
+    PermissionDenied { message: String },
     /// The specified table does not exist or is not declared.
     #[error("unknown table: {message}")]
-    UnknownTable {
-        /// Human-readable error message.
-        message: String,
-    },
+    UnknownTable { message: String },
     /// The specified column does not exist.
     #[error("unknown column: {message}")]
-    UnknownColumn {
-        /// Human-readable error message.
-        message: String,
-    },
+    UnknownColumn { message: String },
     /// A value's type does not match the column's declared type.
     #[error("type mismatch: {message}")]
-    TypeMismatch {
-        /// Human-readable error message.
-        message: String,
-    },
+    TypeMismatch { message: String },
     /// The filter expression is invalid.
     #[error("invalid filter: {message}")]
-    InvalidFilter {
-        /// Human-readable error message.
-        message: String,
-    },
+    InvalidFilter { message: String },
     /// The declared schema conflicts with the stored schema in a way that
     /// cannot be applied automatically (e.g. a column type change).
     #[error("schema conflict: {message}")]
-    SchemaConflict {
-        /// Human-readable error message.
-        message: String,
-    },
+    SchemaConflict { message: String },
     /// A write was rejected because it would exceed the plugin's configured
     /// DB storage quota (`plugins.list.<name>.db_quota_mb`). Reads and
     /// deletes remain available so the plugin can free space.
     #[error("storage quota exceeded: {message}")]
-    QuotaExceeded {
-        /// Human-readable error message.
-        message: String,
-    },
+    QuotaExceeded { message: String },
     /// The requested operation is not implemented by the host.
     #[error("unsupported: {message}")]
-    Unsupported {
-        /// Human-readable error message.
-        message: String,
-    },
+    Unsupported { message: String },
     /// An internal server error occurred.
     #[error("internal server error: {message}")]
-    Internal {
-        /// Human-readable error message.
-        message: String,
-    },
+    Internal { message: String },
     /// An error code this build does not know about (emitted by a newer
     /// host). The error is surfaced as a diagnostic rather than being
     /// dropped wholesale.
     #[error("unknown database error: {message}")]
-    Unknown {
-        /// Human-readable error message.
-        message: String,
-    },
+    Unknown { message: String },
 }
 
 /// Client for communicating with the host-service `db` passenger.
@@ -136,7 +101,6 @@ impl DbClient {
         Ok(client)
     }
 
-    /// Path the IPC client connected to.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
@@ -401,7 +365,6 @@ impl DbClient {
         }
     }
 
-    /// Counts rows matching the filter.
     pub async fn count(&mut self, table: &str, filter: DbFilter) -> Result<i64, DbError> {
         let resp = Self::check_error(
             self.send_request(&DbRequest::Count {
@@ -586,17 +549,15 @@ mod tests {
 
             let server = tokio::spawn(async move {
                 let mut listener = IpcListener::bind(&path_for_server).expect("bind");
-                // First connection: initial connect_with_token + ping.
                 let mut stream = listener.accept().await.expect("accept first");
                 serve_authed_session(&mut stream, &token_for_server).await;
                 drop(stream);
 
-                // Second connection: reconnect + ping (must re-handshake).
+                // The reconnect must re-handshake.
                 let mut stream = listener.accept().await.expect("accept second");
                 serve_authed_session(&mut stream, &token_for_server).await;
             });
 
-            // Wait briefly for the listener to be ready.
             for _ in 0..50 {
                 if socket_path.exists() {
                     break;
@@ -609,7 +570,6 @@ mod tests {
                 .expect("connect_with_token");
             client.ping().await.expect("ping after connect");
 
-            // Drop the first socket from the client side by reconnecting.
             client.reconnect().await.expect("reconnect re-handshakes");
             client.ping().await.expect("ping after reconnect");
 

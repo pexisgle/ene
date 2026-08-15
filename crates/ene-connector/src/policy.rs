@@ -1,5 +1,3 @@
-//! Common transport policies: timeout, backoff retry, rate limiting, pagination.
-//!
 //! The policies are client-agnostic — connectors pair them with their own
 //! HTTP client. The registry applies [`ConnectorPolicy::timeout`] around
 //! every lifecycle operation, and connectors use the retry / rate-limit /
@@ -10,7 +8,6 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-/// Per-connector transport policy applied to lifecycle operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectorPolicy {
     /// Maximum wall time for one lifecycle operation.
@@ -35,7 +32,6 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Creates a policy with the given attempt cap and backoff bounds.
     #[must_use]
     pub const fn new(max_attempts: u32, base_delay: Duration, max_delay: Duration) -> Self {
         Self {
@@ -64,8 +60,6 @@ pub struct RateLimitPolicy {
 }
 
 impl RateLimitPolicy {
-    /// Creates a policy for `max_burst` immediate requests and one token per
-    /// `refill_interval`.
     #[must_use]
     pub const fn new(max_burst: u32, refill_interval: Duration) -> Self {
         Self {
@@ -85,7 +79,6 @@ pub struct PaginationPolicy {
 }
 
 impl PaginationPolicy {
-    /// Creates a policy with the given page cap and page size.
     #[must_use]
     pub const fn new(max_pages: u32, page_size: u32) -> Self {
         Self {
@@ -95,18 +88,13 @@ impl PaginationPolicy {
     }
 }
 
-/// One page produced by a paginated fetch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page<T> {
-    /// Items on this page.
     pub items: Vec<T>,
     /// Opaque cursor for the next page, or `None` when this was the last.
     pub next_page_token: Option<String>,
 }
 
-/// Computes the delay before retry `attempt` (1-based), capped and optionally
-/// jittered.
-///
 /// `jitter_seed` drives a deterministic xorshift PRNG so callers can pin
 /// exact delays in tests; jitter exists to avoid thundering-herd retries and
 /// is not security-sensitive.
@@ -167,8 +155,6 @@ where
     Err(last_error.unwrap_or_else(|| ConnectorError::internal("retry loop exhausted")))
 }
 
-/// Returns a per-call seed that differs between attempts but stays
-/// deterministic within one call.
 fn now_seed() -> u64 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -176,8 +162,6 @@ fn now_seed() -> u64 {
     u64::from(nanos) ^ 0x9E37_79B9_7F4A_7C15
 }
 
-/// Collects every page from a cursor-driven paginated endpoint.
-///
 /// `fetch` receives the opaque next-page token (`None` for the first page)
 /// and returns the page plus the following token. Iteration stops when a
 /// page carries no next token or `policy.max_pages` is reached.
@@ -205,8 +189,6 @@ where
     Ok(items)
 }
 
-/// Async token-bucket rate limiter.
-///
 /// [`acquire`](Self::acquire) waits until a token is available; the wait is
 /// interruptible only by the caller's timeout wrapper, so a burst never
 /// exceeds `max_burst` and refills happen at `refill_interval` per token.
@@ -234,7 +216,6 @@ impl RateLimiter {
         }
     }
 
-    /// Waits until a token is available, then consumes it.
     pub async fn acquire(&self) {
         let mut state = self.state.lock().await;
         loop {
@@ -268,7 +249,6 @@ mod tests {
         assert_eq!(backoff_delay(&policy, 2, 0), Duration::from_millis(200));
         assert_eq!(backoff_delay(&policy, 3, 0), Duration::from_millis(400));
         assert_eq!(backoff_delay(&policy, 4, 0), Duration::from_millis(800));
-        // Exponent beyond the cap stays at the cap.
         assert_eq!(backoff_delay(&policy, 9, 0), Duration::from_secs(1));
     }
 
@@ -370,7 +350,6 @@ mod tests {
         let limiter = RateLimiter::new(RateLimitPolicy::new(2, Duration::from_secs(1)));
         limiter.acquire().await;
         limiter.acquire().await;
-        // Both burst tokens consumed; the third acquire waits for a refill.
         let start = Instant::now();
         limiter.acquire().await;
         assert!(start.elapsed() >= Duration::from_millis(999));
@@ -396,7 +375,6 @@ mod tests {
         .expect("pagination succeeds");
         assert_eq!(pages, vec![1, 2, 3]);
 
-        // A service that never ends is capped at max_pages.
         let endless = collect_pages::<u32, ConnectorError, _, _>(&policy, |token| async move {
             Ok(Page {
                 items: vec![1],

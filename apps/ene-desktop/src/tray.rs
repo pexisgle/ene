@@ -34,7 +34,6 @@ const CHAT_MENU_ID: &str = "ene.chat";
 const QUIT_MENU_ID: &str = "ene.quit";
 const TOOLTIP: &str = "ene";
 
-/// Owns the tray icon (and, on Windows, the pump thread).
 pub struct TrayHandle {
     /// Drop guard for the tray icon on Linux. On Windows the icon
     /// lives in the dedicated thread and is intentionally
@@ -44,18 +43,9 @@ pub struct TrayHandle {
 }
 
 impl TrayHandle {
-    /// Build a new tray icon and wire it to the given event
-    /// sender. Returns `None` if the icon cannot be constructed
-    /// (e.g. on a headless build); the runtime should treat that as
-    /// a soft failure.
+    /// Returns `None` if the icon cannot be constructed (e.g. on a
+    /// headless build); the runtime should treat that as a soft failure.
     pub fn new(event_tx: AppEventSender) -> Option<Self> {
-        // On Windows the icon must be built on the same thread
-        // that runs the Win32 message pump — building it on the
-        // calling (main) thread and then `mem::forget`-ing it
-        // creates a second, orphaned icon in the notification
-        // area. So the Windows path builds the icon inside the
-        // spawned thread; the Linux path builds it on the main
-        // thread because the GTK backend requires it there.
         install_event_pump(event_tx);
 
         #[cfg(target_os = "linux")]
@@ -199,8 +189,6 @@ fn synthetic_icon() -> Icon {
     Icon::from_rgba(rgba, w, h).expect("tray-icon internal bug")
 }
 
-/// Spawn the per-platform event pump that translates
-/// `tray_icon`'s global event receivers into [`AppEvent::Tray`].
 fn install_event_pump(event_tx: AppEventSender) {
     #[cfg(target_os = "windows")]
     {

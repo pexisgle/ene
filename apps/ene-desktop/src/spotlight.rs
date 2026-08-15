@@ -21,21 +21,15 @@ use crate::component::ui::UiStateComponent;
 use crate::gpu::{WindowSurfaceError, pick_format_and_alpha};
 use crate::settings_ui::PageKind;
 
-/// A single selectable action in the spotlight command palette.
 #[derive(Debug, Clone)]
 pub enum SpotlightAction {
-    /// Open a settings page.
     OpenSettings { label: String, page: PageKind },
-    /// Open the dedicated chat window.
     OpenChat { label: String },
-    /// Toggle microphone capture.
     ToggleMic { label: String },
-    /// Toggle the floating caption overlay.
     ToggleCaption { label: String },
 }
 
 impl SpotlightAction {
-    /// Human-readable label displayed in the spotlight list.
     pub fn label(&self) -> &str {
         match self {
             Self::OpenSettings { label, .. }
@@ -46,7 +40,6 @@ impl SpotlightAction {
     }
 }
 
-/// Build the built-in set of spotlight actions.
 pub fn default_actions() -> Vec<SpotlightAction> {
     vec![
         SpotlightAction::OpenSettings {
@@ -65,8 +58,7 @@ pub fn default_actions() -> Vec<SpotlightAction> {
     ]
 }
 
-/// Filter the actions list by a query string (substring match on label,
-/// case-insensitive).
+/// The label is matched case-insensitively as a substring.
 pub fn filter_actions<'a>(query: &str, actions: &'a [SpotlightAction]) -> Vec<&'a SpotlightAction> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -78,7 +70,6 @@ pub fn filter_actions<'a>(query: &str, actions: &'a [SpotlightAction]) -> Vec<&'
         .collect()
 }
 
-/// Frameless translucent window shell for the spotlight palette.
 pub struct SpotlightWindow {
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -413,7 +404,6 @@ impl SpotlightWindow {
         Ok(())
     }
 
-    /// Dispatch a selected spotlight action via ECS messages / state.
     fn execute_action(
         action: &SpotlightAction,
         ai: Option<&Arc<AiBridge>>,
@@ -447,7 +437,7 @@ impl SpotlightWindow {
         }
     }
 
-    /// Send free text through the same path as the chat input.
+    /// Free text goes through the same path as the chat input.
     fn send_chat(ai: Option<&Arc<AiBridge>>, world: &mut World, chat_entity: Entity, text: &str) {
         let Some(ai) = ai else {
             return;

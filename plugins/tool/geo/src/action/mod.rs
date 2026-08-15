@@ -48,8 +48,6 @@ pub(crate) fn truncate(value: &str) -> String {
     truncated
 }
 
-/// Formats a coordinate for display, trimming trailing zeros
-/// (`35.680` -> `35.68`).
 pub(crate) fn format_coord(value: f64) -> String {
     let value = if value == 0.0 { 0.0 } else { value };
     format!("{value:.3}")
@@ -70,7 +68,6 @@ pub(crate) fn format_day_length(total_seconds: u64) -> String {
     }
 }
 
-/// Validates a latitude in degrees.
 pub(crate) fn validate_latitude(value: f64) -> Result<(), GeoError> {
     if value.is_finite() && (-90.0..=90.0).contains(&value) {
         Ok(())
@@ -81,7 +78,6 @@ pub(crate) fn validate_latitude(value: f64) -> Result<(), GeoError> {
     }
 }
 
-/// Validates a longitude in degrees.
 pub(crate) fn validate_longitude(value: f64) -> Result<(), GeoError> {
     if value.is_finite() && (-180.0..=180.0).contains(&value) {
         Ok(())
@@ -159,7 +155,6 @@ mod tests {
         let _serial = TEST_SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The broker mock answers with a body over the plugin's cap.
         let mock = crate::broker::tests::MockBroker::spawn();
         crate::broker::tests::configure_test_broker(&mock).await;
         mock.push(crate::broker::tests::MockResponse::ok(vec![

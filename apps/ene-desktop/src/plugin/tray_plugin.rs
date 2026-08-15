@@ -1,5 +1,3 @@
-//! Tray plugin.
-//!
 //! The tray icon is constructed by `Runtime::resumed` (it needs a
 //! live `winit::Window` to call `WaylandInputRegionContext::try_new`);
 //! tray clicks reach the `AppEvent::Tray(_)` cross-thread channel and

@@ -1,5 +1,3 @@
-//! Embedding forward pass via llama-cpp-4.
-
 use super::load::LoadedModel;
 use super::map_llama_err;
 use ene_ai::error::LlmProviderError;

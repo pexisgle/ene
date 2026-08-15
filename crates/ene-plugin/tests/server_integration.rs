@@ -37,7 +37,6 @@ fn test_socket_path(name: &str) -> PathBuf {
     ))
 }
 
-/// State recorded by the test plugin for assertion.
 #[derive(Debug, Default)]
 struct TestPluginState {
     sandbox_received: AtomicBool,
@@ -454,7 +453,6 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
     }
 }
 
-/// Runs a minimal plugin server loop on the given socket path.
 async fn run_test_server(socket_path: PathBuf, dispatch: Arc<PluginDispatch>) {
     cleanup_path(&socket_path);
     let mut listener = IpcListener::bind(&socket_path).expect("failed to bind test server");
@@ -489,7 +487,6 @@ async fn run_test_server(socket_path: PathBuf, dispatch: Arc<PluginDispatch>) {
     }
 }
 
-/// Spawns a test plugin server and connects a raw IPC stream to it.
 async fn spawn_and_connect(name: &str) -> (IpcStream, Arc<TestPluginState>, PathBuf) {
     let socket_path = test_socket_path(name);
     let state = Arc::new(TestPluginState::default());
@@ -534,7 +531,6 @@ impl TestPeer<'_> {
         }
     }
 
-    /// Performs the handshake on a raw stream and returns the capabilities.
     async fn handshake(&mut self) -> PluginCapabilities {
         write_plugin_request(
             self.stream,
@@ -570,7 +566,6 @@ impl TestPeer<'_> {
         }
     }
 
-    /// Sends a request and reads the single response.
     async fn round_trip(&mut self, req: &PluginIpcRequest) -> PluginIpcResponse {
         write_plugin_request(self.stream, req, self.format)
             .await

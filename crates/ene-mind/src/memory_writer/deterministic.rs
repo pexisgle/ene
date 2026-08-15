@@ -26,7 +26,8 @@ use crate::error::CognitionError;
 use ene_config::PatternLibrary;
 use ene_core::MemoryKind;
 
-/// Normalise Unicode with NFKC (fullwidth → ASCII, combined → single).
+/// Folds fullwidth characters to ASCII and combined characters to single
+/// code points.
 fn nfkc(s: &str) -> String {
     unicode_normalization::UnicodeNormalization::nfkc(s).collect()
 }
@@ -73,10 +74,8 @@ fn is_en_question(msg: &str) -> bool {
     })
 }
 
-/// Confidence for deterministic forget candidates.
 const FORGET_CONFIDENCE: f32 = 0.90;
 
-/// Builds a deletion-request candidate from a forget pattern match.
 fn forget_candidate(user_msg: &str, target: &str) -> MemoryCandidate {
     let title_trunc: String = target.chars().take(20).collect();
     MemoryCandidate {
@@ -127,12 +126,6 @@ fn match_forget_patterns(user_msg: &str, patterns: &PatternLibrary) -> Option<Me
     None
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Extract memory candidates deterministically from a conversation turn.
-///
 /// Matching is limited to explicit forget instructions driven by the language
 /// pack for `locale` (see [`ene_config::PatternLibrary`]); languages without a
 /// pack fall back to English patterns. Explicit remember requests are owned by
@@ -166,20 +159,16 @@ pub fn extract_with_tool_grounding(
 
     let mut candidates: Vec<MemoryCandidate> = Vec::new();
 
-    // Forget-pattern matcher (language-pack driven; falls back to English
-    // patterns for languages without a pack).
     let patterns = PatternLibrary::load(locale.code());
     if let Some(candidate) = match_forget_patterns(&user_norm, &patterns) {
         candidates.push(candidate);
     }
 
-    // Tool-result matcher (always applied when enabled).
     candidates.extend(tool_grounding::extract_tool_candidates(
         turn.tool_results,
         tool_grounding_cfg,
     ));
 
-    // Filter by min_confidence and deduplicate by (title, kind)
     let mut seen = std::collections::HashSet::new();
     let filtered: Vec<MemoryCandidate> = candidates
         .into_iter()
@@ -198,10 +187,6 @@ pub fn extract_with_tool_grounding(
 
     Ok(filtered)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[cfg_attr(
@@ -240,8 +225,6 @@ mod tests {
         }
     }
 
-    // ── Remember is LLM-owned ─────────────────────────────────────────
-
     #[test]
     fn remember_is_no_longer_detected_deterministically() {
         for (msg, locale) in [
@@ -270,8 +253,6 @@ mod tests {
             .expect("deterministic extraction always succeeds");
         assert!(out.is_empty(), "教えて must not be captured: {out:?}");
     }
-
-    // ── Japanese forget ───────────────────────────────────────────────
 
     #[test]
     fn ja_forget_request_creates_deletion_candidate() {
@@ -352,8 +333,6 @@ mod tests {
         }
     }
 
-    // ── English forget ────────────────────────────────────────────────
-
     #[test]
     fn en_forget_request_creates_deletion_candidate() {
         let out = extract(
@@ -411,8 +390,6 @@ mod tests {
         }
     }
 
-    // ── Language fallback ─────────────────────────────────────────────
-
     #[test]
     fn language_without_pack_falls_back_to_english_patterns() {
         // "zh" has no pattern pack: the loader falls back to English patterns,
@@ -444,8 +421,6 @@ mod tests {
             Some("さっきのプロジェクト")
         );
     }
-
-    // ── Tool procedure ────────────────────────────────────────────────
 
     #[test]
     fn tool_success_extracts_procedure() {
@@ -493,8 +468,6 @@ mod tests {
             "default tool grounding must not auto-persist successes: {out:?}"
         );
     }
-
-    // ── Edge cases ────────────────────────────────────────────────────
 
     #[test]
     fn empty_input_returns_empty() {

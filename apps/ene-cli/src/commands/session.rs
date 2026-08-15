@@ -3,9 +3,8 @@ use crate::{context::AppContext, style};
 use async_trait::async_trait;
 use ene_util::Truncate;
 
-/// Map an API v1 [`ene_runtime::PublicApiError`] onto the CLI's own error
-/// type, preserving the actor-dead vs. execution-failure distinction so
-/// callers can tell the actor has shut down from an ordinary failure.
+/// Preserves the actor-dead vs. execution-failure distinction so callers can
+/// tell the actor has shut down from an ordinary failure.
 pub(crate) fn session_error(e: ene_runtime::PublicApiError) -> CliError {
     match e {
         ene_runtime::PublicApiError::ActorDead => {
@@ -233,8 +232,6 @@ async fn handle_split(
             "Cannot compress: No conversation history.".to_string(),
         ));
     }
-    // The snapshot no longer carries the memory handle; it lives on
-    // the diagnostics facade, which is the documented access path.
     if !ctx.handle.diagnostics().memory().is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),

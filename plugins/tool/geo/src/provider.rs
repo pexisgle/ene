@@ -5,14 +5,12 @@ use ene_plugin::{ActionSetProvider, ToolAction};
 use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
 use std::sync::Arc;
 
-/// Shared state for the geo actions.
 #[derive(Clone)]
 pub struct GeoState {
     gate: Arc<ApprovalGate>,
 }
 
 impl GeoState {
-    /// Creates a new `GeoState`.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -20,7 +18,6 @@ impl GeoState {
         }
     }
 
-    /// Returns the approval gate guarding privacy-relevant lookups.
     #[must_use]
     pub fn gate(&self) -> &ApprovalGate {
         &self.gate
@@ -33,18 +30,14 @@ impl Default for GeoState {
     }
 }
 
-/// Built-in geographic information tool provider.
-///
-/// Exposes `geo.location`, `geo.weather`, `geo.timezone`, and
-/// `geo.sunrise_sunset` via [`ActionSetProvider`]. The approval gate is
-/// threaded through provider hooks so per-turn approvals and session-wide
-/// allow patterns survive across the host's post-approval re-invocation.
+/// The approval gate is threaded through provider hooks so per-turn
+/// approvals and session-wide allow patterns survive across the host's
+/// post-approval re-invocation.
 pub struct GeoToolProvider {
     inner: ActionSetProvider,
 }
 
 impl GeoToolProvider {
-    /// Creates a new `GeoToolProvider`.
     #[must_use]
     pub fn new() -> Self {
         let state = Arc::new(GeoState::new());

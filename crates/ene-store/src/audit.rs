@@ -7,7 +7,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// The permission decision recorded for an audited tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -34,7 +33,6 @@ impl AuditDecision {
         }
     }
 
-    /// Parses the stored string back into a decision.
     #[must_use]
     pub fn parse(value: &str) -> Self {
         match value {
@@ -46,10 +44,8 @@ impl AuditDecision {
     }
 }
 
-/// Input for recording a single audited tool call.
 #[derive(Debug, Clone)]
 pub struct NewAuditEntry {
-    /// Turn that triggered the call.
     pub turn_id: String,
     /// Session that triggered the call (`None` for out-of-band diagnostics calls).
     pub session_id: Option<String>,
@@ -59,37 +55,25 @@ pub struct NewAuditEntry {
     pub action: String,
     /// Target resource reported by the permission prompt (may be empty).
     pub target: String,
-    /// Permission decision applied to the call.
     pub decision: AuditDecision,
-    /// Whether the tool call ultimately succeeded.
     pub success: bool,
     /// Raw argument JSON; redacted before persistence.
     pub arguments: String,
 }
 
-/// A persisted audit-log row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEntry {
-    /// Row id.
     pub id: i64,
-    /// Turn that triggered the call.
     pub turn_id: String,
     /// Session that triggered the call (`None` for rows written before
     /// the `session_id` column existed).
     pub session_id: Option<String>,
-    /// Namespaced tool name.
     pub tool_name: String,
-    /// Action label.
     pub action: String,
-    /// Target resource.
     pub target: String,
-    /// Permission decision.
     pub decision: AuditDecision,
-    /// Whether the call succeeded.
     pub success: bool,
-    /// Redacted argument JSON.
     pub redacted_args: String,
-    /// When the call was recorded.
     pub created_at: DateTime<Utc>,
 }
 

@@ -10,7 +10,6 @@ use crate::output::{CueSource, MotionLayer, PerfKind, PerformanceCue};
 use ene_card::ResolvedExpression;
 use ene_core::AffectState;
 
-/// Tracks a single cue slot with priority semantics.
 #[derive(Debug, Clone)]
 struct CueSlot {
     cue: PerformanceCue,
@@ -22,7 +21,6 @@ impl CueSlot {
         Self { cue, source }
     }
 
-    /// Returns `true` if `incoming` should replace this slot.
     const fn should_replace(&self, incoming: CueSource) -> bool {
         cue_source_priority(incoming) >= cue_source_priority(self.source)
     }
@@ -54,8 +52,6 @@ pub struct PerformanceArbiter {
 }
 
 impl PerformanceArbiter {
-    /// Accept a cue from a mid-turn source (stream marker, affect, etc.).
-    ///
     /// Cancel cues clear the relevant slot. Higher-priority sources
     /// replace lower-priority ones; equal-priority sources replace
     /// (latest wins).
@@ -112,9 +108,6 @@ impl PerformanceArbiter {
         self.expression = Some(CueSlot::new(cue, CueSource::Affect));
     }
 
-    /// Resolve and drain the current state, returning the final set of cues
-    /// with their resolved sources.
-    ///
     /// Clears internal state after resolution (ready for next turn).
     pub fn resolve(&mut self) -> Vec<(PerformanceCue, CueSource)> {
         let mut result: Vec<(PerformanceCue, CueSource)> = Vec::with_capacity(5);
@@ -143,13 +136,10 @@ impl PerformanceArbiter {
         result
     }
 
-    /// Returns the current expression name, if any.
     pub fn current_expression(&self) -> Option<&str> {
         self.expression.as_ref().map(|s| s.cue.name.as_str())
     }
 
-    /// Returns the current motion name, if any.
-    ///
     /// Searches Full → Upper → Lower in priority order.
     pub fn current_motion(&self) -> Option<&str> {
         self.motion_full

@@ -45,7 +45,6 @@ pub const SILENT_TOKEN: &str = "<|silent|>";
 /// Privacy-safe activity snapshot from the host (desktop).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivitySnapshot {
-    /// Seconds since the last OS activity signal when available.
     pub idle_seconds: Option<u64>,
     /// Privacy-aware label for the focused window.
     ///
@@ -61,11 +60,9 @@ pub struct ActivitySnapshot {
     pub recent_change: String,
 }
 
-/// Screen summary availability from the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ScreenSummaryStatus {
-    /// Source disabled in settings.
     #[default]
     Disabled,
     /// Source enabled but no summarizer is available on this host.
@@ -74,49 +71,37 @@ pub enum ScreenSummaryStatus {
     Available,
 }
 
-/// Host-supplied observation used to build decision context.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProactiveObservation {
     /// When this observation was captured (unix millis).
     pub captured_at_unix_ms: u64,
-    /// Activity signals when the activity source is enabled.
     pub activity: Option<ActivitySnapshot>,
     /// Short-lived screen **text** summary when [`ScreenSummaryStatus::Available`].
     pub screen_summary: Option<String>,
-    /// Whether screen summary was requested but unavailable.
     pub screen_summary_status: ScreenSummaryStatus,
 }
 
-/// Runtime suppression counters passed into the decision pipeline.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProactiveSuppressionState {
-    /// Seconds since the last user message in the session.
     pub seconds_since_user_input: u64,
     /// Seconds since the last successful proactive utterance (or `u64::MAX` if none).
     pub seconds_since_proactive: u64,
-    /// Proactive utterances already completed in this session.
     pub proactive_turns_this_session: usize,
     /// True while a user turn, tool call, or permission/input wait is active.
     pub user_turn_busy: bool,
 }
 
-/// Normalized input for a proactive decision.
 #[derive(Debug, Clone)]
 pub struct ProactiveContext {
     /// Recent history entries already truncated for the prompt budget.
     pub history: Vec<HistoryEntry>,
-    /// Seconds since last user input.
     pub seconds_since_user_input: u64,
-    /// Activity snapshot when the source is enabled and available.
     pub activity: Option<ActivitySnapshot>,
-    /// Screen summary when the source is enabled and available.
     pub screen_summary: Option<String>,
-    /// Current affect summary line for the prompt (optional).
     pub affect_summary: Option<String>,
     /// Unrounded fatigue from the affect state, compared by the deterministic
     /// gate instead of the prompt's two-decimal wire value.
     pub fatigue: Option<f32>,
-    /// Active commitment one-liners (optional).
     pub commitments: Vec<String>,
     /// User-stored standing rules one-liners (optional).
     ///
@@ -125,7 +110,6 @@ pub struct ProactiveContext {
     /// a suppression condition cannot be dropped by a low score. Serialized
     /// as the trusted `user_instructions` field of the decision context.
     pub user_instructions: Vec<String>,
-    /// Suppression counters at decision time.
     pub suppression: ProactiveSuppressionState,
     /// Quiet-hours window evaluation for the decision instant. Inactive when
     /// quiet hours are disabled or outside the window.
@@ -141,16 +125,12 @@ pub struct ProactiveContext {
     pub world_state: Option<WorldStateSummary>,
 }
 
-/// Urgency hint from the decision model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ProactiveUrgency {
-    /// Low priority.
     Low,
-    /// Default priority.
     #[default]
     Normal,
-    /// High priority.
     High,
 }
 
@@ -164,10 +144,8 @@ impl ProactiveUrgency {
     }
 }
 
-/// Structured decision returned by the lightweight model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProactiveDecision {
-    /// Whether generation should start.
     pub should_speak: bool,
     /// Model confidence in `[0.0, 1.0]`.
     pub confidence: f64,
@@ -175,9 +153,7 @@ pub struct ProactiveDecision {
     pub screen_digest: String,
     /// Internal reason (diagnostics only; never spoken verbatim).
     pub reason: String,
-    /// Optional topic hint for generation.
     pub topic_hint: String,
-    /// Urgency hint.
     pub urgency: ProactiveUrgency,
 }
 
@@ -195,7 +171,6 @@ impl ProactiveDecision {
         }
     }
 
-    /// True when generation should proceed given the configured threshold.
     #[must_use]
     pub fn allows_generation(&self, min_confidence: f64) -> bool {
         self.should_speak && self.confidence >= min_confidence
@@ -208,15 +183,11 @@ impl ProactiveDecision {
 /// yields one of these variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProactiveSkipReason {
-    /// Feature disabled in config.
     Disabled,
-    /// Deterministic gate rejected before calling the LLM.
     Gate(GateRejectReason),
     /// Decision model / parse / timeout failed (fail-closed).
     DecisionFailed(String),
-    /// Model returned `should_speak` but confidence was too low.
     BelowConfidence,
-    /// Model returned `should_speak: false` — it judged speaking unnecessary.
     ModelDeclined,
     /// The main model declined during integrated confirmation; the generation
     /// stream was cancelled before any visible text.
@@ -272,14 +243,11 @@ impl fmt::Display for ProactiveConfirmation {
     }
 }
 
-/// Outcome of [`decide_proactive_speech`].
 #[derive(Debug, Clone)]
 pub struct ProactiveDecisionOutcome {
     /// Normalized decision (always present; fail-closed on errors).
     pub decision: ProactiveDecision,
-    /// Optional skip / silence reason for diagnostics.
     pub skip: Option<ProactiveSkipReason>,
-    /// True when the lightweight LLM was actually invoked.
     pub llm_invoked: bool,
     /// Main-model confirmation state at decision time.
     ///
@@ -290,7 +258,6 @@ pub struct ProactiveDecisionOutcome {
     pub confirmation: ProactiveConfirmation,
 }
 
-/// Build a [`ProactiveContext`] from session history + host observation.
 #[must_use]
 pub fn build_proactive_context(
     config: &ProactiveConfig,
@@ -575,7 +542,6 @@ pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
 }
 
 fn redact_window_label(label: &str) -> String {
-    // Drop obvious path-like and email-like fragments from window titles.
     let mut out = String::with_capacity(label.len().min(200));
     for token in label.split_whitespace() {
         if token.contains('@') || token.contains('/') || token.contains('\\') {

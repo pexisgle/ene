@@ -11,8 +11,6 @@ pub struct PromptCommand;
 /// packet without an actual user message to send.
 const USER_INPUT_PLACEHOLDER: &str = "(your next message)";
 
-/// Renders one [`LlmMessage`] as a labelled, human-readable block.
-///
 /// The label mirrors the wire role so the output can be compared 1:1 with
 /// what `build_messages` actually hands to the provider.
 fn render_message(index: usize, message: &LlmMessage) {

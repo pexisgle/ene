@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::category::ApprovalCategory;
 
-/// One permission request awaiting (or that received) a resolution.
-///
 /// `target` is a display/audit-safe description of what is being accessed
 /// (an origin, a canonical path, an artifact id+version, a process command
 /// line, a credential key name). It never carries file contents, request
@@ -13,14 +11,11 @@ use crate::category::ApprovalCategory;
 pub struct ApprovalRequest {
     /// Unique request id (UUID), used to correlate a later answer.
     pub id: String,
-    /// Plugin name requesting the capability.
     pub plugin: String,
     /// Digest of the plugin's signed manifest, when one is loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_digest: Option<String>,
-    /// Category being requested.
     pub category: ApprovalCategory,
-    /// Audit-safe target description.
     pub target: String,
     /// Optional human-readable detail shown in the confirmation UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,7 +26,7 @@ pub struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
-    /// Builds a request with a fresh UUID.
+    /// The request id is a fresh UUID.
     #[must_use]
     pub fn new(
         plugin: String,

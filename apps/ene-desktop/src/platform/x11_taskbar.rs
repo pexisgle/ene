@@ -37,8 +37,7 @@ use x11rb::protocol::xproto::{
 #[cfg(target_os = "linux")]
 use x11rb::rust_connection::RustConnection;
 
-/// X11 window id (the 32-bit XID the server hands out when
-/// winit creates the window).
+/// The 32-bit XID the server hands out when winit creates the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
 pub struct X11WindowId(pub u32);
@@ -90,7 +89,7 @@ pub enum X11Path {
 }
 
 impl X11Path {
-    /// Pure decision function. Mirrors the Wayland branch in
+    /// Mirrors the Wayland branch in
     /// [`crate::platform::apply_linux_click_through`].
     pub const fn decide(
         allows_input: bool,
@@ -107,7 +106,7 @@ impl X11Path {
     }
 }
 
-/// X11 display-server context. Cheap to clone the `Arc`; the
+/// Cheap to clone the `Arc`; the
 /// inner `Mutex` is the only point of contention with the
 /// runtime's `about_to_wait` dispatch.
 pub struct X11Context {
@@ -121,12 +120,9 @@ pub struct X11Context {
 }
 
 impl X11Context {
-    /// Open an X11 connection, intern the EWMH atoms, and
-    /// apply `_NET_WM_STATE_SKIP_TASKBAR | _SKIP_PAGER` on
-    /// the winit window. Returns `None` if the runtime is
-    /// not running under X11, no X server is reachable, or
-    /// any of the interned atoms is not provided by the
-    /// EWMH-compliant window manager.
+    /// Returns `None` if the runtime is not running under
+    /// X11, no X server is reachable, or any of the interned
+    /// atoms is not provided by the EWMH-compliant window manager.
     pub fn try_new<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> Option<Arc<Mutex<Self>>> {
         if !is_x11_window(window) {
             return None;
@@ -155,8 +151,7 @@ impl X11Context {
         Some(arc)
     }
 
-    /// Update the X11 shape extension input region. Empty slice
-    /// = pass-through (no pixel receives input).
+    /// An empty slice is pass-through (no pixel receives input).
     pub fn set_input_rects(&mut self, rects: &[super::wayland_region::Rect]) {
         if !self.shape_available {
             return;
@@ -183,14 +178,10 @@ impl X11Context {
         ));
     }
 
-    /// Clear the shape input region (no input = full
-    /// pass-through to the desktop).
     pub fn clear_input(&mut self) {
         self.set_input_rects(&[]);
     }
 
-    /// Apply or revoke `_NET_WM_STATE_SKIP_TASKBAR |
-    /// _NET_WM_STATE_SKIP_PAGER`.
     fn set_skip_taskbar(&mut self, skip: bool) {
         static LOGGED_NOOP: Once = Once::new();
         if self.atoms.net_wm_state == 0 {
@@ -251,8 +242,6 @@ pub fn is_x11_window<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> bool 
     )
 }
 
-/// X11 window id from the winit raw window handle, or `None`
-/// if the window is not X11.
 #[cfg(target_os = "linux")]
 pub fn x11_window_id<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> Option<Window> {
     let win = window.window_handle().ok()?.as_raw();
@@ -269,7 +258,6 @@ mod tests {
 
     #[test]
     fn x11_path_decide_truth_table() {
-        // `freeze_forced` always wins.
         assert_eq!(
             X11Path::decide(false, false, true),
             X11Path::Frozen,
@@ -280,7 +268,6 @@ mod tests {
             X11Path::Frozen,
             "freeze overrides silhouette"
         );
-        // No freeze, normal hit-test.
         assert_eq!(
             X11Path::decide(true, true, false),
             X11Path::Full,
@@ -305,8 +292,6 @@ mod tests {
 
     #[test]
     fn x11_path_decide_freeze_does_not_depend_on_allows_input() {
-        // `freeze_forced` short-circuits regardless of the
-        // other two args. Test the four corners.
         for allows_input in [true, false] {
             for cursor_on_silhouette in [true, false] {
                 assert_eq!(

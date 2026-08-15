@@ -1,5 +1,3 @@
-//! Expression resolution: affect mapping, LLM hints, hysteresis.
-
 use ene_card::{ExpressionAffect, ResolvedExpression};
 use ene_core::AffectState;
 
@@ -19,8 +17,6 @@ const NEUTRAL_STATE_RADIUS: f32 = 0.1;
 /// sad face; the caller falls back to neutral instead.
 const REST_POINT_RADIUS: f32 = 0.2;
 
-/// Map affect dimensions to the nearest annotated expression.
-///
 /// Each expression carries its own affect point (card-side annotation), so no
 /// expression name is hardcoded here: cards define any name — including
 /// Japanese or `x_`-prefixed custom ones — and the runtime picks the nearest
@@ -53,9 +49,6 @@ pub fn affect_to_expression<'a>(
         .map(|(e, _)| e.name.as_str())
 }
 
-/// Squared Euclidean distance between an affect annotation and a state over
-/// all four dimensions.
-///
 /// An omitted annotation dimension is 0.0 (neutral on that axis), so the
 /// state's value on that axis counts fully into the distance.
 fn affect_distance(annotation: &ExpressionAffect, state: &AffectState) -> f32 {
@@ -69,8 +62,6 @@ fn affect_distance(annotation: &ExpressionAffect, state: &AffectState) -> f32 {
         + d_fatigue * d_fatigue
 }
 
-/// Resolve the final expression from affect, LLM hints, and constraints.
-///
 /// An LLM proposal is canonical when present; an out-of-list proposal is
 /// rejected and falls back to the affect-mapped expression (or neutral when
 /// no annotation data exists), never to fuzzy string matching. Affect mapping
@@ -175,8 +166,6 @@ fn canonical_name<'a>(lower: &str, available: &'a [ResolvedExpression]) -> Optio
         .map(|e| e.name.as_str())
 }
 
-/// Normalize an expression name against available expressions.
-///
 /// Only an exact (case-insensitive) match is accepted; anything else falls
 /// back to neutral (or the first available expression). Fuzzy matching is
 /// deliberately absent: character-level similarity mis-maps short Japanese

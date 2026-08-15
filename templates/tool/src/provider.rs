@@ -16,7 +16,6 @@ pub struct __PROVIDER_NAME__ {
 }
 
 impl __PROVIDER_NAME__ {
-    /// Creates a new `__PROVIDER_NAME__`.
     #[must_use]
     pub fn new() -> Self {
         let actions: Vec<Box<dyn ene_plugin::ToolAction>> =

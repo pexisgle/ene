@@ -76,10 +76,6 @@ const fn default_deferred_max_polls() -> u32 {
 ene_config::define_config!(
     settings,
     "tools",
-    /// Bounded-task admission caps for the turn actor's background
-    /// `JoinSet`s, plus the deferred-tool poll budget.
-    ///
-    /// See the module docs for the reasoning behind each default.
     pub struct ToolRuntimeConfig {
         /// Max concurrently in-flight direct `CallTool` /
         /// `CancelDeferredTool` tasks (`ENE_TOOLS__CALL_TOOL_CAP`).

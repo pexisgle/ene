@@ -17,7 +17,6 @@ use super::preset;
 /// How often startup re-probes the health endpoint while the engine boots.
 pub const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// The spawned sidecar child plus connection details clients need.
 pub struct SidecarState {
     child: Mutex<Option<tokio::process::Child>>,
     pub work_dir: PathBuf,

@@ -20,11 +20,9 @@ use crate::config::EmotionConfig;
 use self::decay::apply_decay;
 use self::fatigue::apply_conversation_fatigue;
 
-/// Emotion Engine: decay + fatigue + optional LLM affect computation.
 pub struct EmotionEngine;
 
 impl EmotionEngine {
-    /// Update affect state for the current turn: decay, fatigue, optional classifier merge.
     pub fn update_turn(
         &self,
         config: &EmotionConfig,
@@ -83,7 +81,6 @@ impl EmotionEngine {
     }
 }
 
-/// Merge an advisory LLM classifier absolute estimate with confidence-weighted blending.
 fn merge_classifier_proposal(
     state: &mut AffectState,
     proposal: &AffectProposal,
@@ -167,7 +164,7 @@ fn apply_weighted_field(
     }
 }
 
-/// Derive a human-readable mood label from PAD dimensions.
+/// Human-readable mood label from PAD dimensions.
 pub fn compute_mood_label(state: &AffectState) -> &'static str {
     if state.irritation >= 0.6 {
         return "irritated";

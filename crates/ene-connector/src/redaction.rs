@@ -25,10 +25,8 @@ const SECRET_KEY_NAMES: &[&str] = &[
     "credential",
 ];
 
-/// Replacement value written over every redacted secret.
 const REDACTED: &str = "***";
 
-/// Returns `true` when `key` contains a well-known secret name.
 fn is_secret_key_name(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     SECRET_KEY_NAMES
@@ -72,7 +70,6 @@ pub fn scrub_secrets(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
     while i < bytes.len() {
-        // `Bearer ` tokens (case-insensitive).
         if bytes[i..].to_ascii_lowercase().starts_with(b"bearer ") {
             let token_start = i + 7;
             let token_end = match bytes[token_start..].iter().position(|b| !is_token_char(*b)) {
@@ -90,7 +87,6 @@ pub fn scrub_secrets(input: &str) -> String {
             continue;
         }
 
-        // `"key": "value"` JSON pairs and bare `key=value` / `key = value`.
         if let Some((key, value_start)) = key_value_at(bytes, i) {
             if is_secret_key_name(&key) {
                 let (value_end, trailing) = value_span(input, value_start);
@@ -106,8 +102,6 @@ pub fn scrub_secrets(input: &str) -> String {
                 out.push_str(trailing);
                 i = value_end;
             } else {
-                // Preserve the key and separator, then keep scanning the
-                // value as ordinary text.
                 out.push_str(&input[i..value_start]);
                 i = value_start;
             }
@@ -120,7 +114,6 @@ pub fn scrub_secrets(input: &str) -> String {
     out
 }
 
-/// Returns `true` for characters that may appear inside a bare token value.
 fn is_token_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'+' | b'/' | b'=')
 }
@@ -246,7 +239,6 @@ mod tests {
     use super::*;
     use proptest::{prop_assert, prop_assert_eq};
 
-    /// Random nested JSON documents for the redaction properties.
     fn any_json_value() -> impl proptest::strategy::Strategy<Value = Value> {
         use proptest::prelude::*;
         let leaf = prop_oneof![
@@ -264,8 +256,6 @@ mod tests {
         })
     }
 
-    /// Asserts the structural redaction contract: every value under a
-    /// secret-bearing key is exactly the placeholder, recursively.
     fn secrets_masked(value: &Value) -> bool {
         match value {
             Value::Object(obj) => obj.iter().all(|(key, value)| {
@@ -281,23 +271,18 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// A second scrub pass must not resurrect or introduce secret
-        /// material, for any input text.
         #[test]
         fn scrub_secrets_is_idempotent(input in "\\PC{0,128}") {
             let once = scrub_secrets(&input);
             prop_assert_eq!(scrub_secrets(&once), once);
         }
 
-        /// `Bearer` tokens are replaced wholesale, so the token value can
-        /// never survive in the output.
         #[test]
         fn scrub_bearer_never_leaks_token(token in "[A-Za-z0-9._~+/=-]{4,64}") {
             let out = scrub_secrets(&format!("Authorization: Bearer {token}"));
             prop_assert!(!out.contains(&token));
         }
 
-        /// `key=value` pairs under secret-bearing names are replaced.
         #[test]
         fn scrub_key_value_never_leaks_value(
             key in "api_key|access_token|password|auth|token",
@@ -307,8 +292,6 @@ mod tests {
             prop_assert!(!out.contains(&value));
         }
 
-        /// JSON `"key": "value"` pairs under secret-bearing names are
-        /// replaced.
         #[test]
         fn scrub_json_pair_never_leaks_value(
             key in "api_key|access_token|password|auth|token",
@@ -318,8 +301,6 @@ mod tests {
             prop_assert!(!out.contains(&value));
         }
 
-        /// Redaction is idempotent and every value under a secret-bearing
-        /// key is the placeholder.
         #[test]
         fn redact_json_masks_all_secret_keys(value in any_json_value()) {
             let once = redact_json(&value);
@@ -382,8 +363,6 @@ mod tests {
 
     #[test]
     fn scrub_nested_values_wholesale() {
-        // A nested container under a secret key must be replaced entirely —
-        // the embedded value can never survive inside the redaction.
         assert_eq!(
             scrub_secrets(r#"{"api_key": {"value": "sk-top-secret-123"}}"#),
             r#"{"api_key": ***}"#

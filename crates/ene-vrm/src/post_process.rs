@@ -31,9 +31,7 @@ const FXAA_VERTICES: [PostVertex; 3] = [
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PostVertex {
-    /// NDC position of the vertex.
     pub position: [f32; 2],
-    /// Source texture UV.
     pub uv: [f32; 2],
 }
 
@@ -47,7 +45,6 @@ pub struct PostUniforms {
     /// `[0, 1]`, so the luma offsets are `uv + inv_size *
     /// step`.
     pub inv_size: [f32; 2],
-    /// Padding for 16-byte alignment.
     #[expect(
         clippy::pub_underscore_fields,
         reason = "wgpu bind group fields mirror shader naming"
@@ -314,7 +311,6 @@ impl PostProcessor {
         &self.intermediate_view
     }
 
-    /// The size the intermediate texture was built at.
     pub const fn size(&self) -> (u32, u32) {
         self.intermediate_size
     }

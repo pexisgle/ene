@@ -164,8 +164,6 @@ impl ConcurrencyLimiter {
     }
 }
 
-/// An `LlmProvider` that delegates to a plugin binary over IPC.
-///
 /// Created by [`IpcLlmProviderFactory`](crate::factory::IpcLlmProviderFactory)
 /// during `PluginHostManager` startup.
 pub struct IpcLlmProvider {
@@ -195,8 +193,6 @@ pub struct IpcLlmProvider {
 }
 
 impl IpcLlmProvider {
-    /// Creates a new IPC-backed LLM provider.
-    ///
     /// `limiter` should be the same `Arc<ConcurrencyLimiter>` shared by every
     /// provider instance the owning factory creates for this (plugin, kind)
     /// pair — see the module docs.
@@ -227,8 +223,6 @@ impl IpcLlmProvider {
     }
 }
 
-/// Maps a [`PluginHostError`] into the [`LlmProviderError`] domain.
-///
 /// Transport failures become [`LlmProviderError::Network`] (retryable);
 /// all other host errors become [`LlmProviderError::Provider`] (not
 /// retried by the policy).
@@ -268,7 +262,6 @@ fn map_host_error(e: PluginHostError) -> LlmProviderError {
     }
 }
 
-/// Diagnostic label for a [`ResourceClass`] in limiter logs.
 fn class_label(class: ResourceClass) -> String {
     format!("{class:?}")
 }
@@ -584,7 +577,6 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
     }
 }
 
-/// Parses a JSON tool-call delta into an [`LlmToolCallChunk`].
 fn parse_tool_call_delta(value: &serde_json::Value, index: usize) -> LlmToolCallChunk {
     LlmToolCallChunk {
         index: value
@@ -674,8 +666,6 @@ mod concurrency_limiter_tests {
         });
         let _p1 = limiter.acquire("test").await.unwrap();
         let _p2 = limiter.acquire("test").await.unwrap();
-        // Both in-flight slots are held; a third caller with no queue depth
-        // must fail fast rather than block.
         let err = limiter.acquire("test").await.unwrap_err();
         assert!(matches!(err, LlmProviderError::Busy { .. }));
     }
@@ -705,8 +695,6 @@ mod concurrency_limiter_tests {
         }));
         let permit = limiter.acquire("test").await.unwrap();
 
-        // A second caller has queue room (queue_depth: 1) and should wait
-        // rather than being rejected immediately.
         let waiter_limiter = std::sync::Arc::clone(&limiter);
         let waiter = tokio::spawn(async move { waiter_limiter.acquire("test").await });
 
@@ -737,8 +725,6 @@ mod concurrency_limiter_tests {
         let queued = tokio::spawn(async move { queued_limiter.acquire("test").await });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        // A second caller, beyond max_in_flight + queue_depth, must be
-        // rejected immediately rather than growing the wait queue further.
         let err = limiter.acquire("test").await.unwrap_err();
         assert!(matches!(err, LlmProviderError::Busy { .. }));
 
@@ -778,14 +764,12 @@ mod concurrency_limiter_tests {
         }));
         let permit = limiter.acquire("test").await.unwrap();
 
-        // The only wait slot is now occupied by a blocked caller.
         let waiter = tokio::spawn({
             let limiter = Arc::clone(&limiter);
             async move { limiter.acquire("test").await }
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        // Cancelling the waiter must free the slot it reserved.
         waiter.abort();
         assert!(waiter.await.is_err(), "aborted waiter join must fail");
 

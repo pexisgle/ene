@@ -17,7 +17,6 @@ use crate::recall::{RecalledMemory, explain_scored_memories};
 pub struct MemoryJournal;
 
 impl MemoryJournal {
-    /// Embed `query_text`, build a [`Query`] from mind memory policy, and search.
     pub async fn search(
         store: &dyn MemoryPort,
         embedder: &dyn EmbeddingProvider,

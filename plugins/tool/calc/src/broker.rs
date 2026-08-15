@@ -12,10 +12,8 @@ use ene_plugin_proto::{HostServiceId, SandboxConfigData, ToolError};
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
-/// One mediated HTTP response body.
 #[derive(Debug)]
 pub struct FetchOutcome {
-    /// HTTP status.
     pub status: u16,
     /// Response body (size-capped by the host).
     pub body: Vec<u8>,
@@ -46,7 +44,6 @@ impl CalcBroker {
         self.token.write().clone_from(&sandbox.db_auth_token);
     }
 
-    /// Sends one request and returns the response.
     pub async fn fetch(&self, url: &str) -> Result<FetchOutcome, ToolError> {
         let mut client = self
             .session()
@@ -121,7 +118,6 @@ pub(crate) fn broker() -> Arc<CalcBroker> {
     Arc::clone(BROKER_ARC.get_or_init(|| Arc::new(CalcBroker::new())))
 }
 
-/// Configures the shared broker from the host sandbox data.
 pub(crate) fn configure_broker(sandbox: &SandboxConfigData) {
     broker().configure(sandbox);
 }

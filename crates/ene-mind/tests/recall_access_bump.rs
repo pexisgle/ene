@@ -27,7 +27,6 @@ use ene_mind::{
 };
 use ene_store::{MemoryKind, MemoryScope, MemorySource, MemoryStore};
 
-/// Wrap a stored `MemoryItem` in a recalled-memory DTO for prompt injection.
 fn build_recalled(item: MemoryItem, reason: RecallReason) -> RecalledMemory {
     let confidence = item.confidence.get();
     RecalledMemory {

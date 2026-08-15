@@ -1,8 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Configured approval mode for a category.
-///
 /// `Inherit` is only meaningful in a per-plugin override; in the global
 /// policy it resolves as `Ask`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -19,7 +17,6 @@ pub enum ApprovalMode {
     Deny,
 }
 
-/// The outcome of resolving a request against the policy hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedMode {
@@ -28,12 +25,10 @@ pub enum ResolvedMode {
     /// Automatically allowed (still audited and still subject to mandatory
     /// security constraints).
     Allow,
-    /// Automatically denied.
     Deny,
 }
 
 impl ResolvedMode {
-    /// Whether the resolution permits the operation.
     #[must_use]
     pub const fn allows(self) -> bool {
         matches!(self, Self::Allow)

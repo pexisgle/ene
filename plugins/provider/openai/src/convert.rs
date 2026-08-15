@@ -79,7 +79,6 @@ fn user_content(msg: &Value) -> Value {
     Value::Array(oa_parts)
 }
 
-/// An assistant message: optional text plus API-sanitized tool calls.
 fn assistant_content(msg: &Value) -> Value {
     let mut out = json!({ "role": "assistant" });
     if let Some(content) = msg.get("content").and_then(Value::as_str)
@@ -120,7 +119,6 @@ pub(crate) fn sanitize_tool_name(name: &str) -> String {
         .collect()
 }
 
-/// Converts ene `ToolSpec` wire values to `OpenAI` `tools` entries.
 pub(crate) fn to_openai_tools(tools: &[Value]) -> Vec<Value> {
     tools
         .iter()
@@ -257,8 +255,6 @@ pub(crate) fn usage_from_json_value(value: Option<&Value>) -> Option<TokenUsage>
     })
 }
 
-/// Narrow a provider-reported token count to `u32`.
-///
 /// Values above [`u32::MAX`] are treated as absent rather than silently
 /// truncated — a bad provider sentinel must not enter usage accounting as a
 /// plausible-looking number.

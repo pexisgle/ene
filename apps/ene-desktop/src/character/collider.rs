@@ -34,32 +34,26 @@ pub const MIN_BONE_RADIUS: f32 = 0.025;
 /// to include half the chest).
 const VERTEX_WEIGHT_THRESHOLD: f32 = 0.25;
 
-/// Shape category picked for a single humanoid bone.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BoneShape {
-    /// Sphere of `radius` units, centred on the bone's rest
-    /// position. Used for `head` / `jaw` / `eye*` / `shoulder*`
-    /// / `*toes*` (round joints or small round extremities).
+    /// Centred on the bone's rest position. Used for `head` / `jaw` /
+    /// `eye*` / `shoulder*` / `*toes*` (round joints or small round
+    /// extremities).
     Sphere { radius: f32 },
-    /// Y-axis capsule of `half_height` + `radius` in the
-    /// collider's local frame. The collider's `local_rotation`
-    /// maps local +Y to whatever world direction the bone
-    /// needs (vertical for the trunk, foot-aligned for the
-    /// foot). Used for the spine / chest / hips / neck / foot.
+    /// The collider's `local_rotation` maps local +Y to whatever world
+    /// direction the bone needs (vertical for the trunk, foot-aligned
+    /// for the foot). Used for the spine / chest / hips / neck / foot.
     CapsuleY { half_height: f32, radius: f32 },
-    /// Generic capsule whose local +Y is the bone's
-    /// "toward-child" direction in the rest pose. Used for
-    /// limbs (upperarm / lowerarm / upperleg / lowerleg /
-    /// hand) where the local frame is the bone chain and the
-    /// capsule needs to point along the chain direction
-    /// rather than world up.
+    /// Local +Y is the bone's "toward-child" direction in the rest
+    /// pose. Used for limbs (upperarm / lowerarm / upperleg / lowerleg /
+    /// hand) where the local frame is the bone chain and the capsule
+    /// needs to point along the chain direction rather than world up.
     Capsule { half_height: f32, radius: f32 },
 }
 
 impl BoneShape {
-    /// Effective radius of the primitive (used by the
-    /// `MIN_BONE_RADIUS` filter — fingers produce a small
-    /// capsule that the filter drops).
+    /// Used by the `MIN_BONE_RADIUS` filter — fingers produce a small
+    /// capsule that the filter drops.
     pub const fn radius(&self) -> f32 {
         match self {
             Self::Sphere { radius }
@@ -77,7 +71,7 @@ impl BoneShape {
 /// drop them straight into Rapier.
 #[derive(Clone, Copy, Debug)]
 pub struct BoneShapeSpec {
-    /// Node index of the bone in the glTF hierarchy.
+    /// Node index in the glTF hierarchy.
     pub bone_node: usize,
     /// Local translation in the body's frame. The kinematic body sits
     /// at the world origin in the rest pose, so the collider's local
@@ -88,13 +82,10 @@ pub struct BoneShapeSpec {
     /// spheres; the bone's rest world rotation for trunk / foot
     /// `CapsuleY`s; the limb's "toward-child" alignment for `Capsule`s.
     pub local_rotation: Quat,
-    /// Picked shape + dimensions, in world units (already multiplied by
-    /// `actual_scale`).
     pub shape: BoneShape,
-    /// Static offset of the collider's center relative to the bone's rest
-    /// position, in world units (already multiplied by `actual_scale`).
+    /// Relative to the bone's rest position, in world units (already
+    /// multiplied by `actual_scale`).
     pub static_offset: Vec3,
-    /// The bone's world rotation in rest pose.
     pub rest_rotation: Quat,
 }
 
@@ -107,9 +98,9 @@ pub struct BonePose {
     /// Translation in the model's normalised frame (so `PhysicsWorld`
     /// can multiply by `actual_scale` to land in world units).
     pub translation: Vec3,
-    /// Current world rotation of the bone. For limbs this drives the
-    /// capsule orientation directly; for trunk / foot bones the
-    /// rotation is mostly identity and the update is a no-op.
+    /// For limbs this drives the capsule orientation directly; for
+    /// trunk / foot bones the rotation is mostly identity and the
+    /// update is a no-op.
     pub rotation: Quat,
 }
 
@@ -131,11 +122,10 @@ pub fn classify_spring_chain(name: Option<&str>) -> &'static str {
     }
 }
 
-/// Build the list of [`BoneShapeSpec`]s for every humanoid
-/// bone on `model`. Bones whose computed radius falls below
-/// [`MIN_BONE_RADIUS`] — typically the 24 finger segments and
-/// the small toe bones — are dropped so the per-frame
-/// `update_character_bone_positions` call stays cheap.
+/// Bones whose computed radius falls below [`MIN_BONE_RADIUS`] —
+/// typically the 24 finger segments and the small toe bones —
+/// are dropped so the per-frame `update_character_bone_positions`
+/// call stays cheap.
 ///
 /// `actual_scale = auto_fit_scale × model_scale`. The returned
 /// dimensions are already multiplied by this value so the
@@ -182,7 +172,6 @@ pub fn compute_bone_specs(model: &VrmModel, actual_scale: f32) -> Vec<BoneShapeS
                 let rest_rotation = rest_world_rotations[joint.node];
                 let radius = joint.hit_radius.max(0.02) * scale;
 
-                // Segment-aligned capsule when a child joint exists.
                 if i + 1 < chain.joints.len() {
                     let child_joint = &chain.joints[i + 1];
                     let child_world = rest_world[child_joint.node];
@@ -209,7 +198,6 @@ pub fn compute_bone_specs(model: &VrmModel, actual_scale: f32) -> Vec<BoneShapeS
                     }
                 }
 
-                // Fallback for terminal joints or degenerate segments: Sphere
                 out.push(BoneShapeSpec {
                     bone_node: joint.node,
                     local_position,
@@ -256,10 +244,10 @@ fn compute_bone_spec(
     let bone_raw = rest_world[bone.node];
     let local_position = (bone_raw - center) * normalize_scale * actual_scale;
 
-    // Fit the shape. `fit_limb_capsule` etc. operate in the
-    // raw glTF space (where `rest_world` lives); we scale
-    // the resulting dimensions by `normalize_scale *
-    // actual_scale` so they match `local_position`'s frame.
+    // The shape-fit helpers operate in the raw glTF space
+    // (where `rest_world` lives); we scale the resulting
+    // dimensions by `normalize_scale * actual_scale` so they
+    // match `local_position`'s frame.
     let (shape, local_rotation, static_offset) = fit_bone_shape(
         bone_name,
         bone.node,
@@ -412,10 +400,8 @@ pub fn compute_rest_world_rotations(model: &VrmModel) -> Vec<Quat> {
     world_rotations
 }
 
-/// Find the closest ancestor of `bone_node` that is also a
-/// registered humanoid bone. Returns the ancestor's node
-/// index, or `None` if the bone is the top of its humanoid
-/// chain (e.g. `hips` → root).
+/// Returns `None` when the bone is the top of its humanoid chain
+/// (e.g. `hips` → root).
 #[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
 fn humanoid_parent_node(
     bone_node: usize,
@@ -433,10 +419,8 @@ fn humanoid_parent_node(
     None
 }
 
-/// Pick the shape category for `bone_name` and fit a tight
-/// bounding primitive to the weighted vertex cloud. Returns
-/// `(shape, collider_local_rotation, static_offset)` in world units. The
-/// caller is responsible for the `MIN_BONE_RADIUS` filter.
+/// Returns `(shape, collider_local_rotation, static_offset)` in world
+/// units; the caller is responsible for the `MIN_BONE_RADIUS` filter.
 fn fit_bone_shape(
     bone_name: &str,
     bone_node: usize,
@@ -528,7 +512,6 @@ fn fit_bone_shape(
                 }
             }
 
-            // Fallback if child is missing or axis is degenerate: Sphere covering the cloud
             let mut max_r = 0.0f32;
             for &p in weighted_world {
                 max_r = max_r.max((p - bone_world).length());
@@ -548,8 +531,7 @@ fn fit_bone_shape(
     }
 }
 
-/// Strip `left` / `right` from the canonical bone name so the
-/// shape table only needs one match arm per central bone.
+/// Keeps the shape table to one match arm per central bone.
 #[expect(
     dead_code,
     reason = "bone name helper retained for future collider tuning"
@@ -560,9 +542,6 @@ fn strip_side_prefix(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// Bounding-sphere fit: radius is the max distance from the
-/// bone's rest world position to any weighted vertex, then
-/// scaled.
 fn fit_sphere(weighted_world: &[Vec3], bone_world: Vec3, scale: f32) -> f32 {
     let mut max_d2 = 0.0f32;
     for &p in weighted_world {
@@ -574,7 +553,6 @@ fn fit_sphere(weighted_world: &[Vec3], bone_world: Vec3, scale: f32) -> f32 {
     max_d2.sqrt() * scale
 }
 
-/// Get the expected child bone node index for standard humanoid joints.
 pub fn get_humanoid_child_node(bone_name: &str, humanoid: &HumanoidBoneRegistry) -> Option<usize> {
     let child_name = match bone_name {
         "hips" => "spine",
@@ -606,7 +584,6 @@ pub fn get_humanoid_child_node(bone_name: &str, humanoid: &HumanoidBoneRegistry)
         .map(|(_, e)| e.node)
 }
 
-/// Fit a capsule segment between `bone_world` and `child_world`.
 #[expect(
     dead_code,
     reason = "bone name helper retained for future collider tuning"
@@ -785,7 +762,6 @@ mod tests {
         )
     }
 
-    /// Build a `MeshVertex` with the first skinning slot assigned.
     fn vertex(pos: Vec3, joint: u32, weight: f32) -> MeshVertex {
         MeshVertex {
             position: pos.to_array(),
@@ -822,9 +798,6 @@ mod tests {
         );
     }
 
-    /// With identity `inverse_bind` and identity
-    /// `joint_world_rest`, the world position of a vertex
-    /// is just its raw position.
     #[test]
     fn collect_weighted_world_positions_uses_identity_when_unskinned() {
         let vertices = vec![vertex(Vec3::new(1.0, 2.0, 3.0), 0, 1.0)];

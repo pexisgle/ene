@@ -1,5 +1,3 @@
-//! Tracing layer that renders parallel spans as a live-updating ASCII tree.
-//!
 //! Out-of-order child events (A1 → B1 → A2) still produce a correct parent/child
 //! tree because nodes are keyed by span id and re-rendered as a block.
 //!
@@ -205,7 +203,6 @@ impl TreeLogState {
     }
 }
 
-/// Custom tracing layer that drives [`TerminalUi`] tree / flat output.
 pub struct TreeLogLayer {
     state: Mutex<TreeLogState>,
 }
@@ -264,7 +261,6 @@ where
             return;
         }
 
-        // New root, or the parent is already closed / unknown.
         state.ensure_fresh_forest_for_new_root();
         state.forest.roots.push(id.clone());
         state.forest.nodes.insert(

@@ -11,7 +11,6 @@
 //!
 //! Local inference runs in the `ene-plugin-llama-cpp` provider plugin
 //! (GGUF/llama.cpp) and [`ene-voice`] (STT/TTS/VAD).
-#![warn(missing_docs)]
 #![expect(
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
@@ -26,7 +25,6 @@
     )
 )]
 
-/// Configuration types for AI providers, tasks, and retry policies.
 pub mod config;
 /// Effective context-window computation: reconciling the provider-advertised
 /// and user-configured windows, then reserving headroom for the response and
@@ -37,9 +35,7 @@ pub mod context_window;
 /// `EngineDescriptor` capability/concurrency/resource declarations and the
 /// process-wide `ResourceRegistry` admission budget.
 pub mod engine_adapter;
-/// Error types for the AI provider layer.
 pub mod error;
-/// Message and streaming chunk types (`LlmMessage`, `LlmResponseChunk`, etc.).
 pub mod message;
 /// Shared, safe model-file downloader (`ModelFetcher`) used by
 /// the local-llm plugin (GGUF) and `ene-voice` (Kokoro ONNX / `voices.bin`):
@@ -50,15 +46,10 @@ pub mod model_fetch;
 /// Provider-specific settings relocated into the `plugins.list.<name>`
 /// sections (llama.cpp mmproj/acceleration, ONNX dylib path, Kokoro profiles).
 pub mod plugin_config;
-/// Provider resolution from configuration.
 pub mod resolve;
-/// Retry policy for transient provider errors.
 pub mod retry;
-/// Conversation role enum (User, Assistant, System, Tool).
 pub mod role;
-/// Chat provider routing: task kinds to registry-backed provider instances.
 pub mod routing;
-/// Provider trait definitions (`LlmProvider`, `EmbeddingProvider`, etc.).
 pub mod traits;
 
 pub use config::{

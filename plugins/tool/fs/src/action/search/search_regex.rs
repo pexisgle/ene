@@ -11,9 +11,7 @@ use ene_plugin::prelude::*;
     side_effects = "ReadOnly"
 )]
 pub struct FsRegexTestAction {
-    /// String to test against the pattern.
     text: String,
-    /// Regex pattern to match.
     pattern: String,
 }
 

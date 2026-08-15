@@ -79,12 +79,10 @@ impl MemoryHandle {
         }
     }
 
-    /// Whether memory is enabled and both store and embedder are available.
     pub fn is_enabled(&self) -> bool {
         self.store.is_some() && self.embedder.is_some()
     }
 
-    /// Embed a text query for similarity search.
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EneRuntimeError> {
         let embedder = self.embedder.as_ref().ok_or_else(|| {
             EneRuntimeError::from(ene_ai::EmbeddingError::Init(
@@ -96,7 +94,6 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::from)
     }
 
-    /// List typed memories for the current character.
     pub async fn list_typed_memories(
         &self,
         character_id: &str,
@@ -110,7 +107,6 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// List typed memories for the memory journal with user/scope and status filters.
     pub async fn list_journal_memories(
         &self,
         options: &ene_store::MemoryJournalListOptions<'_>,
@@ -122,7 +118,6 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// Fetch a typed memory by id.
     pub async fn inspect_typed_memory(
         &self,
         id: i64,
@@ -134,7 +129,6 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// Search typed memories using hybrid scoring via [`ene_mind::MemoryJournal`].
     pub async fn search_typed_memories_hybrid(
         &self,
         character_id: &str,
@@ -161,7 +155,6 @@ impl MemoryHandle {
         .map_err(EneRuntimeError::from)
     }
 
-    /// Search typed memories and attach explainable recall reasons.
     pub async fn search_typed_memories_explained(
         &self,
         character_id: &str,
@@ -188,7 +181,6 @@ impl MemoryHandle {
         .map_err(EneRuntimeError::from)
     }
 
-    /// Update typed memory pinned flag.
     pub async fn pin_typed_memory(&self, id: i64, pinned: bool) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
         let result = store
@@ -201,7 +193,6 @@ impl MemoryHandle {
         result
     }
 
-    /// Transition typed memory lifecycle status.
     pub async fn set_memory_status(
         &self,
         id: i64,
@@ -218,7 +209,6 @@ impl MemoryHandle {
         result
     }
 
-    /// User-driven restore to active status (journal/CLI UX).
     pub async fn user_restore_typed_memory(&self, id: i64) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
         let result = store
@@ -231,7 +221,7 @@ impl MemoryHandle {
         result
     }
 
-    /// User-driven forget (`Active` → `UserDeleted`).
+    /// Moves a memory from `Active` to `UserDeleted`.
     pub async fn user_forget_typed_memory(&self, id: i64) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
         let result = store
@@ -244,7 +234,6 @@ impl MemoryHandle {
         result
     }
 
-    /// Show current affect state for a character.
     pub async fn show_affect_state(
         &self,
         character_id: &str,
@@ -256,7 +245,6 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// Reset affect state to neutral baseline.
     pub async fn reset_affect_state(&self, character_id: &str) -> Result<(), EneRuntimeError> {
         let store = self.require_store()?;
         let neutral = ene_store::AffectState::neutral(character_id);
@@ -266,7 +254,6 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// List active commitments for a character/user.
     pub async fn list_active_commitments(
         &self,
         character_id: &str,
@@ -280,8 +267,6 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// Mark a commitment as done.
-    ///
     /// # Actor consistency
     ///
     /// [`ene_mind::commitments::CommitmentLedger`] holds no in-memory cache
@@ -299,8 +284,6 @@ impl MemoryHandle {
         result
     }
 
-    /// Mark a commitment as cancelled.
-    ///
     /// Same actor-consistency guarantee as [`Self::complete_commitment`]:
     /// the ledger is stateless, so a direct store write is harmless.
     pub async fn cancel_commitment(&self, id: i64) -> Result<bool, EneRuntimeError> {
@@ -315,7 +298,6 @@ impl MemoryHandle {
         result
     }
 
-    /// Count pending (retryable) and permanent failed memory writes.
     pub async fn count_pending_memory_writes(
         &self,
         character_id: &str,
@@ -327,7 +309,6 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// List pending / permanent memory-write rows for a character.
     pub async fn list_pending_memory_writes(
         &self,
         character_id: &str,
@@ -340,8 +321,6 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// Force pending rows for a character to be due immediately.
-    ///
     /// Used by `/memory retry` so the operator can drain the queue without
     /// waiting for exponential backoff.
     pub async fn schedule_pending_memory_writes_now(
@@ -384,16 +363,12 @@ impl MemoryHandle {
         Ok(())
     }
 
-    /// Create a timestamped file backup of this store's database.
-    ///
     /// Returns an error when the store is in-memory (no path).
     pub async fn backup(&self) -> Result<std::path::PathBuf, EneRuntimeError> {
         let store = self.require_store()?;
         store.backup().await.map_err(EneRuntimeError::Memory)
     }
 
-    /// On-disk path of the store's database, when opened from a file.
-    ///
     /// Exposed (rather than the store itself) so backup/restore commands can
     /// locate the database file without reaching for the store handle.
     #[must_use]
@@ -401,7 +376,6 @@ impl MemoryHandle {
         self.store.as_ref().and_then(|s| s.path())
     }
 
-    /// Run `PRAGMA integrity_check` on the open connection.
     pub async fn check_integrity(&self) -> Result<(), EneRuntimeError> {
         let store = self.require_store()?;
         store
@@ -477,7 +451,6 @@ mod tests {
         MemoryHandle::new(None, None, ene_mind::MindMemoryConfig::default(), None)
     }
 
-    /// Assert a facade call failed with the disabled-store connection error.
     fn assert_connection_error<T: std::fmt::Debug>(result: &Result<T, EneRuntimeError>) {
         assert!(
             matches!(
@@ -660,21 +633,14 @@ mod tests {
     }
 }
 
-/// Opt-in diagnostic events (pipeline detail).
 #[derive(Debug, Clone)]
 pub enum DiagnosticEvent {
     /// Status update for a long-running pre-generation phase.
-    PipelinePhase {
-        /// Active turn.
-        turn: TurnId,
-        /// Short description of the current phase.
-        phase: String,
-    },
+    PipelinePhase { turn: TurnId, phase: String },
     /// Pre-generation timing summary.
     PipelineMetrics {
-        /// Active turn.
         turn: TurnId,
-        /// Map of phase names to elapsed time in milliseconds.
+        /// Elapsed milliseconds per phase name.
         timings: HashMap<String, u64>,
     },
     /// A panic was caught and contained by the actor supervisor.
@@ -693,7 +659,6 @@ pub enum DiagnosticEvent {
     /// recovered, paused by the circuit breaker, or disabled. `status` is a
     /// stable English contract mirroring [`ene_plugin_host::PluginHealthEvent`].
     ToolHealth {
-        /// Tool name.
         tool: String,
         /// Stable status code: `unhealthy`, `restarting`, `restarted`,
         /// `recovered`, `circuit_open`, `circuit_closed`, or `disabled`.
@@ -722,26 +687,18 @@ pub enum DiagnosticEvent {
     /// to a fallback so the user is notified that the conversation is
     /// continuing on a different backend.
     ProviderFallback {
-        /// Provider that failed.
         from: String,
-        /// Provider selected instead.
         to: String,
-        /// Reason for the fallback.
         reason: String,
     },
     /// A deferred memory-write failure or permanent queue warning.
     MemoryWrite {
-        /// Character scope for the failed write.
         character_id: String,
         /// Stable status: `failed`, `enqueued`, or `permanent`.
         status: String,
-        /// Human-readable error detail.
         message: String,
-        /// Optional pending-queue row id.
         pending_id: Option<i64>,
-        /// Current pending retry count for the character (if known).
         pending_count: Option<u64>,
-        /// Current permanent failure count for the character (if known).
         permanent_count: Option<u64>,
     },
     /// A broadcast subscriber lagged and skipped events.
@@ -782,7 +739,6 @@ pub enum DiagnosticEvent {
     },
 }
 
-/// Extracts a human-readable message from a caught panic payload.
 pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -817,7 +773,6 @@ impl DiagnosticEventReceiver {
         }));
     }
 
-    /// Non-blocking poll.
     pub fn try_recv(&mut self) -> Result<DiagnosticEvent, broadcast::error::TryRecvError> {
         match self.inner.try_recv() {
             Err(broadcast::error::TryRecvError::Lagged(n)) => {
@@ -828,7 +783,6 @@ impl DiagnosticEventReceiver {
         }
     }
 
-    /// Async receive.
     pub async fn recv(&mut self) -> Result<DiagnosticEvent, broadcast::error::RecvError> {
         match self.inner.recv().await {
             Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -849,7 +803,6 @@ pub struct EneDiagnostics {
     pub(crate) cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     pub(crate) diag_tx: broadcast::Sender<DiagnosticEvent>,
     pub(crate) memory: MemoryHandle,
-    /// Provider health monitor for failover diagnostics.
     pub(crate) health_monitor: ene_ai::ProviderHealthMonitor,
 }
 
@@ -862,22 +815,18 @@ impl std::fmt::Debug for EneDiagnostics {
 }
 
 impl EneDiagnostics {
-    /// Memory / journal query-and-mutation surface.
     pub const fn memory(&self) -> &MemoryHandle {
         &self.memory
     }
 
-    /// Provider health monitor for failover diagnostics.
     pub const fn health_monitor(&self) -> &ene_ai::ProviderHealthMonitor {
         &self.health_monitor
     }
 
-    /// Snapshot of all cached provider health reports.
     pub fn provider_health_reports(&self) -> Vec<ene_ai::ProviderHealthReport> {
         self.health_monitor.all_reports()
     }
 
-    /// Snapshot of recent provider fallback events.
     pub fn provider_fallback_history(&self) -> Vec<ene_ai::FallbackRecord> {
         self.health_monitor.fallback_history()
     }
@@ -902,7 +851,6 @@ impl EneDiagnostics {
         rx.await.map_err(|_| EneRuntimeError::ChannelClosed)
     }
 
-    /// Subscribe to diagnostic events (pipeline phases/metrics).
     pub fn subscribe(&self) -> DiagnosticEventReceiver {
         DiagnosticEventReceiver {
             inner: self.diag_tx.subscribe(),
@@ -910,7 +858,6 @@ impl EneDiagnostics {
         }
     }
 
-    /// Request a snapshot of the current actor state.
     pub async fn get_snapshot(&self) -> Result<EneStateSnapshot, PublicApiError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx

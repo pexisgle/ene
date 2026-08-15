@@ -18,7 +18,6 @@ pub type ApprovedRequests = Arc<RwLock<HashSet<String>>>;
 /// session". Cleared when the conversation changes.
 pub type AllowedPatterns = Arc<RwLock<HashSet<(String, String)>>>;
 
-/// Conversation and turn of the most recent call context.
 pub type CallContextState = Arc<RwLock<Option<(String, Option<String>)>>>;
 
 /// Fail-closed gate for permission-gated actions.
@@ -45,21 +44,18 @@ impl ApprovalGate {
         }
     }
 
-    /// Records a user approval for the given request id.
     pub fn approve_request(&self, request_id: &str) {
         self.approved_requests
             .write()
             .insert(request_id.to_string());
     }
 
-    /// Records a session-wide allow pattern.
     pub fn allow_pattern(&self, action: &str, target_pattern: &str) {
         self.allowed_patterns
             .write()
             .insert((action.to_string(), target_pattern.to_string()));
     }
 
-    /// Removes a session-wide allow pattern.
     pub fn revoke_pattern(&self, action: &str, target_pattern: &str) {
         self.allowed_patterns
             .write()
@@ -147,6 +143,5 @@ impl Default for ApprovalGate {
 /// Canonical action names used as the `action` field of
 /// `PermissionRequired` and as allow-pattern keys.
 pub mod actions {
-    /// Resetting the session counter.
     pub const COUNTER_RESET: &str = "CounterReset";
 }

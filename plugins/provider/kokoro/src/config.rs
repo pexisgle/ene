@@ -7,7 +7,6 @@ use ene_plugin::PluginError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Default speech speed multiplier.
 pub const DEFAULT_SPEED: f32 = 1.0;
 /// Smallest speed accepted, matching the desktop settings slider.
 pub const MIN_SPEED: f32 = 0.5;
@@ -18,7 +17,6 @@ pub const MAX_SPEED: f32 = 2.0;
 /// migration).
 pub const DEFAULT_PROFILE: &str = "kokoro";
 
-/// Settings for the local Kokoro ONNX TTS provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct KokoroConfig {
@@ -114,17 +112,12 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
 /// Fully-resolved model settings handed to the engine builder.
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
-    /// ONNX model file path.
     pub model_path: PathBuf,
-    /// `voices.bin` path.
     pub voices_path: PathBuf,
-    /// Effective voice name (possibly empty = first voice).
+    /// Possibly empty = first voice.
     pub voice: String,
-    /// Speech speed multiplier.
     pub speed: f32,
-    /// G2P language.
     pub language: Option<String>,
-    /// ONNX Runtime dynamic library path override.
     pub ort_dylib_path: Option<String>,
 }
 
@@ -145,18 +138,12 @@ impl ResolvedConfig {
     }
 }
 
-/// Cache key of a loaded engine; see [`ResolvedConfig::key`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineKey {
-    /// ONNX model file path.
     pub model_path: PathBuf,
-    /// `voices.bin` path.
     pub voices_path: PathBuf,
-    /// Effective voice name.
     pub voice: String,
-    /// Speech speed multiplier.
     pub speed: f32,
-    /// G2P language.
     pub language: Option<String>,
 }
 

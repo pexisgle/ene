@@ -33,7 +33,6 @@ impl EdgeBroker {
         self.token.write().clone_from(&sandbox.db_auth_token);
     }
 
-    /// Opens a WebSocket session through the host.
     pub async fn open(
         &self,
         url: &str,
@@ -69,7 +68,6 @@ pub(crate) fn broker() -> Arc<EdgeBroker> {
     Arc::clone(BROKER_ARC.get_or_init(|| Arc::new(EdgeBroker::new())))
 }
 
-/// Configures the shared broker from the host sandbox data.
 pub(crate) fn configure_broker(sandbox: &SandboxConfigData) {
     broker().configure(sandbox);
 }

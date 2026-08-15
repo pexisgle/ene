@@ -2,7 +2,6 @@ use thiserror::Error;
 
 use ene_ai::EmbeddingError;
 
-/// Errors that can occur during local embedding generation.
 #[derive(Error, Debug)]
 pub enum EneEmbeddingError {
     /// Error from the local llama.cpp embedding path (model load, forward, tokenize).

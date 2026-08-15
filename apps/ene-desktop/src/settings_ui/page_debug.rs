@@ -1,8 +1,3 @@
-//! Debug settings page.
-//!
-//! Toggles for raycast colliders, input region debug outlines, the Linux
-//! mask overlay, and read-only pipeline diagnostics (update FPS,
-//! downsample factor).
 use super::components::{section_card, setting_row, toggle_row};
 use super::widgets::{SettingsAction, apply_action};
 use crate::ai_bridge::AiBridge;

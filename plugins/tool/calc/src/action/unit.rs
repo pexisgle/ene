@@ -71,7 +71,6 @@ impl UnitDef {
 /// US/UK gallons, US survey-free acre, Celsius/Fahrenheit points) rather
 /// than rounded approximations.
 const UNITS: &[(&str, &[&str], UnitDef)] = &[
-    // Length (m)
     (
         "mm",
         &["millimeter", "millimeters", "millimetre", "millimetres"],
@@ -117,7 +116,6 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
         &["nautical_mile", "nautical_miles"],
         UnitDef::linear(Dimension::Length, 1852.0),
     ),
-    // Mass (kg)
     (
         "mg",
         &["milligram", "milligrams"],
@@ -148,7 +146,6 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
         &["pound", "pounds"],
         UnitDef::linear(Dimension::Mass, 0.453_592_37),
     ),
-    // Time (s)
     (
         "ms",
         &["millisecond", "milliseconds"],
@@ -175,7 +172,6 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
         &["weeks"],
         UnitDef::linear(Dimension::Time, 604_800.0),
     ),
-    // Volume (m³)
     (
         "ml",
         &["milliliter", "milliliters", "millilitre", "millilitres"],
@@ -207,7 +203,6 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
         ],
         UnitDef::linear(Dimension::Volume, 0.004_546_09),
     ),
-    // Speed (m/s)
     (
         "m/s",
         &[
@@ -245,7 +240,6 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
         &["foot_per_second", "feet_per_second", "fps"],
         UnitDef::linear(Dimension::Speed, 0.3048),
     ),
-    // Area (m²)
     (
         "mm2",
         &["square_millimeter", "square_millimeters"],
@@ -286,8 +280,6 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
         &["square_foot", "square_feet"],
         UnitDef::linear(Dimension::Area, 0.092_903_04),
     ),
-    // Temperature (K). C/F use an offset so 0 °C == 273.15 K holds; all
-    // three scales share the Temperature dimension.
     (
         "k",
         &["kelvin", "kelvins"],
@@ -308,7 +300,6 @@ const UNITS: &[(&str, &[&str], UnitDef)] = &[
         ],
         UnitDef::affine(Dimension::Temperature, 5.0 / 9.0, 459.67),
     ),
-    // Data (byte)
     (
         "b",
         &["byte", "bytes"],
@@ -366,15 +357,6 @@ fn unit_def(name: &str) -> Option<UnitDef> {
         .map(|(_, _, def)| *def)
 }
 
-/// Converts a value between two units from the built-in catalog.
-///
-/// Supported dimensions: length (mm, cm, m, km, in, ft, yd, mi, nmi),
-/// mass (mg, g, kg, t, oz, lb), time (ms, s, min, h, day, week),
-/// volume (ml, l, m3, `gal_us`, `gal_uk`), speed (m/s, km/h, mph, knot,
-/// ft/s), area (mm2, cm2, m2, km2, ha, acre, ft2), temperature
-/// (k, c, f), and data (b, kb, mb, gb, tb, kib, mib, gib, tib).
-/// Full unit names are accepted as aliases (e.g. "kilometers" for
-/// "km"); comparisons are case-insensitive.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "calc",
@@ -386,7 +368,6 @@ fn unit_def(name: &str) -> Option<UnitDef> {
     side_effects = "Idempotent"
 )]
 pub struct UnitConvertAction {
-    /// The numeric value to convert.
     value: f64,
     /// The source unit (e.g. "km").
     from: String,
@@ -423,7 +404,6 @@ fn convert(value: f64, from: &str, to: &str) -> Result<String, ToolError> {
         });
     }
 
-    // SI-anchored affine conversion: source to SI, SI to target.
     let si = (value + from_def.offset) * from_def.factor;
     let result = si / to_def.factor - to_def.offset;
 

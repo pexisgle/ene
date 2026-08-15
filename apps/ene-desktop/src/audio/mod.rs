@@ -48,9 +48,7 @@ use std::sync::Arc;
 pub struct AudioChunkPayload {
     /// Interleaved mono PCM samples normalized to `[-1.0, 1.0]`.
     pub pcm: Vec<f32>,
-    /// Sample rate in Hz (e.g. 24000).
     pub sample_rate: u32,
-    /// Whether this is the final audio chunk for the turn.
     pub is_final: bool,
     /// Whether the playback sink should stop immediately (barge-in) instead
     /// of draining queued audio. Only meaningful on a final marker: `true`
@@ -62,17 +60,10 @@ pub struct AudioChunkPayload {
     pub cues: Vec<ene_mind::PerformanceCue>,
 }
 
-/// Sender half used by the AI bridge pump to forward `AudioChunk`
-/// events into the playback subsystem.
 pub type AudioChunkSender = crossbeam_channel::Sender<AudioChunkPayload>;
 
-/// Receiver half owned by the playback task.
 #[cfg(feature = "voice")]
 pub type AudioChunkReceiver = crossbeam_channel::Receiver<AudioChunkPayload>;
-
-// ---------------------------------------------------------------------------
-// Voice-only shared state (gated behind the `voice` feature).
-// ---------------------------------------------------------------------------
 
 #[cfg(feature = "voice")]
 use std::collections::VecDeque;
@@ -104,7 +95,6 @@ pub struct AudioState {
     /// character's own voice is not transcribed back into a turn.
     pub tts_playing: Arc<AtomicBool>,
     pub mic_device: Option<String>,
-    /// AI config snapshot used to resolve STT / VAD provider settings.
     pub config: ene_config::EneConfig,
 }
 
@@ -158,13 +148,11 @@ pub struct VisemeState {
     cursor: Arc<Mutex<f64>>,
 }
 
-/// A queued TTS PCM chunk awaiting time-aligned playback.
 #[cfg(feature = "voice")]
 #[derive(Clone)]
 struct VisemeChunk {
     pcm: Vec<f32>,
     sample_rate: u32,
-    /// When the chunk was handed to the playback sink.
     enqueued_at: std::time::Instant,
 }
 
@@ -222,14 +210,10 @@ impl VisemeState {
         }
     }
 
-    /// Analyze the buffered audio and return the smoothed mouth-shape
-    /// weights, if any PCM has been fed.
     pub fn analyze_weights(&self) -> Option<ene_vrm::viseme::VisemeWeights> {
         self.driver.lock().analyze_weights()
     }
 
-    /// Clear the buffered audio, the pending queue, and reset the
-    /// smoothed weights.
     pub fn reset(&self) {
         self.driver.lock().reset();
         self.queue.lock().clear();
@@ -403,7 +387,6 @@ mod tests {
     fn viseme_state_reset_clears_queue() {
         let state = VisemeState::default();
         state.push_chunk(vec![0.5; 2400], 24_000);
-        // Wait and advance so the driver actually gets fed.
         std::thread::sleep(std::time::Duration::from_millis(50));
         state.advance();
         assert!(state.analyze_weights().is_some());

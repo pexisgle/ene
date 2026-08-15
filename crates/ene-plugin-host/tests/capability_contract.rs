@@ -29,7 +29,6 @@ const TEST_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// Concurrency bound passed to [`IpcPluginConnection::connect`] in tests.
 const TEST_MAX_CONCURRENT: usize = 8;
 
-/// Returns a unique socket path for a test.
 fn test_socket_path(name: &str) -> PathBuf {
     let id = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
     PathBuf::from(format!(
@@ -96,7 +95,6 @@ async fn run_mock_server(socket_path: PathBuf, capabilities: PluginCapabilities)
     }
 }
 
-/// Spawns a mock server and connects an [`IpcPluginConnection`] to it.
 async fn connect_mock(
     name: &str,
     capabilities: PluginCapabilities,

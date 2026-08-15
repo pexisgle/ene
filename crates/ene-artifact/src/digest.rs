@@ -5,14 +5,11 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{ArtifactError, Result};
 
-/// Hex-encoded SHA-256 of `data`.
 #[must_use]
 pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
-/// Verifies that the file at `path` hashes to `expected_hex`.
-///
 /// Streams the file so large artifacts are not loaded into memory.
 pub fn verify_sha256(path: &Path, expected_hex: &str) -> Result<bool> {
     let file = std::fs::File::open(path)?;
@@ -29,7 +26,6 @@ pub fn verify_sha256(path: &Path, expected_hex: &str) -> Result<bool> {
     Ok(hex::encode(hasher.finalize()) == expected_hex)
 }
 
-/// Validates that `digest` is a 64-character lowercase hex string.
 pub(crate) fn validate_digest(digest: &str) -> Result<()> {
     if digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()) {
         Ok(())

@@ -2,7 +2,6 @@ use crate::provider::CounterState;
 use ene_plugin::prelude::*;
 use std::sync::Arc;
 
-/// Increments the session counter and returns the new value.
 #[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "counter",
@@ -19,7 +18,6 @@ pub struct IncrementAction {
 }
 
 impl IncrementAction {
-    /// Creates a new `IncrementAction`.
     #[must_use]
     pub const fn new(state: Arc<CounterState>) -> Self {
         Self { state }

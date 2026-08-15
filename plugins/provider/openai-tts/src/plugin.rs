@@ -1,5 +1,3 @@
-//! `OpenAI Speech API` TTS plugin: capabilities and synthesis handler.
-
 use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;

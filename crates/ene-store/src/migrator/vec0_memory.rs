@@ -16,7 +16,6 @@
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use sea_orm_migration::prelude::*;
 
-/// Creates `vec0` ANN index tables over the existing embedding tables.
 pub struct Vec0EmbeddingIndexMigration;
 
 impl MigrationName for Vec0EmbeddingIndexMigration {

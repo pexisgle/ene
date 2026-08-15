@@ -1,9 +1,6 @@
-//! Companion commitment ledger domain model.
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Lifecycle status of a companion commitment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -29,7 +26,6 @@ impl CommitmentStatus {
         }
     }
 
-    /// Parse from a `snake_case` string, logging a warning on unrecognized values.
     pub fn from_db_str(s: &str) -> Self {
         match s {
             "active" => Self::Active,
@@ -52,38 +48,28 @@ impl CommitmentStatus {
 pub struct Commitment {
     /// Primary key (`None` until persisted).
     pub id: Option<i64>,
-    /// Character identifier.
     pub character_id: String,
     /// User identifier (may be empty).
     pub user_id: String,
-    /// Short label for the commitment.
     pub title: String,
-    /// Full description / context.
     pub description: String,
-    /// Lifecycle status.
     pub status: CommitmentStatus,
     /// Parsed due datetime, if known.
     pub due_at: Option<DateTime<Utc>>,
     /// Raw due hint from extraction (e.g. "tomorrow", "次回").
     pub due_label: Option<String>,
-    /// When the commitment was created.
     pub created_at: DateTime<Utc>,
-    /// When the commitment was last updated.
     pub updated_at: DateTime<Utc>,
     /// When the commitment was completed (`Done` only).
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// Payload for creating a new commitment row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewCommitment {
-    /// Character identifier.
     pub character_id: String,
     /// User identifier (may be empty).
     pub user_id: String,
-    /// Short label.
     pub title: String,
-    /// Full description.
     pub description: String,
     /// Initial status (typically `Active`).
     pub status: CommitmentStatus,
@@ -96,11 +82,8 @@ pub struct NewCommitment {
 /// Lightweight DTO for prompt injection (independent of vector recall).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveCommitmentPrompt {
-    /// Commitment id.
     pub id: i64,
-    /// Short label.
     pub title: String,
-    /// Full description.
     pub description: String,
     /// Raw due hint, if any.
     pub due_label: Option<String>,

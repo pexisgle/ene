@@ -35,13 +35,10 @@ use tokio_stream::StreamExt;
 /// Counter for generating unique socket paths across parallel tests.
 static SOCKET_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// Handshake timeout used by the integration tests.
 const TEST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Concurrency bound passed to [`IpcPluginConnection::connect`].
 const TEST_MAX_CONCURRENT: usize = 8;
 
-/// Provider kind both mock plugins declare.
 const MOCK_KIND: &str = "admission-mock";
 
 fn test_socket_path(name: &str) -> PathBuf {
@@ -146,7 +143,6 @@ async fn run_admission_server(
     }
 }
 
-/// Connects a host connection to an in-process mock server.
 async fn connect_mock(
     name: &str,
     resource_class: ResourceClass,
@@ -261,8 +257,6 @@ async fn same_class_providers_share_one_budget_across_plugins() {
         .await
         .expect("first provider admitted");
 
-    // The second provider's request must not be sent while the class budget
-    // is held — it waits at the admission gate.
     let second = tokio::spawn({
         let task = task.clone();
         async move { start_hold_stream(&factory_b, &task).await }
@@ -273,8 +267,6 @@ async fn same_class_providers_share_one_budget_across_plugins() {
         "second same-class provider must wait for the shared budget"
     );
 
-    // Dropping the first stream releases the permit; the queued request is
-    // then admitted.
     drop(stream_a);
     let stream_b = tokio::time::timeout(Duration::from_secs(5), second)
         .await
@@ -289,7 +281,6 @@ async fn same_class_providers_share_one_budget_across_plugins() {
     cleanup_path(&socket_b);
 }
 
-/// Distinct GPU devices are independent budgets.
 #[tokio::test]
 async fn distinct_devices_are_independent_across_plugins() {
     let admission = std::sync::Arc::new(ResourceClassAdmission::new(&[]));
@@ -318,7 +309,6 @@ async fn distinct_devices_are_independent_across_plugins() {
     cleanup_path(&socket_b);
 }
 
-/// A configured budget can admit more than one concurrent job per class.
 #[tokio::test]
 async fn configured_budget_raises_concurrency_per_class() {
     let admission = std::sync::Arc::new(ResourceClassAdmission::new(&[ResourceClassBudget {
@@ -344,7 +334,6 @@ async fn configured_budget_raises_concurrency_per_class() {
             .expect("second permit")
             .expect("second provider admitted");
 
-    // Both permits are held; a third provider fails fast (queue_depth 0).
     let result = start_hold_stream(&factory_c, &task).await;
     let Err(err) = result else {
         panic!("third provider must be rejected");
@@ -385,8 +374,6 @@ async fn permit_released_when_serving_task_dies() {
     server_a.abort();
     drain_until_end(stream_a).await;
 
-    // The permit must be free again: a fresh provider on a fresh connection
-    // is admitted promptly instead of waiting forever.
     let (socket_b, server_b, conn_b) = connect_mock("crash-b", class).await;
     let factory_b = mock_factory(conn_b, class, &admission);
     let stream_b =
@@ -433,7 +420,6 @@ async fn permit_released_when_serving_process_is_sigkilled() {
     let class = ResourceClass::Gpu { device: 0 };
     let child = spawn_child_mock_server(&socket_path, class);
 
-    // Wait for the child to bind its socket.
     tokio::time::timeout(Duration::from_secs(5), async {
         while !socket_path.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -463,7 +449,6 @@ async fn permit_released_when_serving_process_is_sigkilled() {
         .expect("first provider admitted");
     ping_conn.ping().await.expect("child mock alive mid-stream");
 
-    // A second request on the same class queues on the held permit.
     let queued = tokio::spawn({
         let task = task.clone();
         let factory = std::sync::Arc::clone(&factory);

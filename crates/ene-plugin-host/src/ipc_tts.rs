@@ -50,8 +50,6 @@ use crate::wav;
 /// the VOICEVOX default output rate).
 const CHUNK_SAMPLES: usize = 6_000;
 
-/// An `ene_ai::TtsProvider` that delegates to a plugin binary over IPC.
-///
 /// Created by [`IpcTtsProviderFactory`](crate::tts_factory::IpcTtsProviderFactory)
 /// during `PluginHostManager` startup.
 pub struct IpcTtsProvider {
@@ -68,8 +66,6 @@ pub struct IpcTtsProvider {
 }
 
 impl IpcTtsProvider {
-    /// Creates a new IPC-backed TTS provider.
-    ///
     /// `limiter` should be the same `Arc<ConcurrencyLimiter>` shared by every
     /// provider instance the owning factory creates for this (plugin, kind)
     /// pair — see the module docs.
@@ -101,8 +97,6 @@ impl IpcTtsProvider {
     }
 }
 
-/// Maps a [`PluginHostError`] into the [`AudioProviderError`] domain.
-///
 /// IPC timeouts surface as `ExecutionFailed` with a "timed out" message (the
 /// connection layer deliberately does not retry timeouts); transport
 /// failures are reported as provider errors and never retried by the TTS

@@ -12,11 +12,8 @@ use enigo::{Coordinate, Mouse};
     side_effects = "System { privileged: true }"
 )]
 pub struct MouseMoveAction {
-    /// X coordinate.
     x: i32,
-    /// Y coordinate.
     y: i32,
-    /// If true, move relative to current position (default: false).
     #[serde(default)]
     relative: Option<bool>,
 }

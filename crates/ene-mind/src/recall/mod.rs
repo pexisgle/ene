@@ -1,5 +1,3 @@
-//! Recall planning for typed cognitive memory.
-//!
 //! This module produces query plans from the current turn context. It does not
 //! execute database searches; callers pass the resulting [`RecallPlan`] to the
 //! memory store or later recall pipeline stages.

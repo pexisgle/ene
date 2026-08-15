@@ -19,16 +19,12 @@ fn default_state() -> Arc<CalendarState> {
     keywords_primary = "calendar, create, add, event, appointment, schedule",
     side_effects = "Network { external: false }"
 )]
-/// Action to create an event in a calendar.
 pub struct CreateEventAction {
     /// Id of the calendar returned by ``calendar.list_calendars``.
     calendar_id: String,
-    /// Human-readable event title.
     title: String,
-    /// Free-form notes.
     #[serde(default)]
     description: String,
-    /// Location string.
     #[serde(default)]
     location: String,
     /// Start time (RFC3339 with offset, e.g. 2026-08-03T10:00:00+09:00).
@@ -38,7 +34,6 @@ pub struct CreateEventAction {
     /// IANA timezone name for display; defaults to the start offset.
     #[serde(default)]
     timezone: String,
-    /// Attendee identifiers.
     #[serde(default)]
     attendees: Vec<String>,
     /// Event status: 'confirmed' (default) or 'tentative'.
@@ -51,7 +46,6 @@ pub struct CreateEventAction {
 }
 
 impl CreateEventAction {
-    /// Creates a new `CreateEventAction`.
     #[must_use]
     pub const fn new(state: Arc<CalendarState>) -> Self {
         Self {

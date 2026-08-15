@@ -21,7 +21,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::db_server::{DbIpcServer, DbServerError};
 
-/// Per-plugin registration for the `db` host service.
 #[derive(Debug, Clone)]
 pub struct DbPluginRegistration {
     /// Plugin binary name (also used as the table-name prefix stem).
@@ -60,7 +59,6 @@ impl OpenFailureTracker {
     }
 }
 
-/// Shared host-service listener that multiplexes passenger services.
 pub struct HostServiceServer {
     socket_path: PathBuf,
     db: DatabaseConnection,
@@ -78,7 +76,6 @@ pub struct HostServiceServer {
 }
 
 impl HostServiceServer {
-    /// Creates a host-service server bound to `socket_path`.
     pub fn new(
         db: DatabaseConnection,
         socket_path: PathBuf,
@@ -94,26 +91,23 @@ impl HostServiceServer {
         }
     }
 
-    /// Registers the handler that serves `capability` passenger sessions.
     #[must_use]
     pub fn with_capability_handler(mut self, handler: Arc<dyn CapabilityServiceHandler>) -> Self {
         self.capability = Some(handler);
         self
     }
 
-    /// Registers the handler that serves v8 broker passenger sessions.
     #[must_use]
     pub fn with_broker_handler(mut self, handler: SharedBrokerHandler) -> Self {
         self.broker = Some(handler);
         self
     }
 
-    /// Returns the socket path this server listens on.
     pub fn socket_path(&self) -> &std::path::Path {
         &self.socket_path
     }
 
-    /// Runs the accept loop until the task is cancelled.
+    /// Runs until the task is cancelled.
     pub async fn run(self) -> Result<(), DbServerError> {
         #[cfg(unix)]
         if self.socket_path.exists() {
@@ -394,7 +388,6 @@ impl HostServiceServer {
     }
 }
 
-/// Frame sink that writes streaming broker responses to the session socket.
 struct StreamSink<'a> {
     stream: &'a mut ene_plugin_proto::transport::IpcStream,
 }
@@ -406,7 +399,6 @@ impl ene_plugin_proto::BrokerSink for StreamSink<'_> {
     }
 }
 
-/// Socket path for the shared host-service endpoint.
 pub fn host_service_socket_path() -> PathBuf {
     #[cfg(unix)]
     {

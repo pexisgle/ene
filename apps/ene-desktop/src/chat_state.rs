@@ -1,5 +1,3 @@
-//! Chat window state: message list, input draft, and in-flight dialogs.
-
 use std::fmt::Write as _;
 
 use ene_runtime::{HistoryEntry, Role};

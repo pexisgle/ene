@@ -64,17 +64,13 @@ pub enum EneCommand {
         turn: TurnId,
     },
     /// Cancel a specific in-flight turn.
-    Cancel {
-        /// Turn to cancel.
-        turn: TurnId,
-    },
+    Cancel { turn: TurnId },
     /// Shut down the actor and clean up background tasks.
     Shutdown,
     /// Submit a permission decision for a pending destructive operation.
     PermissionDecision {
         /// The `request_id` from a prior `PermissionRequired` event.
         request_id: RequestId,
-        /// The user's decision.
         decision: PermissionDecision,
     },
     /// List all session-wide permission grants.
@@ -96,54 +92,40 @@ pub enum EneCommand {
     },
     /// Run a connector connectivity check (read-only, audited).
     ConnectorCheck {
-        /// Connector to probe.
         id: ConnectorId,
-        /// Reply channel carrying the check result.
         reply: oneshot::Sender<Result<HealthStatus, ConnectorError>>,
     },
     /// Connect a connector (permission-gated, audited).
     ConnectorConnect {
-        /// Connector to authenticate with.
         id: ConnectorId,
         /// Credential handled inside the protected store boundary.
         credential: AccountCredentials,
-        /// Reply channel carrying the authenticated accounts.
         reply: oneshot::Sender<Result<Vec<AuthenticatedAccount>, ConnectorError>>,
     },
     /// Disconnect one account of a connector (permission-gated, audited).
     ConnectorDisconnect {
-        /// Connector owning the account.
         id: ConnectorId,
-        /// Account id to disconnect.
         account: String,
-        /// Reply channel carrying the outcome.
         reply: oneshot::Sender<Result<(), ConnectorError>>,
     },
     /// Record a per-action connector grant (audited).
     ConnectorGrant {
-        /// Connector owning the action.
         id: ConnectorId,
-        /// Action being granted.
         action: String,
         /// Target prefix the grant covers.
         target_pattern: String,
-        /// Reply channel carrying the outcome.
         reply: oneshot::Sender<Result<(), ConnectorError>>,
     },
     /// Remove a per-action connector grant (audited).
     ConnectorRevoke {
-        /// Connector owning the action.
         id: ConnectorId,
-        /// Action being revoked.
         action: String,
-        /// Target prefix being revoked.
         target_pattern: String,
         /// Reply channel reporting whether a grant was removed.
         reply: oneshot::Sender<Result<bool, ConnectorError>>,
     },
     /// Undo the most recent reversible tool operation.
     Undo {
-        /// Reply channel carrying the undo report.
         reply: oneshot::Sender<crate::undo::UndoReport>,
     },
     /// Submit a user-input response for a pending interactive tool.
@@ -155,7 +137,6 @@ pub enum EneCommand {
     },
     /// Request a read-only snapshot of the current actor state (for CLI queries).
     GetSnapshot {
-        /// Reply channel for the snapshot.
         reply: oneshot::Sender<super::event::EneStateSnapshot>,
     },
     /// Request the full conversation history only.
@@ -165,7 +146,6 @@ pub enum EneCommand {
     /// large payload that stays mailbox-based, and this command lets a
     /// consumer fetch just it without paying for a full snapshot.
     GetHistory {
-        /// Reply channel carrying the history entries.
         reply: oneshot::Sender<Vec<ene_mind::HistoryEntry>>,
     },
     /// Manually trigger a compression-only pass over the current conversation.
@@ -174,17 +154,14 @@ pub enum EneCommand {
     /// does **not** start a new session: the session id is unchanged and the
     /// result is a [`CompressionResult`], not a [`ene_mind::SplitResult`].
     CompressContext {
-        /// Result channel carrying the compression result or an error.
         reply: oneshot::Sender<Result<CompressionResult, EneRuntimeError>>,
     },
     /// List all tools in the active tool registry.
     ListTools {
-        /// Reply channel for the tools.
         reply: oneshot::Sender<Vec<ToolSpec>>,
     },
     /// Search tools in the active tool registry using RAG if available.
     SearchTools {
-        /// The query to search for.
         query: String,
         /// Reply channel for the matching tools. `Err(EneRuntimeError::Busy)`
         /// when the actor's `search_tasks` `JoinSet` is at capacity (Stage 8).
@@ -192,14 +169,11 @@ pub enum EneCommand {
     },
     /// Call a tool by name with JSON-encoded arguments.
     CallTool {
-        /// The tool name.
         name: String,
-        /// JSON-encoded arguments.
         arguments: String,
         /// Active turn for call-context propagation. `None` for
         /// diagnostic / background tool calls outside a turn.
         turn: Option<TurnId>,
-        /// Reply channel.
         reply: oneshot::Sender<Result<String, EneRuntimeError>>,
     },
     /// Fire a schedule occurrence (sent by the scheduler timer task).
@@ -214,18 +188,15 @@ pub enum EneCommand {
     ScheduleConfirmationTimeout {
         /// The request id from the emitted `PermissionRequired` event.
         request_id: RequestId,
-        /// Owning schedule.
         schedule_id: i64,
         /// The run waiting for approval.
         run_id: i64,
     },
     /// A scheduled tool action finished (sent by the spawned tool task).
     ScheduleToolFinished {
-        /// Owning schedule.
         schedule_id: i64,
         /// The run that executed the action.
         run_id: i64,
-        /// The turn the action ran under.
         turn: TurnId,
         /// The tool name, for the `ToolCallResult` event.
         tool_name: String,
@@ -237,9 +208,7 @@ pub enum EneCommand {
     },
     /// Create a schedule.
     AddSchedule {
-        /// The new schedule definition.
         new: ene_core::NewSchedule,
-        /// Reply with the persisted schedule.
         reply: oneshot::Sender<Result<ene_core::Schedule, EneRuntimeError>>,
     },
     /// List all schedules.
@@ -249,27 +218,21 @@ pub enum EneCommand {
     },
     /// List recent run history for one schedule.
     ListScheduleRuns {
-        /// Owning schedule.
         schedule_id: i64,
         /// Maximum number of rows, newest first.
         limit: u64,
-        /// Reply with the run rows.
         reply: oneshot::Sender<Result<Vec<ene_core::ScheduleRun>, EneRuntimeError>>,
     },
     /// Delete a schedule and its history.
     DeleteSchedule {
-        /// Schedule to delete.
         schedule_id: i64,
-        /// Reply with whether a row was removed.
         reply: oneshot::Sender<Result<bool, EneRuntimeError>>,
     },
     /// Pause or resume a schedule.
     SetScheduleEnabled {
-        /// Schedule to toggle.
         schedule_id: i64,
         /// Whether it may fire.
         enabled: bool,
-        /// Reply with whether a row was updated.
         reply: oneshot::Sender<Result<bool, EneRuntimeError>>,
     },
     /// Cancel a deferred (background) tool task by id.
@@ -290,13 +253,11 @@ pub enum EneCommand {
     /// serialized with turn execution and emitted as a
     /// [`super::event::LifecycleEvent::CandidateChanged`] audit event.
     ResolveCandidate {
-        /// Candidate row id.
         id: i64,
         /// Target workflow status (`approved` or `rejected`).
         status: ene_store::PendingCandidateStatus,
         /// Active turn context for the audit event (`None` outside a turn).
         turn: Option<TurnId>,
-        /// Reply channel.
         reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
     },
     /// Edit the user-editable fields of a still-pending memory candidate.
@@ -305,13 +266,11 @@ pub enum EneCommand {
     /// serialized with turn execution and emitted as a
     /// [`super::event::LifecycleEvent::CandidateChanged`] audit event.
     EditCandidate {
-        /// Candidate row id.
         id: i64,
         /// New field values (validated before any write).
         edit: ene_store::PendingCandidateEdit,
         /// Active turn context for the audit event (`None` outside a turn).
         turn: Option<TurnId>,
-        /// Reply channel.
         reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
     },
     /// Edit a persisted typed memory in place (title / content / kind /
@@ -323,13 +282,11 @@ pub enum EneCommand {
     /// actor also refreshes the row's embeddings in the background so vector
     /// recall does not serve stale text.
     EditMemory {
-        /// Typed-memory row id.
         id: i64,
         /// New field values (validated before any write).
         edit: ene_store::MemoryEdit,
         /// Active turn context for the audit event (`None` outside a turn).
         turn: Option<TurnId>,
-        /// Reply channel.
         reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
     },
     /// Set the salience (importance / Preference weight) of a typed memory.
@@ -338,13 +295,11 @@ pub enum EneCommand {
     /// is serialized with turn execution and emitted as a
     /// [`super::event::LifecycleEvent::MemoryLedgerChanged`] audit event.
     SetMemorySalience {
-        /// Typed-memory row id.
         id: i64,
         /// New salience value (clamped into `0.0..=1.0` by the store).
         salience: f32,
         /// Active turn context for the audit event (`None` outside a turn).
         turn: Option<TurnId>,
-        /// Reply channel.
         reply: oneshot::Sender<Result<(), crate::public_api::PublicApiError>>,
     },
     /// Invalidate the Tool RAG index, forcing re-embedding on next query.
@@ -359,16 +314,12 @@ pub enum EneCommand {
     WorkspaceCancelSync,
     /// Current workspace index + sync status.
     WorkspaceStatus {
-        /// Reply channel carrying the status view.
         reply: oneshot::Sender<crate::workspace::WorkspaceStatusView>,
     },
     /// Hybrid search over the permitted workspace folders.
     WorkspaceSearch {
-        /// Query text.
         query: String,
-        /// Maximum number of hits.
         limit: usize,
-        /// Reply channel carrying the hits or an error.
         reply: oneshot::Sender<Result<Vec<ene_core::WorkspaceChunkHit>, EneRuntimeError>>,
     },
     /// Persist the `CCv3` character-memory content hash after startup warmup.
@@ -380,7 +331,6 @@ pub enum EneCommand {
     },
     /// Replace the loaded character card.
     SetCharacter {
-        /// New character card.
         card: Box<CharacterCardV3>,
         /// Confirmation channel.
         reply: oneshot::Sender<Result<(), EneRuntimeError>>,
@@ -420,17 +370,14 @@ pub enum EneCommand {
     ApplySettings {
         /// Boxed payload to keep [`EneCommand`] small.
         request: Box<crate::settings::SettingsApplyRequest>,
-        /// Reply channel carrying the apply outcome.
         reply: oneshot::Sender<Result<crate::settings::SettingsApplyResult, EneRuntimeError>>,
     },
     /// Fetch settings snapshots for every configured plugin (plugin center).
     GetPluginSnapshots {
-        /// Reply channel carrying the snapshots.
         reply: oneshot::Sender<Vec<ene_plugin_host::PluginSettingsSnapshot>>,
     },
     /// Fetch the host-side artifact snapshot (Engines page).
     GetArtifactSnapshot {
-        /// Reply channel carrying the snapshot.
         reply: oneshot::Sender<Vec<ene_plugin_host::ArtifactSnapshot>>,
     },
     /// Install or update an artifact from the signed catalog (Engines page).
@@ -439,7 +386,6 @@ pub enum EneCommand {
         artifact_id: String,
         /// Optional version pin; `None` installs the catalog default.
         version: Option<String>,
-        /// Reply channel carrying the installed artifact view.
         reply: oneshot::Sender<Result<ene_plugin_host::InstalledArtifactView, String>>,
     },
     /// Remove an installed artifact (Engines page).
@@ -474,7 +420,6 @@ pub enum EneCommand {
     RollbackArtifact {
         /// Artifact id from the catalog.
         artifact_id: String,
-        /// Reply channel carrying the rolled-back artifact view.
         reply: oneshot::Sender<Result<ene_plugin_host::InstalledArtifactView, String>>,
     },
     /// Force-refresh the signed catalog (Engines page).
@@ -485,37 +430,28 @@ pub enum EneCommand {
     /// Fetch dynamic config options for one plugin config path
     /// (plugin-center wiring of `ListConfigOptions`).
     ListPluginConfigOptions {
-        /// Plugin name.
         plugin: String,
         /// Dotted path inside the plugin config blob.
         path: String,
-        /// Reply channel carrying the options.
         reply: oneshot::Sender<Result<Vec<ene_plugin_proto::ConfigOption>, EneRuntimeError>>,
     },
     /// Validate a plugin config value through the plugin's own validator
     /// (plugin-center wiring of `ValidateConfig`).
     ValidatePluginConfig {
-        /// Plugin name.
         plugin: String,
-        /// Proposed config value.
         value: serde_json::Value,
         /// Reply channel carrying field-level errors (empty = valid).
         reply: oneshot::Sender<Result<Vec<ene_plugin_proto::ConfigFieldError>, EneRuntimeError>>,
     },
     /// List plugin binaries discovered on disk but not configured.
-    GetDiscoveredPlugins {
-        /// Reply channel carrying the names.
-        reply: oneshot::Sender<Vec<String>>,
-    },
+    GetDiscoveredPlugins { reply: oneshot::Sender<Vec<String>> },
     /// List MCP server liveness statuses (plugin center).
     ListMcpStatuses {
-        /// Reply channel carrying the statuses.
         reply: oneshot::Sender<Vec<ene_plugin_host::McpServerStatus>>,
     },
     /// Answer a schedule-run confirmation prompt (approve or deny) from the
     /// Schedules management page, by run identity rather than request id.
     ResolveScheduleConfirmation {
-        /// Owning schedule.
         schedule_id: i64,
         /// The run waiting for confirmation.
         run_id: i64,
@@ -527,11 +463,9 @@ pub enum EneCommand {
     },
     /// Update an existing schedule's editable fields.
     UpdateSchedule {
-        /// Schedule row id.
         id: i64,
         /// New field values (validated exactly like [`EneCommand::AddSchedule`]).
         new: ene_core::NewSchedule,
-        /// Reply channel carrying the updated schedule.
         reply: oneshot::Sender<Result<ene_core::Schedule, EneRuntimeError>>,
     },
     /// Prepare a screen-image vision summary.
@@ -548,7 +482,6 @@ pub enum EneCommand {
         /// Non-image context hints for the summary prompt (layout, window
         /// heuristic, OCR text). Small text only — never pixel data.
         hints: crate::vision::ScreenSummaryHints,
-        /// Reply channel.
         reply: oneshot::Sender<Result<VisionPrepared, crate::public_api::PublicApiError>>,
     },
     /// Stash the *encoded* (JPEG data URI) screen frame for the next

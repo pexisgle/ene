@@ -1,5 +1,3 @@
-//! Turn lifecycle input/output types for cognitive runtime integration.
-
 use std::sync::Arc;
 
 use ene_ai::{EmbeddingProvider, LlmMessage, LlmProvider, Role};
@@ -27,9 +25,7 @@ pub fn interruption_note(state: &InterruptedState) -> String {
 /// A single history entry for prompt composition.
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
-    /// Speaker role.
     pub role: Role,
-    /// Message text.
     pub content: String,
 }
 
@@ -46,21 +42,16 @@ impl HistoryEntry {
 
 /// Input context for a single conversation turn.
 pub struct TurnContext<'a> {
-    /// Cognitive runtime configuration.
     pub config: &'a MindConfig,
     /// Character card for identity kernel compilation.
     pub card: &'a CharacterCardV3,
-    /// Character / card identifier.
     pub character_id: &'a str,
-    /// User display name.
     pub user_name: &'a str,
     /// Session identifier for logging.
     pub session_id: &'a str,
     /// Shared L1 recall cache for this session (None disables caching).
     pub recall_cache: Option<&'a crate::recall::MemoryRecallCache>,
-    /// Current user message.
     pub user_input: &'a str,
-    /// Recent conversation history.
     pub history: &'a [HistoryEntry],
     /// Index of the greeting this session started with (`0` = `first_mes`,
     /// `i+1` = `alternate_greetings[i]`); `None` when no greeting was chosen.
@@ -71,7 +62,6 @@ pub struct TurnContext<'a> {
     /// Workspace document index (optional; only used when the RAG config
     /// enables workspace context injection).
     pub workspace: Option<&'a dyn WorkspaceDocumentPort>,
-    /// Query embedding for recall (optional).
     pub query_embedding: Option<&'a [f32]>,
     /// Embedding provider for model name.
     pub embedder: Option<&'a Arc<dyn EmbeddingProvider>>,
@@ -113,7 +103,6 @@ pub struct TurnContext<'a> {
 /// Output of pre-turn analysis and recall planning.
 #[derive(Debug, Clone)]
 pub struct PreTurnOutput {
-    /// Generated recall plan.
     pub recall_plan: RecallPlan,
     /// Current affect state loaded or defaulted.
     pub affect: AffectState,
@@ -128,15 +117,10 @@ pub struct PreTurnOutput {
 /// Metadata about a composed prompt packet.
 #[derive(Debug, Clone, Default)]
 pub struct PromptPacketMeta {
-    /// Whether the identity kernel section was included.
     pub identity_kernel_included: bool,
-    /// Number of style examples injected.
     pub style_example_count: usize,
-    /// Number of recalled memories injected.
     pub recalled_memory_count: usize,
-    /// Whether the post-history PHI block was included.
     pub post_history_included: bool,
-    /// Whether an active scene summary was included.
     pub scene_summary_included: bool,
     /// Sections dropped by the budget manager.
     pub dropped_sections: Vec<crate::prompt_packet::PromptSectionKind>,
@@ -187,14 +171,11 @@ pub struct ComposePrefetch {
 
 /// Post-turn input for memory writing and affect persistence.
 pub struct PostTurnInput<'a> {
-    /// Turn extraction input.
     pub turn: TurnInput<'a>,
     /// Affect state after the turn (borrowed to avoid cloning in the
     /// deferred/owned path, see [`OwnedPostTurnInput::as_borrowed`]).
     pub affect: &'a AffectState,
-    /// Character identifier.
     pub character_id: &'a str,
-    /// User identifier.
     pub user_id: &'a str,
     /// Source turn that produced this post-turn input, when available.
     ///
@@ -211,24 +192,18 @@ pub struct PostTurnInput<'a> {
 /// Owned turn input for deferred post-turn memory writing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnedTurnInput {
-    /// The user's message text.
     pub user_message: String,
     /// The assistant's response (if available).
     pub assistant_message: Option<String>,
-    /// Tool call results from this turn.
     pub tool_results: Vec<ToolResultSummary>,
 }
 
 /// Owned post-turn input for deferred memory writing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnedPostTurnInput {
-    /// Turn extraction input.
     pub turn: OwnedTurnInput,
-    /// Affect state after the turn.
     pub affect: AffectState,
-    /// Character identifier.
     pub character_id: String,
-    /// User identifier.
     pub user_id: String,
     /// Source turn that produced this post-turn input, when available.
     ///
@@ -245,7 +220,6 @@ pub struct OwnedPostTurnInput {
 }
 
 impl OwnedPostTurnInput {
-    /// Borrows as a [`PostTurnInput`] for synchronous memory-writer calls.
     pub fn as_borrowed(&self) -> PostTurnInput<'_> {
         PostTurnInput {
             turn: TurnInput {

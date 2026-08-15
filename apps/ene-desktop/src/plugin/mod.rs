@@ -1,5 +1,3 @@
-//! # Plugin set for `ene-desktop`
-//!
 //! Each plugin owns the resources, components, messages, and
 //! systems for one slice of the application. They are added to the
 //! `App` in [`crate::app::CorePlugin::build`].

@@ -5,8 +5,6 @@ use ene_plugin::{ActionSetProvider, ToolAction};
 use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
 use std::sync::Arc;
 
-/// Built-in calendar tool provider.
-///
 /// Built on [`ActionSetProvider`]: `list_specs`/`call_tool` dispatch is
 /// handled generically, and the calendar-specific state — DB sandbox
 /// socket/token and the approval gate — is threaded in via hooks.
@@ -15,7 +13,6 @@ pub struct CalendarToolProvider {
 }
 
 impl CalendarToolProvider {
-    /// Creates a new `CalendarToolProvider`.
     #[must_use]
     pub fn new() -> Self {
         let state = Arc::new(CalendarState::new());

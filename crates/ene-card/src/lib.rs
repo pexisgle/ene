@@ -1,11 +1,8 @@
-//! # ene-card
-//!
 //! Character card containers (`CCv3` PNG chunks, `CHARX` archives), card
 //! import/export, per-character settings, and localized card diffs.
 //!
 //! Depends on `ene-config` only for shared error, path, and language-alias
 //! primitives; no settings-loading logic lives here.
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(

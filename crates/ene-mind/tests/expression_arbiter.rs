@@ -1,5 +1,3 @@
-//! Expression arbiter integration tests (resolution, hysteresis, classifier hints).
-
 #![expect(
     clippy::default_trait_access,
     reason = "tests use explicit Default::default for clarity"

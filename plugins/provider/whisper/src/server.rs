@@ -16,12 +16,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::WhisperConfig;
 
-/// How often startup waits re-probe `/health` while the sidecar boots.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// Health probe timeout per attempt.
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// The spawned sidecar child plus connection details clients need.
 pub(crate) struct SidecarState {
     child: Mutex<Option<tokio::process::Child>>,
     base_url: String,
@@ -264,7 +261,6 @@ fn sidecar_binary_name() -> &'static str {
     }
 }
 
-/// Picks a free loopback TCP port by binding and releasing a listener.
 fn pick_free_port() -> Result<u16, PluginError> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .map_err(|e| PluginError::provider(format!("bind loopback port: {e}")))?;

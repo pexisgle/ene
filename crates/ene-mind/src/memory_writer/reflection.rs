@@ -16,11 +16,8 @@ use ene_core::{
 };
 use parking_lot::Mutex;
 
-/// Upper bound on outcome records consumed per reflection pass.
 const OUTCOME_WINDOW_LIMIT: usize = 500;
 
-/// Pipeline that accumulates memory outcomes and periodically generates
-/// self-reflection memories.
 #[derive(Debug)]
 pub struct SelfReflectionPipeline {
     config: ReflectionConfig,
@@ -34,7 +31,6 @@ struct PipelineState {
 }
 
 impl SelfReflectionPipeline {
-    /// Create a new pipeline from the given configuration.
     pub fn new(config: ReflectionConfig) -> Self {
         Self {
             config,
@@ -45,8 +41,6 @@ impl SelfReflectionPipeline {
         }
     }
 
-    /// Record the outcome of an applied arbiter decision.
-    ///
     /// Only decisions with an `outcome_rating` and a valid `inserted_id` are
     /// recorded (neutral 0.0 ratings are stored but contribute to neither
     /// strategy bucket). The record is persisted through the store so the
@@ -85,8 +79,6 @@ impl SelfReflectionPipeline {
         }
     }
 
-    /// Returns `true` when enough turns and outcomes have accumulated to
-    /// trigger a reflection generation pass.
     pub fn should_reflect(&self) -> bool {
         let s = self.state.lock();
         s.turn_counter >= self.config.interval_turns && s.outcome_count >= self.config.min_outcomes
@@ -131,8 +123,6 @@ impl SelfReflectionPipeline {
         s.outcome_count = 0;
     }
 
-    /// Generate reflection memories from accumulated outcomes and persist them.
-    ///
     /// Returns the list of newly created [`NewMemoryItem`]s (already inserted
     /// into the store). The window is every unconsumed outcome for the
     /// character, so rows recorded by calls that did not meet the gate — and
@@ -201,8 +191,6 @@ impl SelfReflectionPipeline {
         items
     }
 
-    /// Build reflection memory items from a batch of outcomes.
-    ///
     /// Outcomes with `rating > 0.3` contribute to "Successful strategies";
     /// outcomes with `rating < -0.3` contribute to "Strategies to avoid".
     pub fn build_reflections(
@@ -287,8 +275,6 @@ async fn persist_outcome_row(store: &dyn MemoryPort, outcome: &MemoryOutcome) ->
     }
 }
 
-/// Record the outcome of an approved deferred candidate.
-///
 /// Approval persists the candidate outside the arbiter (the store's
 /// `approve_pending_candidate` path), so the rating carried on the pending
 /// row is written back here; the row joins the character's unconsumed pool
@@ -319,8 +305,6 @@ pub async fn record_approved_outcome(
     .await;
 }
 
-/// Load active reflection memories for a character (up to 50).
-///
 /// Only [`ene_core::MemoryStatus::Active`] reflections participate in the
 /// recall adjustment: superseded rows are duplicates, and faded/archived
 /// reflections are no longer the current strategy signal. Filtering here keeps
@@ -356,8 +340,6 @@ pub async fn load_reflection_memories(
     }
 }
 
-/// Adjust scored memory totals based on reflection strategy matches.
-///
 /// Memories whose titles match "Successful strategies" content are boosted by
 /// `success_boost`; those matching "Strategies to avoid" are penalized by
 /// `failure_penalty`. The applied factor is recorded in
@@ -589,7 +571,6 @@ mod tests {
     async fn generate_reflection_aggregates_across_calls_and_restarts() {
         let port = InMemoryMemoryPort::new();
 
-        // First call records one outcome but never meets the gate.
         let first_call = SelfReflectionPipeline::new(config(1, 2));
         first_call
             .record_outcome(
@@ -602,8 +583,6 @@ mod tests {
             .await;
         assert!(!first_call.should_reflect());
 
-        // A fresh pipeline (next call, or a restart) aggregates the earlier
-        // row together with its own once the gate is met.
         let second_call = SelfReflectionPipeline::new(config(1, 2));
         second_call
             .record_outcome(
@@ -865,7 +844,6 @@ mod tests {
         assert!((penalized.breakdown.reflection_multiplier - 0.5).abs() < f32::EPSILON);
         assert!((penalized.breakdown.total - 0.5).abs() < f32::EPSILON);
 
-        // Unmatched memories keep the neutral multiplier and unchanged total.
         let untouched = &memories[2];
         assert!((untouched.breakdown.reflection_multiplier - 1.0).abs() < f32::EPSILON);
         assert!((untouched.breakdown.total - 1.0).abs() < f32::EPSILON);

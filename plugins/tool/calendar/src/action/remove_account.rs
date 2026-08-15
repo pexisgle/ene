@@ -18,7 +18,6 @@ fn default_state() -> Arc<CalendarState> {
     keywords_primary = "calendar, remove, unlink, disconnect, delete, account",
     side_effects = "Destructive"
 )]
-/// Action to unlink a calendar account.
 pub struct RemoveAccountAction {
     /// Id of the calendar returned by ``calendar.list_calendars``.
     calendar_id: String,
@@ -29,7 +28,6 @@ pub struct RemoveAccountAction {
 }
 
 impl RemoveAccountAction {
-    /// Creates a new `RemoveAccountAction`.
     #[must_use]
     pub const fn new(state: Arc<CalendarState>) -> Self {
         Self {

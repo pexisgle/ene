@@ -15,9 +15,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::CapabilityRef;
 use crate::transport::IpcStream;
 
-/// One call from a consumer plugin to a capability provided by another
-/// plugin.
-///
 /// `capability` is the provider's declared reference (`gguf-runner@1`),
 /// `method` and `payload` are defined by that capability's contract — the
 /// host treats the payload as opaque and never interprets it.
@@ -45,7 +42,6 @@ pub struct CapabilityCall {
 pub enum CapabilityCallErrorCode {
     /// The calling plugin did not declare a matching `requires` entry.
     Forbidden,
-    /// No provider for the requested capability is registered.
     NoProvider,
     /// The capability reference or method payload is malformed.
     InvalidRequest,
@@ -58,21 +54,16 @@ pub enum CapabilityCallErrorCode {
     Timeout,
     /// The provider connection failed or the provider crashed.
     Transport,
-    /// An internal host error.
     Internal,
 }
 
-/// A capability call failure with a stable code and a diagnostic message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityCallError {
-    /// Stable failure category.
     pub code: CapabilityCallErrorCode,
-    /// Human-readable diagnostic detail.
     pub message: String,
 }
 
 impl CapabilityCallError {
-    /// Creates an error with the given category and message.
     #[must_use]
     pub fn new(code: CapabilityCallErrorCode, message: impl Into<String>) -> Self {
         Self {
@@ -86,21 +77,17 @@ impl CapabilityCallError {
 /// error. Shared by the provider IPC hop and the host-service passenger.
 pub type CapabilityCallResult = Result<serde_json::Value, CapabilityCallError>;
 
-/// Requests on the host-service `capability` passenger.
-///
 /// After [`crate::HostServiceResponse::OpenAck`], each frame is one call and
 /// the peer answers with exactly one [`CapabilityServiceResponse`] (strict
 /// request/response alternation, like the `db` passenger).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CapabilityServiceRequest {
-    /// Invoke a capability method through the host.
     Call {
         /// The call to mediate.
         call: CapabilityCall,
     },
 }
 
-/// Responses on the host-service `capability` passenger.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CapabilityServiceResponse {
     /// Outcome of the preceding [`CapabilityServiceRequest::Call`].
@@ -110,7 +97,6 @@ pub enum CapabilityServiceResponse {
     },
 }
 
-/// Writes a length-prefixed JSON [`CapabilityServiceRequest`].
 pub async fn write_capability_service_request<W: AsyncWrite + Unpin>(
     writer: &mut W,
     request: &CapabilityServiceRequest,
@@ -118,14 +104,12 @@ pub async fn write_capability_service_request<W: AsyncWrite + Unpin>(
     write_framed_json(writer, request).await
 }
 
-/// Reads a length-prefixed JSON [`CapabilityServiceRequest`].
 pub async fn read_capability_service_request<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> std::io::Result<Option<CapabilityServiceRequest>> {
     read_framed_json(reader).await
 }
 
-/// Writes a length-prefixed JSON [`CapabilityServiceResponse`].
 pub async fn write_capability_service_response<W: AsyncWrite + Unpin>(
     writer: &mut W,
     response: &CapabilityServiceResponse,
@@ -133,7 +117,6 @@ pub async fn write_capability_service_response<W: AsyncWrite + Unpin>(
     write_framed_json(writer, response).await
 }
 
-/// Reads a length-prefixed JSON [`CapabilityServiceResponse`].
 pub async fn read_capability_service_response<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> std::io::Result<Option<CapabilityServiceResponse>> {
@@ -197,8 +180,6 @@ where
     Ok(Some(value))
 }
 
-/// Server-side interface for the host-service `capability` passenger.
-///
 /// Implemented by the host's mediation layer ([`CapabilityMediator`] in
 /// `ene-plugin-host`); the shared host-service acceptor in `ene-store`
 /// authenticates the session and hands the stream to this interface. The
@@ -206,8 +187,6 @@ where
 /// other; it is a wire-session interface with no business logic.
 #[async_trait]
 pub trait CapabilityServiceHandler: Send + Sync {
-    /// Serves one authenticated capability session until EOF or an I/O error.
-    ///
     /// `consumer` is the plugin name derived from the session's auth token.
     async fn serve(&self, stream: IpcStream, consumer: String) -> std::io::Result<()>;
 }

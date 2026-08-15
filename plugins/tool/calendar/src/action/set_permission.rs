@@ -18,13 +18,10 @@ fn default_state() -> Arc<CalendarState> {
     keywords_primary = "calendar, permission, access, allow, deny, grant, revoke",
     side_effects = "Idempotent"
 )]
-/// Action to change a calendar's read/write permission flags.
 pub struct SetPermissionAction {
     /// Id of the calendar returned by ``calendar.list_calendars``.
     calendar_id: String,
-    /// Whether read operations should be allowed.
     read_allowed: Option<bool>,
-    /// Whether write operations should be allowed.
     write_allowed: Option<bool>,
 
     #[tool(skip)]
@@ -33,7 +30,6 @@ pub struct SetPermissionAction {
 }
 
 impl SetPermissionAction {
-    /// Creates a new `SetPermissionAction`.
     #[must_use]
     pub const fn new(state: Arc<CalendarState>) -> Self {
         Self {

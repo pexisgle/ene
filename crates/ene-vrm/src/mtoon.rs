@@ -37,7 +37,6 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum OutlineWidthMode {
-    /// No outline.
     #[default]
     None,
     /// Outline width in world coordinates (meters).
@@ -61,7 +60,6 @@ impl OutlineWidthMode {
 /// use that texture slot.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MToonTextureRef {
-    /// glTF texture index.
     pub index: usize,
 }
 
@@ -72,13 +70,11 @@ pub struct MToonTextureRef {
 /// color, no rim/matcap/outline).
 #[derive(Clone, Debug)]
 pub struct MToonMaterial {
-    // -- Rendering --
     /// `transparentWithZWrite` (default: false).
     pub transparent_with_z_write: bool,
     /// `renderQueueOffsetNumber` (default: 0, range -9..+9).
     pub render_queue_offset: i32,
 
-    // -- Lighting --
     /// `shadeColorFactor` (default: [0, 0, 0]).
     pub shade_color: [f32; 3],
     /// `shadeMultiplyTexture` — glTF texture index.
@@ -93,17 +89,14 @@ pub struct MToonMaterial {
     /// `shadingToonyFactor` (default: 0.9).
     pub shading_toony_factor: f32,
 
-    // -- GI --
     /// `giEqualizationFactor` (default: 0.9).
     pub gi_equalization_factor: f32,
 
-    // -- Emission (uses glTF core emissiveFactor + emissiveTexture) --
     /// `emissiveFactor` from glTF core material (default: [0, 0, 0]).
     pub emissive_factor: [f32; 3],
     /// `emissiveTexture` from glTF core material — glTF texture index.
     pub emissive_texture: Option<MToonTextureRef>,
 
-    // -- Rim / MatCap --
     /// `matcapFactor` (default: [1, 1, 1]).
     pub matcap_factor: [f32; 3],
     /// `matcapTexture` — glTF texture index.
@@ -119,7 +112,6 @@ pub struct MToonMaterial {
     /// `rimLightingMixFactor` (default: 1.0).
     pub rim_lighting_mix: f32,
 
-    // -- Outline --
     /// `outlineWidthMode`.
     pub outline_width_mode: OutlineWidthMode,
     /// `outlineWidthFactor` (default: 0.0).
@@ -131,7 +123,6 @@ pub struct MToonMaterial {
     /// `outlineLightingMixFactor` (default: 1.0).
     pub outline_lighting_mix: f32,
 
-    // -- UV Animation --
     /// `uvAnimationMaskTexture` — glTF texture index (B channel).
     pub uv_animation_mask_texture: Option<MToonTextureRef>,
     /// `uvAnimationScrollXSpeedFactor` (default: 0.0).
@@ -212,7 +203,6 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
 
         let mut mat = MToonMaterial::default();
 
-        // Rendering
         if let Some(v) = obj
             .get("transparentWithZWrite")
             .and_then(serde_json::Value::as_bool)
@@ -226,7 +216,6 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
             mat.render_queue_offset = v.clamp(-9, 9) as i32;
         }
 
-        // Lighting
         if let Some(arr) = obj.get("shadeColorFactor").and_then(|v| v.as_array()) {
             mat.shade_color = parse_vec3(arr);
         }
@@ -250,7 +239,6 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
             mat.shading_toony_factor = v as f32;
         }
 
-        // GI
         if let Some(v) = obj
             .get("giEqualizationFactor")
             .and_then(serde_json::Value::as_f64)
@@ -258,7 +246,6 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
             mat.gi_equalization_factor = v as f32;
         }
 
-        // Emission (from glTF core material)
         mat.emissive_factor = material.emissive_factor();
         if let Some(emissive_tex) = material.emissive_texture() {
             mat.emissive_texture = Some(MToonTextureRef {
@@ -266,7 +253,6 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
             });
         }
 
-        // Rim / MatCap
         if let Some(arr) = obj.get("matcapFactor").and_then(|v| v.as_array()) {
             mat.matcap_factor = parse_vec3(arr);
         }
@@ -297,7 +283,6 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
             mat.rim_lighting_mix = v as f32;
         }
 
-        // Outline
         if let Some(s) = obj.get("outlineWidthMode").and_then(|v| v.as_str()) {
             mat.outline_width_mode = OutlineWidthMode::from_json_str(s);
         }
@@ -319,7 +304,6 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
             mat.outline_lighting_mix = v as f32;
         }
 
-        // UV Animation
         mat.uv_animation_mask_texture = parse_texture_ref(obj.get("uvAnimationMaskTexture"));
         if let Some(v) = obj
             .get("uvAnimationScrollXSpeedFactor")
@@ -374,21 +358,13 @@ fn parse_texture_ref_from_obj(
 /// Used internally by [`texture_flags`]; hidden from the "Supported API" docs.
 #[doc(hidden)]
 pub mod flags {
-    /// Base color (albedo) texture present.
     pub const BASE_COLOR_TEXTURE: u32 = 1 << 0;
-    /// Shade multiply texture present.
     pub const SHADE_MULTIPLY_TEXTURE: u32 = 1 << 1;
-    /// Shading shift texture present.
     pub const SHADING_SHIFT_TEXTURE: u32 = 1 << 2;
-    /// Emissive texture present.
     pub const EMISSIVE_TEXTURE: u32 = 1 << 3;
-    /// `MatCap` texture present.
     pub const MATCAP_TEXTURE: u32 = 1 << 4;
-    /// Rim multiply texture present.
     pub const RIM_MULTIPLY_TEXTURE: u32 = 1 << 5;
-    /// Outline width multiply texture present.
     pub const OUTLINE_WIDTH_MULTIPLY_TEXTURE: u32 = 1 << 6;
-    /// UV animation mask texture present.
     pub const UV_ANIMATION_MASK_TEXTURE: u32 = 1 << 7;
 }
 
@@ -410,10 +386,7 @@ impl std::fmt::Debug for MToonGpuTextures {
     }
 }
 
-/// Compute the texture-presence bitmask for a material. Used by
-/// the renderer to fill the per-material uniform.
-///
-/// Called internally by [`crate::renderer::VrmRenderer`]; hidden from the "Supported API" docs.
+/// Used by the renderer to fill the per-material uniform.
 #[doc(hidden)]
 pub const fn texture_flags(mat: &MToonMaterial, has_base_color: bool) -> u32 {
     let mut f = 0u32;
@@ -488,10 +461,8 @@ impl Default for MToonUniform {
 }
 
 impl MToonUniform {
-    /// Size in bytes.
     pub const SIZE: usize = std::mem::size_of::<Self>();
 
-    /// Build a uniform from a material + flags + time.
     pub const fn from_material(mat: &MToonMaterial, tex_flags: u32, time: f32) -> Self {
         Self {
             shade_color_and_shift: [

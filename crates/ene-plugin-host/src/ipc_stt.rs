@@ -31,8 +31,6 @@ use base64::Engine as _;
 /// another container can be added with a matching encoder.
 pub(crate) const STT_AUDIO_FORMAT: &str = "wav";
 
-/// An `ene_ai::SttProvider` that delegates to a plugin binary over IPC.
-///
 /// Created by [`IpcSttProviderFactory`](crate::stt_factory::IpcSttProviderFactory)
 /// during `PluginHostManager` startup.
 pub struct IpcSttProvider {
@@ -49,8 +47,6 @@ pub struct IpcSttProvider {
 }
 
 impl IpcSttProvider {
-    /// Creates a new IPC-backed STT provider.
-    ///
     /// `limiter` should be the same `Arc<ConcurrencyLimiter>` shared by every
     /// provider instance the owning factory creates for this (plugin, kind)
     /// pair — see the TTS adapter's docs for the reasoning.
@@ -80,8 +76,6 @@ impl IpcSttProvider {
     }
 }
 
-/// Maps a [`PluginHostError`] into the [`AudioProviderError`] domain.
-///
 /// Mirrors the TTS adapter's mapping: IPC timeouts surface as `Timeout`,
 /// transport failures are reported as provider errors and never retried
 /// (the connection layer deliberately does not retry non-idempotent calls).

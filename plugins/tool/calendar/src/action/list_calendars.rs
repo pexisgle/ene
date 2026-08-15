@@ -17,7 +17,6 @@ fn default_state() -> Arc<CalendarState> {
     keywords_primary = "calendar, calendars, account, list",
     side_effects = "ReadOnly"
 )]
-/// Action to list all calendar accounts.
 pub struct ListCalendarsAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
@@ -25,7 +24,6 @@ pub struct ListCalendarsAction {
 }
 
 impl ListCalendarsAction {
-    /// Creates a new `ListCalendarsAction`.
     #[must_use]
     pub const fn new(state: Arc<CalendarState>) -> Self {
         Self { state }

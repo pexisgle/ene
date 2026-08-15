@@ -2,18 +2,13 @@ use ene_ai::{LlmMessage, Role, UserMessagePart};
 use ene_card::{CharacterCardV3, expand_cbs_macros, resolve_expressions};
 use ene_config::PromptLibrary;
 
-/// Input parameters for [`build_messages`].
 #[derive(Debug, Clone)]
 pub struct MessageBuildContext<'a> {
-    /// The loaded character card.
     pub card: &'a CharacterCardV3,
-    /// The user's current input text.
     pub user_input: &'a str,
-    /// Conversation history entries.
     pub history: &'a [ene_mind::HistoryEntry],
     /// Optional runtime context appended to the user input (`None` is treated as empty).
     pub runtime_context: Option<&'a str>,
-    /// Runtime rules prepended to the system prompt.
     pub runtime_rules: &'a str,
     /// Display name of the user.
     pub user_name: &'a str,
@@ -85,14 +80,11 @@ pub fn build_system_prompt(
     let char_name = card.data.get_character_name();
     let mut parts: Vec<String> = Vec::new();
 
-    // 1. Desktop mascot context frame — always first so the model
-    //    immediately understands the overlay / short-response constraint.
     let mascot_context = prompts.system().render_mascot_context(char_name, user_name);
     if !mascot_context.is_empty() {
         parts.push(mascot_context);
     }
 
-    // 2. Runtime rules (user-configurable behaviour overrides).
     if !runtime_rules.trim().is_empty() {
         let header = &prompts.system().behavior_rules_header;
         if header.is_empty() {
@@ -102,7 +94,6 @@ pub fn build_system_prompt(
         }
     }
 
-    // 3. Character identity block from the card.
     let char_header = &prompts.system().character_header;
     let mut char_parts: Vec<String> = Vec::new();
 
@@ -127,7 +118,6 @@ pub fn build_system_prompt(
         }
     }
 
-    // 4. Scene / scenario.
     if !card.data.scenario.trim().is_empty() {
         let h = &prompts.system().scene_header;
         if h.is_empty() {
@@ -141,8 +131,6 @@ pub fn build_system_prompt(
     expand_cbs_macros(&combined, char_name, user_name)
 }
 
-/// Builds the Performance Output Protocol (PHI) block.
-///
 /// Produces a concise, command-tone instruction with concrete examples
 /// so that even lower-capability models reliably output the `<|perf:expr=NAME|>`
 /// token in the right position.
@@ -186,7 +174,6 @@ pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> 
             list.join("\n")
         );
 
-        // Expand {{char}} / {{user}} macros from the card author's perspective.
         phi = expand_cbs_macros(&phi, char_name, "User");
         Some(phi)
     };
@@ -201,8 +188,6 @@ pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> 
     }
 }
 
-/// Builds the natural-dialogue output contract for engine-managed expression.
-///
 /// Instructs the LLM to respond in plain dialogue without inline performance markers.
 /// Expression is resolved by the cognitive runtime Output Arbiter after the turn.
 pub fn build_natural_dialogue_contract(
@@ -226,7 +211,6 @@ pub fn build_natural_dialogue_contract(
     Some(contract)
 }
 
-/// Selects the post-history output block for the cognitive streaming path.
 pub fn build_cognitive_output_contract(
     card: &CharacterCardV3,
     prompts: &PromptLibrary,

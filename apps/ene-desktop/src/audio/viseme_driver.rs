@@ -7,16 +7,13 @@
 
 use ene_vrm::viseme::{VisemeAnalyzer, VisemeWeights};
 
-/// Streaming PCM-to-viseme driver.
-///
 /// Feed audio with [`feed_pcm`](Self::feed_pcm) from the playback task
 /// and call [`analyze_weights`](Self::analyze_weights) once per render
 /// frame, handing the result to
 /// [`ene_vrm::expression::ExpressionLayer::apply_viseme_weights`].
 #[derive(Default)]
 pub struct VisemeDriver {
-    /// Analyzer sized to the most recently observed sample rate.
-    /// `None` until the first PCM chunk arrives.
+    /// Stays `None` until the first PCM chunk arrives.
     analyzer: Option<VisemeAnalyzer>,
     sample_rate: u32,
 }
@@ -39,8 +36,8 @@ impl VisemeDriver {
         }
     }
 
-    /// Analyze the buffered audio and return the smoothed mouth-shape
-    /// weights, or `None` before any PCM has been fed.
+    /// Returns the smoothed mouth-shape weights, or `None` before any PCM
+    /// has been fed.
     ///
     /// Intended to be called once per render frame.
     pub fn analyze_weights(&mut self) -> Option<VisemeWeights> {

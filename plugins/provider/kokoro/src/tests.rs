@@ -1,5 +1,4 @@
-//! Plugin contract tests: synthesis against a scripted fake provider, so no
-//! ONNX model file or ONNX Runtime is required.
+//! No ONNX model file or ONNX Runtime is required.
 
 #![expect(
     clippy::expect_used,
@@ -23,7 +22,6 @@ use crate::plugin::{KokoroPlugin, ensure_kokoro_files_present};
 
 const KIND: &str = "kokoro";
 
-/// Scripted provider standing in for the ONNX engine.
 struct FakeTts {
     chunks: Vec<TtsChunk>,
 }

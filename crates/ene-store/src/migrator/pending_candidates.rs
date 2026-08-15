@@ -16,7 +16,6 @@
 
 use sea_orm_migration::prelude::*;
 
-/// Adds the persistent pending memory-candidate approval queue.
 pub struct PendingCandidatesMigration;
 
 impl MigrationName for PendingCandidatesMigration {

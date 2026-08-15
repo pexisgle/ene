@@ -8,7 +8,7 @@
 //! use ene_vrm::prelude::*;
 //! ```
 //!
-//! Everything else in the crate (spring bones, MToon material internals, node constraints,
+//! Everything else in the crate (spring bones, `MToon` material internals, node constraints,
 //! debug rendering, raw glTF sub-parsers, retargeting helpers, …) remains `pub` for advanced
 //! hosts that need it, but is intentionally left out of this module — see
 //! `docs/reference/api/ene-vrm.md` ("Supported API" vs "Internal").

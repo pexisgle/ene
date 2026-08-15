@@ -10,10 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities;
 
-/// A persisted session metadata row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
-    /// Row id.
     pub id: i64,
     /// Logical session key (unique across the store).
     pub session_id: String,
@@ -21,7 +19,6 @@ pub struct SessionMeta {
     pub card_name: String,
     /// Human-readable session title (may be empty until set).
     pub title: String,
-    /// When the session was first created.
     pub created_at: DateTime<Utc>,
     /// When the session was last touched (newest-first ordering key).
     pub updated_at: DateTime<Utc>,
@@ -52,7 +49,6 @@ impl From<entities::session::Model> for SessionMeta {
 /// in by the store on insert.
 #[derive(Debug, Clone)]
 pub struct NewSessionMeta {
-    /// Logical session key.
     pub session_id: String,
     /// Character card the session belongs to.
     pub card_name: String,

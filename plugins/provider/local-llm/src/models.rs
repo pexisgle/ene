@@ -31,7 +31,6 @@ static CHAT_MODELS: LazyLock<Mutex<HashMap<String, Arc<LocalLlamaCppProvider>>>>
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static EMBED_MODELS: LazyLock<Mutex<HashMap<String, Arc<GgufEmbeddingProvider>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-/// Per-model load gates: one mutex per profile key.
 type LoadGates = LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
 /// One gate per profile key: the task loading a model holds it for the whole
 /// load, so concurrent callers wait instead of starting a second llama.cpp
@@ -147,7 +146,6 @@ where
         .map_err(|_| PluginError::provider("model load task ended without a result"))?
 }
 
-/// Current unload epoch for `model`; `0` when never unloaded.
 fn unload_epoch(epochs: &UnloadEpochs, model: &str) -> u64 {
     epochs
         .lock()
@@ -204,8 +202,7 @@ fn cached_embed_model(model: &str) -> Option<Arc<GgufEmbeddingProvider>> {
         .cloned()
 }
 
-/// Loads the chat model for `model` and inserts it into the cache. The
-/// caller must hold the model's load gate.
+/// The caller must hold the model's load gate.
 async fn load_chat_model(
     model: String,
     unload_epoch: u64,
@@ -231,8 +228,7 @@ async fn load_chat_model(
     Ok(insert_if_absent(&model, loaded, generation, unload_epoch))
 }
 
-/// Loads the embedding model for `model` and inserts it into the cache. The
-/// caller must hold the model's load gate.
+/// The caller must hold the model's load gate.
 async fn load_embed_model(
     model: String,
     unload_epoch: u64,
@@ -323,8 +319,6 @@ async fn resolve_mmproj(config: &HostConfig) -> Result<Option<PathBuf>, PluginEr
         .map_err(|e| convert::map_llm_error(&e))
 }
 
-/// Runs a synchronous model build on the blocking pool, mapping the model's
-/// own error type to [`PluginError`].
 async fn load_blocking<T, E>(
     build: impl FnOnce() -> Result<T, E> + Send + 'static,
     map_error: impl FnOnce(E) -> PluginError,
@@ -397,7 +391,6 @@ fn insert_if_unloaded<T>(
     provider
 }
 
-/// Maps embedding load errors without panicking.
 fn map_embed_load_error(err: &EneEmbeddingError) -> PluginError {
     PluginError::provider(err.to_string())
 }

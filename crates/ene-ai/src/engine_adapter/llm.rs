@@ -31,7 +31,6 @@ use crate::traits::LlmProvider;
 /// cloned out of the caller's arguments once, at the adapter boundary.
 #[derive(Debug, Clone)]
 pub struct LlmChatRequest {
-    /// The conversation so far.
     pub messages: Vec<LlmMessage>,
     /// Tool/function definitions available to the model, if any.
     pub tools: Vec<ToolSpec>,
@@ -43,7 +42,6 @@ pub struct LlmChatRequest {
 /// A completed chat turn's assistant text.
 #[derive(Debug, Clone)]
 pub struct LlmChatResponse {
-    /// The full assistant reply text.
     pub text: String,
     /// Token usage the local engine counted itself, if any. Local
     /// models (llama.cpp) know their exact prompt/completion token counts;
@@ -72,7 +70,6 @@ fn map_engine_error<E: std::error::Error>(err: EngineError<E>) -> LlmProviderErr
     }
 }
 
-/// Whether any message in `messages` carries image content.
 fn has_vision_input(messages: &[LlmMessage]) -> bool {
     messages.iter().any(|m| match m {
         LlmMessage::User { parts } => parts
@@ -91,7 +88,6 @@ pub struct LocalLlmEngine<M: ene_infer::LocalModel> {
 }
 
 impl<M: ene_infer::LocalModel> LocalLlmEngine<M> {
-    /// Wraps an already-spawned [`EngineHandle`] with its descriptor.
     #[must_use]
     pub fn new(handle: EngineHandle<M>, descriptor: EngineDescriptor) -> Self {
         Self { handle, descriptor }
@@ -238,14 +234,12 @@ pub struct StreamingLocalLlmEngine<M: ene_infer::StreamingLocalModel> {
 }
 
 impl<M: ene_infer::StreamingLocalModel> StreamingLocalLlmEngine<M> {
-    /// Wraps an already-spawned [`EngineHandle`] with its descriptor, using
-    /// [`DEFAULT_CHUNK_BUFFER`] for the chunk channel's bound.
+    /// Uses [`DEFAULT_CHUNK_BUFFER`] for the chunk channel's bound.
     #[must_use]
     pub fn new(handle: EngineHandle<M>, descriptor: EngineDescriptor) -> Self {
         Self::with_chunk_buffer(handle, descriptor, DEFAULT_CHUNK_BUFFER)
     }
 
-    /// As [`Self::new`], with an explicit chunk-buffer bound.
     #[must_use]
     pub fn with_chunk_buffer(
         handle: EngineHandle<M>,
@@ -258,13 +252,11 @@ impl<M: ene_infer::StreamingLocalModel> StreamingLocalLlmEngine<M> {
         }
     }
 
-    /// The underlying handle — see [`LocalLlmEngine::handle`].
     #[must_use]
     pub fn handle(&self) -> &EngineHandle<M> {
         self.inner.handle()
     }
 
-    /// This engine's declared capability/concurrency/resource metadata.
     #[must_use]
     pub fn descriptor(&self) -> &EngineDescriptor {
         self.inner.descriptor()

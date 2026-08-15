@@ -13,42 +13,32 @@ use std::fmt;
 /// [`expose_for_persistence`](Self::expose_for_persistence) path.
 #[derive(Clone)]
 pub enum CredentialStore {
-    /// An `OAuth2` token set.
     OAuth2 {
-        /// `OAuth2` access token (secret).
         access_token: SecretString,
-        /// `OAuth2` refresh token, if issued (secret).
         refresh_token: Option<SecretString>,
         /// Access-token expiry, if known (not secret).
         expires_at: Option<DateTime<Utc>>,
     },
-    /// A bare API key (secret).
     ApiKey(SecretString),
-    /// No credential.
     None,
 }
 
 impl CredentialStore {
-    /// Returns `true` for the [`OAuth2`](Self::OAuth2) variant.
     #[must_use]
     pub fn is_oauth2(&self) -> bool {
         matches!(self, Self::OAuth2 { .. })
     }
 
-    /// Returns `true` for the [`ApiKey`](Self::ApiKey) variant.
     #[must_use]
     pub fn is_api_key(&self) -> bool {
         matches!(self, Self::ApiKey(_))
     }
 
-    /// Returns `true` for the [`None`](Self::None) variant.
     #[must_use]
     pub fn is_none(&self) -> bool {
         matches!(self, Self::None)
     }
 
-    /// Returns the `OAuth2` access token, if this is an [`OAuth2`](Self::OAuth2)
-    /// credential.
     #[must_use]
     pub fn access_token(&self) -> Option<&str> {
         match self {
@@ -57,7 +47,6 @@ impl CredentialStore {
         }
     }
 
-    /// Returns the `OAuth2` refresh token, if present.
     #[must_use]
     pub fn refresh_token(&self) -> Option<&str> {
         match self {
@@ -68,7 +57,6 @@ impl CredentialStore {
         }
     }
 
-    /// Returns the `OAuth2` access-token expiry, if known.
     #[must_use]
     pub fn expires_at(&self) -> Option<DateTime<Utc>> {
         match self {
@@ -77,8 +65,6 @@ impl CredentialStore {
         }
     }
 
-    /// Returns `true` when an `OAuth2` credential is past its expiry.
-    ///
     /// Credentials without an expiry (and non-`OAuth2` variants) are never
     /// considered expired.
     #[must_use]
@@ -89,7 +75,6 @@ impl CredentialStore {
         }
     }
 
-    /// Returns the API key, if this is an [`ApiKey`](Self::ApiKey) credential.
     #[must_use]
     pub fn api_key(&self) -> Option<&str> {
         match self {
@@ -98,7 +83,6 @@ impl CredentialStore {
         }
     }
 
-    /// Builds an [`OAuth2`](Self::OAuth2) credential from raw tokens.
     #[must_use]
     pub fn oauth2(
         access_token: impl Into<String>,
@@ -112,7 +96,6 @@ impl CredentialStore {
         }
     }
 
-    /// Builds an [`ApiKey`](Self::ApiKey) credential from a raw key.
     #[must_use]
     pub fn from_api_key(key: impl Into<String>) -> Self {
         Self::ApiKey(SecretString::new(key.into().into_boxed_str()))
@@ -129,8 +112,6 @@ impl CredentialStore {
         CredentialData::from(self)
     }
 
-    /// Restores a credential from a previously exported [`CredentialData`].
-    ///
     /// Inverse of [`expose_for_persistence`](Self::expose_for_persistence);
     /// used when loading secrets back out of secure storage.
     pub fn from_exported(data: CredentialData) -> Self {
@@ -163,29 +144,20 @@ impl fmt::Debug for CredentialStore {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum CredentialData {
-    /// `OAuth2` token set (raw).
     OAuth2 {
-        /// Raw access token.
         access_token: String,
-        /// Raw refresh token, if any.
         #[serde(skip_serializing_if = "Option::is_none")]
         refresh_token: Option<String>,
         /// Expiry timestamp (not secret).
         #[serde(skip_serializing_if = "Option::is_none")]
         expires_at: Option<DateTime<Utc>>,
     },
-    /// Raw API key.
     ApiKey {
-        /// Raw API key.
         key: String,
     },
-    /// No credential.
     None,
 }
 
-/// Redacted serialization form used by the blanket [`Serialize`]/[`Deserialize`]
-/// impls on [`CredentialStore`].
-///
 /// This deliberately omits every secret so that accidental serialization
 /// (diagnostics, state snapshots, derived impls on containing structs) can never
 /// leak a token. Only the credential variant — and, for `OAuth2`, the non-secret
@@ -274,8 +246,6 @@ impl From<CredentialData> for CredentialStore {
     }
 }
 
-/// Serializes **without** secrets.
-///
 /// The blanket impl deliberately redacts: any code path that serializes a
 /// [`CredentialStore`] (diagnostics, derived impls on containing structs, state
 /// snapshots) receives only the credential variant and non-secret metadata.
@@ -287,8 +257,6 @@ impl Serialize for CredentialStore {
     }
 }
 
-/// Deserializes the redacted form (no secrets are recovered).
-///
 /// To restore a real credential from secure storage, deserialize a
 /// [`CredentialData`] and convert it via
 /// [`from_exported`](CredentialStore::from_exported).
@@ -299,21 +267,16 @@ impl<'de> serde::Deserialize<'de> for CredentialStore {
     }
 }
 
-/// A credential paired with a human-readable account label.
-///
 /// Used when a connector manages multiple authenticated accounts (e.g. several
 /// calendars) and needs to distinguish them in a UI. The [`Debug`] impl
 /// redacts the underlying secret via [`CredentialStore`].
 #[derive(Debug, Clone)]
 pub struct AccountCredentials {
-    /// Human-readable label for the account (e.g. an email address).
     pub account_label: String,
-    /// The account's credential.
     pub credential: CredentialStore,
 }
 
 impl AccountCredentials {
-    /// Creates an account/credential pair.
     #[must_use]
     pub fn new(account_label: impl Into<String>, credential: CredentialStore) -> Self {
         Self {

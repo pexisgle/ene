@@ -24,7 +24,6 @@ pub struct BeatPulseSnapshot {
     pub intensity: f32,
 }
 
-/// Latest beat pulses awaiting the render loop, plus the enabled flag.
 #[derive(Resource, Default)]
 pub struct BeatSyncState {
     enabled: bool,
@@ -40,7 +39,6 @@ impl BeatSyncState {
         }
     }
 
-    /// Whether beat sync is active.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -56,13 +54,11 @@ impl BeatSyncState {
         }
     }
 
-    /// Drain all pending pulses.
     pub fn drain_pulses(&mut self) -> impl Iterator<Item = BeatPulseSnapshot> + '_ {
         self.pulses.drain(..)
     }
 }
 
-/// Move beat pulses from the event bus into [`BeatSyncState`].
 pub fn apply_beat_pulses_system(
     mut events: MessageReader<BeatPulse>,
     mut state: ResMut<BeatSyncState>,
@@ -86,7 +82,6 @@ pub struct BeatSyncRuntime(Option<crate::audio::beat_sync::BeatSyncHandle>);
 
 #[cfg(feature = "voice")]
 impl BeatSyncRuntime {
-    /// Whether a capture thread is currently running.
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.0
@@ -94,14 +89,12 @@ impl BeatSyncRuntime {
             .is_some_and(crate::audio::beat_sync::BeatSyncHandle::is_alive)
     }
 
-    /// Stop capture and drop the handle.
     pub fn stop(&mut self) {
         if let Some(mut handle) = self.0.take() {
             handle.stop();
         }
     }
 
-    /// Replace the running capture with `handle`, stopping any previous one.
     pub fn replace(&mut self, handle: crate::audio::beat_sync::BeatSyncHandle) {
         self.stop();
         self.0 = Some(handle);

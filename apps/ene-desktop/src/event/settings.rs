@@ -1,5 +1,3 @@
-//! Settings action messages.
-//!
 //! Each variant corresponds to one of the buttons or hotkeys handled
 //! by the settings UI. They are written by UI input systems and
 //! consumed by the `apply_settings_action` system.

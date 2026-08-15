@@ -15,12 +15,9 @@ use ene_core::MemoryPort;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-/// Manages the conversation history with automatic trimming.
 #[derive(Clone, Debug)]
 pub struct ConversationHistory {
-    /// Ordered history entries.
     pub conversation_history: Vec<HistoryEntry>,
-    /// Maximum number of turns to retain.
     pub max_history_turns: usize,
 }
 
@@ -34,12 +31,9 @@ impl ConversationHistory {
     }
 }
 
-/// Holds the current display buffer and partial token carry-over.
 #[derive(Clone, Debug, Default)]
 pub struct DisplayState {
-    /// Accumulated display text for the current response.
     pub display_buffer: String,
-    /// Partial token text carried from a previous chunk.
     pub token_carry: String,
 }
 
@@ -57,18 +51,12 @@ pub struct DisplayState {
 /// stalled stream from withholding more than a sentence of output.
 const MAX_TOKEN_CARRY: usize = 256;
 
-/// Context for the memory subsystem within a session.
 #[derive(Clone)]
 pub struct MemoryContext {
-    /// Optional memory store.
     pub memory_store: Option<Arc<dyn MemoryPort>>,
-    /// Optional embedding provider.
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-    /// The current session ID.
     pub session_id: SessionId,
-    /// Timestamp when the session started.
     pub session_started_at: chrono::DateTime<chrono::Utc>,
-    /// Embedding of the pending user input.
     pub pending_embedding: Option<Vec<f32>>,
     /// Cached hash of the last synced `CCv3` character memory index.
     pub ccv3_memory_hash: Option<u64>,
@@ -84,30 +72,20 @@ pub struct MemoryContext {
 /// `ene-runtime` dependency (architecture boundary).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InterruptedState {
-    /// Identifier of the interrupted turn.
     pub turn_id: String,
     /// Character range of the response that had been spoken before interruption.
     pub spoken_char_range: std::ops::Range<usize>,
-    /// The partial assistant text that had been produced so far.
     pub partial_text: String,
-    /// When the interruption was recorded.
     pub interrupted_at: DateTime<Utc>,
 }
 
-/// Tracks session metadata like embedding and timing.
 #[derive(Clone, Debug, Default)]
 pub struct SessionState {
-    /// The embedding of the last user input.
     pub last_input_embedding: Option<Vec<f32>>,
-    /// Timestamp of the last received message.
     pub last_message_time: Option<DateTime<Utc>>,
-    /// The current conversation turn count.
     pub current_turn_count: usize,
-    /// Last resolved expression name (in-session hysteresis).
     pub last_resolved_expression: String,
-    /// When the last expression change occurred.
     pub last_expression_changed_at: Option<DateTime<Utc>>,
-    /// Running state of the topic-boundary detector.
     pub topic_boundary: super::topic_boundary::TopicBoundaryTracker,
 }
 
@@ -115,23 +93,16 @@ pub struct SessionState {
 /// and the loaded character card. Shared between the streaming engine and the CLI/GUI frontends.
 #[derive(Clone)]
 pub struct ConversationSession {
-    /// Conversation history state.
     pub(crate) history: ConversationHistory,
-    /// Display buffer state.
     pub display: DisplayState,
-    /// Memory context state.
     pub memory: MemoryContext,
-    /// Session metadata state.
     pub(crate) state: SessionState,
-    /// The loaded character card.
     pub character_card: Option<CharacterCardV3>,
-    /// The filesystem path to the current character card.
     current_card_path: String,
     /// Index of the greeting chosen for this session (`0` = `first_mes`,
     /// `i+1` = `alternate_greetings[i]`); `None` before a greeting is applied.
     /// Drives the `@@is_greeting` lorebook decorator (`CCv3` `SPEC_V3.md`).
     active_greeting_index: Option<u32>,
-    /// Snapshot of the most recently interrupted turn, if any.
     interrupted: Option<InterruptedState>,
 }
 
@@ -158,7 +129,6 @@ impl Default for ConversationSession {
 }
 
 impl ConversationSession {
-    /// Creates a new empty session with a fresh session ID and zero turn count.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -194,7 +164,6 @@ impl ConversationSession {
         }
     }
 
-    /// Attaches a memory store and embedding provider for long-term memory.
     pub fn init_memory(
         &mut self,
         store: Arc<dyn MemoryPort>,
@@ -217,8 +186,6 @@ impl ConversationSession {
         resolve_expressions(card)
     }
 
-    /// Loads a character card from `path`, merges `character_settings.json` expressions,
-    /// and clears the conversation history.
     pub fn load_card(
         &mut self,
         path: &str,
@@ -245,7 +212,6 @@ impl ConversationSession {
         Ok(resolve_expressions(&card))
     }
 
-    /// Appends a user message and trims history if it exceeds `max_history_turns * 2`.
     pub fn add_user_message(&mut self, input: &str) {
         self.history.conversation_history.push(HistoryEntry {
             role: Role::User,
@@ -254,7 +220,6 @@ impl ConversationSession {
         self.history.trim_history();
     }
 
-    /// Appends an assistant message and trims history if it exceeds `max_history_turns * 2`.
     pub fn add_assistant_message(&mut self, text: &str) {
         self.history.conversation_history.push(HistoryEntry {
             role: Role::Assistant,
@@ -275,16 +240,11 @@ impl ConversationSession {
         self.active_greeting_index = Some(index);
     }
 
-    /// Index of the greeting this session started with, if any.
     #[must_use]
     pub const fn active_greeting_index(&self) -> Option<u32> {
         self.active_greeting_index
     }
 
-    /// Processes a streaming text chunk, splitting it into text deltas and special tokens
-    /// (e.g., `<|perf:expr=happy|>`). Appends text to the display buffer.
-    ///
-    /// Returns `(text_deltas, special_tokens)`.
     pub fn process_delta(&mut self, chunk: &str) -> (Vec<String>, Vec<String>) {
         let mut text_deltas = Vec::new();
         let mut special_tokens = Vec::new();
@@ -322,8 +282,6 @@ impl ConversationSession {
         pieces
     }
 
-    /// Finalizes the current response: flushes any remaining token carry, commits the
-    /// display buffer as an assistant message, and returns any lingering token fragment.
     pub fn finalize_response(&mut self) -> Option<String> {
         let tail = if self.display.token_carry.is_empty() {
             None
@@ -339,7 +297,6 @@ impl ConversationSession {
         tail
     }
 
-    /// Resets the display buffer (used when a response is interrupted or discarded).
     pub fn reset_display_buffer(&mut self) {
         self.display.display_buffer.clear();
         self.display.token_carry.clear();
@@ -379,12 +336,10 @@ impl ConversationSession {
         self.interrupted.take()
     }
 
-    /// Whether an interruption snapshot is currently pending.
     pub const fn has_pending_interruption(&self) -> bool {
         self.interrupted.is_some()
     }
 
-    /// Resets all session state (history, display, turn count) and returns a new session ID.
     pub fn reset_session(&mut self) -> SessionId {
         let new_id = generate_session_id();
         // The cache is shared with runtime mutation handles, so it is cleared
@@ -410,12 +365,10 @@ impl ConversationSession {
         new_id
     }
 
-    /// Stores an embedding for the current pending user input (used for memory search).
     pub fn set_pending_embedding(&mut self, embedding: Vec<f32>) {
         self.memory.pending_embedding = Some(embedding);
     }
 
-    /// Stores the embedding of the most recent user input (used for topic boundary detection).
     pub fn set_last_input_embedding(&mut self, embedding: Vec<f32>) {
         self.state.last_input_embedding = Some(embedding);
     }
@@ -442,13 +395,11 @@ impl ConversationSession {
         ))
     }
 
-    /// Tracks timing and turn count after a user sends a message.
     pub fn record_user_input(&mut self) {
         self.state.current_turn_count += 1;
         self.state.last_message_time = Some(Utc::now());
     }
 
-    /// Tracks timing and turn count after the assistant sends a response.
     pub fn record_assistant_response(&mut self) {
         self.state.current_turn_count += 1;
         self.state.last_message_time = Some(Utc::now());
@@ -464,7 +415,6 @@ impl ConversationSession {
         })
     }
 
-    /// Records a resolved expression for in-session hysteresis tracking.
     pub fn record_expression_change(&mut self, name: &str) {
         if self.state.last_resolved_expression != name {
             self.state.last_resolved_expression = name.to_string();
@@ -472,7 +422,6 @@ impl ConversationSession {
         }
     }
 
-    /// Last expression name resolved during this session.
     pub fn last_resolved_expression(&self) -> &str {
         &self.state.last_resolved_expression
     }
@@ -510,27 +459,22 @@ impl ConversationSession {
             .map_or("default", |c| c.data.get_character_id())
     }
 
-    /// Returns a reference to the conversation history entries.
     pub fn history(&self) -> &[HistoryEntry] {
         &self.history.conversation_history
     }
 
-    /// Unique identifier for this session.
     pub const fn session_id(&self) -> &SessionId {
         &self.memory.session_id
     }
 
-    /// Timestamp when this session was created.
     pub const fn session_started_at(&self) -> DateTime<Utc> {
         self.memory.session_started_at
     }
 
-    /// Number of turns completed in this session.
     pub const fn current_turn_count(&self) -> usize {
         self.state.current_turn_count
     }
 
-    /// Trim in-memory history, keeping only the last `keep` messages.
     pub fn trim_history_keep_last(&mut self, keep: usize) {
         let len = self.history.conversation_history.len();
         if len > keep {
@@ -538,12 +482,10 @@ impl ConversationSession {
         }
     }
 
-    /// Timestamp of the most recent user message.
     pub const fn last_message_time(&self) -> Option<DateTime<Utc>> {
         self.state.last_message_time
     }
 
-    /// Elapsed minutes since session start.
     pub fn session_elapsed_minutes(&self) -> i64 {
         (Utc::now() - self.memory.session_started_at).num_minutes()
     }
@@ -572,12 +514,10 @@ mod tests {
         assert_eq!(state.turn_id, "turn-1");
         assert_eq!(state.partial_text, "hello wor");
         assert_eq!(state.spoken_char_range, 0..5);
-        // Partial text committed to history.
         assert_eq!(
             s.history().last().map(|e| e.content.as_str()),
             Some("hello wor")
         );
-        // Consumed exactly once.
         assert!(s.take_interruption().is_none());
     }
 

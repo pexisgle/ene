@@ -61,9 +61,8 @@ impl CliCommand for ScheduleCommand {
     }
 }
 
-/// Pulls the next token off `arg`: whitespace-delimited, with single- or
-/// double-quoted segments kept intact (quotes stripped). Returns `None` at
-/// end of input.
+/// Whitespace-delimited tokens are returned with single- or double-quoted
+/// segments kept intact (quotes stripped). Returns `None` at end of input.
 fn next_token(arg: &mut &str) -> Option<String> {
     *arg = arg.trim_start();
     if arg.is_empty() {

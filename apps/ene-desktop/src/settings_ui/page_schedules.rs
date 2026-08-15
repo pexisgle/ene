@@ -1,6 +1,3 @@
-//! Schedules management page: async CRUD, run history, and pending
-//! confirmations.
-//!
 //! The schedule list and run history are fetched asynchronously (never per
 //! frame on the render thread); mutations go through the actor's validated
 //! commands and refetch on completion. All labels are localized.
@@ -11,7 +8,6 @@ use super::components;
 use super::input::{AsyncData, SettingsInputState};
 use std::sync::Arc;
 
-/// Renders the schedules page.
 pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, input: &mut SettingsInputState) {
     input.schedules.poll();
     if !input.schedules.started() {
@@ -93,7 +89,6 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, input: &mut SettingsInputSt
         },
     );
 
-    // Pending confirmations: runs waiting for a decision, answered by run id.
     components::section_card(
         ui,
         "schedules-pending",
@@ -155,7 +150,6 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, input: &mut SettingsInputSt
         },
     );
 
-    // Run history of the selected schedule.
     let mut selected = ui.data_mut(|data| {
         data.get_temp::<i64>(egui::Id::new("schedules_selected"))
             .unwrap_or(-1)
@@ -289,7 +283,6 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, input: &mut SettingsInputSt
     render_add_form(ui, ai, input);
 }
 
-/// Copies a schedule's editable fields into the form buffers.
 fn load_schedule_into_form(ui: &mut egui::Ui, schedule: &ene_core::Schedule) {
     ui.data_mut(|data| {
         data.insert_temp(egui::Id::new("schedules_add_name"), schedule.name.clone());
@@ -639,9 +632,9 @@ fn action_label(action: &ene_core::ScheduleAction) -> String {
     }
 }
 
-/// Strict, shared validation for the schedule add/edit form. Nothing is
-/// silently coerced: invalid JSON, empty names, unknown kinds, non-positive
-/// intervals, and missing cron expressions are rejected with a message.
+/// Nothing is silently coerced: invalid JSON, empty names, unknown kinds,
+/// non-positive intervals, and missing cron expressions are rejected with a
+/// message.
 fn parse_schedule_input(
     name: &str,
     kind: &str,

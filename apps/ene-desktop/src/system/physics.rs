@@ -1,5 +1,3 @@
-//! Physics systems.
-//!
 //! Bridges [`crate::component::character::BoneColliders`] and the
 //! per-frame bone poses into the Rapier state owned by
 //! [`crate::resource::physics::PhysicsWorldResource`].
@@ -13,10 +11,6 @@ use crate::component::physics::{
 };
 use crate::resource::physics::PhysicsWorldResource;
 
-/// Read every entity that has [`BoneColliders`] but no
-/// [`PhysicsBody`] yet, register the per-bone specs with Rapier,
-/// and attach the resulting handle components to the same entity.
-/// Runs once in `Startup`.
 pub fn attach_bone_colliders_system(
     mut physics: ResMut<PhysicsWorldResource>,
     query: Query<(Entity, &BoneColliders), Without<PhysicsBody>>,
@@ -41,7 +35,6 @@ pub fn attach_bone_colliders_system(
     }
 }
 
-/// Step the Rapier physics world once per frame.
 pub fn step_physics_system(mut physics: ResMut<PhysicsWorldResource>) {
     physics.world.step();
 }

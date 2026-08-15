@@ -1,5 +1,3 @@
-//! Permission and user-input dialogs for the chat window.
-
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
@@ -18,8 +16,6 @@ const PERMISSION_FIELD_MAX_CHARS: usize = 160;
 /// Secondary cap for multi-line payloads (e.g. heredoc-style commands).
 const PERMISSION_FIELD_MAX_LINES: usize = 6;
 
-/// Truncate permission dialog field text for display.
-///
 /// Caps both line count and Unicode character count, appending `...`
 /// when either limit is exceeded.
 fn truncate_permission_field(text: &str) -> String {

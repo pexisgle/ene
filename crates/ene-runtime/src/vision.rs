@@ -13,8 +13,8 @@
 //! directly here, awaited by the caller, never inside the actor's command
 //! loop or any actor-owned `JoinSet`.
 //!
-//! What *does* still cross the mailbox (deliberately, see the PR
-//! description for the tradeoff) is a small, payload-free
+//! What *does* still cross the mailbox (deliberately) is a small,
+//! payload-free
 //! `PrepareVisionSummary` request/reply pair: the vision path shares the
 //! same "runtime busy" gate (`active_turn` / in-flight proactive decision)
 //! and the same lazily-initialized local GGUF vision model as the proactive
@@ -198,9 +198,6 @@ impl VisionHandle {
     }
 }
 
-/// Builds the chat messages for a screen summary: the rendered system
-/// prompt, then a user turn carrying the rendered text prompt and the
-/// encoded frame.
 fn build_vision_messages(system: String, user: String, data_uri: String) -> Vec<LlmMessage> {
     vec![
         LlmMessage::System { content: system },

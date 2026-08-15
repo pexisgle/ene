@@ -66,7 +66,6 @@ pub async fn delete(path: &Path, recursive: bool, sandbox: &Sandbox) -> Result<S
     side_effects = "Destructive"
 )]
 pub struct FsDeleteAction {
-    /// Absolute path to delete.
     file_path: String,
     /// Required for directories (default false).
     #[serde(default)]

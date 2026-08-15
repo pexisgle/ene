@@ -1,5 +1,3 @@
-#![expect(missing_docs, reason = "sea-orm migration modules are schema-internal")]
-
 mod conversation_logs_search_index;
 mod embeddings_cleanup;
 mod memory_outcomes;
@@ -1087,7 +1085,6 @@ enum Sessions {
     TurnCount,
 }
 
-/// Adds the deferred memory-write retry queue.
 pub struct PendingMemoryWritesMigration;
 
 impl MigrationName for PendingMemoryWritesMigration {
@@ -1203,7 +1200,6 @@ enum PendingMemoryWrites {
     UpdatedAt,
 }
 
-/// Adds composite index on `(character_id, source_ref)` for `typed_memories`.
 pub struct SourceRefIndexMigration;
 
 impl MigrationName for SourceRefIndexMigration {
@@ -1242,8 +1238,6 @@ impl MigrationTrait for SourceRefIndexMigration {
     }
 }
 
-/// Adds a nullable `session_id` column and index to `audit_log`.
-///
 /// Existing rows keep `NULL`, so audit entries written before this
 /// migration are never misattributed to a session. New rows record the
 /// originating session so `build_export` can filter tool history per

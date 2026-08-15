@@ -1,5 +1,3 @@
-//! Workspace document index queries (the document/workspace RAG persistence).
-
 use super::{MemoryStore, embedding_to_bytes, validate_embedding};
 use crate::entities;
 use chrono::Utc;
@@ -48,7 +46,6 @@ struct LexicalSearchRow {
 }
 
 impl MemoryStore {
-    /// All indexed file rows (no vectors or chunk text).
     pub async fn list_workspace_files(
         &self,
     ) -> Result<Vec<WorkspaceFileRow>, crate::error::EneMemoryError> {
@@ -72,7 +69,7 @@ impl MemoryStore {
             .collect())
     }
 
-    /// Atomically replace one file's chunks and vec0 entries.
+    /// Replaces one file's chunks and vec0 entries atomically.
     pub async fn replace_workspace_file(
         &self,
         file: &WorkspaceFileRow,
@@ -159,8 +156,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Move an indexed file to a new path, keeping its chunks.
-    ///
     /// Returns `false` when no row had `old_path`.
     pub async fn rename_workspace_file(
         &self,
@@ -189,7 +184,7 @@ impl MemoryStore {
         Ok(true)
     }
 
-    /// Delete the file rows (and chunk/vec0 rows) for the given paths.
+    /// Deletes the file rows and their chunk/vec0 rows.
     pub async fn delete_workspace_files(
         &self,
         paths: &[String],
@@ -240,7 +235,7 @@ impl MemoryStore {
         Ok(total)
     }
 
-    /// Hybrid search over chunks belonging to the permitted roots.
+    /// Combines vector and lexical search.
     pub async fn search_workspace(
         &self,
         query: &WorkspaceSearchQuery<'_>,
@@ -304,7 +299,6 @@ impl MemoryStore {
         Ok(hits)
     }
 
-    /// Indexed file/chunk counts.
     pub async fn workspace_index_status(
         &self,
     ) -> Result<WorkspaceIndexStatus, crate::error::EneMemoryError> {

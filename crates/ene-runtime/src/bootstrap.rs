@@ -1,5 +1,3 @@
-//! Host-side helpers for loading config + card before [`crate::EneHandle::open`].
-//!
 //! Product path: apps load config via [`ene_config::ConfigStore`] and the
 //! character card via [`ene_card::load_character_card_localized`] (the
 //! locale comes from `mind.language`, falling back to the system locale),
@@ -13,8 +11,6 @@ use ene_mind::MindConfig;
 use crate::error::EneRuntimeError;
 use crate::handle::EneHandle;
 
-/// Load config (fail-hard) + character card, then open a ready handle.
-///
 /// Intended for CLI startup.
 pub async fn open_from_disk() -> Result<(EneHandle, EneConfig), EneRuntimeError> {
     // Write JSON schemas once at startup rather than on every config load.

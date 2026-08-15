@@ -27,7 +27,6 @@ use ene_core::{
 };
 use parking_lot::Mutex;
 
-/// In-memory [`MemoryPort`] implementation for unit tests.
 #[derive(Default)]
 pub struct InMemoryMemoryPort {
     items: Mutex<Vec<MemoryItem>>,
@@ -40,7 +39,6 @@ pub struct InMemoryMemoryPort {
 }
 
 impl InMemoryMemoryPort {
-    /// Create an empty in-memory port.
     pub fn new() -> Self {
         Self::default()
     }
@@ -58,7 +56,6 @@ impl InMemoryMemoryPort {
         self.items.lock().clone()
     }
 
-    /// Snapshot of the pending user-confirmation queue.
     pub fn pending_candidates(&self) -> Vec<PendingCandidate> {
         self.pending.lock().clone()
     }
@@ -68,7 +65,6 @@ impl InMemoryMemoryPort {
         self.outcomes.lock().clone()
     }
 
-    /// Snapshot of every commitment row currently held.
     pub fn all_commitments(&self) -> Vec<Commitment> {
         self.commitments.lock().clone()
     }
@@ -404,8 +400,6 @@ impl MemoryPort for InMemoryMemoryPort {
             .collect())
     }
 
-    // ── Affect state ────────────────────────────────────────────────────────
-
     async fn get_affect_state(&self, character_id: &str) -> Result<AffectState, MemoryPortError> {
         Ok(AffectState::neutral(character_id))
     }
@@ -421,8 +415,6 @@ impl MemoryPort for InMemoryMemoryPort {
     ) -> Result<Option<PendingAffectProposal>, MemoryPortError> {
         Ok(None)
     }
-
-    // ── Commitment CRUD ─────────────────────────────────────────────────────
 
     async fn list_active_commitments(
         &self,
@@ -547,8 +539,6 @@ impl MemoryPort for InMemoryMemoryPort {
         )))
     }
 
-    // ── Memory spans / compression ──────────────────────────────────────────
-
     async fn insert_memory_span(&self, _span: &NewMemorySpan) -> Result<i64, MemoryPortError> {
         Ok(self.alloc_id())
     }
@@ -653,7 +643,6 @@ mod tests {
         let port = InMemoryMemoryPort::new();
         let now = Utc::now();
         for i in 0..5i64 {
-            // i = 0 is the oldest.
             let created = now - Duration::minutes(5 - i);
             port.insert_pending_candidate(candidate(
                 "ene",
@@ -782,7 +771,6 @@ mod tests {
         let port = InMemoryMemoryPort::new();
         let now = Utc::now();
         let old = now - Duration::days(30);
-        // Two ancient pending rows (age pass removes them) ...
         port.insert_pending_candidate(candidate(
             "ene",
             "u1",
@@ -801,7 +789,6 @@ mod tests {
         ))
         .await
         .unwrap();
-        // ... plus four fresh pending rows.
         for i in 0..4i64 {
             port.insert_pending_candidate(candidate(
                 "ene",

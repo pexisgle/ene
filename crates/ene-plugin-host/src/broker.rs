@@ -43,7 +43,6 @@ use crate::manifest::{FsGrant, ManifestStore, resolve_grant_abs, resolve_grant_p
 /// which fails `Ask` safe to denial.
 #[async_trait]
 pub trait ApprovalResponder: Send + Sync {
-    /// Presents one approval request and returns the user's decision.
     async fn request(&self, plugin: &str, category: ApprovalCategory, target: &str)
     -> ResolvedMode;
 }
@@ -98,7 +97,6 @@ pub(crate) struct PluginState {
     pub(crate) processes: Mutex<HashMap<u32, String>>,
 }
 
-/// Host-side broker hub.
 pub struct BrokerHub {
     pub(crate) plugins: HashMap<String, PluginState>,
     pub(crate) ssrf: parking_lot::RwLock<SsrfPolicy>,
@@ -485,7 +483,6 @@ impl BrokerHub {
     ) -> Result<BrokerResponse, BrokerError> {
         Self::require_service(state, service_of(&request))?;
         match request {
-            // ── File broker ─────────────────────────────────────────────
             BrokerRequest::FileRead { path, max_bytes } => {
                 self.file_read(plugin, state, &path, max_bytes).await
             }
@@ -515,7 +512,6 @@ impl BrokerHub {
                 self.file_save_download(plugin, state, &temp_id, &dest_path, conflict)
                     .await
             }
-            // ── Network broker ──────────────────────────────────────────
             BrokerRequest::NetworkFetch {
                 method,
                 url,
@@ -550,7 +546,6 @@ impl BrokerHub {
                     "streaming requests must use the streaming handler",
                 ))
             }
-            // ── Process broker ──────────────────────────────────────────
             BrokerRequest::ProcessSpawn {
                 argv,
                 cwd,
@@ -564,10 +559,8 @@ impl BrokerHub {
             BrokerRequest::ProcessSignal { pid, signal } => {
                 std::future::ready(Self::process_signal(state, pid, signal)).await
             }
-            // ── Credential broker ───────────────────────────────────────
             BrokerRequest::CredentialGet { key } => self.credential_get(plugin, state, &key).await,
             BrokerRequest::CredentialListKeys => self.credential_list_keys(plugin, state).await,
-            // ── Artifact broker ─────────────────────────────────────────
             BrokerRequest::ArtifactResolve {
                 artifact_id,
                 version,
@@ -587,7 +580,6 @@ impl BrokerHub {
             }
             BrokerRequest::ArtifactList => std::future::ready(self.artifact_list()).await,
             BrokerRequest::ArtifactRefresh => self.artifact_refresh().await,
-            // ── Platform broker ─────────────────────────────────────────
             BrokerRequest::PlatformNow => Ok(BrokerResponse::PlatformNowOk {
                 unix_ms: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -773,8 +765,6 @@ fn service_of(request: &BrokerRequest) -> &'static str {
         | BrokerRequest::PlatformOpenExternal { .. } => "platform",
     }
 }
-
-// ── File broker ─────────────────────────────────────────────────────────
 
 /// Resolves a file-broker path to a canonical target inside a grant.
 ///
@@ -1127,8 +1117,6 @@ fn uniquify(path: &Path) -> PathBuf {
     }
     path.to_path_buf()
 }
-
-// ── Network broker ──────────────────────────────────────────────────────
 
 impl BrokerHub {
     async fn network_fetch(
@@ -1591,7 +1579,6 @@ impl SsrfPolicy {
         }
     }
 
-    /// Resolves `host` and returns the addresses the policy allows.
     pub async fn resolve_allowed(&self, host: &str) -> Result<Vec<std::net::IpAddr>, String> {
         let addresses = tokio::net::lookup_host((host, 0))
             .await
@@ -1606,7 +1593,6 @@ impl SsrfPolicy {
         Ok(allowed)
     }
 
-    /// Whether the policy permits connecting to `ip`.
     #[must_use]
     pub fn is_allowed(&self, ip: std::net::IpAddr) -> bool {
         if ip.is_loopback() {
@@ -1671,8 +1657,6 @@ fn is_blocked_v6(ip: std::net::Ipv6Addr) -> bool {
     }
     false
 }
-
-// ── Process broker ──────────────────────────────────────────────────────
 
 /// Commands that implicitly download and execute code; always denied.
 const IMPLICIT_DOWNLOAD_PROGRAMS: &[&str] = &["npx", "uvx", "bunx"];
@@ -1911,8 +1895,6 @@ fn signal_process(_pid: u32, _signal: u32) -> Result<BrokerResponse, BrokerError
     ))
 }
 
-// ── Credential broker ───────────────────────────────────────────────────
-
 impl BrokerHub {
     async fn credential_get(
         &self,
@@ -1944,8 +1926,6 @@ impl BrokerHub {
         Ok(BrokerResponse::CredentialListKeysOk { keys })
     }
 }
-
-// ── Artifact broker ─────────────────────────────────────────────────────
 
 impl BrokerHub {
     fn artifact_services(&self) -> Result<&ArtifactServices, BrokerError> {
@@ -2247,8 +2227,6 @@ fn wire_artifact(artifact_id: &str, target: &ArtifactTarget) -> ArtifactInfo {
         size: target.size,
     }
 }
-
-// ── Platform broker ─────────────────────────────────────────────────────
 
 impl BrokerHub {
     async fn platform_open_external(

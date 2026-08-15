@@ -39,7 +39,6 @@ impl Default for ResourceLimits {
     }
 }
 
-/// What the plugin process may see, and which enforcement layers are on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxSpec {
     /// Read-only paths the plugin may access (binary dirs, system libs, CA
@@ -84,7 +83,6 @@ impl SandboxSpec {
         }
     }
 
-    /// Whether any enforcement layer is enabled.
     #[must_use]
     pub fn is_enforced(&self) -> bool {
         self.landlock
@@ -99,9 +97,7 @@ impl SandboxSpec {
 /// cgroup v2 limits for one plugin process tree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CgroupSpec {
-    /// Memory limit in bytes.
     pub memory_max_bytes: u64,
-    /// PIDs cap for the subgroup.
     pub pids_max: u64,
     /// CPU quota as `max` (e.g. `"50000 100000"` = 50% of one core) or
     /// `"max"` for unlimited.

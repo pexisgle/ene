@@ -1,5 +1,3 @@
-//! Platform integration systems.
-//!
 //! The per-frame Linux display-server glue lives in the small
 //! systems in this module. Each system runs in a single `AppSet`
 //! so the schedule's existing `First` / `PreUpdate` / `Update` /

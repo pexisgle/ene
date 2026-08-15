@@ -37,7 +37,6 @@
 //! Plugin process supervision and the MCP bridge's SSRF URL validation live
 //! in `ene-plugin-host`; this crate stays the connector and credential
 //! authority.
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(
@@ -80,7 +79,6 @@ pub use redaction::{redact_json, scrub_secrets};
 pub use registry::{AccountRef, ConnectorEvent, ConnectorEventKind, ConnectorRegistry};
 pub use webhook::WebhookValidator;
 
-/// Convenience re-exports of the crate's public API.
 pub mod prelude {
     pub use crate::connector::{
         AccountAuthKind, AuthenticatedAccount, ConnectionState, Connector, ConnectorAction,

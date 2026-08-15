@@ -10,7 +10,6 @@ use ene_plugin::PluginError;
 use hound::SampleFormat;
 use std::io::Cursor;
 
-/// Decoded PCM audio.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedWav {
     /// Mono PCM samples normalized to `[-1.0, 1.0]`.

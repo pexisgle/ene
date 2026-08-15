@@ -39,18 +39,13 @@ use tokio::sync::{broadcast, mpsc};
 pub enum EneEvent {
     /// A chunk of generated text from the LLM (markers stripped).
     TextDelta {
-        /// Active turn.
         turn: TurnId,
-        /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
-        /// The raw text delta.
         delta: String,
     },
     /// Presentation cues (expression / emote) for the active turn.
     Performance {
-        /// Active turn.
         turn: TurnId,
-        /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
         /// Cue list (usually one expression).
         cues: Vec<ene_mind::PerformanceCue>,
@@ -59,33 +54,22 @@ pub enum EneEvent {
     },
     /// A tool call has been requested by the LLM.
     ToolCallStart {
-        /// Active turn.
         turn: TurnId,
-        /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
-        /// The tool name (e.g. "fs.write").
         name: String,
         /// JSON-encoded arguments.
         arguments: String,
     },
-    /// A tool call has completed with its result.
     ToolCallResult {
-        /// Active turn.
         turn: TurnId,
-        /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
-        /// The tool name.
         name: String,
-        /// The tool's output as a string.
         result: String,
     },
     /// A destructive operation requires user approval before execution.
     PermissionRequired {
-        /// Active turn.
         turn: TurnId,
-        /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
-        /// Unique identifier for this permission request.
         request_id: RequestId,
         /// The category of operation (e.g. "write", "delete").
         action: String,
@@ -100,9 +84,7 @@ pub enum EneEvent {
     /// requests can originate from any plugin session, so the payload carries
     /// the plugin name and approval category instead.
     BrokerApprovalRequired {
-        /// Unique identifier for this approval request.
         request_id: RequestId,
-        /// Plugin requesting the capability.
         plugin: String,
         /// Approval category (e.g. `FsRead`, `DynamicHttps`).
         category: String,
@@ -113,38 +95,28 @@ pub enum EneEvent {
     },
     /// An interactive tool needs user input (e.g. a clarifying question).
     UserInputRequired {
-        /// Active turn.
         turn: TurnId,
-        /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
-        /// Unique identifier for this input request.
         request_id: RequestId,
         /// The prompt describing the question, options, and free-text allowance.
         prompt: ene_plugin_proto::UserInputPrompt,
     },
     /// Thin signal that rolling context compression completed for this turn.
     ContextCompressed {
-        /// Active turn.
         turn: TurnId,
-        /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
         /// Compression level label (e.g. "scene").
         level: String,
     },
     /// Terminal event for a run: emitted exactly once after `after_turn` completes.
     Terminal {
-        /// Active turn.
         turn: TurnId,
-        /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
-        /// Why the run terminated.
         reason: TerminalReason,
     },
     /// A turn has started streaming (after provider open succeeds).
     TurnStarted {
-        /// Active turn.
         turn: TurnId,
-        /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
     },
     /// A detected beat pulse from system audio (Beat Sync).
@@ -170,15 +142,12 @@ pub enum EneEvent {
 /// over ownership and returns `None` on every call after the first.
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
-    /// Active turn.
     pub turn: TurnId,
-    /// Who initiated this turn.
     pub origin: crate::types::TurnOrigin,
     /// Interleaved mono PCM samples normalized to `[-1.0, 1.0]`.
     pub pcm: Vec<f32>,
     /// Sample rate in Hz (e.g. 24000).
     pub sample_rate: u32,
-    /// Whether this is the final audio chunk for the turn.
     pub is_final: bool,
     /// Expression cues attributed to the TTS sentence this chunk belongs to.
     ///
@@ -201,22 +170,15 @@ pub struct AudioChunk {
 #[derive(Debug, Clone)]
 pub enum LifecycleEvent {
     /// The actor's status changed.
-    StatusChanged {
-        /// New status value.
-        status: EneStatus,
-    },
+    StatusChanged { status: EneStatus },
     /// New pending memory candidates are available for review.
-    PendingCandidateAvailable {
-        /// Number of pending candidates.
-        count: usize,
-    },
+    PendingCandidateAvailable { count: usize },
     /// A pending memory candidate was approved, rejected, or edited.
     ///
     /// Audit event emitted from the actor after the mutation committed;
     /// consumers refetch the queue via
     /// [`crate::EneHandle::candidates`] rather than trusting this snapshot.
     CandidateChanged {
-        /// Candidate row id.
         id: i64,
         /// Status after the mutation (`pending` for edits, `approved` /
         /// `rejected` for resolutions).
@@ -232,9 +194,7 @@ pub enum LifecycleEvent {
     /// [`crate::query::ledger::MemoryLedgerHandle`] rather than trusting this
     /// snapshot.
     MemoryLedgerChanged {
-        /// Typed-memory row id.
         id: i64,
-        /// Which ledger mutation was applied.
         action: MemoryLedgerChange,
         /// Active turn context at mutation time, when any.
         turn: Option<TurnId>,
@@ -246,11 +206,9 @@ pub enum LifecycleEvent {
     /// was cancelled. Consumers can use `task_id` to correlate this with the
     /// earlier `DeferredAccepted` result returned to the LLM.
     ToolBackgroundCompleted {
-        /// The tool name that owns the background task.
         tool_name: String,
         /// The `task_id` returned by the deferred call acceptance.
         task_id: String,
-        /// Terminal status of the background task.
         status: ene_plugin_proto::DeferredStatus,
     },
     /// A connector's state changed (connected, disconnected, checked,
@@ -259,10 +217,7 @@ pub enum LifecycleEvent {
     /// Audit event emitted after the registry updated its cached status;
     /// consumers refetch the connector list via
     /// [`crate::EneHandle::connectors`] rather than trusting this snapshot.
-    ConnectorChanged {
-        /// Connector whose state changed.
-        id: ene_connector::ConnectorId,
-    },
+    ConnectorChanged { id: ene_connector::ConnectorId },
 }
 
 /// Ledger mutation kind carried by
@@ -295,10 +250,7 @@ pub enum TerminalReason {
     /// provider finished the response).
     Done,
     /// The run terminated due to an error.
-    Failed {
-        /// Human-readable error description.
-        message: String,
-    },
+    Failed { message: String },
     /// The run was cancelled by the user via `EneCommand::Cancel`.
     Cancelled,
     /// A proactive run ended before any visible text because the main model
@@ -321,17 +273,11 @@ pub enum TerminalReason {
 /// (a [`crate::diagnostics::MemoryHandle`]), not on this snapshot.
 #[derive(Clone)]
 pub struct EneStateSnapshot {
-    /// The loaded character card, if any.
     pub character_card: Option<ene_card::CharacterCardV3>,
-    /// Conversation history (`ene_mind::HistoryEntry`).
     pub history: Vec<ene_mind::HistoryEntry>,
-    /// A copy of the current configuration.
     pub config: EneConfig,
-    /// Current session ID.
     pub session_id: SessionId,
-    /// Character card name.
     pub card_name: CardName,
-    /// Current conversation turn count.
     pub current_turn_count: u32,
     /// When the session started (UTC).
     pub session_started_at: DateTime<Utc>,
@@ -347,9 +293,7 @@ pub struct EneStateSnapshot {
 /// can never fire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EneStatus {
-    /// Not currently processing anything.
     Idle,
-    /// An AI stream is running.
     Running,
 }
 
@@ -391,7 +335,6 @@ impl EneEventReceiver {
         );
     }
 
-    /// Non-blocking poll of the event stream.
     pub fn try_recv(&mut self) -> Result<EneEvent, broadcast::error::TryRecvError> {
         match self.inner.try_recv() {
             Err(broadcast::error::TryRecvError::Lagged(n)) => {
@@ -402,7 +345,6 @@ impl EneEventReceiver {
         }
     }
 
-    /// Async receive, waiting for the next event.
     pub async fn recv(&mut self) -> Result<EneEvent, broadcast::error::RecvError> {
         match self.inner.recv().await {
             Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -434,12 +376,11 @@ impl std::fmt::Debug for AudioStreamReceiver {
 }
 
 impl AudioStreamReceiver {
-    /// Non-blocking poll of the audio stream.
     pub fn try_recv(&mut self) -> Result<AudioChunk, mpsc::error::TryRecvError> {
         self.inner.try_recv()
     }
 
-    /// Async receive, waiting for the next audio chunk. Returns `None` once
+    /// Returns `None` once
     /// every sender has been dropped (actor shutdown).
     pub async fn recv(&mut self) -> Option<AudioChunk> {
         self.inner.recv().await
@@ -484,7 +425,6 @@ impl LifecycleReceiver {
         );
     }
 
-    /// Non-blocking poll of the lifecycle stream.
     pub fn try_recv(&mut self) -> Result<LifecycleEvent, broadcast::error::TryRecvError> {
         match self.inner.try_recv() {
             Err(broadcast::error::TryRecvError::Lagged(n)) => {
@@ -495,7 +435,6 @@ impl LifecycleReceiver {
         }
     }
 
-    /// Async receive, waiting for the next lifecycle event.
     pub async fn recv(&mut self) -> Result<LifecycleEvent, broadcast::error::RecvError> {
         match self.inner.recv().await {
             Err(broadcast::error::RecvError::Lagged(n)) => {

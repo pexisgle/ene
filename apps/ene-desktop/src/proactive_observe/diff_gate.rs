@@ -9,7 +9,6 @@
 
 use image::DynamicImage;
 
-/// Fingerprint grid side length in cells (64×64 = 4096 cells).
 const FINGERPRINT_GRID: u32 = 64;
 
 /// Per-cell luminance delta (out of 255) above which a cell counts as
@@ -32,7 +31,6 @@ const OVERVIEW_CHANGED_CELL_LIMIT: usize = 48;
 /// cursor-region changes re-infer.
 const ROI_CHANGED_CELL_LIMIT: usize = 12;
 
-/// Cached screen state: fingerprints plus the summary they produced.
 struct CachedScreen {
     app_label: String,
     overview: Vec<u8>,
@@ -114,7 +112,6 @@ impl Default for ScreenDiffGate {
     }
 }
 
-/// Downscale an image to the 64×64 grayscale fingerprint the gate compares.
 pub fn fingerprint(img: &DynamicImage) -> Vec<u8> {
     img.resize_exact(
         FINGERPRINT_GRID,
@@ -125,7 +122,6 @@ pub fn fingerprint(img: &DynamicImage) -> Vec<u8> {
     .into_raw()
 }
 
-/// Count fingerprint cells whose luminance moved by at least [`CELL_DELTA`].
 /// Different-length fingerprints (surface resized) count as fully changed.
 fn changed_cells(previous: &[u8], current: &[u8]) -> usize {
     if previous.len() != current.len() {
@@ -181,7 +177,6 @@ mod tests {
         let fp = fingerprint(&base);
         gate.cache(fp, None, "code".into(), "hello".into());
 
-        // One extra full-width bright line: more than the overview limit.
         let mut edited = base;
         let pixels = edited.as_mut_rgba8().unwrap();
         for x in 0..pixels.width() {
@@ -200,7 +195,6 @@ mod tests {
         let fp = fingerprint(&base);
         gate.cache(fp, None, "code".into(), "hello".into());
 
-        // A 24x24 cursor sprite moves: only a handful of cells change.
         let mut edited = base;
         let pixels = edited.as_mut_rgba8().unwrap();
         for x in 100..124 {
@@ -280,7 +274,6 @@ mod tests {
         assert!(gate.check(&resized, None, "code").is_none());
     }
 
-    /// Dark code-editor-like image with text rows, used to exercise the gate.
     fn code_like_image(width: u32, height: u32) -> DynamicImage {
         let mut img = DynamicImage::new_rgba8(width, height);
         let pixels = img.as_mut_rgba8().unwrap();

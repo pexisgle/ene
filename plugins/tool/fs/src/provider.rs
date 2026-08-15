@@ -6,8 +6,6 @@ use std::sync::Arc;
 use crate::utils::SandboxRef;
 use crate::utils::sandbox::Sandbox;
 
-/// Built-in filesystem tool provider.
-///
 /// Dispatch is handled by [`ActionSetProvider`]; sandbox / permission state
 /// is threaded through hooks.
 pub struct FsToolProvider {

@@ -1,8 +1,3 @@
-//! IPC client to a single plugin binary.
-//!
-//! [`IpcPluginConnection`] manages the lifecycle of one connection to a
-//! plugin process: handshake, request/response, and reconnection on failure.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,8 +16,6 @@ use tokio::task::JoinHandle;
 
 use crate::error::PluginHostError;
 
-/// Maps a connection-level failure onto the capability-call vocabulary.
-///
 /// The connection reports both provider failures and request timeouts as
 /// `ExecutionFailed`; the timeout path's message is its only stable
 /// discriminator, so the timeout category is recognized from it.
@@ -45,14 +38,10 @@ fn host_capability_error(e: &PluginHostError) -> CapabilityCallError {
     CapabilityCallError::new(code, e.to_string())
 }
 
-/// Maximum number of connection retries with backoff.
 const CONNECT_MAX_RETRIES: u32 = 50;
-/// Delay between connection retry attempts.
 const CONNECT_DELAY: Duration = Duration::from_millis(50);
 /// Default per-call timeout (2 min — LLM calls can be slow).
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
-/// Timeout for one [`PluginIpcRequest::ProcessVadChunk`] round trip.
-///
 /// VAD chunks are sent from the microphone capture thread (a cpal audio
 /// callback) at 32 ms cadence, so a wedged plugin must fail the chunk fast
 /// instead of freezing the callback for the default two-minute request
@@ -62,10 +51,8 @@ const PROCESS_VAD_CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
 /// Message prefix shared by every connection-timeout error, so callers can
 /// classify `ExecutionFailed` as a timeout without matching ad-hoc strings.
 const TIMEOUT_MESSAGE_PREFIX: &str = "timed out after";
-/// Timeout for a `Ping` liveness probe.
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Generates a unique request identifier for IPC request/response correlation.
 fn next_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -82,10 +69,8 @@ const CANCEL_STREAM_MIN_VERSION: u32 = 4;
 /// variant; the host updates its local cache and skips the IPC send.
 const SET_CONFIG_MIN_VERSION: u32 = 5;
 
-/// How a [`IpcPluginConnection::set_config`] call delivers the update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetConfigOutcome {
-    /// `SetConfig` IPC was delivered to the live plugin.
     Pushed,
     /// The peer negotiated a protocol below `SetConfig` support; only the
     /// reconnect cache was updated.
@@ -104,8 +89,6 @@ const DYNAMIC_CONFIG_MIN_VERSION: u32 = 5;
 /// their end.
 const PROCESS_VAD_CHUNK_MIN_VERSION: u32 = 7;
 
-/// Shared routing state for the single reader task.
-///
 /// Every incoming [`PluginIpcResponse`] is dispatched here by the reader task
 /// *before* any request/response correlation, so push messages
 /// ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted)) and stream
@@ -114,19 +97,12 @@ const PROCESS_VAD_CHUNK_MIN_VERSION: u32 = 7;
 /// All internal locks are `parking_lot::Mutex` because they are held only for
 /// the duration of a map lookup/insert — never across an `.await`.
 struct Router {
-    /// Per-request oneshot waiters for request/response correlation.
     waiters: parking_lot::Mutex<HashMap<String, oneshot::Sender<PluginIpcResponse>>>,
-    /// Per-request stream channels for chat streams, keyed by `request_id`.
     streams: parking_lot::Mutex<HashMap<String, mpsc::Sender<PluginIpcResponse>>>,
-    /// Push cache for deferred task completions, keyed by `task_id`.
-    ///
     /// Populated by the reader task when a `DeferredCompleted` push arrives;
     /// drained by [`IpcPluginConnection::poll_deferred`] so a completion that
     /// arrived while the connection was idle is still delivered.
     deferred: parking_lot::Mutex<HashMap<String, Result<ToolResult, ToolError>>>,
-    /// Latest `ConfigSchemaChanged` push, if any has arrived since the last
-    /// [`IpcPluginConnection::take_config_schema_changed`] call.
-    ///
     /// The stored value is the LATEST push, not a history — a second
     /// `ConfigSchemaChanged` before a poll overwrites the first;
     /// `config_version` is the latest value, not a sequence.
@@ -143,24 +119,19 @@ impl Router {
         }
     }
 
-    /// Routes a single response to its destination.
-    ///
     /// Push and stream messages are matched by variant *first*, so they can
     /// never fall through to request/response correlation.
     fn dispatch(&self, resp: PluginIpcResponse) {
         match &resp {
-            // Push: cache the deferred completion for later retrieval.
             PluginIpcResponse::DeferredCompleted { task_id, result } => {
                 self.deferred.lock().insert(task_id.clone(), result.clone());
             }
-            // Push: retain the latest schema change (UI may poll later).
             PluginIpcResponse::ConfigSchemaChanged {
                 schema,
                 config_version,
             } => {
                 *self.schema_changed.lock() = Some((schema.clone(), *config_version));
             }
-            // Stream: forward to the per-request stream channel.
             PluginIpcResponse::StreamChunk { request_id, .. }
             | PluginIpcResponse::StreamEnd { request_id }
             | PluginIpcResponse::StreamError { request_id, .. } => {
@@ -168,7 +139,6 @@ impl Router {
                     drop(tx.try_send(resp));
                 }
             }
-            // Request/response: correlate by `request_id`.
             _ => {
                 let rid = response_request_id(&resp).unwrap_or_default();
                 if let Some(tx) = self.waiters.lock().remove(rid) {
@@ -178,8 +148,6 @@ impl Router {
         }
     }
 
-    /// Fails all pending waiters and closes all stream channels.
-    ///
     /// Called when the reader task exits (EOF, read error, or reconnect) so
     /// that every in-flight `do_request` / stream reader observes the failure
     /// promptly instead of hanging until its own timeout.
@@ -189,8 +157,6 @@ impl Router {
     }
 }
 
-/// Extracts the `request_id` from a response variant, if it carries one.
-///
 /// Push messages ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted),
 /// [`ConfigSchemaChanged`](PluginIpcResponse::ConfigSchemaChanged)) and
 /// [`HandshakeAck`](PluginIpcResponse::HandshakeAck) carry no `request_id`
@@ -224,11 +190,6 @@ fn response_request_id(resp: &PluginIpcResponse) -> Option<&str> {
     }
 }
 
-/// The single reader task for a connection.
-///
-/// Reads responses from the socket in a loop and dispatches each one through
-/// the [`Router`]. Exits on EOF or read error, then fails all pending waiters
-/// so in-flight callers observe the transport failure promptly.
 async fn reader_loop(mut reader: ReadHalf<IpcStream>, router: Arc<Router>, format: WireFormat) {
     loop {
         match read_plugin_response(&mut reader, format).await {
@@ -253,15 +214,12 @@ async fn reader_loop(mut reader: ReadHalf<IpcStream>, router: Arc<Router>, forma
     router.fail_all();
 }
 
-/// An IPC connection to a single plugin binary.
-///
-/// Handles the handshake, request/response round-trips, and transparent
-/// reconnection on transport failure. All request-path methods take `&self`
-/// and may be called concurrently from multiple tasks: the socket write half
-/// is guarded by its own short-lived [`Mutex`] (released *before* awaiting the
-/// response), and responses are correlated by `request_id` through the shared
-/// [`Router`]. Callers therefore share a plain `Arc<IpcPluginConnection>` and
-/// need no external lock to multiplex requests.
+/// All request-path methods take `&self` and may be called concurrently from
+/// multiple tasks: the socket write half is guarded by its own short-lived
+/// [`Mutex`] (released *before* awaiting the response), and responses are
+/// correlated by `request_id` through the shared [`Router`]. Callers therefore
+/// share a plain `Arc<IpcPluginConnection>` and need no external lock to
+/// multiplex requests.
 ///
 /// ## Request multiplexing
 ///
@@ -310,7 +268,6 @@ pub struct IpcPluginConnection {
     /// [`connect`](Self::connect) time so [`reconnect`](Self::reconnect)
     /// reuses the same bound without re-reading configuration.
     handshake_timeout: Duration,
-    /// Shared routing state for the reader task.
     router: Arc<Router>,
     /// Handle to the reader task, behind a lock so [`reconnect`](Self::reconnect)
     /// can abort and replace it through `&self`. Aborted on reconnect/shutdown.
@@ -339,10 +296,6 @@ pub struct IpcPluginConnection {
 }
 
 impl IpcPluginConnection {
-    /// Connects to a plugin binary at `socket_path`, performs the protocol
-    /// handshake (advertising the host's supported version range), and stores
-    /// the advertised capabilities.
-    ///
     /// `max_concurrent` bounds the number of concurrent in-flight requests
     /// against this connection; it is clamped to the semaphore's
     /// valid range (`1..=Semaphore::MAX_PERMITS`) and is normally sourced from
@@ -480,14 +433,10 @@ impl IpcPluginConnection {
         })
     }
 
-    /// Returns the capabilities advertised by the plugin during the handshake.
     pub fn capabilities(&self) -> PluginCapabilities {
         self.capabilities.read().clone()
     }
 
-    /// Returns the protocol version negotiated with the plugin during the
-    /// handshake.
-    ///
     /// Falls within [`VersionRange::host_supported`] (currently
     /// `PLUGIN_IPC_MIN_SUPPORTED_VERSION..=PLUGIN_IPC_PROTOCOL_VERSION`).
     /// Feature gates that depend on a message variant introduced in a later
@@ -498,17 +447,12 @@ impl IpcPluginConnection {
         self.negotiated_version.load(Ordering::Acquire)
     }
 
-    /// Returns the payload framing negotiated with the plugin.
-    ///
     /// The handshake exchange always uses JSON; every later frame uses the
     /// format negotiated for the agreed protocol version.
     fn wire_format(&self) -> WireFormat {
         WireFormat::for_version(self.negotiated_version())
     }
 
-    /// Returns whether the negotiated protocol version supports explicit
-    /// stream cancellation via [`PluginIpcRequest::CancelStream`].
-    ///
     /// `CancelStream` was introduced in protocol v4 (see the
     /// `PLUGIN_IPC_PROTOCOL_VERSION` docs in `ene-plugin-proto`). Every peer
     /// in the host's N-1 window (v5+) knows this variant, so
@@ -524,9 +468,6 @@ impl IpcPluginConnection {
         self.negotiated_version() >= CANCEL_STREAM_MIN_VERSION
     }
 
-    /// Returns whether the negotiated protocol version supports live config
-    /// updates via [`PluginIpcRequest::SetConfig`].
-    ///
     /// `SetConfig` was introduced in protocol v5. Every peer in the host's
     /// N-1 window (v5+) knows this variant, so
     /// [`set_config`](Self::set_config) always sends the live IPC push.
@@ -534,8 +475,6 @@ impl IpcPluginConnection {
         self.negotiated_version() >= SET_CONFIG_MIN_VERSION
     }
 
-    /// Returns whether the peer can handle [`PluginIpcRequest::ListConfigOptions`].
-    ///
     /// Requires protocol ≥ v5 **and**
     /// [`PluginCapabilities::supports_list_config_options`]. Older v5 binaries
     /// that omit the flag (serde default `false`) are never sent the variant.
@@ -544,21 +483,16 @@ impl IpcPluginConnection {
             && self.capabilities().supports_list_config_options
     }
 
-    /// Returns whether the peer can handle [`PluginIpcRequest::ValidateConfig`].
     pub fn supports_validate_config(&self) -> bool {
         self.negotiated_version() >= DYNAMIC_CONFIG_MIN_VERSION
             && self.capabilities().supports_validate_config
     }
 
-    /// Returns whether the peer can handle [`PluginIpcRequest::MigrateConfig`].
     pub fn supports_migrate_config(&self) -> bool {
         self.negotiated_version() >= DYNAMIC_CONFIG_MIN_VERSION
             && self.capabilities().supports_migrate_config
     }
 
-    /// Returns whether the peer can handle
-    /// [`PluginIpcRequest::ProcessVadChunk`].
-    ///
     /// `ProcessVadChunk` was introduced in protocol v7, so only peers that
     /// negotiated v7+ receive VAD requests. The host additionally only
     /// registers a VAD factory when the handshake advertised
@@ -567,7 +501,6 @@ impl IpcPluginConnection {
         self.negotiated_version() >= PROCESS_VAD_CHUNK_MIN_VERSION
     }
 
-    /// Sends a `ListTools` request and returns the actual tool specs.
     pub async fn list_tools(&self) -> Result<Vec<ene_plugin_proto::ToolSpec>, PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::ListTools {
@@ -736,7 +669,6 @@ impl IpcPluginConnection {
         self.router.schema_changed.lock().take()
     }
 
-    /// Sends a `Ping` and waits for `Pong` within [`PING_TIMEOUT`].
     pub async fn ping(&self) -> Result<(), PluginHostError> {
         let resp = self
             .do_request_with_timeout(
@@ -755,8 +687,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Calls a tool exposed by the plugin and returns the result.
-    ///
     /// Tool-level failures are propagated as
     /// [`PluginHostError::Protocol`] so callers (e.g. the runtime's
     /// streaming layer) can still match on structured variants such as
@@ -792,8 +722,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Sets the call context (conversation + turn identifiers) on the plugin.
-    ///
     /// Deprecated: pass context directly via [`call_tool`](Self::call_tool)
     /// instead. The context applies to every subsequent tool call on this
     /// connection; the wire protocol carries only the identifiers, so no
@@ -810,7 +738,6 @@ impl IpcPluginConnection {
         Self::expect_ack(resp, "SetCallContext")
     }
 
-    /// Approves (or denies) a pending permission request by its identifier.
     pub async fn approve_permission(
         &self,
         permission_request_id: &str,
@@ -824,7 +751,6 @@ impl IpcPluginConnection {
         Self::expect_ack(resp, "ApprovePermission")
     }
 
-    /// Registers a session-wide permission allow pattern (action + target glob).
     pub async fn allow_pattern(
         &self,
         action: &str,
@@ -840,7 +766,6 @@ impl IpcPluginConnection {
         Self::expect_ack(resp, "AllowPattern")
     }
 
-    /// Revokes a previously granted session-wide permission allow pattern.
     pub async fn revoke_pattern(
         &self,
         action: &str,
@@ -856,8 +781,6 @@ impl IpcPluginConnection {
         Self::expect_ack(resp, "RevokePattern")
     }
 
-    /// Calls a tool in deferred (background) mode.
-    ///
     /// A background-capable tool responds with [`DeferredOutcome::Deferred`]
     /// carrying a `task_id`; any other tool falls back to
     /// [`DeferredOutcome::Sync`] with the ordinary synchronous result.
@@ -894,8 +817,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Polls the status of a deferred (background) task by its identifier.
-    ///
     /// Checks the local completion cache first (populated by the reader task
     /// when a `DeferredCompleted` push arrives) before issuing a `PollDeferred`
     /// request. This ensures a completion that arrived while the connection
@@ -925,7 +846,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Cancels a deferred (background) task by its identifier.
     pub async fn cancel_deferred(&self, task_id: &str) -> Result<(), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::CancelDeferred {
@@ -936,8 +856,6 @@ impl IpcPluginConnection {
         Self::expect_ack(resp, "CancelDeferred")
     }
 
-    /// Cancels an in-progress chat stream by its `request_id`.
-    ///
     /// A no-op when the negotiated protocol version does not support
     /// [`PluginIpcRequest::CancelStream`] (see
     /// [`supports_cancel_stream`](Self::supports_cancel_stream)) — the
@@ -963,17 +881,12 @@ impl IpcPluginConnection {
         Self::expect_ack(resp, "CancelStream")
     }
 
-    /// Updates the stored config/profiles and, when supported, pushes
-    /// [`PluginIpcRequest::SetConfig`] to the live plugin.
-    ///
     /// The local cache is always updated first so a later reconnect
     /// handshake delivers the fresh values even when the peer negotiated a
     /// protocol version below [`supports_set_config`](Self::supports_set_config)
     /// (in that case the IPC send is skipped with a warning and
     /// [`SetConfigOutcome::CachedOnly`] is returned).
     ///
-    /// Returns [`SetConfigOutcome::Pushed`] when the live plugin received the
-    /// update.
     pub async fn set_config(
         &self,
         config: Option<serde_json::Value>,
@@ -1008,9 +921,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Sends a `CreateChatStream` request and returns a receiver for the
-    /// stream's responses.
-    ///
     /// A per-request channel is registered with the [`Router`] *before* the
     /// request is written, so the single reader task routes every
     /// `StreamChunk` / `StreamEnd` / `StreamError` for this `request_id` into
@@ -1050,16 +960,12 @@ impl IpcPluginConnection {
         Ok(rx)
     }
 
-    /// Unregisters a chat stream's channel with the router.
-    ///
     /// Called when a stream completes or is dropped, releasing the per-request
     /// routing entry.
     pub fn close_chat_stream(&self, request_id: &str) {
         self.router.streams.lock().remove(request_id);
     }
 
-    /// Sends a `ChatCompletion` request and awaits the result.
-    ///
     /// Returns the assistant text plus any token usage the plugin reported;
     /// `usage` is `None` when the plugin does not report it (including
     /// older plugins that omit the field on the wire).
@@ -1093,8 +999,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Sends an `EmbedBatch` request and awaits the result.
-    ///
     /// Returns the per-item embeddings in input order; the plugin validates
     /// nothing about dimensions (the caller does), so a provider that
     /// ignores `dimensions` is fine.
@@ -1126,8 +1030,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Forwards a mediated capability call and awaits the provider's result.
-    ///
     /// The provider's typed [`CapabilityCallError`] passes through unchanged;
     /// connection-level failures are mapped onto the same stable vocabulary
     /// (transport / timeout). The call inherits the connection's per-request
@@ -1156,8 +1058,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Sends a `SynthesizeSpeech` request and awaits the result.
-    ///
     /// Returns the base64-encoded audio bytes and the audio format echoed by
     /// the plugin. The caller decodes the payload; this layer only
     /// correlates the response.
@@ -1193,8 +1093,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Sends a `TranscribeAudio` request and awaits the transcribed text.
-    ///
     /// The caller encodes the audio into the wire payload; this layer only
     /// correlates the response. The wire contract carries no language or
     /// duration, so the host adapter derives what it can from the PCM it
@@ -1225,8 +1123,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Sends a `ProcessVadChunk` request and awaits the VAD event.
-    ///
     /// Only callable after [`supports_vad`](Self::supports_vad) confirmed
     /// the peer knows the message; the manager gates factory registration on
     /// that check.
@@ -1261,14 +1157,10 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Sends a graceful `Shutdown` request (best-effort; ignores errors).
     pub async fn shutdown(&self) {
         drop(self.send_request(&PluginIpcRequest::Shutdown).await);
     }
 
-    /// Reconnects to the plugin binary unconditionally, re-performing the
-    /// handshake.
-    ///
     /// Uses the stored socket path, sandbox, and plugin config captured at
     /// the original [`connect`](Self::connect) call. Useful after a supervised
     /// process restart, where the caller knows the old connection is stale
@@ -1431,10 +1323,6 @@ impl IpcPluginConnection {
         Ok(())
     }
 
-    // ── Internal helpers ──
-
-    /// Validates that a response is the expected [`PluginIpcResponse::Ack`],
-    /// mapping anything else to an execution error.
     fn expect_ack(resp: PluginIpcResponse, what: &str) -> Result<(), PluginHostError> {
         match resp {
             PluginIpcResponse::Ack { .. } => Ok(()),
@@ -1445,8 +1333,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Injects a `request_id` into a [`PluginIpcRequest`] in-place.
-    ///
     /// This match is deliberately exhaustive (no `_` catch-all) so that adding
     /// a new request variant that carries a `request_id` produces a compile
     /// error here, forcing the author to keep this in sync with
@@ -1522,8 +1408,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Verifies that a response's `request_id` matches the expected value.
-    ///
     /// Push messages ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted))
     /// and [`HandshakeAck`](PluginIpcResponse::HandshakeAck) carry no
     /// `request_id`; they are routed separately by the single reader task and
@@ -1563,7 +1447,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Sends a request and reads a single response with the default timeout.
     async fn do_request(
         &self,
         req: PluginIpcRequest,
@@ -1571,8 +1454,6 @@ impl IpcPluginConnection {
         self.do_request_with_timeout(req, self.timeout).await
     }
 
-    /// Returns the `request_id` from a request variant, or `None` if the
-    /// variant does not carry a `request_id` field.
     fn request_request_id(req: &PluginIpcRequest) -> Option<&str> {
         match req {
             PluginIpcRequest::GetConfigSchema { request_id }
@@ -1601,8 +1482,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Sends a request and reads a single response with an explicit timeout.
-    ///
     /// Generates a UUID for non-streaming requests that don't already carry a
     /// `request_id` and verifies the response's `request_id` matches, enabling
     /// concurrent in-flight requests.

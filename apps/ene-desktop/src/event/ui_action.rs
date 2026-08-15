@@ -1,5 +1,3 @@
-//! Settings action message.
-//!
 //! [`SettingsAction`](crate::settings_ui::widgets::SettingsAction) is
 //! the single funnel through which buttons, hotkeys, and direct egui
 //! field changes mutate `CharacterSettings`. This message lifts it

@@ -1,8 +1,3 @@
-//! Connectors settings page.
-//!
-//! Read-only status surface for the connector framework: lists the
-//! registered connectors, and for the selected connector shows health,
-//! accounts, standing per-action grants, and a connectivity-check button.
 //! All fetches run on the bridge runtime through [`AsyncData`] receivers so
 //! the render thread never blocks.
 use std::sync::Arc;

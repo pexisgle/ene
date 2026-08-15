@@ -1,5 +1,3 @@
-#![expect(missing_docs, reason = "sea-orm entity modules are schema-internal")]
-
 pub mod affect_states;
 pub mod audit_log;
 pub mod commitments;

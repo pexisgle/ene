@@ -47,7 +47,6 @@ const KNOWN_TOOL_IDS: &[&str] = &[
     "web",
 ];
 
-/// Built-in provider plugin ids; same purpose as [`KNOWN_TOOL_IDS`].
 const KNOWN_PROVIDER_IDS: &[&str] = &[
     "anthropic",
     "edge-tts",
@@ -86,7 +85,6 @@ fn is_provider_kind(kind: &str) -> bool {
     matches!(kind, "provider" | "hybrid")
 }
 
-/// Renders the plugin center page.
 pub fn render(
     ui: &mut egui::Ui,
     _settings: &mut CharacterSettings,
@@ -1230,9 +1228,6 @@ fn render_entry_settings(
         .editing()
         .get_path(&entry_path)
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-    // The form never sees config/profiles/credentials (they are edited by
-    // dedicated sections), so the unknown-key raw fallback cannot expose
-    // their secrets either.
     let mut form_value = entry_value.clone();
     if let Some(object) = form_value.as_object_mut() {
         object.remove("config");

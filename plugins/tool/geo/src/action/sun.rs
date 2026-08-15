@@ -69,7 +69,6 @@ struct SunResults {
     keywords_primary = "sunrise, sunset, sun, daylight, twilight, dawn, dusk, solar noon",
     side_effects = "Network { external: true }"
 )]
-/// Action to get sunrise and sunset times.
 pub struct SunAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
@@ -88,7 +87,6 @@ pub struct SunAction {
 }
 
 impl SunAction {
-    /// Creates a new `SunAction` with the given shared state.
     #[must_use]
     pub fn new(state: Arc<GeoState>) -> Self {
         Self {

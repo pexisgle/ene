@@ -17,7 +17,6 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
-    /// Human-readable colored text (the REPL default).
     #[default]
     Text,
     /// A single pretty-printed JSON document on stdout.
@@ -33,26 +32,16 @@ impl OutputFormat {
     }
 }
 
-// ── Exit codes ──────────────────────────────────────────────────────────────
-//
 // Kept stable so external callers can branch on them. `2` matches clap's
 // convention for argument/usage errors; `130` matches the REPL's Ctrl-C path.
 
-/// Successful completion.
 pub const EXIT_OK: i32 = 0;
-/// Generic runtime or execution failure.
 pub const EXIT_RUNTIME: i32 = 1;
-/// Invalid arguments or usage (matches clap's convention).
 pub const EXIT_USAGE: i32 = 2;
-/// The operation exceeded its `--timeout`.
 pub const EXIT_TIMEOUT: i32 = 3;
-/// A tool call failed during a non-interactive run.
 pub const EXIT_TOOL_FAILED: i32 = 4;
-/// The runtime was busy or the actor was unavailable.
 pub const EXIT_BUSY: i32 = 5;
-/// A side-effecting operation required confirmation that was not given.
 pub const EXIT_CONFIRMATION_REQUIRED: i32 = 6;
-/// Interrupted by Ctrl-C (matches the REPL path).
 pub const EXIT_INTERRUPTED: i32 = 130;
 
 /// Stable error code strings used in the JSON error envelope.
@@ -63,17 +52,11 @@ pub const EXIT_INTERRUPTED: i32 = 130;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    /// Invalid arguments or usage.
     Usage,
-    /// Generic runtime or execution failure.
     Runtime,
-    /// The operation timed out.
     Timeout,
-    /// A tool call failed.
     ToolFailed,
-    /// The runtime was busy or the actor was unavailable.
     Busy,
-    /// A confirmation flag (`--yes`) was required but not supplied.
     ConfirmationRequired,
 }
 
@@ -98,7 +81,6 @@ pub struct ErrorBody {
     pub message: String,
 }
 
-/// A structured error that carries both a stable code and an exit status.
 #[derive(Debug)]
 pub struct OutputError {
     pub body: ErrorBody,
@@ -139,9 +121,6 @@ impl OutputError {
     }
 }
 
-/// Print a serializable value to stdout as pretty JSON.
-///
-/// Returns an [`OutputError`] if serialization fails.
 pub fn print_json(value: &impl Serialize) -> Result<(), OutputError> {
     let json = serde_json::to_string_pretty(value).map_err(|e| {
         OutputError::new(
@@ -153,9 +132,6 @@ pub fn print_json(value: &impl Serialize) -> Result<(), OutputError> {
     Ok(())
 }
 
-/// Print a serializable value to stdout as a single compact JSON line (JSONL).
-///
-/// Returns an [`OutputError`] if serialization fails.
 pub fn print_jsonl(value: &impl Serialize) -> Result<(), OutputError> {
     let json = serde_json::to_string(value).map_err(|e| {
         OutputError::new(

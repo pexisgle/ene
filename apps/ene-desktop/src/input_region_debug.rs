@@ -30,15 +30,10 @@ use crate::platform::wayland_region::Rect;
 /// What the runtime pushed to the OS this frame.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum InputRegionSource {
-    /// Empty rectangle set. All clicks pass through.
     #[default]
     Empty,
-    /// `F8` freeze hotkey is held. All input accepted.
     Freeze,
-    /// Full-window accept (cursor on silhouette, or mask had
-    /// no data).
     FullWindow,
-    /// Per-rectangle set forwarded from the mask readback.
     Mask,
 }
 
@@ -184,7 +179,6 @@ mod tests {
             glam::Mat4::IDENTITY,
             -3.0,
         );
-        // 4 segments for the window border.
         assert_eq!(out.len(), 4);
         for line in &out {
             assert_eq!(line.color, glam::Vec4::from(COLOR_EMPTY));
@@ -222,7 +216,6 @@ mod tests {
             glam::Mat4::IDENTITY,
             -3.0,
         );
-        // 2 rects × 4 segments.
         assert_eq!(out.len(), 8);
         for line in &out {
             assert_eq!(line.color, glam::Vec4::from(COLOR_MASK));
@@ -277,7 +270,6 @@ mod tests {
         );
         assert_eq!(out.len(), 4);
         for line in &out {
-            // Every vertex on the centred box.
             assert!(
                 (-1.31..=1.31).contains(&line.a.x),
                 "a.x={} out of range",

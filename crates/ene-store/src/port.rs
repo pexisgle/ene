@@ -1,5 +1,3 @@
-//! `impl MemoryPort for MemoryStore`.
-//!
 //! Thin delegation to the inherent methods on [`crate::store::MemoryStore`]
 //! defined elsewhere in this crate; the only real work here is converting
 //! [`crate::error::EneMemoryError`] into [`ene_core::MemoryPortError`] so

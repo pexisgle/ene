@@ -135,7 +135,6 @@ pub fn section_title(section: &str) -> Option<String> {
         .map(|(_, key)| crate::i18n::loader().get(key))
 }
 
-/// Page title + description shown above the page content.
 pub fn page_header(ui: &mut Ui, title: &str, description: &str) {
     ui.add_space(6.0);
     ui.heading(RichText::new(title).size(21.0));
@@ -318,7 +317,6 @@ pub enum BadgeTone {
     Error,
 }
 
-/// Small rounded status pill.
 pub fn status_badge(ui: &mut Ui, text: &str, tone: BadgeTone) {
     let dark = ui.visuals().dark_mode;
     let (bg, fg) = match tone {
@@ -380,8 +378,7 @@ pub fn status_badge(ui: &mut Ui, text: &str, tone: BadgeTone) {
     ui.painter().galley(rect.min + vec2(7.0, 2.5), galley, fg);
 }
 
-/// Amber notice box for recoverable problems (missing assets, validation
-/// warnings).
+/// For recoverable problems (missing assets, validation warnings).
 pub fn warning_box(ui: &mut Ui, text: &str) {
     let dark = ui.visuals().dark_mode;
     let (bg, fg) = if dark {
@@ -404,7 +401,7 @@ pub fn warning_box(ui: &mut Ui, text: &str) {
         });
 }
 
-/// Red notice box for errors that block or failed an operation.
+/// For errors that block or failed an operation.
 pub fn error_box(ui: &mut Ui, text: &str) {
     let dark = ui.visuals().dark_mode;
     let (bg, fg) = if dark {
@@ -427,7 +424,6 @@ pub fn error_box(ui: &mut Ui, text: &str) {
         });
 }
 
-/// Centered placeholder for empty lists and "nothing here yet" states.
 pub fn empty_state(ui: &mut Ui, title: &str, detail: &str) {
     ui.add_space(8.0);
     ui.vertical_centered(|ui| {

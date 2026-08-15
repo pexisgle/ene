@@ -10,10 +10,8 @@ use tracing::{debug, info};
 use crate::config::MindMemoryConfig;
 use crate::error::CognitionError;
 
-/// Scope for a forgetting lifecycle pass.
 #[derive(Debug, Clone)]
 pub struct ForgettingContext<'a> {
-    /// Character identifier.
     pub character_id: &'a str,
     /// User identifier (may be empty).
     pub user_id: Option<&'a str>,
@@ -21,7 +19,6 @@ pub struct ForgettingContext<'a> {
     pub now: DateTime<Utc>,
 }
 
-/// Summary of a forgetting lifecycle run.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ForgettingReport {
     /// Memories transitioned to `faded`.
@@ -49,12 +46,10 @@ impl From<NaturalDecayReport> for ForgettingReport {
     }
 }
 
-/// Natural forgetting lifecycle worker.
 #[derive(Debug, Default)]
 pub struct ForgettingLifecycle;
 
 impl ForgettingLifecycle {
-    /// Apply natural decay transitions for the given scope.
     pub async fn apply(
         store: &dyn MemoryPort,
         ctx: &ForgettingContext<'_>,

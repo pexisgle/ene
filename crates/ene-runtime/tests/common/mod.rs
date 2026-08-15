@@ -1,5 +1,3 @@
-//! Shared helpers for `ene-runtime` integration tests.
-
 #![expect(
     dead_code,
     clippy::expect_used,
@@ -13,7 +11,6 @@ use ene_config::EneConfig;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Build a default character card with a distinct name per test file.
 pub fn test_card(name: &str) -> CharacterCardV3 {
     let mut card = CharacterCardV3::default();
     card.data.name = name.into();

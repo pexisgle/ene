@@ -164,7 +164,6 @@ impl ExpressionName {
         Self(s.into())
     }
 
-    /// Borrow the inner string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -211,7 +210,6 @@ pub struct PrimitiveMorphs {
 }
 
 impl PrimitiveMorphs {
-    /// Build a `PrimitiveMorphs` from a list of morph targets.
     #[must_use]
     pub const fn from_targets(
         primitive_id: PrimitiveId,

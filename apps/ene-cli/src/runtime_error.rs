@@ -1,5 +1,3 @@
-//! User-facing runtime error messages mapped to localized Fluent strings.
-
 use ene_runtime::EneRuntimeError;
 
 pub fn user_message(error: &EneRuntimeError) -> String {

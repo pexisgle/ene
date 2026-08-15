@@ -44,7 +44,6 @@ fn is_busy_error(err: &EneMemoryError) -> bool {
     )
 }
 
-/// How the actor wants a claimed fire handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FireClaimMode {
     /// Execute the action now (the actor holds the single-flight gate).
@@ -57,7 +56,6 @@ pub enum FireClaimMode {
     AwaitConfirmation,
 }
 
-/// Result of a successful fire claim.
 #[derive(Debug, Clone)]
 pub struct ClaimedFire {
     /// The schedule snapshot read inside the claim transaction.
@@ -109,7 +107,6 @@ fn model_to_run(m: entities::schedule_runs::Model) -> ScheduleRun {
 }
 
 impl MemoryStore {
-    /// Validates a new schedule, computes its first fire time, and inserts it.
     pub async fn insert_schedule(
         &self,
         new: &NewSchedule,
@@ -143,7 +140,6 @@ impl MemoryStore {
         model_to_schedule(model)
     }
 
-    /// Fetch a schedule by id.
     pub async fn get_schedule(&self, id: i64) -> Result<Option<Schedule>, EneMemoryError> {
         let maybe = entities::schedules::Entity::find_by_id(id)
             .one(&self.db)
@@ -151,8 +147,6 @@ impl MemoryStore {
         maybe.map(model_to_schedule).transpose()
     }
 
-    /// Replace the editable fields of an existing schedule.
-    ///
     /// Runs the same [`ene_core::first_run_at`] validation as
     /// [`Self::insert_schedule`] (name, kind fields, timezone, cron,
     /// interval, future one-shot start), recomputes `next_run_at`, and keeps
@@ -186,7 +180,6 @@ impl MemoryStore {
         model_to_schedule(model)
     }
 
-    /// Fetch a schedule by its unique name.
     pub async fn get_schedule_by_name(
         &self,
         name: &str,
@@ -198,7 +191,6 @@ impl MemoryStore {
         maybe.map(model_to_schedule).transpose()
     }
 
-    /// List all schedules ordered by name.
     pub async fn list_schedules(&self) -> Result<Vec<Schedule>, EneMemoryError> {
         let rows = entities::schedules::Entity::find()
             .order_by_asc(entities::schedules::Column::Name)
@@ -207,7 +199,6 @@ impl MemoryStore {
         rows.into_iter().map(model_to_schedule).collect()
     }
 
-    /// Enable or disable a schedule; returns whether a row was updated.
     pub async fn set_schedule_enabled(
         &self,
         id: i64,
@@ -417,8 +408,6 @@ impl MemoryStore {
         }))
     }
 
-    /// Record a terminal status for a run and update its schedule counters.
-    ///
     /// Failed runs arm a retry (setting `next_run_at` and the retry pointer)
     /// when `retries < max_retries`. Idempotent: runs already terminal are
     /// left untouched, so a retry-fire outcome can never overwrite a newer
@@ -515,9 +504,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Transition an approved run from `awaiting_approval` to `running` when
-    /// execution actually starts.
-    ///
     /// Without this, a stale confirmation timeout could still mark the run
     /// `timed_out` mid-execution, and a crash mid-execution would be
     /// reconciled as `timed_out` instead of `interrupted`.
@@ -558,9 +544,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Mark runs left in flight by a crash (`running` → `interrupted`,
-    /// `awaiting_approval` → `timed_out`) and sync the owning schedules'
-    /// `last_status`.
     pub async fn reconcile_startup(&self, now: DateTime<Utc>) -> Result<(), EneMemoryError> {
         let txn = self.db.begin().await?;
         let running_ids: Vec<i64> = entities::schedule_runs::Entity::find()
@@ -653,7 +636,6 @@ impl MemoryStore {
         Ok(updated.rows_affected)
     }
 
-    /// Recent run history for a schedule, newest first.
     pub async fn list_runs(
         &self,
         schedule_id: i64,

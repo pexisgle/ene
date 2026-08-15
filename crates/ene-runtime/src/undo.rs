@@ -54,33 +54,25 @@ pub fn is_irreversible(tool_name: &str) -> bool {
     IRREVERSIBLE_TOOLS.contains(&tool_name)
 }
 
-/// A single recorded undo checkpoint on the actor's stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndoEntry {
-    /// The undo metadata for the recorded operation.
     pub metadata: UndoMetadata,
 }
 
-/// Outcome of an `/undo` request, reported back to the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UndoReport {
     /// No reversible operation is available to undo.
     NothingToUndo,
     /// The most recent operation is irreversible and cannot be rolled back.
-    Irreversible {
-        /// Metadata for the irreversible operation.
-        metadata: UndoMetadata,
-    },
+    Irreversible { metadata: UndoMetadata },
     /// A reversible operation was successfully reverted.
     Reverted {
-        /// Metadata for the reverted operation.
         metadata: UndoMetadata,
         /// The owning tool's undo output.
         output: String,
     },
     /// A reversible operation was found but the rollback failed.
     Failed {
-        /// Metadata for the operation that failed to revert.
         metadata: UndoMetadata,
         /// The error reported by the owning tool.
         error: String,
@@ -125,7 +117,6 @@ impl UndoStack {
         }
     }
 
-    /// Record a mutating tool call. Irrelevant tools are ignored.
     pub fn record(&mut self, tool_name: &str, turn_id: &str, target_resources: Vec<String>) {
         if !is_undo_relevant(tool_name) {
             return;
@@ -158,7 +149,6 @@ impl UndoStack {
         self.entries.last()
     }
 
-    /// Remove and return the most recent reversible entry.
     pub fn pop_reversible(&mut self) -> Option<UndoEntry> {
         let pos = self
             .entries
@@ -167,19 +157,16 @@ impl UndoStack {
         Some(self.entries.remove(pos))
     }
 
-    /// All entries, oldest first.
     #[must_use]
     pub fn entries(&self) -> &[UndoEntry] {
         &self.entries
     }
 
-    /// Number of recorded entries.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether the stack is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -211,7 +198,6 @@ mod tests {
         let mut stack = UndoStack::new(10);
         stack.record("filesystem.read", "t1", vec!["/a".into()]);
         stack.record("system.search_tools", "t1", vec![]);
-        // Irreversible tools are warned about but never recorded.
         stack.record("shell.execute", "t1", vec!["ls".into()]);
         assert!(stack.is_empty());
     }

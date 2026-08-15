@@ -3,7 +3,6 @@
 use ene_plugin::PluginError;
 use serde::{Deserialize, Serialize};
 
-/// Default VOICEVOX engine HTTP endpoint.
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:50021";
 
 /// `mode = "external"`: always talk to an engine the user starts and manages
@@ -81,12 +80,6 @@ pub enum EngineMode {
 }
 
 impl VoicevoxConfig {
-    /// Parses the provider config blob delivered with a synthesize request.
-    ///
-    /// # Errors
-    ///
-    /// Returns a provider error when the blob is not a JSON object or a
-    /// field has the wrong type.
     pub fn from_value(value: serde_json::Value) -> Result<Self, PluginError> {
         serde_json::from_value(value)
             .map_err(|e| PluginError::provider(format!("invalid voicevox provider config: {e}")))

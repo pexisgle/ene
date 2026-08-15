@@ -14,7 +14,6 @@ pub const DEFAULT_ENDPOINT_URL: &str =
 /// even when the setting is misconfigured.
 pub const MAX_RETRIES_LIMIT: u32 = 10;
 
-/// Settings for the Edge-TTS provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct EdgeTtsConfig {

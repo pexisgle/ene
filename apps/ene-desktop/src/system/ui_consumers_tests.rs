@@ -1,5 +1,3 @@
-//! Tests for platform / tray / AI consumer systems.
-
 use bevy_ecs::prelude::*;
 
 use crate::component::chat::{ChatStateComponent, ChatUiBundle, ChatWindow};
@@ -305,7 +303,6 @@ fn motion_command_routes_typed_layer_to_vrm() {
     world.init_resource::<MotionLayerState>();
     world.init_resource::<Messages<MotionCommand>>();
 
-    // A `Lower` motion should land on the VRM lower layer (and loop).
     world.write_message(MotionCommand {
         name: "idle".into(),
         layer: ene_card::MotionLayer::Lower,
@@ -324,7 +321,6 @@ fn motion_command_routes_typed_layer_to_vrm() {
     let frame = world.resource::<MotionLayerState>().compose();
     assert_eq!(frame.active_motions, vec!["idle".to_string()]);
 
-    // Cancel the lower layer: the motion is now cleared.
     world
         .resource_mut::<MotionLayerState>()
         .cancel_motion(ene_vrm::MotionLayer::Lower);
@@ -371,7 +367,6 @@ fn apply_cancel_expr_clears_scheduled_and_active_expressions() {
     use crate::system::ui_consumers::apply_cancel_system;
     let mut world = World::new();
     let mut pipeline = EmotionPipelineState::default();
-    // A scheduled (future `target_time`) cue plus an active expression.
     pipeline
         .pending
         .push_back(crate::character_state::EmotionCommand {

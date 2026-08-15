@@ -1,12 +1,9 @@
-//! Affect-state and pending-affect-proposal queries.
-
 use super::{EneMemoryError, MemoryStore};
 use crate::entities;
 use chrono::Utc;
 use sea_orm::EntityTrait;
 
 impl MemoryStore {
-    /// Retrieve the current [`crate::AffectState`] for a character.
     pub async fn get_affect_state(
         &self,
         character_id: &str,
@@ -48,7 +45,6 @@ impl MemoryStore {
         }
     }
 
-    /// Persist or update an [`crate::AffectState`].
     pub async fn upsert_affect_state(
         &self,
         state: &crate::AffectState,
@@ -106,7 +102,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Upsert a pending post-turn classifier proposal for the next turn.
     pub async fn upsert_pending_affect_proposal(
         &self,
         proposal: &crate::PendingAffectProposal,
@@ -140,7 +135,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Retrieve a pending post-turn classifier proposal, if any.
     pub async fn get_pending_affect_proposal(
         &self,
         character_id: &str,
@@ -173,7 +167,6 @@ impl MemoryStore {
         }
     }
 
-    /// Delete a pending post-turn classifier proposal for a character/user key.
     pub async fn delete_pending_affect_proposal(
         &self,
         character_id: &str,
@@ -188,7 +181,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Fetch and consume a pending post-turn classifier proposal.
     pub async fn take_pending_affect_proposal(
         &self,
         character_id: &str,

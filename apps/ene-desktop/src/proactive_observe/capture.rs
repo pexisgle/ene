@@ -18,10 +18,9 @@ const MAX_COMPOSITE_PIXELS: u64 = 1920 * 1080;
 
 const _: () = assert!(MAX_COMPOSITE_PIXELS <= ene_runtime::vision::MAX_PIXELS);
 
-/// Width of the dark separator between overview and ROI in the composite.
 const SEPARATOR_PX: u32 = 8;
 
-/// Capture result with optional active-app label for cache keys.
+/// The active-app label feeds cache keys.
 #[derive(Debug)]
 pub struct CapturedScreen {
     /// Downscaled RGBA/RGB image (the overview).
@@ -36,10 +35,8 @@ pub struct CapturedScreen {
     pub is_code_like: bool,
 }
 
-/// Capture the active window when possible, otherwise the primary display.
 /// When Ene is focused, capture the primary display so background context
-/// remains visible. `cursor` is the global pointer position used to crop the
-/// 100%-scale ROI from the full-resolution capture.
+/// remains visible.
 pub async fn capture_for_summary(cursor: Option<(i32, i32)>) -> Result<CapturedScreen, String> {
     let (app_label, is_code_like) = active_window_signals();
     let ene_focused = is_self_app(&app_label);
@@ -239,8 +236,6 @@ pub fn compose(
     (DynamicImage::ImageRgba8(canvas), overview)
 }
 
-/// Scale an image down to the pixel budget when it exceeds it (very large
-/// displays captured without a usable ROI).
 fn fit_to_budget(image: DynamicImage) -> DynamicImage {
     let (w, h) = image.dimensions();
     if u64::from(w) * u64::from(h) <= MAX_COMPOSITE_PIXELS {
@@ -327,7 +322,6 @@ mod tests {
         assert_eq!(composite.height(), 540);
         assert_eq!(placed.width(), 960);
         assert_eq!(placed.height(), 540);
-        // The ROI keeps its 100% scale in the composite.
         let (cw, ch) = composite.dimensions();
         assert_eq!(cw, 1480);
         assert_eq!(ch, 540);
@@ -341,7 +335,6 @@ mod tests {
         let pixels = u64::from(composite.width()) * u64::from(composite.height());
         assert!(pixels <= MAX_COMPOSITE_PIXELS);
         assert!(placed.width() < 1920, "overview must shrink to make room");
-        // The ROI is never shrunk.
         assert_eq!(composite.width() - placed.width() - SEPARATOR_PX, 512);
     }
 

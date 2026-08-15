@@ -22,17 +22,15 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "LANG")]
     pub lang: Option<String>,
 
-    /// Non-interactive subcommand. Omit to start the interactive REPL.
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
-/// Non-interactive subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run a single prompt and stream the response, then exit.
     Run {
-        /// Prompt text. If omitted, the prompt is read from stdin.
+        /// If omitted, the prompt is read from stdin.
         prompt: Vec<String>,
 
         /// Emit one JSON object per line (streaming events) on stdout.
@@ -54,7 +52,6 @@ pub enum Command {
     },
     /// Manage and call tools.
     Tool {
-        /// Tool subcommand.
         #[command(subcommand)]
         action: ToolAction,
 
@@ -64,7 +61,6 @@ pub enum Command {
     },
     /// Manage conversation sessions.
     Session {
-        /// Session subcommand.
         #[command(subcommand)]
         action: SessionAction,
 
@@ -74,7 +70,6 @@ pub enum Command {
     },
     /// List discovered characters.
     Characters {
-        /// Character subcommand.
         #[command(subcommand)]
         action: CharactersAction,
 
@@ -84,7 +79,6 @@ pub enum Command {
     },
     /// Inspect and manage cognitive memories.
     Memory {
-        /// Memory subcommand.
         #[command(subcommand)]
         action: MemoryAction,
 
@@ -100,7 +94,6 @@ pub enum Command {
     },
     /// Backup, restore, and integrity-check the memory database.
     Store {
-        /// Store subcommand.
         #[command(subcommand)]
         action: StoreAction,
 
@@ -110,7 +103,6 @@ pub enum Command {
     },
     /// Build, sign, and verify signed artifact catalogs (publisher side).
     Catalog {
-        /// Catalog subcommand.
         #[command(subcommand)]
         action: CatalogAction,
 
@@ -126,15 +118,9 @@ pub enum ToolAction {
     /// List all registered tools.
     List,
     /// Search registered tools.
-    Search {
-        /// Search query.
-        query: String,
-    },
+    Search { query: String },
     /// Show detailed help for a tool.
-    Help {
-        /// Tool name.
-        name: String,
-    },
+    Help { name: String },
     /// Call a tool directly with JSON arguments.
     Call {
         /// Tool name.
@@ -155,30 +141,15 @@ pub enum SessionAction {
         archived: bool,
     },
     /// Export a session to a versioned, redacted JSON bundle.
-    Export {
-        /// Session id.
-        id: String,
-    },
+    Export { id: String },
     /// Import a session from a JSON export file.
-    Import {
-        /// Path to the export file.
-        path: PathBuf,
-    },
+    Import { path: PathBuf },
     /// Full-text search over stored conversation messages.
-    Search {
-        /// Search query.
-        query: String,
-    },
+    Search { query: String },
     /// Archive a session.
-    Archive {
-        /// Session id.
-        id: String,
-    },
+    Archive { id: String },
     /// Unarchive a session.
-    Unarchive {
-        /// Session id.
-        id: String,
-    },
+    Unarchive { id: String },
 }
 
 /// `characters` subcommands.
@@ -187,10 +158,7 @@ pub enum CharactersAction {
     /// List discovered characters.
     List,
     /// Import a character card (PNG or CHARX) into the characters directory.
-    Import {
-        /// Path to the card file.
-        path: PathBuf,
-    },
+    Import { path: PathBuf },
 }
 
 /// `memory` subcommands.
@@ -203,15 +171,9 @@ pub enum MemoryAction {
         kind: Option<String>,
     },
     /// Show full typed-memory details.
-    Inspect {
-        /// Memory id.
-        id: i64,
-    },
+    Inspect { id: i64 },
     /// Search typed memories (hybrid score + breakdown).
-    Search {
-        /// Search query.
-        query: String,
-    },
+    Search { query: String },
 }
 
 /// `store` subcommands.
@@ -223,7 +185,6 @@ pub enum StoreAction {
     ListBackups,
     /// Restore the memory database from a backup file (exits afterward).
     Restore {
-        /// Path to the backup file.
         path: PathBuf,
         /// Confirm the destructive restore.
         #[arg(long)]

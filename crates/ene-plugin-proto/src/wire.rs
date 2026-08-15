@@ -7,7 +7,6 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// Payload encoding for a framed IPC message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireFormat {
     /// UTF-8 JSON payload.
@@ -25,7 +24,6 @@ impl WireFormat {
     /// byte-compatible.
     pub const MSGPACK_MIN_PROTOCOL_VERSION: u32 = 6;
 
-    /// Returns the framing negotiated for a plugin IPC protocol version.
     pub const fn for_version(version: u32) -> Self {
         if version >= Self::MSGPACK_MIN_PROTOCOL_VERSION {
             Self::MsgPack
@@ -46,7 +44,6 @@ impl WireFormat {
         }
     }
 
-    /// Decodes a payload in this format into `T`.
     pub(crate) fn decode<T: DeserializeOwned>(self, bytes: &[u8]) -> Result<T, WireError> {
         match self {
             Self::Json => serde_json::from_slice(bytes).map_err(WireError::JsonDecode),
@@ -55,19 +52,14 @@ impl WireFormat {
     }
 }
 
-/// Codec failure for a specific wire format.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WireError {
-    /// JSON payload could not be serialized.
     #[error("JSON serialization failed: {0}")]
     JsonEncode(serde_json::Error),
-    /// JSON payload could not be deserialized.
     #[error("JSON deserialization failed: {0}")]
     JsonDecode(serde_json::Error),
-    /// `MessagePack` payload could not be serialized.
     #[error("MessagePack serialization failed: {0}")]
     MsgPackEncode(rmp_serde::encode::Error),
-    /// `MessagePack` payload could not be deserialized.
     #[error("MessagePack deserialization failed: {0}")]
     MsgPackDecode(rmp_serde::decode::Error),
 }

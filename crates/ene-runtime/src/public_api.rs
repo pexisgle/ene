@@ -106,7 +106,6 @@ pub struct PublicPerfCue {
 /// shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicSessionMeta {
-    /// Row id.
     pub id: i64,
     /// Logical session key (unique across the store).
     pub session_id: String,
@@ -114,13 +113,11 @@ pub struct PublicSessionMeta {
     pub card_name: String,
     /// Human-readable session title (may be empty until set).
     pub title: String,
-    /// When the session was first created.
     pub created_at: DateTime<Utc>,
     /// When the session was last touched (newest-first ordering key).
     pub updated_at: DateTime<Utc>,
     /// Whether the session is archived (hidden from default listings).
     pub archived: bool,
-    /// Number of conversation turns recorded for the session.
     pub turn_count: i64,
 }
 
@@ -150,7 +147,6 @@ pub struct PublicExportedMessage {
     pub role: String,
     /// Message content (secrets redacted).
     pub content: String,
-    /// When the message was recorded.
     pub created_at: DateTime<Utc>,
 }
 
@@ -264,96 +260,65 @@ impl From<ene_store::EneMemoryError> for PublicApiError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicChatEvent {
-    /// The turn has started streaming.
     TurnStarted {
         /// Turn id (UUID string).
         turn: String,
-        /// Who initiated the turn.
         origin: String,
     },
-    /// A chunk of generated text.
     TextDelta {
-        /// Turn id.
         turn: String,
-        /// Who initiated the turn.
         origin: String,
         /// Text chunk (markers stripped).
         delta: String,
     },
-    /// Presentation cues for the turn.
     Performance {
-        /// Turn id.
         turn: String,
-        /// Who initiated the turn.
         origin: String,
-        /// Cue list.
         cues: Vec<PublicPerfCue>,
         /// Aggregate cue source for the batch.
         source: String,
     },
-    /// A tool call was requested.
     ToolCallStart {
-        /// Turn id.
         turn: String,
-        /// Who initiated the turn.
         origin: String,
-        /// Tool name.
         name: String,
         /// Parsed JSON arguments (object), after redaction when converted via
         /// [`PublicChatEvent::from_ene_event`].
         arguments: serde_json::Value,
     },
-    /// A tool call completed.
     ToolCallResult {
-        /// Turn id.
         turn: String,
-        /// Who initiated the turn.
         origin: String,
-        /// Tool name.
         name: String,
         /// Tool output (may be truncated / redacted).
         result: String,
     },
     /// A destructive operation requires approval.
     PermissionRequired {
-        /// Turn id.
         turn: String,
-        /// Who initiated the turn.
         origin: String,
-        /// Permission request id.
         request_id: String,
-        /// Operation category.
         action: String,
-        /// Target resource.
         target: String,
-        /// Human-readable description.
         description: String,
     },
     /// An interactive tool needs user input.
     UserInputRequired {
-        /// Turn id.
         turn: String,
-        /// Who initiated the turn.
         origin: String,
-        /// Input request id.
         request_id: String,
         /// Prompt kind label from the tool ABI.
         prompt_kind: String,
     },
     /// Rolling context compression completed for this turn.
     ContextCompressed {
-        /// Turn id.
         turn: String,
-        /// Who initiated the turn.
         origin: String,
-        /// Compression level label.
         level: String,
     },
     /// The turn reached a terminal state (exactly one per run).
     Terminal {
-        /// Turn id.
         turn: String,
-        /// Who initiated the turn.
         origin: String,
         /// `done`, `failed`, or `cancelled`.
         reason: String,
@@ -385,13 +350,9 @@ pub enum PublicLifecycleEvent {
         status: String,
     },
     /// One or more pending memory candidates became available for review.
-    PendingCandidatesAvailable {
-        /// Number of pending candidates currently awaiting review.
-        count: usize,
-    },
+    PendingCandidatesAvailable { count: usize },
     /// A pending memory candidate was approved, rejected, or edited.
     CandidateChanged {
-        /// Candidate row id.
         id: i64,
         /// Status after the mutation (`pending` / `approved` / `rejected`).
         status: String,
@@ -400,27 +361,20 @@ pub enum PublicLifecycleEvent {
     },
     /// A typed memory was edited or had its salience adjusted.
     MemoryLedgerChanged {
-        /// Typed-memory row id.
         id: i64,
-        /// Mutation kind.
         action: PublicMemoryLedgerChange,
         /// Active turn context at mutation time, when any.
         turn: Option<String>,
     },
     /// A deferred background tool task reached a terminal state.
     ToolBackgroundCompleted {
-        /// Tool name.
         tool_name: String,
-        /// Background task id.
         task_id: String,
         /// Terminal status string (`completed`, `failed`, `cancelled`, …).
         status: String,
     },
     /// A connector's state changed.
-    ConnectorChanged {
-        /// Connector whose state changed.
-        id: String,
-    },
+    ConnectorChanged { id: String },
 }
 
 /// Stable JSON mirror of [`MemoryLedgerChange`] for
@@ -583,7 +537,6 @@ impl PublicChatEvent {
 }
 
 impl PublicLifecycleEvent {
-    /// Convert an internal lifecycle event into the stable public mirror.
     #[must_use]
     pub fn from_lifecycle_event(event: &LifecycleEvent) -> Self {
         match event {
@@ -856,8 +809,6 @@ mod tests {
 
     #[test]
     fn pending_candidate_available_maps_to_dedicated_event() {
-        // PendingCandidateAvailable lives on the lifecycle bus, not the
-        // chat bus, so it mirrors through PublicLifecycleEvent.
         let event = LifecycleEvent::PendingCandidateAvailable { count: 3 };
         let public = PublicLifecycleEvent::from_lifecycle_event(&event);
         let PublicLifecycleEvent::PendingCandidatesAvailable { count } = public else {

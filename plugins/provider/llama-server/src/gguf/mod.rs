@@ -1,5 +1,3 @@
-//! GGUF download, cache, and path resolution.
-
 mod download;
 
 use download::{download_gguf, file_has_gguf_magic};
@@ -9,7 +7,6 @@ use std::path::PathBuf;
 
 pub use download::{filename_from_url, gguf_cache_dir};
 
-/// Ensure a local model's GGUF weights are present on disk (may download).
 pub async fn ensure_gguf_available(
     local: &ResolvedLocalModel,
 ) -> Result<PathBuf, LlmProviderError> {
@@ -45,7 +42,6 @@ pub async fn ensure_gguf_available(
     Ok(path)
 }
 
-/// Ensure a local model's multimodal projector GGUF is present (may download).
 pub async fn ensure_mmproj_available(
     local: &ResolvedLocalModel,
 ) -> Result<Option<PathBuf>, LlmProviderError> {
@@ -83,7 +79,6 @@ pub async fn ensure_mmproj_available(
     Ok(Some(path))
 }
 
-/// Cache path for a URL-derived `{stem}.gguf` (no hash), used for legacy/manual weights.
 fn unhashed_cache_path_from_url(url: &str) -> Result<PathBuf, LlmProviderError> {
     ene_ai::validate_https_url(url)?;
     let path = ene_ai::model_fetch::strip_url_path(url);
@@ -98,7 +93,6 @@ fn unhashed_cache_path_from_url(url: &str) -> Result<PathBuf, LlmProviderError> 
     Ok(gguf_cache_dir().join(format!("{stem}.gguf")))
 }
 
-/// If `{stem}.gguf` exists beside the hashed cache path, link and reuse it.
 async fn try_reuse_unhashed_cache(
     url: &str,
     hashed_path: &PathBuf,

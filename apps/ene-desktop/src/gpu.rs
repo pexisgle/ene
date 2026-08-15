@@ -9,7 +9,6 @@ use wgpu::{
     TextureFormat,
 };
 
-/// Errors that can occur during GPU context creation.
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {
     #[error("Failed to request wgpu adapter: {0}")]
@@ -18,14 +17,12 @@ pub enum GpuError {
     RequestDevice(String),
 }
 
-/// Errors that can occur during window surface creation.
 #[derive(Debug, thiserror::Error)]
 pub enum WindowSurfaceError {
     #[error("Failed to create wgpu surface: {0}")]
     CreateSurface(String),
 }
 
-/// Owned handle to the wgpu globals.
 pub struct GpuContext {
     pub instance: Instance,
     pub adapter: Adapter,

@@ -30,8 +30,6 @@ impl CliCommand for AffectCommand {
             .await
             .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
         let card_name = snapshot.card_name.as_str();
-        // The snapshot no longer carries the memory handle; it lives on
-        // the diagnostics facade, which is the documented access path.
         let memory = diag.memory();
         match sub {
             "show" => match memory.show_affect_state(card_name).await {

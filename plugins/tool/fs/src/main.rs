@@ -2,7 +2,6 @@
 //!
 //! Plugin binary providing filesystem operations:
 //! read, write, edit, search, glob, patch, shell execution, and undo management.
-#![warn(missing_docs)]
 #![expect(
     clippy::arithmetic_side_effects,
     reason = "fs edit/patch/read tools use intentional byte and line-index arithmetic"

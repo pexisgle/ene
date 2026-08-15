@@ -1,5 +1,3 @@
-//! Smoke tests that spawn the real `ene` binary.
-//!
 //! No network is touched: chat/tool commands are deliberately not
 //! exercised, and the plugin host is disabled so no plugin process spawns.
 
@@ -10,15 +8,12 @@
 
 use std::process::Command;
 
-/// Path to the `ene` binary cargo built for this test package.
 fn ene_bin() -> &'static str {
     option_env!("CARGO_BIN_EXE_ene-cli")
         .or(option_env!("CARGO_BIN_EXE_ene_cli"))
         .expect("cargo sets CARGO_BIN_EXE_* for integration tests")
 }
 
-/// The CLI must never need config, the runtime, or a terminal to answer
-/// help/version queries.
 #[test]
 fn help_and_version_exit_zero_without_config() {
     let help = Command::new(ene_bin())
@@ -37,10 +32,8 @@ fn help_and_version_exit_zero_without_config() {
     assert!(String::from_utf8_lossy(&version.stdout).contains("ene"));
 }
 
-/// A local query (character discovery) returns valid JSON without any
-/// provider configuration or network access; the plugin host stays off so
-/// no plugin process spawns. The config is loaded from a temp copy so the
-/// config-version migration never rewrites the repo's `settings.json`.
+/// The config is loaded from a temp copy so the config-version migration
+/// never rewrites the repo's `settings.json`.
 #[test]
 fn characters_list_emits_valid_json_without_providers() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -73,8 +66,6 @@ fn characters_list_emits_valid_json_without_providers() {
     assert!(parsed.is_array(), "characters list must emit a JSON array");
 }
 
-/// A missing `--config` path fails fast with a non-zero exit and an error
-/// on stderr instead of entering the REPL.
 #[test]
 fn missing_config_path_exits_nonzero_with_error() {
     let output = Command::new(ene_bin())

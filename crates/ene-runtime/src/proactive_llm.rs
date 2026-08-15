@@ -28,7 +28,6 @@ const DECISION_MAX_TOKENS: u32 = 256;
 /// the old path still warms up under the plugin path.
 const LOCAL_WARMUP_TIMEOUT: Duration = Duration::from_mins(5);
 
-/// Which decision backend is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionProviderKind {
     /// The `local` plugin provider (llama.cpp over IPC).
@@ -77,11 +76,8 @@ impl LlmProvider for DisabledDecisionProvider {
     }
 }
 
-/// Owned proactive LLM handles (decision + optional local model).
 pub struct ProactiveLlmHandles {
-    /// Provider used for structured decisions.
     pub decision: Arc<dyn LlmProvider>,
-    /// Backend kind in use.
     pub decision_kind: DecisionProviderKind,
     /// Local provider (if any) for screen-image vision.
     local: Option<Arc<dyn LlmProvider>>,

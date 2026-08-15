@@ -1,5 +1,3 @@
-//! Integration tests for the workspace document index store queries.
-
 use super::*;
 use chrono::Utc;
 use ene_core::{NewWorkspaceChunk, WorkspaceFileRow, WorkspaceSearchQuery};
@@ -65,7 +63,6 @@ async fn workspace_replace_rename_delete_and_status() {
     assert_eq!(status.indexed_files, 2);
     assert_eq!(status.indexed_chunks, 2);
 
-    // Rename keeps chunks.
     let renamed = store
         .rename_workspace_file(
             "/roots/a/one.md",
@@ -77,7 +74,6 @@ async fn workspace_replace_rename_delete_and_status() {
     let files = store.list_workspace_files().await.unwrap();
     assert!(files.iter().any(|f| f.path == "/roots/a/one-renamed.md"));
 
-    // Delete removes file + chunks.
     let deleted = store
         .delete_workspace_files(&["/roots/a/two.md".to_string()])
         .await
@@ -88,7 +84,6 @@ async fn workspace_replace_rename_delete_and_status() {
         1
     );
 
-    // Prune removes rows of roots that left the configuration.
     let pruned = store.prune_workspace_roots(&[]).await.unwrap();
     assert_eq!(pruned, 1);
     assert_eq!(
@@ -117,7 +112,6 @@ async fn workspace_search_filters_roots_and_returns_citations() {
     )
     .await;
 
-    // Only permitted roots are searchable.
     let hits = store
         .search_workspace(&WorkspaceSearchQuery {
             query_text: "installation steps",
@@ -136,7 +130,6 @@ async fn workspace_search_filters_roots_and_returns_citations() {
     assert_eq!(hits[0].heading, "heading-0");
     assert!(hits[0].similarity > 0.0);
 
-    // Empty allowlist is fail-closed.
     let hits = store
         .search_workspace(&WorkspaceSearchQuery {
             query_text: "installation steps",

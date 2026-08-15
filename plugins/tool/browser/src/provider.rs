@@ -4,8 +4,6 @@ use ene_plugin::{ActionSetProvider, ToolAction};
 use ene_plugin_proto::{ToolError, ToolProvider, ToolSpec};
 use std::sync::Arc;
 
-/// Browser automation tool provider.
-///
 /// Dispatch is handled by [`ActionSetProvider`].
 pub struct BrowserToolProvider {
     inner: ActionSetProvider,
@@ -13,7 +11,6 @@ pub struct BrowserToolProvider {
 }
 
 impl BrowserToolProvider {
-    /// Creates a new browser tool provider with a shared session store.
     pub fn new() -> Self {
         let store = Arc::new(crate::utils::session::BrowserSessionStore::new());
         let actions: Vec<Box<dyn ToolAction>> = vec![

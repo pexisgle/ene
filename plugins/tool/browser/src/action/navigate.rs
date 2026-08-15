@@ -11,7 +11,7 @@ use std::sync::Arc;
     side_effects = "Browser { mutates_dom: true }"
 )]
 pub struct NavigateAction {
-    /// URL to navigate to. Prefer navigate+URL over clicking links whenever possible.
+    /// Prefer navigate+URL over clicking links whenever possible.
     url: String,
 
     #[tool(skip)]

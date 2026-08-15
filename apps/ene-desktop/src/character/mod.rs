@@ -3,9 +3,7 @@
     expect(clippy::float_cmp, reason = "test asserts exact float equality")
 )]
 
-//! Character rendering. Owns the loaded VRM, depth texture, the
-//! orthographic camera, and per-frame state (look-at, drag, motion
-//! playback, spring bones, FXAA). The runtime calls
+//! The runtime calls
 //! [`CharacterRenderer::render`] every `RedrawRequested`.
 use std::path::PathBuf;
 
@@ -57,7 +55,7 @@ pub struct CharacterRenderer {
     /// Cached `VRMC_springBone` properties. Cloned to avoid a
     /// borrow fight with `&mut VrmModel` in the per-frame update.
     spring_bone_props: Option<SpringBoneProperties>,
-    /// FXAA post-processor. Rebuilt by
+    /// Rebuilt by
     /// [`CharacterRenderer::set_antialiasing_mode`].
     post_processor: Option<PostProcessor>,
     fxaa_shader: Option<wgpu::ShaderModule>,
@@ -65,7 +63,7 @@ pub struct CharacterRenderer {
 }
 
 impl CharacterRenderer {
-    /// Build an un-initialized renderer. The runtime calls
+    /// The runtime calls
     /// [`CharacterRenderer::init`] once the surface format is
     /// known.
     pub fn uninit(assets_dir: &std::path::Path, default_vrm: &str) -> Self {
@@ -108,7 +106,7 @@ impl CharacterRenderer {
         self.model = Some(model);
     }
 
-    /// Load the default VRM and build the render pipeline. Safe to
+    /// Safe to
     /// call more than once; subsequent calls rebuild the pipeline
     /// (e.g. after a surface-format change).
     pub fn init(
@@ -428,7 +426,7 @@ impl CharacterRenderer {
         }
     }
 
-    /// Forward a new skin palette to the GPU. No-op when the
+    /// No-op when the
     /// renderer is missing or the palette is empty.
     pub fn update_skin_palette_gpu(&self, queue: &wgpu::Queue, palette: &[glam::Mat4]) {
         if let Some(renderer) = self.renderer.as_ref() {
@@ -436,7 +434,7 @@ impl CharacterRenderer {
         }
     }
 
-    /// Update the depth texture to match the surface size. Call this
+    /// Call this
     /// from the `Resized` / `ScaleFactorChanged` handlers.
     pub fn resize(&mut self, device: &wgpu::Device, size: (u32, u32)) {
         if size.0 == 0 || size.1 == 0 || size == self.depth_size {
@@ -461,7 +459,7 @@ impl CharacterRenderer {
         self.camera.set_aspect(size.0 as f32 / size.1 as f32);
     }
 
-    /// Draw the model into `view`. No-op if the model failed to load.
+    /// No-op if the model failed to load.
     /// With `Fxaa` the model is drawn into the post-processor's
     /// intermediate texture first, then sampled into `view`.
     pub fn render(
@@ -528,7 +526,6 @@ impl CharacterRenderer {
         queue.submit(std::iter::once(encoder.finish()));
     }
 
-    /// Forward to the internal VRM renderer's `render_mask`.
     /// No-op if the renderer is uninitialised or was built without
     /// a `mask_format`.
     #[cfg_attr(
@@ -553,8 +550,6 @@ impl CharacterRenderer {
         }
     }
 
-    /// Lazily build the FXAA post-processor for the current swapchain
-    /// size and format.
     fn try_build_post_processor(
         &mut self,
         device: &wgpu::Device,
@@ -565,7 +560,6 @@ impl CharacterRenderer {
         if swapchain_size.0 == 0 || swapchain_size.1 == 0 {
             return;
         }
-        // The shader module is built once and re-used.
         if self.fxaa_shader.is_none() {
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("fxaa.shader"),
@@ -591,8 +585,7 @@ impl CharacterRenderer {
         }
     }
 
-    /// rebuild the post-processor at a new swapchain
-    /// size. The runtime calls this on `WindowEvent::Resized`
+    /// The runtime calls this on `WindowEvent::Resized`
     /// in lock-step with the depth-texture resize.
     pub fn resize_post_processor(
         &mut self,
@@ -648,7 +641,6 @@ impl CharacterRenderer {
         self.default_vrm.as_deref()
     }
 
-    /// Update the path of the default VRM model.
     pub fn set_default_vrm(&mut self, path: std::path::PathBuf) {
         self.default_vrm = Some(path);
     }
@@ -726,8 +718,7 @@ impl CharacterRenderer {
         smoothed_target
     }
 
-    /// Compute the world-space head position and rest rotation.
-    /// Returns `(world_pos, rest_rotation)`. The rest rotation
+    /// The rest rotation
     /// is `Quat::IDENTITY` when the model has no humanoid head
     /// bone.
     fn head_world_for(&self, character_position: Vec3, model_scale: f32) -> (Vec3, Quat) {
@@ -747,8 +738,7 @@ impl CharacterRenderer {
         (world, head.rest.rotation)
     }
 
-    /// Compute the world-space "body center" for camera
-    /// targeting. Tries the humanoid `head` → `chest` → `hips`
+    /// Tries the humanoid `head` → `chest` → `hips`
     /// bones and falls back to `character_position` for models
     /// without humanoid bones. Used by
     /// [`Self::update_camera_target`].
@@ -834,8 +824,6 @@ impl CharacterRenderer {
         self.look_at.smoothed_world_target
     }
 
-    /// Per-bone body-tracking weights for the current
-    /// `look_at_strength` slider value.
     #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn body_tracking(&self, strength: f32) -> crate::look_at::BodyTracking {
         crate::look_at::body_tracking_for_strength(strength)
@@ -949,13 +937,11 @@ impl CharacterRenderer {
         self.camera.uniform().map_or([[0.0; 4]; 4], |u| u.view_proj)
     }
 
-    /// Diagnostic: just the view matrix.
     #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn camera_view_dbg(&self) -> [[f32; 4]; 4] {
         self.camera.debug_view().to_cols_array_2d()
     }
 
-    /// Diagnostic: just the orthographic projection matrix.
     #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn camera_proj_dbg(&self) -> [[f32; 4]; 4] {
         self.camera.debug_proj().to_cols_array_2d()
@@ -974,7 +960,6 @@ impl CharacterRenderer {
         (vp * model).to_cols_array_2d()
     }
 
-    /// Diagnostic: the exact matrix the runtime ships to the GPU.
     #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn model_matrix_runtime_dbg(
         &self,
@@ -1049,7 +1034,6 @@ impl CharacterRenderer {
         out
     }
 
-    /// Retrieve the humanoid bone name for an active collider index.
     #[cfg_attr(
         target_os = "linux",
         expect(
@@ -1080,14 +1064,11 @@ impl CharacterRenderer {
     }
 }
 
-/// Compute the world-space position of a humanoid bone:
-/// `(bone_raw - center) * normalize_scale * model_scale + character_position`.
 fn bone_world_rest_position(model: &VrmModel, bone: &HumanoidBoneEntry) -> Vec3 {
     crate::character::collider::compute_rest_world_positions(model)[bone.node]
 }
 
-/// Build a `SpringBoneSimulator` from the loaded model and the
-/// parsed `VRMC_springBone` extension. Clones the rest positions
+/// Clones the rest positions
 /// and rest local rotations so the simulator can step on its own
 /// schedule without the live model data.
 fn build_spring_bone_simulator(
@@ -1172,8 +1153,7 @@ fn bone_world_position(
     character_position + local * model_scale
 }
 
-/// Pick the first available `head` → `chest` → `hips` bone. The
-/// caller is expected to fall back to the AABB center
+/// Callers fall back to the AABB center
 /// (= `character_position` in world space) on `None`.
 fn pick_body_center_bone(humanoid: &ene_vrm::HumanoidBoneRegistry) -> Option<&HumanoidBoneEntry> {
     humanoid
@@ -1220,9 +1200,6 @@ mod body_center_tests {
         }
     }
 
-    /// `bone_world_position` applies the loader's
-    /// `T(-center) * S(normalize_scale)` and the per-frame
-    /// `S(model_scale) * T(character_position)`.
     #[test]
     fn bone_world_position_applies_loader_and_runtime_transforms() {
         let bone = make_bone(Vec3::new(0.0, 2.0, 0.0));
@@ -1230,8 +1207,6 @@ mod body_center_tests {
         let normalize_scale = 0.75;
         let character_position = Vec3::new(0.5, 0.0, 0.0);
         let model_scale = 1.0;
-        // (2.0 - 1.0) * 0.75 = 0.75
-        // character_position + 0.75 * 1.0 = (0.5, 0.75, 0.0)
         let world = bone_world_position(
             bone.rest.translation,
             center,
@@ -1242,8 +1217,6 @@ mod body_center_tests {
         assert_eq!(world, Vec3::new(0.5, 0.75, 0.0));
     }
 
-    /// `bone_world_position` must respect `model_scale`: doubling
-    /// it doubles the bone's offset from the character position.
     #[test]
     fn bone_world_position_scales_offset_by_model_scale() {
         let bone = make_bone(Vec3::new(0.0, 2.0, 0.0));
@@ -1254,7 +1227,6 @@ mod body_center_tests {
             Vec3::ZERO,
             2.0,
         );
-        // 0.75 * 2.0 = 1.5
         assert_eq!(world, Vec3::new(0.0, 1.5, 0.0));
     }
 
@@ -1375,7 +1347,6 @@ mod camera_target_tests {
     #[test]
     fn chest_target_y_matches_hand_computed_formula() {
         let got = chest_target_y(1.5, 0.5, 0.75, 2.0);
-        // (1.5 - 0.5) * 0.75 * 2.0 = 1.0 * 1.5 = 1.5
         assert_eq!(got, 1.5);
     }
 

@@ -1,8 +1,5 @@
-//! User-facing runtime error messages mapped to localized Fluent strings.
-
 use ene_runtime::EneRuntimeError;
 
-/// Map a bootstrap / open failure into a localized user message.
 pub fn user_message(error: &EneRuntimeError) -> String {
     match error {
         EneRuntimeError::NoCharacterCard => {
@@ -65,7 +62,6 @@ pub fn user_message(error: &EneRuntimeError) -> String {
     }
 }
 
-/// Map a turn-terminal failure payload into a localized user message.
 pub fn user_message_from_turn(message: &str) -> String {
     let trimmed = message.trim();
     if trimmed.is_empty() {

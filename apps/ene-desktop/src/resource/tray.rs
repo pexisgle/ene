@@ -1,5 +1,3 @@
-//! Linux-only tray handle plumbing.
-//!
 //! `tray_icon::TrayIcon` is `Rc<RefCell<_>>` and therefore not
 //! `Send + Sync`, so it cannot be a bevy `Resource`. The tray
 //! handle stays on `AppState::tray`; the `Messages<TickGtk>` queue

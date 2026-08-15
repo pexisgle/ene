@@ -19,7 +19,6 @@
 //! Every requirement is fail-closed: if a requirement is enabled and cannot
 //! be initialized, the child is never exec'd and the spawn fails.
 
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(

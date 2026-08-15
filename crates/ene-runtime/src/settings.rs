@@ -51,7 +51,6 @@ pub struct SettingsApplyRequest {
     /// UI re-syncs instead of silently overwriting newer state. `None`
     /// bypasses the check (initial sync / one-shot callers).
     pub base_revision: Option<u64>,
-    /// Full proposed configuration.
     pub config: EneConfig,
 }
 
@@ -65,7 +64,6 @@ impl std::fmt::Debug for SettingsApplyRequest {
     }
 }
 
-/// Outcome of applying a [`SettingsApplyRequest`].
 #[derive(Debug, Clone)]
 pub struct SettingsApplyResult {
     /// The request revision this result answers.

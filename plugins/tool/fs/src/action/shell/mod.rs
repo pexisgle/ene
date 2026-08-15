@@ -109,12 +109,9 @@ pub async fn shell_exec(
     side_effects = "System { privileged: true }"
 )]
 pub struct ShellAction {
-    /// The command to execute.
     command: String,
-    /// Clear, concise description of what this command does in 5-10 words.
     #[serde(default)]
     description: Option<String>,
-    /// Optional timeout in milliseconds.
     #[serde(default)]
     timeout: Option<u64>,
     /// The working directory to run the command in. Defaults to current directory.

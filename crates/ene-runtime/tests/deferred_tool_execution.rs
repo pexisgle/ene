@@ -1,5 +1,3 @@
-//! Integration test for deferred (background) tool execution.
-//!
 //! Verifies that:
 //! 1. Background-capable tools are called with `call_tool_deferred`
 //! 2. Deferred tasks are sent to the actor via `deferred_tool_tx`
@@ -342,7 +340,6 @@ async fn deferred_tool_execution_emits_completion_event() {
         "expected task_id in message"
     );
 
-    // Verify a DeferredToolTask was sent to the actor.
     let task = deferred_tool_rx.try_recv().expect("expected deferred task");
     assert_eq!(task.tool_name, "background.sleep");
     assert_eq!(task.task_id, "task-456");

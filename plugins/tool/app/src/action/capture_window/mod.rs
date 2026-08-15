@@ -41,7 +41,6 @@ fn capture_window_by_title_xcap(
 pub struct CaptureWindowAction {
     /// Substring of window title or app name to capture.
     window_title: String,
-    /// Resize percentage 1-100 (default: 50).
     #[arg(minimum = 1, maximum = 100, default = "50")]
     #[serde(default)]
     scale_percent: Option<u32>,

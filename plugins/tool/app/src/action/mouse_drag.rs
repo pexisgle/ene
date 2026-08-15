@@ -12,15 +12,10 @@ use enigo::{Button, Coordinate, Direction, Mouse};
     side_effects = "System { privileged: true }"
 )]
 pub struct MouseDragAction {
-    /// Start X coordinate.
     x: i32,
-    /// Start Y coordinate.
     y: i32,
-    /// End X coordinate.
     x2: i32,
-    /// End Y coordinate.
     y2: i32,
-    /// Mouse button (default: left).
     #[arg(enum_values = "left, right, middle")]
     #[serde(default)]
     button: Option<String>,

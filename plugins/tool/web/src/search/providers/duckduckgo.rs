@@ -71,8 +71,6 @@ impl SearchProvider for DuckDuckGoProvider {
 }
 
 fn percent_encode(input: &str) -> String {
-    // Form-encoding for the DuckDuckGo query: percent-encode everything
-    // except unreserved characters.
     let mut out = String::new();
     for byte in input.as_bytes() {
         match byte {
