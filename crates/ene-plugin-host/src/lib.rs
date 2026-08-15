@@ -109,6 +109,8 @@ pub mod tool_registry;
 pub mod tts_factory;
 /// RIFF/WAVE encoder and decoder for plugin audio.
 pub mod wav;
+/// Host-mediated WebSocket sessions.
+pub mod ws;
 
 /// Capability registry and requirement gate.
 pub use capability_registry::{

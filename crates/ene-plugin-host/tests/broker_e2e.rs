@@ -709,3 +709,136 @@ async fn file_broker_serves_granted_absolute_paths_and_denies_others() {
     drop(file);
     server.abort();
 }
+
+/// The `WebSocket` passenger relays frames between the plugin and a real
+/// WebSocket server, applying the host's gates (origin approval, SSRF) at
+/// connect time. Loopback is relaxed for this test only.
+#[tokio::test]
+async fn websocket_passenger_relays_frames_through_the_host() {
+    use futures::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::Message;
+
+    // Local WebSocket echo server.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let (mut sink, mut incoming) = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake")
+            .split();
+        while let Some(Ok(Message::Text(text))) = incoming.next().await {
+            if sink.send(Message::Text(text.clone())).await.is_err() {
+                return;
+            }
+            if text.contains("turn.end") {
+                return;
+            }
+        }
+    });
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("host-service-ws.sock");
+    let mut config = test_config();
+    config.list.entry("web".to_string()).and_modify(|entry| {
+        entry.manifest = Some(ws_test_manifest());
+    });
+    config.trusted_publishers = vec![ene_plugin_host::config::TrustedPublisherConfig {
+        publisher: "test-publisher".to_string(),
+        public_key_hex: hex::encode(test_signing_key().verifying_key().to_bytes()),
+    }];
+    let mut full = ene_config::EneConfig::default();
+    full.set_section(&config).expect("set plugin section");
+    let hub = ene_plugin_host::BrokerHub::from_config(&full).expect("hub");
+    hub.allow_loopback_for_tests();
+    let hub = hub.with_approval_responder(Arc::new(AllowAllResponder));
+    let server = ene_store::host_service::HostServiceServer::new(
+        Database::connect("sqlite::memory:").await.expect("db"),
+        socket.clone(),
+        std::collections::HashMap::from([(
+            "web-token".to_string(),
+            ene_store::host_service::DbPluginRegistration {
+                tool_name: "web".to_string(),
+                prefix: "web_".to_string(),
+                quota_bytes: None,
+            },
+        )]),
+    )
+    .with_broker_handler(hub);
+    let server = tokio::spawn(async move {
+        server.run().await.expect("host service");
+    });
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let (mut session, _final_url) = ene_plugin_broker::WebSocketSession::connect(
+        &socket,
+        "web-token",
+        &format!("ws://{addr}/chat"),
+        vec![],
+        None,
+    )
+    .await
+    .expect("open");
+    session.send_text("hello ws").await.expect("send");
+    assert_eq!(
+        session.recv().await.expect("recv"),
+        ene_plugin_broker::WebSocketEvent::Text("hello ws".to_string())
+    );
+    session.send_text("turn.end").await.expect("send");
+    // The echo server mirrors turn.end, then closes; the relay reports the
+    // closure.
+    assert_eq!(
+        session.recv().await.expect("echo"),
+        ene_plugin_broker::WebSocketEvent::Text("turn.end".to_string())
+    );
+    match session.recv().await.expect("close") {
+        ene_plugin_broker::WebSocketEvent::Closed { .. } => {}
+        event => panic!("expected Closed, got {event:?}"),
+    }
+    server.abort();
+}
+
+/// A signed manifest for the test `web` entry that declares dynamic web
+/// access (including plain `http`, which the loopback echo uses).
+fn ws_test_manifest() -> SignedManifest {
+    let manifest = PluginManifest {
+        schema_version: 1,
+        plugin_id: "web".into(),
+        name: "Web".into(),
+        publisher: "test-publisher".into(),
+        version: "1".into(),
+        description: None,
+        fs_slots: Vec::new(),
+        fixed_origins: Vec::new(),
+        dynamic_web: true,
+        artifacts: Vec::new(),
+        sidecars: Vec::new(),
+        host_services: vec!["network".into()],
+        side_effects: ManifestSideEffects::default(),
+        resource_limits: ResourceLimits::default(),
+        permissions: vec![
+            ManifestPermission {
+                category: ApprovalCategory::Http,
+                max: ApprovalMode::Allow,
+            },
+            ManifestPermission {
+                category: ApprovalCategory::DynamicHttps,
+                max: ApprovalMode::Allow,
+            },
+        ],
+    };
+    let payload = ene_approval::canonical_manifest_bytes(&manifest).expect("canonical");
+    let signature = test_signing_key().sign(&payload).to_bytes().to_vec();
+    SignedManifest {
+        payload,
+        signature: Some(signature),
+        key_id: Some("test-publisher".to_string()),
+    }
+}

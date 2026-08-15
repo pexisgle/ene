@@ -1,8 +1,6 @@
-use crate::error::from_git2;
 use crate::output::{BranchEntry, BranchOutput, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
-use git2::BranchType;
 
 /// Lists the branches of a git repository.
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
@@ -46,61 +44,91 @@ impl BranchAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.branch")?;
-        let (current, detached_head) = super::common::head_info(&repo);
+        let repo = scope
+            .resolve_repo(self.path.as_deref(), "git.branch")
+            .await?;
+        let workdir = repo.workdir.to_string_lossy().into_owned();
+        let (current, detached_head) = super::common::head_info(&workdir).await;
 
-        let mut branches: Vec<BranchEntry> = Vec::new();
-        let branch_types = if self.include_remote {
-            [BranchType::Local, BranchType::Remote]
+        let format = "%(HEAD)%09%(refname:short)%09%(upstream:short)%09%(upstream:track)";
+        let format_arg = format!("--format={format}");
+        let ref_args: &[&str] = if self.include_remote {
+            &["refs/heads", "refs/remotes"]
         } else {
-            [BranchType::Local, BranchType::Local]
+            &["refs/heads"]
         };
-        let type_count = if self.include_remote { 2 } else { 1 };
-        for branch_type in branch_types.into_iter().take(type_count) {
-            for item in repo.branches(Some(branch_type)).map_err(from_git2)? {
-                let (branch, _kind) = item.map_err(from_git2)?;
-                let name = branch
-                    .name()
-                    .map_err(from_git2)?
-                    .unwrap_or_default()
-                    .to_string();
-                let upstream_branch = branch.upstream().ok();
-                let upstream = upstream_branch
-                    .as_ref()
-                    .and_then(|up| up.name().ok().flatten())
-                    .map(str::to_string);
-                let (ahead, behind) = match (
-                    branch.get().target(),
-                    upstream_branch.as_ref().and_then(|up| up.get().target()),
-                ) {
-                    (Some(local), Some(remote)) => {
-                        let (a, b) = repo.graph_ahead_behind(local, remote).map_err(from_git2)?;
-                        (Some(a), Some(b))
-                    }
-                    _ => (None, None),
-                };
-                branches.push(BranchEntry {
-                    name,
-                    upstream,
-                    ahead,
-                    behind,
-                    current: false,
-                });
-            }
+        let mut args: Vec<&str> = vec!["for-each-ref", &format_arg];
+        args.extend(ref_args.iter().copied());
+        let run = crate::broker::broker().run_git(&workdir, &args).await?;
+        if !run.ok() {
+            return Err(crate::sandbox::git_run_error(&run));
         }
-
-        for entry in &mut branches {
-            entry.current = current.as_deref() == Some(entry.name.as_str());
-        }
+        let mut branches = parse_branches(&run.stdout, current.as_deref());
         branches.sort_by(|a, b| a.name.cmp(&b.name));
 
         to_json(&BranchOutput {
-            repo: workdir.display().to_string(),
+            repo: workdir,
             current,
             detached_head,
             branches,
         })
     }
+}
+
+/// Parses `for-each-ref` rows (`HEAD \t name \t upstream \t track`) into
+/// branch entries.
+fn parse_branches(output: &str, current: Option<&str>) -> Vec<BranchEntry> {
+    let mut branches = Vec::new();
+    for line in output.lines().filter(|line| !line.is_empty()) {
+        let mut columns = line.split('\t');
+        let head_marker = columns.next().unwrap_or_default();
+        let Some(name) = columns.next() else {
+            continue;
+        };
+        let upstream = columns
+            .next()
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
+        let track = columns.next().unwrap_or_default();
+        let (ahead, behind) = {
+            let (ahead, behind) = parse_track(track);
+            // With an upstream, a missing count means up-to-date on that
+            // side; a `[gone]` upstream reports neither.
+            if upstream.is_some() && track.trim() != "[gone]" {
+                (ahead.or(Some(0)), behind.or(Some(0)))
+            } else {
+                (ahead, behind)
+            }
+        };
+        branches.push(BranchEntry {
+            name: name.to_string(),
+            upstream,
+            ahead,
+            behind,
+            current: head_marker == "*" || current == Some(name),
+        });
+    }
+    branches
+}
+
+/// Parses `%(upstream:track)` output (`[ahead 1]`, `[behind 2]`,
+/// `[ahead 1, behind 2]`, `[gone]`).
+fn parse_track(track: &str) -> (Option<usize>, Option<usize>) {
+    let mut ahead = None;
+    let mut behind = None;
+    let rest = track.trim().trim_start_matches('[').trim_end_matches(']');
+    if rest.is_empty() || rest == "gone" {
+        return (ahead, behind);
+    }
+    for part in rest.split(',') {
+        let part = part.trim();
+        if let Some(count) = part.strip_prefix("ahead ") {
+            ahead = count.parse().ok();
+        } else if let Some(count) = part.strip_prefix("behind ") {
+            behind = count.parse().ok();
+        }
+    }
+    (ahead, behind)
 }
 
 #[cfg(test)]
@@ -119,6 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn lists_branches_with_current_flag() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
@@ -150,6 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn ahead_behind_are_reported_against_upstream() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("base");

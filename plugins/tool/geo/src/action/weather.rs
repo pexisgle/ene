@@ -110,7 +110,7 @@ impl WeatherAction {
             .check(GEO_WEATHER, "geo:ip-weather", &description)?;
 
         let url = build_weather_url(self.location.as_deref())?;
-        let body = fetch_json(self.state.client(), url, "wttr.in").await?;
+        let body = fetch_json(url.as_str(), "wttr.in").await?;
         let parsed: WeatherResponse = serde_json::from_str(&body)
             .map_err(|e| ToolError::execution_failed(format!("Invalid wttr.in response: {e}")))?;
         format_weather(&parsed).map_err(ToolError::from)
@@ -119,7 +119,7 @@ impl WeatherAction {
 
 /// Builds the wttr.in request URL, percent-encoding the location path
 /// segment and requesting the `j1` JSON format.
-fn build_weather_url(location: Option<&str>) -> Result<reqwest::Url, GeoError> {
+fn build_weather_url(location: Option<&str>) -> Result<url::Url, GeoError> {
     if let Some(location) = location
         && location.trim().is_empty()
     {
@@ -131,7 +131,7 @@ fn build_weather_url(location: Option<&str>) -> Result<reqwest::Url, GeoError> {
         validate_weather_location(location)?;
     }
 
-    let mut url = reqwest::Url::parse("https://wttr.in/")
+    let mut url = url::Url::parse("https://wttr.in/")
         .map_err(|e| GeoError::Internal(format!("invalid wttr.in URL: {e}")))?;
     if let Some(location) = location {
         url.path_segments_mut()

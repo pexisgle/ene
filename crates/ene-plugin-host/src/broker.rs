@@ -51,37 +51,57 @@ pub trait ApprovalResponder: Send + Sync {
 /// Fail-closed error used inside the hub; converted to
 /// [`BrokerResponse::Error`] at the boundary.
 #[derive(Debug)]
-struct BrokerError {
-    code: BrokerErrorCode,
-    message: String,
+pub(crate) struct BrokerError {
+    /// Structured error code.
+    pub(crate) code: BrokerErrorCode,
+    /// Human-readable detail.
+    pub(crate) message: String,
+    /// HTTP status when the failure came from an HTTP handshake.
+    pub(crate) http_status: Option<u16>,
 }
 
 impl BrokerError {
-    fn new(code: BrokerErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: BrokerErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
+            http_status: None,
         }
     }
 
-    fn denied(message: impl Into<String>) -> Self {
+    pub(crate) fn denied(message: impl Into<String>) -> Self {
         Self::new(BrokerErrorCode::Denied, message)
+    }
+
+    /// Builds an error carrying an HTTP status (e.g. a WebSocket
+    /// handshake rejection) so the plugin can map it without parsing text.
+    pub(crate) fn with_http_status(
+        code: BrokerErrorCode,
+        message: impl Into<String>,
+        status: u16,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            http_status: Some(status),
+        }
     }
 }
 
 /// One plugin's broker state: verified manifest, grants, credentials, and
 /// live spawned processes.
-struct PluginState {
-    manifest: Option<PluginManifest>,
-    digest: Option<String>,
-    fs_grants: Vec<FsGrant>,
-    credentials: BTreeMap<String, String>,
-    processes: Mutex<HashMap<u32, String>>,
+pub(crate) struct PluginState {
+    pub(crate) manifest: Option<PluginManifest>,
+    pub(crate) digest: Option<String>,
+    pub(crate) fs_grants: Vec<FsGrant>,
+    pub(crate) credentials: BTreeMap<String, String>,
+    pub(crate) processes: Mutex<HashMap<u32, String>>,
 }
 
 /// Host-side broker hub.
 pub struct BrokerHub {
-    plugins: HashMap<String, PluginState>,
+    pub(crate) plugins: HashMap<String, PluginState>,
+    pub(crate) ssrf: parking_lot::RwLock<SsrfPolicy>,
     global: ApprovalPolicy,
     plugin_approval: std::collections::BTreeMap<String, PluginApprovalPolicy>,
     audit: Option<AuditLog>,
@@ -161,6 +181,7 @@ impl BrokerHub {
         };
         let hub = Arc::new(Self {
             plugins,
+            ssrf: parking_lot::RwLock::new(SsrfPolicy::production()),
             global: plugin_config.approval.clone(),
             plugin_approval: plugin_config.plugin_approval.clone(),
             audit,
@@ -180,6 +201,14 @@ impl BrokerHub {
     ) -> Arc<Self> {
         *self.responder.write() = Some(responder);
         Arc::clone(self)
+    }
+
+    /// Test-only: relaxes the SSRF guard to allow loopback connections so
+    /// end-to-end tests can reach local servers. Production hubs keep the
+    /// strict policy.
+    #[doc(hidden)]
+    pub fn allow_loopback_for_tests(&self) {
+        self.ssrf.write().allow_loopback = true;
     }
 }
 
@@ -209,6 +238,24 @@ fn seed_provider_credentials(
                 .credentials
                 .entry("api_key".to_string())
                 .or_insert_with(|| key.clone());
+        }
+    }
+    // Provider kinds without an `ai.providers` entry (TTS plugins) keep
+    // their key in the plugin config blob; resolve it host-side so the
+    // plugin only ever names it. An explicit `plugins.list.<name>.
+    // credentials` entry still wins.
+    for (name, entry) in &plugin_config.list {
+        if !crate::factory::is_broker_credential_kind(name) {
+            continue;
+        }
+        let Some(key) = crate::factory::resolve_blob_api_key(name, &entry.config) else {
+            continue;
+        };
+        if let Some(state) = plugins.get_mut(name) {
+            state
+                .credentials
+                .entry("api_key".to_string())
+                .or_insert(key);
         }
     }
 }
@@ -406,6 +453,14 @@ impl BrokerHandler for BrokerHub {
             Err(e) => sink.write(&BrokerResponse::error(e.code, e.message)).await,
         }
     }
+
+    async fn serve_ws(
+        &self,
+        plugin: &str,
+        stream: ene_plugin_proto::transport::IpcStream,
+    ) -> std::io::Result<()> {
+        crate::BrokerHub::serve_ws_session(self, plugin, stream).await
+    }
 }
 
 impl BrokerHub {
@@ -547,7 +602,7 @@ impl BrokerHub {
         }
     }
 
-    fn require_service(state: &PluginState, service: &str) -> Result<(), BrokerError> {
+    pub(crate) fn require_service(state: &PluginState, service: &str) -> Result<(), BrokerError> {
         let declared = state
             .manifest
             .as_ref()
@@ -562,7 +617,7 @@ impl BrokerHub {
         }
     }
 
-    async fn approve(
+    pub(crate) async fn approve(
         &self,
         plugin: &str,
         state: &PluginState,
@@ -1176,7 +1231,7 @@ impl BrokerHub {
         let origin = normalized_origin(&parsed);
         let category = Self::origin_category(state, &origin, &scheme)?;
         self.approve(plugin, state, category, &origin).await?;
-        let ssrf = SsrfPolicy::production();
+        let ssrf = self.ssrf.read().clone();
         let ips = ssrf
             .resolve_allowed(host)
             .await
@@ -1437,7 +1492,7 @@ impl BrokerHub {
         ))
     }
 
-    fn origin_category(
+    pub(crate) fn origin_category(
         state: &PluginState,
         origin: &str,
         scheme: &str,
@@ -1469,14 +1524,10 @@ fn parse_origin(url: &str) -> Result<String, BrokerError> {
     Ok(normalized_origin(&parsed))
 }
 
-fn normalized_origin(url: &url::Url) -> String {
-    let scheme = url.scheme();
-    let host = url.host_str().unwrap_or_default();
-    let host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
+/// Serializes a URL's authority as a normalized origin under `scheme`:
+/// IPv6 hosts bracketed, the scheme's default port omitted.
+pub(crate) fn normalized_origin_with_scheme(url: &url::Url, scheme: &str) -> String {
+    let host = url.host().map_or_else(String::new, |host| host.to_string());
     let default_port = match scheme {
         "https" => Some(443),
         "http" => Some(80),
@@ -1486,6 +1537,10 @@ fn normalized_origin(url: &url::Url) -> String {
         Some(port) => format!("{scheme}://{host}:{port}"),
         None => format!("{scheme}://{host}"),
     }
+}
+
+fn normalized_origin(url: &url::Url) -> String {
+    normalized_origin_with_scheme(url, url.scheme())
 }
 
 struct FetchBody {
@@ -1505,7 +1560,7 @@ struct FetchHop {
     request: reqwest::Request,
 }
 
-fn is_forbidden_request_header(key: &str) -> bool {
+pub(crate) fn is_forbidden_request_header(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
         "authorization" | "cookie" | "proxy-authorization" | "host"
@@ -1522,6 +1577,7 @@ fn is_forbidden_response_header(key: &str) -> bool {
 /// SSRF guard: blocks loopback, private, link-local, cloud-metadata, and
 /// reserved addresses, and re-checks every resolved address before connect
 /// (DNS-rebinding protection).
+#[derive(Clone)]
 pub struct SsrfPolicy {
     allow_loopback: bool,
 }

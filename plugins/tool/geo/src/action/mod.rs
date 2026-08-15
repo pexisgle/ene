@@ -18,67 +18,23 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Hard cap on API-provided free-form strings echoed into results.
 const MAX_FIELD_CHARS: usize = 200;
 
-/// Performs a GET request and returns the response body, bounding both the
-/// wait time (client-level timeout) and the body size.
-pub(crate) async fn fetch_json(
-    client: &reqwest::Client,
-    url: reqwest::Url,
-    service: &str,
-) -> Result<String, ToolError> {
-    let response = client.get(url).send().await.map_err(|e| {
-        ToolError::execution_failed(format!(
-            "HTTP request to {service} failed: {}",
-            sanitize_reqwest_error(e)
-        ))
-    })?;
-    let status = response.status();
-    if !status.is_success() {
+/// Fetches a URL through the host's `Network` broker and returns the body,
+/// bounding the body size and requiring valid UTF-8.
+pub(crate) async fn fetch_json(url: &str, service: &str) -> Result<String, ToolError> {
+    let outcome = crate::broker::broker().fetch(url).await?;
+    if !(200..300).contains(&outcome.status) {
         return Err(ToolError::execution_failed(format!(
-            "{service} returned HTTP {status}"
+            "{service} returned HTTP {}",
+            outcome.status
         )));
     }
-    read_bounded_body(response).await
-}
-
-/// Reads a response body, rejecting it when the declared or actual size
-/// exceeds [`MAX_BODY_BYTES`] or when it is not valid UTF-8. The body is
-/// consumed in chunks and the running total is checked before each chunk is
-/// buffered, so a body without a known size (e.g. chunked transfer) cannot
-/// force the whole body into memory.
-async fn read_bounded_body(response: reqwest::Response) -> Result<String, ToolError> {
-    if let Some(len) = response.content_length()
-        && let Ok(len) = usize::try_from(len)
-        && len > MAX_BODY_BYTES
-    {
+    if outcome.body.len() > MAX_BODY_BYTES {
         return Err(ToolError::execution_failed(format!(
-            "API response too large ({len} bytes, max {MAX_BODY_BYTES})"
+            "API response too large (max {MAX_BODY_BYTES} bytes)"
         )));
     }
-    let mut body = Vec::new();
-    let mut response = response;
-    while let Some(chunk) = response.chunk().await.map_err(|e| {
-        ToolError::execution_failed(format!(
-            "Failed to read API response: {}",
-            sanitize_reqwest_error(e)
-        ))
-    })? {
-        if body.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
-            return Err(ToolError::execution_failed(format!(
-                "API response too large (max {MAX_BODY_BYTES} bytes)"
-            )));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    std::str::from_utf8(&body)
-        .map(str::to_string)
+    String::from_utf8(outcome.body)
         .map_err(|_| ToolError::execution_failed("API response is not valid UTF-8"))
-}
-
-/// Renders a reqwest error without its request URL, whose query string may
-/// carry location parameters that do not belong in logs or tool results.
-/// reqwest's `Display` appends `for url (...)`, so a raw `{e}` would echo it.
-fn sanitize_reqwest_error(e: reqwest::Error) -> String {
-    e.without_url().to_string()
 }
 
 /// Truncates an API-provided string to at most [`MAX_FIELD_CHARS`]
@@ -137,9 +93,15 @@ pub(crate) fn validate_longitude(value: f64) -> Result<(), GeoError> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "tests serialize the shared broker with a std mutex across awaits"
+)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
+
+    /// Serializes tests that reconfigure the process-wide shared broker.
+    static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn truncate_keeps_short_strings() {
@@ -193,41 +155,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounded_body_rejects_known_oversize() {
-        let http_response = http::Response::builder()
-            .body(reqwest::Body::from(vec![
-                0u8;
-                MAX_BODY_BYTES.saturating_add(1)
-            ]))
-            .unwrap();
-        let err = read_bounded_body(reqwest::Response::from(http_response))
+    async fn fetch_json_rejects_oversized_bodies() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The broker mock answers with a body over the plugin's cap.
+        let mock = crate::broker::tests::MockBroker::spawn();
+        crate::broker::tests::configure_test_broker(&mock).await;
+        mock.push(crate::broker::tests::MockResponse::ok(vec![
+            0u8;
+            MAX_BODY_BYTES
+                .saturating_add(
+                    1
+                )
+        ]));
+        let err = fetch_json("https://wttr.in/?format=j1", "wttr.in")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("too large"), "{err}");
     }
 
     #[tokio::test]
-    async fn bounded_body_rejects_unknown_size_stream() {
-        // A body with no size hint (as with chunked transfer) must still
-        // bail on the running total instead of buffering past the cap.
-        let reader = tokio::io::repeat(0)
-            .take(u64::try_from(MAX_BODY_BYTES.saturating_add(64 * 1024)).unwrap());
-        let stream = tokio_util::io::ReaderStream::new(reader);
-        let http_response = http::Response::builder()
-            .body(reqwest::Body::wrap_stream(stream))
-            .unwrap();
-        let err = read_bounded_body(reqwest::Response::from(http_response))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("too large"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn bounded_body_accepts_small_bodies() {
-        let http_response = http::Response::builder()
-            .body(reqwest::Body::from(br#"{"ok":true}"#.to_vec()))
-            .unwrap();
-        let body = read_bounded_body(reqwest::Response::from(http_response))
+    async fn fetch_json_accepts_small_bodies() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mock = crate::broker::tests::MockBroker::spawn();
+        crate::broker::tests::configure_test_broker(&mock).await;
+        mock.push(crate::broker::tests::MockResponse::ok(
+            br#"{"ok":true}"#.to_vec(),
+        ));
+        let body = fetch_json("https://wttr.in/?format=j1", "wttr.in")
             .await
             .unwrap();
         assert_eq!(body, r#"{"ok":true}"#);

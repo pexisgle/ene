@@ -27,10 +27,9 @@ pub const SUPPORTED_VOICES: &[&str] = &["alloy", "echo", "fable", "onyx", "nova"
 
 /// Settings for the `OpenAI Speech API` TTS provider.
 ///
-/// `api_key` is deliberately not part of the struct: it is resolved per
-/// request from the host-delivered blob, the request config, or the
-/// `OPENAI_API_KEY` environment variable (see [`resolve_api_key`]) so the
-/// secret never round-trips through a typed value.
+/// `api_key` is deliberately not part of the struct: the host resolves it
+/// into the credential store and injects it at request time, so the secret
+/// never round-trips through the plugin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct OpenAiTtsConfig {
@@ -114,35 +113,6 @@ impl OpenAiTtsConfig {
     }
 }
 
-/// Resolves the effective API key: the host-delivered blob
-/// (`plugins.list.openai-tts.config`, via `set_config`) wins, then the
-/// per-request config, then the `OPENAI_API_KEY` environment variable.
-///
-/// # Errors
-///
-/// Returns a provider error when no key is configured anywhere.
-pub fn resolve_api_key(host_config: Option<&Value>, config: &Value) -> Result<String, PluginError> {
-    if let Some(key) = host_config
-        .and_then(|cfg| cfg.get("api_key"))
-        .and_then(resolve_key_value)
-    {
-        return Ok(key);
-    }
-    if let Some(key) = config.get("api_key").and_then(resolve_key_value) {
-        return Ok(key);
-    }
-    std::env::var("OPENAI_API_KEY")
-        .ok()
-        .map(|key| key.trim().to_string())
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| {
-            PluginError::provider(
-                "no API key found: set plugins.list.openai-tts.config.api_key \
-                 or OPENAI_API_KEY",
-            )
-        })
-}
-
 /// Resolves the effective API base URL with the same precedence as the key:
 /// host blob, request config, `OPENAI_BASE_URL`, then the API default.
 #[must_use]
@@ -164,41 +134,6 @@ pub fn resolve_base_url(host_config: Option<&Value>, config: &Value) -> String {
             },
             str::to_string,
         )
-}
-
-/// Reads an `api_key` value in either plain-string or
-/// `{source: inline|env|auto}` descriptor form.
-fn resolve_key_value(value: &Value) -> Option<String> {
-    match value {
-        Value::String(key) if !key.trim().is_empty() => Some(key.trim().to_string()),
-        Value::Object(obj) => {
-            let source = obj.get("source").and_then(Value::as_str).unwrap_or("auto");
-            match source {
-                "inline" => obj
-                    .get("inline")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|key| !key.is_empty())
-                    .map(str::to_string),
-                "env" => {
-                    let var_name = obj
-                        .get("env")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or("OPENAI_API_KEY");
-                    std::env::var(var_name)
-                        .ok()
-                        .map(|key| key.trim().to_string())
-                        .filter(|key| !key.is_empty())
-                }
-                // "auto" (or an unrecognized source) falls through to the
-                // caller's process-env fallback.
-                _ => None,
-            }
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]

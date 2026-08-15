@@ -53,18 +53,23 @@ that can provide them.
 Per-plugin sandbox settings live at `plugins.list.<name>.sandbox`; the
 global default is `plugins.sandbox`. Pure computation built-ins (`calc`,
 `counter`, `random`) ship **sandboxed by default**, as do the
-broker-migrated built-ins `web`, `fs`, `openai`, and `anthropic`: `web`
+broker-migrated built-ins `web`, `fs`, `openai`, `anthropic`,
+`openai-tts`, `elevenlabs`, `geo`, `calc`, `git`, `edge-tts`, and
+`utility` (pure computation plus host-mediated Db/timer channels): `web`
 talks through the `Network` broker (SSRF and redirect handling moved
 host-side), `fs` routes all user-file I/O and shell execution through the
 `File` / `Process` brokers — its tools keep absolute-path arguments, which
 the host resolves against the configured grants
-(`plugins.list.<name>.fs_grants`) by canonical containment — and the
-provider plugins mediate every API request through the `Network` broker
-with the API key injected host-side by name (see [Credential
-injection](#credential-injection)). Remaining built-ins default to
-disabled until their migration to the broker channel lands. Enabled
-plugins refuse to start when the kernel cannot enforce the requested
-layers.
+(`plugins.list.<name>.fs_grants`) by canonical containment — `git` runs
+every `git` invocation through the `Process` broker with the repository
+path resolved against the same grants, `edge-tts` reaches its WebSocket
+endpoint through the `WebSocket` broker passenger (SSRF + origin gates at
+connect time), and the provider/network plugins mediate every API request
+through the `Network` broker with the API key injected host-side by name
+(see [Credential injection](#credential-injection)). Remaining built-ins
+default to disabled until their migration to the broker channel lands.
+Enabled plugins refuse to start when the kernel cannot enforce the
+requested layers.
 
 ## Broker channel (protocol v8)
 
@@ -79,6 +84,7 @@ The host-service socket now multiplexes passengers beyond `db` and
 | `credential` | host-owned credentials; only key names are ever audited |
 | `artifact` | signed-catalog resolution, installation, and one-generation rollback |
 | `platform` | time, locale, opening external URLs |
+| `websocket` | `ws://` / `wss://` sessions with origin approval, SSRF address pinning, and credential injection at connect time |
 | `db` / `capability` | existing typed DB CRUD and plugin-to-plugin calls |
 
 Identity is pinned to the authenticated token: a plugin can never open a

@@ -27,6 +27,12 @@ use crate::ssml::{chunk_text, escape_xml, sanitize};
 pub struct EdgeTtsPlugin;
 
 impl ene_plugin::ConfigurablePlugin for EdgeTtsPlugin {
+    /// Captures the broker socket/token so every connection is
+    /// host-mediated.
+    fn set_sandbox(&self, sandbox: &ene_plugin_proto::SandboxConfigData) {
+        crate::broker::configure_broker(sandbox);
+    }
+
     /// Advertises the settings surface for `plugins.list.edge-tts.config`.
     /// No API keys are involved: the service is the anonymous Edge Read
     /// Aloud endpoint.

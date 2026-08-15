@@ -1,6 +1,7 @@
-//! Edge speech WebSocket client: connection setup with browser-mimicking
-//! headers, `speech.config` + `ssml` request frames, and audio collection
-//! with exponential-backoff reconnects.
+//! Edge speech WebSocket client over the host's `WebSocket` broker:
+//! connection setup with browser-mimicking headers, `speech.config` +
+//! `ssml` request frames, and audio collection with exponential-backoff
+//! reconnects.
 //!
 //! The wire format mirrors the upstream python `edge-tts` client: a
 //! `TrustedClientToken` + `ConnectionId` + `Sec-MS-GEC` query string, a
@@ -11,14 +12,9 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures::{SinkExt, StreamExt};
-use http::header::{HeaderName, HeaderValue, ORIGIN, USER_AGENT};
+use ene_plugin_broker::{BrokerClientError, WebSocketEvent, WebSocketSession};
 use sha2::{Digest, Sha256};
-use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::{Error as WsError, Message};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tracing::debug;
 
 use crate::config::EdgeTtsConfig;
@@ -92,15 +88,15 @@ async fn synthesize_pass(
     mp3: &mut Vec<u8>,
 ) -> Result<usize, EdgeError> {
     let mut ws = connect(config).await?;
-    send_frame(&mut ws, &speech_config()).await?;
+    ws.send_text(&speech_config())
+        .await
+        .map_err(|e| EdgeError::Send(e.to_string()))?;
     let mut index = start_index;
     while index < chunks.len() {
         let chunk_start = mp3.len();
-        send_frame(
-            &mut ws,
-            &synthesis_request(&build_ssml(config, &chunks[index])),
-        )
-        .await?;
+        ws.send_text(&synthesis_request(&build_ssml(config, &chunks[index])))
+            .await
+            .map_err(|e| EdgeError::Send(e.to_string()))?;
         match collect_audio(&mut ws, mp3).await {
             Ok(()) => index += 1,
             Err(e) if e.retryable() => {
@@ -113,10 +109,9 @@ async fn synthesize_pass(
     Ok(index - start_index)
 }
 
-/// Connects to the configured endpoint with the browser-mimicking headers.
-async fn connect(
-    config: &EdgeTtsConfig,
-) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, EdgeError> {
+/// Connects to the configured endpoint through the host's WebSocket broker
+/// with the browser-mimicking headers.
+async fn connect(config: &EdgeTtsConfig) -> Result<WebSocketSession, EdgeError> {
     let request_id = uuid::Uuid::new_v4().simple().to_string();
     let url = format!(
         "{}?TrustedClientToken={}&ConnectionId={}&Sec-MS-GEC={}&Sec-MS-GEC-Version={}",
@@ -126,38 +121,23 @@ async fn connect(
         sec_ms_gec_token(),
         SEC_MS_GEC_VERSION,
     );
-    let mut request = url
-        .into_client_request()
-        .map_err(|e| EdgeError::Connect(format!("invalid endpoint URL: {e}")))?;
-    let headers = request.headers_mut();
-    headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
-    headers.insert(ORIGIN, HeaderValue::from_static(ORIGIN_VALUE));
-    headers.insert(
-        HeaderName::from_static("accept-encoding"),
-        HeaderValue::from_static("gzip, deflate, br, zstd"),
-    );
-    headers.insert(
-        HeaderName::from_static("accept-language"),
-        HeaderValue::from_static("en-US,en;q=0.9"),
-    );
-    headers.insert(
-        HeaderName::from_static("pragma"),
-        HeaderValue::from_static("no-cache"),
-    );
-    headers.insert(
-        HeaderName::from_static("cache-control"),
-        HeaderValue::from_static("no-cache"),
-    );
-    headers.insert(
-        HeaderName::from_static("cookie"),
-        HeaderValue::from_str(&format!("muid={};", uuid::Uuid::new_v4().simple()))
-            .map_err(|e| EdgeError::Connect(format!("invalid muid header: {e}")))?,
-    );
+    let headers = vec![
+        ("User-Agent".to_string(), USER_AGENT_VALUE.to_string()),
+        ("Origin".to_string(), ORIGIN_VALUE.to_string()),
+        (
+            "Accept-Encoding".to_string(),
+            "gzip, deflate, br, zstd".to_string(),
+        ),
+        ("Accept-Language".to_string(), "en-US,en;q=0.9".to_string()),
+        ("Pragma".to_string(), "no-cache".to_string()),
+        ("Cache-Control".to_string(), "no-cache".to_string()),
+    ];
+    // The `muid` cookie is stripped by the host with all cookie headers;
+    // the service accepts connections without it.
 
-    timeout(CONNECT_TIMEOUT, connect_async(request))
+    timeout(CONNECT_TIMEOUT, crate::broker::broker().open(&url, headers))
         .await
         .map_err(|_| EdgeError::Timeout)?
-        .map(|(ws, _)| ws)
         .map_err(|e| classify_connect_error(&e))
 }
 
@@ -200,19 +180,15 @@ fn synthesis_request(ssml: &str) -> String {
 }
 
 /// Reads frames until `turn.end`, appending MP3 payloads to `audio`.
-async fn collect_audio<W>(ws: &mut W, audio: &mut Vec<u8>) -> Result<(), EdgeError>
-where
-    W: futures::Stream<Item = Result<Message, WsError>> + Unpin,
-{
+async fn collect_audio(ws: &mut WebSocketSession, audio: &mut Vec<u8>) -> Result<(), EdgeError> {
     let mut audio_received = false;
     loop {
-        let message = timeout(MESSAGE_TIMEOUT, ws.next())
+        let event = timeout(MESSAGE_TIMEOUT, ws.recv())
             .await
             .map_err(|_| EdgeError::Timeout)?
-            .ok_or_else(|| EdgeError::Connect("connection closed before turn.end".to_string()))?
             .map_err(|e| classify_connect_error(&e))?;
-        match message {
-            Message::Text(text) => match text_path(&text) {
+        match event {
+            WebSocketEvent::Text(text) => match text_path(&text) {
                 Some("turn.start" | "response" | "audio.metadata") => {}
                 Some("turn.end") => break,
                 Some(other) => {
@@ -226,7 +202,7 @@ where
                     ));
                 }
             },
-            Message::Binary(bytes) => {
+            WebSocketEvent::Binary(bytes) => {
                 let frame = parse_binary_frame(&bytes)?;
                 if frame.path != "audio" {
                     return Err(EdgeError::Protocol(format!(
@@ -267,8 +243,7 @@ where
                     }
                 }
             }
-            Message::Ping(_) | Message::Pong(_) => {}
-            Message::Close(_) | Message::Frame(_) => {
+            WebSocketEvent::Closed { .. } | WebSocketEvent::Error { .. } => {
                 return Err(EdgeError::Connect(
                     "connection closed before turn.end".to_string(),
                 ));
@@ -281,45 +256,29 @@ where
     Ok(())
 }
 
-async fn send_frame<W>(ws: &mut W, frame: &str) -> Result<(), EdgeError>
-where
-    W: futures::Sink<Message, Error = WsError> + Unpin,
-{
-    ws.send(Message::text(frame.to_string()))
-        .await
-        .map_err(|e| EdgeError::Send(e.to_string()))
-}
-
 /// Maps a handshake failure to a typed error. 408/429 (rate limiting) are
 /// transport-level failures and retryable; 403 means the `Sec-MS-GEC` token
 /// was rejected, so the clock is re-synced from the response `Date` header
 /// and the error is retryable; any other 4xx is a permanent rejection.
-fn classify_connect_error(error: &WsError) -> EdgeError {
+fn classify_connect_error(error: &BrokerClientError) -> EdgeError {
     match error {
-        WsError::Http(response) if response.status().is_client_error() => {
-            match response.status().as_u16() {
-                403 => {
-                    apply_server_clock_skew(response);
-                    EdgeError::Rejected(403)
-                }
-                408 | 429 => EdgeError::Connect(format!("HTTP {}", response.status().as_u16())),
-                status => EdgeError::Rejected(status),
+        BrokerClientError::HttpStatus { status, message } => match status {
+            Some(403) => {
+                apply_server_clock_skew_message(message);
+                EdgeError::Rejected(403)
             }
-        }
+            Some(408 | 429) | None => EdgeError::Connect(message.clone()),
+            Some(status) => EdgeError::Rejected(*status),
+        },
         other => EdgeError::Connect(other.to_string()),
     }
 }
 
-/// Corrects the process clock from the response `Date` header so the next
-/// `Sec-MS-GEC` token lands in the service's 5-minute window. A missing or
-/// unparseable date leaves the existing skew untouched; the retry still
-/// regenerates the token with a fresh `ConnectionId`.
-fn apply_server_clock_skew(response: &http::Response<Option<Vec<u8>>>) {
-    let Some(date) = response
-        .headers()
-        .get(http::header::DATE)
-        .and_then(|value| value.to_str().ok())
-    else {
+/// Corrects the process clock from the handshake error's `Date` header (the
+/// host forwards it in the message) so the next `Sec-MS-GEC` token lands in
+/// the service's 5-minute window.
+fn apply_server_clock_skew_message(message: &str) {
+    let Some(date) = message.split_once(" Date: ").map(|(_, date)| date) else {
         return;
     };
     let Some(skew) = clock_skew_secs(date, unix_now_secs()) else {
@@ -385,8 +344,6 @@ async fn backoff(attempt: u32) {
 )]
 mod tests {
     use super::*;
-    use http::Response;
-
     /// 2026-08-05 01:23:45 UTC; golden token from the upstream python
     /// edge-tts `DRM.generate_sec_ms_gec` algorithm.
     const PINNED_NOW_SECS: u64 = 1_785_893_025;
@@ -432,13 +389,11 @@ mod tests {
         assert_eq!(clock_skew_secs("not a date", PINNED_NOW_SECS), None);
     }
 
-    fn http_error(status: u16) -> WsError {
-        WsError::Http(Box::new(
-            Response::builder()
-                .status(status)
-                .body(None)
-                .expect("response"),
-        ))
+    fn http_error(status: u16) -> BrokerClientError {
+        BrokerClientError::HttpStatus {
+            status: Some(status),
+            message: format!("WebSocket handshake failed: HTTP {status}"),
+        }
     }
 
     #[test]

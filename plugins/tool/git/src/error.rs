@@ -44,9 +44,6 @@ pub enum GitError {
         /// Maximum permitted blob size.
         limit: usize,
     },
-    /// Underlying libgit2 failure.
-    #[error(transparent)]
-    Git2(#[from] git2::Error),
 }
 
 impl From<GitError> for ToolError {
@@ -59,9 +56,4 @@ impl From<GitError> for ToolError {
             other => ToolError::execution_failed(other.to_string()),
         }
     }
-}
-
-/// Converts a libgit2 failure into the plugin's structured tool error.
-pub(crate) fn from_git2(e: git2::Error) -> ToolError {
-    GitError::from(e).into()
 }

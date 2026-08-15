@@ -5,6 +5,7 @@
 //! with `response_format=pcm` (24 kHz 16-bit mono little-endian PCM) and
 //! returns the audio as WAV over the plugin IPC.
 
+mod broker;
 mod client;
 mod config;
 mod pcm;

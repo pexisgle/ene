@@ -218,7 +218,64 @@ pub(crate) fn build_provider_config(
 /// (`NetworkFetch.credential`) and therefore never receive the API key in
 /// their provider config.
 pub(crate) fn is_broker_credential_kind(kind: &str) -> bool {
-    matches!(kind, "openai" | "anthropic")
+    matches!(kind, "openai" | "openai-tts" | "anthropic" | "elevenlabs")
+}
+
+/// Resolves an `api_key` from a plugin config blob per the
+/// `{"source": "inline"|"env"|"auto"}` contract the provider plugins used
+/// before broker credential injection. The host resolves the value so the
+/// plugin only ever names the key; an absent, null, or empty `api_key`
+/// falls back to the kind's default environment variable (the plugin child
+/// process no longer receives the host environment). `None` means no key is
+/// configured.
+pub(crate) fn resolve_blob_api_key(kind: &str, config: &serde_json::Value) -> Option<String> {
+    resolve_blob_api_key_with_env(kind, config, |name| std::env::var(name).ok())
+}
+
+fn resolve_blob_api_key_with_env(
+    kind: &str,
+    config: &serde_json::Value,
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let default_env = match kind {
+        "openai" | "openai-tts" => "OPENAI_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "elevenlabs" => "ELEVENLABS_API_KEY",
+        _ => return None,
+    };
+    let default_env_value = || get_env(default_env).filter(|key| !key.is_empty());
+    match config.get("api_key") {
+        Some(serde_json::Value::String(key)) if !key.trim().is_empty() => {
+            Some(key.trim().to_string())
+        }
+        Some(serde_json::Value::Object(obj)) => {
+            let source = obj
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("auto");
+            match source {
+                "inline" => obj
+                    .get("inline")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_string),
+                "env" => {
+                    let var_name = obj
+                        .get("env")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(default_env);
+                    get_env(var_name).filter(|key| !key.is_empty())
+                }
+                // "auto" (or an unrecognized source) falls back to the
+                // kind's default environment variable.
+                _ => default_env_value(),
+            }
+        }
+        _ => default_env_value(),
+    }
 }
 
 /// Applies per-task overrides onto the provider config forwarded to a plugin.
@@ -334,8 +391,119 @@ mod tests {
             "anthropic must be treated as a broker-credential kind"
         );
         assert!(
-            !is_broker_credential_kind("elevenlabs"),
+            !is_broker_credential_kind("edge-tts"),
             "non-migrated kinds still receive the key"
+        );
+    }
+
+    fn env_with<'a>(
+        keys: &'a [(&'a str, &'a str)],
+    ) -> impl Fn(&str) -> Option<String> + Clone + 'a {
+        move |name: &str| {
+            keys.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    /// The blob resolver covers every migrated kind and honors the
+    /// `{"source": ...}` contract without touching the plugin.
+    #[test]
+    fn resolve_blob_api_key_supports_plain_and_descriptor_shapes() {
+        let no_env = |_name: &str| None;
+        assert_eq!(
+            resolve_blob_api_key_with_env(
+                "openai-tts",
+                &serde_json::json!({"api_key": "sk-tts"}),
+                no_env,
+            ),
+            Some("sk-tts".to_string())
+        );
+        assert_eq!(
+            resolve_blob_api_key_with_env(
+                "elevenlabs",
+                &serde_json::json!({"api_key": {"source": "inline", "inline": "xi-1"}}),
+                no_env,
+            ),
+            Some("xi-1".to_string())
+        );
+        assert_eq!(
+            resolve_blob_api_key_with_env(
+                "anthropic",
+                &serde_json::json!({"api_key": {"source": "env"}}),
+                no_env,
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_blob_api_key_with_env(
+                "web",
+                &serde_json::json!({"api_key": "ignored"}),
+                no_env,
+            ),
+            None,
+            "non-credential kinds are not resolved"
+        );
+    }
+
+    /// An absent, null, or empty `api_key` falls back to the kind's default
+    /// environment variable, since the plugin child process no longer
+    /// inherits the host environment.
+    #[test]
+    fn resolve_blob_api_key_falls_back_to_default_env() {
+        let env = env_with(&[("OPENAI_API_KEY", "sk-env")]);
+        for config in [
+            serde_json::json!({}),
+            serde_json::json!({"api_key": null}),
+            serde_json::json!({"api_key": ""}),
+            serde_json::json!({"api_key": "   "}),
+            serde_json::json!({"api_key": {"source": "auto"}}),
+        ] {
+            assert_eq!(
+                resolve_blob_api_key_with_env("openai-tts", &config, env.clone()),
+                Some("sk-env".to_string()),
+                "{config}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_blob_api_key_returns_none_without_env() {
+        let no_env = |_name: &str| None;
+        for config in [
+            serde_json::json!({}),
+            serde_json::json!({"api_key": null}),
+            serde_json::json!({"api_key": ""}),
+        ] {
+            assert_eq!(
+                resolve_blob_api_key_with_env("anthropic", &config, no_env),
+                None,
+                "{config}"
+            );
+        }
+    }
+
+    /// An explicit `{"source": "env", "env": "CUSTOM"}` descriptor reads
+    /// only the named variable and is not overridden by the default.
+    #[test]
+    fn resolve_blob_api_key_honors_explicit_env_descriptor() {
+        let env = env_with(&[("OPENAI_API_KEY", "sk-default"), ("CUSTOM", "sk-custom")]);
+        assert_eq!(
+            resolve_blob_api_key_with_env(
+                "openai",
+                &serde_json::json!({"api_key": {"source": "env", "env": "CUSTOM"}}),
+                env.clone(),
+            ),
+            Some("sk-custom".to_string())
+        );
+        assert_eq!(
+            resolve_blob_api_key_with_env(
+                "openai",
+                &serde_json::json!({"api_key": {"source": "env", "env": "MISSING"}}),
+                env.clone(),
+            ),
+            None,
+            "an explicit env name that is unset must not read the default"
         );
     }
 

@@ -248,6 +248,10 @@ impl HostServiceServer {
                 Self::open_broker_session(stream, db_plugins, broker, failed_opens, token).await?;
                 return Ok(());
             }
+            HostServiceId::WebSocket => {
+                Self::open_ws_session(stream, db_plugins, broker, failed_opens, token).await?;
+                return Ok(());
+            }
         }
 
         let Some(reg) = db_plugins.get(&token).cloned() else {
@@ -327,6 +331,47 @@ impl HostServiceServer {
                 write_framed_json(&mut stream, &response).await?;
             }
         }
+    }
+
+    /// Opens a `WebSocket` passenger session: authenticates the token,
+    /// acknowledges, then hands the stream to the broker handler.
+    async fn open_ws_session(
+        stream: ene_plugin_proto::transport::IpcStream,
+        db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
+        broker: Option<SharedBrokerHandler>,
+        failed_opens: Arc<Mutex<OpenFailureTracker>>,
+        token: String,
+    ) -> Result<(), DbServerError> {
+        let Some(handler) = broker else {
+            warn!("Host service Open for WebSocket without a broker handler");
+            let mut stream = stream;
+            write_host_service_response(
+                &mut stream,
+                &HostServiceResponse::Error {
+                    code: HostServiceErrorCode::UnknownService,
+                    message: "broker services are not implemented by this host".to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        };
+        let Some(reg) = db_plugins.get(&token).cloned() else {
+            Self::log_rejected_open(&failed_opens, "Host service Open rejected: unknown token");
+            let mut stream = stream;
+            write_host_service_response(
+                &mut stream,
+                &HostServiceResponse::Error {
+                    code: HostServiceErrorCode::AuthRejected,
+                    message: "Invalid auth token".to_string(),
+                },
+            )
+            .await?;
+            return Ok(());
+        };
+        let mut stream = stream;
+        write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await?;
+        handler.serve_ws(&reg.tool_name, stream).await?;
+        Ok(())
     }
 
     /// Logs a rejected `Open`/handshake at `warn` at most once per second,

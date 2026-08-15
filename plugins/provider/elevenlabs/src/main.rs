@@ -1,16 +1,16 @@
 //! # ene-plugin-elevenlabs
 //!
 //! `ElevenLabs` TTS provider plugin for the ene unified plugin system.
-//! Synthesizes speech over the REST `/text-to-speech/{voice_id}/stream`
-//! endpoint (default) or the bidirectional WebSocket `stream-input`
-//! endpoint, requesting `pcm_{rate}` and returning WAV over the plugin IPC.
+//! Synthesizes speech over the `/text-to-speech/{voice_id}/stream` REST
+//! endpoint (broker-mediated), requesting `pcm_{rate}` and returning WAV
+//! over the plugin IPC.
 
+mod broker;
 mod client;
 mod config;
 mod pcm;
 mod plugin;
 mod wav;
-mod ws;
 
 #[cfg(test)]
 mod mock_server;

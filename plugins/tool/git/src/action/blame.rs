@@ -1,8 +1,7 @@
-use crate::error::{GitError, from_git2};
+use crate::error::GitError;
 use crate::output::{BlameLine, BlameOutput, format_time, short_oid, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
-use std::path::Path;
 
 const MAX_BLAME_LINES: usize = 2000;
 
@@ -56,36 +55,33 @@ impl BlameAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.blame")?;
+        let repo = scope
+            .resolve_repo(self.path.as_deref(), "git.blame")
+            .await?;
+        let workdir = repo.workdir.to_string_lossy().into_owned();
         scope.validate_relative_path(&self.file)?;
 
-        let head = repo.head().map_err(super::common::map_head_error)?;
-        let tree = head.peel_to_tree().map_err(from_git2)?;
-        let blob = tree
-            .get_path(Path::new(&self.file))
-            .map_err(|e| {
-                if e.code() == git2::ErrorCode::NotFound {
-                    ToolError::from(GitError::NotFound(format!(
-                        "{file} not found in HEAD",
-                        file = self.file
-                    )))
-                } else {
-                    ToolError::from(GitError::Git2(e))
-                }
-            })?
-            .to_object(&repo)
-            .map_err(from_git2)?
-            .peel_to_blob()
-            .map_err(from_git2)?;
-        let content = String::from_utf8_lossy(blob.content()).into_owned();
-        if content.len() > scope.max_read_bytes() {
+        let broker = crate::broker::broker();
+        let size_run = broker
+            .run_git(
+                &workdir,
+                &["cat-file", "-s", &format!("HEAD:{}", self.file)],
+            )
+            .await?;
+        if !size_run.ok() {
+            return Err(ToolError::from(GitError::NotFound(format!(
+                "{file} not found in HEAD",
+                file = self.file
+            ))));
+        }
+        let blob_size = size_run.stdout.trim().parse::<usize>().unwrap_or(0);
+        if blob_size > scope.max_read_bytes() {
             return Err(ToolError::from(GitError::ReadLimitExceeded {
                 path: self.file.clone(),
                 limit: scope.max_read_bytes(),
             }));
         }
-        let lines: Vec<&str> = content.lines().collect();
-        let total = lines.len();
+        let total = blob_size_count(&workdir, &self.file, &broker).await?;
 
         let start = usize::try_from(self.start_line.unwrap_or(1)).unwrap_or(1);
         let end = self
@@ -107,55 +103,99 @@ impl BlameAction {
             (end, false)
         };
 
-        let blame = repo
-            .blame_file(Path::new(&self.file), None)
-            .map_err(from_git2)?;
-        let mut out_lines: Vec<BlameLine> = Vec::new();
-        for n in start..=reported_end {
-            let hunk = blame.get_line(n).ok_or_else(|| {
-                ToolError::from(GitError::NotFound(format!(
-                    "no blame data for line {n} in {file}",
-                    file = self.file
-                )))
-            })?;
-            let commit = hunk.orig_commit_id();
-            let (author, author_email, author_time) =
-                match hunk.orig_signature().or_else(|| hunk.final_signature()) {
-                    Some(sig) => (
-                        sig.name().unwrap_or_default().to_string(),
-                        sig.email().unwrap_or_default().to_string(),
-                        format_time(sig.when()),
-                    ),
-                    None => (String::new(), String::new(), String::new()),
-                };
-            out_lines.push(BlameLine {
-                line: n,
-                text: lines
-                    .get(n.saturating_sub(1))
-                    .copied()
-                    .unwrap_or_default()
-                    .to_string(),
-                commit: commit.to_string(),
-                short_commit: short_oid(commit),
-                author,
-                author_email,
-                author_time,
-                subject: hunk
-                    .summary()
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-                    .to_string(),
-            });
+        let range = format!("-L {start},{reported_end}");
+        let blame_run = broker
+            .run_git(
+                &workdir,
+                &["blame", "--porcelain", &range, "--", &self.file],
+            )
+            .await?;
+        if !blame_run.ok() {
+            return Err(crate::sandbox::git_run_error(&blame_run));
         }
+        let out_lines = parse_porcelain(&blame_run.stdout, start, reported_end);
 
         to_json(&BlameOutput {
-            repo: workdir.display().to_string(),
+            repo: workdir,
             file: self.file.clone(),
             lines: out_lines,
             truncated,
         })
     }
+}
+
+/// Counts the lines of the committed file via `git show` output.
+async fn blob_size_count(
+    workdir: &str,
+    file: &str,
+    broker: &crate::broker::GitBroker,
+) -> Result<usize, ToolError> {
+    let show = broker
+        .run_git(workdir, &["show", &format!("HEAD:{file}")])
+        .await?;
+    if !show.ok() {
+        return Err(ToolError::from(GitError::NotFound(format!(
+            "{file} not found in HEAD"
+        ))));
+    }
+    Ok(show.stdout.lines().count())
+}
+
+/// Parses `git blame --porcelain` output for the requested line range.
+fn parse_porcelain(output: &str, start: usize, end: usize) -> Vec<BlameLine> {
+    let mut lines = Vec::new();
+    let mut commit = String::new();
+    let mut author = String::new();
+    let mut author_email = String::new();
+    let mut author_time_unix = 0_i64;
+    let mut author_tz = String::new();
+    let mut subject = String::new();
+    let mut final_line = 0_usize;
+    for raw in output.lines() {
+        if let Some(rest) = raw.strip_prefix('\t') {
+            if (start..=end).contains(&final_line) {
+                lines.push(BlameLine {
+                    line: final_line,
+                    text: rest.to_string(),
+                    commit: commit.clone(),
+                    short_commit: short_oid(&commit),
+                    author: author.clone(),
+                    author_email: author_email.clone(),
+                    author_time: format_time(author_time_unix, &author_tz),
+                    subject: subject.clone(),
+                });
+            }
+            continue;
+        }
+        let first = raw.split_whitespace().next().unwrap_or_default();
+        if first.len() == 40 && first.chars().all(|c| c.is_ascii_hexdigit()) {
+            // Commit line: `<oid> <orig> <final> [<count>]`.
+            let mut parts = raw.split_whitespace();
+            commit = parts.next().unwrap_or_default().to_string();
+            final_line = parts.nth(1).and_then(|n| n.parse().ok()).unwrap_or(0);
+            continue;
+        }
+        if let Some((key, value)) = raw.split_once(' ') {
+            // Header line: `<key> <value>`.
+            match key {
+                "author" => author = value.to_string(),
+                "author-mail" => {
+                    author_email = value
+                        .trim()
+                        .trim_start_matches('<')
+                        .trim_end_matches('>')
+                        .to_string();
+                }
+                "author-time" => {
+                    author_time_unix = value.trim().parse().unwrap_or(0);
+                }
+                "author-tz" => author_tz = value.trim().to_string(),
+                "summary" => subject = value.to_string(),
+                _ => {}
+            }
+        }
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -181,6 +221,7 @@ mod tests {
 
     #[tokio::test]
     async fn attributes_every_line_to_the_introducing_commit() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\ntwo\nthree\n");
         let oid = fixture.commit_all("initial");
@@ -200,6 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn reattribution_after_second_commit() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\ntwo\nthree\n");
         fixture.commit_all("initial");
@@ -216,6 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn line_range_limits_output() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\ntwo\nthree\n");
         fixture.commit_all("initial");
@@ -235,6 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_line_range_is_rejected() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("initial");
@@ -245,6 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_is_rejected() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("initial");

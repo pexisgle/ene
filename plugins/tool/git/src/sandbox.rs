@@ -1,6 +1,6 @@
+use crate::broker::GitRun;
 use crate::error::GitError;
 use ene_plugin_proto::{SandboxConfigData, ToolError};
-use git2::Repository;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -27,9 +27,9 @@ pub fn resolve_sandbox(sandbox_ref: &SandboxRef) -> Arc<RepoScope> {
 ///
 /// Mirrors the fs plugin's sandbox contract: every path the caller names must
 /// resolve inside an allowed directory (or a session-granted pattern), and a
-/// repository discovered from that path must have its working tree inside the
-/// allowlist too — otherwise a path inside the workspace could expose the
-/// history of an ancestor repository living outside it.
+/// repository discovered from that path must have its working tree and git
+/// dirs inside the allowlist too — otherwise a path inside the workspace
+/// could expose the history of an ancestor repository living outside it.
 pub struct RepoScope {
     allowed_directories: Vec<PathBuf>,
     allowed_patterns: Arc<RwLock<HashSet<(String, String)>>>,
@@ -71,28 +71,45 @@ impl RepoScope {
         }
     }
 
-    /// Resolves `path_arg` (default `.`) to an open repository whose working
-    /// tree lies inside the allowlist.
-    pub fn resolve_repo(
+    /// Resolves `path_arg` (default `.`) to a repository whose working tree
+    /// and git dirs lie inside the allowlist.
+    pub async fn resolve_repo(
         &self,
         path_arg: Option<&str>,
         action: &str,
-    ) -> Result<(Repository, PathBuf), ToolError> {
+    ) -> Result<ResolvedRepo, ToolError> {
         let resolved = self.resolve_path(path_arg, action)?;
-        let repo = Repository::discover(&resolved).map_err(|e| not_a_repository(&resolved, e))?;
-        let workdir = repo
-            .workdir()
-            .ok_or_else(|| {
-                ToolError::from(GitError::BareRepository {
-                    path: resolved.display().to_string(),
-                })
-            })?
-            .to_path_buf();
+        let resolved_str = resolved.to_string_lossy().into_owned();
+        let broker = crate::broker::broker();
+        let run = broker
+            .run_git(&resolved_str, &["rev-parse", "--show-toplevel"])
+            .await?;
+        let workdir = match repo_stdout(&run) {
+            Some(workdir) => PathBuf::from(workdir),
+            None => return Err(not_a_repository(&resolved, &run)),
+        };
         let workdir = canonicalize_existing(&workdir);
         self.ensure_allowed(&workdir, action)?;
-        self.ensure_allowed(&canonicalize_existing(repo.path()), action)?;
-        self.ensure_allowed(&canonicalize_existing(repo.commondir()), action)?;
-        Ok((repo, workdir))
+        let workdir_str = workdir.to_string_lossy().into_owned();
+        let git_dir = resolve_git_path(
+            &workdir,
+            &broker
+                .run_git(&workdir_str, &["rev-parse", "--git-dir"])
+                .await?,
+        );
+        let common_dir = resolve_git_path(
+            &workdir,
+            &broker
+                .run_git(&workdir_str, &["rev-parse", "--git-common-dir"])
+                .await?,
+        );
+        self.ensure_allowed(&git_dir, action)?;
+        self.ensure_allowed(&common_dir, action)?;
+        Ok(ResolvedRepo {
+            workdir,
+            git_dir,
+            common_dir,
+        })
     }
 
     /// Maximum bytes a single committed blob may contribute to a response.
@@ -175,6 +192,16 @@ impl RepoScope {
     }
 }
 
+/// A repository resolved through the host's process broker.
+pub struct ResolvedRepo {
+    /// Absolute working-tree path.
+    pub workdir: PathBuf,
+    /// Absolute git dir (worktree-specific).
+    pub git_dir: PathBuf,
+    /// Absolute common git dir (shared across worktrees).
+    pub common_dir: PathBuf,
+}
+
 fn invalid_path(path: &str, reason: &str) -> ToolError {
     ToolError::from(GitError::InvalidPath {
         path: path.to_string(),
@@ -182,14 +209,53 @@ fn invalid_path(path: &str, reason: &str) -> ToolError {
     })
 }
 
-fn not_a_repository(path: &Path, e: git2::Error) -> ToolError {
-    if e.code() == git2::ErrorCode::NotFound {
-        ToolError::from(GitError::NotARepository {
-            path: path.display().to_string(),
-        })
-    } else {
-        ToolError::from(GitError::Git2(e))
+/// The trimmed first stdout line of a successful run, or `None` on a
+/// non-zero exit.
+fn repo_stdout(run: &GitRun) -> Option<String> {
+    run.ok().then(|| {
+        run.stdout
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_string()
+    })
+}
+
+/// Maps a failed `git` run to a structured error, preferring a stderr
+/// snippet when present.
+pub(crate) fn git_run_error(run: &GitRun) -> ToolError {
+    let detail = run.stderr.trim();
+    if detail.is_empty() {
+        return ToolError::execution_failed("git command failed");
     }
+    ToolError::execution_failed(detail.chars().take(300).collect::<String>())
+}
+
+/// Resolves a `git rev-parse --git-dir` output to an absolute path:
+/// relative outputs (`.git`) are anchored at the working tree.
+fn resolve_git_path(workdir: &Path, run: &GitRun) -> PathBuf {
+    let Some(git_dir) = repo_stdout(run) else {
+        return workdir.join(".git");
+    };
+    let path = PathBuf::from(git_dir);
+    if path.is_absolute() {
+        canonicalize_existing(&path)
+    } else {
+        canonicalize_existing(&workdir.join(path))
+    }
+}
+
+fn not_a_repository(path: &Path, run: &GitRun) -> ToolError {
+    let stderr = run.stderr.trim().to_string();
+    if stderr.contains("work tree") || stderr.contains("bare") {
+        return ToolError::from(GitError::BareRepository {
+            path: path.display().to_string(),
+        });
+    }
+    ToolError::from(GitError::NotARepository {
+        path: path.display().to_string(),
+    })
 }
 
 fn canonicalize_existing(path: &Path) -> PathBuf {
@@ -216,33 +282,37 @@ mod tests {
         )
     }
 
-    #[test]
-    fn resolves_repository_inside_allowed_directory() {
+    #[tokio::test]
+    async fn resolves_repository_inside_allowed_directory() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
         let scope = scope_allowing(&fixture.path());
-        let (repo, workdir) = scope
+        let repo = scope
             .resolve_repo(Some(&fixture.path()), "git.status")
+            .await
             .unwrap();
-        assert!(!repo.is_bare());
-        assert_eq!(workdir.to_str().unwrap(), fixture.path());
+        assert_eq!(repo.workdir.to_str().unwrap(), fixture.path());
     }
 
-    #[test]
-    fn rejects_paths_outside_allowed_directory() {
+    #[tokio::test]
+    async fn rejects_paths_outside_allowed_directory() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         let scope = scope_allowing(&fixture.path());
         let other = tempfile::tempdir().unwrap();
         let err = scope
             .resolve_repo(Some(other.path().to_str().unwrap()), "git.status")
+            .await
             .err()
             .expect("path outside sandbox should be rejected");
         assert!(is_sandbox_violation(&err), "{err:?}");
     }
 
-    #[test]
-    fn rejects_repository_root_outside_workspace() {
+    #[tokio::test]
+    async fn rejects_repository_root_outside_workspace() {
+        let _serial = crate::fixture::with_broker().await;
         let parent = tempfile::tempdir().unwrap();
         let repo_path = parent.path().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
@@ -254,24 +324,28 @@ mod tests {
         let scope = scope_allowing(inner.to_str().unwrap());
         let err = scope
             .resolve_repo(Some(inner.to_str().unwrap()), "git.status")
+            .await
             .err()
             .expect("repository root outside workspace should be rejected");
         assert!(is_sandbox_violation(&err), "{err:?}");
     }
 
-    #[test]
-    fn rejects_non_repository_paths() {
+    #[tokio::test]
+    async fn rejects_non_repository_paths() {
+        let _serial = crate::fixture::with_broker().await;
         let dir = tempfile::tempdir().unwrap();
         let scope = scope_allowing(dir.path().to_str().unwrap());
         let err = scope
             .resolve_repo(Some(dir.path().to_str().unwrap()), "git.status")
+            .await
             .err()
             .expect("non-repository path should be rejected");
         assert!(err.to_string().contains("not a git repository"), "{err}");
     }
 
-    #[test]
-    fn allow_pattern_grants_and_revokes_access() {
+    #[tokio::test]
+    async fn allow_pattern_grants_and_revokes_access() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         let other = tempfile::tempdir().unwrap();
         let repo_path = other.path().join("repo");
@@ -282,20 +356,22 @@ mod tests {
         let scope = scope_allowing(&fixture.path());
         let err = scope
             .resolve_repo(Some(repo_path.to_str().unwrap()), "git.status")
+            .await
             .err()
             .expect("ungranted repository should be rejected");
         assert!(is_sandbox_violation(&err));
 
         scope.allow_pattern("git.status", repo_path.to_str().unwrap());
-        let (repo, workdir) = scope
+        let repo = scope
             .resolve_repo(Some(repo_path.to_str().unwrap()), "git.status")
+            .await
             .unwrap();
-        assert_eq!(workdir.to_str().unwrap(), repo_path.to_str().unwrap());
-        assert_eq!(repo.path().parent().unwrap(), repo_path.as_path());
+        assert_eq!(repo.workdir.to_str().unwrap(), repo_path.to_str().unwrap());
 
         scope.revoke_pattern("git.status", repo_path.to_str().unwrap());
         let err = scope
             .resolve_repo(Some(repo_path.to_str().unwrap()), "git.status")
+            .await
             .err()
             .expect("revoked repository should be rejected");
         assert!(is_sandbox_violation(&err));
@@ -316,11 +392,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn missing_parent_is_reported() {
+    #[tokio::test]
+    async fn missing_parent_is_reported() {
+        let _serial = crate::fixture::with_broker().await;
         let scope = RepoScope::default();
         let err = scope
             .resolve_repo(Some("/definitely/not/a/repo"), "git.status")
+            .await
             .err()
             .expect("missing parent should be rejected");
         assert!(
@@ -329,9 +407,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_sandbox_falls_back_to_default() {
+    #[tokio::test]
+    async fn resolve_sandbox_falls_back_to_default() {
+        let _serial = crate::fixture::with_broker().await;
         let scope = resolve_sandbox(&crate::sandbox::default_sandbox());
-        drop(scope.resolve_repo(None, "git.status"));
+        drop(scope.resolve_repo(None, "git.status").await);
     }
 }

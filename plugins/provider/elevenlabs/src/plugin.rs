@@ -8,10 +8,9 @@ use serde_json::{Value, json};
 
 use crate::client;
 use crate::config::{
-    DEFAULT_MODEL, DEFAULT_SAMPLE_RATE, ElevenLabsConfig, MAX_INPUT_CHARS, Mode,
-    SUPPORTED_SAMPLE_RATES, resolve_api_key, resolve_base_url, validate_voice_id,
+    DEFAULT_MODEL, DEFAULT_SAMPLE_RATE, ElevenLabsConfig, MAX_INPUT_CHARS, SUPPORTED_SAMPLE_RATES,
+    resolve_base_url, validate_voice_id,
 };
-use crate::ws;
 
 /// Configuration delivered by the host at handshake time
 /// (`plugins.list.elevenlabs.config`), stored per process.
@@ -45,8 +44,14 @@ impl ene_plugin::ConfigurablePlugin for ElevenLabsPlugin {
         *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
     }
 
+    /// Captures the broker socket/token so every request is host-mediated.
+    fn set_sandbox(&self, sandbox: &ene_plugin_proto::SandboxConfigData) {
+        crate::broker::configure_broker(sandbox);
+    }
+
     /// Advertises the config schema; `api_key` is marked `x-ene-secret: true`
-    /// so the host masks/redacts it.
+    /// so the host masks/redacts it. The key itself is unused by the plugin:
+    /// the host injects it into broker requests by key name.
     fn config_schema(&self) -> Option<Value> {
         Some(json!({
             "type": "object",
@@ -71,15 +76,8 @@ impl ene_plugin::ConfigurablePlugin for ElevenLabsPlugin {
                 },
                 "base_url": {
                     "type": "string",
-                    "description": "API base URL override (defaults to https://api.elevenlabs.io/v1; websocket mode swaps the scheme)",
+                    "description": "API base URL override (defaults to https://api.elevenlabs.io/v1)",
                     "x-ene-ui": { "group": "connection", "order": 0, "impact": "runtime_reload" }
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["rest", "ws"],
-                    "default": "rest",
-                    "description": "Transport: rest (POST /text-to-speech/{voice_id}/stream) or ws (stream-input websocket)",
-                    "x-ene-ui": { "group": "connection", "order": 1, "impact": "runtime_reload" }
                 },
                 "model_id": {
                     "type": "string",
@@ -178,13 +176,7 @@ impl TtsPlugin for ElevenLabsPlugin {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let api_key = resolve_api_key(host_config.as_ref(), &config)?;
         let base_url = resolve_base_url(host_config.as_ref(), &config);
-        match parsed.mode {
-            Mode::Rest => {
-                client::synthesize_rest(&parsed, &api_key, &base_url, &text, &voice_id).await
-            }
-            Mode::Ws => ws::synthesize_ws(&parsed, &api_key, &base_url, &text, &voice_id).await,
-        }
+        client::synthesize_rest(&parsed, &base_url, &text, &voice_id).await
     }
 }

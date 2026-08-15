@@ -14,6 +14,7 @@
 
 use std::path::Path;
 
+pub use ene_plugin_proto::ws::{WebSocketRequest, WebSocketResponse};
 pub use ene_plugin_proto::{
     BrokerRequest, BrokerResponse, HostServiceErrorCode, HostServiceId, HostServiceRequest,
     HostServiceResponse, IpcStream, read_framed_json, read_host_service_response,
@@ -43,6 +44,14 @@ pub enum BrokerClientError {
     Denied {
         /// Structured code.
         code: ene_plugin_proto::BrokerErrorCode,
+        /// Human-readable detail.
+        message: String,
+    },
+    /// A WebSocket handshake failed with an HTTP status.
+    #[error("WebSocket handshake failed: {message}")]
+    HttpStatus {
+        /// HTTP status from the peer (`None` when unknown).
+        status: Option<u16>,
         /// Human-readable detail.
         message: String,
     },
@@ -226,6 +235,150 @@ impl BrokerClient {
                 }
                 None => return Err(BrokerClientError::Closed),
             }
+        }
+    }
+
+    /// Shuts the session down cleanly.
+    pub async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.stream.shutdown().await
+    }
+}
+
+/// One event received on a host-mediated WebSocket session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebSocketEvent {
+    /// A text message from the peer.
+    Text(String),
+    /// A binary message from the peer.
+    Binary(Vec<u8>),
+    /// The connection closed; the session is finished.
+    Closed {
+        /// Close code.
+        code: u16,
+        /// Close reason.
+        reason: String,
+    },
+    /// A session error; the session is finished.
+    Error {
+        /// HTTP status when the handshake failed on the wire, else `None`.
+        status: Option<u16>,
+        /// Human-readable detail.
+        message: String,
+    },
+}
+
+/// A host-mediated WebSocket session.
+///
+/// The host validates SSRF and origin approvals, injects the named
+/// credential, and relays frames; the plugin only sends and receives
+/// [`WebSocketEvent`]s. Sends are fire-and-forget: [`recv`](Self::recv)
+/// yields pushed messages until the session closes.
+pub struct WebSocketSession {
+    stream: IpcStream,
+}
+
+impl WebSocketSession {
+    /// Opens a session on the host-service socket and completes the
+    /// WebSocket handshake for `url`.
+    pub async fn connect(
+        socket_path: &Path,
+        token: &str,
+        url: &str,
+        headers: Vec<(String, String)>,
+        credential: Option<&str>,
+    ) -> Result<(Self, String), BrokerClientError> {
+        let mut stream = IpcStream::connect(socket_path)
+            .await
+            .map_err(|e| BrokerClientError::Connect(e.to_string()))?;
+        write_host_service_request(
+            &mut stream,
+            &HostServiceRequest::Open {
+                service: HostServiceId::WebSocket,
+                token: token.to_string(),
+            },
+        )
+        .await?;
+        match read_host_service_response(&mut stream).await? {
+            Some(HostServiceResponse::OpenAck) => {}
+            Some(HostServiceResponse::Error { code, message }) => {
+                return Err(BrokerClientError::OpenRejected { code, message });
+            }
+            None => return Err(BrokerClientError::Closed),
+        }
+        write_framed_json(
+            &mut stream,
+            &WebSocketRequest::Open {
+                url: url.to_string(),
+                headers,
+                credential: credential.map(str::to_string),
+            },
+        )
+        .await?;
+        match read_framed_json(&mut stream).await? {
+            Some(WebSocketResponse::OpenOk { final_url }) => Ok((Self { stream }, final_url)),
+            Some(WebSocketResponse::Error { status, message }) => {
+                Err(BrokerClientError::HttpStatus { status, message })
+            }
+            Some(other) => Err(BrokerClientError::Request(format!(
+                "unexpected frame while opening WebSocket: {other:?}"
+            ))),
+            None => Err(BrokerClientError::Closed),
+        }
+    }
+
+    /// Sends a text frame (fire-and-forget).
+    pub async fn send_text(&mut self, data: &str) -> Result<(), BrokerClientError> {
+        write_framed_json(
+            &mut self.stream,
+            &WebSocketRequest::SendText {
+                data: data.to_string(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Sends a binary frame (fire-and-forget).
+    pub async fn send_binary(&mut self, data: &[u8]) -> Result<(), BrokerClientError> {
+        write_framed_json(
+            &mut self.stream,
+            &WebSocketRequest::SendBinary {
+                data: data.to_vec(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Starts the close handshake.
+    pub async fn close(&mut self, code: u16, reason: &str) -> Result<(), BrokerClientError> {
+        write_framed_json(
+            &mut self.stream,
+            &WebSocketRequest::Close {
+                code,
+                reason: reason.to_string(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Reads the next pushed frame. `Closed` / `Error` events are terminal:
+    /// no further reads succeed.
+    pub async fn recv(&mut self) -> Result<WebSocketEvent, BrokerClientError> {
+        match read_framed_json(&mut self.stream).await? {
+            Some(WebSocketResponse::MessageText { data }) => Ok(WebSocketEvent::Text(data)),
+            Some(WebSocketResponse::MessageBinary { data }) => Ok(WebSocketEvent::Binary(data)),
+            Some(WebSocketResponse::Closed { code, reason }) => {
+                Ok(WebSocketEvent::Closed { code, reason })
+            }
+            Some(WebSocketResponse::Error { status, message }) => {
+                Ok(WebSocketEvent::Error { status, message })
+            }
+            Some(WebSocketResponse::OpenOk { .. }) => Err(BrokerClientError::Request(
+                "unexpected OpenOk after the session opened".to_string(),
+            )),
+            None => Err(BrokerClientError::Closed),
         }
     }
 

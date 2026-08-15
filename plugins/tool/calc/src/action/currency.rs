@@ -91,31 +91,15 @@ impl CurrencyConvertAction {
         let access_key = self.resolve_access_key();
         let url = build_convert_url(&from, &to, self.amount, access_key.as_deref())?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| ToolError::execution_failed(format!("HTTP client init failed: {e}")))?;
-
-        let response = client.get(url).send().await.map_err(|e| {
-            ToolError::execution_failed(format!(
-                "HTTP request failed: {}",
-                sanitize_reqwest_error(e)
-            ))
-        })?;
-        let status = response.status();
-        let body = response.text().await.map_err(|e| {
-            ToolError::execution_failed(format!(
-                "Failed to read response: {}",
-                sanitize_reqwest_error(e)
-            ))
-        })?;
-        if !status.is_success() {
+        let response = crate::broker::broker().fetch(url.as_str()).await?;
+        if !(200..300).contains(&response.status) {
             return Err(ToolError::execution_failed(format!(
-                "exchangerate.host returned HTTP {status}"
+                "exchangerate.host returned HTTP {}",
+                response.status
             )));
         }
 
-        let parsed: ConvertResponse = serde_json::from_str(&body)
+        let parsed: ConvertResponse = serde_json::from_slice(&response.body)
             .map_err(|e| ToolError::execution_failed(format!("Invalid API response: {e}")))?;
         format_convert_response(&parsed, &from, &to, self.amount)
     }
@@ -153,8 +137,8 @@ fn build_convert_url(
     to: &str,
     amount: f64,
     access_key: Option<&str>,
-) -> Result<reqwest::Url, ToolError> {
-    let mut url = reqwest::Url::parse("https://api.exchangerate.host/convert")
+) -> Result<url::Url, ToolError> {
+    let mut url = url::Url::parse("https://api.exchangerate.host/convert")
         .map_err(|e| ToolError::internal(format!("failed to parse exchangerate.host URL: {e}")))?;
     url.query_pairs_mut()
         .append_pair("from", from)
@@ -164,14 +148,6 @@ fn build_convert_url(
         url.query_pairs_mut().append_pair("access_key", key);
     }
     Ok(url)
-}
-
-/// Renders a reqwest error without its request URL, whose query string
-/// carries the exchangerate.host access key. reqwest's Display appends
-/// `for url (...)`, so a raw `{e}` would leak the key into logs and the
-/// tool result the model sees.
-fn sanitize_reqwest_error(e: reqwest::Error) -> String {
-    e.without_url().to_string()
 }
 
 fn format_convert_response(
@@ -314,30 +290,5 @@ mod tests {
     fn convert_url_carries_key_in_query() {
         let url = build_convert_url("USD", "EUR", 100.0, Some("secret")).unwrap();
         assert!(url.as_str().contains("access_key=secret"), "{url}");
-    }
-
-    #[tokio::test]
-    async fn request_error_does_not_leak_access_key() {
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            drop(socket);
-        });
-
-        let url = reqwest::Url::parse(&format!(
-            "http://{addr}/convert?from=USD&to=EUR&amount=1&access_key=SECRET_KEY"
-        ))
-        .unwrap();
-        let err = reqwest::Client::new().get(url).send().await.unwrap_err();
-        server.await.unwrap();
-
-        // The raw Display carries the URL; the sanitized message must not.
-        assert!(err.to_string().contains("SECRET_KEY"), "{err}");
-        let sanitized = sanitize_reqwest_error(err);
-        assert!(!sanitized.contains("SECRET_KEY"), "{sanitized}");
-        assert!(!sanitized.contains("access_key"), "{sanitized}");
     }
 }

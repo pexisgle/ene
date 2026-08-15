@@ -1,8 +1,6 @@
-use crate::error::from_git2;
 use crate::output::{StatusFileEntry, StatusOutput, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
-use git2::{Status, StatusOptions};
 
 const MAX_STATUS_ENTRIES: usize = 2000;
 
@@ -52,69 +50,102 @@ impl StatusAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let scope = resolve_sandbox(&self.sandbox);
-        let (repo, workdir) = scope.resolve_repo(self.path.as_deref(), "git.status")?;
+        let repo = scope
+            .resolve_repo(self.path.as_deref(), "git.status")
+            .await?;
+        let workdir = repo.workdir.to_string_lossy().into_owned();
 
-        let mut opts = StatusOptions::new();
-        opts.include_untracked(self.include_untracked)
-            .recurse_untracked_dirs(self.include_untracked)
-            .include_ignored(false);
-        let statuses = repo.statuses(Some(&mut opts)).map_err(from_git2)?;
+        let untracked_mode = if self.include_untracked {
+            "--untracked-files=normal"
+        } else {
+            "--untracked-files=no"
+        };
+        let status_run = crate::broker::broker()
+            .run_git(&workdir, &["status", "--porcelain=v1", untracked_mode])
+            .await?;
+        let status_text = if status_run.ok() {
+            status_run.stdout
+        } else {
+            return Err(crate::sandbox::git_run_error(&status_run));
+        };
+        let (branch, detached_head) = super::common::head_info(&workdir).await;
 
         let mut entries: Vec<StatusFileEntry> = Vec::new();
-        for entry in statuses.iter() {
+        let status_lines = status_text.lines();
+        let total = status_lines.clone().count();
+        for line in status_lines {
             if entries.len() >= MAX_STATUS_ENTRIES {
                 break;
             }
-            let status = entry.status();
+            let Some(parsed) = parse_status_line(line) else {
+                continue;
+            };
             entries.push(StatusFileEntry {
-                path: entry.path().map(str::to_string).unwrap_or_default(),
-                staged: index_code(status),
-                unstaged: worktree_code(status),
-                untracked: status.is_wt_new(),
-                conflicted: status.is_conflicted(),
+                path: parsed.path,
+                staged: parsed.staged,
+                unstaged: parsed.unstaged,
+                untracked: parsed.untracked,
+                conflicted: parsed.conflicted,
             });
         }
         entries.sort_by(|a, b| a.path.cmp(&b.path));
 
-        let (branch, detached_head) = super::common::head_info(&repo);
         to_json(&StatusOutput {
-            repo: workdir.display().to_string(),
+            repo: workdir,
             branch,
             detached_head,
-            clean: statuses.is_empty(),
+            clean: status_text.is_empty(),
             entries,
-            truncated: statuses.len() > MAX_STATUS_ENTRIES,
+            truncated: total > MAX_STATUS_ENTRIES,
         })
     }
 }
 
-fn index_code(status: Status) -> Option<&'static str> {
-    if status.is_index_new() {
-        Some("A")
-    } else if status.is_index_modified() {
-        Some("M")
-    } else if status.is_index_deleted() {
-        Some("D")
-    } else if status.is_index_renamed() {
-        Some("R")
-    } else if status.is_index_typechange() {
-        Some("T")
-    } else {
-        None
-    }
+/// One parsed `--porcelain=v1` line.
+struct ParsedStatus {
+    path: String,
+    staged: Option<&'static str>,
+    unstaged: Option<&'static str>,
+    untracked: bool,
+    conflicted: bool,
 }
 
-fn worktree_code(status: Status) -> Option<&'static str> {
-    if status.is_wt_modified() {
-        Some("M")
-    } else if status.is_wt_deleted() {
-        Some("D")
-    } else if status.is_wt_renamed() {
-        Some("R")
-    } else if status.is_wt_typechange() {
-        Some("T")
-    } else {
-        None
+fn parse_status_line(line: &str) -> Option<ParsedStatus> {
+    let bytes = line.as_bytes();
+    if bytes.len() < 4 || bytes[2] != b' ' {
+        return None;
+    }
+    let index = code_for(bytes[0]);
+    let worktree = code_for(bytes[1]);
+    // Renames use `XY orig -> dest`; report the destination like libgit2's
+    // `entry.path()` did.
+    let path = line[3..]
+        .split_once(" -> ")
+        .map_or(line[3..].to_string(), |(_, dest)| dest.to_string());
+    Some(ParsedStatus {
+        path,
+        staged: index,
+        unstaged: worktree,
+        untracked: worktree == Some("?"),
+        conflicted: matches!(
+            (bytes[0], bytes[1]),
+            (b'U', b'U' | b'A' | b'D') | (b'A', b'A' | b'U') | (b'D', b'D' | b'U')
+        ),
+    })
+}
+
+/// Maps a porcelain status letter to the output's change-letter contract.
+fn code_for(byte: u8) -> Option<&'static str> {
+    match byte {
+        b'A' => Some("A"),
+        b'M' => Some("M"),
+        b'D' => Some("D"),
+        b'R' => Some("R"),
+        b'T' => Some("T"),
+        b'C' => Some("C"),
+        b'U' => Some("U"),
+        b'?' => Some("?"),
+        _ => None,
     }
 }
 
@@ -136,6 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn clean_repo_reports_clean() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.commit_all("first");
@@ -152,6 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn untracked_and_modified_files_are_listed() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("tracked.txt", "v1\n");
         fixture.commit_all("first");
@@ -174,6 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn staged_and_deleted_files_are_listed() {
+        let _serial = crate::fixture::with_broker().await;
         let fixture = RepoFixture::init();
         fixture.write("a.txt", "one\n");
         fixture.write("gone.txt", "bye\n");

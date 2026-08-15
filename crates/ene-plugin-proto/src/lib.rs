@@ -91,6 +91,8 @@ pub mod transport;
 /// Token usage accounting for LLM responses.
 pub mod usage;
 mod wire;
+/// WebSocket broker passenger wire types (protocol v8).
+pub mod ws;
 
 /// Capability and provider spec types.
 pub use capabilities::{

@@ -57,6 +57,7 @@ impl CalcToolProvider {
         let config_hook = config;
         let inner = ActionSetProvider::new(actions)
             .with_config_schema_hook(|| Some(generate_calc_schema()))
+            .with_sandbox_hook(crate::broker::configure_broker)
             .with_set_config_hook(move |value| {
                 match serde_json::from_value::<CalcConfig>(value.clone()) {
                     Ok(cfg) => match config_hook.write() {

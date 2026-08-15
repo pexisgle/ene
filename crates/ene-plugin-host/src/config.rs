@@ -238,10 +238,13 @@ pub struct AutoSaveConfig {
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // Pure computation plugins carry no filesystem, network, or process
     // needs, so the OS sandbox is safe to enforce for them from day one.
-    // Broker-migrated built-ins (`web`, `fs`, `openai`) are sandboxed too:
-    // every OS-touching operation they perform goes through the host
-    // (see `docs/concepts/sandbox-and-approvals.md`). Remaining built-ins
-    // stay unsandboxed until their broker migration lands.
+    // Broker-migrated built-ins (`web`, `fs`, `git`, `edge-tts`,
+    // `openai`, `openai-tts`, `elevenlabs`, `geo`, `calc`) are sandboxed
+    // too, as is `utility`, whose actions are pure computation plus
+    // host-mediated Db/timer channels: every OS-touching operation they
+    // perform goes through the host (see
+    // `docs/concepts/sandbox-and-approvals.md`). Remaining built-ins stay
+    // unsandboxed until their broker migration lands.
     let sandboxed_pure = PluginEntry {
         sandbox: Some(SandboxEntryConfig {
             enabled: true,
@@ -268,7 +271,19 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     .map(|name| (name.to_string(), PluginEntry::default()))
     .collect();
 
-    for name in ["calc", "counter", "random", "web", "fs"] {
+    for name in [
+        "calc",
+        "counter",
+        "random",
+        "web",
+        "fs",
+        "geo",
+        "git",
+        "edge-tts",
+        "utility",
+        "openai-tts",
+        "elevenlabs",
+    ] {
         list.insert(name.to_string(), sandboxed_pure.clone());
     }
 
@@ -303,13 +318,19 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
         },
     );
 
-    // The OpenAI Speech API TTS provider plugin authenticates with the same
-    // OPENAI_API_KEY credential and honors the same base URL override as the
-    // openai plugin.
+    // The OpenAI Speech API TTS provider plugin authenticates through
+    // broker credential injection (the host resolves the key from the
+    // plugin config blob or OPENAI_API_KEY and injects it at request
+    // time), so only OPENAI_BASE_URL is forwarded for the plugin-side
+    // base-URL fallback.
     list.insert(
         "openai-tts".to_string(),
         PluginEntry {
-            env_passthrough: vec!["OPENAI_API_KEY".to_string(), "OPENAI_BASE_URL".to_string()],
+            sandbox: Some(SandboxEntryConfig {
+                enabled: true,
+                ..SandboxEntryConfig::default()
+            }),
+            env_passthrough: vec!["OPENAI_BASE_URL".to_string()],
             ..PluginEntry::default()
         },
     );
@@ -355,15 +376,18 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
     // `ai.tts.provider = "edge-tts"` selects it.
     list.insert("edge-tts".to_string(), PluginEntry::default());
 
-    // The ElevenLabs TTS provider plugin needs ELEVENLABS_API_KEY forwarded
-    // from the host environment; without it the provider cannot authenticate.
+    // The ElevenLabs TTS provider plugin authenticates through broker
+    // credential injection (the host resolves the key from the plugin
+    // config blob or ELEVENLABS_API_KEY and injects it as `xi-api-key` at
+    // request time), so only ELEVENLABS_BASE_URL is forwarded.
     list.insert(
         "elevenlabs".to_string(),
         PluginEntry {
-            env_passthrough: vec![
-                "ELEVENLABS_API_KEY".to_string(),
-                "ELEVENLABS_BASE_URL".to_string(),
-            ],
+            sandbox: Some(SandboxEntryConfig {
+                enabled: true,
+                ..SandboxEntryConfig::default()
+            }),
+            env_passthrough: vec!["ELEVENLABS_BASE_URL".to_string()],
             ..PluginEntry::default()
         },
     );
@@ -485,7 +509,7 @@ impl PluginEntry {
     /// Warns when the delivered object contains host-reserved keys
     /// (`enable`, `checksum`) that would confuse plugin authors.
     pub fn delivered_config(&self, plugin_name: &str) -> Option<serde_json::Value> {
-        let config = if self.extra.is_empty() {
+        let mut config = if self.extra.is_empty() {
             Some(self.config.clone())
                 .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()))
         } else {
@@ -516,6 +540,15 @@ impl PluginEntry {
             }
             Some(serde_json::Value::Object(folded))
         };
+        // Broker-credential kinds never receive the API key in their config
+        // blob: the host resolves it into the credential store and injects
+        // it at request time (see `factory::resolve_blob_api_key`).
+        if crate::factory::is_broker_credential_kind(plugin_name)
+            && let Some(blob) = &mut config
+            && let Some(obj) = blob.as_object_mut()
+        {
+            obj.remove("api_key");
+        }
         if let Some(ref blob) = config {
             warn_reserved_config_keys(plugin_name, blob);
         }
