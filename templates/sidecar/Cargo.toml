@@ -8,3 +8,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 rand = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

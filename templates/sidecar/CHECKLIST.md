@@ -16,6 +16,9 @@ Every sidecar-enabled provider must satisfy all of these before it ships:
   same reset path.
 - **Work directory**: per-process directory under the plugin's temp/data
   area; presets are written there and the directory is removed on restart.
+- **Handshake split**: the config blob (`set_config`) and the per-model
+  profile map (`set_profiles`) arrive separately; combine both before
+  `write_presets`.
 - **Model resolution**: catalog-managed weights arrive as `model_path`
   (host-injected CAS path); URL weights go through `ene_ai::ModelFetcher`
   (HTTPS-only, magic-byte validation, `.part` + atomic rename).
