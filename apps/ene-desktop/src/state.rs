@@ -83,7 +83,7 @@ impl AppState {
     /// [`CharacterRenderer::init`] right after the surface exists.
     pub fn with_channel(
         gpu: GpuContext,
-        mut settings: CharacterSettings,
+        settings: CharacterSettings,
         bootstrap_handle: &tokio::runtime::Handle,
     ) -> (Self, AppEventSender) {
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -142,12 +142,6 @@ impl AppState {
                     (None, Some(crate::runtime_error::user_message(&error)))
                 }
             };
-        // The plugin host records trust-on-first-use checksums into
-        // `settings.json` during `EneHandle::open`. Reload so the store's
-        // snapshot includes them; saving the pre-open snapshot would strip
-        // the checksums and force every plugin binary to be re-hashed on the
-        // next startup.
-        settings.load_from_file();
         let character = CharacterRenderer::uninit(
             &settings.assets_dir,
             settings.current_character().unwrap_or(""),

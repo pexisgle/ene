@@ -402,9 +402,12 @@ pub struct PluginEntry {
     /// Whether this plugin is enabled.
     pub enable: bool,
     /// Expected SHA-256 checksum of the plugin binary (hex-encoded).
-    /// When set, the binary is verified before launch.
-    /// When absent, the checksum is computed on first activation and
-    /// recorded back to configuration (trust-on-first-use).
+    /// When set, the binary is verified before launch and on every restart;
+    /// a mismatch is a hard failure.
+    /// When absent, a trust-on-first-use checksum is computed at startup and
+    /// pinned in memory for restart-time verification. It is never written
+    /// back to configuration, so rebuilding the binary between host runs
+    /// (debug builds differ per environment) cannot invalidate the entry.
     #[serde(default)]
     pub checksum: Option<String>,
     /// Environment variable names to pass through from the host process
