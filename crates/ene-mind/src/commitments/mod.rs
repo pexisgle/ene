@@ -218,7 +218,7 @@ impl CommitmentLedger {
                 title = %candidate.title,
                 "inserted active commitment (ledger-first)"
             );
-            active.push(inserted_commitment(id, ctx, candidate));
+            active.push(inserted_commitment(id, ctx, candidate, due_at));
             inserted.push(id);
         }
 
@@ -411,19 +411,18 @@ fn commitment_titles(active: &[Commitment]) -> Vec<&str> {
 /// The row a just-inserted candidate becomes, for mirroring into the in-batch
 /// active set.
 ///
-/// Only the fields title matching and supersede comparison read are meaningful;
-/// timestamps are approximated with "now" because nothing in the batch reads
-/// them. The authoritative row is the one the store wrote.
+/// `due_at` is the value the ledger already parsed for the insert; mirroring
+/// it verbatim keeps a later content-only supersede in the same batch from
+/// re-anchoring the relative deadline to a fresh `Utc::now()`. Other
+/// timestamps are approximated because nothing in the batch reads them; the
+/// authoritative row is the one the store wrote.
 fn inserted_commitment(
     id: i64,
     ctx: &CommitmentSyncContext<'_>,
     candidate: &MemoryCandidate,
+    due_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Commitment {
     let now = chrono::Utc::now();
-    let due_at = candidate
-        .commitment_due
-        .as_deref()
-        .and_then(|due| parse_due_at(chrono::Utc::now(), due));
 
     Commitment {
         id: Some(id),
@@ -448,6 +447,7 @@ fn inserted_commitment(
 mod tests {
     use super::*;
     use crate::memory_writer::candidate::{MemoryCandidate, TurnInput};
+    use crate::memory_writer::test_support::InMemoryMemoryPort;
     use crate::memory_writer::{ArbiterContext, ArbiterOptions, CandidateProvenance};
     use ene_ai::{EmbeddingKind, EmbeddingProvider};
     use ene_store::MemoryStore;
@@ -724,6 +724,43 @@ mod tests {
             after.due_at,
             Some(due_before),
             "content-only update must not re-anchor the relative deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_batch_content_only_supersede_keeps_first_relative_deadline() {
+        // Two same-title candidates in one batch: the second only changes the
+        // content. The in-batch mirror must carry the first candidate's
+        // authoritative due_at, so the supersede does not re-anchor "in 3
+        // days" to a later `Utc::now()`.
+        let store = InMemoryMemoryPort::new();
+
+        let mut first = commitment_candidate(0.9);
+        first.commitment_due = Some("in 3 days".to_string());
+        let mut second = first.clone();
+        second.content = "Let's discuss the UI design instead".to_string();
+
+        let ids =
+            CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &[first, second])
+                .await
+                .unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(
+            ids[0], ids[1],
+            "second candidate must supersede the same row"
+        );
+
+        let row = store
+            .all_commitments()
+            .into_iter()
+            .find(|c| c.id == Some(ids[0]))
+            .unwrap();
+        assert_eq!(row.description, "Let's discuss the UI design instead");
+        assert_eq!(row.due_label.as_deref(), Some("in 3 days"));
+        assert_eq!(
+            row.due_at,
+            store.inserted_due_at(),
+            "batch content-only supersede must keep the first candidate's deadline"
         );
     }
 
