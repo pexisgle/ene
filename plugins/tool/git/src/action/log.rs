@@ -60,6 +60,14 @@ impl LogAction {
             .unwrap_or(30)
             .clamp(1, 100);
 
+        if let Some(name) = &self.branch
+            && name.starts_with('-')
+        {
+            return Err(ToolError::InvalidArguments {
+                message: "branch must not start with '-' (would be parsed as a git option)"
+                    .to_string(),
+            });
+        }
         let branch = match &self.branch {
             Some(name) => Some(name.clone()),
             None => super::common::head_info(&workdir).await.0,
@@ -231,5 +239,23 @@ mod tests {
         let result = action(&fixture, None, None).run().await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("no commits"), "{err}");
+    }
+
+    /// A branch/revision that looks like a git option must be rejected
+    /// instead of being parsed by git.
+    #[tokio::test]
+    async fn option_looking_branch_is_rejected() {
+        let _serial = crate::fixture::with_broker().await;
+        let fixture = RepoFixture::init();
+        fixture.write("a.txt", "one\n");
+        fixture.commit_all("first");
+        for bad in ["--all", "-n5"] {
+            let err = action(&fixture, None, Some(bad))
+                .run()
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("must not start with '-'"), "{bad}: {err}");
+        }
     }
 }

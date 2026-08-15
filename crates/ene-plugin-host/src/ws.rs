@@ -147,7 +147,7 @@ impl BrokerHub {
         // `wss://` carries the same trust as `https://`; approve the
         // HTTPS-equivalent origin so fixed-origin manifests work unchanged.
         let http_scheme = if scheme == "wss" { "https" } else { "http" };
-        let origin = format!("{http_scheme}://{host}:{port}");
+        let origin = crate::broker::normalized_origin_with_scheme(&parsed, http_scheme);
         let category = Self::origin_category(state, &origin, http_scheme)?;
         self.approve(plugin, state, category, &origin).await?;
 
@@ -187,7 +187,9 @@ impl BrokerHub {
                 url.to_string(),
             )
             .map_err(|e| BrokerError::new(BrokerErrorCode::InvalidTarget, e.to_string()))?;
-        let host_header: http::header::HeaderValue = host
+        // The Host header must carry the exact authority from the URL,
+        // including a non-default port and IPv6 brackets.
+        let host_header: http::header::HeaderValue = Self::host_authority(&parsed)
             .parse::<http::header::HeaderValue>()
             .map_err(|e| BrokerError::new(BrokerErrorCode::InvalidTarget, e.to_string()))?;
         request
@@ -228,6 +230,16 @@ impl BrokerHub {
                 .await
                 .map_err(|e| Self::ws_handshake_error(&e))?;
         Ok(ws)
+    }
+
+    /// Serializes a URL's authority for the Host header: IPv6 hosts
+    /// bracketed, an explicit port preserved.
+    fn host_authority(url: &url::Url) -> String {
+        let authority = url.host().map_or_else(String::new, |host| host.to_string());
+        match url.port() {
+            Some(port) => format!("{authority}:{port}"),
+            None => authority,
+        }
     }
 
     /// Relays frames between the WebSocket and the plugin session until
@@ -418,5 +430,210 @@ impl BrokerHub {
         drop(cmd_tx);
         drop(push.await);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PluginEntry;
+    use crate::broker::PluginState;
+    use crate::config::PluginConfig;
+    use ene_approval::{ApprovalCategory, ApprovalMode, ApprovalPolicy, OriginDecl};
+    use ene_plugin_proto::transport::IpcStream;
+    use futures::{SinkExt, StreamExt};
+    use std::collections::HashMap;
+    use tokio::net::UnixStream;
+    use tokio_tungstenite::tungstenite::Message;
+
+    fn test_config() -> PluginConfig {
+        let mut policy = ApprovalPolicy::default();
+        policy
+            .categories
+            .insert(ApprovalCategory::FixedOriginNetwork, ApprovalMode::Allow);
+        PluginConfig {
+            enabled: true,
+            approval: policy,
+            list: HashMap::from([("edge-tts".to_string(), PluginEntry::default())]),
+            ..PluginConfig::default()
+        }
+    }
+
+    fn test_hub() -> Arc<BrokerHub> {
+        let mut full = ene_config::EneConfig::default();
+        full.set_section(&test_config())
+            .expect("set plugin section");
+        BrokerHub::from_config(&full).expect("hub")
+    }
+
+    /// The production edge-tts URL normalizes to the manifest's exact
+    /// origin and is approved as a fixed origin (regression: the old
+    /// unconditional `:443` never matched).
+    #[test]
+    fn edge_tts_production_origin_passes_builtin_manifest() {
+        let hub = test_hub();
+        let state = hub.plugins.get("edge-tts").expect("builtin state");
+        assert_eq!(
+            crate::manifest::builtin_manifest("edge-tts")
+                .expect("edge-tts manifest")
+                .fixed_origins,
+            vec![OriginDecl {
+                origin: "https://speech.platform.bing.com".into(),
+            }]
+        );
+
+        let parsed = url::Url::parse(
+            "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1",
+        )
+        .expect("production URL");
+        let origin = crate::broker::normalized_origin_with_scheme(&parsed, "https");
+        assert_eq!(origin, "https://speech.platform.bing.com");
+        let category = BrokerHub::origin_category(state, &origin, "https").expect("category");
+        assert_eq!(category, ApprovalCategory::FixedOriginNetwork);
+    }
+
+    #[test]
+    fn origins_and_host_authorities_match_http_normalization() {
+        let wss = url::Url::parse("wss://speech.platform.bing.com:8443/edge/v1").unwrap();
+        assert_eq!(
+            crate::broker::normalized_origin_with_scheme(&wss, "https"),
+            "https://speech.platform.bing.com:8443"
+        );
+        assert_eq!(
+            BrokerHub::host_authority(&wss),
+            "speech.platform.bing.com:8443"
+        );
+
+        let ipv6 = url::Url::parse("ws://[::1]:8080/echo").unwrap();
+        assert_eq!(
+            crate::broker::normalized_origin_with_scheme(&ipv6, "http"),
+            "http://[::1]:8080"
+        );
+        assert_eq!(BrokerHub::host_authority(&ipv6), "[::1]:8080");
+
+        let plain = url::Url::parse("ws://[::1]/echo").unwrap();
+        assert_eq!(
+            crate::broker::normalized_origin_with_scheme(&plain, "http"),
+            "http://[::1]"
+        );
+        assert_eq!(BrokerHub::host_authority(&plain), "[::1]");
+    }
+
+    /// Full `serve_ws_session` round trip through a local echo server: the
+    /// relay delivers frames both ways.
+    #[tokio::test]
+    async fn ws_session_relays_through_local_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("handshake");
+            let (mut sink, mut incoming) = ws.split();
+            while let Some(message) = incoming.next().await {
+                match message.expect("message") {
+                    Message::Text(text) => {
+                        sink.send(Message::text(text)).await.expect("echo");
+                    }
+                    Message::Close(_) => {
+                        // tungstenite replies to the close automatically;
+                        // flushing sends that reply before the socket drops.
+                        drop(sink.flush().await);
+                        break;
+                    }
+                    Message::Ping(payload) => {
+                        sink.send(Message::Pong(payload)).await.expect("pong");
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let mut hub = test_hub();
+        hub.allow_loopback_for_tests();
+        let mut manifest = crate::manifest::builtin_manifest("edge-tts").expect("edge-tts");
+        manifest.fixed_origins = vec![OriginDecl {
+            origin: format!("http://{addr}"),
+        }];
+        Arc::get_mut(&mut hub)
+            .expect("sole hub owner")
+            .plugins
+            .insert(
+                "edge-tts".to_string(),
+                PluginState {
+                    manifest: Some(manifest),
+                    digest: None,
+                    fs_grants: Vec::new(),
+                    credentials: std::collections::BTreeMap::new(),
+                    processes: parking_lot::Mutex::new(HashMap::new()),
+                },
+            );
+
+        let (client_io, server_io) = UnixStream::pair().expect("socket pair");
+        let session = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move {
+                hub.serve_ws_session("edge-tts", IpcStream::Unix(server_io))
+                    .await
+            }
+        });
+        let mut io = IpcStream::Unix(client_io);
+        let url = format!("ws://{addr}/echo");
+        write_framed_json(
+            &mut io,
+            &WebSocketRequest::Open {
+                url: url.clone(),
+                headers: Vec::new(),
+                credential: None,
+            },
+        )
+        .await
+        .expect("open");
+        assert_eq!(
+            read_framed_json::<_, WebSocketResponse>(&mut io)
+                .await
+                .expect("read")
+                .expect("frame"),
+            WebSocketResponse::OpenOk { final_url: url }
+        );
+        write_framed_json(
+            &mut io,
+            &WebSocketRequest::SendText {
+                data: "ping".to_string(),
+            },
+        )
+        .await
+        .expect("send");
+        assert_eq!(
+            read_framed_json::<_, WebSocketResponse>(&mut io)
+                .await
+                .expect("read")
+                .expect("frame"),
+            WebSocketResponse::MessageText {
+                data: "ping".to_string(),
+            }
+        );
+        write_framed_json(
+            &mut io,
+            &WebSocketRequest::Close {
+                code: 1000,
+                reason: "done".to_string(),
+            },
+        )
+        .await
+        .expect("close");
+        let closed = read_framed_json::<_, WebSocketResponse>(&mut io)
+            .await
+            .expect("read")
+            .expect("frame");
+        assert!(matches!(
+            closed,
+            WebSocketResponse::Closed { code: 1000, .. }
+        ));
+        session.await.expect("session task").expect("session ok");
+        server.abort();
     }
 }

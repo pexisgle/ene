@@ -91,11 +91,11 @@ impl BrokerError {
 /// One plugin's broker state: verified manifest, grants, credentials, and
 /// live spawned processes.
 pub(crate) struct PluginState {
-    manifest: Option<PluginManifest>,
-    digest: Option<String>,
-    fs_grants: Vec<FsGrant>,
+    pub(crate) manifest: Option<PluginManifest>,
+    pub(crate) digest: Option<String>,
+    pub(crate) fs_grants: Vec<FsGrant>,
     pub(crate) credentials: BTreeMap<String, String>,
-    processes: Mutex<HashMap<u32, String>>,
+    pub(crate) processes: Mutex<HashMap<u32, String>>,
 }
 
 /// Host-side broker hub.
@@ -1524,14 +1524,10 @@ fn parse_origin(url: &str) -> Result<String, BrokerError> {
     Ok(normalized_origin(&parsed))
 }
 
-fn normalized_origin(url: &url::Url) -> String {
-    let scheme = url.scheme();
-    let host = url.host_str().unwrap_or_default();
-    let host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
+/// Serializes a URL's authority as a normalized origin under `scheme`:
+/// IPv6 hosts bracketed, the scheme's default port omitted.
+pub(crate) fn normalized_origin_with_scheme(url: &url::Url, scheme: &str) -> String {
+    let host = url.host().map_or_else(String::new, |host| host.to_string());
     let default_port = match scheme {
         "https" => Some(443),
         "http" => Some(80),
@@ -1541,6 +1537,10 @@ fn normalized_origin(url: &url::Url) -> String {
         Some(port) => format!("{scheme}://{host}:{port}"),
         None => format!("{scheme}://{host}"),
     }
+}
+
+fn normalized_origin(url: &url::Url) -> String {
+    normalized_origin_with_scheme(url, url.scheme())
 }
 
 struct FetchBody {

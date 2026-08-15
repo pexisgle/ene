@@ -83,7 +83,11 @@ impl DiffAction {
             .into_iter()
             .map(str::to_string)
             .collect();
-        numstat_args.extend(pathspec.iter().map(String::as_str));
+        if !pathspec.is_empty() {
+            // `--` keeps a leading-dash path from being parsed as an option.
+            numstat_args.push("--");
+            numstat_args.extend(pathspec.iter().map(String::as_str));
+        }
         let numstat = broker.run_git(&workdir, &numstat_args).await?;
         if !numstat.ok() {
             return Err(crate::sandbox::git_run_error(&numstat));
@@ -98,7 +102,10 @@ impl DiffAction {
         let (patch, truncated) = if wants_text {
             let mut patch_args: Vec<&str> = Vec::new();
             patch_args.extend(base_args.iter().copied());
-            patch_args.extend(pathspec.iter().map(String::as_str));
+            if !pathspec.is_empty() {
+                patch_args.push("--");
+                patch_args.extend(pathspec.iter().map(String::as_str));
+            }
             let patch_run = broker.run_git(&workdir, &patch_args).await?;
             if !patch_run.ok() {
                 return Err(crate::sandbox::git_run_error(&patch_run));
@@ -275,5 +282,28 @@ mod tests {
             .await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("'..'"), "{err}");
+    }
+
+    /// A path named like a git option must be treated as a pathspec, not
+    /// parsed as `--output` (regression for option injection).
+    #[tokio::test]
+    async fn option_looking_path_is_not_parsed_as_git_option() {
+        let _serial = crate::fixture::with_broker().await;
+        let fixture = RepoFixture::init();
+        fixture.write("--output", "one\n");
+        fixture.commit_all("first");
+        fixture.write("--output", "one\ntwo\n");
+
+        let out: Value = serde_json::from_str(
+            &action(&fixture, false, Some("both"), Some("--output"))
+                .run()
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(out["files_changed"], 1);
+        let patch = out["patch"].as_str().unwrap();
+        assert!(patch.contains("+two"), "{patch}");
+        assert!(patch.contains("a/--output"), "{patch}");
     }
 }
