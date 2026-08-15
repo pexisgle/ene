@@ -1,19 +1,20 @@
 //! Lightweight heuristics for detecting code / terminal windows and
 //! extracting rough text hints from captured screen regions.
 //!
-//! This module does **not** perform full OCR. The `is_code_window` function is
-//! a cheap window-title/class-based filter that lets the observer signal to the
-//! vision model that it is looking at code-like content. Full offline OCR
-//! (e.g. via Tesseract or a local OCR model) would go here in a future iteration.
-
-use image::DynamicImage;
+//! This module does **not** perform OCR itself. The `is_code_window` function
+//! is a cheap window-title/class-based filter that decides whether the
+//! observer pays for a verbatim transcription pass: code-like windows get a
+//! `read_screen_text` call against the local vision model, and the resulting
+//! text rides along to the summary prompt as an `ocr_text` hint.
 
 /// Determine whether the active window *likely* contains code or structured
 /// terminal output by checking the window title and class against a list of
-/// known developer-tool substrings.
+/// known developer-tool indicators.
 ///
+/// Indicators match whole title/class words only, so ambiguous substrings
+/// such as `ide` in "Video" or `log` in "Login" do not pay for an OCR pass.
 /// Returns `true` when the combined `window_title` and `window_class` text
-/// contain any of the known code/terminal indicators.
+/// contains any of the known code/terminal indicators as a word.
 ///
 /// # Example
 ///
@@ -34,7 +35,9 @@ pub fn is_code_window(window_title: &str, window_class: &str) -> bool {
         "nvim",
         "emacs",
         "vscode",
+        "xcode",
         "intellij",
+        "windowsterminal",
         "ide",
         "bash",
         "zsh",
@@ -45,21 +48,11 @@ pub fn is_code_window(window_title: &str, window_class: &str) -> bool {
         "diff",
         "log",
     ];
-    code_indicators.iter().any(|ind| lower.contains(ind))
-}
-
-/// Extract ASCII text-line hints from a raw RGB image (simplified heuristic).
-///
-/// This is a **placeholder** for future local OCR integration. The current
-/// implementation always returns `None`, indicating that no text could be
-/// extracted. When integrated with a local OCR engine (e.g. Tesseract, a
-/// small ONNX model, or the built-in Gemma vision model with a "read this
-/// text" prompt), this function would return extracted text lines.
-///
-/// The function signature is stabilised so callers can be written today and
-/// filled in later.
-pub fn extract_text_hints(_img: &DynamicImage) -> Option<String> {
-    None
+    code_indicators.iter().any(|ind| {
+        lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|tok| tok == *ind)
+    })
 }
 
 #[cfg(test)]
@@ -97,8 +90,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_text_placeholder_returns_none() {
-        let img = DynamicImage::new_rgba8(100, 100);
-        assert!(extract_text_hints(&img).is_none());
+    fn rejects_ambiguous_substring_false_positives() {
+        assert!(!is_code_window("Video Player", ""));
+        assert!(!is_code_window("Login Manager", ""));
+        assert!(!is_code_window("Video", "mpv"));
     }
 }
