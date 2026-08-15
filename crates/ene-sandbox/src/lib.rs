@@ -12,8 +12,9 @@
 //! areas are not passed through. On Linux the sandbox composes Landlock
 //! (filesystem allowlist), `no_new_privs` + seccomp (privilege and dangerous
 //! syscall filtering), rlimits, and — when the host can obtain them — cgroup
-//! v2 and a network namespace. On Windows it composes a Job Object with a
-//! restricted low-integrity token.
+//! v2 and a network namespace. On Windows it composes a Job Object with
+//! process/memory/CPU limits and kill-on-close (restricted-token /
+//! `AppContainer` hardening is the documented next step, see `windows`).
 //!
 //! Every requirement is fail-closed: if a requirement is enabled and cannot
 //! be initialized, the child is never exec'd and the spawn fails.

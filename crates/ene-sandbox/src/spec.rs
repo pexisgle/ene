@@ -62,7 +62,8 @@ pub struct SandboxSpec {
     /// cgroup v2 memory/pids/cpu limits (Linux; requires a delegated
     /// cgroupfs). When `Some`, the child is moved into the named subgroup.
     pub cgroup: Option<CgroupSpec>,
-    /// Apply the Windows Job Object + restricted token.
+    /// Apply the Windows Job Object (process/memory/CPU limits, tree
+    /// kill-on-close).
     pub job_object: bool,
 }
 
