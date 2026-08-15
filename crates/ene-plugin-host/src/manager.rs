@@ -64,10 +64,13 @@ const MAX_DELAY_MS: u64 = 30_000;
 enum PinnedChecksum {
     /// User explicitly configured this checksum — mismatch is a hard fail.
     Configured(String),
-    /// Trust-on-first-use: recorded at startup. Mismatch means the binary
-    /// was replaced while the host was running (e.g. cargo build in dev).
-    /// Still a hard fail for this process lifetime (the running instance
-    /// was verified against the original), but documented as expected.
+    /// Trust-on-first-use: computed at startup and pinned in memory for this
+    /// process lifetime, never persisted. A binary rebuilt between host runs
+    /// is therefore re-pinned on the next startup instead of failing it.
+    /// Mismatch still means the binary was replaced while the host was
+    /// running (e.g. cargo build in dev) and stays a hard fail for this
+    /// lifetime (the running instance was verified against the original),
+    /// but it is documented as expected.
     Tofu(String),
 }
 
@@ -89,10 +92,11 @@ struct SupervisedPlugin {
     /// The checksum the binary is pinned to, re-verified on every restart.
     /// Always present for plugins started via `start_plugin`: either the
     /// user-configured checksum ([`PinnedChecksum::Configured`]) or the
-    /// trust-on-first-use checksum recorded at startup
-    /// ([`PinnedChecksum::Tofu`]). Restart-time verification is therefore
-    /// always active — the binary pinned at startup must still be on disk to
-    /// restart. There is no "no checksum" state, so no fail-open path.
+    /// trust-on-first-use checksum computed at startup and kept in memory
+    /// only ([`PinnedChecksum::Tofu`]). Restart-time verification is
+    /// therefore always active — the binary pinned at startup must still be
+    /// on disk to restart. There is no "no checksum" state, so no fail-open
+    /// path.
     pinned_checksum: PinnedChecksum,
     /// Environment variable names to copy from the host on restart.
     env_passthrough: Vec<String>,
@@ -1169,9 +1173,6 @@ impl PluginHostManager {
             }
         }
 
-        // TOFU checksums to persist after startup completes.
-        let mut checksums_to_record: HashMap<String, String> = HashMap::new();
-
         // Hash every eligible plugin binary up front on blocking threads.
         // A debug-built plugin can take seconds to hash, so doing it inline
         // on the async runtime would stall startup serially; running all
@@ -1196,7 +1197,7 @@ impl PluginHostManager {
                             name: name.clone(),
                             reason: "binary not found".to_string(),
                         })?;
-                    verify_and_record_checksum(&name, &binary_path, expected_checksum.as_deref())
+                    verify_or_compute_checksum(&name, &binary_path, expected_checksum.as_deref())
                 }),
             );
         }
@@ -1288,10 +1289,7 @@ impl PluginHostManager {
             )
             .await
             {
-                Ok((plugin, conn, tofu_checksum)) => {
-                    if let Some(checksum) = tofu_checksum {
-                        checksums_to_record.insert(name.clone(), checksum);
-                    }
+                Ok((plugin, conn)) => {
                     started.push(StartedPlugin {
                         capabilities: conn.capabilities(),
                         plugin,
@@ -1599,34 +1597,6 @@ impl PluginHostManager {
             supervised.push(Arc::clone(&started_plugin.plugin));
             connections.push(Arc::clone(conn));
             names.push(name.clone());
-        }
-
-        // Batch-persist TOFU checksums recorded during this startup.
-        //
-        // NOTE: `updated_config` is derived from the in-memory `config`
-        // parameter captured at process startup. `ene_config::update_section`
-        // re-reads the file from disk before overwriting the `plugins`
-        // section, so concurrent edits to *other* sections are preserved.
-        // However, if another process modified the `plugins` section between
-        // our startup read and this write, those changes are lost. This is
-        // acceptable because only a single host process writes plugin config
-        // at startup; a dedicated atomic writer may replace this in future.
-        if !checksums_to_record.is_empty() {
-            let mut updated_config = config
-                .get_section::<crate::config::PluginConfig>()
-                .unwrap_or_default();
-            for (name, checksum) in &checksums_to_record {
-                if let Some(e) = updated_config.list.get_mut(name) {
-                    e.checksum = Some(checksum.clone());
-                }
-            }
-            if let Err(e) = ene_config::update_section(&updated_config) {
-                tracing::warn!(
-                    component = "PluginHostManager",
-                    error = %e,
-                    "Failed to persist plugin checksums to configuration"
-                );
-            }
         }
 
         // Connect to configured MCP servers. Each server gets its own
@@ -2375,14 +2345,7 @@ impl PluginHostManager {
         db_token: Option<String>,
         handshake_timeout: Duration,
         max_concurrent: usize,
-    ) -> Result<
-        (
-            Arc<Mutex<SupervisedPlugin>>,
-            Arc<IpcPluginConnection>,
-            Option<String>,
-        ),
-        PluginHostError,
-    > {
+    ) -> Result<(Arc<Mutex<SupervisedPlugin>>, Arc<IpcPluginConnection>), PluginHostError> {
         let binary_path = find_plugin_binary(name).ok_or_else(|| PluginHostError::SpawnFailed {
             name: name.to_string(),
             reason: "binary not found".to_string(),
@@ -2390,7 +2353,7 @@ impl PluginHostManager {
 
         // Checksum outcome from the parallel precompute pass: `Ok(None)` is a
         // verified binary, `Ok(Some(hex))` a trust-on-first-use checksum to
-        // persist, `Err` a failed verification.
+        // pin for restart-time verification, `Err` a failed verification.
         let tofu_checksum = checksum?;
 
         let socket_path: PathBuf = {
@@ -2535,15 +2498,15 @@ impl PluginHostManager {
 
         // The pinned checksum for restart-time verification: the configured
         // checksum when present, otherwise the trust-on-first-use checksum
-        // just recorded. Either way the binary that was verified at startup
-        // is pinned and re-verified on every restart.
+        // computed at startup (in-memory only). Either way the binary that
+        // was verified at startup is pinned and re-verified on every restart.
         let pinned_checksum = match expected_checksum {
             Some(configured) => PinnedChecksum::Configured(configured),
             None => match tofu_checksum.clone() {
                 Some(tofu) => PinnedChecksum::Tofu(tofu),
-                // Unreachable: `verify_and_record_checksum` always records a
-                // TOFU checksum when none is configured. Recompute defensively
-                // rather than panic so this stays panic-free.
+                // Unreachable: `verify_or_compute_checksum` always computes a
+                // TOFU checksum when none is configured. Recompute
+                // defensively rather than panic so this stays panic-free.
                 None => PinnedChecksum::Tofu(compute_binary_checksum(name, &binary_path)?),
             },
         };
@@ -2562,7 +2525,7 @@ impl PluginHostManager {
             sandbox_guard,
         };
 
-        Ok((Arc::new(Mutex::new(plugin)), Arc::new(conn), tofu_checksum))
+        Ok((Arc::new(Mutex::new(plugin)), Arc::new(conn)))
     }
 
     /// Test-only manager with no plugins and no health bridge.
@@ -3072,10 +3035,13 @@ fn verify_plugin_checksum(
 /// checksum when none is configured yet.
 ///
 /// When `expected` is `Some`, verifies via [`verify_plugin_checksum`] and
-/// returns `Ok(None)` (nothing new to record). When `expected` is `None`,
-/// computes the checksum and returns it as `Ok(Some(checksum))` for the
-/// caller to persist (trust-on-first-use).
-fn verify_and_record_checksum(
+/// returns `Ok(None)` (nothing new to pin). When `expected` is `None`,
+/// computes the checksum and returns it as `Ok(Some(checksum))` so the
+/// caller can pin it in memory for restart-time verification. The checksum
+/// is deliberately never written back to configuration: binaries legitimately
+/// change between builds (debug builds differ per environment), so a
+/// persisted pin would fail startup after any rebuild.
+fn verify_or_compute_checksum(
     plugin_name: &str,
     path: &std::path::Path,
     expected: Option<&str>,
@@ -3086,7 +3052,7 @@ fn verify_and_record_checksum(
             component = "PluginHostManager",
             plugin = %plugin_name,
             checksum = %actual,
-            "Recording plugin binary checksum (trust-on-first-use)"
+            "Pinning plugin binary checksum (trust-on-first-use, in-memory)"
         );
         return Ok(Some(actual));
     };
@@ -3291,23 +3257,23 @@ mod tests {
         // reference hash (it reads in chunks, never the whole file).
         assert_eq!(compute_binary_checksum("fake", &bin_path).unwrap(), real);
 
-        assert!(verify_and_record_checksum("fake", &bin_path, Some(&real)).is_ok());
+        assert!(verify_or_compute_checksum("fake", &bin_path, Some(&real)).is_ok());
         assert_eq!(
-            verify_and_record_checksum("fake", &bin_path, Some(&real)).unwrap(),
+            verify_or_compute_checksum("fake", &bin_path, Some(&real)).unwrap(),
             None
         );
 
         // Case-insensitive comparison: uppercase hex also matches.
         let upper = real.to_ascii_uppercase();
-        assert!(verify_and_record_checksum("fake", &bin_path, Some(&upper)).is_ok());
+        assert!(verify_or_compute_checksum("fake", &bin_path, Some(&upper)).is_ok());
 
-        let result = verify_and_record_checksum("fake", &bin_path, Some("deadbeef"));
+        let result = verify_or_compute_checksum("fake", &bin_path, Some("deadbeef"));
         assert!(matches!(
             result,
             Err(PluginHostError::ChecksumMismatch { .. })
         ));
 
-        let tofu = verify_and_record_checksum("fake", &bin_path, None).unwrap();
+        let tofu = verify_or_compute_checksum("fake", &bin_path, None).unwrap();
         assert_eq!(tofu, Some(real));
 
         drop(std::fs::remove_dir_all(&dir));

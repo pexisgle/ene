@@ -46,7 +46,6 @@
           "tavily_api_key": ""
         },
         "enable": true,
-        "checksum": "a650d7fc1ff1ec3416eef5e52f7cd15dd5ddeb0224daa000cd3b9e6ef2a085cd",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -80,7 +79,6 @@
           }
         },
         "enable": true,
-        "checksum": "0d3f246d7b58a5dccb2bdbdea1c167c8cf644b8ead5485d9de80fcefb82d9881",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "manifest": null,
@@ -115,7 +113,6 @@
           }
         },
         "enable": true,
-        "checksum": "ef1291bd40625c83602e2d7f60ae7cd0203cb3d96d48d0915917994dfbe428ec",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "manifest": null,
@@ -125,7 +122,6 @@
       },
       "anthropic": {
         "enable": true,
-        "checksum": "1a6c4dddc5992bbf1dcce1d454823782c268115616aea6e91ba99ff7a8cba093",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -137,7 +133,6 @@
       },
       "app": {
         "enable": true,
-        "checksum": "3708dfc6d88e1fd103e98271647825fb1302e26837c3d9fb80ffef729348b848",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -149,7 +144,6 @@
       },
       "browser": {
         "enable": true,
-        "checksum": "b170a261edf4ba765c969756e39564b2ecdc3545e2830b054c943b04c6f62c78",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -161,7 +155,6 @@
       },
       "calc": {
         "enable": true,
-        "checksum": "675d8e8ef0b6f48e46bb66c7243c6dbb74e6c537a3ad4688651047e114b636b8",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -173,7 +166,6 @@
       },
       "calendar": {
         "enable": true,
-        "checksum": "1a0a26105aa2af60989b49f23885c811f42d69528a87ef0f9ef7530af7754ade",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -185,7 +177,6 @@
       },
       "counter": {
         "enable": true,
-        "checksum": "4bf934c6c2b90187af3f131391d8c9f1bbc2dc0d49d52fb088123a3bf5bc3216",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -197,7 +188,6 @@
       },
       "edge-tts": {
         "enable": true,
-        "checksum": "38db2b7639f42cd76b1594ccef25ff1cea8a4ce77ff142062a421919aa5b46e7",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -209,7 +199,6 @@
       },
       "elevenlabs": {
         "enable": true,
-        "checksum": "d7864df355ad0b4f93a5878269d6f5aa69b8eb47d8852e99c1198d010b40e7b8",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -221,7 +210,6 @@
       },
       "fs": {
         "enable": true,
-        "checksum": "eb40e28a6133c1fd820154325ff0c70bbfa3fe3a3bc2cd82d9140d37147c2db4",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -233,7 +221,6 @@
       },
       "geo": {
         "enable": true,
-        "checksum": "2bb32b9d341999958c4c58e37f9f6db14dd84a8d6ab8f5defb7aa65090f4773a",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -245,7 +232,6 @@
       },
       "git": {
         "enable": true,
-        "checksum": "eac83f95fecf9246f1e0eba6bdbce4d64cae2acca39ecbc1e9f54147009e4746",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -257,7 +243,6 @@
       },
       "homeassistant": {
         "enable": true,
-        "checksum": "8550b7ad1d3a0ab3e3f6686ee324b01515581dcfe08996f8076ee1f86e3c54c7",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -269,7 +254,6 @@
       },
       "kokoro": {
         "enable": true,
-        "checksum": "8cfe202aeb4a61c4f144e34d2f8d1be2ad72b7a20a99e4bf37e77beb623ec2e0",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -281,7 +265,6 @@
       },
       "onnx": {
         "enable": true,
-        "checksum": "29ff4cedce78eaecd48dd557372f54e7b2bf696285ec7ddaef17a9709cc87ce2",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -293,7 +276,6 @@
       },
       "openai": {
         "enable": true,
-        "checksum": "c3fa0d2bbfaa5cf4b7602864cf4ef156683e18477002eaae0f110e84c4159be7",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -305,7 +287,6 @@
       },
       "openai-tts": {
         "enable": true,
-        "checksum": "45601d5afc7d6560c5ee408a922daf3942c03753bf4ba57fd6fad8e72cfe6ad4",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -317,7 +298,6 @@
       },
       "random": {
         "enable": true,
-        "checksum": "4a873cf65b845175e15c51569c093765016f31e9804e273ac915a0638e940435",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -329,7 +309,6 @@
       },
       "utility": {
         "enable": true,
-        "checksum": "e369de311010ea1cde8e5849bba2984451325b22debcf1d5cbe92c16876f88aa",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -341,7 +320,6 @@
       },
       "voicevox": {
         "enable": true,
-        "checksum": "ecea4f0c450e8aba3286970b769ecbb24616042edaef98694e0ae6c50b13fe87",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
@@ -353,7 +331,6 @@
       },
       "whisper": {
         "enable": true,
-        "checksum": "6d46767a2be5ea50cea4b0c6bf1736b11bbea2d743b268644aa4f0722604efdc",
         "env_passthrough": [],
         "db_quota_mb": 256,
         "config": null,
