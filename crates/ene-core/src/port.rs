@@ -239,12 +239,14 @@ pub trait MemoryPort: Send + Sync {
     /// Insert a new commitment ledger row and return its assigned ID.
     async fn insert_commitment(&self, new: &NewCommitment) -> Result<i64, MemoryPortError>;
 
-    /// Supersede an active commitment's description and due label.
+    /// Supersede an active commitment's description, due label, and parsed due
+    /// datetime.
     async fn supersede_commitment(
         &self,
         id: i64,
         description: &str,
         due_label: Option<&str>,
+        due_at: Option<DateTime<Utc>>,
     ) -> Result<bool, MemoryPortError>;
 
     /// Mark a commitment as done.

@@ -20,10 +20,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ene_core::{
-    ActiveSceneSummaryRow, AffectState, Commitment, GatheredCandidate, MemoryItem, MemoryKind,
-    MemoryOutcome, MemoryPort, MemoryPortError, MemoryStatus, NaturalDecayReport, NewCommitment,
-    NewMemoryItem, NewMemorySpan, PendingAffectProposal, PendingCandidate, PendingMemoryWrite,
-    Query,
+    ActiveSceneSummaryRow, AffectState, Commitment, CommitmentStatus, GatheredCandidate,
+    MemoryItem, MemoryKind, MemoryOutcome, MemoryPort, MemoryPortError, MemoryStatus,
+    NaturalDecayReport, NewCommitment, NewMemoryItem, NewMemorySpan, PendingAffectProposal,
+    PendingCandidate, PendingMemoryWrite, Query,
 };
 use parking_lot::Mutex;
 
@@ -33,6 +33,8 @@ pub struct InMemoryMemoryPort {
     items: Mutex<Vec<MemoryItem>>,
     pending: Mutex<Vec<PendingCandidate>>,
     outcomes: Mutex<Vec<MemoryOutcome>>,
+    commitments: Mutex<Vec<Commitment>>,
+    inserted_due_at: Mutex<Option<DateTime<Utc>>>,
     next_id: AtomicI64,
     fail_pending_list: AtomicBool,
 }
@@ -64,6 +66,16 @@ impl InMemoryMemoryPort {
     /// Snapshot of every recorded outcome, newest first.
     pub fn outcomes(&self) -> Vec<MemoryOutcome> {
         self.outcomes.lock().clone()
+    }
+
+    /// Snapshot of every commitment row currently held.
+    pub fn all_commitments(&self) -> Vec<Commitment> {
+        self.commitments.lock().clone()
+    }
+
+    /// Due datetime the last `insert_commitment` call was given.
+    pub fn inserted_due_at(&self) -> Option<DateTime<Utc>> {
+        *self.inserted_due_at.lock()
     }
 
     /// Make `list_pending_candidates` fail, exercising loader error paths.
@@ -392,15 +404,6 @@ impl MemoryPort for InMemoryMemoryPort {
             .collect())
     }
 
-    async fn list_active_commitments(
-        &self,
-        _character_id: &str,
-        _user_id: Option<&str>,
-        _limit: usize,
-    ) -> Result<Vec<Commitment>, MemoryPortError> {
-        Ok(Vec::new())
-    }
-
     // ── Affect state ────────────────────────────────────────────────────────
 
     async fn get_affect_state(&self, character_id: &str) -> Result<AffectState, MemoryPortError> {
@@ -421,32 +424,94 @@ impl MemoryPort for InMemoryMemoryPort {
 
     // ── Commitment CRUD ─────────────────────────────────────────────────────
 
-    async fn insert_commitment(&self, _new: &NewCommitment) -> Result<i64, MemoryPortError> {
-        Ok(self.alloc_id())
+    async fn list_active_commitments(
+        &self,
+        character_id: &str,
+        user_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Commitment>, MemoryPortError> {
+        let commitments = self.commitments.lock();
+        Ok(commitments
+            .iter()
+            .filter(|c| {
+                c.character_id == character_id
+                    && user_id.is_none_or(|uid| c.user_id == uid || c.user_id.is_empty())
+                    && c.status == CommitmentStatus::Active
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn insert_commitment(&self, new: &NewCommitment) -> Result<i64, MemoryPortError> {
+        let id = self.alloc_id();
+        let now = Utc::now();
+        *self.inserted_due_at.lock() = new.due_at;
+        self.commitments.lock().push(Commitment {
+            id: Some(id),
+            character_id: new.character_id.clone(),
+            user_id: new.user_id.clone(),
+            title: new.title.clone(),
+            description: new.description.clone(),
+            status: new.status,
+            due_at: new.due_at,
+            due_label: new.due_label.clone(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        });
+        Ok(id)
     }
 
     async fn supersede_commitment(
         &self,
-        _id: i64,
-        _description: &str,
-        _due_label: Option<&str>,
+        id: i64,
+        description: &str,
+        due_label: Option<&str>,
+        due_at: Option<DateTime<Utc>>,
     ) -> Result<bool, MemoryPortError> {
-        Ok(false)
+        let mut commitments = self.commitments.lock();
+        let Some(row) = commitments.iter_mut().find(|c| c.id == Some(id)) else {
+            return Ok(false);
+        };
+        row.description = description.to_string();
+        row.due_label = due_label.map(str::to_string);
+        row.due_at = due_at;
+        row.updated_at = Utc::now();
+        Ok(true)
     }
 
-    async fn complete_commitment(&self, _id: i64) -> Result<bool, MemoryPortError> {
-        Ok(false)
+    async fn complete_commitment(&self, id: i64) -> Result<bool, MemoryPortError> {
+        let mut commitments = self.commitments.lock();
+        let Some(row) = commitments.iter_mut().find(|c| c.id == Some(id)) else {
+            return Ok(false);
+        };
+        row.status = CommitmentStatus::Done;
+        row.completed_at = Some(Utc::now());
+        row.updated_at = Utc::now();
+        Ok(true)
     }
 
-    async fn cancel_commitment(&self, _id: i64) -> Result<bool, MemoryPortError> {
-        Ok(false)
+    async fn cancel_commitment(&self, id: i64) -> Result<bool, MemoryPortError> {
+        let mut commitments = self.commitments.lock();
+        let Some(row) = commitments.iter_mut().find(|c| c.id == Some(id)) else {
+            return Ok(false);
+        };
+        row.status = CommitmentStatus::Cancelled;
+        row.updated_at = Utc::now();
+        Ok(true)
     }
 
-    async fn mark_stale_commitments(
-        &self,
-        _now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<usize, MemoryPortError> {
-        Ok(0)
+    async fn mark_stale_commitments(&self, now: DateTime<Utc>) -> Result<usize, MemoryPortError> {
+        let mut commitments = self.commitments.lock();
+        let mut stale = 0usize;
+        for row in commitments.iter_mut() {
+            if row.status == CommitmentStatus::Active && row.due_at.is_some_and(|due| due < now) {
+                row.status = CommitmentStatus::Stale;
+                stale += 1;
+            }
+        }
+        Ok(stale)
     }
 
     // ── Pending memory writes ───────────────────────────────────────────────

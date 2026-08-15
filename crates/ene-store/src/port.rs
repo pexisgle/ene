@@ -253,8 +253,9 @@ impl MemoryPort for MemoryStore {
         id: i64,
         description: &str,
         due_label: Option<&str>,
+        due_at: Option<DateTime<Utc>>,
     ) -> Result<bool, MemoryPortError> {
-        Ok(Self::supersede_commitment(self, id, description, due_label).await?)
+        Ok(Self::supersede_commitment(self, id, description, due_label, due_at).await?)
     }
 
     async fn complete_commitment(&self, id: i64) -> Result<bool, MemoryPortError> {

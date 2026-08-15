@@ -678,10 +678,11 @@ impl MemoryPort for WriteTrackingPort<'_> {
         id: i64,
         description: &str,
         due_label: Option<&str>,
+        due_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<bool, MemoryPortError> {
         let changed = self
             .inner
-            .supersede_commitment(id, description, due_label)
+            .supersede_commitment(id, description, due_label, due_at)
             .await?;
         if changed {
             self.mark();
@@ -1095,6 +1096,7 @@ mod tests {
             _id: i64,
             _description: &str,
             _due_label: Option<&str>,
+            _due_at: Option<chrono::DateTime<chrono::Utc>>,
         ) -> Result<bool, MemoryPortError> {
             Ok(true)
         }

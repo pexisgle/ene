@@ -979,9 +979,18 @@ fn candidate_to_new_item(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) 
         _ => MemorySalience::default(),
     };
 
-    // `commitment_due` is intentionally not mapped to `valid_until` yet: natural
-    // language due-date parsing is not implemented.
-    let (valid_from, valid_until) = (None, None);
+    // Commitment candidates carry a parsed deadline on the ledger row; mirror
+    // it onto the typed memory so recall sees the same expiry window.
+    let (valid_from, valid_until) = match candidate.kind {
+        MemoryKind::Commitment => (
+            None,
+            candidate
+                .commitment_due
+                .as_deref()
+                .and_then(|due| crate::commitments::parse_due_at(chrono::Utc::now(), due)),
+        ),
+        _ => (None, None),
+    };
 
     // The store has no dedicated tags column, so candidate tags are serialized
     // into the content as a trailing JSON metadata footer. Downstream consumers
@@ -3042,7 +3051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commitment_due_not_mapped_to_valid_until() {
+    async fn commitment_due_maps_to_valid_until() {
         let turn = TurnInput {
             user_message: "remind me tomorrow at 3pm",
             assistant_message: None,
@@ -3056,14 +3065,22 @@ mod tests {
             confidence: 0.9,
             should_persist: true,
             deletion_target_key: None,
-            commitment_due: Some("tomorrow 15:00".to_string()),
+            commitment_due: Some("tomorrow at 15:00".to_string()),
             tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
         let ArbiterAction::Persist { item, .. } = decision_action(&decisions) else {
             panic!("expected Persist");
         };
-        assert!(item.valid_until.is_none());
+        let due = item
+            .valid_until
+            .expect("commitment due must map to valid_until");
+        let now = chrono::Utc::now();
+        assert!(due > now, "due must be in the future, got {due}");
+        assert!(
+            due < now + chrono::Duration::days(2),
+            "due must be within two days, got {due}"
+        );
         assert!(item.valid_from.is_none());
     }
 
