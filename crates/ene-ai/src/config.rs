@@ -216,15 +216,16 @@ impl GpuLayers {
         }
     }
 
-    /// Parses a config value: empty or case-insensitive `"auto"` → [`Self::Auto`],
-    /// otherwise a non-negative integer (or integer string) → [`Self::Layers`].
+    /// Parses a config value: `"auto"` → [`Self::Auto`], otherwise a decimal
+    /// string within `u32` range → [`Self::Layers`].
     #[must_use]
     pub fn parse(raw: &str) -> Option<Self> {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        if raw == "auto" {
             Some(Self::Auto)
+        } else if raw.bytes().all(|byte| byte.is_ascii_digit()) {
+            raw.parse::<u32>().ok().map(Self::Layers)
         } else {
-            trimmed.parse::<u32>().ok().map(Self::Layers)
+            None
         }
     }
 }
@@ -244,11 +245,13 @@ impl schemars::JsonSchema for GpuLayers {
     }
 
     fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Decimal-string pattern mirrors `parse`'s u32 range; `^[0-9]+$` alone
+        // would admit out-of-range strings the deserializer rejects.
         schemars::json_schema!({
             "oneOf": [
                 {
                     "type": "string",
-                    "pattern": "(?i)^auto$|^[0-9]+$"
+                    "pattern": "^auto$|^([0-9]{1,9}|[0-3][0-9]{9}|4[0-1][0-9]{8}|42[0-8][0-9]{7}|429[0-3][0-9]{6}|4294[0-8][0-9]{5}|42949[0-5][0-9]{4}|429496[0-6][0-9]{3}|4294967[0-1][0-9]{2}|42949672[0-8][0-9]|429496729[0-5])$"
                 },
                 {
                     "type": "integer",
@@ -662,19 +665,19 @@ mod tests {
                 serde_json::json!("auto"),
             ),
             (
-                serde_json::json!("AUTO"),
-                GpuLayers::Auto,
-                serde_json::json!("auto"),
-            ),
-            (
-                serde_json::json!(""),
-                GpuLayers::Auto,
-                serde_json::json!("auto"),
-            ),
-            (
                 serde_json::json!("33"),
                 GpuLayers::Layers(33),
                 serde_json::json!("33"),
+            ),
+            (
+                serde_json::json!("007"),
+                GpuLayers::Layers(7),
+                serde_json::json!("7"),
+            ),
+            (
+                serde_json::json!("4294967295"),
+                GpuLayers::Layers(u32::MAX),
+                serde_json::json!("4294967295"),
             ),
             (
                 serde_json::json!(33),
@@ -700,8 +703,21 @@ mod tests {
     fn gpu_layers_rejects_misconfiguration() {
         for raw in [
             serde_json::json!("bogus"),
+            serde_json::json!(""),
+            serde_json::json!(" "),
+            serde_json::json!(" 33"),
+            serde_json::json!("33 "),
+            serde_json::json!("AUTO"),
+            serde_json::json!("Auto"),
+            serde_json::json!("auto "),
+            serde_json::json!("+33"),
             serde_json::json!("-1"),
+            serde_json::json!("4294967296"),
+            serde_json::json!("999999999999"),
+            serde_json::json!(-1),
+            serde_json::json!(u64::from(u32::MAX) + 1),
             serde_json::json!(1.5),
+            serde_json::json!(true),
         ] {
             assert!(
                 serde_json::from_value::<GpuLayers>(raw).is_err(),
@@ -720,15 +736,18 @@ mod tests {
     #[test]
     fn gpu_layers_schema_matches_wire_representation() {
         // The schema drives config validation/UI and must accept exactly the
-        // values the custom serde accepts: "auto" (any case), integer
-        // strings, and non-negative integers.
+        // values the custom serde accepts: "auto", decimal strings within
+        // u32 range, and non-negative integers.
         let schema = schemars::schema_for!(GpuLayers);
         let json = serde_json::to_value(schema).expect("schema serializes");
         let one_of = json["oneOf"].as_array().expect("schema must be oneOf");
 
         let string = &one_of[0];
         assert_eq!(string["type"], "string");
-        assert_eq!(string["pattern"], "(?i)^auto$|^[0-9]+$");
+        assert_eq!(
+            string["pattern"],
+            "^auto$|^([0-9]{1,9}|[0-3][0-9]{9}|4[0-1][0-9]{8}|42[0-8][0-9]{7}|429[0-3][0-9]{6}|4294[0-8][0-9]{5}|42949[0-5][0-9]{4}|429496[0-6][0-9]{3}|4294967[0-1][0-9]{2}|42949672[0-8][0-9]|429496729[0-5])$"
+        );
 
         let integer = &one_of[1];
         assert_eq!(integer["type"], "integer");
