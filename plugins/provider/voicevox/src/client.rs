@@ -121,6 +121,48 @@ pub async fn engine_reachable(config: &VoicevoxConfig) -> bool {
     response.status().is_success()
 }
 
+/// One speaker (character) as reported by the engine's `/speakers` endpoint,
+/// with its selectable styles.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Speaker {
+    /// Character name, used as the option group label.
+    pub name: String,
+    /// Voice styles belonging to this character.
+    pub styles: Vec<Style>,
+}
+
+/// One selectable style within a [`Speaker`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct Style {
+    /// Style name (e.g. "ノーマル").
+    pub name: String,
+    /// Style id, written into `speaker_id`.
+    pub id: u64,
+}
+
+/// Fetches the engine's speaker list for the settings UI.
+///
+/// Uses the same short health-probe timeout as [`engine_reachable`] so a
+/// down engine answers quickly with an error instead of hanging the settings
+/// page. Never spawns a managed engine — listing speakers is a read-only
+/// query against whatever is already running.
+///
+/// # Errors
+///
+/// Returns a provider error when the engine is unreachable or the response
+/// is not the documented `/speakers` shape.
+pub async fn fetch_speakers(config: &VoicevoxConfig) -> Result<Vec<Speaker>, PluginError> {
+    let client = http_client()?;
+    let url = format!("{}/speakers", config.server_url.trim_end_matches('/'));
+    let response = client
+        .get(&url)
+        .timeout(HEALTH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| PluginError::provider(format!("GET {url} failed: {e}")))?;
+    parse_json_response(response, "/speakers").await
+}
+
 /// Runs the 2-step synthesis flow and returns the WAV bytes.
 ///
 /// # Errors

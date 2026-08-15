@@ -33,7 +33,7 @@ async fn main() {
         None,
         None,
         None,
-        Some(std::sync::Arc::new(ElevenLabsPlugin)),
+        Some(std::sync::Arc::new(ElevenLabsPlugin::default())),
         None,
     ))
     .await

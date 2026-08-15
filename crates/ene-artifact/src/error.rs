@@ -100,6 +100,12 @@ pub enum ArtifactError {
     /// Ed25519 key parsing failure.
     #[error("key error: {0}")]
     Key(String),
+    /// The operation was cancelled (download interrupted by the user).
+    #[error("operation cancelled")]
+    Cancelled,
+    /// An archive payload violated the extraction safety rules.
+    #[error("unsafe archive payload: {0}")]
+    UnsafeArchive(String),
 }
 
 impl ArtifactError {

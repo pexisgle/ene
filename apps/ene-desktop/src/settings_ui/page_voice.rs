@@ -1,154 +1,21 @@
-//! Voice settings page — Text-to-Speech (TTS), Speech-to-Text (STT), and Microphone/VAD configuration.
+//! Voice settings page — Text-to-Speech (TTS), Speech-to-Text (STT), and
+//! Microphone/VAD configuration.
+//!
+//! The page edits only the routing fields (`ai.tts.provider`,
+//! `ai.stt.provider`). Every provider-owned value lives in
+//! `plugins.list.<plugin>.config` and is rendered from the plugin's own JSON
+//! Schema via [`provider_form`], so switching providers never mixes fields
+//! from another provider and plugin schemas stay authoritative.
 
 use super::components::{section_card, setting_row, slider_row, warning_box};
 use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
+use super::provider_form;
 use super::widgets::editable_combo;
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
 use bevy_ecs::world::World;
 use std::sync::Arc;
-
-/// Known Kokoro TTS voice presets with human-readable Japanese descriptions.
-const KOKORO_VOICE_PRESETS: &[(&str, &str)] = &[
-    ("af_heart", "af_heart (女性・標準)"),
-    ("af_bella", "af_bella (女性・明瞭)"),
-    ("af_nicole", "af_nicole (女性・落ち着いた)"),
-    ("af_sky", "af_sky (女性・明るい)"),
-    ("af_alloy", "af_alloy (女性・中性)"),
-    ("af_aoede", "af_aoede (女性・表現力豊かな)"),
-    ("af_kore", "af_kore (女性・ナレーション)"),
-    ("af_nova", "af_nova (女性・エネルギッシュ)"),
-    ("af_river", "af_river (女性・ソフト)"),
-    ("af_sarah", "af_sarah (女性・アナウンス)"),
-    ("am_adam", "am_adam (男性・標準)"),
-    ("am_echo", "am_echo (男性・落ち着いた)"),
-    ("jf_alpha", "jf_alpha (日本語女性)"),
-    ("jf_gongitsune", "jf_gongitsune (日本語童話風)"),
-];
-
-/// `OpenAI` Speech API voices advertised by the `openai-tts` plugin.
-const OPENAI_TTS_VOICES: &[&str] = &["alloy", "echo", "fable", "onyx", "nova", "shimmer"];
-/// `OpenAI` Speech API models advertised by the `openai-tts` plugin.
-const OPENAI_TTS_MODELS: &[&str] = &["tts-1", "tts-1-hd"];
-/// Language codes offered as one-click choices for TTS / STT; the free-form
-/// editor accepts any other BCP-47 code.
-const LANGUAGE_CHOICES: &[&str] = &["ja", "en", "zh", "ko", "fr", "de", "es", "it", "pt"];
-
-/// TTS voice presets for the selected provider, as (value, label) pairs.
-fn tts_voice_choices(provider: &str, current: &str) -> Vec<(String, String)> {
-    let presets: Vec<(String, String)> = match provider {
-        "kokoro" => KOKORO_VOICE_PRESETS
-            .iter()
-            .map(|(id, desc)| ((*id).to_string(), (*desc).to_string()))
-            .collect(),
-        "openai_tts" => OPENAI_TTS_VOICES
-            .iter()
-            .map(|v| ((*v).to_string(), (*v).to_string()))
-            .collect(),
-        _ => Vec::new(),
-    };
-    if !current.is_empty() && !presets.iter().any(|(value, _)| value == current) {
-        let mut with_current = vec![(current.to_string(), current.to_string())];
-        with_current.extend(presets);
-        return with_current;
-    }
-    presets
-}
-
-/// TTS model presets for the selected provider, as (value, label) pairs.
-fn tts_model_choices(provider: &str, current: &str) -> Vec<(String, String)> {
-    let presets: Vec<(String, String)> = match provider {
-        "kokoro" => vec![(
-            "kokoro-v1_0.onnx".to_string(),
-            "kokoro-v1_0.onnx (local)".to_string(),
-        )],
-        "openai_tts" => OPENAI_TTS_MODELS
-            .iter()
-            .map(|m| ((*m).to_string(), (*m).to_string()))
-            .collect(),
-        _ => Vec::new(),
-    };
-    if !current.is_empty() && !presets.iter().any(|(value, _)| value == current) {
-        let mut with_current = vec![(current.to_string(), current.to_string())];
-        with_current.extend(presets);
-        return with_current;
-    }
-    presets
-}
-
-fn language_choices(current: &str) -> Vec<(String, String)> {
-    let mut choices: Vec<(String, String)> = LANGUAGE_CHOICES
-        .iter()
-        .map(|code| ((*code).to_string(), (*code).to_string()))
-        .collect();
-    if !current.is_empty() && !choices.iter().any(|(value, _)| value == current) {
-        choices.insert(0, (current.to_string(), current.to_string()));
-    }
-    choices
-}
-
-/// Whisper GGUF model filenames offered as quick picks for the STT model
-/// field. The field is a path fallback per the whisper plugin contract, so
-/// the free-form editor remains the primary input.
-fn stt_model_choices(current: &str) -> Vec<(String, String)> {
-    let presets = [
-        "ggml-tiny.bin",
-        "ggml-base.bin",
-        "ggml-small.bin",
-        "ggml-medium.bin",
-        "ggml-large-v3-turbo.bin",
-    ];
-    let mut choices: Vec<(String, String)> = presets
-        .iter()
-        .map(|name| ((*name).to_string(), (*name).to_string()))
-        .collect();
-    if !current.is_empty() && !choices.iter().any(|(value, _)| value == current) {
-        choices.insert(0, (current.to_string(), current.to_string()));
-    }
-    choices
-}
-
-/// Fills provider-appropriate model/voice/language when the TTS provider
-/// changes; unknown providers reset to empty so values from the previous
-/// provider never leak into the new one.
-fn apply_tts_provider_defaults(
-    tts: &mut ene_ai::TtsConfig,
-    input: &mut SettingsInputState,
-    provider: &str,
-) {
-    let (model, voice, language) = match provider {
-        "kokoro" => (
-            "kokoro-v1_0.onnx".to_string(),
-            "af_heart".to_string(),
-            "ja".to_string(),
-        ),
-        "openai_tts" => ("tts-1".to_string(), "alloy".to_string(), "ja".to_string()),
-        _ => (String::new(), String::new(), String::new()),
-    };
-    tts.model.clone_from(&model);
-    tts.voice.clone_from(&voice);
-    tts.language.clone_from(&language);
-    input.tts_model = model;
-    input.tts_voice = voice;
-    input.tts_language = language;
-}
-
-/// Same as [`apply_tts_provider_defaults`] for the STT provider.
-fn apply_stt_provider_defaults(
-    stt: &mut ene_ai::SttConfig,
-    input: &mut SettingsInputState,
-    provider: &str,
-) {
-    let (model, language) = match provider {
-        "whisper" => ("ggml-medium.bin".to_string(), "ja".to_string()),
-        _ => (String::new(), String::new()),
-    };
-    stt.model.clone_from(&model);
-    stt.language.clone_from(&language);
-    input.stt_model = model;
-    input.stt_language = language;
-}
 
 /// Warns when the configured provider is not registered by any running
 /// plugin; the selection stays visible but cannot take effect until the
@@ -171,6 +38,40 @@ fn provider_missing_hint(
     }
 }
 
+fn provider_selector_control(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    provider: &mut String,
+    choices: &[(String, String)],
+) -> bool {
+    let description = provider_form::provider_description(provider);
+    let group = provider_form::provider_display_group(provider);
+    let combo = ui
+        .horizontal_wrapped(|ui| editable_combo(ui, id_salt, provider, choices, 160.0))
+        .inner;
+    if let Some(description) = description {
+        ui.add(egui::Label::new(egui::RichText::new(description).weak()).wrap());
+    }
+    if let Some(group) = group {
+        ui.weak(format!("[{group}]"));
+    }
+    combo.commit_requested()
+}
+
+fn provider_setting_row(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    title: &str,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    ui.push_id(id_salt, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(title);
+            ui.vertical(content);
+        });
+    });
+}
+
 pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
@@ -185,6 +86,15 @@ pub fn render(
     if !input.provider_catalog.started() {
         input.provider_catalog.start(ai.fetch_provider_catalog());
     }
+    if !input.plugin_snapshots.started() {
+        input.plugin_snapshots.start(ai.fetch_plugin_snapshots());
+    }
+    input.plugin_snapshots.poll();
+    if !input.artifact_snapshot.started() {
+        input.artifact_snapshot.start(ai.fetch_artifact_snapshot());
+    }
+    input.artifact_snapshot.poll();
+    super::artifact_card::poll_artifact_actions(input);
     #[cfg(feature = "voice")]
     if input.mic_devices.is_empty() {
         input.mic_devices = crate::audio::capture::list_input_device_names();
@@ -213,13 +123,7 @@ pub fn render(
                         .clicked()
                     {
                         ai_cfg.tts.provider = "kokoro".to_string();
-                        ai_cfg.tts.model = "kokoro-v1_0.onnx".to_string();
-                        ai_cfg.tts.voice = "af_heart".to_string();
-                        ai_cfg.tts.language = "ja".to_string();
                         input.tts_provider = "kokoro".to_string();
-                        input.tts_model = "kokoro-v1_0.onnx".to_string();
-                        input.tts_voice = "af_heart".to_string();
-                        input.tts_language = "ja".to_string();
                         changed = true;
                     }
 
@@ -235,13 +139,7 @@ pub fn render(
                         .clicked()
                     {
                         ai_cfg.tts.provider = "openai_tts".to_string();
-                        ai_cfg.tts.model = "tts-1".to_string();
-                        ai_cfg.tts.voice = "alloy".to_string();
-                        ai_cfg.tts.language = "ja".to_string();
                         input.tts_provider = "openai_tts".to_string();
-                        input.tts_model = "tts-1".to_string();
-                        input.tts_voice = "alloy".to_string();
-                        input.tts_language = "ja".to_string();
                         changed = true;
                     }
 
@@ -259,11 +157,10 @@ pub fn render(
                 });
 
                 ui.add_space(6.0);
-                setting_row(
+                provider_setting_row(
                     ui,
                     "tts_provider_row",
                     &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-provider"),
-                    "",
                     |ui| {
                         let mut choices: Vec<(String, String)> = Vec::new();
                         choices.push((
@@ -273,9 +170,9 @@ pub fn render(
                         if let Some(catalog) =
                             input.provider_catalog.data.clone().flatten().as_ref()
                         {
-                            choices.extend(
-                                catalog.tts.iter().map(|kind| (kind.clone(), kind.clone())),
-                            );
+                            choices.extend(catalog.tts.iter().map(|kind| {
+                                (kind.clone(), provider_form::provider_display_name(kind))
+                            }));
                         }
                         if !input.tts_provider.is_empty()
                             && input.tts_provider != "none"
@@ -285,22 +182,23 @@ pub fn render(
                         {
                             choices.insert(
                                 0,
-                                (input.tts_provider.clone(), input.tts_provider.clone()),
+                                (
+                                    input.tts_provider.clone(),
+                                    provider_form::provider_display_name(&input.tts_provider),
+                                ),
                             );
                         }
 
-                        let combo = editable_combo(
+                        let commit_requested = provider_selector_control(
                             ui,
                             "tts_provider_combo",
                             &mut input.tts_provider,
                             &choices,
-                            160.0,
                         );
-                        if combo.commit_requested() {
+                        if commit_requested {
                             let provider = input.tts_provider.trim().to_string();
                             if provider != ai_cfg.tts.provider {
                                 ai_cfg.tts.provider.clone_from(&provider);
-                                apply_tts_provider_defaults(&mut ai_cfg.tts, input, &provider);
                                 changed = true;
                             }
                         }
@@ -321,113 +219,43 @@ pub fn render(
 
                 if ai_cfg.tts.provider != "none" && !ai_cfg.tts.provider.is_empty() {
                     ui.indent("tts_details", |ui| {
-                        setting_row(
+                        let plugin =
+                            provider_form::plugin_name_for_provider_kind(&ai_cfg.tts.provider);
+                        let artifacts = input.artifact_snapshot.data.clone().unwrap_or_default();
+                        provider_form::render_provider_artifact_card(
                             ui,
-                            "tts_voice_row",
-                            &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-voice"),
-                            "",
-                            |ui| {
-                                let choices =
-                                    tts_voice_choices(&ai_cfg.tts.provider, &input.tts_voice);
-                                let combo = editable_combo(
-                                    ui,
-                                    "tts_voice_combo",
-                                    &mut input.tts_voice,
-                                    &choices,
-                                    120.0,
-                                );
-                                if combo.commit_requested() {
-                                    ai_cfg.tts.voice = input.tts_voice.trim().to_string();
-                                    changed = true;
-                                }
-                            },
+                            ai,
+                            input,
+                            &artifacts,
+                            &ai_cfg.tts.provider,
                         );
-
-                        if slider_row(
+                        let snapshots = input.plugin_snapshots.data.clone().unwrap_or_default();
+                        let rendered = provider_form::render_provider_config_form(
                             ui,
-                            "tts_speed_row",
-                            &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-speed"),
-                            "",
-                            &mut ai_cfg.tts.speed,
-                            0.5..=2.0,
-                            0.1,
-                            |v| format!("{v:.1}x"),
-                        ) {
-                            changed = true;
+                            draft,
+                            ai,
+                            input,
+                            &snapshots,
+                            &plugin,
+                            &ai_cfg.tts.provider,
+                        );
+                        changed |= rendered;
+                        if !rendered && !snapshots.iter().any(|snapshot| snapshot.id == plugin) {
+                            warning_box(
+                                ui,
+                                &i18n_embed_fl::fl!(
+                                    crate::i18n::loader(),
+                                    "audio-provider-not-running"
+                                ),
+                            );
                         }
-
-                        setting_row(
+                        provider_form::render_config_actions(
                             ui,
-                            "tts_language_row",
-                            &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-language"),
-                            "",
-                            |ui| {
-                                let choices = language_choices(&input.tts_language);
-                                let combo = editable_combo(
-                                    ui,
-                                    "tts_language_combo",
-                                    &mut input.tts_language,
-                                    &choices,
-                                    80.0,
-                                );
-                                if combo.commit_requested() {
-                                    ai_cfg.tts.language = input.tts_language.trim().to_string();
-                                    changed = true;
-                                }
-                            },
-                        );
-
-                        setting_row(
-                            ui,
-                            "tts_model_row",
-                            &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-model"),
-                            "",
-                            |ui| {
-                                let choices =
-                                    tts_model_choices(&ai_cfg.tts.provider, &input.tts_model);
-                                let combo = editable_combo(
-                                    ui,
-                                    "tts_model_combo",
-                                    &mut input.tts_model,
-                                    &choices,
-                                    180.0,
-                                );
-                                if combo.commit_requested() {
-                                    ai_cfg.tts.model = input.tts_model.trim().to_string();
-                                    changed = true;
-                                }
-                            },
-                        );
-
-                        setting_row(
-                            ui,
-                            "tts_model_path_row",
-                            &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-model-path"),
-                            "",
-                            |ui| {
-                                if super::widgets::path_row(ui, &mut input.tts_model_path, 220.0) {
-                                    ai_cfg.tts.model_path =
-                                        if input.tts_model_path.trim().is_empty() {
-                                            None
-                                        } else {
-                                            Some(input.tts_model_path.trim().to_string())
-                                        };
-                                    changed = true;
-                                }
-                            },
-                        );
-
-                        setting_row(
-                            ui,
-                            "tts_voices_path_row",
-                            &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-voices-path"),
-                            "",
-                            |ui| {
-                                if super::widgets::path_row(ui, &mut input.tts_voices_path, 220.0) {
-                                    settings.set_kokoro_voices_path(&input.tts_voices_path);
-                                    changed = true;
-                                }
-                            },
+                            draft,
+                            ai,
+                            input,
+                            snapshots.iter().find(|snapshot| snapshot.id == plugin),
+                            &plugin,
                         );
                     });
                 }
@@ -439,11 +267,10 @@ pub fn render(
             "voice-stt",
             &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-stt-section"),
             |ui| {
-                setting_row(
+                provider_setting_row(
                     ui,
                     "stt_provider_row",
                     &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-stt-provider"),
-                    "",
                     |ui| {
                         let mut choices: Vec<(String, String)> = vec![(
                             "none".to_string(),
@@ -452,9 +279,9 @@ pub fn render(
                         if let Some(catalog) =
                             input.provider_catalog.data.clone().flatten().as_ref()
                         {
-                            choices.extend(
-                                catalog.stt.iter().map(|kind| (kind.clone(), kind.clone())),
-                            );
+                            choices.extend(catalog.stt.iter().map(|kind| {
+                                (kind.clone(), provider_form::provider_display_name(kind))
+                            }));
                         }
                         if !input.stt_provider.is_empty()
                             && input.stt_provider != "none"
@@ -464,22 +291,23 @@ pub fn render(
                         {
                             choices.insert(
                                 0,
-                                (input.stt_provider.clone(), input.stt_provider.clone()),
+                                (
+                                    input.stt_provider.clone(),
+                                    provider_form::provider_display_name(&input.stt_provider),
+                                ),
                             );
                         }
 
-                        let combo = editable_combo(
+                        let commit_requested = provider_selector_control(
                             ui,
                             "stt_provider_combo",
                             &mut input.stt_provider,
                             &choices,
-                            160.0,
                         );
-                        if combo.commit_requested() {
+                        if commit_requested {
                             let provider = input.stt_provider.trim().to_string();
                             if provider != ai_cfg.stt.provider {
                                 ai_cfg.stt.provider.clone_from(&provider);
-                                apply_stt_provider_defaults(&mut ai_cfg.stt, input, &provider);
                                 changed = true;
                             }
                         }
@@ -499,60 +327,43 @@ pub fn render(
                 );
                 if ai_cfg.stt.provider != "none" && !ai_cfg.stt.provider.is_empty() {
                     ui.indent("stt_details", |ui| {
-                        setting_row(
+                        let plugin =
+                            provider_form::plugin_name_for_provider_kind(&ai_cfg.stt.provider);
+                        let artifacts = input.artifact_snapshot.data.clone().unwrap_or_default();
+                        provider_form::render_provider_artifact_card(
                             ui,
-                            "stt_model_row",
-                            &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-stt-model"),
-                            "",
-                            |ui| {
-                                let choices = stt_model_choices(&input.stt_model);
-                                let combo = editable_combo(
-                                    ui,
-                                    "stt_model_combo",
-                                    &mut input.stt_model,
-                                    &choices,
-                                    180.0,
-                                );
-                                if combo.commit_requested() {
-                                    ai_cfg.stt.model = input.stt_model.trim().to_string();
-                                    changed = true;
-                                }
-                            },
+                            ai,
+                            input,
+                            &artifacts,
+                            &ai_cfg.stt.provider,
                         );
-
-                        setting_row(
+                        let snapshots = input.plugin_snapshots.data.clone().unwrap_or_default();
+                        let rendered = provider_form::render_provider_config_form(
                             ui,
-                            "stt_language_row",
-                            &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-stt-language"),
-                            "",
-                            |ui| {
-                                let choices = language_choices(&input.stt_language);
-                                let combo = editable_combo(
-                                    ui,
-                                    "stt_language_combo",
-                                    &mut input.stt_language,
-                                    &choices,
-                                    80.0,
-                                );
-                                if combo.commit_requested() {
-                                    ai_cfg.stt.language = input.stt_language.trim().to_string();
-                                    changed = true;
-                                }
-                            },
+                            draft,
+                            ai,
+                            input,
+                            &snapshots,
+                            &plugin,
+                            &ai_cfg.stt.provider,
                         );
-
-                        setting_row(
+                        changed |= rendered;
+                        if !rendered && !snapshots.iter().any(|snapshot| snapshot.id == plugin) {
+                            warning_box(
+                                ui,
+                                &i18n_embed_fl::fl!(
+                                    crate::i18n::loader(),
+                                    "audio-provider-not-running"
+                                ),
+                            );
+                        }
+                        provider_form::render_config_actions(
                             ui,
-                            "stt_model_path_row",
-                            &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-stt-model-path"),
-                            "",
-                            |ui| {
-                                let mut model_path = settings.whisper_model_path();
-                                if super::widgets::path_row(ui, &mut model_path, 220.0) {
-                                    settings.set_whisper_model_path(&model_path);
-                                    changed = true;
-                                }
-                            },
+                            draft,
+                            ai,
+                            input,
+                            snapshots.iter().find(|snapshot| snapshot.id == plugin),
+                            &plugin,
                         );
                     });
                 }
@@ -686,38 +497,136 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    #[test]
-    fn tts_provider_switch_fills_presets_and_resets_unknown() {
-        let mut tts = ene_ai::TtsConfig::default();
-        let mut input = SettingsInputState::new();
-        input.tts_model = "kokoro-v1_0.onnx".to_string();
-        input.tts_voice = "af_heart".to_string();
-        input.tts_language = "ja".to_string();
-
-        apply_tts_provider_defaults(&mut tts, &mut input, "openai_tts");
-        assert_eq!(tts.model, "tts-1");
-        assert_eq!(tts.voice, "alloy");
-        assert_eq!(input.tts_model, "tts-1");
-        assert_eq!(input.tts_voice, "alloy");
-
-        apply_tts_provider_defaults(&mut tts, &mut input, "edge-tts");
-        assert!(tts.model.is_empty());
-        assert!(input.tts_voice.is_empty());
+    fn voice_page_overflow(width: f32) -> f32 {
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 700.0),
+            )),
+            ..Default::default()
+        };
+        let choices = vec![("openai_tts".to_string(), "OpenAI TTS (cloud)".to_string())];
+        let mut provider = "openai_tts".to_string();
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "api_key": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "object", "properties": {
+                            "source": {"type": "string", "enum": ["inline", "env", "auto"]},
+                            "inline": {"type": "string"},
+                            "env": {"type": "string"}
+                        }}
+                    ],
+                    "x-ene-secret": true,
+                    "description": "OpenAI API key or a credential descriptor with source set to inline, env, or auto"
+                },
+                "base_url": {
+                    "type": "string",
+                    "description": "API base URL override (defaults to https://api.openai.com/v1)",
+                    "x-ene-ui": {"group": "connection", "impact": "runtime_reload"}
+                },
+                "model": {
+                    "type": "string",
+                    "enum": ["tts-1", "tts-1-hd"],
+                    "description": "Speech API model ID (e.g. tts-1, tts-1-hd)",
+                    "x-ene-ui": {"group": "voice", "impact": "runtime_reload"}
+                },
+                "voice": {
+                    "type": "string",
+                    "enum": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+                    "description": "Default voice (e.g. alloy, nova, shimmer)",
+                    "x-ene-ui": {"group": "voice", "impact": "runtime_reload"}
+                },
+                "speed": {
+                    "type": "number",
+                    "minimum": 0.25,
+                    "maximum": 4.0,
+                    "description": "Speech speed multiplier (0.25-4.0)",
+                    "x-ene-ui": {"group": "voice", "impact": "runtime_reload"}
+                }
+            }
+        });
+        let mut value = json!({
+            "api_key": "",
+            "base_url": "https://api.openai.com/v1",
+            "model": "tts-1",
+            "voice": "alloy",
+            "speed": 1.0
+        });
+        let mut overflow = 0.0_f32;
+        let _output = context.run_ui(input, |ui| {
+            super::super::components::page_header(
+                ui,
+                "Voice & Audio",
+                "Speech-to-text, text-to-speech, microphone, and VAD.",
+            );
+            ui.separator();
+            let output = egui::ScrollArea::vertical()
+                .id_salt(("voice_page_layout", width.to_bits()))
+                .hscroll(false)
+                .auto_shrink([false; 2])
+                .show_viewport(ui, |ui, viewport| {
+                    ui.set_max_width(viewport.width());
+                    ui.set_width(viewport.width());
+                    let content_right = ui.max_rect().right();
+                    ui.vertical(|ui| {
+                        section_card(ui, "voice-tts-test", "Text-to-Speech (TTS)", |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                drop(ui.button("Kokoro 82M (Local, Recommended)"));
+                                drop(ui.button("OpenAI TTS (Cloud)"));
+                                drop(ui.button("Disabled"));
+                            });
+                            provider_setting_row(
+                                ui,
+                                "tts_provider_test",
+                                "Text-to-speech provider",
+                                |ui| {
+                                    provider_selector_control(
+                                        ui,
+                                        "tts_provider_combo_test",
+                                        &mut provider,
+                                        &choices,
+                                    );
+                                },
+                            );
+                            ui.indent("tts_details_test", |ui| {
+                                super::super::schema_form::schema_object_form(
+                                    ui,
+                                    &schema,
+                                    &mut value,
+                                    "plugins.list.openai-tts.config",
+                                    super::super::schema_form::SchemaFormOptions {
+                                        show_advanced: true,
+                                        show_impact: true,
+                                        epoch: 0,
+                                        options: None,
+                                    },
+                                );
+                            });
+                        });
+                    });
+                    (ui.min_rect().right() - content_right).max(0.0)
+                });
+            overflow = output
+                .inner
+                .max((output.content_size.x - output.inner_rect.width()).max(0.0));
+        });
+        overflow
     }
 
     #[test]
-    fn stt_provider_switch_fills_whisper_defaults() {
-        let mut stt = ene_ai::SttConfig::default();
-        let mut input = SettingsInputState::new();
-
-        apply_stt_provider_defaults(&mut stt, &mut input, "whisper");
-        assert_eq!(stt.model, "ggml-medium.bin");
-        assert_eq!(stt.language, "ja");
-        assert_eq!(input.stt_model, "ggml-medium.bin");
-
-        apply_stt_provider_defaults(&mut stt, &mut input, "custom");
-        assert!(stt.model.is_empty());
-        assert!(input.stt_language.is_empty());
+    fn voice_page_stays_within_narrow_and_wide_viewports() {
+        for width in [500.0, 560.0, 900.0] {
+            let overflow = voice_page_overflow(width);
+            assert!(
+                overflow <= 0.5,
+                "{width}-point Voice page overflowed by {overflow} points"
+            );
+        }
     }
 }

@@ -8,7 +8,7 @@ use ene_plugin_broker::HttpMethod;
 use serde::Serialize;
 
 use crate::broker::broker;
-use crate::config::{ElevenLabsConfig, VoiceSettings};
+use crate::config::{ElevenLabsConfig, VoiceSettings, resolve_base_url};
 use crate::pcm;
 use crate::wav;
 
@@ -128,6 +128,93 @@ pub async fn synthesize_rest(
         tokio::time::sleep(delay).await;
         attempt = next;
     }
+}
+
+/// Response shape of the `/voices` endpoint (only the fields the settings
+/// UI needs; unknown fields are ignored).
+#[derive(serde::Deserialize)]
+struct VoicesResponse {
+    voices: Vec<VoiceSummary>,
+}
+
+#[derive(serde::Deserialize)]
+struct VoiceSummary {
+    voice_id: String,
+    name: String,
+}
+
+/// Fetches the account's voice list for the settings UI.
+///
+/// Uses the same host-mediated broker as synthesis (the `api_key`
+/// credential is injected as `xi-api-key`). A missing credential, network
+/// failure, or non-2xx response yields `Ok(vec![])` — the caller treats an
+/// unavailable voice list as "keep the free-form field", never as a
+/// configuration error. The response is bounded to [`MAX_ERROR_BODY_BYTES`];
+/// a real voice list is a few KB, so the cap is generous yet safe.
+pub async fn fetch_voices(
+    config: &ElevenLabsConfig,
+) -> Result<Vec<ene_plugin::ConfigOption>, PluginError> {
+    let base_url = resolve_base_url(
+        None,
+        &serde_json::json!({
+            "base_url": config.base_url
+        }),
+    );
+    let url = format!("{}/voices", base_url.trim_end_matches('/'));
+    let response = broker()
+        .fetch(
+            HttpMethod::Get,
+            &url,
+            Vec::new(),
+            Some("api_key"),
+            Some("xi-api-key"),
+            None,
+        )
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!(
+                component = "ene-plugin-elevenlabs",
+                error = %e,
+                "voice list unavailable; keeping free-form voice field"
+            );
+            return Ok(Vec::new());
+        }
+    };
+    if !(200..300).contains(&response.status) {
+        tracing::warn!(
+            component = "ene-plugin-elevenlabs",
+            status = response.status,
+            "voice list unavailable; keeping free-form voice field"
+        );
+        return Ok(Vec::new());
+    }
+    let body: Vec<u8> = response
+        .body
+        .into_iter()
+        .take(MAX_ERROR_BODY_BYTES)
+        .collect();
+    let parsed: VoicesResponse = match serde_json::from_slice(&body) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            tracing::warn!(
+                component = "ene-plugin-elevenlabs",
+                error = %e,
+                "voice list unparseable; keeping free-form voice field"
+            );
+            return Ok(Vec::new());
+        }
+    };
+    Ok(parsed
+        .voices
+        .into_iter()
+        .map(|voice| ene_plugin::ConfigOption {
+            value: serde_json::json!(voice.voice_id),
+            label: voice.name,
+            group: None,
+        })
+        .collect())
 }
 
 /// Maps a non-success status to a typed provider error, with the upstream

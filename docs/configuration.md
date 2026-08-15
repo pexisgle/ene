@@ -110,8 +110,8 @@ Unknown top-level keys are preserved across save (round-trip safe).
     },
     "retry":     { "max_attempts": 3, "base_delay_ms": 500, "max_delay_ms": 30000, "timeout_ms": 120000 },
     "fallback":  { "enabled": false, "health_check_timeout_ms": 5000, "cache_ttl_ms": 60000, "max_history": 32 },
-    "tts":       { "provider": "kokoro", "model": "kokoro-v1_0.onnx", "voice": "af_heart", "speed": 1.0, "language": "ja" },
-    "stt":       { "provider": "whisper", "model": "", "language": "" },
+    "tts":       { "provider": "kokoro" },
+    "stt":       { "provider": "whisper" },
     "vad":       { "provider": "none" }
   }
 }
@@ -134,8 +134,11 @@ Unknown top-level keys are preserved across save (round-trip safe).
 - **`ai.fallback`** — optional failover to a second provider when health
   checks fail.
 - **`ai.tts` / `ai.stt` / `ai.vad`** — voice pipeline provider selection
-  (see [Voice & avatar](concepts/voice-and-avatar.md)). `model`/`voice`
-  are provider-specific.
+  only (see [Voice & avatar](concepts/voice-and-avatar.md)). Every
+  provider-owned value (model, voice, speed, language, engine mode, model
+  path) lives in `plugins.list.<provider>.config`, which the provider plugin
+  receives on handshake and live config pushes. Switching `provider` never
+  mixes settings from another provider.
 - **`ai.local_models`** — local GGUF model definitions (URL, context size,
   GPU layers, quantization, dimensions) used by the `local` provider.
 
@@ -240,8 +243,16 @@ catalog (SHA-256 verified, versioned, one-generation rollback) and injects
 the verified CAS path as `model_path` in the config delivered to the plugin;
 the `url` path is then skipped. Sidecar binaries work the same way: the host
 injects `server_path` into `plugins.list.llama-server.config` /
-`plugins.list.whisper.config` when the plugin's sidecar artifact is
-installed. User-configured values always win over injected ones.
+`plugins.list.whisper.config` / `plugins.list.voicevox.config` when the
+plugin's sidecar artifact is installed. User-configured values always win
+over injected ones.
+
+VOICEVOX engine mode is configured with `plugins.list.voicevox.config`:
+`mode` is `"external"` (use a running engine; the default) or `"managed"`
+(spawn `server_path` with `server_args` when the engine is not running,
+waiting up to `startup_timeout_secs` for `GET /version`). The former
+`auto_start` / `engine_path` / `engine_args` keys are migrated
+automatically to `mode` / `server_path` / `server_args`.
 
 ### `plugins.artifact` — signed distribution catalog
 
@@ -253,11 +264,44 @@ installed. User-configured values always win over injected ones.
       "catalog_url": "https://cdn.example/ene/catalog.json",
       "catalog_keys": [
         { "key_id": "0123456789abcdef", "public_key_hex": "<64 hex chars>" }
-      ]
+      ],
+      "root_dir": null,
+      "max_bytes": 8589934592
     }
   }
 }
 ```
+
+`catalog_keys` are the Ed25519 verifying keys (64 hex chars each) that sign
+the catalog; there is **no built-in default URL or key** — an operator must
+provide both or the artifact system stays inactive. `root_dir` overrides the
+default storage root, `max_bytes` caps each artifact download.
+
+Catalog entries may declare a **payload** and **platform variants**:
+
+```json
+{
+  "id": "voicevox-engine",
+  "kind": "sidecar",
+  "version": "0.20.0",
+  "urls": ["https://cdn.example/vvpp/0.20.0/voicevox.vvpp"],
+  "sha256": "<hex>",
+  "size": 123456789,
+  "payload": { "format": "zip-vvpp", "entrypoint": "run" },
+  "platforms": {
+    "linux-x86_64": { "kind": "sidecar", "version": "0.20.0", "urls": ["..."], "sha256": "<hex>", "size": 123456789, "payload": { "format": "zip-vvpp", "entrypoint": "run" } }
+  }
+}
+```
+
+`payload.format` is `"raw"` (the object is used directly; sidecar binaries
+get an executable bit) or `"zip-vvpp"` (a VOICEVOX VVPP/zip archive whose
+`engine_manifest.json` `command` must match `entrypoint`). Platform variants
+keyed by `{os}-{arch}` replace the top-level fields for that platform.
+Zip payloads are streamed from disk and extracted with traversal, symlink,
+entry-count, and unpack-size checks; installs, updates, cancels, rollbacks,
+and uninstalls are explicit user actions (Engines/Voice pages), never
+automatic.
 
 The catalog is a single signed JSON document produced by
 `ene catalog build` / `ene catalog update` (see

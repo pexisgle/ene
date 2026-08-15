@@ -16,7 +16,9 @@
 //! Each synthesize therefore re-reads the plugin blob from the global config
 //! singleton (refreshed on every full config load — see
 //! [`ene_ai::plugin_config`]) and falls back to the `create_provider`
-//! snapshot when the singleton has no blob.
+//! snapshot when the singleton has no blob. The blob is the canonical
+//! provider-owned config: `ai.tts` only routes the provider kind, so no
+//! host-side merge happens on the request path.
 //!
 //! ## Concurrency admission control
 //!
@@ -56,7 +58,6 @@ pub struct IpcTtsProvider {
     kind: String,
     conn: Arc<IpcPluginConnection>,
     plugin_name: String,
-    voice: Option<String>,
     format: String,
     /// Provider config snapshot from `create_provider`, used when the global
     /// config singleton carries no blob for this plugin (see module docs).
@@ -77,7 +78,6 @@ impl IpcTtsProvider {
         kind: String,
         conn: Arc<IpcPluginConnection>,
         plugin_name: String,
-        voice: Option<String>,
         format: String,
         config_snapshot: serde_json::Value,
         limiter: Arc<ConcurrencyLimiter>,
@@ -86,7 +86,6 @@ impl IpcTtsProvider {
             kind,
             conn,
             plugin_name,
-            voice,
             format,
             config_snapshot,
             limiter,
@@ -94,19 +93,11 @@ impl IpcTtsProvider {
     }
 
     /// Builds the provider config for the next synthesize: the live plugin
-    /// blob (or the creation-time snapshot) merged with the resolved
-    /// `ai.tts.voice` so a speaker override set after startup also applies.
-    fn current_provider_config(&self) -> (serde_json::Value, Option<String>) {
-        let blob = ene_ai::plugin_config::global_plugin_config_blob(&self.plugin_name)
-            .unwrap_or_else(|| self.config_snapshot.clone());
-        let voice = ene_config::get_global_config()
-            .get_section::<ene_ai::AiConfig>()
-            .ok()
-            .and_then(|ai| ai.resolve_tts())
-            .filter(|resolved| resolved.provider == self.kind)
-            .and_then(|resolved| resolved.voice)
-            .or_else(|| self.voice.clone());
-        (blob, voice)
+    /// blob (or the creation-time snapshot). The blob is the single source of
+    /// provider-owned settings; `ai.tts` contributes only the routing kind.
+    fn current_provider_config(&self) -> serde_json::Value {
+        ene_ai::plugin_config::global_plugin_config_blob(&self.plugin_name)
+            .unwrap_or_else(|| self.config_snapshot.clone())
     }
 }
 
@@ -153,7 +144,7 @@ impl TtsProvider for IpcTtsProvider {
                 other => AudioProviderError::Provider(other.to_string()),
             })?;
 
-        let (provider_config, voice) = self.current_provider_config();
+        let provider_config = self.current_provider_config();
         let (tx, rx) = mpsc::channel::<Result<TtsChunk, AudioProviderError>>(4);
         let conn = Arc::clone(&self.conn);
         let kind = self.kind.clone();
@@ -167,7 +158,7 @@ impl TtsProvider for IpcTtsProvider {
                     kind,
                     provider_config,
                     text,
-                    voice.unwrap_or_default(),
+                    String::new(),
                     format,
                 )
                 .await;
@@ -336,7 +327,6 @@ mod tests {
             "voicevox".to_string(),
             Arc::new(conn),
             "voicevox".to_string(),
-            None,
             "wav".to_string(),
             serde_json::Value::Null,
             limiter,
@@ -526,12 +516,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn factory_builds_provider_with_kind_and_resolved_voice() {
+    async fn factory_builds_provider_with_kind_and_plugin_blob() {
         use ene_ai::traits::TtsProviderFactory as _;
 
         let mut config = ene_config::EneConfig::default();
         drop(config.set_path("ai.tts.provider", "voicevox"));
-        drop(config.set_path("ai.tts.voice", "42"));
         drop(config.set_path("plugins.list.voicevox.config.speaker_id", "7"));
 
         let (provider, _server, _dir) = spawn_connected_provider(

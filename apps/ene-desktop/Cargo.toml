@@ -87,6 +87,7 @@ futures = { workspace = true }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 
 [dev-dependencies]
+fluent-syntax = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

@@ -108,8 +108,8 @@ JSON Schema で編集され、`x-ene-ui` フィールドメタデータと
     },
     "retry":     { "max_attempts": 3, "base_delay_ms": 500, "max_delay_ms": 30000, "timeout_ms": 120000 },
     "fallback":  { "enabled": false, "health_check_timeout_ms": 5000, "cache_ttl_ms": 60000, "max_history": 32 },
-    "tts":       { "provider": "kokoro", "model": "kokoro-v1_0.onnx", "voice": "af_heart", "speed": 1.0, "language": "ja" },
-    "stt":       { "provider": "whisper", "model": "", "language": "" },
+    "tts":       { "provider": "kokoro" },
+    "stt":       { "provider": "whisper" },
     "vad":       { "provider": "none" }
   }
 }
@@ -128,9 +128,12 @@ JSON Schema で編集され、`x-ene-ui` フィールドメタデータと
   埋め込み次元を上書き、`query_prefix` は埋め込みクエリの接頭辞。
 - **`ai.retry`** — 一時的プロバイダーエラーのリトライポリシー。
 - **`ai.fallback`** — ヘルスチェック失敗時に代替プロバイダーへフェイルオーバー。
-- **`ai.tts` / `ai.stt` / `ai.vad`** — 音声パイプラインのプロバイダー選択
-  （[音声とアバター](concepts/voice-and-avatar.md)参照）。`model`/`voice` は
-  プロバイダー固有です。
+- **`ai.tts` / `ai.stt` / `ai.vad`** — 音声パイプラインのプロバイダー選択のみ
+  （[音声とアバター](concepts/voice-and-avatar.md)参照）。プロバイダー固有の値
+  （model・voice・speed・language・エンジンモード・モデルパス）はすべて
+  `plugins.list.<provider>.config` に置かれ、ハンドシェイクとライブ設定反映で
+  プロバイダープラグインへ渡されます。`provider` を切り替えても別プロバイダーの
+  設定が混ざることはありません。
 - **`ai.local_models`** — `local` プロバイダーが使うローカル GGUF モデル定義
   （URL・コンテキストサイズ・GPU レイヤー・量子化・次元）。
 
@@ -207,6 +210,50 @@ JSON Schema で編集され、`x-ene-ui` フィールドメタデータと
 `plugins.list.web.credentials.exa_api_key` と
 `plugins.list.web.credentials.tavily_api_key` を使います。
 [プラグインと MCP](concepts/plugins-and-mcp.md) 参照。
+
+署名付きカタログ（`plugins.artifact`）が有効な場合、ホストはカタログ経由で
+モデルをインストールし（SHA-256 検証・世代管理・1 世代ロールバック）、検証済み
+パスを `model_path` としてプラグインへ注入します。サイドカーも同様で、
+`plugins.list.llama-server.config`・`plugins.list.whisper.config`・
+`plugins.list.voicevox.config` へ `server_path` が注入されます。ユーザー設定が
+注入値を優先します。
+
+`catalog_keys` はカタログへ署名する Ed25519 検証鍵（各 64 hex 文字）です。
+**既定の URL や鍵は同梱されません**。運用者が両方を設定しない限り
+アーティファクトシステムは無効のままです。`root_dir` は既定の保存先を、
+`max_bytes` は各アーティファクトのダウンロード上限を上書きします。
+
+カタログの各エントリは **payload** と **platform 別バリアント**を宣言できます:
+
+```json
+{
+  "id": "voicevox-engine",
+  "kind": "sidecar",
+  "version": "0.20.0",
+  "urls": ["https://cdn.example/vvpp/0.20.0/voicevox.vvpp"],
+  "sha256": "<hex>",
+  "size": 123456789,
+  "payload": { "format": "zip-vvpp", "entrypoint": "run" },
+  "platforms": {
+    "linux-x86_64": { "kind": "sidecar", "version": "0.20.0", "urls": ["..."], "sha256": "<hex>", "size": 123456789, "payload": { "format": "zip-vvpp", "entrypoint": "run" } }
+  }
+}
+```
+
+`payload.format` は `"raw"`（オブジェクトをそのまま使用。サイドカーバイナリには
+実行権限が付与されます）または `"zip-vvpp"`（`engine_manifest.json` の
+`command` が `entrypoint` と一致する必要がある VOICEVOX VVPP/zip アーカイブ）
+です。`{os}-{arch}` キーの platform バリアントは該当プラットフォームでは
+トップレベル欄を置き換えます。zip はディスクからストリーミング展開され、
+パストラバーサル・シンボリックリンク・エントリ数・展開サイズの検査を受けます。
+インストール・更新・キャンセル・ロールバック・アンインストールはすべて明示操作
+（Engines / Voice ページ）で、自動実行はされません。
+
+VOICEVOX のエンジンモードは `plugins.list.voicevox.config` の `mode` で指定します:
+`"external"`（起動済みエンジンを使う。既定）または `"managed"`（エンジン停止時に
+`server_path` を `server_args` 付きで起動し、`startup_timeout_secs` 秒まで
+`GET /version` を待つ）。従来の `auto_start` / `engine_path` / `engine_args` は
+`mode` / `server_path` / `server_args` へ自動移行されます。
 
 ## `desktop.*` — デスクトップアプリ
 

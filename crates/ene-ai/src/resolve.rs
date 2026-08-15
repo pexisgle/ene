@@ -162,30 +162,22 @@ impl ResolvedEmbedding {
     }
 }
 
-/// Fully resolved TTS provider settings.
+/// Fully resolved TTS provider routing.
+///
+/// Provider-owned settings are not resolved here: they live in the
+/// `plugins.list.<plugin>.config` blob that the plugin host forwards to the
+/// provider plugin (see [`crate::plugin_config`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedTts {
     /// Provider name (e.g. `"kokoro"`, `"openai"`).
     pub provider: String,
-    /// Model name (provider-specific).
-    pub model: String,
-    /// Voice identifier, if configured.
-    pub voice: Option<String>,
-    /// Speech speed multiplier (1.0 = normal), clamped to `[0.1, 5.0]`.
-    pub speed: f32,
-    /// Language code for G2P (e.g. `"en"`, `"ja"`), if configured.
-    pub language: Option<String>,
 }
 
-/// Fully resolved STT provider settings.
+/// Fully resolved STT provider routing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedStt {
     /// Provider name (e.g. `"whisper"`, `"openai"`).
     pub provider: String,
-    /// Model name (provider-specific).
-    pub model: String,
-    /// Language hint, if configured.
-    pub language: Option<String>,
 }
 
 /// Fully resolved VAD engine settings.
@@ -1050,26 +1042,20 @@ impl AiConfig {
         })
     }
 
-    /// Resolve TTS provider settings from [`AiConfig::tts`].
+    /// Resolve the TTS provider selection from [`AiConfig::tts`].
     ///
-    /// Returns `None` when the provider is `"none"` (TTS disabled). The `speed`
-    /// multiplier is clamped to `[0.1, 5.0]` with a warning when adjusted.
+    /// Returns `None` when the provider is `"none"` (TTS disabled).
     #[must_use]
     pub fn resolve_tts(&self) -> Option<ResolvedTts> {
         if self.tts.provider == "none" {
             return None;
         }
-        let speed = clamp_with_warn(self.tts.speed, 0.1, 5.0, "ai.tts.speed");
         Some(ResolvedTts {
             provider: self.tts.provider.clone(),
-            model: self.tts.model.clone(),
-            voice: (!self.tts.voice.trim().is_empty()).then(|| self.tts.voice.clone()),
-            speed,
-            language: (!self.tts.language.trim().is_empty()).then(|| self.tts.language.clone()),
         })
     }
 
-    /// Resolve STT provider settings from [`AiConfig::stt`].
+    /// Resolve the STT provider selection from [`AiConfig::stt`].
     ///
     /// Returns `None` when the provider is `"none"` (STT disabled).
     #[must_use]
@@ -1079,8 +1065,6 @@ impl AiConfig {
         }
         Some(ResolvedStt {
             provider: self.stt.provider.clone(),
-            model: self.stt.model.clone(),
-            language: (!self.stt.language.trim().is_empty()).then(|| self.stt.language.clone()),
         })
     }
 
@@ -1098,22 +1082,6 @@ impl AiConfig {
             provider: self.vad.provider.clone(),
         })
     }
-}
-
-/// Clamp `value` to `[min, max]`, emitting a `tracing::warn!` when it is
-/// adjusted. Used to sanitize numeric config values at the resolve boundary.
-fn clamp_with_warn(value: f32, min: f32, max: f32, field: &str) -> f32 {
-    let clamped = value.clamp(min, max);
-    if (clamped - value).abs() > f32::EPSILON {
-        tracing::warn!(
-            component = "AiConfig",
-            field,
-            value,
-            clamped,
-            "config value out of range; clamping"
-        );
-    }
-    clamped
 }
 
 // ── Provider health monitoring and failover ─────────────────────────────
@@ -1531,45 +1499,21 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tts_maps_fields_and_clamps_speed() {
+    fn resolve_tts_maps_provider_only() {
         let mut cfg = AiConfig::default();
         cfg.tts.provider = "kokoro".to_string();
-        cfg.tts.model = "kokoro-v1.0".to_string();
-        cfg.tts.voice = "af_heart".to_string();
-        cfg.tts.language = "en".to_string();
-        cfg.tts.speed = 99.0;
 
         let resolved = cfg.resolve_tts().expect("tts enabled");
         assert_eq!(resolved.provider, "kokoro");
-        assert_eq!(resolved.model, "kokoro-v1.0");
-        assert_eq!(resolved.voice.as_deref(), Some("af_heart"));
-        assert_eq!(resolved.language.as_deref(), Some("en"));
-        assert!((resolved.speed - 5.0).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn resolve_tts_empty_voice_and_language_are_none() {
-        let mut cfg = AiConfig::default();
-        cfg.tts.provider = "kokoro".to_string();
-        cfg.tts.voice = "   ".to_string();
-        cfg.tts.language = String::new();
-
-        let resolved = cfg.resolve_tts().expect("tts enabled");
-        assert!(resolved.voice.is_none());
-        assert!(resolved.language.is_none());
-    }
-
-    #[test]
-    fn resolve_stt_maps_fields() {
+    fn resolve_stt_maps_provider_only() {
         let mut cfg = AiConfig::default();
         cfg.stt.provider = "whisper".to_string();
-        cfg.stt.model = "whisper.gguf".to_string();
-        cfg.stt.language = "ja".to_string();
 
         let resolved = cfg.resolve_stt().expect("stt enabled");
         assert_eq!(resolved.provider, "whisper");
-        assert_eq!(resolved.model, "whisper.gguf");
-        assert_eq!(resolved.language.as_deref(), Some("ja"));
     }
 
     #[test]
@@ -1579,11 +1523,6 @@ mod tests {
 
         let resolved = cfg.resolve_vad().expect("vad enabled");
         assert_eq!(resolved.provider, "silero");
-    }
-
-    #[test]
-    fn clamp_with_warn_noop_in_range() {
-        assert!((clamp_with_warn(0.5, 0.0, 1.0, "x") - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]

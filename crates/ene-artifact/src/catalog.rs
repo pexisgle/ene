@@ -18,6 +18,52 @@ pub enum ArtifactKind {
     Model,
 }
 
+/// Payload format of an artifact object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PayloadFormat {
+    /// A single raw file; the CAS object is used directly (plugin binaries,
+    /// model weights).
+    Raw,
+    /// A ZIP archive (VOICEVOX VVPP and friends) that is safely extracted
+    /// into a per-generation directory before activation; `entrypoint`
+    /// names the executable inside the archive.
+    ZipVvpp,
+}
+
+/// How an artifact's bytes are materialized after download verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPayload {
+    /// Payload container format.
+    pub format: PayloadFormat,
+    /// Executable path inside the archive, relative to the archive root
+    /// (zip-vvpp only; e.g. `engine_manifest.json`'s `command`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
+    /// Maximum total uncompressed size accepted during extraction (zip
+    /// bombs); defaults to [`DEFAULT_UNPACK_LIMIT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpack_limit: Option<u64>,
+}
+
+impl Default for ArtifactPayload {
+    fn default() -> Self {
+        Self {
+            format: PayloadFormat::Raw,
+            entrypoint: None,
+            unpack_limit: None,
+        }
+    }
+}
+
+/// Default cap on total uncompressed bytes for extracted payloads (8 GiB —
+/// far above any real engine distribution, far below a hostile archive's
+/// claimed sizes).
+pub const DEFAULT_UNPACK_LIMIT: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Maximum number of entries accepted in an extracted archive.
+pub const MAX_ARCHIVE_ENTRIES: usize = 4096;
+
 /// One installable artifact version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactTarget {
@@ -32,6 +78,32 @@ pub struct ArtifactTarget {
     pub sha256: String,
     /// Exact artifact size in bytes.
     pub size: u64,
+    /// Payload format for the artifact bytes. `None`/`raw` keeps the
+    /// original single-file behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<ArtifactPayload>,
+    /// Platform-specific variants, keyed by `{os}-{arch}` (e.g.
+    /// `linux-x86_64`, `windows-x86_64`). When the current platform has a
+    /// variant, it replaces the top-level target fields entirely; the
+    /// top-level fields remain the fallback for platforms without a variant
+    /// (and for older catalog readers that predate this field).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub platforms: BTreeMap<String, ArtifactTarget>,
+}
+
+impl ArtifactTarget {
+    /// Returns the target for `platform`, or the top-level fallback when the
+    /// catalog does not carry a variant for it.
+    #[must_use]
+    pub fn for_platform(&self, platform: &str) -> &ArtifactTarget {
+        self.platforms.get(platform).unwrap_or(self)
+    }
+
+    /// The `{os}-{arch}` key for the running process.
+    #[must_use]
+    pub fn current_platform() -> String {
+        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+    }
 }
 
 /// Signed catalog metadata (TUF-inspired).
@@ -226,6 +298,11 @@ fn check_rollback(
             // installed version simply has no update path.
             continue;
         };
+        // Platform variants replace the top-level target for the running
+        // platform; the rollback check must compare against the variant an
+        // install would actually select, not the (possibly stale) top-level
+        // fallback.
+        let target = target.for_platform(&ArtifactTarget::current_platform());
         match compare_versions(&target.version, installed_version) {
             std::cmp::Ordering::Less => {
                 return Err(ArtifactError::Rollback {
@@ -285,6 +362,8 @@ mod tests {
                             urls: vec!["https://example.test/a.bin".to_string()],
                             sha256: "ab".repeat(32),
                             size: 4,
+                            payload: None,
+                            platforms: BTreeMap::new(),
                         },
                     )
                 })
@@ -380,6 +459,74 @@ mod tests {
         let installed =
             BTreeMap::from([("fs".to_string(), ("1.2.0".to_string(), "ab".repeat(32)))]);
         assert!(verifier.verify(&signed, &installed, 0).is_ok());
+    }
+
+    /// Rollback checks compare against the *platform variant* an install
+    /// would select, not the top-level fallback.
+    #[test]
+    fn rollback_check_uses_platform_variant() {
+        let key = test_key();
+        let platform = ArtifactTarget::current_platform();
+        let mut meta = metadata(2, &[("fs", "1.0.0")]);
+        let target = meta.artifacts.get_mut("fs").expect("target");
+        // The variant for the running platform is *older* than installed.
+        target.platforms.insert(
+            platform,
+            ArtifactTarget {
+                version: "0.9.0".to_string(),
+                kind: ArtifactKind::Sidecar,
+                urls: vec!["https://example.test/platform.bin".to_string()],
+                sha256: "ef".repeat(32),
+                size: 4,
+                payload: None,
+                platforms: BTreeMap::new(),
+            },
+        );
+        let signed = sign_catalog(&meta, key.0.clone(), &key.1).expect("sign");
+        let verifier = CatalogVerifier::new(trusted(&key));
+        let installed =
+            BTreeMap::from([("fs".to_string(), ("1.0.0".to_string(), "ab".repeat(32)))]);
+        assert!(
+            matches!(
+                verifier.verify(&signed, &installed, 0),
+                Err(ArtifactError::Rollback { .. })
+            ),
+            "a platform variant older than the installed version is a rollback"
+        );
+    }
+
+    /// A same-version digest change in the platform variant is rejected even
+    /// when the top-level fallback matches the installed digest.
+    #[test]
+    fn rollback_check_uses_platform_variant_digest() {
+        let key = test_key();
+        let platform = ArtifactTarget::current_platform();
+        let mut meta = metadata(2, &[("fs", "1.0.0")]);
+        let target = meta.artifacts.get_mut("fs").expect("target");
+        target.platforms.insert(
+            platform,
+            ArtifactTarget {
+                version: "1.0.0".to_string(),
+                kind: ArtifactKind::Sidecar,
+                urls: vec!["https://example.test/platform.bin".to_string()],
+                // Same version, different digest than the installed one.
+                sha256: "cd".repeat(32),
+                size: 4,
+                payload: None,
+                platforms: BTreeMap::new(),
+            },
+        );
+        let signed = sign_catalog(&meta, key.0.clone(), &key.1).expect("sign");
+        let verifier = CatalogVerifier::new(trusted(&key));
+        let installed =
+            BTreeMap::from([("fs".to_string(), ("1.0.0".to_string(), "ab".repeat(32)))]);
+        assert!(
+            matches!(
+                verifier.verify(&signed, &installed, 0),
+                Err(ArtifactError::Rollback { .. })
+            ),
+            "a same-version digest change in the platform variant is rejected"
+        );
     }
 
     #[test]

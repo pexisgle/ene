@@ -58,6 +58,7 @@ pub use artifact_state::{
 pub use broker::ApprovalResponder;
 pub use broker::BrokerHub;
 pub use ene_approval::{ALL_CATEGORIES, ApprovalCategory, ApprovalMode};
+pub use ene_artifact::{ArtifactProgress, InstallStage};
 /// Host-side registry of plugin capability declarations and resolution.
 pub mod capability_registry;
 /// Host mediation for plugin-to-plugin capability calls.

@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use tokio_stream::Stream;
 
 use crate::config::{DEFAULT_PROFILE, ResolvedConfig};
-use crate::plugin::KokoroPlugin;
+use crate::plugin::{KokoroPlugin, ensure_kokoro_files_present};
 
 const KIND: &str = "kokoro";
 
@@ -403,6 +403,29 @@ fn tts_capabilities_shape() {
             queue_depth: 2,
         }
     );
+}
+
+#[test]
+fn missing_model_files_fail_with_explicit_acquisition_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let resolved = ResolvedConfig {
+        model_path: dir.path().join("kokoro.onnx"),
+        voices_path: dir.path().join("voices.bin"),
+        voice: "af_heart".to_string(),
+        speed: 1.0,
+        language: None,
+        ort_dylib_path: None,
+    };
+    let err = ensure_kokoro_files_present(&resolved).expect_err("missing files rejected");
+    assert!(err.to_string().contains("not found"));
+    assert!(err.to_string().contains("Engines page"));
+
+    std::fs::write(&resolved.model_path, b"onnx").expect("write model");
+    let err = ensure_kokoro_files_present(&resolved).expect_err("voices.bin still missing");
+    assert!(err.to_string().contains("voices.bin"));
+
+    std::fs::write(&resolved.voices_path, b"voices").expect("write voices");
+    ensure_kokoro_files_present(&resolved).expect("all files present");
 }
 
 #[test]

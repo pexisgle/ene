@@ -40,7 +40,7 @@ async fn main() {
         None,
         None,
         None,
-        Some(std::sync::Arc::new(EdgeTtsPlugin)),
+        Some(std::sync::Arc::new(EdgeTtsPlugin::default())),
         None,
     ))
     .await

@@ -856,54 +856,6 @@ impl CharacterSettings {
         self.store.read().with_config_mut(f);
     }
 
-    /// Reads the Kokoro `voices.bin` path from the Kokoro plugin profile
-    /// (`plugins.list.kokoro.profiles.kokoro.voices_path`). Empty when unset.
-    pub fn kokoro_voices_path(&self) -> String {
-        let value = self
-            .config()
-            .get_path("plugins.list.kokoro.profiles.kokoro.voices_path");
-        value
-            .as_ref()
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_default()
-    }
-
-    /// Writes the Kokoro `voices.bin` path into the Kokoro plugin profile
-    /// (`plugins.list.kokoro.profiles.kokoro.voices_path`). Passing an empty
-    /// string clears it (`null`).
-    pub fn set_kokoro_voices_path(&self, path: &str) {
-        let trimmed = path.trim();
-        let value = if trimmed.is_empty() { "null" } else { trimmed };
-        self.with_config_mut(|c| {
-            drop(c.set_path("plugins.list.kokoro.profiles.kokoro.voices_path", value));
-        });
-    }
-
-    /// Reads the whisper plugin's model path
-    /// (`plugins.list.whisper.config.model_path`). Empty when unset.
-    pub fn whisper_model_path(&self) -> String {
-        let value = self
-            .config()
-            .get_path("plugins.list.whisper.config.model_path");
-        value
-            .as_ref()
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_default()
-    }
-
-    /// Writes the whisper plugin's model path
-    /// (`plugins.list.whisper.config.model_path`). Passing an empty string
-    /// clears it (`null`).
-    pub fn set_whisper_model_path(&self, path: &str) {
-        let trimmed = path.trim();
-        let value = if trimmed.is_empty() { "null" } else { trimmed };
-        self.with_config_mut(|c| {
-            drop(c.set_path("plugins.list.whisper.config.model_path", value));
-        });
-    }
-
     /// Reads the onnx plugin's VAD speech threshold
     /// (`plugins.list.onnx.config.threshold`); defaults to 0.5.
     pub fn vad_threshold(&self) -> f32 {

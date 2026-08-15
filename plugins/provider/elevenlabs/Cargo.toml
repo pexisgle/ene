@@ -11,6 +11,7 @@ publish.workspace = true
 hound = { workspace = true }
 ene-plugin-broker = { workspace = true }
 ene-plugin-proto = { workspace = true }
+futures = { workspace = true }
 ene-plugin = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

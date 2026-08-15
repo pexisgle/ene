@@ -4,6 +4,7 @@
 //! frame the `UiWindow` calls [`SettingsUi::render`] with the live
 //! `&mut CharacterSettings` and the `Arc<AiBridge>`.
 pub mod apply;
+pub mod artifact_card;
 pub mod components;
 pub mod draft;
 pub mod input;
@@ -26,6 +27,7 @@ pub mod page_plugins;
 pub mod page_schedules;
 pub mod page_sessions;
 pub mod page_voice;
+pub mod provider_form;
 pub mod schema_form;
 pub mod widgets;
 
@@ -1458,92 +1460,108 @@ impl SettingsUi {
         let plugin_focus = self.plugin_focus.take();
         egui::ScrollArea::vertical()
             .id_salt("settings_page_scroll")
+            .hscroll(false)
             .auto_shrink([false; 2])
-            .show(ui, |ui| match self.current_page {
-                PageKind::Overview => page_overview::render(
-                    ui,
-                    settings,
-                    ai,
-                    &mut self.input,
-                    &mut self.current_page,
-                    self.apply_feedback.as_ref(),
-                ),
-                PageKind::Character => page_character::render(
-                    ui,
-                    settings,
-                    &mut self.animation,
-                    ai,
-                    &mut self.input,
-                    &mut self.emotion_queue,
-                    now_secs,
-                    world,
-                    ui_entity,
-                ),
-                PageKind::CharacterEditor => {
-                    page_character_editor::render(ui, settings, ai, world, ui_entity);
+            .show_viewport(ui, |ui, viewport| {
+                if self.current_page == PageKind::Voice {
+                    ui.set_max_width(viewport.width());
+                    ui.set_width(viewport.width());
                 }
-                PageKind::General => {
-                    page_graphics::render(
+                match self.current_page {
+                    PageKind::Overview => page_overview::render(
+                        ui,
+                        settings,
+                        ai,
+                        &mut self.input,
+                        &mut self.current_page,
+                        self.apply_feedback.as_ref(),
+                    ),
+                    PageKind::Character => page_character::render(
+                        ui,
+                        settings,
+                        &mut self.animation,
+                        ai,
+                        &mut self.input,
+                        &mut self.emotion_queue,
+                        now_secs,
+                        world,
+                        ui_entity,
+                    ),
+                    PageKind::CharacterEditor => {
+                        page_character_editor::render(ui, settings, ai, world, ui_entity);
+                    }
+                    PageKind::General => {
+                        page_graphics::render(
+                            ui,
+                            settings,
+                            &mut self.draft,
+                            &mut self.animation,
+                            ai,
+                            world,
+                            ui_entity,
+                        );
+                        page_accessibility::render(ui, settings);
+                    }
+                    PageKind::Ai => page_ai::render(
                         ui,
                         settings,
                         &mut self.draft,
                         &mut self.animation,
                         ai,
-                        world,
-                        ui_entity,
-                    );
-                    page_accessibility::render(ui, settings);
-                }
-                PageKind::Ai => page_ai::render(
-                    ui,
-                    settings,
-                    &mut self.draft,
-                    &mut self.animation,
-                    ai,
-                    &mut self.input,
-                    world,
-                    ui_entity,
-                ),
-                PageKind::Voice => {
-                    page_voice::render(ui, settings, &mut self.draft, ai, &mut self.input, world);
-                }
-                PageKind::Features => page_features::render(ui, &mut self.draft),
-                PageKind::Memory => page_memory::render_config(ui, settings, &mut self.draft),
-                PageKind::Memories => {
-                    page_memory::render_journal(ui, ai, world, ui_entity);
-                    page_memory_ledger::render(ui, ai, &mut self.input, world, ui_entity);
-                }
-                PageKind::Permissions => {
-                    page_permissions::render(ui, ai, &mut self.input, world, ui_entity);
-                }
-                PageKind::Approvals => {
-                    page_approvals::render(ui, settings, &mut self.draft, ai, world, ui_entity);
-                }
-                PageKind::Connectors => {
-                    page_connectors::render(ui, ai, &mut self.input, world, ui_entity);
-                }
-                PageKind::Sessions => {
-                    page_sessions::render(ui, ai, &mut self.input, world, ui_entity);
-                }
-                PageKind::Schedules => page_schedules::render(ui, ai, &mut self.input),
-                PageKind::Plugins => {
-                    page_plugins::render(
-                        ui,
-                        settings,
-                        &mut self.draft,
-                        ai,
                         &mut self.input,
                         world,
                         ui_entity,
-                        plugin_focus.as_deref(),
-                    );
-                }
-                PageKind::Engines => {
-                    page_engines::render(ui, &mut self.draft, ai, &mut self.input);
-                }
-                PageKind::Advanced => page_advanced::render(ui, &mut self.draft, reveal_advanced),
-                PageKind::Diagnostics => {
-                    page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);
+                    ),
+                    PageKind::Voice => {
+                        page_voice::render(
+                            ui,
+                            settings,
+                            &mut self.draft,
+                            ai,
+                            &mut self.input,
+                            world,
+                        );
+                    }
+                    PageKind::Features => page_features::render(ui, &mut self.draft),
+                    PageKind::Memory => page_memory::render_config(ui, settings, &mut self.draft),
+                    PageKind::Memories => {
+                        page_memory::render_journal(ui, ai, world, ui_entity);
+                        page_memory_ledger::render(ui, ai, &mut self.input, world, ui_entity);
+                    }
+                    PageKind::Permissions => {
+                        page_permissions::render(ui, ai, &mut self.input, world, ui_entity);
+                    }
+                    PageKind::Approvals => {
+                        page_approvals::render(ui, settings, &mut self.draft, ai, world, ui_entity);
+                    }
+                    PageKind::Connectors => {
+                        page_connectors::render(ui, ai, &mut self.input, world, ui_entity);
+                    }
+                    PageKind::Sessions => {
+                        page_sessions::render(ui, ai, &mut self.input, world, ui_entity);
+                    }
+                    PageKind::Schedules => page_schedules::render(ui, ai, &mut self.input),
+                    PageKind::Plugins => {
+                        page_plugins::render(
+                            ui,
+                            settings,
+                            &mut self.draft,
+                            ai,
+                            &mut self.input,
+                            world,
+                            ui_entity,
+                            plugin_focus.as_deref(),
+                        );
+                    }
+                    PageKind::Engines => {
+                        page_engines::render(ui, &mut self.draft, ai, &mut self.input);
+                    }
+                    PageKind::Advanced => {
+                        page_advanced::render(ui, &mut self.draft, reveal_advanced);
+                    }
+                    PageKind::Diagnostics => {
+                        page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);
+                    }
                 }
             });
     }

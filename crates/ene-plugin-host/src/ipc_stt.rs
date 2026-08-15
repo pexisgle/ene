@@ -10,7 +10,9 @@
 //!
 //! Like TTS providers, each `transcribe` re-reads the plugin blob from the
 //! global config singleton and falls back to the `create_provider` snapshot,
-//! so `plugins.list.<name>.config` edits apply without a host restart.
+//! so `plugins.list.<name>.config` edits apply without a host restart. The
+//! blob is the canonical provider-owned config: `ai.stt` only routes the
+//! provider kind, so no host-side merge happens on the request path.
 
 use std::sync::Arc;
 
@@ -71,25 +73,10 @@ impl IpcSttProvider {
         }
     }
 
-    /// Returns the live plugin blob (or the creation-time snapshot) merged
-    /// with the resolved `ai.stt.model` / `ai.stt.language`, mirroring how
-    /// the TTS adapter forwards `ai.tts.voice` so the desktop settings keep
-    /// working without duplicating them in the plugin config.
+    /// Returns the live plugin blob (or the creation-time snapshot).
     fn current_provider_config(&self) -> serde_json::Value {
-        let mut blob = ene_ai::plugin_config::global_plugin_config_blob(&self.plugin_name)
-            .unwrap_or_else(|| self.config_snapshot.clone());
-        if let Ok(ai) = ene_config::get_global_config().get_section::<ene_ai::AiConfig>()
-            && let Some(resolved) = ai.resolve_stt()
-            && resolved.provider == self.kind
-        {
-            if !resolved.model.trim().is_empty() {
-                blob["model"] = serde_json::Value::String(resolved.model.clone());
-            }
-            if let Some(language) = &resolved.language {
-                blob["language"] = serde_json::Value::String(language.clone());
-            }
-        }
-        blob
+        ene_ai::plugin_config::global_plugin_config_blob(&self.plugin_name)
+            .unwrap_or_else(|| self.config_snapshot.clone())
     }
 }
 

@@ -484,58 +484,48 @@ fn default_providers() -> BTreeMap<String, AiProviderDef> {
     providers
 }
 
-/// TTS (text-to-speech) provider configuration.
+/// TTS (text-to-speech) provider routing.
+///
+/// Holds only the provider selection. Provider-owned settings (model, voice,
+/// speed, language, model path, engine mode) live in
+/// `plugins.list.<plugin>.config`, which the provider plugin receives on
+/// handshake and live `SetConfig` — the host adapters forward that blob
+/// verbatim on every synthesis request (see `ene-plugin-host`'s
+/// `IpcTtsProvider`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct TtsConfig {
     /// Provider name (`"none"` disables TTS).
     pub provider: String,
-    /// Model name (provider-specific).
-    pub model: String,
-    /// Voice identifier (provider-specific, e.g. `"af_heart"`).
-    pub voice: String,
-    /// Speech speed multiplier (1.0 = normal).
-    pub speed: f32,
-    /// Language code for grapheme-to-phoneme conversion (e.g. `"en"`, `"ja"`;
-    /// empty defaults to English).
-    pub language: String,
-    /// Explicit filesystem path to the TTS model (used when non-empty).
-    pub model_path: Option<String>,
 }
 
 impl Default for TtsConfig {
     fn default() -> Self {
         Self {
             provider: "none".to_string(),
-            model: String::new(),
-            voice: String::new(),
-            speed: 1.0,
-            language: String::new(),
-            model_path: None,
         }
     }
 }
 
-/// STT (speech-to-text) provider configuration.
+/// STT (speech-to-text) provider routing.
+///
+/// Holds only the provider selection. Provider-owned settings (model,
+/// language, model path, engine mode) live in `plugins.list.<plugin>.config`
+/// and are forwarded verbatim by the host adapters on every transcription
+/// request.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct SttConfig {
     /// Provider name (`"none"` disables STT).
     pub provider: String,
-    /// Model name (provider-specific).
-    pub model: String,
-    /// Language hint (e.g. `"ja"`, `"en"`; empty = auto-detect).
-    pub language: String,
 }
 
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
             provider: "none".to_string(),
-            model: String::new(),
-            language: String::new(),
         }
     }
 }

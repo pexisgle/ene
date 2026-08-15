@@ -7,8 +7,16 @@
 | 段階 | 同梱プロバイダー | 設定 |
 |---|---|---|
 | **STT**（音声 → テキスト） | `whisper`（ローカル whisper.cpp） | `ai.stt.provider` |
-| **TTS**（テキスト → 音声） | `kokoro`（ローカル ONNX）・`edge-tts`・`elevenlabs`・`openai-tts`・`voicevox` | `ai.tts.provider`・`model`・`voice`・`speed`・`language` |
+| **TTS**（テキスト → 音声） | `kokoro`（ローカル ONNX）・`edge-tts`・`elevenlabs`・`openai-tts`・`voicevox` | `ai.tts.provider` |
 | **VAD**（音声区間検出） | `onnx`（Silero）・`none` | `ai.vad.provider` |
+
+`ai.tts` / `ai.stt` はプロバイダー選択のみ行います。プロバイダー固有の値
+（`model`・`voice`・`speed`・`language`・モデルパス・エンジンモード）は
+`plugins.list.<provider>.config` に置かれ、各プロバイダープラグインが公開する
+スキーマを音声設定ページが描画します。例えば Kokoro の音声は
+`plugins.list.kokoro.config.voice`、VOICEVOX の話者は
+`plugins.list.voicevox.config.speaker_id` です（managed エンジンは
+`mode` / `server_path` を使用）。
 
 デスクトップアプリはマイク音声（cpal）をキャプチャし、選択した STT
 プロバイダーで文字起こしし、ランタイムの音声チャネルでストリーミングされて

@@ -75,26 +75,27 @@ impl ene_plugin::ConfigurablePlugin for OpenAiTtsPlugin {
                         }
                     ],
                     "x-ene-secret": true,
-                    "description": "OpenAI API key, or a {source: inline|env|auto} descriptor"
+                    "description": "OpenAI API key, or a {source: inline|env|auto} descriptor",
+                    "x-ene-ui": { "label_key": "provider-openai-tts-api-key-label", "description_key": "provider-openai-tts-api-key-desc" }
                 },
                 "base_url": {
                     "type": "string",
                     "description": "API base URL override (defaults to https://api.openai.com/v1)",
-                    "x-ene-ui": { "group": "connection", "order": 0, "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "connection", "order": 0, "impact": "runtime_reload", "label_key": "provider-openai-tts-base-url-label", "description_key": "provider-openai-tts-base-url-desc" }
                 },
                 "model": {
                     "type": "string",
                     "enum": ["tts-1", "tts-1-hd"],
                     "default": "tts-1",
                     "description": "Speech synthesis model (tts-1 for low latency, tts-1-hd for higher quality)",
-                    "x-ene-ui": { "group": "voice", "order": 0, "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "voice", "order": 0, "impact": "runtime_reload", "label_key": "provider-openai-tts-model-label", "description_key": "provider-openai-tts-model-desc" }
                 },
                 "voice": {
                     "type": "string",
                     "enum": SUPPORTED_VOICES,
                     "default": "alloy",
                     "description": "Default voice; a per-request voice overrides it",
-                    "x-ene-ui": { "group": "voice", "order": 1, "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "voice", "order": 1, "impact": "runtime_reload", "label_key": "provider-openai-tts-voice-label", "description_key": "provider-openai-tts-voice-desc" }
                 },
                 "speed": {
                     "type": "number",
@@ -109,7 +110,8 @@ impl ene_plugin::ConfigurablePlugin for OpenAiTtsPlugin {
                     "minimum": 1,
                     "maximum": MAX_SAMPLE_RATE,
                     "default": DEFAULT_SAMPLE_RATE,
-                    "description": "Output sample rate written into the WAV header (the Speech API's pcm format is fixed at 24 kHz; override for compatible endpoints)"
+                    "description": "Output sample rate written into the WAV header (the Speech API's pcm format is fixed at 24 kHz; override for compatible endpoints)",
+                    "x-ene-ui": { "group": "voice", "order": 3, "advanced": true, "impact": "runtime_reload", "label_key": "provider-openai-tts-sample-rate-label", "description_key": "provider-openai-tts-sample-rate-desc" }
                 }
             }
         }))
@@ -147,7 +149,16 @@ impl TtsPlugin for OpenAiTtsPlugin {
             )));
         }
 
-        let parsed = OpenAiTtsConfig::from_value(&config)?;
+        // The delivered `set_config` blob is canonical; the request blob is
+        // the fallback when the host never delivered one.
+        let delivered = PLUGIN_CONFIG
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let parsed = match delivered.as_ref() {
+            Some(blob) => OpenAiTtsConfig::from_value(blob)?,
+            None => OpenAiTtsConfig::from_value(&config)?,
+        };
         let voice = parsed.resolve_voice(&voice);
         if !SUPPORTED_VOICES.contains(&voice.as_str()) {
             return Err(PluginError::provider(format!(

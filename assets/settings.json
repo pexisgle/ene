@@ -1,5 +1,209 @@
 {
   "$schema": "./schema/settings.schema.json",
+  "version": 7,
+  "character": "Alicia",
+  "user_name": "User",
+  "ai": {
+    "local_models": {
+      "gemma-4-e2b": {
+        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+        "context_size": 16384,
+        "gpu_layers": "auto",
+        "quantization": "F16",
+        "model_path": "",
+        "dimensions": null
+      },
+      "gemma-4-e4b": {
+        "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
+        "context_size": 16384,
+        "gpu_layers": "auto",
+        "quantization": "F16",
+        "model_path": "",
+        "dimensions": null
+      },
+      "jina-v5-small": {
+        "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+        "context_size": 2048,
+        "dimensions": 1024,
+        "gpu_layers": "auto",
+        "quantization": "F16",
+        "model_path": ""
+      }
+    },
+    "providers": {
+      "openrouter": {
+        "api_key": {
+          "env": "OPENROUTER_API_KEY",
+          "inline": "",
+          "source": "env"
+        },
+        "base_url": "https://openrouter.ai/api/v1",
+        "kind": "openai_compatible",
+        "context_window": null
+      }
+    },
+    "tasks": {
+      "chat": {
+        "max_tokens": 8192,
+        "model": "openai/gpt-5.6-luna",
+        "provider": "openrouter",
+        "supports_vision": true,
+        "dimensions": null,
+        "query_prefix": null,
+        "thinking_disabled": false
+      },
+      "classifier": {
+        "model": "openai/gpt-5.6-luna",
+        "provider": "openrouter",
+        "max_tokens": null,
+        "dimensions": null,
+        "query_prefix": null,
+        "supports_vision": false,
+        "thinking_disabled": false
+      },
+      "embedding": {
+        "model": "jina-v5-small",
+        "provider": "local",
+        "max_tokens": null,
+        "dimensions": null,
+        "query_prefix": null,
+        "supports_vision": false,
+        "thinking_disabled": false
+      },
+      "proactive": {
+        "model": "gemma-4-e4b",
+        "provider": "local",
+        "max_tokens": null,
+        "dimensions": null,
+        "query_prefix": null,
+        "supports_vision": false,
+        "thinking_disabled": false
+      }
+    },
+    "retry": {
+      "max_attempts": 3,
+      "base_delay_ms": 500,
+      "max_delay_ms": 30000,
+      "timeout_ms": 120000
+    },
+    "fallback": {
+      "enabled": false,
+      "health_check_timeout_ms": 5000,
+      "cache_ttl_ms": 60000,
+      "max_history": 32
+    },
+    "tts": {
+      "provider": "kokoro"
+    },
+    "stt": {
+      "provider": "whisper"
+    },
+    "vad": {
+      "provider": "none"
+    }
+  },
+  "desktop": {
+    "graphics": {
+      "quality": "high"
+    },
+    "language": "ja",
+    "mic_device": null,
+    "spotlight_enabled": true,
+    "caption_enabled": true,
+    "caption_position": null,
+    "caption_pinned": null,
+    "beat_sync": {
+      "enabled": false,
+      "device": null
+    },
+    "theme": "system"
+  },
+  "mind": {
+    "language": "ja",
+    "emotion": {
+      "classifier_language": "ja",
+      "enabled": true
+    },
+    "proactive": {
+      "cooldown_seconds": 60,
+      "enabled": false,
+      "interval_seconds": 10,
+      "min_idle_seconds": 20,
+      "sources": {
+        "activity": true,
+        "conversation": true,
+        "screen_summary": true,
+        "memory": true,
+        "window_title_level": "app_only"
+      },
+      "confirmation_enabled": false,
+      "fatigue_suppression_threshold": 0.7,
+      "paused": false,
+      "quiet_hours": {
+        "enabled": false,
+        "days": {
+          "monday": false,
+          "tuesday": false,
+          "wednesday": false,
+          "thursday": false,
+          "friday": false,
+          "saturday": false,
+          "sunday": false
+        },
+        "start": {
+          "hour": 22,
+          "minute": 0
+        },
+        "end": {
+          "hour": 7,
+          "minute": 0
+        },
+        "suppress": {
+          "notifications": true,
+          "decisions": true,
+          "tts": true
+        },
+        "policy": "discard",
+        "timezone": ""
+      },
+      "pending_confirmation": {
+        "enabled": false,
+        "min_age_days": 3,
+        "min_confidence": 0.7,
+        "reask_after_days": 7
+      },
+      "world_state": {
+        "enabled": false,
+        "max_snapshots": 64,
+        "min_snapshots_for_trend": 3,
+        "engaged_idle_seconds": 60,
+        "change_window": 3
+      }
+    },
+    "memory_limits": {
+      "commitment_active_match_limit": 4096
+    },
+    "memory_approval": {
+      "require_approval": false
+    },
+    "topic_boundary": {
+      "enabled": true,
+      "boundary_threshold": 0.3,
+      "weight_centroid": 0.6,
+      "weight_silence": 0.15,
+      "weight_topic_length": 0.25,
+      "centroid_alpha": 0.15,
+      "min_utterance_chars": 6,
+      "silence_saturation_secs": 300,
+      "max_topic_turns": 12
+    },
+    "session": {
+      "session_timeout_minutes": 120
+    }
+  },
+  "store": {
+    "enabled": true
+  },
   "tools": {
     "enabled": true,
     "list": {
@@ -256,7 +460,14 @@
         "enable": true,
         "env_passthrough": [],
         "db_quota_mb": 256,
-        "config": null,
+        "config": {
+          "model_path": null,
+          "voices_path": null,
+          "voice": "af_heart",
+          "speed": 1.0,
+          "language": "ja",
+          "ort_dylib_path": null
+        },
         "profiles": {},
         "manifest": null,
         "sandbox": null,
@@ -322,7 +533,20 @@
         "enable": true,
         "env_passthrough": [],
         "db_quota_mb": 256,
-        "config": null,
+        "config": {
+          "server_url": "http://127.0.0.1:50021",
+          "mode": "external",
+          "server_path": null,
+          "server_args": [],
+          "speaker_id": 0,
+          "speed_scale": 1.0,
+          "pitch_scale": 0.0,
+          "intonation_scale": 1.0,
+          "volume_scale": 1.0,
+          "tempo_dynamics_scale": 1.0,
+          "output_sampling_rate": null,
+          "startup_timeout_secs": 10
+        },
         "profiles": {},
         "manifest": null,
         "sandbox": null,
@@ -333,7 +557,15 @@
         "enable": true,
         "env_passthrough": [],
         "db_quota_mb": 256,
-        "config": null,
+        "config": {
+          "model": "ggml-medium.bin",
+          "language": "ja",
+          "model_path": null,
+          "mode": "auto",
+          "server_path": null,
+          "server_args": [],
+          "startup_timeout_secs": 60
+        },
         "profiles": {},
         "manifest": null,
         "sandbox": null,
@@ -413,216 +645,5 @@
       "max_redirects": 5,
       "auto_save": null
     }
-  },
-  "version": 6,
-  "character": "Alicia",
-  "user_name": "User",
-  "ai": {
-    "local_models": {
-      "gemma-4-e2b": {
-        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
-        "context_size": 16384,
-        "gpu_layers": "auto",
-        "quantization": "F16",
-        "model_path": "",
-        "dimensions": null
-      },
-      "gemma-4-e4b": {
-        "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
-        "context_size": 16384,
-        "gpu_layers": "auto",
-        "quantization": "F16",
-        "model_path": "",
-        "dimensions": null
-      },
-      "jina-v5-small": {
-        "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
-        "context_size": 2048,
-        "dimensions": 1024,
-        "gpu_layers": "auto",
-        "quantization": "F16",
-        "model_path": ""
-      }
-    },
-    "providers": {
-      "openrouter": {
-        "api_key": {
-          "env": "OPENROUTER_API_KEY",
-          "inline": "",
-          "source": "env"
-        },
-        "base_url": "https://openrouter.ai/api/v1",
-        "kind": "openai_compatible",
-        "context_window": null
-      }
-    },
-    "tasks": {
-      "chat": {
-        "max_tokens": 8192,
-        "model": "openai/gpt-5.6-luna",
-        "provider": "openrouter",
-        "supports_vision": true,
-        "dimensions": null,
-        "query_prefix": null,
-        "thinking_disabled": false
-      },
-      "classifier": {
-        "model": "openai/gpt-5.6-luna",
-        "provider": "openrouter",
-        "max_tokens": null,
-        "dimensions": null,
-        "query_prefix": null,
-        "supports_vision": false,
-        "thinking_disabled": false
-      },
-      "embedding": {
-        "model": "jina-v5-small",
-        "provider": "local",
-        "max_tokens": null,
-        "dimensions": null,
-        "query_prefix": null,
-        "supports_vision": false,
-        "thinking_disabled": false
-      },
-      "proactive": {
-        "model": "gemma-4-e4b",
-        "provider": "local",
-        "max_tokens": null,
-        "dimensions": null,
-        "query_prefix": null,
-        "supports_vision": false,
-        "thinking_disabled": false
-      }
-    },
-    "retry": {
-      "max_attempts": 3,
-      "base_delay_ms": 500,
-      "max_delay_ms": 30000,
-      "timeout_ms": 120000
-    },
-    "fallback": {
-      "enabled": false,
-      "health_check_timeout_ms": 5000,
-      "cache_ttl_ms": 60000,
-      "max_history": 32
-    },
-    "tts": {
-      "provider": "kokoro",
-      "model": "kokoro-v1_0.onnx",
-      "voice": "af_heart",
-      "speed": 1.0,
-      "language": "ja",
-      "model_path": null
-    },
-    "stt": {
-      "provider": "whisper",
-      "model": "ggml-medium.bin",
-      "language": "ja"
-    },
-    "vad": {
-      "provider": "none"
-    }
-  },
-  "desktop": {
-    "graphics": {
-      "quality": "high"
-    },
-    "language": "ja",
-    "mic_device": null,
-    "spotlight_enabled": true,
-    "caption_enabled": true,
-    "caption_position": null,
-    "caption_pinned": null,
-    "beat_sync": {
-      "enabled": false,
-      "device": null
-    },
-    "theme": "system"
-  },
-  "mind": {
-    "language": "ja",
-    "emotion": {
-      "classifier_language": "ja",
-      "enabled": true
-    },
-    "proactive": {
-      "cooldown_seconds": 60,
-      "enabled": false,
-      "interval_seconds": 10,
-      "min_idle_seconds": 20,
-      "sources": {
-        "activity": true,
-        "conversation": true,
-        "screen_summary": true,
-        "memory": true,
-        "window_title_level": "app_only"
-      },
-      "confirmation_enabled": false,
-      "fatigue_suppression_threshold": 0.7,
-      "paused": false,
-      "quiet_hours": {
-        "enabled": false,
-        "days": {
-          "monday": false,
-          "tuesday": false,
-          "wednesday": false,
-          "thursday": false,
-          "friday": false,
-          "saturday": false,
-          "sunday": false
-        },
-        "start": {
-          "hour": 22,
-          "minute": 0
-        },
-        "end": {
-          "hour": 7,
-          "minute": 0
-        },
-        "suppress": {
-          "notifications": true,
-          "decisions": true,
-          "tts": true
-        },
-        "policy": "discard",
-        "timezone": ""
-      },
-      "pending_confirmation": {
-        "enabled": false,
-        "min_age_days": 3,
-        "min_confidence": 0.7,
-        "reask_after_days": 7
-      },
-      "world_state": {
-        "enabled": false,
-        "max_snapshots": 64,
-        "min_snapshots_for_trend": 3,
-        "engaged_idle_seconds": 60,
-        "change_window": 3
-      }
-    },
-    "memory_limits": {
-      "commitment_active_match_limit": 4096
-    },
-    "memory_approval": {
-      "require_approval": false
-    },
-    "topic_boundary": {
-      "enabled": true,
-      "boundary_threshold": 0.3,
-      "weight_centroid": 0.6,
-      "weight_silence": 0.15,
-      "weight_topic_length": 0.25,
-      "centroid_alpha": 0.15,
-      "min_utterance_chars": 6,
-      "silence_saturation_secs": 300,
-      "max_topic_turns": 12
-    },
-    "session": {
-      "session_timeout_minutes": 120
-    }
-  },
-  "store": {
-    "enabled": true
   }
 }

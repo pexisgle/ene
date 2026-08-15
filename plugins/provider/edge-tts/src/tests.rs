@@ -102,7 +102,7 @@ async fn synthesize_with_endpoint(
     let config = json!({"endpoint_url": format!("ws://{addr}"), "max_retries": 3});
     tokio::time::timeout(
         Duration::from_secs(10),
-        EdgeTtsPlugin.synthesize(
+        EdgeTtsPlugin::default().synthesize(
             KIND,
             config,
             text.to_string(),
@@ -276,7 +276,7 @@ async fn http_403_retries_after_clock_skew_correction() {
 
 #[tokio::test]
 async fn rejects_wrong_kind_format_and_empty_text() {
-    let plugin = EdgeTtsPlugin;
+    let plugin = EdgeTtsPlugin::default();
     let config = json!({});
 
     let err = plugin

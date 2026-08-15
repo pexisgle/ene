@@ -566,6 +566,34 @@ impl AiBridge {
         self.spawn_fetch(async move { handle.rollback_artifact(&artifact_id).await })
     }
 
+    /// Starts an asynchronous artifact removal.
+    pub fn uninstall_artifact(
+        &self,
+        artifact_id: String,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.uninstall_artifact(&artifact_id).await })
+    }
+
+    /// Starts an asynchronous cancel of an in-flight artifact install.
+    pub fn cancel_artifact_install(
+        &self,
+        artifact_id: String,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.cancel_artifact_install(&artifact_id).await })
+    }
+
+    /// Starts an asynchronous fetch of in-flight artifact progress.
+    pub fn fetch_artifact_progress(
+        &self,
+    ) -> tokio::sync::oneshot::Receiver<
+        std::collections::BTreeMap<String, Option<ene_plugin_host::ArtifactProgress>>,
+    > {
+        let handle = Arc::clone(&self.handle);
+        self.spawn_fetch(async move { handle.artifact_progress().await })
+    }
+
     /// Starts an asynchronous catalog refresh.
     pub fn refresh_catalog(&self) -> tokio::sync::oneshot::Receiver<Result<u64, String>> {
         let handle = Arc::clone(&self.handle);
@@ -607,13 +635,27 @@ impl AiBridge {
                         field_path,
                         options
                             .into_iter()
-                            .map(|option| (option.label, option.value.to_string()))
+                            .map(|option| {
+                                (option.label, Self::option_value_to_string(&option.value))
+                            })
                             .collect(),
                     );
                 }
             }
             map
         })
+    }
+
+    /// Converts a plugin `ConfigOption` value into the string written into
+    /// the config form: strings stay unquoted, numbers/booleans use their
+    /// JSON representation, and anything else degrades to JSON.
+    fn option_value_to_string(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(text) => text.clone(),
+            serde_json::Value::Number(number) => number.to_string(),
+            serde_json::Value::Bool(flag) => flag.to_string(),
+            other => other.to_string(),
+        }
     }
 
     /// Starts an asynchronous schedule-list fetch.
@@ -1577,6 +1619,30 @@ mod tests {
         let processing = Arc::new(AtomicBool::new(true));
         processing.store(false, Ordering::Relaxed);
         assert!(!processing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn option_value_to_string_unquotes_strings_and_keeps_scalars() {
+        assert_eq!(
+            AiBridge::option_value_to_string(&serde_json::json!("Rachel")),
+            "Rachel",
+            "JSON strings must not carry quotes into the config form"
+        );
+        assert_eq!(
+            AiBridge::option_value_to_string(&serde_json::json!(42)),
+            "42",
+            "numbers use their JSON representation"
+        );
+        assert_eq!(
+            AiBridge::option_value_to_string(&serde_json::json!(true)),
+            "true",
+            "booleans use their JSON representation"
+        );
+        assert_eq!(
+            AiBridge::option_value_to_string(&serde_json::json!(1.5)),
+            "1.5",
+            "floats use their JSON representation"
+        );
     }
 
     #[test]

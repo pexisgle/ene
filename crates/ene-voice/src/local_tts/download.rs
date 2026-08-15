@@ -1,13 +1,12 @@
-//! Feature-independent Kokoro model download and path resolution.
+//! Feature-independent Kokoro model path resolution and validators.
 //!
 //! Everything in this module compiles and can be called with the
-//! `local-tts` feature disabled — the kokoro provider plugin invokes
-//! [`ensure_kokoro_files_exist`] from its own process before loading the
-//! model (that feature only gates the `ort` / ONNX Runtime native
-//! dependency). Network I/O goes through the shared [`ene_ai::ModelFetcher`],
-//! which supplies in-flight coalescing, `.part` + atomic rename, RAII
-//! partial cleanup, HTTPS-only enforcement, and progress reporting; this
-//! module supplies the two Kokoro-specific [`ene_ai::ModelValidator`]s.
+//! `local-tts` feature disabled (that feature only gates the `ort` / ONNX
+//! Runtime native dependency). Model acquisition is explicit only: the
+//! kokoro provider plugin never downloads on first use, so this module's
+//! default URLs and the shared [`ene_ai::ModelFetcher`] remain available to
+//! explicit acquisition tooling; the validators describe the expected file
+//! shapes.
 
 use ene_ai::model_fetch::{PrefixPredicateValidator, SizeMultipleValidator};
 use ene_ai::{AudioProviderError, ModelFetcher, ModelValidator};

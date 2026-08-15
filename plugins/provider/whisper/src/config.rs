@@ -9,12 +9,18 @@ use serde_json::Value;
 
 /// Settings for the local whisper.cpp STT provider.
 ///
-/// `model` and `language` are forwarded per request from `ai.stt.*` by the
-/// host adapter (mirroring how the TTS adapter forwards `ai.tts.voice`), so
-/// only the path override lives in the plugin blob.
+/// The whole blob (`model`, `language`, engine mode, server path) is the
+/// provider-owned config: `ai.stt` only routes the provider kind, and the
+/// host adapter forwards this blob verbatim on every transcription request.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct WhisperConfig {
+    /// Whisper GGUF model name or path; used as the model-path fallback
+    /// when `model_path` is unset (formerly forwarded from `ai.stt.model`).
+    pub model: Option<String>,
+    /// Language hint (`"ja"`, `"en"`, …); empty = auto-detect (formerly
+    /// forwarded from `ai.stt.language`).
+    pub language: Option<String>,
     /// Explicit whisper GGUF model file path.
     pub model_path: Option<String>,
     /// Engine mode: `auto` (sidecar when a server binary is configured,
@@ -91,7 +97,11 @@ impl WhisperConfig {
     pub fn resolve_model_path(&self, request_model: &str) -> PathBuf {
         non_empty(self.model_path.as_deref())
             .map(PathBuf::from)
-            .or_else(|| non_empty(Some(request_model)).map(PathBuf::from))
+            .or_else(|| {
+                non_empty(Some(request_model))
+                    .or(self.model.as_deref())
+                    .map(PathBuf::from)
+            })
             .unwrap_or_else(|| ene_config::models_dir().join("gguf").join("whisper.gguf"))
     }
 }

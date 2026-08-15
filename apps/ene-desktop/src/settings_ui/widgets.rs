@@ -914,13 +914,14 @@ pub(crate) fn editable_combo(
         .find(|(choice, _)| choice == value)
         .map_or_else(|| value.as_str(), |(_, label)| label.as_str());
 
+    let combo_width = ui.available_width().min(200.0);
     egui::ComboBox::from_id_salt(id_salt)
         .selected_text(if selected_label.is_empty() {
             "—"
         } else {
             selected_label
         })
-        .width(200.0)
+        .width(combo_width)
         .show_ui(ui, |ui| {
             for (choice, label) in choices {
                 if ui.selectable_label(choice == value, label).clicked() {
@@ -930,7 +931,8 @@ pub(crate) fn editable_combo(
             }
         });
 
-    let response = ui.add(egui::TextEdit::singleline(value).desired_width(text_width));
+    let editor_width = ui.available_width().min(text_width);
+    let response = ui.add(egui::TextEdit::singleline(value).desired_width(editor_width));
     EditableComboResponse {
         response,
         selection_changed,

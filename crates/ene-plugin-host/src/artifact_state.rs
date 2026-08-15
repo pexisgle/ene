@@ -16,9 +16,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ene_approval::PluginManifest;
 use ene_artifact::catalog::compare_versions;
 use ene_artifact::{
-    ArtifactInstaller, ArtifactKind, CatalogMetadata, CatalogVerifier, Downloader,
-    InstalledArtifact, InstallerConfig, SignedCatalog, TrustedCatalogKeys,
+    ArtifactInstaller, ArtifactKind, ArtifactProgress, CatalogMetadata, CatalogVerifier,
+    Downloader, InstalledArtifact, InstallerConfig, SignedCatalog, TrustedCatalogKeys,
 };
+use tokio_util::sync::CancellationToken;
+
+/// Upper bound for a signed catalog document. Real catalogs are a few KB;
+/// the cap protects the host from an unauthenticated endpoint streaming an
+/// unbounded body before signature verification can reject it.
+const CATALOG_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 use crate::config::ArtifactConfig;
 
@@ -28,6 +34,7 @@ fn builtin_sidecar_artifacts(plugin: &str) -> &'static [&'static str] {
     match plugin {
         "llama-server" => &["llama-server"],
         "whisper" => &["whisper-server"],
+        "voicevox" => &["voicevox-engine"],
         _ => &[],
     }
 }
@@ -63,6 +70,12 @@ pub struct InstalledArtifactView {
     pub sha256: String,
     /// Size in bytes.
     pub size: u64,
+    /// Executable path inside the generation root for extracted payloads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
+    /// Generation root for extracted payloads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_root: Option<String>,
     /// CAS object path (read-only for plugins).
     pub path: String,
 }
@@ -79,6 +92,11 @@ impl InstalledArtifactView {
             .to_string(),
             sha256: artifact.sha256.clone(),
             size: artifact.size,
+            entrypoint: artifact.entrypoint.clone(),
+            install_root: artifact
+                .install_root
+                .as_ref()
+                .map(|root| root.to_string_lossy().into_owned()),
             path: object_path.to_string_lossy().into_owned(),
         }
     }
@@ -196,11 +214,23 @@ impl ArtifactState {
     }
 
     /// Path of the installed artifact's active object, if installed.
+    ///
+    /// Extracted payloads (zip-vvpp) resolve to the verified entrypoint
+    /// inside the generation root — that is what a sidecar spawns, not the
+    /// archive. Raw payloads return the CAS object itself.
     #[must_use]
     pub fn installed_path(&self, id: &str) -> Option<PathBuf> {
-        self.installer
-            .installed(id)
-            .map(|artifact| self.object_path(&artifact.sha256))
+        let artifact = self.installer.installed(id)?;
+        match (
+            artifact.install_root.as_deref(),
+            artifact.entrypoint.as_deref(),
+        ) {
+            (Some(root), Some(entrypoint)) => {
+                let path = root.join(entrypoint);
+                path.is_file().then_some(path)
+            }
+            _ => Some(self.object_path(&artifact.sha256)),
+        }
     }
 
     /// Snapshot of every installed artifact plus catalog targets.
@@ -222,7 +252,12 @@ impl ArtifactState {
         ids.into_iter()
             .map(|id| {
                 let current = installed.artifacts.get(&id);
-                let target = metadata.as_ref().and_then(|m| m.artifacts.get(&id));
+                let target = metadata
+                    .as_ref()
+                    .and_then(|m| m.artifacts.get(&id))
+                    .map(|target| {
+                        target.for_platform(&ene_artifact::ArtifactTarget::current_platform())
+                    });
                 let update_available = match (current, target) {
                     (Some(installed), Some(target)) => {
                         compare_versions(&target.version, &installed.version)
@@ -264,11 +299,23 @@ impl ArtifactState {
         id: &str,
         version: Option<&str>,
     ) -> Result<InstalledArtifactView, String> {
+        self.install_with(id, version, None, None).await
+    }
+
+    /// Installs (or updates) `id` with progress reporting and cancellation.
+    pub async fn install_with(
+        &self,
+        id: &str,
+        version: Option<&str>,
+        progress: Option<&(dyn Fn(ArtifactProgress) + Sync)>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<InstalledArtifactView, String> {
         let metadata = self.catalog_metadata(true).await?;
         let target = metadata
             .artifacts
             .get(id)
-            .ok_or_else(|| format!("artifact '{id}' not in catalog"))?;
+            .ok_or_else(|| format!("artifact '{id}' not in catalog"))?
+            .for_platform(&ene_artifact::ArtifactTarget::current_platform());
         if let Some(version) = version
             && target.version != version
         {
@@ -279,11 +326,19 @@ impl ArtifactState {
         }
         let installed = self
             .installer
-            .install(id, target, &self.downloader, self.config.max_bytes, &|_| {
-                Err(ene_artifact::ArtifactError::RedirectRejected(
-                    "artifact redirects are not followed".to_string(),
-                ))
-            })
+            .install(
+                id,
+                target,
+                &self.downloader,
+                self.config.max_bytes,
+                &|_| {
+                    Err(ene_artifact::ArtifactError::RedirectRejected(
+                        "artifact redirects are not followed".to_string(),
+                    ))
+                },
+                progress,
+                cancel,
+            )
             .await
             .map_err(|e| e.to_string())?;
         Ok(InstalledArtifactView::from_artifact(
@@ -299,6 +354,11 @@ impl ArtifactState {
             &installed,
             &self.object_path(&installed.sha256),
         ))
+    }
+
+    /// Removes the installed generation for `id` (files, state, and CAS).
+    pub fn uninstall(&self, id: &str) -> Result<(), String> {
+        self.installer.uninstall(id).map_err(|e| e.to_string())
     }
 
     /// Force-refreshes the catalog and returns its version.
@@ -409,10 +469,7 @@ impl ArtifactState {
         if !response.status().is_success() {
             return Err(format!("catalog fetch failed: {}", response.status()));
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| format!("catalog fetch failed: {e}"))?;
+        let bytes = read_bounded_body(response, CATALOG_MAX_BYTES).await?;
         let signed: SignedCatalog =
             serde_json::from_slice(&bytes).map_err(|e| format!("invalid catalog JSON: {e}"))?;
         let metadata = self
@@ -430,6 +487,32 @@ impl ArtifactState {
     }
 }
 
+/// Reads a response body with a hard cap, streaming so an oversized body is
+/// rejected without being buffered.
+async fn read_bounded_body(response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes)
+    {
+        return Err(format!(
+            "catalog response too large: exceeds the {max_bytes}-byte limit"
+        ));
+    }
+    use futures::StreamExt;
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("catalog fetch failed: {e}"))?;
+        body.extend_from_slice(&chunk);
+        if body.len() as u64 > max_bytes {
+            return Err(format!(
+                "catalog response exceeds the {max_bytes}-byte limit"
+            ));
+        }
+    }
+    Ok(body)
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -444,6 +527,7 @@ mod tests {
     fn builtin_sidecar_table_covers_sidecar_plugins() {
         assert_eq!(builtin_sidecar_artifacts("llama-server"), &["llama-server"]);
         assert_eq!(builtin_sidecar_artifacts("whisper"), &["whisper-server"]);
+        assert_eq!(builtin_sidecar_artifacts("voicevox"), &["voicevox-engine"]);
         assert!(builtin_sidecar_artifacts("kokoro").is_empty());
     }
 
@@ -499,5 +583,91 @@ mod tests {
         let digest = "ab".repeat(32);
         let path = state.object_path(&digest);
         assert!(path.ends_with(format!("objects/ab/{}", "ab".repeat(31))));
+    }
+
+    /// The catalog body read is hard-capped and streaming: an oversized
+    /// response is rejected without being buffered.
+    #[tokio::test]
+    async fn catalog_body_read_is_bounded() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let body = vec![b'x'; 4096];
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut tmp).await.expect("read");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.expect("write head");
+            socket.write_all(&body).await.expect("write body");
+        });
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://{addr}/catalog"))
+            .send()
+            .await
+            .expect("send");
+        let err = read_bounded_body(response, 1024)
+            .await
+            .expect_err("oversized catalog rejected");
+        assert!(err.contains("limit"));
+    }
+
+    #[tokio::test]
+    async fn catalog_body_read_accepts_small_responses() {
+        let client = reqwest::Client::new();
+        // A plain-HTTP echo of a small body via a raw listener.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let body = br#"{"version":1}"#.to_vec();
+        let served_body = body.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut tmp).await.expect("read");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served_body.len()
+            );
+            socket.write_all(head.as_bytes()).await.expect("write head");
+            socket.write_all(&served_body).await.expect("write body");
+        });
+        let response = client
+            .get(format!("http://{addr}/catalog"))
+            .send()
+            .await
+            .expect("send");
+        let bytes = read_bounded_body(response, 1024).await.expect("small body");
+        assert_eq!(bytes, body);
     }
 }
