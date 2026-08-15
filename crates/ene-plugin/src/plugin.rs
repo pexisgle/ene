@@ -155,8 +155,16 @@ pub trait ConfigurablePlugin: Send + Sync {
     }
 
     /// List dynamic options for a config path (e.g. `"voice"`).
-    fn list_config_options(&self, _path: &str) -> Vec<ConfigOption> {
-        Vec::new()
+    ///
+    /// Async because providers may need to query a live engine or a remote
+    /// catalog (VOICEVOX `/speakers`, `ElevenLabs` voices). The IPC wire shape
+    /// is unchanged: the server awaits this and packs the result into
+    /// [`ConfigOptions`](ene_plugin_proto::PluginIpcResponse::ConfigOptions).
+    fn list_config_options(
+        &self,
+        _path: &str,
+    ) -> futures::future::BoxFuture<'_, Vec<ConfigOption>> {
+        Box::pin(async { Vec::new() })
     }
 
     /// Validate a candidate config value; return field-level errors (empty = ok).

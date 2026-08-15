@@ -7,8 +7,16 @@ The voice pipeline has three stages, each backed by a provider plugin:
 | Stage | Built-in providers | Config |
 |---|---|---|
 | **STT** (speech → text) | `whisper` (local whisper.cpp) | `ai.stt.provider` |
-| **TTS** (text → speech) | `kokoro` (local ONNX), `edge-tts`, `elevenlabs`, `openai-tts`, `voicevox` | `ai.tts.provider`, `model`, `voice`, `speed`, `language` |
+| **TTS** (text → speech) | `kokoro` (local ONNX), `edge-tts`, `elevenlabs`, `openai-tts`, `voicevox` | `ai.tts.provider` |
 | **VAD** (voice activity) | `onnx` (Silero), `none` | `ai.vad.provider` |
+
+`ai.tts` / `ai.stt` select the provider only. Provider-owned values (`model`,
+`voice`, `speed`, `language`, model paths, engine mode) live in
+`plugins.list.<provider>.config` — the schema each provider plugin advertises,
+rendered by the Voice settings page. For example, the Kokoro voice is
+`plugins.list.kokoro.config.voice`, and the VOICEVOX speaker is
+`plugins.list.voicevox.config.speaker_id` (with `mode`/`server_path` for
+managed engines).
 
 The desktop app captures microphone audio (cpal), feeds it through the
 chosen STT provider, and plays TTS audio chunks (rodio) that stream back

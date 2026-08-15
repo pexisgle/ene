@@ -72,17 +72,10 @@ impl TtsProviderFactory for IpcTtsProviderFactory {
     ) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
         let blob = ene_ai::plugin_config::plugin_config_blob(config, &self.plugin_name)
             .unwrap_or_default();
-        let voice = config
-            .get_section::<ene_ai::AiConfig>()
-            .ok()
-            .and_then(|ai| ai.resolve_tts())
-            .filter(|resolved| resolved.provider == self.kind)
-            .and_then(|resolved| resolved.voice);
         Ok(Box::new(IpcTtsProvider::new(
             self.kind.clone(),
             Arc::clone(&self.conn),
             self.plugin_name.clone(),
-            voice,
             TTS_AUDIO_FORMAT.to_string(),
             blob,
             Arc::clone(&self.limiter),

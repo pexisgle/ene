@@ -46,6 +46,25 @@ impl<T> AsyncData<T> {
         }
     }
 
+    /// Starts a replacement fetch while keeping the last value for display.
+    ///
+    /// Used by live-updating views (artifact progress) that must render the
+    /// most recent snapshot while the next fetch is in flight.
+    pub fn refresh(&mut self, receiver: tokio::sync::oneshot::Receiver<T>) {
+        if self.receiver.is_none() {
+            self.receiver = Some(receiver);
+            self.error = None;
+        }
+    }
+
+    /// Re-runs a fetch with the latest input, discarding any cached value
+    /// or error (used by re-validate / reload buttons).
+    pub fn restart(&mut self, receiver: tokio::sync::oneshot::Receiver<T>) {
+        self.receiver = Some(receiver);
+        self.data = None;
+        self.error = None;
+    }
+
     /// Drains a completed fetch (non-blocking).
     pub fn poll(&mut self) {
         let Some(receiver) = &mut self.receiver else {
@@ -104,14 +123,7 @@ pub struct SettingsInputState {
     pub ai_embedding_dimensions: String,
     pub ai_validation_message: Option<String>,
     pub tts_provider: String,
-    pub tts_model: String,
-    pub tts_voice: String,
-    pub tts_language: String,
-    pub tts_model_path: String,
-    pub tts_voices_path: String,
     pub stt_provider: String,
-    pub stt_model: String,
-    pub stt_language: String,
     /// Enumerated input device names for the microphone picker. Filled by
     /// the Voice page (and the Features audio section) when the window is
     /// shown; empty without the `voice` feature.
@@ -138,6 +150,22 @@ pub struct SettingsInputState {
         String,
         tokio::sync::oneshot::Receiver<Result<ene_plugin_host::InstalledArtifactView, String>>,
     >,
+    /// In-flight artifact removals, keyed by artifact id.
+    pub artifact_uninstalls:
+        std::collections::HashMap<String, tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    /// In-flight cancel requests for artifact installs, keyed by artifact id.
+    pub artifact_cancels:
+        std::collections::HashMap<String, tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    /// Live download progress of in-flight artifact installs (polled every
+    /// frame while an install is running).
+    pub artifact_progress:
+        AsyncData<std::collections::BTreeMap<String, Option<ene_plugin_host::ArtifactProgress>>>,
+    /// Last error per artifact operation (install/rollback/uninstall),
+    /// displayed until the next action or snapshot refresh.
+    pub artifact_errors: std::collections::BTreeMap<String, String>,
+    /// Two-step confirmation arms for destructive artifact actions
+    /// (`artifact_id|action` → armed).
+    pub artifact_arm: std::collections::BTreeMap<String, bool>,
     /// In-flight catalog refresh.
     pub catalog_refresh: Option<tokio::sync::oneshot::Receiver<Result<u64, String>>>,
     /// Two-step delete arms for model files on the Engines page
@@ -267,15 +295,7 @@ impl SettingsInputState {
         };
 
         self.tts_provider.clone_from(&ai_cfg.tts.provider);
-        self.tts_model.clone_from(&ai_cfg.tts.model);
-        self.tts_voice.clone_from(&ai_cfg.tts.voice);
-        self.tts_language.clone_from(&ai_cfg.tts.language);
-        self.tts_model_path = ai_cfg.tts.model_path.clone().unwrap_or_default();
-        self.tts_voices_path = settings.kokoro_voices_path();
-
         self.stt_provider.clone_from(&ai_cfg.stt.provider);
-        self.stt_model.clone_from(&ai_cfg.stt.model);
-        self.stt_language.clone_from(&ai_cfg.stt.language);
     }
 }
 

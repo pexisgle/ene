@@ -43,6 +43,10 @@ pub struct KokoroPlugin {
     /// `plugins.list.kokoro.profiles` map delivered at handshake; the
     /// `kokoro` profile carries the legacy `voices_path` slot.
     profiles: Mutex<Option<Value>>,
+    /// Delivered config from `set_config` (handshake / live `SetConfig`),
+    /// canonical over the per-request blob (which may predate an artifact
+    /// injection).
+    delivered: Mutex<Option<KokoroConfig>>,
     /// Lazily-built engine, keyed by its resolved config.
     engine: Arc<Mutex<Option<CachedEngine>>>,
     build: EngineBuilder,
@@ -58,6 +62,7 @@ impl KokoroPlugin {
     pub(crate) fn with_builder(build: EngineBuilder) -> Self {
         Self {
             profiles: Mutex::new(None),
+            delivered: Mutex::new(None),
             engine: Arc::new(Mutex::new(None)),
             build,
         }
@@ -132,6 +137,15 @@ impl Default for KokoroPlugin {
 }
 
 impl ene_plugin::ConfigurablePlugin for KokoroPlugin {
+    fn set_config(&self, config: &Value) {
+        if let Ok(config) = KokoroConfig::from_value(config) {
+            *self
+                .delivered
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(config);
+        }
+    }
+
     /// Receives the per-profile config map (`plugins.list.kokoro.profiles`).
     fn set_profiles(&self, profiles: &Value) {
         *self.profiles.lock().unwrap_or_else(PoisonError::into_inner) = Some(profiles.clone());
@@ -151,17 +165,17 @@ impl ene_plugin::ConfigurablePlugin for KokoroPlugin {
                 "model_path": {
                     "type": "string",
                     "description": "Kokoro ONNX model file path (defaults to the shared models cache)",
-                    "x-ene-ui": { "group": "model", "order": 0, "impact": "plugin_restart" }
+                    "x-ene-ui": { "group": "model", "order": 0, "impact": "plugin_restart", "label_key": "provider-kokoro-model-path-label", "description_key": "provider-kokoro-model-path-desc" }
                 },
                 "voices_path": {
                     "type": "string",
                     "description": "voices.bin path; falls back to the kokoro profile's voices_path, then the shared models cache",
-                    "x-ene-ui": { "group": "model", "order": 1, "impact": "plugin_restart" }
+                    "x-ene-ui": { "group": "model", "order": 1, "impact": "plugin_restart", "label_key": "provider-kokoro-voices-path-label", "description_key": "provider-kokoro-voices-path-desc" }
                 },
                 "voice": {
                     "type": "string",
                     "description": "Default voice (e.g. af_heart, jf_alpha); a per-request voice overrides it; empty selects the first voice in voices.bin. Alternating voices reload the model on each switch.",
-                    "x-ene-ui": { "group": "voice", "order": 0, "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "voice", "order": 0, "impact": "runtime_reload", "label_key": "provider-kokoro-voice-label", "description_key": "provider-kokoro-voice-desc" }
                 },
                 "speed": {
                     "type": "number",
@@ -169,17 +183,17 @@ impl ene_plugin::ConfigurablePlugin for KokoroPlugin {
                     "maximum": 2.0,
                     "default": 1.0,
                     "description": "Speech speed multiplier (0.5-2.0)",
-                    "x-ene-ui": { "group": "voice", "order": 1, "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "voice", "order": 1, "impact": "runtime_reload", "slider": { "min": 0.5, "max": 2.0, "step": 0.1 }, "label_key": "provider-kokoro-speed-label", "description_key": "provider-kokoro-speed-desc" }
                 },
                 "language": {
                     "type": "string",
                     "description": "G2P language: \"ja\" selects the Japanese kana rules; anything else uses the English rules",
-                    "x-ene-ui": { "group": "voice", "order": 2, "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "voice", "order": 2, "impact": "runtime_reload", "label_key": "provider-kokoro-language-label", "description_key": "provider-kokoro-language-desc" }
                 },
                 "ort_dylib_path": {
                     "type": "string",
                     "description": "ONNX Runtime dynamic library path override (ort default resolution when unset). Fixed at process start: ONNX Runtime initializes once, so a change requires a restart",
-                    "x-ene-ui": { "group": "runtime", "order": 0, "advanced": true, "impact": "app_restart" }
+                    "x-ene-ui": { "group": "runtime", "order": 0, "advanced": true, "impact": "app_restart", "label_key": "provider-kokoro-ort-dylib-path-label", "description_key": "provider-kokoro-ort-dylib-path-desc" }
                 }
             }
         }))
@@ -211,7 +225,15 @@ impl TtsPlugin for KokoroPlugin {
         if text.trim().is_empty() {
             return Err(PluginError::provider("cannot synthesize empty text"));
         }
-        let parsed = KokoroConfig::from_value(&config)?;
+        // The delivered `set_config` blob is canonical (it carries any
+        // artifact-injected paths); the request blob is the fallback when
+        // the host never delivered a config.
+        let parsed = self
+            .delivered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or(KokoroConfig::from_value(&config)?);
         let profiles = self
             .profiles
             .lock()
@@ -220,19 +242,6 @@ impl TtsPlugin for KokoroPlugin {
         let profile = profiles.as_ref().and_then(|p| p.get(DEFAULT_PROFILE));
         let resolved = parsed.resolve(&voice, profile);
         Self::ensure_known_voice(&resolved.voice)?;
-        // Model acquisition lives in the plugin process since #321 removed
-        // the runtime prefetch and the desktop download UI; the shared
-        // fetcher skips files that already exist and validate. Non-fatal:
-        // engine construction reports the clear missing-file error.
-        if let Err(e) =
-            ene_voice::ensure_kokoro_files_exist(&resolved.model_path, &resolved.voices_path).await
-        {
-            tracing::warn!(
-                component = "ene-plugin-kokoro",
-                error = %e,
-                "Kokoro model download failed; will report a clear error on engine load"
-            );
-        }
         let provider = self.engine(&resolved).await?;
         synthesize_with(provider.as_ref(), &text).await
     }
@@ -250,6 +259,7 @@ pub fn provides() -> Vec<CapabilityRef> {
 }
 
 fn build_real(resolved: &ResolvedConfig) -> Result<Arc<dyn TtsProvider>, PluginError> {
+    ensure_kokoro_files_present(resolved)?;
     ene_voice::local_tts::provider::open(
         &resolved.model_path,
         &resolved.voices_path,
@@ -260,6 +270,31 @@ fn build_real(resolved: &ResolvedConfig) -> Result<Arc<dyn TtsProvider>, PluginE
     )
     .map(|engine| Arc::new(engine) as Arc<dyn TtsProvider>)
     .map_err(|e| PluginError::provider(format!("kokoro model init failed: {e}")))
+}
+
+/// Rejects synthesis when the Kokoro model files are not on disk.
+///
+/// Acquisition is explicit only: the plugin never downloads anything on
+/// first use. A missing file points the user at the Engines page / artifact
+/// catalog or the `plugins.list.kokoro.config` paths.
+pub(crate) fn ensure_kokoro_files_present(resolved: &ResolvedConfig) -> Result<(), PluginError> {
+    let missing = [
+        (resolved.model_path.as_path(), "model (kokoro.onnx)"),
+        (resolved.voices_path.as_path(), "voices.bin"),
+    ]
+    .into_iter()
+    .filter(|(path, _)| !path.is_file())
+    .map(|(path, label)| format!("{label} not found at {}", path.display()))
+    .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(PluginError::provider(format!(
+        "Kokoro model files are missing: {}. Install them explicitly \
+         (Engines page / artifact catalog) or set plugins.list.kokoro.config \
+         model_path / voices_path.",
+        missing.join("; ")
+    )))
 }
 
 /// Collects the provider's PCM chunks and wraps them in a WAV container.

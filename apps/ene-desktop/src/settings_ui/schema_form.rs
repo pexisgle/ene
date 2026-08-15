@@ -14,16 +14,23 @@
 use super::draft::FieldImpact;
 use std::collections::BTreeMap;
 
+pub(crate) const BUILTIN_PROVIDER_GROUP_IDS: &[&str] =
+    &["connection", "engine", "model", "runtime", "voice"];
+
 /// `x-ene-ui` field metadata extracted from a property schema.
 #[derive(Debug, Clone, Default)]
 pub struct UiMetadata {
     pub group: Option<String>,
+    pub label_key: Option<String>,
+    pub description_key: Option<String>,
     pub order: Option<f64>,
     pub control: Option<String>,
     pub advanced: bool,
     pub impact: Option<FieldImpact>,
     pub options_path: Option<String>,
     pub secret: bool,
+    /// `x-ene-ui.slider: {min, max, step}` for number fields.
+    pub slider: Option<(f64, f64, f64)>,
 }
 
 impl UiMetadata {
@@ -36,6 +43,14 @@ impl UiMetadata {
             .map_or_else(Self::default, |object| Self {
                 group: object
                     .get("group")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                label_key: object
+                    .get("label_key")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                description_key: object
+                    .get("description_key")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
                 order: object.get("order").and_then(serde_json::Value::as_f64),
@@ -56,6 +71,19 @@ impl UiMetadata {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
                 secret: false,
+                slider: object
+                    .get("slider")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|slider| {
+                        Some((
+                            slider.get("min")?.as_f64()?,
+                            slider.get("max")?.as_f64()?,
+                            slider
+                                .get("step")
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or(0.1),
+                        ))
+                    }),
             });
         if meta.secret {
             return meta;
@@ -153,7 +181,7 @@ pub fn schema_object_form(
         changed |= render_property(ui, property_schema, value, path, name, options);
     }
     for (group, members) in &grouped {
-        egui::CollapsingHeader::new(group.as_str())
+        egui::CollapsingHeader::new(localized_group(group))
             .default_open(true)
             .id_salt(("schema_form_group", path, group))
             .show(ui, |ui| {
@@ -185,6 +213,16 @@ pub fn schema_object_form(
     changed
 }
 
+/// Localizes a group name: `x-ene-ui.group_key` (FTL key) wins; known group
+/// codes (`engine`, `voice`, `model`, `runtime`, `connection`) map onto
+/// shared keys; anything else (third-party plugins) renders as-is.
+fn localized_group(group: &str) -> String {
+    if BUILTIN_PROVIDER_GROUP_IDS.contains(&group) {
+        return crate::i18n::loader().get(&format!("provider-group-{group}"));
+    }
+    group.to_string()
+}
+
 fn render_property(
     ui: &mut egui::Ui,
     property_schema: &serde_json::Value,
@@ -198,20 +236,15 @@ fn render_property(
     if options.show_impact
         && let Some(impact) = meta.impact
     {
-        ui.horizontal(|ui| {
-            ui.label(name);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(property_label(name, &meta));
             ui.weak(format!("({})", impact.code()));
         });
     } else {
-        ui.horizontal(|ui| {
-            ui.label(name);
-        });
+        ui.label(property_label(name, &meta));
     }
-    if let Some(description) = property_schema
-        .get("description")
-        .and_then(serde_json::Value::as_str)
-    {
-        ui.weak(description);
+    if let Some(description) = property_description(property_schema, &meta) {
+        ui.add(egui::Label::new(egui::RichText::new(description).weak()).wrap());
     }
     if let Some(options_path) = meta.options_path.as_deref() {
         ui.weak(format!(
@@ -248,6 +281,28 @@ fn render_property(
     changed
 }
 
+/// Localized property label: `x-ene-ui.label_key` (FTL key) wins, falling
+/// back to the raw property name (third-party plugins).
+fn property_label(name: &str, meta: &UiMetadata) -> String {
+    meta.label_key
+        .as_deref()
+        .map_or_else(|| name.to_string(), |key| crate::i18n::loader().get(key))
+}
+
+/// Localized property description: `x-ene-ui.description_key` (FTL key)
+/// wins, falling back to the schema `description` (third-party plugins).
+fn property_description(schema: &serde_json::Value, meta: &UiMetadata) -> Option<String> {
+    meta.description_key.as_deref().map_or_else(
+        || {
+            schema
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        },
+        |key| Some(crate::i18n::loader().get(key)),
+    )
+}
+
 /// Renders a value against its schema node. The `_path` is used for stable
 /// ids; `secret` handling is delegated to the caller via metadata.
 fn render_value(
@@ -265,7 +320,7 @@ fn render_value(
     if nullable {
         if value.is_null() {
             let mut set = false;
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.weak("(null)");
                 if ui
                     .small_button(i18n_embed_fl::fl!(crate::i18n::loader(), "schema-null-set"))
@@ -284,7 +339,7 @@ fn render_value(
             return false;
         }
         let mut clear = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .small_button(i18n_embed_fl::fl!(
                     crate::i18n::loader(),
@@ -341,7 +396,7 @@ fn one_of_form(
     };
     let mut selected = matching(value).unwrap_or(0);
     let mut changed = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt(("schema_one_of", path))
             .selected_text(
                 variants
@@ -402,7 +457,7 @@ fn array_form(
     };
     let mut remove: Option<usize> = None;
     for (index, item) in items.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if let Some(item_schema) = &item_schema {
                 changed |=
                     render_value(ui, item_schema, item, &format!("{path}[{index}]"), options);
@@ -453,6 +508,26 @@ fn number_form(
 ) -> bool {
     let min = schema.get("minimum").and_then(serde_json::Value::as_f64);
     let max = schema.get("maximum").and_then(serde_json::Value::as_f64);
+    let slider = UiMetadata::from_schema(schema).slider;
+    if let Some((slider_min, slider_max, slider_step)) = slider {
+        let mut current = value.as_f64().unwrap_or(slider_min);
+        let bounded = current.clamp(slider_min, slider_max);
+        if ui
+            .add(egui::Slider::new(&mut current, slider_min..=slider_max).step_by(slider_step))
+            .changed()
+        {
+            let quantized = (current / slider_step).round() * slider_step;
+            let quantized = quantized.clamp(slider_min, slider_max);
+            *value = if integer {
+                serde_json::Value::from(quantized.round() as i64)
+            } else {
+                serde_json::Value::from(quantized)
+            };
+            return true;
+        }
+        ui.weak(format!("{bounded}"));
+        return false;
+    }
     let formatted = |n: f64| {
         if integer {
             format!("{n:.0}")
@@ -461,7 +536,8 @@ fn number_form(
         }
     };
     let mut text = value.as_f64().map_or_else(String::new, formatted);
-    let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(120.0));
+    let width = ui.available_width().min(120.0);
+    let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(width));
     if response.changed() && text.trim() != value.as_f64().map_or_else(String::new, formatted) {
         let parsed: Option<f64> = text.trim().parse().ok();
         if integer {
@@ -607,13 +683,15 @@ fn string_form(
             .and_then(serde_json::Value::as_str)
             .is_some_and(|format| format == "longtext");
     let response = if multiline {
+        let width = ui.available_width().min(280.0);
         ui.add(
             egui::TextEdit::multiline(&mut current)
                 .desired_rows(4)
-                .desired_width(280.0),
+                .desired_width(width),
         )
     } else {
-        ui.add(egui::TextEdit::singleline(&mut current).desired_width(220.0))
+        let width = ui.available_width().min(220.0);
+        ui.add(egui::TextEdit::singleline(&mut current).desired_width(width))
     };
     if response.changed() {
         *value = serde_json::Value::String(current);
@@ -634,7 +712,7 @@ fn secret_form(ui: &mut egui::Ui, value: &mut serde_json::Value, path: &str, epo
     let is_placeholder = value.as_str() == Some(super::draft::SECRET_PLACEHOLDER);
     let is_set = is_placeholder || value.as_str().is_some_and(|current| !current.is_empty());
     let mut changed = false;
-    ui.horizontal(|ui| {
+    let content = |ui: &mut egui::Ui| {
         if is_set && buffer.is_empty() {
             ui.weak("••••••••");
             ui.weak(i18n_embed_fl::fl!(
@@ -642,10 +720,11 @@ fn secret_form(ui: &mut egui::Ui, value: &mut serde_json::Value, path: &str, epo
                 "schema-secret-set-hint"
             ));
         }
+        let width = ui.available_width().min(220.0);
         let response = ui.add(
             egui::TextEdit::singleline(&mut buffer)
                 .password(true)
-                .desired_width(220.0),
+                .desired_width(width),
         );
         if response.changed() {
             ui.data_mut(|data| {
@@ -678,7 +757,8 @@ fn secret_form(ui: &mut egui::Ui, value: &mut serde_json::Value, path: &str, epo
             });
             changed = true;
         }
-    });
+    };
+    ui.horizontal_wrapped(content);
     changed
 }
 
@@ -724,11 +804,12 @@ pub fn raw_json_form(
     let mut text = ui.data_mut(|data| data.get_temp::<String>(id).unwrap_or(redacted_text));
     let mut error: Option<String> =
         ui.data_mut(|data| data.get_temp::<String>(egui::Id::new(("schema_raw_err", path))));
+    let width = ui.available_width().min(320.0);
     let response = ui.add(
         egui::TextEdit::multiline(&mut text)
             .code_editor()
             .desired_rows(5)
-            .desired_width(320.0),
+            .desired_width(width),
     );
     if response.changed() {
         ui.data_mut(|data| {
@@ -736,7 +817,7 @@ pub fn raw_json_form(
         });
     }
     let mut changed = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui
             .small_button(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
@@ -1036,6 +1117,86 @@ mod tests {
                 "section `{key}` has schema constructs the generic form cannot render: {issues:?}"
             );
         }
+    }
+
+    #[test]
+    fn narrow_provider_schema_form_stays_within_content_width() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "api_key": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "object", "properties": {
+                            "source": {"type": "string", "enum": ["inline", "env", "auto"]},
+                            "inline": {"type": "string"},
+                            "env": {"type": "string"}
+                        }}
+                    ],
+                    "x-ene-secret": true,
+                    "description": "API key or credential descriptor"
+                },
+                "base_url": {
+                    "type": "string",
+                    "description": "API base URL override for a compatible speech service endpoint",
+                    "x-ene-ui": {"group": "connection", "impact": "runtime_reload"}
+                },
+                "model": {
+                    "type": "string",
+                    "enum": ["tts-1", "tts-1-hd"],
+                    "x-ene-ui": {"group": "voice", "impact": "runtime_reload"}
+                },
+                "voice": {
+                    "type": "string",
+                    "enum": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+                    "x-ene-ui": {"group": "voice", "impact": "runtime_reload"}
+                },
+                "speed": {
+                    "type": "number",
+                    "minimum": 0.25,
+                    "maximum": 4.0,
+                    "x-ene-ui": {"group": "voice", "impact": "runtime_reload"}
+                }
+            }
+        });
+        let mut value = json!({
+            "api_key": "",
+            "base_url": "https://api.openai.com/v1",
+            "model": "tts-1",
+            "voice": "alloy",
+            "speed": 1.0
+        });
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(560.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let mut overflow = 0.0_f32;
+        let _output = context.run_ui(input, |ui| {
+            let content_right = ui.max_rect().right();
+            ui.indent("provider_details", |ui| {
+                schema_object_form(
+                    ui,
+                    &schema,
+                    &mut value,
+                    "plugins.list.openai-tts.config",
+                    SchemaFormOptions {
+                        show_advanced: true,
+                        show_impact: true,
+                        epoch: 0,
+                        options: None,
+                    },
+                );
+            });
+            overflow = (ui.min_rect().right() - content_right).max(0.0);
+        });
+        assert!(
+            overflow <= 0.5,
+            "narrow provider form overflowed by {overflow} points"
+        );
     }
 
     #[test]

@@ -442,6 +442,34 @@ pub enum EneCommand {
         /// Reply channel carrying the installed artifact view.
         reply: oneshot::Sender<Result<ene_plugin_host::InstalledArtifactView, String>>,
     },
+    /// Remove an installed artifact (Engines page).
+    UninstallArtifact {
+        /// Artifact id from the catalog.
+        artifact_id: String,
+        /// Reply channel carrying the removal outcome.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Cancel an in-flight artifact install (Engines page).
+    CancelArtifactInstall {
+        /// Artifact id whose install should be cancelled.
+        artifact_id: String,
+        /// Reply channel carrying the cancellation outcome.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Fetch the live progress of every in-flight artifact operation
+    /// (Engines page progress bars).
+    GetArtifactProgress {
+        /// Reply channel carrying artifact id → current progress.
+        reply: oneshot::Sender<
+            std::collections::BTreeMap<String, Option<ene_plugin_host::ArtifactProgress>>,
+        >,
+    },
+    /// Internal: an artifact operation finished; drop its cancel token and
+    /// progress slot (sent by the spawned background task itself).
+    ArtifactOperationFinished {
+        /// Artifact id whose operation completed.
+        artifact_id: String,
+    },
     /// Roll an artifact back one generation (Engines page).
     RollbackArtifact {
         /// Artifact id from the catalog.

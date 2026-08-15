@@ -18,20 +18,19 @@ use crate::broker::broker;
 use crate::client::MAX_PCM_BYTES;
 use crate::config::{DEFAULT_BASE_URL, DEFAULT_MODEL, resolve_base_url};
 use crate::mock_server::{MockElevenLabsServer, MockResponse, RecordedRequest};
-use crate::plugin::{ElevenLabsPlugin, PLUGIN_CONFIG};
+use crate::plugin::ElevenLabsPlugin;
 
 const KIND: &str = "elevenlabs";
 const TEST_VOICE: &str = "21m00Tcm4TlvDq8ikWAM";
 
-/// Serializes tests that read or write the process-wide `PLUGIN_CONFIG`
-/// static or the shared broker (every synthesize call touches both).
+/// Serializes tests that use the shared broker.
 static TEST_SERIAL: StdMutex<()> = StdMutex::new(());
 
 /// Serializes tests that mutate the process environment.
 static ENV_MUTEX: StdMutex<()> = StdMutex::new(());
 
 fn test_plugin() -> ElevenLabsPlugin {
-    ElevenLabsPlugin
+    ElevenLabsPlugin::default()
 }
 
 /// Points the shared broker at `mock`'s socket. The static broker caches
@@ -732,13 +731,13 @@ async fn voice_settings_are_clamped_before_sending() {
 #[tokio::test]
 async fn set_config_base_url_is_used_by_synthesis() {
     let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
-    test_plugin().set_config(&json!({"base_url": "https://host.example/v1"}));
+    let plugin = test_plugin();
+    plugin.set_config(&json!({"base_url": "https://host.example/v1"}));
     let mock = MockElevenLabsServer::spawn().expect("mock server");
     configure_broker(&mock).await;
     mock.push(MockResponse::ok(pcm_fixture()));
 
-    test_plugin()
+    plugin
         .synthesize(
             KIND,
             json!({
@@ -746,12 +745,11 @@ async fn set_config_base_url_is_used_by_synthesis() {
                 "voice_id": TEST_VOICE
             }),
             "hello".to_string(),
-            String::new(),
+            TEST_VOICE.to_string(),
             "wav".to_string(),
         )
         .await
         .expect("synthesis succeeds");
-    *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
 
     let requests = mock.requests.lock().expect("request log");
     assert!(
@@ -761,6 +759,65 @@ async fn set_config_base_url_is_used_by_synthesis() {
         "host blob base_url must win: {}",
         requests[0].url
     );
+}
+
+#[tokio::test]
+async fn delivered_config_wins_over_stale_blob_and_wire_voice_overrides_default() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let plugin = test_plugin();
+    plugin.set_config(&json!({
+        "base_url": MockElevenLabsServer::url(),
+        "model_id": "eleven_multilingual_v2",
+        "voice_id": "delivered_voice",
+        "sample_rate": 44_100,
+        "voice_settings": {
+            "stability": 0.2,
+            "similarity_boost": 0.9,
+            "style": 0.1,
+            "use_speaker_boost": false
+        }
+    }));
+    let mock = MockElevenLabsServer::spawn().expect("mock server");
+    configure_broker(&mock).await;
+    mock.push(MockResponse::ok(pcm_fixture()));
+
+    let audio = plugin
+        .synthesize(
+            KIND,
+            json!({
+                "base_url": "https://stale.example/v1",
+                "model_id": "stale-model",
+                "voice_id": "stale_voice",
+                "sample_rate": 16_000,
+                "voice_settings": {
+                    "stability": 1.0,
+                    "similarity_boost": 0.0,
+                    "style": 1.0,
+                    "use_speaker_boost": true
+                }
+            }),
+            "hello".to_string(),
+            "wire_voice".to_string(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("delivered config and wire voice are accepted");
+
+    assert_wav_payload(&audio, &pcm_fixture(), 44_100);
+    let requests = mock.requests.lock().expect("request log");
+    let request = &requests[0];
+    assert!(
+        request
+            .url
+            .contains("/text-to-speech/wire_voice/stream?output_format=pcm_44100")
+    );
+    assert!(request.url.starts_with(MockElevenLabsServer::url()));
+    let body: Value = serde_json::from_str(&request.body).expect("request body is JSON");
+    assert_eq!(body["model_id"], "eleven_multilingual_v2");
+    assert_eq!(body["voice_settings"]["stability"], 0.2);
+    assert_eq!(body["voice_settings"]["similarity_boost"], 0.9);
+    assert_eq!(body["voice_settings"]["style"], 0.1);
+    assert_eq!(body["voice_settings"]["use_speaker_boost"], false);
 }
 
 #[test]

@@ -2039,6 +2039,8 @@ impl BrokerHub {
                         "artifact redirects are not followed".to_string(),
                     ))
                 },
+                None,
+                None,
             )
             .await
             .map_err(|e| BrokerError::new(BrokerErrorCode::Internal, e.to_string()))?;

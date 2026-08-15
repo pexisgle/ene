@@ -102,6 +102,10 @@ pub struct PluginSettingsSnapshot {
     pub supports_dynamic_config: bool,
     /// Whether the plugin answers `ValidateConfig` (delegated validation).
     pub supports_validate_config: bool,
+    /// Sidecar artifact ids this plugin may use (manifest requirements plus
+    /// the built-in table for shipped plugins whose manifest predates the
+    /// catalog). Drives the Engines page's artifact card.
+    pub sidecars: Vec<String>,
     /// Current config blob delivered to the plugin.
     pub config: Option<serde_json::Value>,
     /// Per-profile config blobs, keyed by profile name.

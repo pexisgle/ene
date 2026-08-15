@@ -57,7 +57,7 @@ Provide models and voice engines:
 | `edge-tts` | `edge-tts` | Cloud TTS (Microsoft Edge) |
 | `elevenlabs` | `elevenlabs` | Cloud TTS (ElevenLabs REST, broker-mediated) |
 | `openai-tts` | `openai_tts` | Cloud TTS (OpenAI) |
-| `voicevox` | `voicevox` | TTS via a VOICEVOX engine (auto-start supported) |
+| `voicevox` | `voicevox` | TTS via a VOICEVOX / Aivis Speech engine (external or managed sidecar mode) |
 
 ## Lifecycle of a plugin
 

@@ -137,6 +137,12 @@ pub(super) struct TurnActor {
     /// Wall-clock source for scheduler due-time evaluation (injectable in
     /// tests so scheduler integration tests advance virtual time).
     scheduler_clock: crate::scheduler::SchedulerClock,
+    /// Cancellation tokens for in-flight artifact installs, keyed by
+    /// artifact id (Engines page cancel button).
+    artifact_cancels: HashMap<String, tokio_util::sync::CancellationToken>,
+    /// Live progress of in-flight artifact installs, keyed by artifact id.
+    /// Entries are removed when the operation finishes.
+    artifact_progress: HashMap<String, watch::Sender<Option<ene_plugin_host::ArtifactProgress>>>,
     permission_scopes: Arc<Mutex<Vec<crate::streaming::PermissionScope>>>,
     /// Connector framework registry shared with the handle; the actor
     /// resolves permission prompts and records audit rows for lifecycle ops.
@@ -355,6 +361,8 @@ impl TurnActor {
             scheduler_notify,
             scheduler_notify_rx: Some(scheduler_notify_rx),
             scheduler_clock,
+            artifact_cancels: HashMap::new(),
+            artifact_progress: HashMap::new(),
             permission_scopes: Arc::new(Mutex::new(Vec::new())),
             connectors,
             undo_stack: Arc::new(Mutex::new(crate::undo::UndoStack::new(64))),
@@ -2907,25 +2915,50 @@ impl TurnActor {
                 version,
                 reply,
             } => {
-                let result = self
-                    .install_artifact(&artifact_id, version.as_deref())
-                    .await;
+                self.spawn_artifact_install(artifact_id, version, reply);
+                true
+            }
+            EneCommand::RollbackArtifact { artifact_id, reply } => {
+                self.spawn_artifact_rollback(artifact_id, reply);
+                true
+            }
+            EneCommand::UninstallArtifact { artifact_id, reply } => {
+                self.spawn_artifact_uninstall(artifact_id, reply);
+                true
+            }
+            EneCommand::CancelArtifactInstall { artifact_id, reply } => {
+                let result = match self.artifact_cancels.get(&artifact_id) {
+                    Some(token) => {
+                        token.cancel();
+                        Ok(())
+                    }
+                    None => Err(format!("no artifact install in flight for '{artifact_id}'")),
+                };
                 if reply.send(result).is_err() {
                     tracing::debug!(
                         component = "TurnActor",
-                        "artifact install reply dropped (UI closed the window)"
+                        "artifact cancel reply dropped (UI closed the window)"
                     );
                 }
                 true
             }
-            EneCommand::RollbackArtifact { artifact_id, reply } => {
-                let result = self.rollback_artifact(&artifact_id).await;
-                if reply.send(result).is_err() {
+            EneCommand::GetArtifactProgress { reply } => {
+                let snapshot = self
+                    .artifact_progress
+                    .iter()
+                    .map(|(id, sender)| (id.clone(), *sender.borrow()))
+                    .collect();
+                if reply.send(snapshot).is_err() {
                     tracing::debug!(
                         component = "TurnActor",
-                        "artifact rollback reply dropped (UI closed the window)"
+                        "artifact progress reply dropped (UI closed the window)"
                     );
                 }
+                true
+            }
+            EneCommand::ArtifactOperationFinished { artifact_id } => {
+                self.artifact_cancels.remove(&artifact_id);
+                self.artifact_progress.remove(&artifact_id);
                 true
             }
             EneCommand::RefreshCatalog { reply } => {
@@ -4720,30 +4753,130 @@ impl TurnActor {
         }
     }
 
-    /// Installs or updates an artifact, then pushes re-injected config to
-    /// live plugins.
-    async fn install_artifact(
-        &self,
-        artifact_id: &str,
-        version: Option<&str>,
-    ) -> Result<ene_plugin_host::InstalledArtifactView, String> {
-        let mut host = self.plugin_host.lock().await;
-        match host.as_mut() {
-            Some(manager) => manager.install_artifact(artifact_id, version).await,
-            None => Err("plugin host is not running".to_string()),
-        }
+    /// Starts an artifact install/update in a background task so a large
+    /// download (e.g. a VOICEVOX engine) never blocks the actor mailbox.
+    /// Progress is published through a per-artifact `watch` channel and the
+    /// result is delivered through `reply`; the task reports completion
+    /// back through [`EneCommand::ArtifactOperationFinished`] so the cancel
+    /// token and progress slot are reaped.
+    fn spawn_artifact_install(
+        &mut self,
+        artifact_id: String,
+        version: Option<String>,
+        reply: oneshot::Sender<Result<ene_plugin_host::InstalledArtifactView, String>>,
+    ) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (progress_tx, _progress_rx) =
+            watch::channel::<Option<ene_plugin_host::ArtifactProgress>>(None);
+        self.artifact_cancels
+            .insert(artifact_id.clone(), cancel.clone());
+        self.artifact_progress
+            .insert(artifact_id.clone(), progress_tx.clone());
+
+        let host = Arc::clone(&self.plugin_host);
+        let cmd_tx = self.cmd_tx.clone();
+        tokio::spawn(async move {
+            let progress = move |progress: ene_plugin_host::ArtifactProgress| {
+                let _previous_progress = progress_tx.send_replace(Some(progress));
+            };
+            // Take the shared artifact handle with a short lock, then run
+            // the download/extraction *without* holding the plugin-host
+            // mutex (a multi-gigabyte install must not stall plugin config
+            // pushes, health probes, or provider calls).
+            let handle = {
+                let mut guard = host.lock().await;
+                match guard.as_mut() {
+                    Some(manager) => manager.artifact_handle(),
+                    None => None,
+                }
+            };
+            let result = match handle {
+                Some(state) => {
+                    let view = state
+                        .install_with(
+                            &artifact_id,
+                            version.as_deref(),
+                            Some(&progress),
+                            Some(&cancel),
+                        )
+                        .await;
+                    let mut guard = host.lock().await;
+                    if let Some(manager) = guard.as_mut() {
+                        manager.push_artifact_configs().await;
+                    }
+                    view
+                }
+                None => Err("plugin host is not running".to_string()),
+            };
+            drop(reply.send(result));
+            drop(cmd_tx.send(EneCommand::ArtifactOperationFinished { artifact_id }));
+        });
     }
 
-    /// Rolls an artifact back one generation.
-    async fn rollback_artifact(
-        &self,
-        artifact_id: &str,
-    ) -> Result<ene_plugin_host::InstalledArtifactView, String> {
-        let mut host = self.plugin_host.lock().await;
-        match host.as_mut() {
-            Some(manager) => manager.rollback_artifact(artifact_id).await,
-            None => Err("plugin host is not running".to_string()),
-        }
+    /// Starts an artifact rollback in a background task (file moves plus a
+    /// config re-push; kept off the mailbox for symmetry with installs).
+    fn spawn_artifact_rollback(
+        &mut self,
+        artifact_id: String,
+        reply: oneshot::Sender<Result<ene_plugin_host::InstalledArtifactView, String>>,
+    ) {
+        let host = Arc::clone(&self.plugin_host);
+        let cmd_tx = self.cmd_tx.clone();
+        tokio::spawn(async move {
+            let handle = {
+                let mut guard = host.lock().await;
+                match guard.as_mut() {
+                    Some(manager) => manager.artifact_handle(),
+                    None => None,
+                }
+            };
+            let result = match handle {
+                Some(state) => {
+                    let view = state.rollback(&artifact_id);
+                    let mut guard = host.lock().await;
+                    if let Some(manager) = guard.as_mut() {
+                        manager.push_artifact_configs().await;
+                    }
+                    view
+                }
+                None => Err("plugin host is not running".to_string()),
+            };
+            drop(reply.send(result));
+            drop(cmd_tx.send(EneCommand::ArtifactOperationFinished { artifact_id }));
+        });
+    }
+
+    /// Starts an artifact removal in a background task (deleting a large
+    /// generation directory should not block the mailbox).
+    fn spawn_artifact_uninstall(
+        &mut self,
+        artifact_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    ) {
+        let host = Arc::clone(&self.plugin_host);
+        let cmd_tx = self.cmd_tx.clone();
+        tokio::spawn(async move {
+            let handle = {
+                let mut guard = host.lock().await;
+                match guard.as_mut() {
+                    Some(manager) => manager.artifact_handle(),
+                    None => None,
+                }
+            };
+            let result = match handle {
+                Some(state) => {
+                    let outcome = state.uninstall(&artifact_id);
+                    let mut guard = host.lock().await;
+                    if let Some(manager) = guard.as_mut() {
+                        manager.push_artifact_configs_forced().await;
+                    }
+                    outcome
+                }
+                None => Err("plugin host is not running".to_string()),
+            };
+            drop(reply.send(result));
+            drop(cmd_tx.send(EneCommand::ArtifactOperationFinished { artifact_id }));
+        });
     }
 
     /// Force-refreshes the signed catalog.

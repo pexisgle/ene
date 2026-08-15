@@ -2,8 +2,34 @@ use std::path::Path;
 
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{ArtifactError, Result};
+
+/// Phase of an install operation, reported to the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallStage {
+    /// Downloading the artifact bytes.
+    Download,
+    /// Verifying digest/size (and zip structure).
+    Verify,
+    /// Extracting a zip-vvpp payload (streamed from disk).
+    Extract,
+    /// Activating the generation.
+    Activate,
+}
+
+/// Progress of a download/install operation, reported to the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactProgress {
+    /// Bytes transferred so far (including a resumed offset).
+    pub downloaded_bytes: u64,
+    /// Expected total bytes, when the catalog declares a size.
+    pub total_bytes: Option<u64>,
+    /// Current phase of the operation.
+    pub stage: InstallStage,
+}
 
 /// Outcome of a completed download.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,13 +121,24 @@ impl Downloader {
         expected_size: u64,
         max_bytes: u64,
         on_redirect: &(dyn Fn(&str) -> Result<()> + Sync),
+        progress: Option<&(dyn Fn(ArtifactProgress) + Sync)>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<DownloadOutcome> {
         let mut current_url = url.to_string();
         let mut etag: Option<String> = None;
         let mut bytes = std::fs::metadata(destination).map_or(0, |metadata| metadata.len());
         for _hop in 0..=self.max_redirects {
             let outcome = self
-                .fetch_once(&current_url, destination, etag.as_deref(), bytes, max_bytes)
+                .fetch_once(
+                    &current_url,
+                    destination,
+                    etag.as_deref(),
+                    bytes,
+                    max_bytes,
+                    expected_size,
+                    progress,
+                    cancel,
+                )
                 .await?;
             if let Some(location) = outcome.redirect_to {
                 let next_url = url::Url::parse(&current_url)
@@ -151,6 +188,9 @@ impl Downloader {
         etag: Option<&str>,
         offset: u64,
         max_bytes: u64,
+        expected_size: u64,
+        progress: Option<&(dyn Fn(ArtifactProgress) + Sync)>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<FetchOnce> {
         let parsed = url::Url::parse(url).map_err(|e| ArtifactError::Transport {
             url: url.to_string(),
@@ -237,6 +277,9 @@ impl Downloader {
 
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
+            if cancel.is_some_and(CancellationToken::is_cancelled) {
+                return Err(ArtifactError::Cancelled);
+            }
             let chunk = chunk.map_err(|e| ArtifactError::transport(url, &e))?;
             total = total.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
             if total > max_bytes {
@@ -246,6 +289,13 @@ impl Downloader {
                 });
             }
             file.write_all(&chunk).await?;
+            if let Some(report) = progress {
+                report(ArtifactProgress {
+                    downloaded_bytes: total,
+                    total_bytes: Some(expected_size),
+                    stage: InstallStage::Download,
+                });
+            }
         }
         file.flush().await?;
         file.sync_all().await?;
@@ -316,6 +366,57 @@ mod tests {
         format!("http://{addr}/artifact.bin")
     }
 
+    /// HTTP/1.1 server accepting up to `connections` sequential requests,
+    /// each served with `ETag` + `Range` support (for resume tests).
+    async fn serve_multi(body: &'static [u8], connections: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            for _ in 0..connections {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    let n = socket.read(&mut tmp).await.expect("read");
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&buf).to_string();
+                let range_start = request.lines().find_map(|line| {
+                    line.strip_prefix("Range: ")
+                        .and_then(|range| range.trim().strip_prefix("bytes="))
+                        .and_then(|spec| spec.split('-').next())
+                        .and_then(|start| start.parse::<usize>().ok())
+                });
+                let (status_line, content_range, payload) = match range_start {
+                    Some(start) => (
+                        "206 Partial Content",
+                        format!(
+                            "Content-Range: bytes {start}-{}/{}\r\n",
+                            body.len() - 1,
+                            body.len()
+                        ),
+                        &body[start..],
+                    ),
+                    None => ("200 OK", String::new(), body),
+                };
+                let head = format!(
+                    "HTTP/1.1 {status_line}\r\n{content_range}ETag: \"v1\"\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                socket.write_all(head.as_bytes()).await.expect("write head");
+                socket.write_all(payload).await.expect("write body");
+            }
+        });
+        format!("http://{addr}/artifact.bin")
+    }
+
     fn no_redirects(_url: &str) -> Result<()> {
         Err(ArtifactError::RedirectRejected("not expected".to_string()))
     }
@@ -328,7 +429,16 @@ mod tests {
         let part = dir.path().join("artifact.part");
         let digest = crate::digest::sha256_hex(body);
         let outcome = Downloader::test_new()
-            .download_to(&url, &part, &digest, body.len() as u64, 1024, &no_redirects)
+            .download_to(
+                &url,
+                &part,
+                &digest,
+                body.len() as u64,
+                1024,
+                &no_redirects,
+                None,
+                None,
+            )
             .await
             .expect("download");
         assert_eq!(outcome.bytes, body.len() as u64);
@@ -345,7 +455,16 @@ mod tests {
         std::fs::write(&part, &body[..7]).expect("seed part");
         let digest = crate::digest::sha256_hex(body);
         let outcome = Downloader::test_new()
-            .download_to(&url, &part, &digest, body.len() as u64, 1024, &no_redirects)
+            .download_to(
+                &url,
+                &part,
+                &digest,
+                body.len() as u64,
+                1024,
+                &no_redirects,
+                None,
+                None,
+            )
             .await
             .expect("resumed download");
         assert_eq!(outcome.bytes, body.len() as u64);
@@ -360,7 +479,16 @@ mod tests {
         let part = dir.path().join("artifact.part");
         let digest = crate::digest::sha256_hex(body);
         let err = Downloader::test_new()
-            .download_to(&url, &part, &digest, body.len() as u64, 5, &no_redirects)
+            .download_to(
+                &url,
+                &part,
+                &digest,
+                body.len() as u64,
+                5,
+                &no_redirects,
+                None,
+                None,
+            )
             .await
             .expect_err("cap must trip");
         assert!(matches!(err, ArtifactError::SizeExceeded { .. }));
@@ -380,6 +508,8 @@ mod tests {
                 body.len() as u64,
                 1024,
                 &no_redirects,
+                None,
+                None,
             )
             .await
             .expect_err("digest mismatch");
@@ -414,9 +544,77 @@ mod tests {
         let part = dir.path().join("artifact.part");
         let digest = crate::digest::sha256_hex(body);
         let err = Downloader::test_new()
-            .download_to(&url, &part, &digest, body.len() as u64, 1024, &no_redirects)
+            .download_to(
+                &url,
+                &part,
+                &digest,
+                body.len() as u64,
+                1024,
+                &no_redirects,
+                None,
+                None,
+            )
             .await
             .expect_err("redirect must be rejected by the caller policy");
         assert!(matches!(err, ArtifactError::RedirectRejected(_)));
+    }
+
+    #[tokio::test]
+    async fn cancellation_mid_download_keeps_part_and_resumes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio_util::sync::CancellationToken;
+
+        // Large enough that reqwest yields several stream chunks, so the
+        // cancel fired from the progress callback lands mid-transfer.
+        let body: &'static [u8] = Box::leak(vec![0xABu8; 1024 * 1024].into_boxed_slice());
+        let url = serve_multi(body, 2).await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let part = dir.path().join("artifact.part");
+        let digest = crate::digest::sha256_hex(body);
+        let cancel = CancellationToken::new();
+        let cancelled = AtomicBool::new(false);
+        let progress = |_progress: ArtifactProgress| {
+            if !cancelled.swap(true, Ordering::SeqCst) {
+                cancel.cancel();
+            }
+        };
+
+        let err = Downloader::test_new()
+            .download_to(
+                &url,
+                &part,
+                &digest,
+                body.len() as u64,
+                body.len() as u64 + 1024,
+                &no_redirects,
+                Some(&progress),
+                Some(&cancel),
+            )
+            .await
+            .expect_err("cancel fires mid-download");
+        assert!(matches!(err, ArtifactError::Cancelled));
+
+        let partial = std::fs::metadata(&part).expect("part metadata").len();
+        assert!(
+            (0..body.len() as u64).contains(&partial),
+            "partial download is kept for resume ({partial} bytes)"
+        );
+
+        // The kept `.part` lets the next attempt resume via Range.
+        let outcome = Downloader::test_new()
+            .download_to(
+                &url,
+                &part,
+                &digest,
+                body.len() as u64,
+                body.len() as u64 + 1024,
+                &no_redirects,
+                None,
+                None,
+            )
+            .await
+            .expect("resumed download");
+        assert_eq!(outcome.bytes, body.len() as u64);
+        assert_eq!(std::fs::read(&part).expect("read"), body);
     }
 }

@@ -38,7 +38,7 @@ struct EngineKey {
 /// The static capability data (`stt_spec()` / `STT_PROVIDER_KIND`) comes
 /// from the `#[provider(...)]` attribute; the model list is deliberately
 /// empty because model selection is path-based (the `model` config value is
-/// a path fallback, forwarded per request from `ai.stt.model`).
+/// a path fallback inside the provider-owned config blob).
 ///
 /// The `whisper-runner@1` capability declaration is hand-written because the
 /// derive only emits `provides()` for `LlmPlugin`.
@@ -55,6 +55,10 @@ pub struct WhisperPlugin {
     /// Lazily-built engine, keyed by its resolved config.
     engine: Arc<Mutex<Option<CachedEngine>>>,
     build: EngineBuilder,
+    /// Delivered config from `set_config` (handshake / live `SetConfig`),
+    /// canonical over the per-request blob (which may predate an artifact
+    /// injection).
+    delivered: std::sync::Mutex<Option<WhisperConfig>>,
 }
 
 impl WhisperPlugin {
@@ -68,6 +72,21 @@ impl WhisperPlugin {
         Self {
             engine: Arc::new(Mutex::new(None)),
             build,
+            delivered: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The canonical provider config: the delivered `set_config` blob, or
+    /// the per-request blob when the host never delivered one.
+    fn effective_config(&self, request: &Value) -> Result<WhisperConfig, PluginError> {
+        let delivered = self
+            .delivered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match delivered {
+            Some(config) => Ok(config),
+            None => WhisperConfig::from_value(request),
         }
     }
 
@@ -136,39 +155,58 @@ impl Default for WhisperPlugin {
 }
 
 impl ene_plugin::ConfigurablePlugin for WhisperPlugin {
+    fn set_config(&self, config: &Value) {
+        if let Ok(config) = WhisperConfig::from_value(config) {
+            *self
+                .delivered
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(config);
+        }
+    }
+
     /// Advertises the settings surface for `plugins.list.whisper.config`.
     fn config_schema(&self) -> Option<Value> {
         Some(json!({
             "type": "object",
             "properties": {
+                "model": {
+                    "type": "string",
+                    "description": "whisper GGUF model name (e.g. ggml-small.bin); used as a path fallback when model_path is unset",
+                    "x-ene-ui": { "order": 0, "impact": "runtime_reload", "label_key": "provider-whisper-model-label", "description_key": "provider-whisper-model-desc" }
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Language hint (e.g. ja, en); empty = auto-detect",
+                    "x-ene-ui": { "order": 1, "impact": "runtime_reload", "label_key": "provider-whisper-language-label", "description_key": "provider-whisper-language-desc" }
+                },
                 "model_path": {
                     "type": "string",
-                    "description": "whisper.cpp GGUF model file path (defaults to the shared models cache; ai.stt.model is used as a path fallback)",
-                    "x-ene-ui": { "order": 0, "impact": "plugin_restart" }
+                    "description": "whisper.cpp GGUF model file path (defaults to the shared models cache)",
+                    "x-ene-ui": { "order": 2, "impact": "plugin_restart", "label_key": "provider-whisper-model-path-label", "description_key": "provider-whisper-model-path-desc" }
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["auto", "sidecar", "in-process"],
                     "default": "auto",
                     "description": "Engine mode: auto uses the whisper-server sidecar when a server binary is configured, otherwise the in-process engine",
-                    "x-ene-ui": { "order": 1, "impact": "plugin_restart" }
+                    "x-ene-ui": { "order": 3, "impact": "plugin_restart", "label_key": "provider-whisper-mode-label", "description_key": "provider-whisper-mode-desc" }
                 },
                 "server_path": {
                     "type": "string",
                     "description": "Path to the whisper-server executable (host-injected from the artifact catalog when installed)",
-                    "x-ene-ui": { "order": 2, "impact": "plugin_restart" }
+                    "x-ene-ui": { "order": 4, "impact": "plugin_restart", "label_key": "provider-whisper-server-path-label", "description_key": "provider-whisper-server-path-desc" }
                 },
                 "server_args": {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Extra command-line arguments passed to whisper-server",
-                    "x-ene-ui": { "order": 3, "impact": "plugin_restart" }
+                    "x-ene-ui": { "order": 5, "impact": "plugin_restart", "label_key": "provider-whisper-server-args-label", "description_key": "provider-whisper-server-args-desc" }
                 },
                 "startup_timeout_secs": {
                     "type": "integer",
                     "minimum": 1,
                     "description": "How long to wait for whisper-server /health after spawning",
-                    "x-ene-ui": { "order": 4, "impact": "plugin_restart" }
+                    "x-ene-ui": { "order": 6, "impact": "plugin_restart", "label_key": "provider-whisper-startup-timeout-label", "description_key": "provider-whisper-startup-timeout-desc" }
                 }
             }
         }))
@@ -201,23 +239,11 @@ impl SttPlugin for WhisperPlugin {
                 "cannot transcribe empty audio".to_string(),
             ));
         }
-        let blob = config.clone();
-        let config = WhisperConfig::from_value(&config)?;
-        // The host forwards `ai.stt.model` and `ai.stt.language` per request
-        // (mirroring the TTS adapter's `ai.tts.voice` forwarding), so the
-        // blob carries them alongside `plugins.list.whisper.config`.
-        let request_model = blob
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_string();
-        let language = blob
-            .get("language")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string);
+        let config = self.effective_config(&config)?;
+        // `model` / `language` live in the provider-owned config blob
+        // (`plugins.list.whisper.config`); the host forwards it verbatim.
+        let request_model = config.model.clone().unwrap_or_default();
+        let language = config.language.clone();
         if config.wants_sidecar() {
             let model_path = config.resolve_model_path(&request_model);
             let state = crate::server::ensure_sidecar(&config, &model_path).await?;
@@ -268,10 +294,24 @@ pub fn provides() -> Vec<CapabilityRef> {
 mod tests {
     use super::*;
 
+    type ModelLoadLog = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
     fn fake_builder(text: String) -> EngineBuilder {
         Arc::new(move |_config, _model, _language| {
             let text = text.clone();
             Ok(Arc::new(FakeStt { text }) as Arc<dyn SttProvider>)
+        })
+    }
+
+    /// Builder that records the `(model, language)` it was asked to load.
+    fn recording_builder(seen: ModelLoadLog) -> EngineBuilder {
+        Arc::new(move |_config, model, language| {
+            seen.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((model.to_string(), language));
+            Ok(Arc::new(FakeStt {
+                text: "ok".to_string(),
+            }) as Arc<dyn SttProvider>)
         })
     }
 
@@ -313,6 +353,37 @@ mod tests {
             .expect("transcribe");
         assert_eq!(text.text, "hello world");
         assert_eq!(text.language, None);
+    }
+
+    /// The config delivered at handshake / live `SetConfig` is canonical: a
+    /// stale request blob (raw persisted config) must not override the
+    /// delivered model/language on the transcribe path.
+    #[tokio::test]
+    async fn delivered_config_beats_stale_request_blob() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let plugin = WhisperPlugin::with_builder(recording_builder(Arc::clone(&seen)));
+        plugin.set_config(&json!({
+            "model": "delivered.gguf",
+            "language": "ja",
+            "mode": "in-process"
+        }));
+
+        plugin
+            .transcribe(
+                WhisperPlugin::STT_PROVIDER_KIND,
+                json!({ "model": "stale.gguf", "language": "en", "mode": "in-process" }),
+                crate::wav::decode_wav_test_fixture(),
+                "wav".into(),
+            )
+            .await
+            .expect("transcribe");
+
+        let seen = seen.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            seen.as_slice(),
+            &[("delivered.gguf".to_string(), Some("ja".to_string()))],
+            "the delivered config drives the engine build, not the stale blob"
+        );
     }
 
     #[tokio::test]

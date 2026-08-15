@@ -594,6 +594,7 @@ fn placeholder_snapshot(id: &str, entry: &ene_plugin_host::PluginEntry) -> Plugi
         schema_version: 0,
         supports_dynamic_config: false,
         supports_validate_config: false,
+        sidecars: Vec::new(),
         config: None,
         profiles: None,
         credentials: Vec::new(),
@@ -665,6 +666,9 @@ fn render_config(
         .editing()
         .get_path(&schema_path)
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    if config_value.is_null() {
+        config_value = serde_json::Value::Object(serde_json::Map::new());
+    }
     if let Some(schema) = &snapshot.schema {
         let options = fetch_options(ui, ai, input, snapshot, schema);
         egui::CollapsingHeader::new(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-config"))
@@ -767,7 +771,7 @@ fn render_draft_validation(
         .entry(snapshot.id.clone())
         .or_default();
     state.poll();
-    if validate_clicked {
+    if validate_clicked && !state.loading() {
         // Validate the *merged* draft value so placeholders never reach the
         // plugin's own validator.
         let merged = super::apply::merge_secrets(draft.persisted(), draft.editing());
@@ -775,7 +779,9 @@ fn render_draft_validation(
             .get_path(&format!("plugins.list.{}.config", snapshot.id))
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
         let plugin = snapshot.id.clone();
-        state.start(ai.validate_plugin_config_async(plugin, draft_value));
+        // Re-validate with the latest draft every click: a cached result
+        // must not make later clicks no-ops.
+        state.restart(ai.validate_plugin_config_async(plugin, draft_value));
     }
     if state.loading() {
         ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-loading"));
@@ -1773,6 +1779,7 @@ mod tests {
             schema_version: 0,
             supports_dynamic_config: false,
             supports_validate_config: false,
+            sidecars: Vec::new(),
             config: None,
             profiles: None,
             credentials: Vec::new(),

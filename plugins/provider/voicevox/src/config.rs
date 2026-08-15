@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 /// Default VOICEVOX engine HTTP endpoint.
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:50021";
 
+/// `mode = "external"`: always talk to an engine the user starts and manages
+/// themselves (or an existing VOICEVOX / Aivis Speech install).
+pub const MODE_EXTERNAL: &str = "external";
+/// `mode = "managed"`: spawn `server_path` when the engine is not running.
+pub const MODE_MANAGED: &str = "managed";
+
 /// Settings for the VOICEVOX-compatible TTS provider.
 ///
 /// Field names are the `snake_case` keys documented in
@@ -34,12 +40,13 @@ pub struct VoicevoxConfig {
     /// Output sample rate (e.g. 24000 / 48000). Only sent when set; the
     /// engine default (24000 for VOICEVOX) applies otherwise.
     pub output_sampling_rate: Option<u32>,
-    /// Whether to spawn the engine binary when the server is not running.
-    pub auto_start: bool,
+    /// Engine mode: `"external"` (default; use a running engine) or
+    /// `"managed"` (spawn `server_path` when the engine is not running).
+    pub mode: String,
     /// Engine executable path used by managed mode.
-    pub engine_path: Option<String>,
+    pub server_path: Option<String>,
     /// Extra command-line arguments passed to the engine binary.
-    pub engine_args: Vec<String>,
+    pub server_args: Vec<String>,
     /// How long managed mode waits for `GET /version` to succeed after
     /// spawning the engine.
     pub startup_timeout_secs: u64,
@@ -56,12 +63,21 @@ impl Default for VoicevoxConfig {
             volume_scale: 1.0,
             tempo_dynamics_scale: 1.0,
             output_sampling_rate: None,
-            auto_start: false,
-            engine_path: None,
-            engine_args: Vec::new(),
+            mode: MODE_EXTERNAL.to_string(),
+            server_path: None,
+            server_args: Vec::new(),
             startup_timeout_secs: 10,
         }
     }
+}
+
+/// Effective engine mode after resolving the `mode` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineMode {
+    /// Use an already-running engine; never spawn a child.
+    External,
+    /// Spawn `server_path` when the engine is not running.
+    Managed,
 }
 
 impl VoicevoxConfig {
@@ -74,6 +90,31 @@ impl VoicevoxConfig {
     pub fn from_value(value: serde_json::Value) -> Result<Self, PluginError> {
         serde_json::from_value(value)
             .map_err(|e| PluginError::provider(format!("invalid voicevox provider config: {e}")))
+    }
+
+    /// Resolves the configured engine mode. Unknown values fall back to
+    /// [`EngineMode::External`] with a warning, so a typo cannot silently
+    /// spawn a binary.
+    #[must_use]
+    pub fn mode(&self) -> EngineMode {
+        match self.mode.trim() {
+            MODE_MANAGED => EngineMode::Managed,
+            MODE_EXTERNAL | "" => EngineMode::External,
+            other => {
+                tracing::warn!(
+                    component = "VoicevoxPlugin",
+                    mode = other,
+                    "unknown voicevox mode; falling back to external"
+                );
+                EngineMode::External
+            }
+        }
+    }
+
+    /// The launch signature for managed-mode engine restart decisions.
+    #[must_use]
+    pub fn launch_key(&self) -> crate::engine::LaunchKey {
+        crate::engine::LaunchKey::from_config(self)
     }
 
     /// Resolves the speaker for a request: a non-empty `voice` value that
@@ -114,8 +155,8 @@ mod tests {
         assert_eq!(cfg.server_url, DEFAULT_SERVER_URL);
         assert_eq!(cfg.speaker_id, 0);
         assert!((cfg.speed_scale - 1.0).abs() < 1e-4);
-        assert!(!cfg.auto_start);
-        assert!(cfg.engine_path.is_none());
+        assert_eq!(cfg.mode(), EngineMode::External);
+        assert!(cfg.server_path.is_none());
         assert_eq!(cfg.startup_timeout_secs, 10);
     }
 
@@ -130,9 +171,9 @@ mod tests {
             "volume_scale": 0.9,
             "tempo_dynamics_scale": 1.2,
             "output_sampling_rate": 48000,
-            "auto_start": true,
-            "engine_path": "/opt/voicevox/run",
-            "engine_args": ["--port", "10101"],
+            "mode": "managed",
+            "server_path": "/opt/voicevox/run",
+            "server_args": ["--port", "10101"],
             "startup_timeout_secs": 30,
             "voice": "14",
             "future_key": "preserved"
@@ -142,10 +183,16 @@ mod tests {
         assert_eq!(cfg.speaker_id, 42);
         assert!((cfg.speed_scale - 1.5).abs() < 1e-4);
         assert_eq!(cfg.output_sampling_rate, Some(48_000));
-        assert!(cfg.auto_start);
-        assert_eq!(cfg.engine_path.as_deref(), Some("/opt/voicevox/run"));
-        assert_eq!(cfg.engine_args, vec!["--port", "10101"]);
+        assert_eq!(cfg.mode(), EngineMode::Managed);
+        assert_eq!(cfg.server_path.as_deref(), Some("/opt/voicevox/run"));
+        assert_eq!(cfg.server_args, vec!["--port", "10101"]);
         assert_eq!(cfg.startup_timeout_secs, 30);
+    }
+
+    #[test]
+    fn unknown_mode_falls_back_to_external() {
+        let cfg = VoicevoxConfig::from_value(json!({"mode": "auto"})).expect("config parses");
+        assert_eq!(cfg.mode(), EngineMode::External);
     }
 
     #[test]

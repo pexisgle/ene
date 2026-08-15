@@ -1,43 +1,37 @@
 //! Engines page: unified management of local inference engines.
 //!
-//! One place for sidecar binaries (llama-server / whisper-server), model
-//! files, catalog state, and the per-engine settings (enable toggle plus
-//! schema-driven config forms). Cloud providers stay on the Plugins page.
+//! One place for sidecar binaries (llama-server / whisper-server /
+//! VOICEVOX), model files, catalog state, and the per-engine settings
+//! (enable toggle plus schema-driven config forms). Cloud providers stay on
+//! the Plugins page. The sidecar rows are rendered by the shared
+//! [`artifact_card`] module (also used by the Voice page), and the set of
+//! sidecars per engine comes from the plugin snapshot's requirements rather
+//! than a hardcoded table.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::ai_bridge::AiBridge;
+use crate::settings_ui::artifact_card;
 use crate::settings_ui::components::{self, BadgeTone, status_badge};
 use crate::settings_ui::draft::SettingsDraft;
 use crate::settings_ui::input::{AsyncData, SettingsInputState};
+use crate::settings_ui::provider_form;
 use crate::settings_ui::schema_form::{SchemaFormOptions, schema_object_form};
 use ene_plugin_host::{ArtifactSnapshot, PluginHealthState, PluginSettingsSnapshot};
 use serde_json::Value;
 
-/// Local engines shown on this page: plugin name + whether it runs a
-/// sidecar binary that the artifact catalog manages.
-const ENGINES: &[(&str, bool)] = &[
-    ("llama-server", true),
-    ("voicevox", false),
-    ("whisper", true),
-    ("kokoro", false),
-    ("onnx", false),
-];
+/// Local engines shown on this page, in display order. Whether an engine
+/// runs a catalog-managed sidecar is derived from its snapshot's `sidecars`
+/// (manifest requirements plus the built-in table), so new sidecar plugins
+/// appear automatically.
+const ENGINES: &[&str] = &["llama-server", "voicevox", "whisper", "kokoro", "onnx"];
 
 /// Plugins whose profiles are model definitions (weights on disk).
 const MODEL_PROFILE_PLUGINS: &[&str] = &["llama-server", "local-llm"];
 
 fn fl(key: &str) -> String {
     crate::i18n::loader().get(key)
-}
-
-fn sidecar_artifact_id(plugin: &str) -> &'static str {
-    if plugin == "whisper" {
-        "whisper-server"
-    } else {
-        "llama-server"
-    }
 }
 
 /// Renders the Engines page.
@@ -55,7 +49,7 @@ pub fn render(
         input.artifact_snapshot.start(ai.fetch_artifact_snapshot());
     }
     input.artifact_snapshot.poll();
-    poll_artifact_actions(input);
+    artifact_card::poll_artifact_actions(input);
 
     render_catalog(ui, draft, ai, input);
     ui.add_space(8.0);
@@ -63,25 +57,32 @@ pub fn render(
     let snapshots = input.plugin_snapshots.data.clone().unwrap_or_default();
     let artifacts = input.artifact_snapshot.data.clone().unwrap_or_default();
     components::section_card(ui, "engines-list", &fl("engines-list"), |ui| {
-        for (index, (name, has_sidecar)) in ENGINES.iter().enumerate() {
-            render_engine(
-                ui,
-                draft,
-                ai,
-                input,
-                name,
-                *has_sidecar,
-                &snapshots,
-                &artifacts,
-            );
-            if index + 1 < ENGINES.len() {
+        // Fixed display order for the built-ins, then any snapshot-declared
+        // engine (third-party plugin with sidecar requirements or model
+        // profiles) so a new sidecar plugin is never dropped from the page.
+        let mut names: Vec<String> = ENGINES.iter().map(|name| (*name).to_string()).collect();
+        for snapshot in &snapshots {
+            let declared = !snapshot.sidecars.is_empty()
+                || snapshot.profiles.as_ref().is_some_and(|profiles| {
+                    profiles
+                        .as_object()
+                        .is_some_and(|object| !object.is_empty())
+                });
+            if declared && !names.iter().any(|name| name == &snapshot.id) {
+                names.push(snapshot.id.clone());
+            }
+        }
+        for (index, name) in names.iter().enumerate() {
+            render_engine(ui, draft, ai, input, name, &snapshots, &artifacts);
+            if index + 1 < names.len() {
                 ui.separator();
             }
         }
     });
 }
 
-/// Catalog configuration and refresh controls.
+/// Catalog configuration: enable flag, URL, trusted Ed25519 keys, storage
+/// root, and refresh controls.
 fn render_catalog(
     ui: &mut egui::Ui,
     draft: &mut SettingsDraft,
@@ -102,6 +103,25 @@ fn render_catalog(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let mut root_dir = artifact_cfg
+        .get("root_dir")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut keys: Vec<(String, String)> = artifact_cfg
+        .get("catalog_keys")
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| {
+                    Some((
+                        key.get("key_id")?.as_str()?.to_string(),
+                        key.get("public_key_hex")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mut changed = false;
 
     components::section_card(ui, "engines-catalog", &fl("engines-catalog"), |ui| {
@@ -114,6 +134,48 @@ fn render_catalog(
                 .add(egui::TextEdit::singleline(&mut url).desired_width(300.0))
                 .changed();
         });
+        ui.horizontal(|ui| {
+            ui.label(fl("engines-catalog-root"));
+            changed |= ui
+                .add(egui::TextEdit::singleline(&mut root_dir).desired_width(300.0))
+                .changed();
+        });
+        ui.label(fl("engines-catalog-keys"));
+        let mut removed_key: Option<usize> = None;
+        for (index, (key_id, public_key)) in keys.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(egui::TextEdit::singleline(key_id).desired_width(140.0))
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(public_key)
+                            .desired_width(280.0)
+                            .hint_text(fl("engines-catalog-key-hint")),
+                    )
+                    .changed();
+                if ui.small_button("✕").clicked() {
+                    removed_key = Some(index);
+                }
+            });
+        }
+        if let Some(index) = removed_key {
+            keys.remove(index);
+            changed = true;
+        }
+        if ui.small_button(fl("engines-catalog-add-key")).clicked() {
+            keys.push((String::new(), String::new()));
+            changed = true;
+        }
+        if !keys.is_empty()
+            && !keys.iter().all(|(id, key)| {
+                !id.trim().is_empty()
+                    && key.trim().len() == 64
+                    && key.trim().chars().all(|c| c.is_ascii_hexdigit())
+            })
+        {
+            ui.weak(fl("engines-catalog-key-invalid"));
+        }
         ui.horizontal(|ui| {
             let refreshing = input.catalog_refresh.is_some();
             if ui
@@ -153,6 +215,31 @@ fn render_catalog(
                 "catalog_url".to_string(),
                 Value::String(url.trim().to_string()),
             );
+            object.insert(
+                "root_dir".to_string(),
+                if root_dir.trim().is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(root_dir.trim().to_string())
+                },
+            );
+            object.insert(
+                "catalog_keys".to_string(),
+                Value::Array(
+                    keys.into_iter()
+                        .map(|(key_id, public_key_hex)| {
+                            Value::Object(
+                                [
+                                    ("key_id".to_string(), Value::String(key_id)),
+                                    ("public_key_hex".to_string(), Value::String(public_key_hex)),
+                                ]
+                                .into_iter()
+                                .collect(),
+                            )
+                        })
+                        .collect(),
+                ),
+            );
         }
         draft.set_path(path, artifact_cfg);
     }
@@ -164,7 +251,6 @@ fn render_engine(
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
     name: &str,
-    has_sidecar: bool,
     snapshots: &[PluginSettingsSnapshot],
     artifacts: &[ArtifactSnapshot],
 ) {
@@ -187,86 +273,24 @@ fn render_engine(
         }
     });
 
-    if has_sidecar {
-        render_sidecar_row(ui, ai, input, sidecar_artifact_id(name), artifacts);
-    }
-    render_models(ui, draft, input, name);
-    render_config_form(ui, draft, ai, input, snapshot);
-}
-
-/// Sidecar binary row: installed version, update, and rollback.
-fn render_sidecar_row(
-    ui: &mut egui::Ui,
-    ai: &Arc<AiBridge>,
-    input: &mut SettingsInputState,
-    artifact_id: &str,
-    artifacts: &[ArtifactSnapshot],
-) {
-    ui.horizontal(|ui| {
-        ui.label(format!("{}:", fl("engines-sidecar")));
-        let artifact = artifacts.iter().find(|a| a.artifact_id == artifact_id);
-        match artifact {
-            Some(artifact) => {
-                match &artifact.installed {
-                    Some(installed) => {
-                        ui.label(format!(
-                            "{} v{} ({}",
-                            fl("engines-installed-version"),
-                            installed.version,
-                            format_size(installed.size)
-                        ));
-                        ui.label(")");
-                    }
-                    None => {
-                        ui.weak(fl("engines-not-installed"));
-                    }
-                }
-                if let Some(error) = &artifact.error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
-                let updating = input.artifact_installs.contains_key(artifact_id);
-                if artifact.update_available && !updating {
-                    if ui
-                        .small_button(fl("engines-update"))
-                        .on_hover_text(fl("engines-update-hint"))
-                        .clicked()
-                    {
-                        input.artifact_installs.insert(
-                            artifact_id.to_string(),
-                            ai.install_artifact(artifact_id.to_string(), None),
-                        );
-                    }
-                } else if updating {
-                    ui.weak(fl("engines-updating"));
-                }
-                let rolling = input.artifact_rollbacks.contains_key(artifact_id);
-                if artifact.installed.is_some() && !rolling {
-                    if ui
-                        .small_button(fl("engines-rollback"))
-                        .on_hover_text(fl("engines-rollback-hint"))
-                        .clicked()
-                    {
-                        input.artifact_rollbacks.insert(
-                            artifact_id.to_string(),
-                            ai.rollback_artifact(artifact_id.to_string()),
-                        );
-                    }
-                } else if rolling {
-                    ui.weak(fl("engines-rolling-back"));
-                }
-            }
-            None => {
-                ui.weak(fl("engines-not-installed"));
-            }
+    if let Some(snapshot) = snapshot
+        && !snapshot.sidecars.is_empty()
+    {
+        for sidecar in &snapshot.sidecars {
+            artifact_card::render_artifact_card(ui, ai, input, artifacts, sidecar);
         }
-    });
+    }
+    render_models(ui, draft, ai, input, artifacts, name);
+    render_config_form(ui, draft, ai, input, snapshot);
 }
 
 /// Model files section: profile list with paths, sizes, and removal.
 fn render_models(
     ui: &mut egui::Ui,
     draft: &mut SettingsDraft,
+    ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
+    artifacts: &[ArtifactSnapshot],
     plugin: &str,
 ) {
     if !MODEL_PROFILE_PLUGINS.contains(&plugin) {
@@ -289,6 +313,15 @@ fn render_models(
             let mut removed: Option<String> = None;
             let mut updated = None;
             for (name, profile) in object {
+                // Catalog-managed models get the same explicit
+                // install/update/cancel/rollback/uninstall card as sidecars.
+                if let Some(artifact_id) = profile
+                    .get("artifact_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                {
+                    artifact_card::render_artifact_card(ui, ai, input, artifacts, artifact_id);
+                }
                 ui.horizontal(|ui| {
                     ui.strong(name);
                     let path = profile
@@ -306,7 +339,11 @@ fn render_models(
                         .map(|metadata| metadata.len());
                     match (path, size) {
                         (Some(path), Some(size)) => {
-                            ui.weak(format!("{} ({})", path.display(), format_size(size)));
+                            ui.weak(format!(
+                                "{} ({})",
+                                path.display(),
+                                artifact_card::format_size(size)
+                            ));
                         }
                         (Some(path), None) => {
                             ui.weak(format!(
@@ -317,11 +354,7 @@ fn render_models(
                         }
                         (None, _) => {
                             if let Some(url) = url {
-                                ui.weak(format!(
-                                    "{} ({})",
-                                    url,
-                                    fl("engines-model-download-on-use")
-                                ));
+                                ui.weak(format!("{} ({})", url, fl("engines-model-not-installed")));
                             }
                         }
                     }
@@ -346,13 +379,6 @@ fn render_models(
                         } else {
                             input.model_delete_arm.insert(arm_key.clone(), true);
                         }
-                    } else if input
-                        .model_delete_arm
-                        .get(&arm_key)
-                        .copied()
-                        .unwrap_or(false)
-                    {
-                        input.model_delete_arm.insert(arm_key, false);
                     }
                 });
             }
@@ -397,6 +423,9 @@ fn render_config_form(
         .editing()
         .get_path(&schema_path)
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    if config_value.is_null() {
+        config_value = Value::Object(serde_json::Map::new());
+    }
     if let Some(schema) = &snapshot.schema {
         egui::CollapsingHeader::new(fl("plugins-config"))
             .id_salt(("engines_config", snapshot.id.as_str()))
@@ -416,6 +445,14 @@ fn render_config_form(
                 ) {
                     draft.set_path(&schema_path, config_value);
                 }
+                provider_form::render_config_actions(
+                    ui,
+                    draft,
+                    ai,
+                    input,
+                    Some(snapshot),
+                    &snapshot.id,
+                );
             });
     } else if !config_value
         .as_object()
@@ -437,61 +474,15 @@ fn render_config_form(
     }
 }
 
-/// Dynamic options for `x-ene-ui.options_path` fields, fetched once per
-/// plugin and polled every frame (same contract as the Plugins page).
+/// Dynamic options for `x-ene-ui.options_path` fields (shared helper with
+/// the Voice/Plugins pages, including the explicit load/reload button).
 fn schema_form_options(
     ui: &mut egui::Ui,
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
     snapshot: &PluginSettingsSnapshot,
 ) -> std::collections::BTreeMap<String, Vec<(String, String)>> {
-    let Some(schema) = &snapshot.schema else {
-        return std::collections::BTreeMap::new();
-    };
-    let state = input.plugin_options.entry(snapshot.id.clone()).or_default();
-    state.poll();
-    let mut fields = Vec::new();
-    collect_options_paths(schema, "", &mut fields);
-    if !state.started() {
-        let plugin = snapshot.id.clone();
-        state.start(ai.fetch_plugin_options(plugin, fields));
-    }
-    if state.loading() {
-        ui.weak(fl("plugins-loading"));
-    }
-    if let Some(error) = state.error.clone() {
-        ui.colored_label(ui.visuals().error_fg_color, error);
-    }
-    if let Some(map) = &state.data
-        && !map.is_empty()
-    {
-        return map.clone();
-    }
-    std::collections::BTreeMap::new()
-}
-
-fn collect_options_paths(
-    schema: &serde_json::Value,
-    prefix: &str,
-    out: &mut Vec<(String, String)>,
-) {
-    let meta = super::schema_form::UiMetadata::from_schema(schema);
-    if let Some(options_path) = meta.options_path {
-        out.push((prefix.to_string(), options_path));
-    }
-    if let Some(properties) = schema
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-    {
-        for (name, child) in properties {
-            let child_prefix = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}.{name}")
-            };
-            collect_options_paths(child, &child_prefix, out);
-        }
-    }
+    provider_form::schema_form_options(ui, ai, input, snapshot, &snapshot.id)
 }
 
 fn render_health_badge(ui: &mut egui::Ui, snapshot: &PluginSettingsSnapshot) {
@@ -504,47 +495,4 @@ fn render_health_badge(ui: &mut egui::Ui, snapshot: &PluginSettingsSnapshot) {
         PluginHealthState::Stopped => (fl("plugins-health-stopped"), BadgeTone::Neutral),
     };
     status_badge(ui, &label, tone);
-}
-
-/// Polls in-flight artifact installs/rollbacks; a completed action resets
-/// the artifact snapshot so the next frame refetches fresh state.
-fn poll_artifact_actions(input: &mut SettingsInputState) {
-    let mut finished_installs: Vec<String> = Vec::new();
-    for (id, receiver) in &mut input.artifact_installs {
-        match receiver.try_recv() {
-            Ok(Ok(_) | Err(_)) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                finished_installs.push(id.clone());
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
-        }
-    }
-    for id in finished_installs {
-        input.artifact_installs.remove(&id);
-        input.artifact_snapshot = AsyncData::default();
-    }
-    let mut finished_rollbacks: Vec<String> = Vec::new();
-    for (id, receiver) in &mut input.artifact_rollbacks {
-        match receiver.try_recv() {
-            Ok(Ok(_) | Err(_)) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                finished_rollbacks.push(id.clone());
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
-        }
-    }
-    for id in finished_rollbacks {
-        input.artifact_rollbacks.remove(&id);
-        input.artifact_snapshot = AsyncData::default();
-    }
-}
-
-fn format_size(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 * 1024 {
-        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    } else if bytes >= 1024 * 1024 {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
 }

@@ -38,15 +38,17 @@ pub mod digest;
 pub mod download;
 /// Error types.
 pub mod error;
+/// Safe extraction of zip payloads (VVPP and friends).
+pub mod extract;
 /// Install, switch, roll back, and GC artifacts.
 pub mod installer;
 
 pub use cas::{Cas, CasEntry};
 pub use catalog::{
-    ArtifactKind, ArtifactTarget, CatalogMetadata, CatalogVerifier, SignedCatalog,
-    TrustedCatalogKeys, canonical_catalog_bytes, sign_catalog,
+    ArtifactKind, ArtifactPayload, ArtifactTarget, CatalogMetadata, CatalogVerifier, PayloadFormat,
+    SignedCatalog, TrustedCatalogKeys, canonical_catalog_bytes, sign_catalog,
 };
 pub use digest::{sha256_hex, verify_sha256};
-pub use download::{DownloadOutcome, Downloader};
+pub use download::{ArtifactProgress, DownloadOutcome, Downloader, InstallStage};
 pub use error::{ArtifactError, Result};
 pub use installer::{ArtifactInstaller, InstalledArtifact, InstalledState, InstallerConfig};

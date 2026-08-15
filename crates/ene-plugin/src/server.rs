@@ -378,8 +378,13 @@ impl PluginDispatch {
                 .is_some_and(|c| c.supports_migrate_config())
     }
 
-    /// First trait object that advertises list-options support handles the path.
-    fn list_config_options(&self, path: &str) -> Vec<ene_plugin_proto::ConfigOption> {
+    /// First trait object that advertises list-options support handles the
+    /// path; the boxed future lets plugins query live engines or remote
+    /// catalogs without blocking the IPC read loop.
+    fn list_config_options(
+        &self,
+        path: &str,
+    ) -> futures::future::BoxFuture<'_, Vec<ene_plugin_proto::ConfigOption>> {
         if let Some(tool) = &self.tool
             && tool.supports_list_config_options()
         {
@@ -415,7 +420,7 @@ impl PluginDispatch {
         {
             return capability.list_config_options(path);
         }
-        Vec::new()
+        Box::pin(async { Vec::new() })
     }
 
     fn validate_config(
@@ -996,7 +1001,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
         PluginIpcRequest::ListConfigOptions { request_id, path } => {
             PluginIpcResponse::ConfigOptions {
                 request_id: request_id.clone(),
-                options: dispatch.list_config_options(path),
+                options: dispatch.list_config_options(path).await,
             }
         }
         PluginIpcRequest::ValidateConfig { request_id, value } => {
@@ -2460,8 +2465,11 @@ mod tests {
             true
         }
 
-        fn list_config_options(&self, path: &str) -> Vec<ene_plugin_proto::ConfigOption> {
-            if path == "voice" {
+        fn list_config_options(
+            &self,
+            path: &str,
+        ) -> futures::future::BoxFuture<'_, Vec<ene_plugin_proto::ConfigOption>> {
+            let options = if path == "voice" {
                 vec![ene_plugin_proto::ConfigOption {
                     value: serde_json::json!("alloy"),
                     label: "Alloy".into(),
@@ -2469,7 +2477,8 @@ mod tests {
                 }]
             } else {
                 Vec::new()
-            }
+            };
+            Box::pin(async move { options })
         }
 
         fn validate_config(

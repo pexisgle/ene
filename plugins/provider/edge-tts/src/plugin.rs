@@ -1,5 +1,7 @@
 //! Edge-TTS plugin: capabilities and synthesis handler.
 
+use std::sync::{Mutex, PoisonError};
+
 use async_trait::async_trait;
 use ene_plugin::prelude::*;
 use serde_json::{Value, json};
@@ -15,7 +17,7 @@ use crate::ssml::{chunk_text, escape_xml, sanitize};
 /// The static capability data (`tts_spec()` / `TTS_PROVIDER_KIND`) is
 /// generated from the `#[provider(...)]` attribute; synthesis is
 /// hand-written.
-#[derive(TtsPlugin, Default)]
+#[derive(TtsPlugin)]
 #[provider(
     kind = "edge-tts",
     formats = "wav",
@@ -24,9 +26,30 @@ use crate::ssml::{chunk_text, escape_xml, sanitize};
     concurrency = 2,
     queue_depth = 4,
 )]
-pub struct EdgeTtsPlugin;
+pub struct EdgeTtsPlugin {
+    /// Delivered config from `set_config`, canonical over the per-request
+    /// blob (which may predate a live config push).
+    delivered: Mutex<Option<EdgeTtsConfig>>,
+}
+
+impl Default for EdgeTtsPlugin {
+    fn default() -> Self {
+        Self {
+            delivered: Mutex::new(None),
+        }
+    }
+}
 
 impl ene_plugin::ConfigurablePlugin for EdgeTtsPlugin {
+    fn set_config(&self, config: &Value) {
+        if let Ok(config) = EdgeTtsConfig::from_value(config.clone()) {
+            *self
+                .delivered
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(config);
+        }
+    }
+
     /// Captures the broker socket/token so every connection is
     /// host-mediated.
     fn set_sandbox(&self, sandbox: &ene_plugin_proto::SandboxConfigData) {
@@ -44,31 +67,31 @@ impl ene_plugin::ConfigurablePlugin for EdgeTtsPlugin {
                     "type": "string",
                     "default": "ja-JP-NanamiNeural",
                     "description": "Edge voice name, short (ja-JP-NanamiNeural) or long form",
-                    "x-ene-ui": { "group": "voice", "order": 0, "options_path": "voices", "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "voice", "order": 0, "impact": "runtime_reload", "label_key": "provider-edge-tts-voice-label", "description_key": "provider-edge-tts-voice-desc" }
                 },
                 "locale": {
                     "type": "string",
                     "default": "ja-JP",
                     "description": "SSML xml:lang value on the <speak> element",
-                    "x-ene-ui": { "group": "voice", "order": 1, "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "voice", "order": 1, "impact": "runtime_reload", "label_key": "provider-edge-tts-locale-label", "description_key": "provider-edge-tts-locale-desc" }
                 },
                 "rate": {
                     "type": "string",
                     "default": "+0%",
                     "description": "Prosody rate adjustment (e.g. +10%, -10%)",
-                    "x-ene-ui": { "group": "voice", "order": 2, "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "voice", "order": 2, "impact": "runtime_reload", "label_key": "provider-edge-tts-rate-label", "description_key": "provider-edge-tts-rate-desc" }
                 },
                 "pitch": {
                     "type": "string",
                     "default": "+0Hz",
                     "description": "Prosody pitch adjustment (e.g. +5Hz, -5Hz)",
-                    "x-ene-ui": { "group": "voice", "order": 3, "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "voice", "order": 3, "impact": "runtime_reload", "label_key": "provider-edge-tts-pitch-label", "description_key": "provider-edge-tts-pitch-desc" }
                 },
                 "volume": {
                     "type": "string",
                     "default": "+0%",
                     "description": "Prosody volume adjustment (e.g. +10%, -10%)",
-                    "x-ene-ui": { "group": "voice", "order": 4, "impact": "runtime_reload" }
+                    "x-ene-ui": { "group": "voice", "order": 4, "impact": "runtime_reload", "label_key": "provider-edge-tts-volume-label", "description_key": "provider-edge-tts-volume-desc" }
                 },
                 "max_retries": {
                     "type": "integer",
@@ -110,7 +133,15 @@ impl TtsPlugin for EdgeTtsPlugin {
                 "edge-tts only emits wav audio; requested format: {format}"
             )));
         }
-        let config = EdgeTtsConfig::from_value(config)?.with_voice(&voice)?;
+        // The delivered `set_config` blob is canonical; the request blob is
+        // the fallback when the host never delivered one.
+        let config = self
+            .delivered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or(EdgeTtsConfig::from_value(config)?)
+            .with_voice(&voice)?;
         let chunks = chunk_text(&escape_xml(&sanitize(&text)));
         if chunks.is_empty() {
             return Err(PluginError::provider(

@@ -1638,6 +1638,55 @@ impl EneHandle {
             .unwrap_or_else(|_| Err("runtime reply dropped".to_string()))
     }
 
+    /// Removes an installed artifact from the signed catalog.
+    pub async fn uninstall_artifact(&self, artifact_id: &str) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::UninstallArtifact {
+                artifact_id: artifact_id.to_string(),
+                reply: tx,
+            })
+            .is_err()
+        {
+            return Err("runtime is not running".to_string());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("runtime reply dropped".to_string()))
+    }
+
+    /// Cancels an in-flight artifact install.
+    pub async fn cancel_artifact_install(&self, artifact_id: &str) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::CancelArtifactInstall {
+                artifact_id: artifact_id.to_string(),
+                reply: tx,
+            })
+            .is_err()
+        {
+            return Err("runtime is not running".to_string());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("runtime reply dropped".to_string()))
+    }
+
+    /// Live progress of every in-flight artifact operation.
+    pub async fn artifact_progress(
+        &self,
+    ) -> std::collections::BTreeMap<String, Option<ene_plugin_host::ArtifactProgress>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(EneCommand::GetArtifactProgress { reply: tx })
+            .is_err()
+        {
+            return std::collections::BTreeMap::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Rolls an artifact back one generation.
     pub async fn rollback_artifact(
         &self,

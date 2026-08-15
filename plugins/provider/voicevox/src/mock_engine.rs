@@ -174,6 +174,14 @@ fn route(
             "application/json",
             b"{\"version\":\"0.15.0\"}".to_vec(),
         )
+    } else if method == "GET" && path.starts_with("/speakers") {
+        (
+            200,
+            "application/json",
+            r#"[{"name":"四国めたん","speaker_uuid":"7ffcb7ce-00ec-4bdc-82cd-45a8889e43ff","styles":[{"name":"ノーマル","id":2},{"name":"あまあま","id":0}]},{"name":"ずんだもん","speaker_uuid":"388f246b-8c41-4ac1-8e2d-5d79f3fa56fa","styles":[{"name":"ノーマル","id":3}]}]"#
+                .to_string()
+                .into_bytes(),
+        )
     } else if method == "POST" && path.starts_with("/audio_query") {
         (
             200,

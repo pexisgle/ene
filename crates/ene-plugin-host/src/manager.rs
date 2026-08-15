@@ -1029,8 +1029,10 @@ pub struct PluginHostManager {
     /// by killing child processes with a brief wait for reaping.
     shutdown_on_drop: bool,
     /// Host-side artifact services (signed catalog + CAS). `None` when the
-    /// artifact system is disabled or not configured.
-    artifact: Option<ArtifactState>,
+    /// artifact system is disabled or not configured. Shared (`Arc`) so
+    /// long-running installs can proceed without holding the whole manager
+    /// (and with it the plugin-host mutex) for the duration of a download.
+    artifact: Option<Arc<ArtifactState>>,
     /// Raw delivered config/profiles per plugin plus the sidecar artifact
     /// ids used for injection; re-injected after artifact installs/rollbacks.
     delivered: std::sync::Mutex<HashMap<String, DeliveredConfig>>,
@@ -1123,7 +1125,7 @@ impl PluginHostManager {
         // Host-side artifact services (None when the artifact system is
         // inactive); used for sidecar/model path injection and the Engines
         // page state.
-        let artifact = ArtifactState::from_config(&plugin_config.artifact);
+        let artifact = ArtifactState::from_config(&plugin_config.artifact).map(Arc::new);
         let delivered: std::sync::Mutex<HashMap<String, DeliveredConfig>> =
             std::sync::Mutex::new(HashMap::new());
 
@@ -2004,6 +2006,15 @@ impl PluginHostManager {
         }
     }
 
+    /// Clones the shared artifact services handle, if configured.
+    ///
+    /// Background install tasks use this to run downloads/extraction
+    /// without holding the plugin-host mutex for the whole operation.
+    #[must_use]
+    pub fn artifact_handle(&self) -> Option<Arc<ArtifactState>> {
+        self.artifact.clone()
+    }
+
     /// Installs or updates an artifact from the signed catalog, then pushes
     /// re-injected config to live plugins.
     pub async fn install_artifact(
@@ -2011,24 +2022,69 @@ impl PluginHostManager {
         id: &str,
         version: Option<&str>,
     ) -> Result<InstalledArtifactView, String> {
+        self.install_artifact_with_progress(id, version, None, None)
+            .await
+    }
+
+    /// Installs or updates an artifact with progress reporting and
+    /// cancellation, then pushes re-injected config to live plugins.
+    pub async fn install_artifact_with_progress(
+        &self,
+        id: &str,
+        version: Option<&str>,
+        progress: Option<&(dyn Fn(ene_artifact::ArtifactProgress) + Sync)>,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<InstalledArtifactView, String> {
+        // Run the download/extraction on the shared handle without holding
+        // the plugin-host lock: a multi-gigabyte VOICEVOX install must not
+        // stall plugin config pushes or health probes.
         let state = self
-            .artifact
-            .as_ref()
+            .artifact_handle()
             .ok_or_else(|| "artifact system is not configured".to_string())?;
-        let view = state.install(id, version).await?;
-        self.push_artifact_configs().await;
+        let view = state.install_with(id, version, progress, cancel).await?;
+        self.push_artifact_configs_inner(false).await;
         Ok(view)
+    }
+
+    /// Pushes artifact-injected config to live plugins. Public for runtime
+    /// background tasks that install through a cloned
+    /// [`ArtifactState`](crate::artifact_state::ArtifactState) handle.
+    pub async fn push_artifact_configs(&self) {
+        self.push_artifact_configs_inner(false).await;
+    }
+
+    /// Pushes artifact-injected config to live plugins, delivering the raw
+    /// (un-injected) blobs even when they equal the stored raw config —
+    /// used after uninstalls so a removed sidecar's `server_path` is
+    /// dropped from live plugins.
+    pub async fn push_artifact_configs_forced(&self) {
+        self.push_artifact_configs_inner(true).await;
     }
 
     /// Rolls an artifact back one generation and pushes re-injected config.
     pub async fn rollback_artifact(&self, id: &str) -> Result<InstalledArtifactView, String> {
         let state = self
-            .artifact
-            .as_ref()
+            .artifact_handle()
             .ok_or_else(|| "artifact system is not configured".to_string())?;
         let view = state.rollback(id)?;
-        self.push_artifact_configs().await;
+        self.push_artifact_configs_inner(false).await;
         Ok(view)
+    }
+
+    /// Removes an installed artifact and pushes re-injected config to live
+    /// plugins.
+    ///
+    /// The push is forced: after an uninstall the injected `server_path` is
+    /// gone, so the raw (un-injected) config must be delivered even when it
+    /// equals the stored raw blob — otherwise live plugins keep spawning the
+    /// removed binary.
+    pub async fn uninstall_artifact(&self, id: &str) -> Result<(), String> {
+        let state = self
+            .artifact_handle()
+            .ok_or_else(|| "artifact system is not configured".to_string())?;
+        state.uninstall(id)?;
+        self.push_artifact_configs_inner(true).await;
+        Ok(())
     }
 
     /// Force-refreshes the signed catalog and returns its version.
@@ -2042,7 +2098,7 @@ impl PluginHostManager {
 
     /// Re-runs artifact injection over the stored raw blobs and pushes the
     /// result to live connections whose delivered config changed.
-    async fn push_artifact_configs(&self) {
+    async fn push_artifact_configs_inner(&self, force: bool) {
         let Some(state) = &self.artifact else {
             return;
         };
@@ -2059,7 +2115,7 @@ impl PluginHostManager {
             let mut config = delivered.raw_config.clone();
             let mut profiles = delivered.raw_profiles.clone();
             state.inject(&delivered.sidecars, &mut config, &mut profiles);
-            if config == delivered.raw_config && profiles == delivered.raw_profiles {
+            if !force && config == delivered.raw_config && profiles == delivered.raw_profiles {
                 continue;
             }
             match conn.set_config(config.clone(), profiles.clone()).await {
@@ -2103,11 +2159,16 @@ impl PluginHostManager {
         let plugin_config = config
             .get_section::<crate::config::PluginConfig>()
             .unwrap_or_default();
+        let manifest_store = ManifestStore::new(&plugin_config.trusted_publishers);
         let mut names: Vec<&String> = plugin_config.list.keys().collect();
         names.sort();
         let mut snapshots = Vec::with_capacity(names.len());
         for name in names {
             let entry = &plugin_config.list[name];
+            let manifest = match &entry.manifest {
+                Some(signed) => manifest_store.verify(signed, name).ok(),
+                None => builtin_manifest(name),
+            };
             let connection = self.connection(name);
             let (schema, schema_version) = match &connection {
                 Some(conn) => conn.config_schema_with_version().await.unwrap_or((None, 0)),
@@ -2206,6 +2267,7 @@ impl PluginHostManager {
                 supports_validate_config: connection
                     .as_ref()
                     .is_some_and(|conn| conn.supports_validate_config()),
+                sidecars: sidecar_ids_for(name, manifest.as_ref()),
                 config,
                 profiles,
                 credentials,

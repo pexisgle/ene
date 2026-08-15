@@ -66,6 +66,9 @@
 //!   provider plugins now own out of `ai.*` (see `migrate_v4_to_v5`);
 //! - version 5 → 6 mirrors the llama-cpp plugin's config and profiles into
 //!   the experimental llama-server plugin (see `migrate_v5_to_v6`).
+//! - version 6 → 7 reduces `ai.tts` / `ai.stt` to provider routing and moves
+//!   every provider-owned value into `plugins.list.<plugin>.config`, plus
+//!   renames the VOICEVOX managed-mode keys (see `migrate_v6_to_v7`).
 //!
 //! They are registered by a `ctor` in this crate because `ene-config` owns
 //! the settings document schema, and the steps must be in place wherever a
@@ -82,7 +85,7 @@ use std::sync::OnceLock;
 /// one whose `version` exceeds it is rejected (see
 /// [`EneConfigError::ConfigVersionTooNew`]). Bump this whenever you register a
 /// new migration step.
-pub const CURRENT_CONFIG_VERSION: u32 = 6;
+pub const CURRENT_CONFIG_VERSION: u32 = 7;
 
 /// The JSON key holding the schema version in `settings.json`.
 const VERSION_KEY: &str = "version";
@@ -98,6 +101,12 @@ const LLAMA_SERVER_PLUGIN: &str = "llama-server";
 const ONNX_PLUGIN: &str = "onnx";
 /// Plugin list key the v4→v5 migration relocates `ai.stt.model_path` into.
 const WHISPER_PLUGIN: &str = "whisper";
+/// Plugin list key for the `OpenAI` Speech API TTS plugin.
+const OPENAI_TTS_PLUGIN: &str = "openai-tts";
+/// Plugin list key for the `ElevenLabs` TTS plugin.
+const ELEVENLABS_PLUGIN: &str = "elevenlabs";
+/// Plugin list key for the VOICEVOX / Aivis Speech TTS plugin.
+const VOICEVOX_PLUGIN: &str = "voicevox";
 const KOKORO_PLUGIN: &str = "kokoro";
 /// Default profile name under `plugins.list.kokoro.profiles` for the single
 /// Kokoro voice set shipped today.
@@ -723,7 +732,204 @@ pub(crate) fn migrate_v5_to_v6(doc: &mut serde_json::Value) -> Result<(), EneCon
     mirror_local_models_into_plugin_profiles(doc, LLAMA_SERVER_PLUGIN)
 }
 
-/// Registers the v1→v2 … v5→v6 steps at process start, wherever a
+/// Returns the `plugins.list.<plugin>.config` object, creating the
+/// intermediate `plugins.list.<plugin>` entry when the plugin section is
+/// absent. `None` when `plugins.list.<plugin>` exists but is not an object.
+fn plugin_config_object<'a>(
+    doc: &'a mut serde_json::Value,
+    plugin: &str,
+) -> Option<&'a mut serde_json::Map<String, serde_json::Value>> {
+    let root = doc.as_object_mut()?;
+    let list = object_at(root, "plugins")?;
+    let plugin_entry = object_at(list, "list")?;
+    let entry = object_at(plugin_entry, plugin)?;
+    // A `null` config blob (the v6 default for most built-in plugins) is
+    // normalized to an empty object: the v7 schema treats null as "no
+    // provider-owned values yet", and the relocation must not fail on the
+    // stock configuration. Non-object scalars/arrays keep failing loudly
+    // rather than silently discarding a user value.
+    let config = entry
+        .entry("config")
+        .or_insert_with(|| serde_json::json!({}));
+    if config.is_null() {
+        *config = serde_json::json!({});
+    }
+    config.as_object_mut()
+}
+
+/// Destination plugin + key for one legacy `ai.tts` / `ai.stt` value.
+///
+/// Well-known providers map onto their plugin's config keys (some renamed,
+/// e.g. VOICEVOX `voice` → `speaker_id`); unknown providers get the same
+/// key inside `plugins.list.<provider>.config` so a future plugin can pick
+/// the values up without a second migration.
+fn tts_destination<'a>(provider: &'a str, key: &'a str) -> (&'a str, &'a str) {
+    match (provider, key) {
+        ("kokoro", _) => (KOKORO_PLUGIN, key),
+        ("openai_tts", _) => (OPENAI_TTS_PLUGIN, key),
+        ("elevenlabs", "model") => (ELEVENLABS_PLUGIN, "model_id"),
+        ("elevenlabs", "voice") => (ELEVENLABS_PLUGIN, "voice_id"),
+        ("elevenlabs", _) => (ELEVENLABS_PLUGIN, key),
+        ("voicevox", "voice") => (VOICEVOX_PLUGIN, "speaker_id"),
+        ("voicevox", "speed") => (VOICEVOX_PLUGIN, "speed_scale"),
+        ("voicevox", _) => (VOICEVOX_PLUGIN, key),
+        (other, _) => (other, key),
+    }
+}
+
+/// Moves every non-routing key out of `ai.<section>` into the selected
+/// provider plugin's config, then deletes the dead keys from `ai.<section>`.
+///
+/// Existing non-empty destination values win (fill-only-missing, matching
+/// the earlier relocation steps). Keys with no value (empty strings, `null`)
+/// are removed without being written anywhere.
+fn relocate_ai_section_to_provider_plugin(
+    doc: &mut serde_json::Value,
+    section: &str,
+) -> Result<(), EneConfigError> {
+    let Some(ai) = doc.pointer(&format!("/ai/{section}")) else {
+        return Ok(());
+    };
+    let provider = ai
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && *p != "none")
+        .map(str::to_string);
+    let entries: Vec<(String, serde_json::Value)> = ai
+        .as_object()
+        .into_iter()
+        .flat_map(serde_json::Map::iter)
+        .filter(|(key, _)| key.as_str() != "provider")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let _ = ai;
+    if let Some(ai) = doc
+        .pointer_mut(&format!("/ai/{section}"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for (key, _) in &entries {
+            ai.remove(key);
+        }
+    }
+    for (key, value) in entries {
+        if !has_value(&value) {
+            continue;
+        }
+        let Some(provider) = provider.as_deref() else {
+            continue;
+        };
+        let (plugin, destination) = tts_destination(provider, &key);
+        let Some(config) = plugin_config_object(doc, plugin) else {
+            return Err(EneConfigError::GenericConfigError(format!(
+                "plugins.list.{plugin} is not a JSON object; cannot relocate ai.{section}.{key}"
+            )));
+        };
+        let value = if plugin == VOICEVOX_PLUGIN && destination == "speaker_id" {
+            match value {
+                serde_json::Value::String(text) => text.trim().parse::<u64>().map_or_else(
+                    |_| {
+                        tracing::warn!(
+                            component = "Config",
+                            value = %text,
+                            "ai.tts.voice is not a numeric VOICEVOX speaker id; \
+                             leaving speaker_id untouched"
+                        );
+                        serde_json::Value::Null
+                    },
+                    serde_json::Value::from,
+                ),
+                other => other,
+            }
+        } else {
+            value
+        };
+        if value.is_null() {
+            continue;
+        }
+        if config
+            .get(destination)
+            .is_none_or(|existing| !has_value(existing))
+        {
+            config.insert(destination.to_string(), value);
+        }
+    }
+    Ok(())
+}
+
+/// Renames the legacy VOICEVOX managed-mode keys onto the unified sidecar
+/// naming, then removes the old keys.
+///
+/// `auto_start` (bool) becomes `mode` (`"managed"` / `"external"`);
+/// `engine_path` / `engine_args` become `server_path` / `server_args`.
+/// Existing non-empty `mode` / `server_path` / `server_args` values win; the
+/// old keys are always removed because the v7 plugin no longer reads them.
+fn migrate_voicevox_sidecar_keys(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+    // Only touch documents that actually configure the plugin; an absent
+    // voicevox entry must not be synthesized by the migration.
+    if doc
+        .pointer(&format!("/plugins/list/{VOICEVOX_PLUGIN}"))
+        .is_none()
+    {
+        return Ok(());
+    }
+    let Some(config) = plugin_config_object(doc, VOICEVOX_PLUGIN) else {
+        return Err(EneConfigError::GenericConfigError(
+            "plugins.list.voicevox.config is not a JSON object; \
+             cannot migrate managed-mode keys"
+                .to_string(),
+        ));
+    };
+    let mode_missing = config
+        .get("mode")
+        .is_none_or(|existing| !has_value(existing));
+    if mode_missing {
+        match config.remove("auto_start") {
+            Some(serde_json::Value::Bool(true)) => {
+                config.insert("mode".to_string(), serde_json::json!("managed"));
+            }
+            Some(_) | None => {
+                config.insert("mode".to_string(), serde_json::json!("external"));
+            }
+        }
+    } else {
+        config.remove("auto_start");
+    }
+    if let Some(path) = config.remove("engine_path")
+        && has_value(&path)
+        && config
+            .get("server_path")
+            .is_none_or(|existing| !has_value(existing))
+    {
+        config.insert("server_path".to_string(), path);
+    }
+    if let Some(args) = config.remove("engine_args")
+        && has_value(&args)
+        && config
+            .get("server_args")
+            .is_none_or(|existing| !has_value(existing))
+    {
+        config.insert("server_args".to_string(), args);
+    }
+    Ok(())
+}
+
+/// v6 → v7: `ai.tts` / `ai.stt` become provider routing only.
+///
+/// Every provider-owned value moves into the selected provider plugin's
+/// `plugins.list.<plugin>.config` (the single source the host adapters and
+/// the settings UI use from v7 on), and the VOICEVOX config switches to the
+/// unified `mode` / `server_path` / `server_args` sidecar naming. Unknown
+/// providers receive the same-named keys so future plugins can consume them;
+/// existing non-empty destination values are never overwritten; re-running
+/// the step on a v7 document is a no-op.
+pub(crate) fn migrate_v6_to_v7(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+    relocate_ai_section_to_provider_plugin(doc, "tts")?;
+    relocate_ai_section_to_provider_plugin(doc, "stt")?;
+    migrate_voicevox_sidecar_keys(doc)
+}
+
+/// Registers the v1→v2 … v6→v7 steps at process start, wherever a
 /// `settings.json` is loaded. `ene-config` owns these steps because the
 /// `version` field and the migration machinery live here, and the relocated
 /// keys are host document schema rather than the property of any single
@@ -770,12 +976,22 @@ const _: () = {
                 "failed to register settings.json migration v5->v6"
             );
         }
+        if let Err(err) = register_migration(6, migrate_v6_to_v7) {
+            tracing::error!(
+                component = "Config",
+                error = %err,
+                "failed to register settings.json migration v6->v7"
+            );
+        }
     }
 };
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    type FieldMapping = (&'static str, &'static str);
+    type VoiceProviderMigrationCase = (&'static str, &'static str, &'static [FieldMapping]);
 
     /// Runs `body` with the effective current version temporarily set to
     /// `version` and the registry cleared, restoring both afterwards.
@@ -1737,5 +1953,379 @@ pub(crate) mod tests {
                 "the mirror keeps the routing entry intact"
             );
         });
+    }
+
+    /// The v6→v7 step moves every known TTS provider's values into the
+    /// provider plugin config and reduces `ai.tts` to routing.
+    #[test]
+    fn v6_to_v7_relocates_known_tts_provider_values() {
+        let mut doc = serde_json::json!({
+            "version": 6,
+            "ai": {
+                "tts": {
+                    "provider": "voicevox",
+                    "model": "legacy-model",
+                    "voice": "42",
+                    "speed": 1.25,
+                    "language": "ja",
+                    "model_path": "/data/tts.onnx",
+                    "future_key": "preserved"
+                },
+                "stt": { "provider": "none", "model": "dead" }
+            },
+            "plugins": {
+                "list": {
+                    "voicevox": {
+                        "config": {
+                            "speaker_id": 7,
+                            "auto_start": true,
+                            "engine_path": "/opt/voicevox/run",
+                            "engine_args": ["--port", "50021"]
+                        }
+                    }
+                }
+            }
+        });
+        migrate_v6_to_v7(&mut doc).expect("migration succeeds");
+
+        let tts = doc.pointer("/ai/tts").expect("ai.tts remains");
+        assert_eq!(tts.get("provider"), Some(&serde_json::json!("voicevox")));
+        assert_eq!(tts.as_object().expect("object").len(), 1, "routing only");
+        let config = doc
+            .pointer("/plugins/list/voicevox/config")
+            .expect("voicevox config");
+        assert_eq!(
+            config.get("speaker_id"),
+            Some(&serde_json::json!(7)),
+            "existing wins"
+        );
+        assert_eq!(config.get("mode"), Some(&serde_json::json!("managed")));
+        assert_eq!(
+            config.get("server_path"),
+            Some(&serde_json::json!("/opt/voicevox/run"))
+        );
+        assert_eq!(
+            config.get("server_args"),
+            Some(&serde_json::json!(["--port", "50021"]))
+        );
+        assert!(config.get("auto_start").is_none());
+        assert!(config.get("engine_path").is_none());
+        assert!(config.get("engine_args").is_none());
+        assert_eq!(
+            config.get("future_key"),
+            Some(&serde_json::json!("preserved")),
+            "unknown keys are preserved in the provider config"
+        );
+        let stt = doc.pointer("/ai/stt").expect("ai.stt remains");
+        assert_eq!(stt.as_object().expect("object").len(), 1, "routing only");
+    }
+
+    /// Unknown providers receive the same-named keys so a future plugin can
+    /// consume them without another migration.
+    #[test]
+    fn v6_to_v7_unknown_provider_gets_same_named_keys() {
+        let mut doc = serde_json::json!({
+            "version": 6,
+            "ai": {
+                "tts": {
+                    "provider": "future-tts",
+                    "model": "m1",
+                    "voice": "v1",
+                    "custom": {"nested": true}
+                }
+            }
+        });
+        migrate_v6_to_v7(&mut doc).expect("migration succeeds");
+        let config = doc
+            .pointer("/plugins/list/future-tts/config")
+            .expect("unknown provider config created");
+        assert_eq!(config.get("model"), Some(&serde_json::json!("m1")));
+        assert_eq!(config.get("voice"), Some(&serde_json::json!("v1")));
+        assert_eq!(
+            config.get("custom"),
+            Some(&serde_json::json!({"nested": true}))
+        );
+        assert_eq!(
+            doc.pointer("/ai/tts")
+                .expect("ai.tts")
+                .as_object()
+                .expect("object")
+                .len(),
+            1
+        );
+    }
+
+    /// `Kokoro`, `openai_tts`, and `ElevenLabs` use their plugin-specific key
+    /// mappings; an existing destination value always wins.
+    #[test]
+    fn v6_to_v7_maps_provider_specific_keys_and_preserves_existing() {
+        let mut doc = serde_json::json!({
+            "version": 6,
+            "ai": {
+                "tts": {
+                    "provider": "elevenlabs",
+                    "model": "eleven_v2",
+                    "voice": "Rachel",
+                    "speed": 1.1
+                },
+                "stt": {
+                    "provider": "whisper",
+                    "model": "ggml-small.bin",
+                    "language": "en"
+                }
+            },
+            "plugins": {
+                "list": {
+                    "elevenlabs": { "config": { "voice_id": "already-set" } }
+                }
+            }
+        });
+        migrate_v6_to_v7(&mut doc).expect("migration succeeds");
+        let eleven = doc
+            .pointer("/plugins/list/elevenlabs/config")
+            .expect("elevenlabs config");
+        assert_eq!(
+            eleven.get("model_id"),
+            Some(&serde_json::json!("eleven_v2"))
+        );
+        assert_eq!(
+            eleven.get("voice_id"),
+            Some(&serde_json::json!("already-set")),
+            "existing value wins"
+        );
+        assert_eq!(eleven.get("speed"), Some(&serde_json::json!(1.1)));
+        let whisper = doc
+            .pointer("/plugins/list/whisper/config")
+            .expect("whisper config");
+        assert_eq!(
+            whisper.get("model"),
+            Some(&serde_json::json!("ggml-small.bin"))
+        );
+        assert_eq!(whisper.get("language"), Some(&serde_json::json!("en")));
+        assert_eq!(
+            doc.pointer("/ai/stt")
+                .expect("ai.stt")
+                .as_object()
+                .expect("object")
+                .len(),
+            1
+        );
+    }
+
+    /// Re-running the v6→v7 step on an already-migrated document is a no-op
+    /// (idempotence): values stay put and `mode` is not overwritten.
+    #[test]
+    fn v6_to_v7_is_idempotent() {
+        let mut doc = serde_json::json!({
+            "version": 7,
+            "ai": { "tts": { "provider": "voicevox" } },
+            "plugins": {
+                "list": {
+                    "voicevox": {
+                        "config": {
+                            "mode": "external",
+                            "speaker_id": 3
+                        }
+                    }
+                }
+            }
+        });
+        let before = doc.clone();
+        migrate_v6_to_v7(&mut doc).expect("migration succeeds");
+        assert_eq!(doc, before);
+    }
+
+    /// The legacy VOICEVOX `voice` value is a JSON string; `speaker_id` is a
+    /// number, so the migration converts numeric strings and safely ignores
+    /// non-numeric ones.
+    #[test]
+    fn v6_to_v7_voicevox_voice_converts_to_numeric_speaker_id() {
+        let mut doc = serde_json::json!({
+            "version": 6,
+            "ai": { "tts": { "provider": "voicevox", "voice": "42" } },
+            "plugins": { "list": { "voicevox": { "config": { "speaker_id": 7 } } } }
+        });
+        migrate_v6_to_v7(&mut doc).expect("migration succeeds");
+        let config = doc
+            .pointer("/plugins/list/voicevox/config")
+            .expect("voicevox config");
+        assert_eq!(
+            config.get("speaker_id"),
+            Some(&serde_json::json!(7)),
+            "existing numeric speaker_id wins over the legacy string"
+        );
+
+        let mut doc = serde_json::json!({
+            "version": 6,
+            "ai": { "tts": { "provider": "voicevox", "voice": "42" } }
+        });
+        migrate_v6_to_v7(&mut doc).expect("migration succeeds");
+        let config = doc
+            .pointer("/plugins/list/voicevox/config")
+            .expect("voicevox config");
+        assert_eq!(
+            config.get("speaker_id"),
+            Some(&serde_json::json!(42)),
+            "numeric string is converted to a number"
+        );
+
+        let mut doc = serde_json::json!({
+            "version": 6,
+            "ai": { "tts": { "provider": "voicevox", "voice": "not-a-speaker" } },
+            "plugins": { "list": { "voicevox": { "config": { "speaker_id": 3 } } } }
+        });
+        migrate_v6_to_v7(&mut doc).expect("migration succeeds");
+        let config = doc
+            .pointer("/plugins/list/voicevox/config")
+            .expect("voicevox config");
+        assert_eq!(
+            config.get("speaker_id"),
+            Some(&serde_json::json!(3)),
+            "non-numeric legacy voice leaves the existing speaker untouched"
+        );
+    }
+
+    /// Every built-in TTS provider and the built-in STT provider relocate
+    /// their legacy `ai.*` values onto the provider-owned config keys.
+    #[test]
+    fn v6_to_v7_covers_every_builtin_voice_provider() {
+        // (provider kind, plugin key, expected destination mapping)
+        let cases: &[VoiceProviderMigrationCase] = &[
+            (
+                "kokoro",
+                "kokoro",
+                &[("model", "model"), ("voice", "voice"), ("speed", "speed")],
+            ),
+            (
+                "openai_tts",
+                "openai-tts",
+                &[("model", "model"), ("voice", "voice"), ("speed", "speed")],
+            ),
+            (
+                "edge-tts",
+                "edge-tts",
+                &[("voice", "voice"), ("language", "language")],
+            ),
+            (
+                "elevenlabs",
+                "elevenlabs",
+                &[("model", "model_id"), ("voice", "voice_id")],
+            ),
+            (
+                "voicevox",
+                "voicevox",
+                &[("voice", "speaker_id"), ("speed", "speed_scale")],
+            ),
+        ];
+        for (provider, plugin, mappings) in cases {
+            let mut doc = serde_json::json!({
+                "version": 6,
+                "ai": {
+                    "tts": {
+                        "provider": provider,
+                        "model": "m1",
+                        "voice": if *provider == "voicevox" { serde_json::json!("2") } else { serde_json::json!("v1") },
+                        "speed": 1.1,
+                        "language": "ja",
+                        "unknown_key": "kept"
+                    }
+                }
+            });
+            let root = doc.as_object_mut().expect("root");
+            let plugins = root
+                .entry("plugins")
+                .or_insert_with(|| serde_json::json!({ "list": {} }));
+            let list = plugins["list"]
+                .as_object_mut()
+                .expect("plugins.list object");
+            list.insert(
+                (*plugin).to_string(),
+                serde_json::json!({ "enable": true, "config": null }),
+            );
+            migrate_v6_to_v7(&mut doc).expect("migration succeeds");
+            let config = doc
+                .pointer(&format!("/plugins/list/{plugin}/config"))
+                .expect("provider config created");
+            for (source, destination) in *mappings {
+                let expected = if *source == "voice" && *provider == "voicevox" {
+                    serde_json::json!(2)
+                } else if *source == "voice" {
+                    serde_json::json!("v1")
+                } else if *source == "model" {
+                    serde_json::json!("m1")
+                } else if *source == "speed" {
+                    serde_json::json!(1.1)
+                } else {
+                    serde_json::json!("ja")
+                };
+                assert_eq!(
+                    config.get(*destination),
+                    Some(&expected),
+                    "{provider}: {source} → {destination}"
+                );
+            }
+            assert_eq!(
+                config.get("unknown_key"),
+                Some(&serde_json::json!("kept")),
+                "{provider}: unknown keys are preserved"
+            );
+            assert_eq!(
+                doc.pointer("/ai/tts")
+                    .expect("ai.tts")
+                    .as_object()
+                    .expect("object")
+                    .len(),
+                1,
+                "{provider}: ai.tts holds routing only"
+            );
+        }
+
+        // STT: whisper (the only built-in STT provider).
+        let mut doc = serde_json::json!({
+            "version": 6,
+            "ai": { "stt": { "provider": "whisper", "model": "ggml-small.bin", "language": "en" } },
+            "plugins": { "list": { "whisper": { "enable": true, "config": null } } }
+        });
+        migrate_v6_to_v7(&mut doc).expect("migration succeeds");
+        let config = doc
+            .pointer("/plugins/list/whisper/config")
+            .expect("whisper config");
+        assert_eq!(
+            config.get("model"),
+            Some(&serde_json::json!("ggml-small.bin"))
+        );
+        assert_eq!(config.get("language"), Some(&serde_json::json!("en")));
+    }
+
+    /// The stock v6 default (`config: null` + `ai.tts` values) migrates
+    /// without failing: the null blob is normalized to an empty object.
+    #[test]
+    fn v6_to_v7_normalizes_null_plugin_config() {
+        let mut doc = serde_json::json!({
+            "version": 6,
+            "ai": {
+                "tts": { "provider": "kokoro", "voice": "af_heart", "speed": 1.0, "language": "ja" }
+            },
+            "plugins": {
+                "list": {
+                    "kokoro": { "enable": true, "config": null },
+                    "voicevox": { "enable": true, "config": null }
+                }
+            }
+        });
+        migrate_v6_to_v7(&mut doc).expect("null config migrates");
+        let kokoro = doc
+            .pointer("/plugins/list/kokoro/config")
+            .expect("kokoro config");
+        assert_eq!(kokoro.get("voice"), Some(&serde_json::json!("af_heart")));
+        assert_eq!(kokoro.get("speed"), Some(&serde_json::json!(1.0)));
+        let voicevox = doc
+            .pointer("/plugins/list/voicevox/config")
+            .expect("voicevox config");
+        assert_eq!(
+            voicevox.get("mode"),
+            Some(&serde_json::json!("external")),
+            "null voicevox config is normalized and gains mode"
+        );
     }
 }

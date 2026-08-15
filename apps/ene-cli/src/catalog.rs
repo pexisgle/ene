@@ -37,7 +37,7 @@ struct CatalogSpec {
 }
 
 /// One artifact entry in a spec file.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SpecArtifact {
     id: String,
     /// `plugin`, `sidecar`, or `model`.
@@ -49,6 +49,28 @@ struct SpecArtifact {
     sha256: String,
     /// Exact artifact size in bytes.
     size: u64,
+    /// Payload format: `"raw"` (default) or `"zip-vvpp"` with an
+    /// `entrypoint` (the archive's `engine_manifest.json` `command`).
+    #[serde(default)]
+    payload: Option<SpecPayload>,
+    /// Platform-specific variants keyed by `{os}-{arch}` (e.g.
+    /// `linux-x86_64`); a variant replaces the top-level fields for that
+    /// platform. Used for per-platform payloads (CPU vs GPU builds).
+    #[serde(default)]
+    platforms: BTreeMap<String, SpecArtifact>,
+}
+
+/// Payload declaration for one artifact entry.
+#[derive(Debug, Clone, Deserialize)]
+struct SpecPayload {
+    /// `"raw"` or `"zip-vvpp"`.
+    format: String,
+    /// Executable path inside the archive (zip-vvpp only).
+    #[serde(default)]
+    entrypoint: Option<String>,
+    /// Maximum total uncompressed bytes accepted during extraction.
+    #[serde(default)]
+    unpack_limit: Option<u64>,
 }
 
 fn default_version() -> u64 {
@@ -180,23 +202,8 @@ fn build(
     let key = parse_signing_key(key_hex)?;
     let mut artifacts = BTreeMap::new();
     for artifact in &spec.artifacts {
-        validate_digest(&artifact.sha256)?;
-        if artifact.urls.is_empty() {
-            return Err(OutputError::new(
-                ErrorCode::Usage,
-                format!("artifact '{}' has no urls", artifact.id),
-            ));
-        }
-        artifacts.insert(
-            artifact.id.clone(),
-            ArtifactTarget {
-                version: artifact.version.clone(),
-                kind: parse_kind(&artifact.kind)?,
-                urls: artifact.urls.clone(),
-                sha256: artifact.sha256.clone(),
-                size: artifact.size,
-            },
-        );
+        artifact.validate()?;
+        artifacts.insert(artifact.id.clone(), artifact.clone().into_target()?);
     }
     let version = version_override.unwrap_or(spec.version);
     let expires_at_ms = if spec.expires_at_ms > 0 {
@@ -221,6 +228,98 @@ fn build(
         out: Some(out.display().to_string()),
         public_key_hex: None,
     })
+}
+
+impl SpecArtifact {
+    /// Recursively validates one spec entry (top-level and every platform
+    /// variant): digest shape, non-empty URLs, and payload format/entrypoint
+    /// constraints.
+    fn validate(&self) -> Result<(), OutputError> {
+        let invalid = |detail: String| {
+            OutputError::new(ErrorCode::Usage, format!("artifact '{}' {detail}", self.id))
+        };
+        validate_digest(&self.sha256)
+            .map_err(|e| invalid(format!("has an invalid sha256: {e}")))?;
+        if self.urls.is_empty() {
+            return Err(invalid("has no urls".to_string()));
+        }
+        if let Some(payload) = &self.payload {
+            match payload.format.as_str() {
+                "raw" => {}
+                "zip-vvpp" => {
+                    if payload
+                        .entrypoint
+                        .as_deref()
+                        .is_none_or(|entrypoint| entrypoint.trim().is_empty())
+                    {
+                        return Err(invalid(
+                            "declares a zip-vvpp payload without an entrypoint".to_string(),
+                        ));
+                    }
+                }
+                other => {
+                    return Err(invalid(format!(
+                        "has unknown payload format '{other}' (expected raw or zip-vvpp)"
+                    )));
+                }
+            }
+        }
+        for (platform, variant) in &self.platforms {
+            variant.validate().map_err(|e| {
+                OutputError::new(
+                    ErrorCode::Usage,
+                    format!(
+                        "artifact '{}' platform '{platform}': {}",
+                        self.id, e.body.message
+                    ),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Converts one spec entry into a catalog target, including payload and
+    /// platform variants.
+    fn into_target(self) -> Result<ArtifactTarget, OutputError> {
+        let payload = self
+            .payload
+            .as_ref()
+            .map(|payload| {
+                let format = match payload.format.as_str() {
+                    "raw" => ene_artifact::PayloadFormat::Raw,
+                    "zip-vvpp" => ene_artifact::PayloadFormat::ZipVvpp,
+                    other => {
+                        return Err(OutputError::new(
+                            ErrorCode::Usage,
+                            format!(
+                                "artifact '{}' has unknown payload format '{other}' \
+                                 (expected raw or zip-vvpp)",
+                                self.id
+                            ),
+                        ));
+                    }
+                };
+                Ok(ene_artifact::ArtifactPayload {
+                    format,
+                    entrypoint: payload.entrypoint.clone(),
+                    unpack_limit: payload.unpack_limit,
+                })
+            })
+            .transpose()?;
+        let mut platforms = BTreeMap::new();
+        for (platform, variant) in &self.platforms {
+            platforms.insert(platform.clone(), variant.clone().into_target()?);
+        }
+        Ok(ArtifactTarget {
+            version: self.version.clone(),
+            kind: parse_kind(&self.kind)?,
+            urls: self.urls.clone(),
+            sha256: self.sha256.clone(),
+            size: self.size,
+            payload,
+            platforms,
+        })
+    }
 }
 
 fn update(
@@ -506,5 +605,104 @@ mod tests {
         )
         .expect_err("bad digest must fail");
         assert!(err.to_string().contains("SHA-256"));
+    }
+
+    #[test]
+    fn variant_with_invalid_digest_is_rejected() {
+        let artifact = serde_json::from_value::<SpecArtifact>(serde_json::json!({
+            "id": "voicevox",
+            "kind": "sidecar",
+            "version": "1.0.0",
+            "urls": ["https://example.test/vvpp"],
+            "sha256": "ab".repeat(32),
+            "size": 4,
+            "platforms": {
+                "linux-x86_64": {
+                    "id": "voicevox",
+                    "kind": "sidecar",
+                    "version": "1.0.0",
+                    "urls": ["https://example.test/linux"],
+                    "sha256": "zz-not-hex",
+                    "size": 4
+                }
+            }
+        }))
+        .expect("spec parses");
+        let err = artifact.validate().expect_err("invalid variant digest");
+        assert!(err.body.message.contains("linux-x86_64"));
+    }
+
+    #[test]
+    fn variant_without_urls_is_rejected() {
+        let artifact = serde_json::from_value::<SpecArtifact>(serde_json::json!({
+            "id": "whisper",
+            "kind": "sidecar",
+            "version": "1.0.0",
+            "urls": ["https://example.test/whisper"],
+            "sha256": "ab".repeat(32),
+            "size": 4,
+            "platforms": {
+                "linux-x86_64": {
+                    "id": "whisper",
+                    "kind": "sidecar",
+                    "version": "1.0.0",
+                    "urls": [],
+                    "sha256": "ab".repeat(32),
+                    "size": 4
+                }
+            }
+        }))
+        .expect("spec parses");
+        let err = artifact.validate().expect_err("variant without urls");
+        assert!(err.body.message.contains("no urls"));
+    }
+
+    #[test]
+    fn zip_vvpp_variant_requires_entrypoint() {
+        let artifact = serde_json::from_value::<SpecArtifact>(serde_json::json!({
+            "id": "voicevox",
+            "kind": "sidecar",
+            "version": "1.0.0",
+            "urls": ["https://example.test/vvpp"],
+            "sha256": "ab".repeat(32),
+            "size": 4,
+            "payload": { "format": "zip-vvpp" }
+        }))
+        .expect("spec parses");
+        let err = artifact.validate().expect_err("missing entrypoint");
+        assert!(err.body.message.contains("entrypoint"));
+    }
+
+    #[test]
+    fn valid_platform_variant_builds_and_selects() {
+        let artifact = serde_json::from_value::<SpecArtifact>(serde_json::json!({
+            "id": "voicevox",
+            "kind": "sidecar",
+            "version": "1.0.0",
+            "urls": ["https://example.test/fallback"],
+            "sha256": "ab".repeat(32),
+            "size": 4,
+            "payload": { "format": "zip-vvpp", "entrypoint": "run.sh" },
+            "platforms": {
+                "linux-x86_64": {
+                    "id": "voicevox",
+                    "kind": "sidecar",
+                    "version": "1.0.0",
+                    "urls": ["https://example.test/linux"],
+                    "sha256": "cd".repeat(32),
+                    "size": 4,
+                    "payload": { "format": "zip-vvpp", "entrypoint": "run.sh" }
+                }
+            }
+        }))
+        .expect("spec parses");
+        artifact.validate().expect("valid spec passes");
+        let target = artifact.into_target().expect("converts");
+        let platform = ene_artifact::ArtifactTarget::current_platform();
+        if target.platforms.contains_key(&platform) {
+            assert_eq!(target.for_platform(&platform).sha256, "cd".repeat(32));
+        } else {
+            assert_eq!(target.for_platform(&platform).sha256, "ab".repeat(32));
+        }
     }
 }

@@ -138,6 +138,8 @@ fn signed_catalog_with_expiry(
                 urls: vec!["https://example.test/fs.bin".to_string()],
                 sha256: "ab".repeat(32),
                 size: 4,
+                payload: None,
+                platforms: std::collections::BTreeMap::new(),
             },
         )]),
     };

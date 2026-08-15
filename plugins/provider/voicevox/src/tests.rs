@@ -8,6 +8,7 @@
     reason = "unit tests use expect/expect_err for concise assertions"
 )]
 
+use std::ffi::{OsStr, OsString};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -18,10 +19,47 @@ use crate::config::VoicevoxConfig;
 use crate::mock_engine::spawn_mock_engine;
 use crate::plugin::VoicevoxPlugin;
 
-/// Serializes tests that mutate the process environment: `set_var` /
-/// `remove_var` are process-global and would otherwise race with concurrent
-/// env reads in other tests.
-static ENV_MUTEX: StdMutex<()> = StdMutex::new(());
+static ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct ScopedEnv {
+    key: &'static str,
+    previous: Option<OsString>,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl ScopedEnv {
+    fn set(
+        lock: tokio::sync::MutexGuard<'static, ()>,
+        key: &'static str,
+        value: impl AsRef<OsStr>,
+    ) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: every environment access in this test binary is serialized
+        // by `ENV_MUTEX`, which remains held until this guard restores it.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self {
+            key,
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        // SAFETY: `_lock` is still held while Drop restores the process-wide
+        // value, including when a test unwinds after a failed assertion.
+        unsafe {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
 
 const KIND: &str = "voicevox";
 
@@ -120,6 +158,38 @@ async fn external_mode_reports_engine_unreachable() {
 }
 
 #[tokio::test]
+async fn speaker_options_query_running_engine() {
+    let mock = spawn_mock_engine().expect("mock engine");
+    let plugin = test_plugin();
+    plugin.set_config(&json!({"server_url": mock.url}));
+
+    let options = plugin.list_config_options("speakers").await;
+    assert_eq!(options.len(), 3);
+    assert_eq!(options[0].value, json!(2));
+    assert_eq!(options[0].label, "四国めたん / ノーマル");
+    assert_eq!(options[0].group.as_deref(), Some("四国めたん"));
+    assert_eq!(options[1].value, json!(0));
+    assert_eq!(options[2].value, json!(3));
+}
+
+#[tokio::test]
+async fn speaker_options_are_empty_when_engine_is_down() {
+    let port = pick_free_port();
+    let plugin = test_plugin();
+    plugin.set_config(&json!({
+        "server_url": format!("http://127.0.0.1:{port}"),
+        "mode": "managed",
+        "server_path": "/nonexistent/engine"
+    }));
+
+    // Listing speakers must never spawn a managed engine or block forever;
+    // a down engine simply yields no candidates.
+    let options = plugin.list_config_options("speakers").await;
+    assert!(options.is_empty());
+    assert!(plugin.list_config_options("voices").await.is_empty());
+}
+
+#[tokio::test]
 async fn rejects_non_wav_format() {
     let mock = spawn_mock_engine().expect("mock engine");
     let plugin = test_plugin();
@@ -148,8 +218,8 @@ async fn managed_mode_uses_existing_server_without_spawning() {
             KIND,
             json!({
                 "server_url": mock.url,
-                "auto_start": true,
-                "engine_path": "/nonexistent/engine"
+                "mode": "managed",
+                "server_path": "/nonexistent/engine"
             }),
             "hello".to_string(),
             String::new(),
@@ -171,7 +241,7 @@ async fn managed_mode_requires_engine_path_when_server_down() {
             KIND,
             json!({
                 "server_url": format!("http://127.0.0.1:{port}"),
-                "auto_start": true
+                "mode": "managed"
             }),
             "hello".to_string(),
             String::new(),
@@ -180,30 +250,72 @@ async fn managed_mode_requires_engine_path_when_server_down() {
         .await
         .expect_err("engine_path is missing");
 
-    assert!(err.to_string().contains("engine_path"));
+    assert!(err.to_string().contains("server_path"));
+}
+
+#[tokio::test]
+async fn managed_mode_reports_spawn_failure() {
+    let port = pick_free_port();
+    let plugin = test_plugin();
+
+    let err = plugin
+        .synthesize(
+            KIND,
+            json!({
+                "server_url": format!("http://127.0.0.1:{port}"),
+                "mode": "managed",
+                "server_path": "/nonexistent/ene-engine-binary",
+                "startup_timeout_secs": 1
+            }),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect_err("spawn of a missing binary fails");
+
+    assert!(err.to_string().contains("failed to spawn VOICEVOX engine"));
+}
+
+#[tokio::test]
+async fn managed_mode_reports_startup_timeout() {
+    let port = pick_free_port();
+    let plugin = test_plugin();
+
+    // `sleep` spawns fine but never answers GET /version; the startup
+    // timeout must fire and kill it (minimum timeout is 1 s).
+    let err = plugin
+        .synthesize(
+            KIND,
+            json!({
+                "server_url": format!("http://127.0.0.1:{port}"),
+                "mode": "managed",
+                "server_path": "sleep",
+                "server_args": ["30"],
+                "startup_timeout_secs": 1
+            }),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect_err("engine never answers /version");
+
+    assert!(err.to_string().contains("did not answer GET /version"));
 }
 
 #[tokio::test]
 async fn managed_mode_spawns_engine_and_kills_it_on_drop() {
+    let env_lock = ENV_MUTEX.lock().await;
     // Child branch: the plugin spawns this same test binary (filtered with
-    // `--exact` by `engine_args` below) as the managed engine; the marker
+    // `--exact` by `server_args` below) as the managed engine; the marker
     // env var makes the child serve the mock engine instead of running
     // assertions.
     if let Some(port) = fake_engine_child_port() {
         run_fake_engine_child(port).await;
     }
     let port = pick_free_port();
-    {
-        let _env_guard = ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // SAFETY: test-only env mutation, serialized by `ENV_MUTEX`; the
-        // plugin spawns this test binary as the engine, and the marker makes
-        // the child process serve the mock engine on this port.
-        unsafe {
-            std::env::set_var(FAKE_ENGINE_ENV, port.to_string());
-        }
-    }
+    let _env_guard = ScopedEnv::set(env_lock, FAKE_ENGINE_ENV, port.to_string());
 
     let plugin = test_plugin();
     let wav = plugin
@@ -211,9 +323,9 @@ async fn managed_mode_spawns_engine_and_kills_it_on_drop() {
             KIND,
             json!({
                 "server_url": format!("http://127.0.0.1:{port}"),
-                "auto_start": true,
-                "engine_path": std::env::current_exe().expect("test binary path"),
-                "engine_args": [
+                "mode": "managed",
+                "server_path": std::env::current_exe().expect("test binary path"),
+                "server_args": [
                     "--exact",
                     "tests::managed_mode_spawns_engine_and_kills_it_on_drop"
                 ],
@@ -245,11 +357,185 @@ async fn managed_mode_spawns_engine_and_kills_it_on_drop() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
 
-    // SAFETY: test-only env cleanup, serialized by `ENV_MUTEX`.
-    unsafe {
-        std::env::remove_var(FAKE_ENGINE_ENV);
+/// The delivered `set_config` blob is canonical: a stale request blob (raw
+/// persisted config without the injected `server_path`) must not win over
+/// the config the host delivered at handshake / live `SetConfig`.
+#[tokio::test]
+async fn synthesis_uses_delivered_config_over_stale_request_blob() {
+    let mock = spawn_mock_engine().expect("mock engine");
+    let plugin = test_plugin();
+    plugin.set_config(&json!({
+        "server_url": mock.url,
+        "mode": "managed",
+        "server_path": "/nonexistent/engine"
+    }));
+
+    let wav = plugin
+        .synthesize(
+            KIND,
+            // A stale request blob: points at a dead port and omits
+            // server_path entirely. The delivered config must win.
+            json!({
+                "server_url": format!("http://127.0.0.1:{}", pick_free_port()),
+                "mode": "managed"
+            }),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("delivered config drives synthesis");
+    assert!(wav.starts_with(b"RIFF"));
+}
+
+/// Changing the launch signature via `set_config` stops the old engine
+/// child; the next synthesis starts one with the new settings.
+#[tokio::test]
+async fn set_config_stops_engine_when_launch_signature_changes() {
+    let env_lock = ENV_MUTEX.lock().await;
+    if let Some(port) = fake_engine_child_port() {
+        run_fake_engine_child(port).await;
     }
+    let port = pick_free_port();
+    let _env_guard = ScopedEnv::set(env_lock, FAKE_ENGINE_ENV, port.to_string());
+    let executable = std::env::current_exe().expect("test binary path");
+    let plugin = test_plugin();
+    let server_url = format!("http://127.0.0.1:{port}");
+
+    plugin.set_config(&json!({
+        "server_url": server_url,
+        "mode": "managed",
+        "server_path": executable,
+        "server_args": ["--exact", "tests::set_config_stops_engine_when_launch_signature_changes"],
+        "startup_timeout_secs": 15
+    }));
+    plugin
+        .synthesize(
+            KIND,
+            json!({"server_url": server_url, "mode": "managed"}),
+            "こんにちは".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("first launch starts the engine");
+
+    // A different launch signature must stop the child started above.
+    plugin.set_config(&json!({
+        "server_url": server_url,
+        "mode": "managed",
+        "server_path": executable,
+        "server_args": [
+            "--exact",
+            "tests::set_config_stops_engine_when_launch_signature_changes",
+            "--nocapture"
+        ],
+        "startup_timeout_secs": 15
+    }));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let refused = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err();
+        if refused {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "old engine still serving after launch signature change"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The next synthesis must start a fresh engine from the new launch
+    // signature (the spawned kill task ran asynchronously). The marker env
+    // stays set so the spawned child serves the mock engine again.
+    let second_wav = plugin
+        .synthesize(
+            KIND,
+            json!({"server_url": server_url, "mode": "managed"}),
+            "またね".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("second launch uses the new signature");
+    assert!(second_wav.starts_with(b"RIFF"));
+
+    drop(plugin);
+}
+
+/// End-to-end wire contract: the config delivered at handshake (with an
+/// artifact-injected `server_path`) is canonical. A stale request blob —
+/// the raw persisted config, pointing at a dead port and omitting
+/// `server_path` — must not override it on the synthesize path.
+#[tokio::test]
+async fn ipc_handshake_delivered_config_beats_stale_request_blob() {
+    use ene_plugin::SandboxConfigData;
+    use ene_plugin_host::IpcPluginConnection;
+    use std::time::Duration;
+
+    let mock = spawn_mock_engine().expect("mock engine");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("plugin.sock");
+    let env_lock = ENV_MUTEX.lock().await;
+    let _env_guard = ScopedEnv::set(env_lock, "ENE_PLUGIN_SOCKET", &socket);
+
+    let dispatch = ene_plugin::PluginDispatch::new(
+        None,
+        None,
+        None,
+        Some(std::sync::Arc::new(VoicevoxPlugin::default())),
+        None,
+    );
+    let server = tokio::spawn(async move {
+        drop(ene_plugin::run_plugin_server(dispatch).await);
+    });
+    for _ in 0..50 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let delivered = json!({
+        "server_url": mock.url,
+        "mode": "managed",
+        "server_path": "/nonexistent/engine"
+    });
+    let conn = IpcPluginConnection::connect(
+        &socket,
+        SandboxConfigData::default(),
+        Some(delivered),
+        None,
+        Duration::from_secs(5),
+        4,
+    )
+    .await
+    .expect("handshake with delivered config");
+
+    let dead_url = format!("http://127.0.0.1:{}", pick_free_port());
+    let (audio_base64, _) = conn
+        .synthesize_speech(
+            String::new(),
+            KIND.to_string(),
+            json!({ "server_url": dead_url, "mode": "managed" }),
+            "hello".to_string(),
+            String::new(),
+            "wav".to_string(),
+        )
+        .await
+        .expect("delivered config drives synthesis over the stale blob");
+    assert!(
+        !audio_base64.is_empty(),
+        "synthesis against the delivered engine endpoint must succeed"
+    );
+
+    drop(conn);
+    server.abort();
 }
 
 /// Env var marking this process as the managed-mode fake engine child.
@@ -291,9 +577,9 @@ fn config_schema_advertises_all_settings() {
         "volume_scale",
         "tempo_dynamics_scale",
         "output_sampling_rate",
-        "auto_start",
-        "engine_path",
-        "engine_args",
+        "mode",
+        "server_path",
+        "server_args",
         "startup_timeout_secs",
     ] {
         assert!(
@@ -318,5 +604,5 @@ fn empty_provider_config_parses_to_defaults() {
     let config = VoicevoxConfig::from_value(json!({})).expect("empty config parses");
     assert_eq!(config.server_url, "http://127.0.0.1:50021");
     assert_eq!(config.speaker_id, 0);
-    assert!(!config.auto_start);
+    assert_eq!(config.mode(), crate::config::EngineMode::External);
 }
