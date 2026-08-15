@@ -72,11 +72,10 @@ impl Default for UiStartedAt {
 /// scratch); mirrors `SettingsUi::UiState`. The runtime reads
 /// / writes this via `Mut<UiStateComponent>`.
 ///
-/// TODO: deduplicate `runtime_startup_error`, `runtime_disconnected`,
-/// and `reconnect_attempted` between this component and `AppState`
-/// (in `state.rs`) — `sync_runtime_health_to_ui` /
-/// `pull_runtime_health_from_ui` copy them every frame. Pick a single
-/// source of truth once the health-sync path settles.
+/// Runtime health (`runtime_startup_error`, `runtime_disconnected`,
+/// `reconnect_attempted`) lives here exclusively: the actor failure is
+/// handed over via [`crate::resource::startup::RuntimeStartupError`] and
+/// reconnect results are written directly into this component.
 #[derive(Component, Default)]
 pub struct UiStateComponent(pub UiState);
 

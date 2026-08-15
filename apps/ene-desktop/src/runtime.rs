@@ -104,7 +104,12 @@ impl Runtime {
             ui.0.settings_window_visible = true;
         }
 
-        if let Some(error) = state.runtime_startup_error.clone() {
+        let startup_error = state
+            .app
+            .world_mut()
+            .remove_resource::<crate::resource::startup::RuntimeStartupError>()
+            .and_then(|resource| resource.0);
+        if let Some(error) = startup_error {
             let mut ui = state.ui_bevy_state_mut();
             ui.0.settings_window_visible = true;
             ui.0.fatal_startup_dismissed = false;
@@ -693,7 +698,6 @@ impl ApplicationHandler for Runtime {
         self.sync_theme();
         self.sync_runtime_to_bevy();
         self.state.app.update();
-        self.state.pull_runtime_health_from_ui();
         self.handle_runtime_reconnect();
         if self.handle_exit(event_loop) {
             return;
@@ -772,7 +776,6 @@ impl Runtime {
                 "Failed to sync global hotkey registration"
             );
         }
-        self.state.sync_runtime_health_to_ui();
     }
 
     fn handle_runtime_reconnect(&mut self) {
@@ -798,7 +801,6 @@ impl Runtime {
                 );
             }
         }
-        self.state.sync_runtime_health_to_ui();
     }
 
     fn handle_exit(&mut self, event_loop: &ActiveEventLoop) -> bool {
