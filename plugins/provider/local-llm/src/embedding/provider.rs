@@ -79,7 +79,7 @@ impl GgufEmbeddingProvider {
             model_path: path,
             mmproj_path: None,
             acceleration,
-            gpu_layers: "auto".to_string(),
+            gpu_layers: ene_ai::GpuLayers::Auto,
             context_size: 8192,
         };
         let resource = resource_class_for(&spec)?;

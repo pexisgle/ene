@@ -497,8 +497,22 @@ pub fn local_model_defs_from_plugins(
                 };
                 let gpu_layers = object
                     .get("gpu_layers")
-                    .and_then(serde_json::Value::as_i64)
-                    .map_or_else(|| "auto".to_string(), |layers| layers.to_string());
+                    .and_then(|value| {
+                        match serde_json::from_value::<ene_ai::GpuLayers>(value.clone()) {
+                            Ok(layers) => Some(layers),
+                            Err(e) => {
+                                tracing::warn!(
+                                    component = "SettingsApply",
+                                    plugin = %plugin,
+                                    profile = %name,
+                                    error = %e,
+                                    "Invalid gpu_layers in plugin profile; falling back to auto"
+                                );
+                                None
+                            }
+                        }
+                    })
+                    .unwrap_or_default();
                 let context_size = object
                     .get("context_size")
                     .and_then(serde_json::Value::as_u64)
@@ -660,7 +674,7 @@ mod tests {
         let def = map.get("jina").expect("profile derives a model entry");
         assert_eq!(def.url, "https://example.com/jina.gguf");
         assert_eq!(def.quantization, "F16");
-        assert_eq!(def.gpu_layers, "33");
+        assert_eq!(def.gpu_layers, ene_ai::GpuLayers::Layers(33));
         assert_eq!(def.context_size, 8192);
         assert_eq!(def.dimensions, Some(1024));
         assert!(

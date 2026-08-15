@@ -49,8 +49,8 @@ pub struct LocalGgufLoadParams {
     pub mmproj_path: Option<String>,
     /// Preferred acceleration backend.
     pub acceleration: ProactiveAcceleration,
-    /// GPU layer offload: `"auto"` or an integer string.
-    pub gpu_layers: String,
+    /// GPU layer offload: `auto` or an explicit layer count.
+    pub gpu_layers: ene_ai::GpuLayers,
     /// Context size for inference.
     pub context_size: u32,
     /// Per-request timeout for decision completion. Maps directly onto
@@ -93,7 +93,7 @@ impl LocalLlamaCppProvider {
             model_path,
             mmproj_path,
             acceleration: params.acceleration,
-            gpu_layers: params.gpu_layers.clone(),
+            gpu_layers: params.gpu_layers,
             context_size: params.context_size.max(256),
         };
         let resource = resource_class_for(&spec)?;
@@ -182,7 +182,7 @@ mod tests {
             model_path: String::new(),
             mmproj_path: None,
             acceleration: ProactiveAcceleration::Cpu,
-            gpu_layers: "auto".to_string(),
+            gpu_layers: ene_ai::GpuLayers::Auto,
             context_size: 2048,
             request_timeout_seconds: 20,
         };
@@ -211,7 +211,7 @@ mod tests {
             model_path: path,
             mmproj_path: mmproj,
             acceleration: ProactiveAcceleration::Cpu,
-            gpu_layers: "0".to_string(),
+            gpu_layers: ene_ai::GpuLayers::Layers(0),
             context_size: 2048,
             request_timeout_seconds: 120,
         })
@@ -278,7 +278,7 @@ mod tests {
             model_path: path,
             mmproj_path: mmproj,
             acceleration: ProactiveAcceleration::Cpu,
-            gpu_layers: "0".to_string(),
+            gpu_layers: ene_ai::GpuLayers::Layers(0),
             context_size: 2048,
             request_timeout_seconds: 120,
         })

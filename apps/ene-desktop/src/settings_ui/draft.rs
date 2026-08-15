@@ -836,6 +836,61 @@ mod tests {
     }
 
     #[test]
+    fn gpu_layers_validator_agrees_with_serde() {
+        // The draft validator consumes the generated settings schema, so its
+        // verdict must match the custom serde's wire set exactly.
+        let sections =
+            ene_config::config::registered_schemas_for(ene_config::ConfigTarget::Settings);
+        let (_, ai) = sections
+            .iter()
+            .find(|(key, _)| key == "ai")
+            .expect("ai section schema is registered");
+        let schema = serde_json::to_value(&ai.schema).expect("ai schema serializes");
+        let defs = schema
+            .get("$defs")
+            .or_else(|| schema.get("definitions"))
+            .and_then(serde_json::Value::as_object)
+            .expect("ai schema has shared definitions");
+        let gpu_layers = defs.get("GpuLayers").expect("ai schema defines GpuLayers");
+
+        for value in [
+            json!("auto"),
+            json!("33"),
+            json!("0"),
+            json!("007"),
+            json!("4294967295"),
+            json!(0),
+            json!(33),
+            json!(u64::from(u32::MAX)),
+            json!(""),
+            json!(" "),
+            json!(" 33"),
+            json!("33 "),
+            json!("AUTO"),
+            json!("Auto"),
+            json!("auto "),
+            json!("bogus"),
+            json!("+33"),
+            json!("-1"),
+            json!("4294967296"),
+            json!("999999999999"),
+            json!(-1),
+            json!(u64::from(u32::MAX) + 1),
+            json!(1.5),
+            json!(true),
+        ] {
+            let mut issues = Vec::new();
+            validate_value(gpu_layers, &value, "gpu_layers", Some(defs), &mut issues);
+            let schema_accepts = issues.is_empty();
+            let serde_accepts = serde_json::from_value::<ene_ai::GpuLayers>(value.clone()).is_ok();
+            assert_eq!(
+                schema_accepts, serde_accepts,
+                "draft validator and serde disagree on {value}"
+            );
+        }
+    }
+
+    #[test]
     fn impact_metadata_is_parsed() {
         assert_eq!(
             FieldImpact::parse("runtime_reload"),

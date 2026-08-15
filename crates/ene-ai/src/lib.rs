@@ -63,7 +63,7 @@ pub mod traits;
 
 pub use config::{
     AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, BUILTIN_PROVIDER_KINDS, FallbackConfig,
-    LEGACY_OPENAI_COMPATIBLE_KIND, LOCAL_PROVIDER, LocalModelDef, OPENAI_PROVIDER_KIND,
+    GpuLayers, LEGACY_OPENAI_COMPATIBLE_KIND, LOCAL_PROVIDER, LocalModelDef, OPENAI_PROVIDER_KIND,
     ProactiveAcceleration, RetryConfig, SttConfig, TaskRef, TtsConfig, VadConfig,
     canonical_provider_kind, is_builtin_kind, kind_typo_suggestion,
 };

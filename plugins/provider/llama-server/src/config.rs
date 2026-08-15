@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
-use ene_ai::config::ProactiveAcceleration;
+use ene_ai::config::{GpuLayers, ProactiveAcceleration};
 use ene_plugin::{PluginError, ResourceClass};
 use serde::Deserialize;
 use serde_json::Value;
@@ -32,10 +32,6 @@ const DEFAULT_CONTEXT_SIZE: u32 = 16_384;
 /// Default quantization label when a profile omits it (same as
 /// `ene_ai::LocalModelDef`).
 const DEFAULT_QUANTIZATION: &str = "F16";
-
-/// Default GPU offload when a profile omits it (same as
-/// `ene_ai::LocalModelDef`).
-const DEFAULT_GPU_LAYERS: &str = "auto";
 
 /// How long the plugin waits for the sidecar to answer `/health` after
 /// spawning it.
@@ -104,23 +100,13 @@ pub(crate) fn declared_resource_class(acceleration: ProactiveAcceleration) -> Re
 /// Number of GPU layers to request from the sidecar.
 ///
 /// `cpu` forces 0; anything else uses the profile's `gpu_layers` with the
-/// same `"auto"` → all-layers (999) convention as the in-process plugin's
-/// `parse_gpu_layers`.
-pub(crate) fn n_gpu_layers_for(acceleration: ProactiveAcceleration, gpu_layers: &str) -> u32 {
+/// same `auto` → all-layers convention as [`GpuLayers::n_layers`].
+pub(crate) fn n_gpu_layers_for(acceleration: ProactiveAcceleration, gpu_layers: GpuLayers) -> u32 {
     match acceleration {
         ProactiveAcceleration::Cpu => 0,
         ProactiveAcceleration::Auto
         | ProactiveAcceleration::Vulkan
-        | ProactiveAcceleration::Cuda => parse_gpu_layers(gpu_layers),
-    }
-}
-
-fn parse_gpu_layers(raw: &str) -> u32 {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
-        999
-    } else {
-        trimmed.parse().unwrap_or(999)
+        | ProactiveAcceleration::Cuda => gpu_layers.n_layers(),
     }
 }
 
@@ -134,7 +120,7 @@ pub(crate) struct Profile {
     pub(crate) artifact_version: Option<String>,
     pub(crate) quantization: Option<String>,
     pub(crate) model_path: Option<String>,
-    pub(crate) gpu_layers: Option<String>,
+    pub(crate) gpu_layers: Option<GpuLayers>,
     pub(crate) context_size: Option<u32>,
     pub(crate) dimensions: Option<usize>,
 }
@@ -181,13 +167,9 @@ impl Profile {
             .unwrap_or(DEFAULT_QUANTIZATION)
     }
 
-    /// GPU layer offload: `"auto"` or an integer string.
-    pub(crate) fn gpu_layers(&self) -> &str {
-        self.gpu_layers
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(DEFAULT_GPU_LAYERS)
+    /// GPU layer offload, defaulting to `auto`.
+    pub(crate) fn gpu_layers(&self) -> GpuLayers {
+        self.gpu_layers.unwrap_or_default()
     }
 
     /// Context window for chat loads.
@@ -305,7 +287,7 @@ mod tests {
         assert_eq!(profile.model_path(), None);
         assert_eq!(profile.url(), None);
         assert_eq!(profile.quantization(), "F16");
-        assert_eq!(profile.gpu_layers(), "auto");
+        assert_eq!(profile.gpu_layers(), GpuLayers::Auto);
         assert_eq!(profile.context_size(), 16_384);
     }
 
@@ -324,7 +306,7 @@ mod tests {
         assert_eq!(profile.url(), Some("https://cdn.example/model.gguf"));
         assert_eq!(profile.quantization(), "Q4_0");
         assert_eq!(profile.model_path(), Some("/data/model.gguf"));
-        assert_eq!(profile.gpu_layers(), "33");
+        assert_eq!(profile.gpu_layers(), GpuLayers::Layers(33));
         assert_eq!(profile.context_size(), 4096);
         assert_eq!(profile.dimensions(), Some(384));
     }
@@ -351,10 +333,28 @@ mod tests {
 
     #[test]
     fn gpu_layer_mapping_matches_in_process_plugin() {
-        assert_eq!(n_gpu_layers_for(ProactiveAcceleration::Cpu, "33"), 0);
-        assert_eq!(n_gpu_layers_for(ProactiveAcceleration::Vulkan, "33"), 33);
-        assert_eq!(n_gpu_layers_for(ProactiveAcceleration::Auto, "auto"), 999);
-        assert_eq!(n_gpu_layers_for(ProactiveAcceleration::Cuda, "bogus"), 999);
+        assert_eq!(
+            n_gpu_layers_for(ProactiveAcceleration::Cpu, GpuLayers::Layers(33)),
+            0
+        );
+        assert_eq!(
+            n_gpu_layers_for(ProactiveAcceleration::Vulkan, GpuLayers::Layers(33)),
+            33
+        );
+        assert_eq!(
+            n_gpu_layers_for(ProactiveAcceleration::Auto, GpuLayers::Auto),
+            999
+        );
+    }
+
+    #[test]
+    fn profile_rejects_invalid_gpu_layers() {
+        let result: Result<Profile, _> =
+            serde_json::from_value(serde_json::json!({ "gpu_layers": "bogus" }));
+        assert!(
+            result.is_err(),
+            "misconfiguration must fail at the boundary"
+        );
     }
 
     #[test]

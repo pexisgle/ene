@@ -46,10 +46,6 @@ const DEFAULT_CONTEXT_SIZE: u32 = 16_384;
 /// `ene_ai::LocalModelDef`).
 const DEFAULT_QUANTIZATION: &str = "F16";
 
-/// Default GPU offload when a profile omits it (same as
-/// `ene_ai::LocalModelDef`).
-const DEFAULT_GPU_LAYERS: &str = "auto";
-
 /// The host-delivered plugin config blob (`plugins.list.llama-cpp.config`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
@@ -115,7 +111,7 @@ pub(crate) struct Profile {
     pub(crate) artifact_version: Option<String>,
     pub(crate) quantization: Option<String>,
     pub(crate) model_path: Option<String>,
-    pub(crate) gpu_layers: Option<String>,
+    pub(crate) gpu_layers: Option<ene_ai::GpuLayers>,
     pub(crate) context_size: Option<u32>,
     pub(crate) dimensions: Option<usize>,
 }
@@ -162,13 +158,9 @@ impl Profile {
             .unwrap_or(DEFAULT_QUANTIZATION)
     }
 
-    /// GPU layer offload: `"auto"` or an integer string.
-    pub(crate) fn gpu_layers(&self) -> &str {
-        self.gpu_layers
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(DEFAULT_GPU_LAYERS)
+    /// GPU layer offload, defaulting to `auto`.
+    pub(crate) fn gpu_layers(&self) -> ene_ai::GpuLayers {
+        self.gpu_layers.unwrap_or_default()
     }
 
     /// Context window for chat loads (the embedding provider sizes its own
@@ -275,7 +267,7 @@ mod tests {
         assert_eq!(profile.model_path(), None);
         assert_eq!(profile.url(), None);
         assert_eq!(profile.quantization(), "F16");
-        assert_eq!(profile.gpu_layers(), "auto");
+        assert_eq!(profile.gpu_layers(), ene_ai::GpuLayers::Auto);
         assert_eq!(profile.context_size(), 16_384);
     }
 
@@ -292,7 +284,7 @@ mod tests {
         assert_eq!(profile.url(), Some("https://cdn.example/model.gguf"));
         assert_eq!(profile.model_path(), Some("/data/model.gguf"));
         assert_eq!(profile.quantization(), "Q4_0");
-        assert_eq!(profile.gpu_layers(), "33");
+        assert_eq!(profile.gpu_layers(), ene_ai::GpuLayers::Layers(33));
         assert_eq!(profile.context_size(), 8192);
     }
 
