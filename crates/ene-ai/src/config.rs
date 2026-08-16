@@ -9,6 +9,15 @@ use ene_config::schemars;
 /// Reserved task provider name that resolves against [`AiConfig::local_models`].
 pub const LOCAL_PROVIDER: &str = "local";
 
+/// Plugin id that serves [`LOCAL_PROVIDER`] by default: the in-process
+/// llama.cpp backend works without an external binary, so it wins over the
+/// llama-server sidecar unless the user picks the sidecar explicitly.
+pub const DEFAULT_LOCAL_ENGINE: &str = "llama-cpp";
+
+/// Plugin ids that may serve [`LOCAL_PROVIDER`]; the settings UI lists
+/// these as concrete engine choices instead of the abstract `"local"`.
+pub const LOCAL_ENGINE_CHOICES: &[&str] = &[DEFAULT_LOCAL_ENGINE, "llama-server"];
+
 /// Provider kind served by the OpenAI-compatible provider plugin
 /// (`plugins/provider/openai`).
 pub const OPENAI_PROVIDER_KIND: &str = "openai";
@@ -625,6 +634,8 @@ ene_config::define_config!(
     pub struct AiConfig {
         /// Named local GGUF model registry.
         pub local_models: BTreeMap<String, LocalModelDef> = BTreeMap::new(),
+        /// Plugin id serving [`LOCAL_PROVIDER`] (see [`LOCAL_ENGINE_CHOICES`]).
+        pub local_engine: String = DEFAULT_LOCAL_ENGINE.to_string(),
         /// Named cloud provider definitions.
         pub providers: BTreeMap<String, AiProviderDef> = default_providers(),
         /// Task → provider/model routing.

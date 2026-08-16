@@ -939,7 +939,7 @@ fn render_builtin_hints(
     snapshot: &PluginSettingsSnapshot,
 ) {
     match snapshot.id.as_str() {
-        "local-llm" | "llama-server" => {
+        "llama-cpp" | "local-llm" | "llama-server" => {
             ui.weak(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
                 "plugins-local-profiles-hint"
@@ -1114,7 +1114,9 @@ fn render_profiles(
         "plugins-profiles"
     ))
     .id_salt(("plugin_profiles", snapshot.id.as_str()))
-    .default_open(snapshot.id == "local-llm" || snapshot.id == "llama-server")
+    .default_open(
+        snapshot.id == "llama-cpp" || snapshot.id == "local-llm" || snapshot.id == "llama-server",
+    )
     .show(ui, |ui| {
         let names: Vec<String> = profiles
             .as_object()

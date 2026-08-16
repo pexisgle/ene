@@ -465,7 +465,7 @@ fn merge_object_value(
     }
 }
 
-/// Derives `ai.local_models` from `plugins.list.{local-llm,llama-server}`
+/// Derives `ai.local_models` from `plugins.list.{local-llm,llama-server,llama-cpp}`
 /// profiles, keeping plugin profiles the single UI source of truth for local
 /// models while the runtime's local-model resolution keeps reading
 /// `ai.local_models`. The map is regenerated from scratch on every apply, so
@@ -479,15 +479,17 @@ fn derive_local_models(config: &mut ene_config::EneConfig) {
 }
 
 /// Builds the `ai.local_models` map from `plugins.list.{local-llm,
-/// llama-server}` profiles. Shared by the apply pipeline and the AI page so
-/// both resolve local models identically.
+/// llama-server,llama-cpp}` profiles. Shared by the apply pipeline and the
+/// AI page so both resolve local models identically. `llama-cpp` iterates
+/// last so its profiles win name collisions, matching the runtime's
+/// first-registered local backend.
 #[must_use]
 pub fn local_model_defs_from_plugins(
     config: &ene_config::EneConfig,
 ) -> std::collections::BTreeMap<String, ene_ai::LocalModelDef> {
     let mut local_models = std::collections::BTreeMap::new();
     if let Ok(plugins) = config.get_section::<ene_plugin_host::PluginConfig>() {
-        for plugin in ["local-llm", "llama-server"] {
+        for plugin in ["local-llm", "llama-server", "llama-cpp"] {
             let Some(entry) = plugins.list.get(plugin) else {
                 continue;
             };
@@ -681,6 +683,34 @@ mod tests {
             !map.contains_key("ghost"),
             "only configured profiles appear"
         );
+    }
+
+    #[test]
+    fn local_models_are_derived_from_llama_cpp_profiles() {
+        // The runtime plugin reads `plugins.list.llama-cpp.profiles`, so an
+        // apply must keep those entries in `ai.local_models` instead of
+        // dropping them (the v2→v3 migration writes them under this key).
+        let mut config = ene_config::EneConfig::default();
+        let mut plugins = ene_plugin_host::PluginConfig::default();
+        plugins
+            .list
+            .entry("llama-cpp".to_string())
+            .or_default()
+            .profiles
+            .insert(
+                "jina".to_string(),
+                json!({
+                    "url": "https://example.com/jina.gguf",
+                    "dimensions": 1024
+                }),
+            );
+        drop(config.set_section(&plugins));
+
+        let map = local_model_defs_from_plugins(&config);
+        let def = map
+            .get("jina")
+            .expect("llama-cpp profile derives a model entry");
+        assert_eq!(def.dimensions, Some(1024));
     }
 
     /// Direct writes to `CharacterSettings` while the window is open
