@@ -84,6 +84,16 @@ impl MockElevenLabsServer {
         let socket = dir.path().join("mock-broker.sock");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let responses = Arc::new(Mutex::new(VecDeque::new()));
+        // Bind synchronously so the first request never races the accept
+        // loop's startup; a lost race would fail the fetch with ENOENT and
+        // burn one retry backoff in every test.
+        let std_listener =
+            std::os::unix::net::UnixListener::bind(&socket).map_err(std::io::Error::other)?;
+        std_listener
+            .set_nonblocking(true)
+            .map_err(std::io::Error::other)?;
+        let listener =
+            tokio::net::UnixListener::from_std(std_listener).map_err(std::io::Error::other)?;
         let server = Self {
             socket,
             requests: Arc::clone(&requests),
@@ -91,7 +101,7 @@ impl MockElevenLabsServer {
             _dir: dir,
         };
         tokio::spawn(run_server(
-            server.socket.clone(),
+            listener,
             Arc::clone(&requests),
             Arc::clone(&responses),
         ));
@@ -121,11 +131,10 @@ impl MockElevenLabsServer {
 }
 
 async fn run_server(
-    socket: std::path::PathBuf,
+    listener: tokio::net::UnixListener,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     responses: Arc<Mutex<VecDeque<MockResponse>>>,
 ) {
-    let listener = tokio::net::UnixListener::bind(&socket).expect("mock bind");
     let (mut stream, _) = listener.accept().await.expect("mock accept");
     let open: HostServiceRequest = read_host_service_request(&mut stream)
         .await
