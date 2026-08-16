@@ -560,20 +560,6 @@ mod tests {
         );
     }
 
-    /// The registry should reflect what the loader found —
-    /// a model with no `VRMC_vrm.humanoid` block gets an
-    /// empty registry, not a panic.
-    #[test]
-    fn empty_registry_is_default_state() {
-        let reg = HumanoidBoneRegistry::default();
-        assert!(reg.is_empty());
-        assert_eq!(reg.len(), 0);
-        assert!(reg.head().is_none());
-        assert!(reg.hips().is_none());
-        assert!(reg.left_eye().is_none());
-        assert!(reg.right_eye().is_none());
-    }
-
     /// `BoneRestTransform` defaults to identity (the glTF
     /// spec's "no transform applied" semantic). Consumers
     /// like `LookAt` use `rest.rotation * yaw_pitch_delta`

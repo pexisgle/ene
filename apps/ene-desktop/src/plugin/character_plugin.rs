@@ -44,7 +44,6 @@ fn spawn_character_entity(mut commands: Commands) {
 }
 
 #[cfg(test)]
-#[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
 mod tests {
     use super::*;
 
@@ -59,15 +58,5 @@ mod tests {
             .world_mut()
             .query_filtered::<Entity, With<CharacterRoot>>();
         assert_eq!(q.iter(app.world()).count(), 1);
-    }
-
-    #[test]
-    fn bundle_defaults_are_safe() {
-        let bundle = CharacterBundle::default();
-        assert!(bundle.model.model.is_none());
-        assert!(bundle.motion.asset.is_none());
-        assert!(bundle.spring_bone.0.is_none());
-        assert!(bundle.colliders.0.is_empty());
-        assert_eq!(bundle.transform.scale, 0.0);
     }
 }

@@ -1363,7 +1363,10 @@ mod tests {
         std::fs::write(&path, "{}").expect("write empty settings fixture");
 
         let result = load_full_config_from(&path);
-        assert!(result.is_ok(), "empty settings.json should extract ok");
+        let config = result.expect("empty settings.json should extract ok");
+        assert_eq!(config.version, crate::migration::CURRENT_CONFIG_VERSION);
+        assert_eq!(config.user_name, EneConfig::default().user_name);
+        assert!(runtime_rules_is_default(&config.runtime_rules));
     }
 
     #[test]

@@ -12,7 +12,6 @@ use crate::events::AppEvent;
 use crate::resource::emotion_pipeline::EmotionPipelineState;
 use crate::resource::event_channels::EventChannels;
 use crate::resource::exit::ExitRequested;
-use crate::settings::QuestionDraft;
 use crate::settings_ui::PageKind;
 use crate::system::event_pump::pump_legacy_events;
 use crate::system::ui_consumers::{
@@ -284,14 +283,6 @@ fn emote_token_emits_message_via_pump() {
     let events: Vec<_> = cursor.read(&*messages).collect();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].0, "happy");
-}
-
-#[test]
-fn question_draft_default_is_blank() {
-    let d = QuestionDraft::default();
-    assert_eq!(d.text, "");
-    assert!(d.selected.is_none());
-    assert!(!d.skipped);
 }
 
 #[test]

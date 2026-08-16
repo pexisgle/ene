@@ -1621,6 +1621,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_request_rejects_truncated_frame() {
+        // The length prefix promises more bytes than the stream carries. A
+        // clean EOF on the prefix means "connection closed", but an EOF in
+        // the middle of a declared frame is corruption and must error.
+        // The response reader shares this exact framing path, so one
+        // direction suffices.
+        let mut buf: &[u8] = &[4, 0, 0, 0, 0xAA];
+        let result = read_plugin_request(&mut buf, WireFormat::Json).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_request_rejects_invalid_payload() {
+        // A frame whose bytes are not a valid `PluginIpcRequest` for the
+        // negotiated format is a protocol violation, not a clean close.
+        // The response reader deserializes through the same `WireFormat`
+        // decode, so the error path is identical in both directions.
+        let mut buf: &[u8] = &[4, 0, 0, 0, b'{', b'x', b'}', 0];
+        let result = read_plugin_request(&mut buf, WireFormat::Json).await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, PluginError::Protocol(_)));
+        assert!(err.to_string().contains("Failed to deserialize"));
+    }
+
+    #[tokio::test]
     async fn write_request_rejects_oversized_message() {
         let big_arguments = "x".repeat(MAX_MESSAGE_SIZE + 1);
         let req = PluginIpcRequest::CallTool {

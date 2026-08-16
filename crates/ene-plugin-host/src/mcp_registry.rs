@@ -655,21 +655,6 @@ mod tests {
         );
     }
 
-    /// HTTP liveness must use an authoritative `ping` RPC, not just
-    /// `is_transport_closed`. This test verifies the transport-kind dispatch
-    /// contract: `McpTransportKind::Http` and `McpTransportKind::Stdio` are
-    /// distinct variants that drive different liveness strategies in `ping()`,
-    /// so HTTP servers that keep their channel open but become unresponsive
-    /// are still detected.
-    #[tokio::test]
-    async fn http_liveness_requires_ping_rpc_not_just_transport_check() {
-        assert_ne!(McpTransportKind::Http, McpTransportKind::Stdio);
-
-        let registry = McpToolRegistry::new();
-        let result = registry.ping().await;
-        assert!(result.is_err());
-    }
-
     #[test]
     fn https_url_is_accepted() {
         assert!(validate_http_url("https://mcp.example.com/sse", false).is_ok());

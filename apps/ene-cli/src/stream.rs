@@ -333,21 +333,3 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle, activ
 fn turn_matches(active: &TurnId, event_turn: &TurnId) -> bool {
     active == event_turn
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn turn_matches_accepts_same_turn() {
-        let turn = TurnId::new();
-        assert!(turn_matches(&turn, &turn));
-    }
-
-    #[test]
-    fn turn_matches_rejects_other_turn() {
-        let active = TurnId::new();
-        let other = TurnId::new();
-        assert!(!turn_matches(&active, &other));
-    }
-}

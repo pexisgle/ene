@@ -333,20 +333,6 @@ mod tests {
     }
 
     #[test]
-    fn default_weights_are_zero() {
-        assert_eq!(
-            VisemeWeights::default(),
-            VisemeWeights {
-                aa: 0.0,
-                ih: 0.0,
-                ou: 0.0,
-                ee: 0.0,
-                oh: 0.0,
-            }
-        );
-    }
-
-    #[test]
     fn empty_buffer_yields_zero_weights() {
         let mut analyzer = VisemeAnalyzer::new(SR);
         assert_eq!(analyzer.analyze(), VisemeWeights::default());

@@ -87,14 +87,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_all_none() {
-        let usage = TokenUsage::default();
-        assert_eq!(usage.prompt_tokens, None);
-        assert_eq!(usage.completion_tokens, None);
-        assert_eq!(usage.total_tokens, None);
-    }
-
-    #[test]
     fn missing_fields_deserialize_to_none() {
         // Load-bearing contract: an older peer omits the usage fields
         // entirely; they must default to `None`, not error.

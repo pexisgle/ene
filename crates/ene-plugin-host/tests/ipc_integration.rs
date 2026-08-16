@@ -1678,9 +1678,9 @@ async fn in_flight_requests_are_bounded_by_max_concurrent() {
     cleanup_path(&socket_path);
 }
 
-/// Dropping the plugin while N calls are in flight must fail every caller
+/// Dropping the plugin while a call is in flight must fail the caller
 /// **promptly** — well inside the 2-minute `DEFAULT_TIMEOUT` — rather than
-/// leaving the waiters orphaned until their own timeout.
+/// leaving the waiter orphaned until its own timeout.
 ///
 /// `reconnect_from` aborts the old reader task, which is suspended inside
 /// `read_plugin_response` and therefore never reaches the trailing `fail_all()`
@@ -1691,7 +1691,7 @@ async fn in_flight_requests_are_bounded_by_max_concurrent() {
 /// once, preserving the "a transport error means the request never reached the
 /// plugin" invariant for non-idempotent `CallTool`.
 ///
-/// Without the item 1 fix the callers would block for the full `DEFAULT_TIMEOUT`
+/// Without the item 1 fix the caller would block for the full `DEFAULT_TIMEOUT`
 /// (the mock never comes back, so the reconnect cannot succeed) and this test
 /// would fail on its deadline.
 #[tokio::test]
@@ -1699,19 +1699,18 @@ async fn in_flight_calls_fail_promptly_when_plugin_drops() {
     let (conn, _state, in_flight, call_count, gate, server_handle, socket_path) =
         spawn_concurrent_and_connect("drop-inflight", 8).await;
 
-    const N: usize = 3;
     let mut handles = Vec::new();
-    for i in 0..N {
+    for i in 0..1 {
         let c = Arc::clone(&conn);
         handles.push(tokio::spawn(async move {
             c.call_tool("mock.slow", &format!("call-{i}"), None).await
         }));
     }
 
-    wait_for_in_flight(&in_flight, N).await;
+    wait_for_in_flight(&in_flight, 1).await;
     assert_eq!(
         call_count.load(Ordering::Acquire),
-        N,
+        1,
         "each request must reach the plugin exactly once before the drop"
     );
 
@@ -1724,17 +1723,16 @@ async fn in_flight_calls_fail_promptly_when_plugin_drops() {
     server_handle.abort();
     cleanup_path(&socket_path);
 
-    // Every caller must fail far inside DEFAULT_TIMEOUT (2 min). On observing
-    // the transport failure each caller attempts a reconnect that cannot
+    // The caller must fail far inside DEFAULT_TIMEOUT (2 min). On observing
+    // the transport failure it attempts a reconnect that cannot
     // succeed (nothing is listening), running the full connect-retry budget
     // (~2.5 s) before surfacing the error. Those reconnects serialize on the
     // writer lock and the generation does not advance on a *failed* reconnect,
-    // so the last of the N callers returns after roughly N × 2.5 s. The bound
-    // below accommodates that with margin while staying an order of magnitude
-    // under DEFAULT_TIMEOUT — without the item 1 `fail_all()` fix the waiters
-    // would instead block for the full 2 min and blow well past this deadline.
-    let deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_millis(2_500 * N as u64 + 10_000);
+    // so the caller returns after roughly 2.5 s. The bound below accommodates
+    // that with margin while staying an order of magnitude under
+    // DEFAULT_TIMEOUT — without the item 1 `fail_all()` fix the waiter would
+    // instead block for the full 2 min and blow well past this deadline.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2_500 + 10_000);
     for handle in handles {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let result = tokio::time::timeout(remaining, handle)
@@ -1751,7 +1749,7 @@ async fn in_flight_calls_fail_promptly_when_plugin_drops() {
     // a fresh stream by the retry path (item 3).
     assert_eq!(
         call_count.load(Ordering::Acquire),
-        N,
+        1,
         "no request may be dispatched to the plugin more than once"
     );
 

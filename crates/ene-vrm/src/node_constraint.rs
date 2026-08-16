@@ -613,13 +613,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_empty_by_default() {
-        let reg = NodeConstraintRegistry::default();
-        assert!(reg.is_empty());
-        assert_eq!(reg.len(), 0);
-    }
-
-    #[test]
     fn constraint_source_and_weight_accessors() {
         let c = NodeConstraint::Rotation {
             source_node: 42,

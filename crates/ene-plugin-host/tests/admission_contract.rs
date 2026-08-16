@@ -411,8 +411,8 @@ async fn mock_server_child() {
 }
 
 /// A real SIGKILL of the serving plugin process must release the held class
-/// permit; a queued request then proceeds (and fails on the dead connection)
-/// instead of waiting on a leaked permit.
+/// permit; a queued same-class request from another plugin connection then
+/// proceeds instead of waiting on a leaked permit.
 #[cfg(unix)]
 #[tokio::test]
 async fn permit_released_when_serving_process_is_sigkilled() {
@@ -449,10 +449,13 @@ async fn permit_released_when_serving_process_is_sigkilled() {
         .expect("first provider admitted");
     ping_conn.ping().await.expect("child mock alive mid-stream");
 
+    // A second same-class provider (its own in-process mock connection,
+    // sharing the admission registry) must wait for the child-held permit.
+    let (socket_b, server_b, conn_b) = connect_mock("sigkill-b", class).await;
+    let factory_b = mock_factory(conn_b, class, &admission);
     let queued = tokio::spawn({
         let task = task.clone();
-        let factory = std::sync::Arc::clone(&factory);
-        async move { start_hold_stream(&factory, &task).await }
+        async move { start_hold_stream(&factory_b, &task).await }
     });
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(
@@ -463,17 +466,18 @@ async fn permit_released_when_serving_process_is_sigkilled() {
     kill_child(child);
     drain_until_end(stream_a).await;
 
-    // The queued request must now pass the admission gate (the permit was
-    // released). It then fails on the dead connection, or — if the write was
-    // buffered before the socket closed — returns a stream that dies moments
-    // later; either way it cleared the gate, which is the property under
-    // test (a leaked permit would still be blocking here).
-    let _outcome = tokio::time::timeout(Duration::from_secs(15), queued)
+    // The queued request must now clear the admission gate (the kill
+    // released the permit) and establish its stream on the fresh connection.
+    let stream_b = tokio::time::timeout(Duration::from_secs(5), queued)
         .await
         .expect("queued request must proceed once the permit is released")
-        .expect("join");
+        .expect("join")
+        .expect("second provider admitted");
+    drop(stream_b);
 
+    server_b.abort();
     cleanup_path(&socket_path);
+    cleanup_path(&socket_b);
 }
 
 #[cfg(unix)]
