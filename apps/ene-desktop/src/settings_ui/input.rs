@@ -237,7 +237,7 @@ pub struct SettingsInputState {
 impl SettingsInputState {
     pub fn new() -> Self {
         Self {
-            ai_embedding_provider: "cloud".to_string(),
+            ai_embedding_provider: "llama-cpp".to_string(),
             ai_embedding_model: "text-embedding-3-small".to_string(),
             ai_embedding_dimensions: "1536".to_string(),
             ai_api_key_source: "env".to_string(),
@@ -263,6 +263,9 @@ impl SettingsInputState {
         let ai_cfg = settings.config_section::<ene_runtime::AiConfig>();
         self.ai_chat_provider
             .clone_from(&ai_cfg.tasks.chat.provider);
+        if ene_ai::AiConfig::is_local_provider(&ai_cfg.tasks.chat.provider) {
+            self.ai_chat_provider.clone_from(&ai_cfg.local_engine);
+        }
         self.ai_chat_model = ai_cfg.tasks.chat.model.clone().unwrap_or_default();
         if let Some(def) = ai_cfg.providers.get(&ai_cfg.tasks.chat.provider) {
             self.ai_base_url.clone_from(&def.base_url);
@@ -277,22 +280,22 @@ impl SettingsInputState {
             self.ai_api_key.clear();
             self.ai_api_key_env = "OPENAI_API_KEY".to_string();
         }
-        self.ai_embedding_provider =
-            if ene_ai::AiConfig::is_local_provider(&ai_cfg.tasks.embedding.provider) {
-                "local".to_string()
-            } else {
-                "cloud".to_string()
-            };
+        self.ai_embedding_provider
+            .clone_from(&ai_cfg.tasks.embedding.provider);
+        if ene_ai::AiConfig::is_local_provider(&ai_cfg.tasks.embedding.provider) {
+            self.ai_embedding_provider.clone_from(&ai_cfg.local_engine);
+        }
         self.ai_embedding_model = ai_cfg.tasks.embedding.model.clone().unwrap_or_default();
-        self.ai_embedding_dimensions = if self.ai_embedding_provider == "local" {
-            "auto".to_string()
-        } else {
-            ai_cfg
-                .tasks
-                .embedding
-                .dimensions
-                .map_or_else(|| "1536".to_string(), |d| d.to_string())
-        };
+        self.ai_embedding_dimensions =
+            if ene_ai::LOCAL_ENGINE_CHOICES.contains(&self.ai_embedding_provider.as_str()) {
+                "auto".to_string()
+            } else {
+                ai_cfg
+                    .tasks
+                    .embedding
+                    .dimensions
+                    .map_or_else(|| "1536".to_string(), |d| d.to_string())
+            };
 
         self.tts_provider.clone_from(&ai_cfg.tts.provider);
         self.stt_provider.clone_from(&ai_cfg.stt.provider);

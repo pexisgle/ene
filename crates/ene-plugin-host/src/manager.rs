@@ -830,8 +830,12 @@ pub type VadFactoriesByPlugin = HashMap<String, Vec<(String, VadFactoryHandle)>>
 pub struct ProviderFactoryRemoval {
     /// Number of LLM factories removed.
     pub llm: usize,
+    /// Number of local-engine LLM factories removed.
+    pub local_llm: usize,
     /// Number of embedding factories removed.
     pub embedding: usize,
+    /// Number of local-engine embedding factories removed.
+    pub local_embedding: usize,
     /// Number of TTS factories removed.
     pub tts: usize,
     /// Number of STT factories removed.
@@ -844,7 +848,13 @@ impl ProviderFactoryRemoval {
     /// Whether any factory was removed.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.llm == 0 && self.embedding == 0 && self.tts == 0 && self.stt == 0 && self.vad == 0
+        self.llm == 0
+            && self.local_llm == 0
+            && self.embedding == 0
+            && self.local_embedding == 0
+            && self.tts == 0
+            && self.stt == 0
+            && self.vad == 0
     }
 }
 
@@ -889,6 +899,28 @@ fn remove_matching_factories<X: ?Sized>(
     removed
 }
 
+/// Removes factories whose stored `Arc` matches any handle in `expected`,
+/// regardless of map key — the local-engine maps are keyed by plugin id
+/// rather than provider kind.
+fn remove_matching_local_factories<X: ?Sized>(
+    factories: &mut HashMap<String, Arc<X>>,
+    expected: &[(String, Arc<X>)],
+) -> usize {
+    let mut removed = 0;
+    factories.retain(|_, stored| {
+        if expected
+            .iter()
+            .any(|(_, handle)| Arc::ptr_eq(stored, handle))
+        {
+            removed += 1;
+            false
+        } else {
+            true
+        }
+    });
+    removed
+}
+
 /// The plugin host is the single provider registry: provider creation
 /// resolves through its factory maps (which mirror the capability
 /// declarations), never through a process-global registry.
@@ -900,6 +932,23 @@ impl ene_ai::ProviderHost for PluginHostManager {
         config: &EneConfig,
         task: &ene_ai::TaskRef,
     ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::LlmProviderError> {
+        if kind == ene_ai::LOCAL_PROVIDER {
+            let engine = config.get_section::<ene_ai::AiConfig>().map_or_else(
+                |_| ene_ai::DEFAULT_LOCAL_ENGINE.to_string(),
+                |ai| ai.local_engine,
+            );
+            if let Some(factory) = self.local_llm_factories.get(&engine) {
+                return factory.create_provider(config, task);
+            }
+            if !self.local_llm_factories.is_empty() {
+                tracing::warn!(
+                    component = "PluginHostManager",
+                    engine = %engine,
+                    "Configured local engine has no registered factory; \
+                     using the first registered local backend"
+                );
+            }
+        }
         self.llm_factories
             .get(kind)
             .ok_or_else(|| {
@@ -915,6 +964,23 @@ impl ene_ai::ProviderHost for PluginHostManager {
         kind: &str,
         config: &EneConfig,
     ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+        if kind == ene_ai::LOCAL_PROVIDER {
+            let engine = config.get_section::<ene_ai::AiConfig>().map_or_else(
+                |_| ene_ai::DEFAULT_LOCAL_ENGINE.to_string(),
+                |ai| ai.local_engine,
+            );
+            if let Some(factory) = self.local_embedding_factories.get(&engine) {
+                return factory.create_embedding_provider(config);
+            }
+            if !self.local_embedding_factories.is_empty() {
+                tracing::warn!(
+                    component = "PluginHostManager",
+                    engine = %engine,
+                    "Configured local engine has no registered embedding factory; \
+                     using the first registered local backend"
+                );
+            }
+        }
         self.embedding_factories
             .get(kind)
             .ok_or_else(|| {
@@ -1001,8 +1067,13 @@ pub struct PluginHostManager {
     tool_registries: Vec<Arc<dyn ToolRegistry>>,
     llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
     llm_factory_plugins: HashMap<String, String>,
+    /// [`ene_ai::LOCAL_PROVIDER`] LLM factories keyed by plugin id, so the
+    /// configured local engine wins over registration order when several
+    /// local backends declare the same kind.
+    local_llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
     embedding_factories: HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
     embedding_factory_plugins: HashMap<String, String>,
+    local_embedding_factories: HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>>,
     tts_factories: HashMap<String, Arc<dyn ene_ai::TtsProviderFactory>>,
     tts_factory_plugins: HashMap<String, String>,
     stt_factories: HashMap<String, Arc<dyn ene_ai::SttProviderFactory>>,
@@ -1102,8 +1173,10 @@ impl PluginHostManager {
                 tool_registries: Vec::new(),
                 llm_factories: HashMap::new(),
                 llm_factory_plugins: HashMap::new(),
+                local_llm_factories: HashMap::new(),
                 embedding_factories: HashMap::new(),
                 embedding_factory_plugins: HashMap::new(),
+                local_embedding_factories: HashMap::new(),
                 tts_factories: HashMap::new(),
                 tts_factory_plugins: HashMap::new(),
                 stt_factories: HashMap::new(),
@@ -1137,9 +1210,15 @@ impl PluginHostManager {
         let mut llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
             HashMap::new();
         let mut llm_factory_plugins: HashMap<String, String> = HashMap::new();
+        let mut local_llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
+            HashMap::new();
         let mut embedding_factories: HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>> =
             HashMap::new();
         let mut embedding_factory_plugins: HashMap<String, String> = HashMap::new();
+        let mut local_embedding_factories: HashMap<
+            String,
+            Arc<dyn ene_ai::EmbeddingProviderFactory>,
+        > = HashMap::new();
         let mut tts_factories: HashMap<String, Arc<dyn ene_ai::TtsProviderFactory>> =
             HashMap::new();
         let mut tts_factory_plugins: HashMap<String, String> = HashMap::new();
@@ -1208,7 +1287,8 @@ impl PluginHostManager {
         // and provider registration is deferred to pass 2 so the capability
         // gate can decide which plugins are registered at all.
         let mut started: Vec<StartedPlugin> = Vec::new();
-        for (name, entry) in &plugin_config.list {
+        for name in startup_order(plugin_config.list.keys()) {
+            let entry = &plugin_config.list[name];
             if !entry.enable {
                 tracing::info!(
                     component = "PluginHostManager",
@@ -1463,15 +1543,6 @@ impl PluginHostManager {
             }
 
             for spec in &caps.llm_providers {
-                if llm_factories.contains_key(&spec.kind) {
-                    tracing::warn!(
-                        component = "PluginHostManager",
-                        plugin = %name,
-                        kind = %spec.kind,
-                        "Duplicate LLM provider kind; skipping"
-                    );
-                    continue;
-                }
                 let factory = IpcLlmProviderFactory::new(
                     spec.kind.clone(),
                     Arc::clone(conn),
@@ -1482,14 +1553,37 @@ impl PluginHostManager {
                     spec.resource_class,
                     &class_admission,
                 );
-                llm_factories.insert(
-                    spec.kind.clone(),
-                    Arc::new(factory) as Arc<dyn ene_ai::LlmProviderFactory>,
-                );
+                let factory: Arc<dyn ene_ai::LlmProviderFactory> = Arc::new(factory);
+                if spec.kind == ene_ai::LOCAL_PROVIDER {
+                    // Keep every local backend reachable: the configured
+                    // `ai.local_engine` picks the serving plugin regardless
+                    // of registration order.
+                    local_llm_factories.insert(name.clone(), Arc::clone(&factory));
+                }
+                if llm_factories.contains_key(&spec.kind) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        kind = %spec.kind,
+                        "Duplicate LLM provider kind; skipping"
+                    );
+                    continue;
+                }
+                llm_factories.insert(spec.kind.clone(), Arc::clone(&factory));
                 llm_factory_plugins.insert(spec.kind.clone(), name.clone());
             }
 
             for kind in &caps.embed_providers {
+                let factory = IpcEmbeddingProviderFactory::new(
+                    kind.clone(),
+                    Arc::clone(conn),
+                    name.clone(),
+                    is_builtin_plugin(name),
+                );
+                let factory: Arc<dyn ene_ai::EmbeddingProviderFactory> = Arc::new(factory);
+                if kind == ene_ai::LOCAL_PROVIDER {
+                    local_embedding_factories.insert(name.clone(), Arc::clone(&factory));
+                }
                 if embedding_factories.contains_key(kind) {
                     tracing::warn!(
                         component = "PluginHostManager",
@@ -1499,16 +1593,7 @@ impl PluginHostManager {
                     );
                     continue;
                 }
-                let factory = IpcEmbeddingProviderFactory::new(
-                    kind.clone(),
-                    Arc::clone(conn),
-                    name.clone(),
-                    is_builtin_plugin(name),
-                );
-                embedding_factories.insert(
-                    kind.clone(),
-                    Arc::new(factory) as Arc<dyn ene_ai::EmbeddingProviderFactory>,
-                );
+                embedding_factories.insert(kind.clone(), Arc::clone(&factory));
                 embedding_factory_plugins.insert(kind.clone(), name.clone());
             }
 
@@ -1702,8 +1787,10 @@ impl PluginHostManager {
             tool_registries,
             llm_factories,
             llm_factory_plugins,
+            local_llm_factories,
             embedding_factories,
             embedding_factory_plugins,
+            local_embedding_factories,
             tts_factories,
             tts_factory_plugins,
             stt_factories,
@@ -1747,17 +1834,19 @@ impl PluginHostManager {
         &mut self,
         handles: &PluginFactoryHandles,
     ) -> ProviderFactoryRemoval {
-        ProviderFactoryRemoval {
+        let mut removal = ProviderFactoryRemoval {
             llm: remove_matching_factories(
                 &mut self.llm_factories,
                 &mut self.llm_factory_plugins,
                 &handles.llm,
             ),
+            local_llm: 0,
             embedding: remove_matching_factories(
                 &mut self.embedding_factories,
                 &mut self.embedding_factory_plugins,
                 &handles.embedding,
             ),
+            local_embedding: 0,
             tts: remove_matching_factories(
                 &mut self.tts_factories,
                 &mut self.tts_factory_plugins,
@@ -1773,7 +1862,14 @@ impl PluginHostManager {
                 &mut self.vad_factory_plugins,
                 &handles.vad,
             ),
-        }
+        };
+        removal.local_llm =
+            remove_matching_local_factories(&mut self.local_llm_factories, &handles.llm);
+        removal.local_embedding = remove_matching_local_factories(
+            &mut self.local_embedding_factories,
+            &handles.embedding,
+        );
+        removal
     }
 
     /// Returns the embedding provider factories contributed by plugins,
@@ -1789,12 +1885,21 @@ impl PluginHostManager {
     pub fn embedding_factories_by_plugin(&self) -> EmbeddingFactoriesByPlugin {
         let mut grouped = EmbeddingFactoriesByPlugin::new();
         for (kind, factory) in &self.embedding_factories {
+            if kind == ene_ai::LOCAL_PROVIDER {
+                continue;
+            }
             if let Some(plugin) = self.embedding_factory_plugins.get(kind) {
                 grouped
                     .entry(plugin.clone())
                     .or_default()
                     .push((kind.clone(), Arc::clone(factory)));
             }
+        }
+        for (plugin, factory) in &self.local_embedding_factories {
+            grouped
+                .entry(plugin.clone())
+                .or_default()
+                .push((ene_ai::LOCAL_PROVIDER.to_string(), Arc::clone(factory)));
         }
         grouped
     }
@@ -1870,12 +1975,21 @@ impl PluginHostManager {
     pub fn llm_factories_by_plugin(&self) -> LlmFactoriesByPlugin {
         let mut grouped = LlmFactoriesByPlugin::new();
         for (kind, factory) in &self.llm_factories {
+            if kind == ene_ai::LOCAL_PROVIDER {
+                continue;
+            }
             if let Some(plugin) = self.llm_factory_plugins.get(kind) {
                 grouped
                     .entry(plugin.clone())
                     .or_default()
                     .push((kind.clone(), Arc::clone(factory)));
             }
+        }
+        for (plugin, factory) in &self.local_llm_factories {
+            grouped
+                .entry(plugin.clone())
+                .or_default()
+                .push((ene_ai::LOCAL_PROVIDER.to_string(), Arc::clone(factory)));
         }
         grouped
     }
@@ -2601,8 +2715,10 @@ impl PluginHostManager {
             mcp_registries: Vec::new(),
             llm_factories: HashMap::new(),
             llm_factory_plugins: HashMap::new(),
+            local_llm_factories: HashMap::new(),
             embedding_factories: HashMap::new(),
             embedding_factory_plugins: HashMap::new(),
+            local_embedding_factories: HashMap::new(),
             tts_factories: HashMap::new(),
             tts_factory_plugins: HashMap::new(),
             stt_factories: HashMap::new(),
@@ -2707,6 +2823,22 @@ fn is_valid_plugin_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The order plugins start and register their providers in.
+///
+/// `plugins.list` is a `HashMap` with no defined iteration order, but pass 2
+/// of [`PluginHostManager::start`] registers provider factories
+/// first-come-first-served per provider kind, and two plugins may declare the
+/// same kind (the in-process and sidecar local GGUF backends both serve kind
+/// `local`). Sorting makes the duplicate-kind winner deterministic across
+/// runs instead of a startup race, and lexicographic order keeps `llama-cpp`
+/// (the backend that works without an external `llama-server` binary) ahead
+/// of `llama-server`.
+fn startup_order<'a>(names: impl Iterator<Item = &'a String>) -> Vec<&'a String> {
+    let mut ordered: Vec<&String> = names.collect();
+    ordered.sort_unstable();
+    ordered
 }
 
 /// The plugin binaries that ship with Ene as trusted built-ins.
@@ -3135,6 +3267,7 @@ fn verify_or_compute_checksum(
 )]
 mod tests {
     use super::*;
+    use ene_ai::ProviderHost;
 
     /// Serializes tests that mutate the process environment (`set_var` /
     /// `remove_var` are unsound when concurrent threads read the env).
@@ -3261,6 +3394,116 @@ mod tests {
         assert!(!is_valid_plugin_name("foo\\bar"));
         assert!(!is_valid_plugin_name("has space"));
         assert!(!is_valid_plugin_name("semi;colon"));
+    }
+
+    #[test]
+    fn startup_order_is_sorted_and_keeps_llama_cpp_first() {
+        // Deterministic regardless of HashMap iteration order...
+        let names = ["zeta".to_string(), "alpha".to_string()];
+        let sorted = startup_order(names.iter())
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(sorted, ["alpha", "zeta"]);
+        // ...and the duplicate `local` provider kind resolves to the
+        // in-process backend: `llama-cpp` sorts before `llama-server`.
+        let local = ["llama-server".to_string(), "llama-cpp".to_string()];
+        let ordered = startup_order(local.iter())
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered[0], "llama-cpp");
+        assert_eq!(ordered[1], "llama-server");
+    }
+
+    #[tokio::test]
+    async fn local_engine_routing_prefers_configured_plugin() {
+        let mut manager = PluginHostManager::test_instance();
+        for plugin in ["llama-cpp", "llama-server"] {
+            manager.local_llm_factories.insert(
+                plugin.to_string(),
+                Arc::new(LocalEngineLlmFactory(plugin)) as LlmFactoryHandle,
+            );
+            manager.local_embedding_factories.insert(
+                plugin.to_string(),
+                Arc::new(LocalEngineEmbeddingFactory(plugin)) as EmbeddingFactoryHandle,
+            );
+        }
+        // The configured engine wins even though registration order would
+        // have picked `llama-cpp` first.
+        let mut config = ene_config::EneConfig::default();
+        let ai = ene_ai::AiConfig {
+            local_engine: "llama-server".to_string(),
+            ..ene_ai::AiConfig::default()
+        };
+        drop(config.set_section(&ai));
+
+        let llm_err = match manager
+            .create_llm_provider(ene_ai::LOCAL_PROVIDER, &config, &ene_ai::TaskRef::default())
+            .await
+        {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            llm_err.contains("served by llama-server"),
+            "unexpected winner: {llm_err}"
+        );
+        let embed_err = match manager
+            .create_embedding_provider(ene_ai::LOCAL_PROVIDER, &config)
+            .await
+        {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            embed_err.contains("served by llama-server"),
+            "unexpected winner: {embed_err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_engine_routing_falls_back_when_engine_plugin_missing() {
+        let mut manager = PluginHostManager::test_instance();
+        let llm_factory: LlmFactoryHandle = Arc::new(LocalEngineLlmFactory("llama-cpp"));
+        let embed_factory: EmbeddingFactoryHandle =
+            Arc::new(LocalEngineEmbeddingFactory("llama-cpp"));
+        manager
+            .local_llm_factories
+            .insert("llama-cpp".to_string(), Arc::clone(&llm_factory));
+        manager
+            .local_embedding_factories
+            .insert("llama-cpp".to_string(), Arc::clone(&embed_factory));
+        // The first-registered backend also lives in the kind-keyed map,
+        // which is what the fallback path consults.
+        manager
+            .llm_factories
+            .insert(ene_ai::LOCAL_PROVIDER.to_string(), Arc::clone(&llm_factory));
+        manager.embedding_factories.insert(
+            ene_ai::LOCAL_PROVIDER.to_string(),
+            Arc::clone(&embed_factory),
+        );
+        // `llama-server` is configured but not registered (plugin disabled):
+        // routing falls back to the first registered local backend instead
+        // of failing.
+        let mut config = ene_config::EneConfig::default();
+        let ai = ene_ai::AiConfig {
+            local_engine: "llama-server".to_string(),
+            ..ene_ai::AiConfig::default()
+        };
+        drop(config.set_section(&ai));
+
+        let embed_err = match manager
+            .create_embedding_provider(ene_ai::LOCAL_PROVIDER, &config)
+            .await
+        {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            embed_err.contains("served by llama-cpp"),
+            "unexpected winner: {embed_err}"
+        );
     }
 
     #[test]
@@ -4189,6 +4432,45 @@ mod tests {
         }
     }
 
+    /// Factory that reports which plugin served the request through its
+    /// error text, so local-engine routing tests can observe the winner.
+    struct LocalEngineLlmFactory(&'static str);
+
+    impl ene_ai::LlmProviderFactory for LocalEngineLlmFactory {
+        fn provider_name(&self) -> &str {
+            self.0
+        }
+
+        fn create_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+            _task: &ene_ai::TaskRef,
+        ) -> Result<Box<dyn ene_ai::LlmProvider>, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider(format!(
+                "served by {}",
+                self.0
+            )))
+        }
+    }
+
+    struct LocalEngineEmbeddingFactory(&'static str);
+
+    impl ene_ai::EmbeddingProviderFactory for LocalEngineEmbeddingFactory {
+        fn provider_kind(&self) -> &str {
+            ene_ai::LOCAL_PROVIDER
+        }
+
+        fn create_embedding_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
+            Err(ene_ai::EmbeddingError::Init(format!(
+                "served by {}",
+                self.0
+            )))
+        }
+    }
+
     struct KindEmbeddingFactory(&'static str);
 
     impl ene_ai::EmbeddingProviderFactory for KindEmbeddingFactory {
@@ -4299,7 +4581,9 @@ mod tests {
             removal,
             ProviderFactoryRemoval {
                 llm: 1,
+                local_llm: 0,
                 embedding: 1,
+                local_embedding: 0,
                 tts: 1,
                 stt: 1,
                 vad: 1,
@@ -4346,7 +4630,9 @@ mod tests {
             removal,
             ProviderFactoryRemoval {
                 llm: 0,
+                local_llm: 0,
                 embedding: 0,
+                local_embedding: 0,
                 tts: 0,
                 stt: 0,
                 vad: 0,

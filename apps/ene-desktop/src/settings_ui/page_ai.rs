@@ -55,17 +55,12 @@ const EMBEDDING_MODEL_FALLBACK: &[&str] = &[
 /// Common embedding vector sizes offered as one-click choices.
 const EMBEDDING_DIMENSION_CHOICES: &[&str] = &["512", "768", "1024", "1536", "3072"];
 
-fn first_openai_compatible_provider(ai: &AiConfig) -> Option<String> {
-    ai.providers
-        .iter()
-        .find_map(|(name, def)| def.is_openai_compatible().then(|| name.clone()))
-}
-
-fn ensure_local_embedding_provider(ai: &mut AiConfig, draft: &mut SettingsDraft) {
+fn ensure_local_embedding_provider(ai: &mut AiConfig, draft: &mut SettingsDraft, engine: &str) {
     // Plugin profiles are the single source of truth for local models:
     // `ai.local_models` is derived from them at apply time.
     let mut plugins = draft.section::<ene_plugin_host::PluginConfig>();
-    let entry = plugins.list.entry("local-llm".to_string()).or_default();
+    let entry = plugins.list.entry(engine.to_string()).or_default();
+    entry.enable = true;
     if !entry.profiles.contains_key(DEFAULT_LOCAL_EMBED_MODEL) {
         entry.profiles.insert(
             DEFAULT_LOCAL_EMBED_MODEL.to_string(),
@@ -78,26 +73,28 @@ fn ensure_local_embedding_provider(ai: &mut AiConfig, draft: &mut SettingsDraft)
     }
     draft.set_section(&plugins);
     ai.tasks.embedding.provider = LOCAL_PROVIDER.to_string();
+    ai.local_engine = engine.to_string();
     if ai.tasks.embedding.model.is_none() {
         ai.tasks.embedding.model = Some(DEFAULT_LOCAL_EMBED_MODEL.to_string());
     }
 }
 
-fn set_embedding_cloud(ai: &mut AiConfig) {
-    let chat_key = ai.tasks.chat.provider.clone();
-    let provider_key = match ai.providers.get(&chat_key) {
-        Some(def) if def.is_openai_compatible() => chat_key,
-        _ => first_openai_compatible_provider(ai).unwrap_or_else(|| {
-            ai.providers
-                .insert(chat_key.clone(), AiProviderDef::default());
-            chat_key
-        }),
-    };
-    ai.tasks.embedding.provider = provider_key;
+/// Applies a typed cloud provider key to the embedding task. The key is
+/// registered when it was not in `ai.providers` yet (same behaviour as the
+/// chat row), and model / dimensions get their defaults only on first use
+/// so an existing cloud selection keeps its values.
+fn select_embedding_cloud(ai: &mut AiConfig, provider: &str) {
+    ai.tasks.embedding.provider = provider.to_string();
+    if !ai.providers.contains_key(provider) {
+        ai.providers
+            .insert(provider.to_string(), AiProviderDef::default());
+    }
     if ai.tasks.embedding.model.is_none() {
         ai.tasks.embedding.model = Some("text-embedding-3-small".to_string());
     }
-    ai.tasks.embedding.dimensions = Some(1536);
+    if ai.tasks.embedding.dimensions.is_none() {
+        ai.tasks.embedding.dimensions = Some(1536);
+    }
 }
 
 /// Provider keys as (value, label) choices, OpenAI-compatible entries first.
@@ -120,6 +117,23 @@ fn provider_choices(ai: &AiConfig) -> Vec<(String, String)> {
     compatible
 }
 
+/// Provider choices shared by the chat and embedding rows: the concrete
+/// local engines first, then every registered provider definition.
+fn provider_picker_choices(ai: &AiConfig) -> Vec<(String, String)> {
+    let mut choices = ene_ai::LOCAL_ENGINE_CHOICES
+        .iter()
+        .map(|engine| ((*engine).to_string(), (*engine).to_string()))
+        .collect::<Vec<_>>();
+    choices.extend(provider_choices(ai));
+    choices
+}
+
+/// Whether a picker buffer value names one of the local engines (as opposed
+/// to a cloud provider key).
+fn is_local_engine(value: &str) -> bool {
+    ene_ai::LOCAL_ENGINE_CHOICES.contains(&value)
+}
+
 /// Chat model candidates for the current chat provider.
 ///
 /// Local providers list registered GGUF models; cloud providers use the
@@ -128,7 +142,7 @@ fn provider_choices(ai: &AiConfig) -> Vec<(String, String)> {
 /// stays selectable and visible.
 fn local_profile_names(draft: &SettingsDraft) -> Vec<String> {
     let plugins = draft.section::<ene_plugin_host::PluginConfig>();
-    let mut names: Vec<String> = ["local-llm", "llama-server"]
+    let mut names: Vec<String> = ["llama-cpp", "local-llm", "llama-server"]
         .iter()
         .filter_map(|plugin| plugins.list.get(*plugin))
         .flat_map(|entry| entry.profiles.keys().cloned())
@@ -304,7 +318,7 @@ pub fn render(
                     &i18n_embed_fl::fl!(crate::i18n::loader(), "provider"),
                     "",
                     |ui| {
-                        let mut choices = provider_choices(&ai_cfg);
+                        let mut choices = provider_picker_choices(&ai_cfg);
                         if !choices
                             .iter()
                             .any(|(value, _)| value == &input.ai_chat_provider)
@@ -329,11 +343,21 @@ pub fn render(
                             if !new_provider.is_empty()
                                 && new_provider != ai_cfg.tasks.chat.provider
                             {
-                                ai_cfg.tasks.chat.provider.clone_from(&new_provider);
-                                if !ai_cfg.providers.contains_key(&new_provider) {
-                                    ai_cfg
-                                        .providers
-                                        .insert(new_provider.clone(), AiProviderDef::default());
+                                if is_local_engine(&new_provider) {
+                                    ai_cfg.tasks.chat.provider = LOCAL_PROVIDER.to_string();
+                                    ai_cfg.local_engine.clone_from(&new_provider);
+                                    let mut plugins =
+                                        draft.section::<ene_plugin_host::PluginConfig>();
+                                    plugins.list.entry(new_provider.clone()).or_default().enable =
+                                        true;
+                                    draft.set_section(&plugins);
+                                } else {
+                                    ai_cfg.tasks.chat.provider.clone_from(&new_provider);
+                                    if !ai_cfg.providers.contains_key(&new_provider) {
+                                        ai_cfg
+                                            .providers
+                                            .insert(new_provider.clone(), AiProviderDef::default());
+                                    }
                                 }
                                 sync_provider_buffers(input, &ai_cfg);
                                 draft.set_section(&ai_cfg);
@@ -580,51 +604,64 @@ pub fn render(
                     &i18n_embed_fl::fl!(crate::i18n::loader(), "provider"),
                     "",
                     |ui| {
-                        let mut current_provider = input.ai_embedding_provider.clone();
-                        egui::ComboBox::from_id_salt("embedding_provider")
-                            .selected_text(current_provider.as_str())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut current_provider,
-                                    "cloud".to_string(),
-                                    i18n_embed_fl::fl!(crate::i18n::loader(), "cloud-api"),
-                                );
-                                ui.selectable_value(
-                                    &mut current_provider,
-                                    "local".to_string(),
-                                    i18n_embed_fl::fl!(crate::i18n::loader(), "local-gguf"),
-                                );
-                            });
-                        if current_provider != input.ai_embedding_provider {
-                            input.ai_embedding_provider.clone_from(&current_provider);
-                            if current_provider.as_str() == "local" {
-                                ensure_local_embedding_provider(&mut ai_cfg, draft);
-                                input.ai_embedding_model.clone_from(
-                                    ai_cfg
+                        let mut choices = provider_picker_choices(&ai_cfg);
+                        if !choices
+                            .iter()
+                            .any(|(value, _)| value == &input.ai_embedding_provider)
+                        {
+                            choices.insert(
+                                0,
+                                (
+                                    input.ai_embedding_provider.clone(),
+                                    input.ai_embedding_provider.clone(),
+                                ),
+                            );
+                        }
+                        let combo = editable_combo(
+                            ui,
+                            "embedding_provider_combo",
+                            &mut input.ai_embedding_provider,
+                            &choices,
+                            200.0,
+                        );
+                        if combo.commit_requested() {
+                            let new_provider = input.ai_embedding_provider.trim().to_string();
+                            if !new_provider.is_empty()
+                                && new_provider != ai_cfg.tasks.embedding.provider
+                            {
+                                if is_local_engine(&new_provider) {
+                                    ensure_local_embedding_provider(
+                                        &mut ai_cfg,
+                                        draft,
+                                        &new_provider,
+                                    );
+                                    input.ai_embedding_model.clone_from(
+                                        ai_cfg
+                                            .tasks
+                                            .embedding
+                                            .model
+                                            .as_ref()
+                                            .unwrap_or(&String::new()),
+                                    );
+                                    input.ai_embedding_dimensions = "auto".to_string();
+                                } else {
+                                    select_embedding_cloud(&mut ai_cfg, &new_provider);
+                                    input.ai_embedding_model.clone_from(
+                                        ai_cfg
+                                            .tasks
+                                            .embedding
+                                            .model
+                                            .as_ref()
+                                            .unwrap_or(&String::new()),
+                                    );
+                                    input.ai_embedding_dimensions = ai_cfg
                                         .tasks
                                         .embedding
-                                        .model
-                                        .as_ref()
-                                        .unwrap_or(&String::new()),
-                                );
-                                input.ai_embedding_dimensions = "auto".to_string();
-                            } else {
-                                set_embedding_cloud(&mut ai_cfg);
-                                input.ai_embedding_model.clone_from(
-                                    ai_cfg
-                                        .tasks
-                                        .embedding
-                                        .model
-                                        .as_ref()
-                                        .unwrap_or(&String::new()),
-                                );
-                                input.ai_embedding_dimensions = ai_cfg
-                                    .tasks
-                                    .embedding
-                                    .dimensions
-                                    .map_or_else(|| "1536".to_string(), |d| d.to_string());
+                                        .dimensions
+                                        .map_or_else(|| "1536".to_string(), |d| d.to_string());
+                                }
+                                draft.set_section(&ai_cfg);
                             }
-                            draft.set_section(&ai_cfg);
                         }
                     },
                 );
@@ -657,7 +694,7 @@ pub fn render(
                     &i18n_embed_fl::fl!(crate::i18n::loader(), "dimensions"),
                     "",
                     |ui| {
-                        if input.ai_embedding_provider == "local" {
+                        if is_local_engine(&input.ai_embedding_provider) {
                             ui.add_sized(
                                 [100.0, 0.0],
                                 egui::Label::new(i18n_embed_fl::fl!(

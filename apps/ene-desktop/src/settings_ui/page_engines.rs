@@ -28,7 +28,7 @@ use serde_json::Value;
 const ENGINES: &[&str] = &["llama-server", "voicevox", "whisper", "kokoro", "onnx"];
 
 /// Plugins whose profiles are model definitions (weights on disk).
-const MODEL_PROFILE_PLUGINS: &[&str] = &["llama-server", "local-llm"];
+const MODEL_PROFILE_PLUGINS: &[&str] = &["llama-cpp", "llama-server", "local-llm"];
 
 fn fl(key: &str) -> String {
     crate::i18n::loader().get(key)
