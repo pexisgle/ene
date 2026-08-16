@@ -1089,6 +1089,10 @@ impl SettingsUi {
             self.current_page = PageKind::Ai;
         }
 
+        // Advance the async apply pipeline even while the bar is hidden so
+        // a finishing apply updates the draft and feedback banner.
+        self.pump_apply(settings, ai);
+
         if let Some(mut state) = world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
             && let Some(page) = state.0.focused_page.take()
         {
@@ -1109,31 +1113,30 @@ impl SettingsUi {
                 data.insert_temp(egui::Id::new("advanced_filter"), filter);
             });
         }
+        // The bar must be laid out before the content panels: the nested
+        // side/central panels consume every remaining point, so rendering it
+        // afterwards would place it below the visible area.
+        if self.apply_feedback.is_some() || self.draft.is_dirty() {
+            egui::Panel::bottom("settings_apply_bar")
+                .resizable(false)
+                .show_separator_line(false)
+                .show(ui, |ui| {
+                    self.render_apply_bar(ui, settings, Some(ai));
+                });
+        }
         let mut selected_page: Option<PageKind> = None;
         let narrow = use_compact_navigation(ui.available_width());
-        if narrow {
-            self.render_compact_nav(ui, &mut selected_page);
-            ui.separator();
-            self.render_page_content(
-                ui,
-                settings,
-                ai,
-                world,
-                ui_entity,
-                now_secs,
-                &mut selected_page,
-            );
-        } else {
-            egui::Panel::left("settings_nav_sidebar")
-                .default_size(212.0)
-                .min_size(180.0)
-                .resizable(false)
-                .show(ui, |ui| {
-                    self.render_sidebar(ui, &mut selected_page);
-                });
-            egui::CentralPanel::default()
-                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 8)))
-                .show(ui, |ui| {
+        // An explicit id anchors the page's auto-id chain so the apply bar
+        // appearing or disappearing cannot shift every widget id (and with
+        // it widget state). Nested panels take their ids from the parent ui
+        // salt, so without this scope the sidebar/page ids depend on how
+        // many widgets the bar rendered in the same frame.
+        ui.scope_builder(
+            egui::UiBuilder::new().id(egui::Id::new("settings_content")),
+            |ui| {
+                if narrow {
+                    self.render_compact_nav(ui, &mut selected_page);
+                    ui.separator();
                     self.render_page_content(
                         ui,
                         settings,
@@ -1143,13 +1146,33 @@ impl SettingsUi {
                         now_secs,
                         &mut selected_page,
                     );
-                });
-        }
+                } else {
+                    egui::Panel::left("settings_nav_sidebar")
+                        .default_size(212.0)
+                        .min_size(180.0)
+                        .resizable(false)
+                        .show(ui, |ui| {
+                            self.render_sidebar(ui, &mut selected_page);
+                        });
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 8)))
+                        .show(ui, |ui| {
+                            self.render_page_content(
+                                ui,
+                                settings,
+                                ai,
+                                world,
+                                ui_entity,
+                                now_secs,
+                                &mut selected_page,
+                            );
+                        });
+                }
+            },
+        );
         if let Some(page) = selected_page {
             self.current_page = page;
         }
-
-        self.render_apply_bar(ui, settings, ai);
 
         // Rendered last so it floats above every page: a close, app exit,
         // reload, or character switch with unsaved card edits must confirm
@@ -1236,9 +1259,8 @@ impl SettingsUi {
         &mut self,
         ui: &mut egui::Ui,
         settings: &CharacterSettings,
-        ai: &Arc<AiBridge>,
+        ai: Option<&Arc<AiBridge>>,
     ) {
-        self.pump_apply(settings, ai);
         let mut dismiss_feedback = false;
         if let Some(feedback) = &self.apply_feedback {
             let (color, message) = if feedback.ok {
@@ -1319,6 +1341,7 @@ impl SettingsUi {
                             "settings-apply-hint"
                         ))
                         .clicked()
+                        && let Some(ai) = ai
                     {
                         self.apply_pending(settings, ai);
                     }
@@ -1792,6 +1815,166 @@ mod tests {
     fn compact_navigation_boundary_is_exclusive() {
         assert!(use_compact_navigation(719.0));
         assert!(!use_compact_navigation(720.0));
+    }
+
+    #[test]
+    fn apply_bar_lays_out_above_the_bottom_edge_and_never_overlaps_content() {
+        // The apply bar must be laid out before the nested side/central
+        // panels: those panels consume every remaining point, so a bar
+        // rendered after them lands below the visible area.
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 640.0),
+            )),
+            ..Default::default()
+        };
+        let mut bar_rect = egui::Rect::NOTHING;
+        let mut content_rect = egui::Rect::NOTHING;
+        // Two frames: the bottom panel sizes itself to its content from the
+        // previous frame, so the steady-state layout only exists on frame 2.
+        for _ in 0..2 {
+            let _output = context.run_ui(input.clone(), |ui| {
+                egui::Panel::bottom("settings_apply_bar")
+                    .resizable(false)
+                    .show_separator_line(false)
+                    .show(ui, |ui| {
+                        let response = egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(0x33, 0x35, 0x3b))
+                            .inner_margin(egui::Margin::symmetric(8, 6))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("pending");
+                                    ui.button("Apply").clicked();
+                                });
+                            })
+                            .response;
+                        bar_rect = response.rect;
+                    });
+                egui::Panel::left("settings_nav_sidebar")
+                    .default_size(212.0)
+                    .min_size(180.0)
+                    .resizable(false)
+                    .show(ui, |ui| {
+                        ui.label("nav");
+                    });
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 8)))
+                    .show(ui, |ui| {
+                        let response = egui::ScrollArea::vertical()
+                            .id_salt("settings_page_scroll")
+                            .hscroll(false)
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                ui.label("content");
+                            });
+                        content_rect = response.inner_rect;
+                    });
+            });
+        }
+        let visible = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 640.0));
+        assert!(
+            visible.contains_rect(bar_rect),
+            "apply bar {bar_rect:?} must stay inside the visible area {visible:?}"
+        );
+        assert!(
+            bar_rect.top() >= content_rect.bottom(),
+            "apply bar {bar_rect:?} overlaps content {content_rect:?}"
+        );
+        assert!(
+            bar_rect.bottom() <= visible.bottom() + 0.5,
+            "apply bar {bar_rect:?} must sit at the bottom of the window"
+        );
+    }
+
+    #[test]
+    fn apply_bar_toggle_does_not_repaint_page_widget_ids() {
+        // egui debug builds paint a red 2px outline around every widget
+        // whose id changes rect between passes (`warn_if_rect_changes_id`).
+        // The page content must keep its auto-id chain anchored at a stable
+        // id so showing or hiding the apply bar cannot shift every page
+        // widget id (and with it widget state) for one frame.
+        fn has_red_stroke(shape: &egui::Shape) -> bool {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().any(has_red_stroke),
+                egui::Shape::Rect(rect) => {
+                    let [r, g, b, a] = rect.stroke.color.to_array();
+                    rect.stroke.width > 0.0 && a > 0 && r > 120 && g < 110 && b < 110
+                }
+                _ => false,
+            }
+        }
+
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let settings = crate::settings::CharacterSettings {
+            assets_dir: std::path::PathBuf::from("/tmp"),
+            characters: Vec::new(),
+            character_state: crate::settings::CharacterState::default(),
+            store: std::sync::Arc::new(parking_lot::RwLock::new(
+                ene_config::ConfigStore::from_config(ene_config::EneConfig::default()),
+            )),
+            character_store: ene_card::CharacterConfigStore::default(),
+        };
+        let mut ui_state = SettingsUi::new();
+        for frame in 0..6 {
+            if frame == 2 {
+                ui_state
+                    .draft
+                    .set_path("mind.language", serde_json::Value::String("ja".into()));
+            }
+            if frame == 5 {
+                ui_state.draft.resync(ene_config::EneConfig::default());
+            }
+            let dirty = ui_state.draft.is_dirty();
+            let output = context.run_ui(input.clone(), |ui| {
+                if dirty {
+                    egui::Panel::bottom("settings_apply_bar")
+                        .resizable(false)
+                        .show_separator_line(false)
+                        .show(ui, |ui| {
+                            ui_state.render_apply_bar(ui, &settings, None);
+                        });
+                }
+                ui.scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new("settings_content")),
+                    |ui| {
+                        egui::Panel::left("settings_nav_sidebar")
+                            .default_size(212.0)
+                            .min_size(180.0)
+                            .resizable(false)
+                            .show(ui, |ui| {
+                                ui.label("nav");
+                            });
+                        egui::CentralPanel::default()
+                            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 8)))
+                            .show(ui, |ui| {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("settings_page_scroll")
+                                    .hscroll(false)
+                                    .auto_shrink([false; 2])
+                                    .show(ui, |ui| {
+                                        ui.label("content");
+                                    });
+                            });
+                    },
+                );
+            });
+            for clipped in &output.shapes {
+                assert!(
+                    !has_red_stroke(&clipped.shape),
+                    "red id-warning rect on frame {frame} while the apply bar is {}",
+                    if dirty { "shown" } else { "hidden" }
+                );
+            }
+        }
     }
 
     #[test]
