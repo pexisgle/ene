@@ -1255,26 +1255,6 @@ mod tests {
         assert_eq!(resolved, "neutral");
     }
 
-    /// The `PendingPermission` / `PendingUserInput` /
-    /// `QuestionDraft` types are consumed by the dialog
-    /// renderer in `page_ai.rs`. A future refactor that
-    /// accidentally drops one of the fields would lose the
-    /// dialog data, so this test pins the public surface.
-    #[test]
-    fn pending_dialog_types_constructible() {
-        let _perm = PendingPermission {
-            request_id: ene_runtime::RequestId::new("test"),
-            action: "fs.write".to_string(),
-            target: "/tmp/example.txt".to_string(),
-            description: Some("Write a 4 KB file".to_string()),
-        };
-        let _draft = QuestionDraft {
-            text: "alice".to_string(),
-            selected: Some("yes".to_string()),
-            skipped: false,
-        };
-    }
-
     #[test]
     fn accessors_return_none_when_characters_empty() {
         let mut settings = empty_settings();

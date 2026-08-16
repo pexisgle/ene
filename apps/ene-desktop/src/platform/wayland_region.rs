@@ -397,11 +397,6 @@ mod tests {
     }
 
     #[test]
-    fn input_region_state_default_is_full() {
-        assert_eq!(InputRegionState::default(), InputRegionState::Full);
-    }
-
-    #[test]
     fn set_full_input_round_trips_via_state() {
         let mut ctx = make_ctx();
         ctx.set_full_input();

@@ -76,15 +76,3 @@ impl CliCommand for CommitmentsCommand {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn parse_parts_for_list_and_done_subcommands() {
-        assert_eq!("list".split_whitespace().collect::<Vec<_>>(), vec!["list"]);
-        assert_eq!(
-            "done 42".split_whitespace().collect::<Vec<_>>(),
-            vec!["done", "42"]
-        );
-    }
-}

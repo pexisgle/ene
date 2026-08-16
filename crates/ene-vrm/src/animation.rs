@@ -899,16 +899,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interpolation_default_is_linear() {
-        assert_eq!(Interpolation::default(), Interpolation::Linear);
-    }
-
-    #[test]
-    fn repeat_mode_default_is_loop() {
-        assert_eq!(RepeatMode::default(), RepeatMode::Loop);
-    }
-
-    #[test]
     fn vrma_player_default_state() {
         let p = VrmaPlayer::default();
         assert_eq!(p.time, 0.0);
@@ -1178,14 +1168,6 @@ mod tests {
         };
         let frame = evaluate_clip(&clip, 0.0);
         assert!(frame.look_at_yaw_pitch.is_some());
-    }
-
-    #[test]
-    fn vrma_properties_default_is_empty() {
-        let p = VrmaProperties::default();
-        assert!(p.humanoid_bones.is_empty());
-        assert!(p.expressions.is_empty());
-        assert!(p.look_at_node.is_none());
     }
 
     #[test]

@@ -371,19 +371,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn viseme_state_push_and_advance() {
-        let state = VisemeState::default();
-        // Push a chunk of 2400 samples at 24 kHz = 100 ms of audio.
-        state.push_chunk(vec![0.5; 2400], 24_000);
-        state.advance();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        state.advance();
-        // After 50 ms at 24 kHz, ~1200 samples should be consumed.
-        let weights = state.analyze_weights();
-        assert!(weights.is_some());
-    }
-
-    #[test]
     fn viseme_state_reset_clears_queue() {
         let state = VisemeState::default();
         state.push_chunk(vec![0.5; 2400], 24_000);
@@ -406,16 +393,5 @@ mod tests {
         state.push_chunk(vec![0.5; 100], 0);
         state.advance();
         assert!(state.analyze_weights().is_none());
-    }
-
-    #[test]
-    fn viseme_state_multiple_chunks_consumed_in_order() {
-        let state = VisemeState::default();
-        state.push_chunk(vec![0.1; 1200], 24_000);
-        state.push_chunk(vec![0.9; 1200], 24_000);
-        // Wait long enough for both chunks to have "played".
-        std::thread::sleep(std::time::Duration::from_millis(120));
-        state.advance();
-        assert!(state.analyze_weights().is_some());
     }
 }

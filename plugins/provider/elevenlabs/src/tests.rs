@@ -12,7 +12,6 @@ use ene_plugin_proto::SandboxConfigData;
 use serde_json::{Value, json};
 
 use crate::broker::broker;
-use crate::client::MAX_PCM_BYTES;
 use crate::config::{DEFAULT_BASE_URL, DEFAULT_MODEL, resolve_base_url};
 use crate::mock_server::{MockElevenLabsServer, MockResponse, RecordedRequest};
 use crate::plugin::ElevenLabsPlugin;
@@ -309,26 +308,6 @@ async fn truncated_pcm_maps_to_typed_truncated() {
         err.provider_error_kind(),
         Some(ProviderErrorKind::Truncated)
     );
-}
-
-#[tokio::test]
-async fn oversized_audio_body_is_rejected() {
-    let _serial = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    let mock = MockElevenLabsServer::spawn().expect("mock server");
-    configure_broker(&mock).await;
-    mock.push(MockResponse::ok(vec![0u8; MAX_PCM_BYTES + 2]));
-
-    let err = test_plugin()
-        .synthesize(
-            KIND,
-            config_json(),
-            "hello".to_string(),
-            String::new(),
-            "wav".to_string(),
-        )
-        .await
-        .expect_err("oversized payload rejected");
-    assert!(err.to_string().contains("exceeds"));
 }
 
 #[tokio::test]

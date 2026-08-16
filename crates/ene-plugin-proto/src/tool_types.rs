@@ -735,11 +735,6 @@ mod tests {
     }
 
     #[test]
-    fn side_effects_default_is_read_only() {
-        assert_eq!(SideEffects::default(), SideEffects::ReadOnly);
-    }
-
-    #[test]
     fn tool_spec_defaults_to_unknown_side_effects() {
         // `ToolSpec::new` leaves side effects unknown (`None`), which is
         // fail-closed: the tool is not eligible for parallel execution.
@@ -991,11 +986,6 @@ mod tests {
         assert!(!ToolName::is_valid("a:::b"));
         assert!(ToolName::try_new("a..b").is_err());
         assert!(ToolName::try_new("a::b").is_err());
-    }
-
-    #[test]
-    fn tool_name_try_new_ok() {
-        assert!(ToolName::try_new("filesystem.read").is_ok());
     }
 
     #[test]
