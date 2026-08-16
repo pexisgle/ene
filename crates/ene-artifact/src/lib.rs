@@ -19,7 +19,6 @@
 //!
 //! The crate is deliberately host-side: plugin binaries never touch it.
 
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(
@@ -32,11 +31,9 @@
 pub mod cas;
 /// Signed catalog metadata and verification.
 pub mod catalog;
-/// SHA-256 helpers.
 pub mod digest;
 /// Resumable, size-capped HTTPS downloads.
 pub mod download;
-/// Error types.
 pub mod error;
 /// Safe extraction of zip payloads (VVPP and friends).
 pub mod extract;

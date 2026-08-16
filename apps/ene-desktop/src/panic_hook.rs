@@ -3,7 +3,7 @@
 use std::panic::PanicHookInfo;
 use std::path::PathBuf;
 
-/// Install the desktop panic hook. Call once near the start of `main`.
+/// Must be called once near the start of `main`.
 pub fn install() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

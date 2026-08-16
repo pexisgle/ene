@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 /// extractor.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Locale {
-    /// Resolved primary language code (e.g. `"ja"`, `"en"`).
     code: String,
 }
 
@@ -29,7 +28,6 @@ impl Locale {
         }
     }
 
-    /// The resolved primary language code (e.g. `"ja"`, `"en"`).
     pub fn code(&self) -> &str {
         &self.code
     }
@@ -38,22 +36,16 @@ impl Locale {
 /// Summary of a tool call result, used for procedure memory extraction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultSummary {
-    /// Name of the tool that was called.
     pub tool_name: String,
-    /// Whether the tool call succeeded.
     pub success: bool,
-    /// Brief description of what was done.
     pub summary: String,
 }
 
 /// Input for a single conversation turn, passed to extractors.
 #[derive(Debug, Clone)]
 pub struct TurnInput<'a> {
-    /// The user's message text.
     pub user_message: &'a str,
-    /// The assistant's response (if available).
     pub assistant_message: Option<&'a str>,
-    /// Tool call results from this turn.
     pub tool_results: &'a [ToolResultSummary],
 }
 
@@ -63,11 +55,8 @@ pub struct TurnInput<'a> {
 /// decide whether to persist it, merge it with existing memories, or discard it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryCandidate {
-    /// The kind of memory this candidate represents.
     pub kind: MemoryKind,
-    /// Short title or label (e.g. "project X の話").
     pub title: String,
-    /// Full content of the memory.
     pub content: String,
     /// The exact quote from the conversation that triggered extraction.
     pub source_quote: String,

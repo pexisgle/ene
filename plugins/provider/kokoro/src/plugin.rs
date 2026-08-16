@@ -1,5 +1,3 @@
-//! Local Kokoro-TTS (ONNX) provider plugin: capabilities, config, synthesis.
-
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -84,7 +82,6 @@ impl KokoroPlugin {
         )))
     }
 
-    /// Returns the cached engine for `resolved`, or `None` on a miss.
     fn cached(&self, resolved: &ResolvedConfig) -> Option<Arc<dyn TtsProvider>> {
         let guard = self.engine.lock().unwrap_or_else(PoisonError::into_inner);
         guard

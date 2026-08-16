@@ -3,7 +3,6 @@
 //! Unified runtime facade integrating LLM streaming, tool orchestration,
 //! long-term memory, and session management through an actor-based
 //! message-passing architecture.
-#![warn(missing_docs)]
 #![expect(
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
@@ -47,7 +46,6 @@ pub use ene_store::host_service;
 /// compression, tools) live on [`EneHandle`] itself.
 pub mod diagnostics;
 mod empty_response_log;
-/// Core error types.
 pub mod error;
 /// Actor-based runtime with message-passing architecture.
 pub mod handle;
@@ -91,11 +89,9 @@ pub mod vision;
 /// Workspace document indexer and its operations handle.
 pub mod workspace;
 
-// ── Bootstrap helpers ──
 /// Host helpers for `ConfigStore` → card → [`EneHandle::open`].
 pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 
-// ── Actor types ──
 /// Actor handle, events, status, and state snapshot.
 ///
 /// The event bus is split into three channels: [`EneEvent`] /
@@ -110,7 +106,6 @@ pub use handle::{
     ProviderCatalog, ShutdownTimeout, TerminalReason,
 };
 
-// ── Read-only query / vision handles ──
 /// Pending memory-candidate approval handle and its summary DTO.
 pub use query::candidates::{MemoryCandidateHandle, PendingCandidateEdit, PendingCandidateSummary};
 /// Interactive memory/commitment ledger handle.
@@ -120,17 +115,14 @@ pub use query::sessions::SessionQueryHandle;
 /// Screen-image vision summarization handle.
 pub use vision::VisionHandle;
 
-// ── Diagnostics ──
 /// Diagnostics facade and memory query-and-mutation handle.
 pub use diagnostics::{DiagnosticEvent, DiagnosticEventReceiver, EneDiagnostics, MemoryHandle};
 
-// ── Tools ──
 /// Tool registry operations handle (list / search / call / invalidate).
 pub use tools::ToolHandle;
 /// Workspace document index operations handle.
 pub use workspace::{WorkspaceHandle, WorkspaceIndexer, WorkspaceStatusView};
 
-// ── Public API v1 ──
 /// Public API version constant, JSON chat/lifecycle-event mirrors, session
 /// DTOs, and the unified [`public_api::PublicApiError`] category.
 pub use public_api::{
@@ -139,14 +131,12 @@ pub use public_api::{
     redact_tool_arguments_json,
 };
 
-// ── Config types ──
 /// Top-level application configuration (re-exported from `ene-config`).
 #[doc(no_inline)]
 pub use ene_config::EneConfig;
 /// Bounded-task admission caps for the turn actor (`tools.*`, Stage 8).
 pub use task_config::ToolRuntimeConfig;
 
-// ── Provider types ──
 /// AI provider registry and task routing config.
 #[doc(no_inline)]
 pub use ene_ai::AiConfig;
@@ -157,7 +147,6 @@ pub use ene_ai::LlmMessage;
 #[doc(no_inline)]
 pub use ene_ai::LlmProvider;
 
-// ── Memory types ──
 /// Persistent scheduler domain types.
 pub use ene_core::{
     NewSchedule, Schedule, ScheduleAction, ScheduleConfirmation, ScheduleKind, ScheduleRun,
@@ -167,7 +156,6 @@ pub use ene_core::{
 #[doc(no_inline)]
 pub use ene_store::StoreConfig;
 
-// ── Session / history ──
 /// Role enum for conversation history (re-exported from `ene-ai`).
 #[doc(no_inline)]
 pub use ene_ai::Role;
@@ -194,16 +182,12 @@ pub use types::RequestId;
 /// Turn identity, origin, and run/cancel errors.
 pub use types::{CancelError, RunError, TurnId, TurnOrigin};
 
-// ── Tool types ──
 /// `ToolSpec` type (re-exported from `ene-tool-proto`).
 #[doc(no_inline)]
 pub use ene_plugin_proto::ToolSpec;
 
-// ── Core error ──
-/// Runtime error type.
 pub use error::EneRuntimeError;
 
-// ── Stream types ──
 /// A single answer in a multi-question interactive prompt (re-exported from `ene-tool-proto`).
 pub use streaming::MultiAnswer;
 /// Permission decision type.
@@ -215,7 +199,6 @@ pub use streaming::{GrantType, PermissionScope};
 /// Undo report returned by [`EneHandle::undo`].
 pub use undo::UndoReport;
 
-// ── Prompt builder ──
 /// Message build context struct.
 pub use message_builder::MessageBuildContext;
 /// Build messages for LLM completion request.

@@ -1,6 +1,3 @@
-//! End-to-end contract tests against the real plugin binary and a real
-//! `llama-server` sidecar.
-//!
 //! The tests skip (not fail) when the network is unavailable or no
 //! `llama-server` binary can be resolved, so CI stays green without either.
 #![expect(
@@ -41,8 +38,6 @@ async fn inference_contract_round_trip_and_sidecar_recovery() {
     });
     let mut session = PluginSession::start(&profiles, &config).await;
 
-    // 1. Real token-by-token streaming: more than one text delta and usage
-    // on the final chunk.
     write_stream(&mut session, "req-stream", "Once upon a time").await;
     let (deltas, full_text, final_chunk) = session.drain_chat_stream("req-stream").await;
     assert!(
@@ -59,7 +54,6 @@ async fn inference_contract_round_trip_and_sidecar_recovery() {
         "expected non-empty streamed text"
     );
 
-    // 2. Non-streaming completion constrained by a JSON schema.
     let completion = session
         .request(PluginIpcRequest::ChatCompletion {
             request_id: "req-completion".to_string(),
@@ -85,7 +79,6 @@ async fn inference_contract_round_trip_and_sidecar_recovery() {
     );
     assert!(usage.is_some(), "local completion reports token usage");
 
-    // 3. GGUF embeddings: one vector per item, model dims, finite values.
     let embedded = session
         .request(PluginIpcRequest::EmbedBatch {
             request_id: "req-embed".to_string(),
@@ -111,8 +104,6 @@ async fn inference_contract_round_trip_and_sidecar_recovery() {
         );
     }
 
-    // 4. Typed failures, then a successful request proves the process
-    // survived each one (no panics, no crashes).
     let unknown = session
         .request(PluginIpcRequest::CreateChatStream {
             request_id: "req-unknown".to_string(),
@@ -170,7 +161,6 @@ async fn inference_contract_round_trip_and_sidecar_recovery() {
     };
     assert!(message.contains("dims"), "dimension error: {message}");
 
-    // 5. The plugin (and its sidecar) survived every typed error.
     write_stream(&mut session, "req-alive", "Say hello.").await;
     let (_, alive_text, _) = session.drain_chat_stream("req-alive").await;
     assert!(
@@ -178,8 +168,8 @@ async fn inference_contract_round_trip_and_sidecar_recovery() {
         "expected a stream after error paths"
     );
 
-    // 6. A killed sidecar is respawned on the next request (Linux-only: the
-    // test locates the sidecar by its unique preset directory name).
+    // Linux-only; the test locates the sidecar by its unique preset
+    // directory name.
     #[cfg(target_os = "linux")]
     {
         let output = std::process::Command::new("pgrep")

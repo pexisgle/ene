@@ -17,7 +17,6 @@ pub fn render_journal(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
         "memory-ledger-below-hint"
     ));
     ui.add_space(4.0);
-    // ── Tab bar ───────────────────────────────────────────────────────────────
     let mut do_refresh = false;
     let mut do_recall_search = false;
     let mut do_fetch_pending = false;
@@ -35,7 +34,6 @@ pub fn render_journal(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
                 fl!(crate::i18n::loader(), "memory-page-tab-recall"),
             );
 
-            // Pending Approval tab with badge
             let pending_count = state.0.memory_journal_pending_count;
             let pending_label = if pending_count > 0 {
                 format!(
@@ -65,7 +63,6 @@ pub fn render_journal(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
         }
     });
 
-    // ── Toolbar ───────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
         if ui
             .button(fl!(crate::i18n::loader(), "memory-journal-refresh"))
@@ -87,14 +84,12 @@ pub fn render_journal(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
                 &mut state.0.memory_journal_recall_debug,
                 fl!(crate::i18n::loader(), "memory-journal-recall-debug"),
             );
-            // Toggling the checkbox switches to RecallSearch mode.
             if state.0.memory_journal_recall_debug && !before {
                 state.0.memory_journal_mode = MemoryPageMode::RecallSearch;
             }
         }
     });
 
-    // ── Filter row (browse mode only) ────────────────────────────────────────
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity)
         && state.0.memory_journal_mode == MemoryPageMode::Browse
     {
@@ -114,7 +109,6 @@ pub fn render_journal(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
         });
     }
 
-    // ── Execute deferred actions ──────────────────────────────────────────────
     if do_refresh {
         refresh_journal(ai, world, ui_entity);
     }
@@ -132,7 +126,6 @@ pub fn render_journal(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
         return;
     };
 
-    // ── Mode-specific content ─────────────────────────────────────────────────
     match snapshot.memory_journal_mode {
         MemoryPageMode::Browse => {
             section_card(
@@ -177,13 +170,11 @@ pub fn render_journal(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
         }
     }
 
-    // ── Status message ────────────────────────────────────────────────────────
     if let Some(message) = snapshot.memory_journal_message.as_deref() {
         ui.separator();
         ui.label(message);
     }
 
-    // ── Journal stats (always visible) ────────────────────────────────────────
     egui::Frame::group(ui.style())
         .corner_radius(egui::CornerRadius::same(8))
         .inner_margin(egui::Margin::same(10))
@@ -229,8 +220,6 @@ pub fn render_journal(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
         });
 }
 
-// ── Recall search UI ─────────────────────────────────────────────────────────
-
 fn render_recall_search_ui(
     ui: &mut egui::Ui,
     ai: &Arc<AiBridge>,
@@ -264,8 +253,6 @@ fn render_recall_search_ui(
 
     render_recall_rows(ui, snapshot);
 }
-
-// ── Pending approval UI ───────────────────────────────────────────────
 
 fn render_pending_approval(
     ui: &mut egui::Ui,
@@ -634,8 +621,6 @@ fn render_candidate_history(
         });
 }
 
-// ── Commitment management UI ──────────────────────────────────────────
-
 fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
     ui.separator();
 
@@ -793,8 +778,6 @@ fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
         });
 }
 
-// ── Salience bar visualization ────────────────────────────────────────
-
 fn render_salience_bar(ui: &mut egui::Ui, salience: f32) {
     let color = if salience > 0.7 {
         egui::Color32::GREEN
@@ -809,8 +792,6 @@ fn render_salience_bar(ui: &mut egui::Ui, salience: f32) {
         .desired_width(60.0);
     ui.add(bar);
 }
-
-// ── Browse rows ──────────────────────────────────────────────────────────────
 
 fn render_browse_rows(
     ui: &mut egui::Ui,
@@ -898,8 +879,6 @@ fn render_browse_rows(
         });
 }
 
-// ── Lifecycle badge helpers ─────────────────────────────────────────────────
-
 fn status_label(status: MemoryStatus) -> String {
     match status {
         MemoryStatus::Active => fl!(crate::i18n::loader(), "memory-journal-status-active"),
@@ -959,8 +938,6 @@ fn lifecycle_hint(row: &crate::settings::MemoryJournalRow) -> Option<String> {
     None
 }
 
-// ── Recall rows ──────────────────────────────────────────────────────────────
-
 fn render_recall_rows(ui: &mut egui::Ui, snapshot: &crate::settings::UiState) {
     ui.separator();
     egui::ScrollArea::vertical()
@@ -996,8 +973,6 @@ fn render_recall_rows(ui: &mut egui::Ui, snapshot: &crate::settings::UiState) {
             }
         });
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn action_label_from_key(action_key: &str) -> String {
     match action_key {

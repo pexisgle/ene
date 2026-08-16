@@ -1,5 +1,3 @@
-//! Prompt qualifiers for recalled typed memories.
-
 #![expect(
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
@@ -17,7 +15,6 @@ pub fn format_recalled_content(memory: &RecalledMemory) -> String {
     }
 }
 
-/// Return a prompt prefix for uncertain or disputed memories, if any.
 pub fn recall_content_qualifier(memory: &RecalledMemory) -> Option<&'static str> {
     // Pending candidates are unconfirmed by construction: they sit in
     // the user-approval queue, so the character should treat them as

@@ -7,7 +7,6 @@ use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-/// Shared state for the homeassistant actions.
 #[derive(Clone)]
 pub struct HomeAssistantState {
     config: Arc<RwLock<HomeAssistantConfig>>,
@@ -51,13 +50,11 @@ impl HomeAssistantState {
         &self.gate
     }
 
-    /// Returns the shared HTTP client.
     #[must_use]
     pub fn client(&self) -> &reqwest::Client {
         &self.client
     }
 
-    /// Returns a copy of the current plugin configuration.
     #[must_use]
     pub fn config(&self) -> HomeAssistantConfig {
         self.config.read().clone()
@@ -115,7 +112,6 @@ pub struct HomeAssistantToolProvider {
 }
 
 impl HomeAssistantToolProvider {
-    /// Creates a new `HomeAssistantToolProvider`.
     #[must_use]
     pub fn new() -> Self {
         let state = Arc::new(HomeAssistantState::new());

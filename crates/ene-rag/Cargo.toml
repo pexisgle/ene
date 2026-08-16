@@ -40,7 +40,6 @@ schemars = { workspace = true }
 serde = { workspace = true }
 unicode-normalization = { workspace = true }
 
-# tool-selection pipeline (feature = "tool")
 ene-ai = { workspace = true, optional = true }
 ene-plugin-proto = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }

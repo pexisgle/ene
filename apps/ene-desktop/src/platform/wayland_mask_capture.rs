@@ -20,8 +20,6 @@ use std::sync::Arc;
 /// usages are combined.
 pub const MASK_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// Bytes per pixel of [`MASK_TARGET_FORMAT`]. Used to slice the
-/// readback buffer.
 const BYTES_PER_PIXEL: u64 = 4;
 
 /// Round `width * BYTES_PER_PIXEL` up to the next multiple of
@@ -45,8 +43,6 @@ pub const fn aligned_bytes_per_row(width: u32) -> u32 {
 /// from the wgpu primitive rasteriser.
 const PIXEL_THRESHOLD: u8 = 16;
 
-/// Offscreen mask capture target. Holds the texture, view, and
-/// readback buffer for a single, downsampled silhouette read.
 /// The render pass that writes into `target_view()` lives in
 /// the runtime's Linux dispatch.
 pub struct MaskCaptureCamera {
@@ -55,11 +51,6 @@ pub struct MaskCaptureCamera {
     readback: wgpu::Buffer,
     width: u32,
     height: u32,
-    /// Cached `bytes_per_row` for the readback: `width *
-    /// BYTES_PER_PIXEL` rounded up to
-    /// [`wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`]. The CPU walk
-    /// indexes per-pixel using `width`, so the trailing per-row
-    /// padding is unread.
     bytes_per_row: u32,
     downsample: u32,
     last_readback: Vec<u8>,
@@ -67,15 +58,13 @@ pub struct MaskCaptureCamera {
     /// contents. Until then `extract_rectangles` returns the
     /// previous frame's rectangles (or empty on first frame).
     readback_fresh: bool,
-    /// `true` while the readback buffer is mapped. `encode_readback`
-    /// skips the copy to avoid wgpu validation errors.
+    /// `encode_readback` skips the copy to avoid wgpu validation errors.
     pub is_mapped: bool,
 }
 
 impl MaskCaptureCamera {
-    /// Build a new mask capture target for the given window
-    /// size + downsample. `downsample` is clamped to at least
-    /// `1`; a `downsample` of `0` would divide by zero.
+    /// `downsample` is clamped to at least `1`; a `downsample`
+    /// of `0` would divide by zero.
     pub fn try_new(
         device: &wgpu::Device,
         width: u32,
@@ -141,7 +130,6 @@ impl MaskCaptureCamera {
         })
     }
 
-    /// Resize the target to match a new window size / downsample.
     /// Returns `true` if anything changed.
     pub fn resize(
         &mut self,
@@ -165,8 +153,7 @@ impl MaskCaptureCamera {
         }
     }
 
-    /// View into which the mask shader writes. The runtime
-    /// renders the model into this view once per frame.
+    /// The runtime renders the model into this view once per frame.
     pub const fn target_view(&self) -> &wgpu::TextureView {
         &self.target_view
     }
@@ -194,8 +181,7 @@ impl MaskCaptureCamera {
         self.downsample
     }
 
-    /// Append a `copy_texture_to_buffer` to the encoder. The
-    /// matching `readback_slice` happens at the start of the
+    /// The matching `readback_slice` happens at the start of the
     /// next frame (one-frame latency is fine).
     pub fn encode_readback(&self, encoder: &mut wgpu::CommandEncoder) {
         if self.is_mapped {
@@ -253,9 +239,8 @@ impl MaskCaptureCamera {
         self.readback.slice(..)
     }
 
-    /// Copy the bytes currently mapped by the GPU into
-    /// `self.last_readback`. Returns the number of bytes copied,
-    /// or `0` if the buffer is not currently mapped.
+    /// Returns the number of bytes copied (`0` when the mapped range is
+    /// empty).
     pub fn copy_mapped_into_last_readback(&mut self) -> usize {
         let mapped = self.readback.slice(..).get_mapped_range();
         let len = mapped.len();
@@ -327,8 +312,7 @@ fn extract_rectangles_impl(
 /// Shared `MaskCaptureCamera` for the click-through dispatcher.
 pub type MaskCaptureState = Arc<parking_lot::Mutex<MaskCaptureCamera>>;
 
-/// Build a fresh `MaskCaptureState` for the given window size and
-/// downsample, returning `None` if the size is zero.
+/// Returns `None` if the size is zero.
 pub fn new_mask_capture_state(
     device: &wgpu::Device,
     window_width: u32,
@@ -339,7 +323,6 @@ pub fn new_mask_capture_state(
         .map(|c| Arc::new(parking_lot::Mutex::new(c)))
 }
 
-/// Compute the downsampled (width, height) pair, clamped to 1×1.
 fn downsample_dims(width: u32, height: u32, downsample: u32) -> (u32, u32) {
     let d = downsample.max(1);
     let w = (width / d).max(1);
@@ -360,11 +343,9 @@ mod tests {
 
     #[test]
     fn downsample_dims_normal_size_rounds_down() {
-        // 560 / 8 = 70, 980 / 8 = 122 (legacy default)
+        // 560×980 is the legacy default window size.
         assert_eq!(downsample_dims(560, 980, 8), (70, 122));
-        // 1 = identity
         assert_eq!(downsample_dims(560, 980, 1), (560, 980));
-        // divisor 4
         assert_eq!(downsample_dims(560, 980, 4), (140, 245));
     }
 
@@ -409,7 +390,7 @@ mod tests {
     fn extract_rectangles_respects_row_stride_alignment() {
         let width = 70;
         let height = 2;
-        let bytes_per_row = aligned_bytes_per_row(width); // 512
+        let bytes_per_row = aligned_bytes_per_row(width);
         assert_eq!(bytes_per_row, 512);
 
         let mut data = vec![0u8; (bytes_per_row * height) as usize];

@@ -1,6 +1,3 @@
-//! Core tool types: `ToolName`, `ToolSpec`, `ToolRagProfile`, `KeywordSet`,
-//! `SideEffects`, `ToolExample`, `ToolVersion`.
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +27,6 @@ impl JsonSchema for ToolName {
 }
 
 impl ToolName {
-    /// Valid characters for a tool name: alphanumeric, `_`, `.`, `:`
     const fn valid_char(c: u8) -> bool {
         c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b':'
     }
@@ -55,7 +51,6 @@ impl ToolName {
         if matches!(first, b'.' | b':') || matches!(last, b'.' | b':') {
             return false;
         }
-        // Reject consecutive separator characters (e.g. "a..b", "a::b", "a.:b").
         !bytes
             .windows(2)
             .any(|w| matches!(w, [b'.' | b':', b'.' | b':']))
@@ -113,12 +108,10 @@ impl ToolName {
         self.0.rsplit_once('.').map_or(&self.0, |(_, a)| a)
     }
 
-    /// Borrow the fully-qualified name (e.g. `"filesystem.read"`).
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Consumes the `ToolName` and returns the inner `String`.
     /// Use when handing the name to a non-`ToolName` consumer
     /// (e.g. an IPC error payload, a log line, a DB row key).
     pub fn into_string(self) -> String {
@@ -137,16 +130,12 @@ impl std::fmt::Display for ToolName {
 /// of the spec).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct ToolVersion {
-    /// Major version.
     pub major: u32,
-    /// Minor version.
     pub minor: u32,
-    /// Patch version.
     pub patch: u32,
 }
 
 impl ToolVersion {
-    /// Construct a new version.
     #[must_use]
     pub const fn new(major: u32, minor: u32, patch: u32) -> Self {
         Self {
@@ -192,7 +181,6 @@ pub struct KeywordSet {
 }
 
 impl KeywordSet {
-    /// Build a `KeywordSet` with only `primary` keywords.
     pub fn primary_only(primary: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             primary: primary.into_iter().map(Into::into).collect(),
@@ -200,7 +188,6 @@ impl KeywordSet {
         }
     }
 
-    /// Build a `KeywordSet` with primary + secondary keywords.
     pub fn with_secondary(
         primary: impl IntoIterator<Item = impl Into<String>>,
         secondary: impl IntoIterator<Item = impl Into<String>>,
@@ -212,7 +199,6 @@ impl KeywordSet {
         }
     }
 
-    /// Returns true if no keywords are present.
     pub const fn is_empty(&self) -> bool {
         self.primary.is_empty()
             && self.secondary.is_empty()
@@ -231,25 +217,13 @@ pub enum SideEffects {
     #[default]
     ReadOnly,
     /// File-system interaction. `mutates: true` if it writes.
-    FileSystem {
-        /// Whether the operation mutates the file system.
-        mutates: bool,
-    },
+    FileSystem { mutates: bool },
     /// Network access. `external: true` if it goes outside the loopback.
-    Network {
-        /// Whether the network call goes to external services.
-        external: bool,
-    },
+    Network { external: bool },
     /// System-level access (process spawn, signals, etc.).
-    System {
-        /// Whether privileged operations are involved.
-        privileged: bool,
-    },
+    System { privileged: bool },
     /// Browser automation.
-    Browser {
-        /// Whether the operation mutates the DOM.
-        mutates_dom: bool,
-    },
+    Browser { mutates_dom: bool },
     /// Destructive: data loss is possible and rollback is not guaranteed.
     Destructive,
     /// Idempotent: calling twice with the same args yields the same effect.
@@ -339,7 +313,6 @@ impl ToolCategory {
 /// `IpcResponse::RagProfiles` and consumed by `ene-rag`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolRagProfile {
-    /// Full tool name (e.g. `"filesystem.read"`).
     pub name: ToolName,
     /// Short human-friendly name (e.g. `"Read File"`).
     pub display_name: String,
@@ -349,7 +322,6 @@ pub struct ToolRagProfile {
     pub description: String,
     /// Category used for `per_category_limits` filtering.
     pub category: ToolCategory,
-    /// Structured keywords (primary / secondary / domain / negative).
     pub keywords: KeywordSet,
     /// Example invocations — one embedding row each (`field_key = ex_N`).
     #[serde(default)]
@@ -360,9 +332,7 @@ pub struct ToolRagProfile {
     /// Preconditions that must hold before invocation.
     #[serde(default)]
     pub preconditions: Vec<String>,
-    /// Side effects specific to this tool.
     pub side_effects: SideEffects,
-    /// Related tool names.
     #[serde(default)]
     pub related: Vec<ToolName>,
     /// Semantic version (invalidates embedding cache on meaningful bumps).
@@ -467,7 +437,6 @@ impl ToolRagProfile {
     }
 }
 
-/// Format a [`KeywordSet`] for inclusion in description embeddings.
 fn format_keywords(keywords: &KeywordSet) -> String {
     let mut parts = Vec::new();
     if !keywords.primary.is_empty() {
@@ -506,7 +475,6 @@ pub struct UndoMetadata {
     /// Target resources affected (e.g. file paths), best-effort.
     #[serde(default)]
     pub target_resources: Vec<String>,
-    /// Whether the operation can be rolled back.
     pub reversibility: Reversibility,
 }
 
@@ -574,8 +542,6 @@ impl ToolSpec {
         self
     }
 
-    /// Declare the tool's side effects.
-    ///
     /// Only [`SideEffects::ReadOnly`] makes a tool eligible for bounded
     /// parallel execution; any other value (or leaving it unset) keeps the
     /// tool on the sequential path.
@@ -585,8 +551,6 @@ impl ToolSpec {
         self
     }
 
-    /// Whether this tool may run in a bounded parallel batch.
-    ///
     /// A tool is parallelizable only when it explicitly declares
     /// [`SideEffects::ReadOnly`] and is not background-capable (deferred tools
     /// already return immediately, so parallelizing them buys nothing and
@@ -685,28 +649,22 @@ pub struct ToolResult {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// A single piece of content in a [`ToolResult`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolContent {
     /// Plain text content.
-    Text {
-        /// The text content.
-        text: String,
-    },
+    Text { text: String },
     /// Structured JSON content.
     Json(serde_json::Value),
     /// Base64-encoded image data with MIME type.
     Image {
         /// MIME type of the image (e.g. `"image/png"`, `"image/jpeg"`).
         mime_type: String,
-        /// Base64-encoded image data.
         data_base64: String,
     },
 }
 
 impl ToolResult {
-    /// Create a `ToolResult` with a single text content item.
     pub fn text(s: impl Into<String>) -> Self {
         Self {
             content: vec![ToolContent::Text { text: s.into() }],

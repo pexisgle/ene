@@ -27,9 +27,7 @@ pub enum LlmProviderError {
     /// actually returned before truncation, useful for diagnostics.
     #[error("response truncated (finish_reason=length) after {partial_chars} chars: {reason}")]
     Truncated {
-        /// Human-readable reason for the truncation.
         reason: String,
-        /// Number of characters the model emitted before being cut off.
         partial_chars: usize,
     },
 
@@ -43,7 +41,6 @@ pub enum LlmProviderError {
     #[error("provider error: {0}")]
     Provider(String),
 
-    /// Local llama.cpp load / inference failure.
     #[error("local LLM error: {0}")]
     LocalLlm(String),
 
@@ -55,10 +52,7 @@ pub enum LlmProviderError {
     /// declared `ConcurrencyHint` admission control rejects a request:
     /// `queue_depth` is the plugin's configured queue depth in that case.
     #[error("engine busy: queue depth {queue_depth} exceeded")]
-    Busy {
-        /// The engine's configured queue depth at the time of the call.
-        queue_depth: usize,
-    },
+    Busy { queue_depth: usize },
 
     /// A local engine's job timed out (`ene_infer::EngineError::Timeout`).
     /// Distinct from [`Self::Truncated`], which is a *model* truncating its
@@ -112,22 +106,16 @@ impl LlmProviderError {
 /// as nested payloads for typed matching via `AiError` variants.
 #[derive(Debug, Error)]
 pub enum AiError {
-    /// Chat / completion provider failure.
     #[error(transparent)]
     Llm(#[from] LlmProviderError),
-    /// Embedding provider failure.
     #[error(transparent)]
     Embedding(#[from] crate::traits::EmbeddingError),
-    /// Audio provider (TTS / STT / VAD) failure.
     #[error(transparent)]
     Audio(#[from] crate::traits::AudioProviderError),
-    /// API key is missing or empty.
     #[error("API key not configured: {0}")]
     MissingApiKey(String),
-    /// Provider base URL is missing.
     #[error("base URL not configured: {0}")]
     MissingBaseUrl(String),
-    /// Provider base URL failed format checks.
     #[error("invalid base URL: {0}")]
     InvalidBaseUrl(String),
 }

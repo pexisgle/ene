@@ -26,7 +26,6 @@
 //! `SeaORM` entities, SQL, and DB-row conversions are NOT here — those stay
 //! in `ene-store`, which re-exports the crate's types unchanged rather than
 //! redefining them.
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(

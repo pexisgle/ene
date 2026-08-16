@@ -56,8 +56,6 @@ use crate::platform::{
 #[cfg(target_os = "linux")]
 static FIRST_DISPATCH_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// Inputs to [`apply_linux_click_through`].
-///
 /// Every field is passed in directly — no shared platform-state
 /// struct or `&mut AppState` borrow is required. Callers either pass
 /// `bevy_ecs::Res<…>` references or, in the non-bevy runtime
@@ -202,8 +200,6 @@ pub fn apply_linux_click_through(
     (rects, source)
 }
 
-/// Run the layer-shell detection probe against the stand-alone
-/// Wayland connection (if any) and update the cached status.
 #[cfg(target_os = "linux")]
 pub fn detect_layer_shell(
     layer_shell: Option<&LayerShellState>,

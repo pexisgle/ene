@@ -30,7 +30,6 @@ pub struct WhisperConfig {
     /// Path to the `whisper-server` executable (host-injected when a
     /// catalog-managed sidecar artifact is installed).
     pub server_path: Option<String>,
-    /// Extra command-line arguments passed to the sidecar on spawn.
     pub server_args: Vec<String>,
     /// How long to wait for the sidecar health check after spawning.
     pub startup_timeout_secs: Option<u64>,
@@ -42,9 +41,7 @@ pub enum EngineMode {
     /// Use the sidecar when a server path is configured; fall back to the
     /// in-process engine otherwise.
     Auto,
-    /// Always transcribe through the whisper-server sidecar.
     Sidecar,
-    /// Always use the in-process whisper.cpp engine.
     InProcess,
 }
 
@@ -55,7 +52,6 @@ impl WhisperConfig {
         self.startup_timeout_secs.unwrap_or(60).max(1)
     }
 
-    /// Resolves the configured engine mode.
     #[must_use]
     pub fn mode(&self) -> EngineMode {
         match self.mode.as_deref().map_or("auto", str::trim) {
@@ -79,12 +75,6 @@ impl WhisperConfig {
 }
 
 impl WhisperConfig {
-    /// Parses the provider config blob delivered with a transcribe request.
-    ///
-    /// # Errors
-    ///
-    /// Returns a provider error when the blob is not a JSON object or a
-    /// field has the wrong type.
     pub fn from_value(value: &Value) -> Result<Self, PluginError> {
         serde_json::from_value(value.clone())
             .map_err(|e| PluginError::provider(format!("invalid whisper provider config: {e}")))

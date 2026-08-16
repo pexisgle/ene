@@ -18,7 +18,6 @@ use super::draft::SettingsDraft;
 /// without a live actor.
 #[cfg(test)]
 pub trait SettingsApplier {
-    /// Applies a unified settings draft to the runtime actor.
     fn apply_settings_blocking(
         &self,
         request: ene_runtime::SettingsApplyRequest,
@@ -52,7 +51,6 @@ pub struct ApplyOutcome {
 }
 
 impl ApplyOutcome {
-    /// Whether the apply reported no runtime errors.
     #[must_use]
     pub const fn ok(&self) -> bool {
         self.runtime_errors.is_empty()
@@ -84,7 +82,6 @@ pub struct ApplyPrepare {
     pub errors: Vec<String>,
 }
 
-/// `Debug` never prints the merged config: it holds real secret values.
 impl std::fmt::Debug for ApplyPrepare {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApplyPrepare")
@@ -584,7 +581,6 @@ mod tests {
         }
     }
 
-    /// Applier that always reports a stale-draft conflict.
     struct ConflictingApplier;
 
     impl SettingsApplier for ConflictingApplier {
@@ -863,12 +859,10 @@ mod tests {
     fn merge_restores_unchanged_secrets_and_keeps_replacements_and_deletes() {
         let original = super::super::draft::config_with_real_secrets();
         let mut draft = SettingsDraft::new(original.clone());
-        // Replacement: the user typed a new inline key.
         draft.set_path(
             "ai.providers.openai.api_key.inline",
             json!("sk-user-replacement"),
         );
-        // Deletion: the credential entry is removed from the map.
         let mut credentials = draft
             .editing()
             .get_path("plugins.list.demo.credentials")
@@ -878,7 +872,6 @@ mod tests {
             .expect("credentials object")
             .remove("cred-key");
         draft.set_path("plugins.list.demo.credentials", credentials);
-        // Everything else stays redacted (unchanged) in the draft.
 
         let merged = merge_secrets(&original, draft.editing());
         let ai = merged

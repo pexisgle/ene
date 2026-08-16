@@ -36,13 +36,10 @@ use std::path::Path;
 pub struct ConversationLogEntry {
     /// Speaker role (e.g. "user", "assistant").
     pub role: String,
-    /// Message content.
     pub content: String,
-    /// When the message was recorded.
     pub created_at: DateTime<Utc>,
 }
 
-/// A row of tool embedding data with all fields (domain type from `ene-core`).
 pub use ene_core::ToolEmbeddingFieldRow;
 
 /// Registers the sqlite-vec extension globally for the process.
@@ -251,7 +248,6 @@ pub(crate) async fn ensure_vec0_index(
     Ok(())
 }
 
-/// Reads the stored `CREATE` statement of a vec0 shadow table, if any.
 async fn vec0_existing_sql(
     db: &DatabaseConnection,
     table: &str,
@@ -311,8 +307,6 @@ pub(crate) enum EmbeddingCol {
 
 #[cfg(test)]
 impl EmbeddingCol {
-    /// The SQL column reference interpolated into the cosine-similarity
-    /// expression.
     const fn as_sql(self) -> &'static str {
         match self {
             Self::Bare => "embedding",
@@ -380,7 +374,6 @@ pub(crate) fn validate_embedding(
     Ok(())
 }
 
-/// SQLite-backed long-term memory store with vector similarity search.
 pub struct MemoryStore {
     db: DatabaseConnection,
     embedding_dim: usize,
@@ -460,23 +453,20 @@ impl MemoryStore {
         }
     }
 
-    /// Decode stored embedding bytes.
     pub fn decode_embedding_bytes(&self, bytes: &[u8]) -> Vec<f32> {
         bytes_to_embedding(bytes)
     }
 
-    /// Raw `sea-orm` connection — used by migration helpers.
+    /// Used by migration helpers.
     pub const fn connection(&self) -> &DatabaseConnection {
         &self.db
     }
 
-    /// On-disk path when this store was opened from a file.
     #[must_use]
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
 
-    /// Vector dimensionality for this store's embedding model.
     pub const fn embedding_dim(&self) -> usize {
         self.embedding_dim
     }
@@ -610,13 +600,10 @@ impl MemoryStore {
         Ok(Self::init(db, embedding_dim, None))
     }
 
-    /// Run `PRAGMA integrity_check` on the open connection.
     pub async fn check_integrity(&self) -> Result<(), EneMemoryError> {
         crate::backup::check_integrity(&self.db).await
     }
 
-    /// Create a timestamped file backup of this store's database.
-    ///
     /// Returns an error when the store is in-memory (no path).
     pub async fn backup(&self) -> Result<std::path::PathBuf, EneMemoryError> {
         let path = self.path().ok_or_else(|| {
@@ -1007,7 +994,6 @@ impl MemoryStore {
         })
     }
 
-    /// Fetch a single pending candidate by id, or `None` when absent.
     pub async fn get_pending_candidate(
         &self,
         id: i64,

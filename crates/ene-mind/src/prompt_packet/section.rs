@@ -1,5 +1,3 @@
-//! Prompt section kinds and deterministic ordering.
-
 /// Logical section of a [`super::PromptPacket`].
 ///
 /// Variant order matches the deterministic render order in
@@ -86,7 +84,6 @@ impl PromptSectionKind {
         }
     }
 
-    /// Default markdown heading for system-block sections.
     pub const fn heading(self) -> Option<&'static str> {
         match self {
             Self::PlatformContract
@@ -107,7 +104,6 @@ impl PromptSectionKind {
         }
     }
 
-    /// All kinds in deterministic render order.
     pub const fn render_order() -> &'static [Self] {
         &[
             Self::PlatformContract,
@@ -129,10 +125,8 @@ impl PromptSectionKind {
     }
 }
 
-/// A single prompt section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptSection {
-    /// Section classification.
     pub kind: PromptSectionKind,
     /// Rendered section body (without heading).
     pub content: String,
@@ -148,7 +142,6 @@ pub struct PromptSection {
 }
 
 impl PromptSection {
-    /// Create a new section with `item_count = 0`.
     pub fn new(kind: PromptSectionKind, content: impl Into<String>) -> Self {
         let content = content.into();
         Self {
@@ -160,7 +153,6 @@ impl PromptSection {
         }
     }
 
-    /// Set the authoritative item count carried by this section.
     #[must_use]
     pub(crate) const fn with_item_count(mut self, item_count: usize) -> Self {
         self.item_count = item_count;
@@ -175,7 +167,6 @@ impl PromptSection {
         self.note = None;
     }
 
-    /// Render the section for the system block (heading + body + note).
     pub fn render_system_block(&self) -> Option<String> {
         if self.content.trim().is_empty() {
             return None;

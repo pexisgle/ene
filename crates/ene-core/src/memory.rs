@@ -1,5 +1,3 @@
-//! Typed memory domain model.
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -101,7 +99,6 @@ pub enum ForgettingPolicy {
 }
 
 impl MemoryKind {
-    /// Returns the `snake_case` string representation for storage/DB use.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Episodic => "episodic",
@@ -282,7 +279,6 @@ impl MemoryKind {
     }
 }
 
-/// The lifecycle status of a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -302,7 +298,6 @@ pub enum MemoryStatus {
 }
 
 impl MemoryStatus {
-    /// Returns the `snake_case` string representation for storage/DB use.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
@@ -334,7 +329,6 @@ impl MemoryStatus {
     }
 }
 
-/// The scope or ownership of a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -348,7 +342,6 @@ pub enum MemoryScope {
 }
 
 impl MemoryScope {
-    /// Returns the `snake_case` string representation for storage/DB use.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Character => "character",
@@ -374,7 +367,6 @@ impl MemoryScope {
     }
 }
 
-/// The provenance of a memory (how it was created).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -394,7 +386,6 @@ pub enum MemorySource {
 }
 
 impl MemorySource {
-    /// Returns the `snake_case` string representation for storage/DB use.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Conversation => "conversation",
@@ -432,7 +423,6 @@ impl MemorySource {
 pub struct MemoryConfidence(f32);
 
 impl MemoryConfidence {
-    /// The maximum possible confidence.
     pub const MAX: Self = Self(1.0);
 
     /// Create a new confidence value, clamping to [0.0, 1.0].
@@ -448,7 +438,6 @@ impl MemoryConfidence {
         Self(val)
     }
 
-    /// Unwrap to the raw `f32` value.
     pub const fn get(self) -> f32 {
         self.0
     }
@@ -466,7 +455,6 @@ impl Default for MemoryConfidence {
 pub struct MemorySalience(f32);
 
 impl MemorySalience {
-    /// The maximum possible salience.
     pub const MAX: Self = Self(1.0);
 
     /// Create a new salience value, clamping to [0.0, 1.0].
@@ -482,7 +470,6 @@ impl MemorySalience {
         Self(val)
     }
 
-    /// Unwrap to the raw `f32` value.
     pub const fn get(self) -> f32 {
         self.0
     }
@@ -512,48 +499,31 @@ impl Default for AffectAnnotation {
     }
 }
 
-/// A typed memory item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryItem {
     /// Primary key (`None` until persisted).
     pub id: Option<i64>,
-    /// Ownership scope.
     pub scope: MemoryScope,
-    /// Character identifier.
     pub character_id: String,
     /// User identifier (may be empty).
     pub user_id: String,
-    /// Memory kind.
     pub kind: MemoryKind,
-    /// Short title or label.
     pub title: String,
-    /// Full memory content.
     pub content: String,
-    /// Provenance of the memory.
     pub source: MemorySource,
     /// Optional reference to the source (e.g. `session_id` or turn sequence).
     pub source_ref: Option<String>,
-    /// Confidence score.
     pub confidence: MemoryConfidence,
-    /// Salience / importance score.
     pub salience: MemorySalience,
-    /// Emotional annotation (valence + arousal).
     pub affect: AffectAnnotation,
     /// Relationship impact score (-1.0..=1.0).
     pub relationship_impact: f32,
-    /// Number of times this memory has been accessed.
     pub access_count: i64,
-    /// Timestamp of the last access.
     pub last_accessed_at: Option<DateTime<Utc>>,
-    /// When the memory was created.
     pub created_at: DateTime<Utc>,
-    /// When the memory was last updated.
     pub updated_at: DateTime<Utc>,
-    /// Start of validity period.
     pub valid_from: Option<DateTime<Utc>>,
-    /// End of validity period.
     pub valid_until: Option<DateTime<Utc>>,
-    /// Lifecycle status.
     pub status: MemoryStatus,
     /// ID of the memory this one supersedes (predecessor link).
     ///
@@ -574,37 +544,22 @@ pub struct MemoryItem {
 /// Payload for creating a new memory item (fields set by the store are omitted).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewMemoryItem {
-    /// Ownership scope.
     pub scope: MemoryScope,
-    /// Character identifier.
     pub character_id: String,
     /// User identifier (may be empty).
     pub user_id: String,
-    /// Memory kind.
     pub kind: MemoryKind,
-    /// Short title or label.
     pub title: String,
-    /// Full memory content.
     pub content: String,
-    /// Provenance of the memory.
     pub source: MemorySource,
-    /// Optional reference to the source.
     pub source_ref: Option<String>,
-    /// Confidence score.
     pub confidence: MemoryConfidence,
-    /// Salience / importance score.
     pub salience: MemorySalience,
-    /// Emotional annotation.
     pub affect: AffectAnnotation,
-    /// Relationship impact score.
     pub relationship_impact: f32,
-    /// Start of validity period.
     pub valid_from: Option<DateTime<Utc>>,
-    /// End of validity period.
     pub valid_until: Option<DateTime<Utc>>,
-    /// Initial lifecycle status.
     pub status: MemoryStatus,
-    /// ID of the memory this one supersedes.
     pub supersedes_id: Option<i64>,
     /// Pin state — pinned memories skip natural decay.
     #[serde(default)]
@@ -625,13 +580,9 @@ pub struct NewMemoryItem {
 /// stale scope behind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryEdit {
-    /// Short title or label.
     pub title: String,
-    /// Full memory content.
     pub content: String,
-    /// Memory kind.
     pub kind: MemoryKind,
-    /// Confidence score.
     pub confidence: MemoryConfidence,
 }
 
@@ -673,21 +624,13 @@ pub enum MemoryCandidateSource {
 #[serde(rename_all = "snake_case", default)]
 #[schemars(crate = "schemars")]
 pub struct HybridSearchWeights {
-    /// Relevance weight for vector cosine similarity.
     pub vector: f32,
-    /// Relevance weight for lexical token overlap.
     pub lexical: f32,
-    /// Quality weight for recency decay score.
     pub recency: f32,
-    /// Quality weight for memory salience.
     pub salience: f32,
-    /// Quality weight for memory confidence.
     pub confidence: f32,
-    /// Quality weight for emotional/affect match.
     pub emotional_match: f32,
-    /// Quality weight for relationship impact.
     pub relationship: f32,
-    /// Quality weight for prior access boost.
     pub access_boost: f32,
 }
 
@@ -727,7 +670,6 @@ pub enum OutcomeRatingSource {
 }
 
 impl OutcomeRatingSource {
-    /// Returns the `snake_case` string representation for storage/DB use.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Affect => "affect",
@@ -767,17 +709,13 @@ pub struct MemoryOutcome {
     /// Denormalized so the reflection generator can embed strategy titles
     /// without joining `typed_memories` per record.
     pub memory_title: String,
-    /// Character the outcome belongs to.
     pub character_id: String,
     /// User identifier (may be empty for character-level rows).
     pub user_id: String,
     /// Outcome rating (-1.0 negative ..= 1.0 positive).
     pub rating: f32,
-    /// How the rating was produced.
     pub source: OutcomeRatingSource,
-    /// Optional reference to the source turn/session.
     pub source_ref: Option<String>,
-    /// When the outcome was recorded.
     pub created_at: DateTime<Utc>,
 }
 
@@ -792,13 +730,10 @@ pub struct Query<'a> {
     pub query_text: &'a str,
     /// Optional query embedding for vector similarity (`None` = lexical/recency only).
     pub embedding: Option<&'a [f32]>,
-    /// Character scope.
     pub character_id: &'a str,
-    /// Optional user scope filter.
     pub user_id: Option<&'a str>,
     /// Embedding model name for vector index lookup (ignored when `embedding` is `None`).
     pub model_name: &'a str,
-    /// Maximum results to return.
     pub limit: usize,
     /// Minimum vector similarity for vector-sourced candidates.
     pub similarity_threshold: f32,
@@ -806,7 +741,6 @@ pub struct Query<'a> {
     pub candidate_pool_size: usize,
     /// Optional query affect for emotional match scoring.
     pub query_affect: Option<AffectAnnotation>,
-    /// Component weights for the hybrid formula.
     pub weights: HybridSearchWeights,
     /// Half-life in days for recency decay.
     pub decay_half_life_days: f64,
@@ -844,21 +778,14 @@ pub type MemorySearchOptions<'a> = Query<'a>;
 /// Filter options for the desktop/CLI memory journal browse list.
 #[derive(Debug, Clone)]
 pub struct MemoryJournalListOptions<'a> {
-    /// Character scope.
     pub character_id: &'a str,
     /// When set, include rows scoped to this user or global (empty `user_id`).
     pub user_id: Option<&'a str>,
-    /// Include archived memories.
     pub include_archived: bool,
-    /// Include superseded memories.
     pub include_superseded: bool,
-    /// Include user-deleted memories.
     pub include_user_deleted: bool,
-    /// Optional kind filter.
     pub kind: Option<MemoryKind>,
-    /// Maximum rows to return.
     pub limit: usize,
-    /// Pagination offset.
     pub offset: usize,
 }
 
@@ -866,21 +793,13 @@ pub struct MemoryJournalListOptions<'a> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryScoreBreakdown {
-    /// Raw vector cosine similarity.
     pub vector_similarity: f32,
-    /// Lexical overlap score.
     pub lexical_score: f32,
-    /// Recency decay score.
     pub recency_score: f32,
-    /// Memory salience value.
     pub salience: f32,
-    /// Memory confidence value used in the weighted score.
     pub confidence: f32,
-    /// Affect match score.
     pub emotional_match: f32,
-    /// Normalized relationship impact score.
     pub relationship: f32,
-    /// Access-frequency boost.
     pub access_boost: f32,
     /// Combined query-relevance signal in `[0, 1]` — the weighted blend of
     /// vector similarity and lexical overlap that forms the score base.
@@ -902,7 +821,6 @@ pub struct MemoryScoreBreakdown {
     /// consistent: `total` is the pre-reflection score scaled by this factor,
     /// rather than a silent overwrite of `total`.
     pub reflection_multiplier: f32,
-    /// Final hybrid total score.
     pub total: f32,
 }
 
@@ -931,11 +849,8 @@ impl Default for MemoryScoreBreakdown {
 /// A typed memory with hybrid score breakdown and recall sources.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScoredMemory {
-    /// The recalled memory item.
     pub item: MemoryItem,
-    /// Explainable score components.
     pub breakdown: MemoryScoreBreakdown,
-    /// Sources that contributed this candidate.
     pub sources: Vec<MemoryCandidateSource>,
 }
 
@@ -952,11 +867,9 @@ pub struct ScoredMemory {
 /// size-aware (cap candidate counts, or send identifiers instead of full items).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GatheredCandidate {
-    /// The recalled memory item.
     pub item: MemoryItem,
     /// Best vector cosine similarity across recall sources (0.0 when absent).
     pub vector_similarity: f32,
-    /// Sources that contributed this candidate.
     pub sources: Vec<MemoryCandidateSource>,
 }
 

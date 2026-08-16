@@ -63,7 +63,6 @@
 //! # Ok(())
 //! # }
 //! ```
-#![warn(missing_docs)]
 
 /// Client for connecting to the core DB server.
 pub mod client;

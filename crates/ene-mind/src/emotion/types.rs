@@ -1,16 +1,11 @@
-//! Input/output types for the Emotion Engine.
-
 use std::time::Duration;
 
 use ene_card::AffectBaseline;
 use ene_core::AffectState;
 
-/// Optional LLM affect classifier proposal.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AffectProposal {
-    /// Detected user emotion label.
     pub user_emotion: String,
-    /// Detected user intent label.
     pub user_intent: String,
     /// Estimated valence after the conversation (-1.0 ..= 1.0).
     pub valence: f32,
@@ -20,15 +15,12 @@ pub struct AffectProposal {
     pub irritation: f32,
     /// Estimated affinity after the conversation (-1.0 ..= 1.0).
     pub affinity: f32,
-    /// Suggested expression name from the classifier.
     pub recommended_expression: String,
     /// Classifier confidence in `[0.0, 1.0]`.
     pub confidence: f32,
-    /// Human-readable reason from the classifier.
     pub reason: String,
 }
 
-/// Per-field delta applied during a turn update.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AffectDelta {
     /// Field name (e.g. `valence`, `irritation`).
@@ -37,20 +29,16 @@ pub struct AffectDelta {
     pub delta: f32,
 }
 
-/// Human-readable reason for an affect change.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AffectUpdateReason {
     /// Short category label (e.g. `decay`, `fatigue`, `classifier`).
     pub category: &'static str,
     /// Detail message for tracing.
     pub detail: String,
-    /// Field deltas attributed to this reason.
     pub deltas: Vec<AffectDelta>,
 }
 
-/// Input for a single turn affect update.
 pub struct TurnAffectInput<'a> {
-    /// Mutable affect state to update in place.
     pub state: &'a mut AffectState,
     /// Elapsed time since the last persisted update.
     pub elapsed_since_update: Duration,
@@ -65,7 +53,6 @@ pub struct TurnAffectInput<'a> {
 }
 
 impl TurnAffectInput<'_> {
-    /// Attach a classifier proposal to this input.
     #[must_use]
     pub fn with_proposal(mut self, proposal: AffectProposal) -> Self {
         self.classifier_proposal = Some(proposal);
@@ -73,11 +60,8 @@ impl TurnAffectInput<'_> {
     }
 }
 
-/// Result of a turn affect update.
 #[derive(Debug, Clone)]
 pub struct AffectUpdateResult {
-    /// Recomputed mood label after update.
     pub mood_label: String,
-    /// Traceable update reasons for debugging.
     pub reasons: Vec<AffectUpdateReason>,
 }

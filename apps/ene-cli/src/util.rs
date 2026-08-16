@@ -1,4 +1,3 @@
-/// Mask an API key for display, showing at most a short prefix and suffix.
 pub fn mask_api_key(key: &str) -> String {
     let trimmed = key.trim();
     if trimmed.is_empty() {

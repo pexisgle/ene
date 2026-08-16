@@ -1,4 +1,3 @@
-//! Mask capture debug overlay.
 use crate::platform::wayland_mask_capture::MaskCaptureState;
 use ene_vrm::debug_renderer::DebugLine;
 
@@ -18,7 +17,6 @@ fn pixel_to_world(
     ene_vrm::view_pos_to_world(view_pos, view_inverse)
 }
 
-/// Build the line list for the mask-capture debug overlay.
 pub fn build_mask_rect_lines(
     out: &mut Vec<DebugLine>,
     mask: &MaskCaptureState,

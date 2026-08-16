@@ -10,7 +10,6 @@ use std::sync::OnceLock;
 
 use ene_ai::AudioProviderError;
 
-/// Result of the one-time ORT initialization, cached process-wide.
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 /// The normalized dylib path used by the first caller that initialized ORT,

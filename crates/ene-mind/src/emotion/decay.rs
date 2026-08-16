@@ -7,9 +7,7 @@ use ene_core::AffectState;
 
 use super::types::{AffectDelta, AffectUpdateReason};
 
-/// Apply exponential decay toward the character's affect baseline using
-/// `half_life_minutes`. An all-zero baseline reproduces the legacy decay
-/// toward zero exactly.
+/// An all-zero baseline reproduces the legacy decay toward zero exactly.
 pub fn apply_decay(
     state: &mut AffectState,
     half_life_minutes: f64,

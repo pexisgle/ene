@@ -19,24 +19,19 @@ use crate::title_match::{TitleMatchMode, TitleMatcher, normalize_title};
 /// Provenance of a memory candidate, used to set [`MemorySource`] on persist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateProvenance {
-    /// Produced by the deterministic extractor.
     Deterministic,
-    /// Produced by the LLM extractor.
     LlmExtracted,
 }
 
 /// Optional semantic duplicate match for a candidate (from vector search).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SemanticMatch {
-    /// ID of the matched existing memory.
     pub memory_id: i64,
     /// Cosine similarity score.
     pub similarity: f32,
-    /// The matched memory item (for content comparison).
     pub memory: MemoryItem,
 }
 
-/// Tunable thresholds for arbitration decisions.
 #[derive(Debug, Clone)]
 pub struct ArbiterOptions {
     /// Minimum confidence required to persist a candidate.
@@ -77,8 +72,6 @@ impl Default for ArbiterOptions {
 }
 
 impl ArbiterOptions {
-    /// Build options from [`MindMemoryConfig`].
-    ///
     /// The float thresholds are clamped into the unit interval defensively,
     /// mirroring `MemoryDiversifyOptions::from_config`; deserialization already
     /// clamps, but options may be built from a programmatically constructed config.
@@ -104,19 +97,15 @@ impl ArbiterOptions {
 pub struct ArbiterContext<'a> {
     /// The conversation turn the candidates were extracted from.
     pub turn: TurnInput<'a>,
-    /// Character identifier for scoped memories.
     pub character_id: &'a str,
     /// User identifier (may be empty).
     pub user_id: &'a str,
-    /// Optional session/turn reference stored as `source_ref`.
     pub source_ref: Option<&'a str>,
     /// Source turn that produced the candidates, when extraction ran inside
     /// a turn. Persisted on deferred candidates so the approval UI can point
     /// back at the conversation.
     pub source_turn: Option<&'a str>,
-    /// How the candidates were produced.
     pub provenance: CandidateProvenance,
-    /// Decision thresholds.
     pub options: ArbiterOptions,
     /// Pre-computed semantic matches per candidate index (optional).
     pub semantic_matches: HashMap<usize, Vec<SemanticMatch>>,
@@ -186,9 +175,7 @@ pub enum ArbiterReasonCode {
 /// Human-readable decision reason with structured code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArbiterReason {
-    /// Structured reason code.
     pub code: ArbiterReasonCode,
-    /// Additional detail for logs and debugging.
     pub detail: String,
 }
 
@@ -206,7 +193,6 @@ impl ArbiterReason {
 pub enum ArbiterAction {
     /// Insert a new typed memory.
     Persist {
-        /// New memory payload.
         item: NewMemoryItem,
         /// Outcome rating of the interaction that produced this decision
         /// (-1.0 negative ..= 1.0 positive), derived from turn affect valence.
@@ -215,25 +201,18 @@ pub enum ArbiterAction {
     /// Do not persist or modify anything.
     Ignore,
     /// Mark an existing memory as user-deleted.
-    MarkUserDeleted {
-        /// ID of the memory to mark deleted.
-        memory_id: i64,
-    },
+    MarkUserDeleted { memory_id: i64 },
     /// Insert a replacement and mark the prior row superseded.
     Supersede {
         /// New memory payload (with `supersedes_id` set to the old row).
         new_item: NewMemoryItem,
-        /// ID of the memory being replaced.
         superseded_id: i64,
         /// Outcome rating of the interaction that produced this decision
         /// (-1.0 negative ..= 1.0 positive), derived from turn affect valence.
         outcome_rating: Option<f32>,
     },
     /// Mark an existing memory as disputed.
-    MarkDisputed {
-        /// ID of the disputed memory.
-        memory_id: i64,
-    },
+    MarkDisputed { memory_id: i64 },
     /// Defer persistence until the user confirms (weak contradiction).
     ///
     /// Carries the conflicting memory's identity so the deferred candidate can
@@ -252,21 +231,16 @@ pub enum ArbiterAction {
     },
 }
 
-/// Decision for one candidate.
 #[derive(Debug, Clone)]
 pub struct CandidateDecision {
-    /// The original candidate.
     pub candidate: MemoryCandidate,
-    /// Recommended action.
     pub action: ArbiterAction,
-    /// Why this action was chosen.
     pub reason: ArbiterReason,
 }
 
 /// Result of applying decisions to the store.
 #[derive(Debug, Clone)]
 pub struct AppliedDecision {
-    /// The decision that was applied.
     pub decision: CandidateDecision,
     /// ID of a newly inserted memory, if any.
     pub inserted_id: Option<i64>,
@@ -277,7 +251,6 @@ pub struct AppliedDecision {
     pub outcome_rating: Option<f32>,
 }
 
-/// Validates, deduplicates, and resolves contradictions for memory candidates.
 #[derive(Debug, Default)]
 pub struct MemoryArbiter;
 
@@ -326,7 +299,6 @@ impl MemoryArbiter {
         decisions
     }
 
-    /// Load active memories, evaluate candidates, and apply decisions.
     pub async fn arbitrate_and_apply(
         store: &dyn MemoryPort,
         candidates: &[MemoryCandidate],
@@ -364,8 +336,6 @@ impl MemoryArbiter {
         Self::apply_decisions(store, &decisions, ctx).await
     }
 
-    /// Apply a slice of decisions to the memory store.
-    ///
     /// **Non-transactional**: each decision is applied independently. If one
     /// fails mid-batch, previously applied decisions are already committed and
     /// will not be rolled back. Callers that need all-or-nothing semantics
@@ -599,8 +569,6 @@ impl MemoryArbiter {
         None
     }
 
-    /// Deduplicate tool-derived memories by their stable per-tool title.
-    ///
     /// Tool-grounding candidates (`tool failure:{tool}`, `tool:{tool}`,
     /// `tool outcome:{tool}`) carry an empty `source_quote` and a title that is
     /// constant per tool while the content varies with every failure. The
@@ -1036,7 +1004,6 @@ const INTERRUPTED_CONFIDENCE_PENALTY: f32 = 0.15;
 /// Tag marker used to flag episodes from interrupted (barge-in) turns.
 pub(crate) const INTERRUPTED_TAG: &str = "interrupted";
 
-/// Whether a candidate originated from an interrupted turn.
 fn is_interrupted_candidate(candidate: &MemoryCandidate) -> bool {
     candidate.tags.iter().any(|tag| tag == INTERRUPTED_TAG)
 }
@@ -1197,8 +1164,6 @@ const fn is_arbitration_visible(status: MemoryStatus) -> bool {
 /// (superseding the prior record) rather than by volatile content.
 const TOOL_TITLE_PREFIXES: &[&str] = &["tool failure:", "tool:", "tool outcome:"];
 
-/// Whether a candidate was produced by tool-result grounding.
-///
 /// Tool-grounding candidates are the only ones built with an empty
 /// `source_quote` *and* a `tool*:` title prefix, so the pair of signals
 /// distinguishes them from LLM/deterministic candidates without threading
@@ -1210,8 +1175,6 @@ fn is_tool_derived_candidate(candidate: &MemoryCandidate) -> bool {
             .any(|prefix| candidate.title.starts_with(prefix))
 }
 
-/// Lightweight validity check for tool-derived candidates.
-///
 /// Tool-grounding candidates bypass the `source_quote`-in-turn check (their
 /// quote is empty by construction), so they used to pass validation
 /// unconditionally. This enforces a minimal bar instead:
@@ -1369,7 +1332,6 @@ mod tests {
         &decisions.first().expect("one decision").action
     }
 
-    /// Build a fully-populated [`MemoryItem`] for contradiction tests.
     fn memory_item(
         id: i64,
         kind: MemoryKind,
@@ -1475,7 +1437,6 @@ mod tests {
         }
     }
 
-    /// An [`ArbiterContext`] wired to a specific embedder.
     fn ctx_with_embedder<'a>(
         turn: TurnInput<'a>,
         embedder: &'a dyn EmbeddingProvider,
@@ -3086,8 +3047,6 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_candidate_confidence_is_deprioritized() {
-        // An interrupted (barge-in) episode is partial and therefore less
-        // reliable: the persisted confidence is reduced by the penalty.
         let turn = TurnInput {
             user_message: "remember project X",
             assistant_message: None,
@@ -3109,8 +3068,6 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_candidate_tags_are_serialized_into_content() {
-        // The store has no tags column, so tags are serialized into the
-        // content as a metadata footer.
         let turn = TurnInput {
             user_message: "remember project X",
             assistant_message: None,
@@ -3153,8 +3110,6 @@ mod tests {
         let content = "plain content";
         assert_eq!(append_tags_metadata(content, &[]), content);
     }
-
-    // ── Every arbiter threshold is wired through config ──
 
     #[test]
     fn from_config_wires_all_thresholds() {
@@ -3203,8 +3158,6 @@ mod tests {
                 < f32::EPSILON
         );
     }
-
-    // ── Staged source_quote verification ──
 
     fn quote_candidate(quote: &str) -> MemoryCandidate {
         MemoryCandidate {
@@ -3269,8 +3222,6 @@ mod tests {
         );
         assert!((candidate.confidence - 0.7).abs() < f32::EPSILON);
     }
-
-    // ── Contradiction-key matching by title embedding similarity ──
 
     /// Synonymous titles ("職業" vs "仕事") are matched by embedding similarity
     /// and detected as a contradiction, where exact-title matching missed them.
@@ -3390,7 +3341,6 @@ mod tests {
         let arbiter_ctx = ctx_with_embedder(turn, &embedder);
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &existing, &arbiter_ctx).await;
 
-        // No false positive from the unrelated titles.
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::Persist { .. }

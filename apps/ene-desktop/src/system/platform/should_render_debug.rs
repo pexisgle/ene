@@ -117,9 +117,7 @@ mod tests {
         world.insert_resource(DragActive(false));
         world.insert_resource(DebugFps(60));
         step_world(&mut world);
-        // First frame always runs.
         assert!(world.resource::<ShouldRenderDebug>().0);
-        // Second frame within the interval must not.
         step_world(&mut world);
         assert!(!world.resource::<ShouldRenderDebug>().0);
     }
@@ -134,10 +132,8 @@ mod tests {
         world.insert_resource(DragActive(false));
         world.insert_resource(DebugFps(1));
         step_world(&mut world);
-        // Second frame is throttled.
         step_world(&mut world);
         assert!(!world.resource::<ShouldRenderDebug>().0);
-        // User starts dragging — next frame must run.
         world.insert_resource(DragActive(true));
         step_world(&mut world);
         assert!(world.resource::<ShouldRenderDebug>().0);

@@ -39,14 +39,12 @@ use ene_plugin_proto::VadEvent as WireVadEvent;
 use crate::ipc_plugin::IpcPluginConnection;
 use crate::ipc_provider::ConcurrencyLimiter;
 
-/// Generates unique session ids for the plugin-side engine state map.
 fn next_session_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     format!("vad-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Maps a wire VAD event onto the host's `ene_ai::VadEvent`.
 fn map_event(event: WireVadEvent) -> VadEvent {
     match event {
         WireVadEvent::SpeechStart => VadEvent::SpeechStart,
@@ -56,8 +54,6 @@ fn map_event(event: WireVadEvent) -> VadEvent {
     }
 }
 
-/// An `ene_ai::VadEngine` that delegates to a plugin binary over IPC.
-///
 /// Created by [`IpcVadFactory`] during `PluginHostManager` startup. Holds a
 /// `tokio::runtime::Handle` captured at factory construction so
 /// `process_chunk` can block on the async connection from the capture
@@ -77,7 +73,6 @@ pub struct IpcVadEngine {
 }
 
 impl IpcVadEngine {
-    /// Creates a new IPC-backed VAD engine with a fresh session id.
     #[must_use]
     pub fn new(
         kind: String,
@@ -102,14 +97,11 @@ impl IpcVadEngine {
         }
     }
 
-    /// The PCM sample rate this engine's chunks arrive at (from the
-    /// plugin's `VadProviderSpec`).
     #[must_use]
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
-    /// Returns the live plugin blob (or the creation-time snapshot).
     fn current_provider_config(&self) -> serde_json::Value {
         ene_ai::plugin_config::global_plugin_config_blob(&self.plugin_name)
             .unwrap_or_else(|| self.config_snapshot.clone())
@@ -161,8 +153,6 @@ impl Drop for IpcVadEngine {
     }
 }
 
-/// Maps a [`PluginHostError`] into the [`AudioProviderError`] domain.
-///
 /// Mirrors the STT/TTS adapters: no retries for transport failures (the
 /// capture loop escalates after repeated failures and resets the engine).
 fn map_host_error(e: crate::error::PluginHostError) -> AudioProviderError {
@@ -215,8 +205,6 @@ impl VadEngine for IpcVadEngine {
     }
 }
 
-/// Factory that creates [`IpcVadEngine`] instances for a specific engine
-/// kind served by a plugin binary.
 pub struct IpcVadFactory {
     kind: String,
     conn: Arc<IpcPluginConnection>,
@@ -230,9 +218,6 @@ pub struct IpcVadFactory {
 }
 
 impl IpcVadFactory {
-    /// Creates a new factory for the given engine kind, sharing the plugin
-    /// connection.
-    ///
     /// `frame_size` and `sample_rate` come from the plugin's
     /// `VadProviderSpec`; `concurrency` is its declared hint; `handle` is
     /// the runtime that owns the connection (captured at manager startup),

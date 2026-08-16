@@ -12,7 +12,6 @@ use enigo::Keyboard;
     side_effects = "System { privileged: true }"
 )]
 pub struct TypeTextAction {
-    /// Text to type.
     text: String,
 }
 

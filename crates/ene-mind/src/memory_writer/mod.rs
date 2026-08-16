@@ -1,5 +1,3 @@
-// Memory Writer: deterministic/LLM extraction + Memory Arbiter.
-
 pub mod arbiter;
 pub mod candidate;
 pub mod deterministic;
@@ -31,7 +29,6 @@ use crate::config::MindConfig;
 use crate::error::CognitionError;
 use crate::lifecycle::PostTurnInput;
 
-/// Optional providers for LLM extraction and semantic deduplication.
 pub struct MemoryWriteProviders<'a> {
     /// LLM provider for optional memory candidate extraction.
     pub llm: Option<&'a dyn LlmProvider>,
@@ -52,7 +49,6 @@ impl Default for MemoryWriteProviders<'_> {
     }
 }
 
-/// Memory Writer orchestrator.
 #[derive(Debug, Default)]
 pub struct MemoryWriter;
 
@@ -365,7 +361,6 @@ impl MemoryWriter {
         Ok(())
     }
 
-    /// Apply natural forgetting lifecycle for the turn scope.
     pub async fn apply_forgetting(
         store: &dyn MemoryPort,
         config: &MindConfig,
@@ -380,7 +375,6 @@ impl MemoryWriter {
         Ok(())
     }
 
-    /// Extract, arbitrate, persist memories, apply forgetting, and update affect.
     pub async fn after_turn(
         store: &dyn MemoryPort,
         config: &MindConfig,
@@ -807,9 +801,8 @@ mod tests {
 
     #[tokio::test]
     async fn llm_empty_persists_nothing_without_forget() {
-        // An empty LLM result used to fall back to the deterministic remember
-        // pattern; remember is now LLM-owned, so nothing persists when
-        // the LLM returns no candidates and no forget was requested.
+        // Remember is LLM-owned, so nothing persists when the LLM returns no
+        // candidates and no forget was requested.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let config = MindConfig {
             language: "en".into(),
@@ -1125,9 +1118,8 @@ mod tests {
 
     #[tokio::test]
     async fn llm_failure_persists_nothing_without_forget() {
-        // LLM failure used to fall back to the deterministic remember pattern;
-        // remember is now LLM-owned, so nothing persists on failure
-        // unless a forget was requested.
+        // Remember is LLM-owned, so nothing persists on failure unless a
+        // forget was requested.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let config = MindConfig {
             language: "en".into(),

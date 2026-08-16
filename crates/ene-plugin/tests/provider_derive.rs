@@ -8,8 +8,6 @@
 
 use ene_plugin::prelude::*;
 
-// ── LlmPlugin ────────────────────────────────────────────────────────────
-
 #[derive(LlmPlugin)]
 #[provider(
     kind = "test-llm",
@@ -88,8 +86,6 @@ fn llm_capability_declarations_match_attributes() {
     );
 }
 
-// ── TtsPlugin ────────────────────────────────────────────────────────────
-
 #[derive(TtsPlugin)]
 #[provider(kind = "test-tts", voices = "voice-a, voice-b", formats = "wav, mp3")]
 pub struct TestTtsProvider;
@@ -122,8 +118,6 @@ fn tts_provider_kind_const() {
     assert_eq!(TestTtsProvider::TTS_PROVIDER_KIND, "test-tts");
 }
 
-// ── SttPlugin ────────────────────────────────────────────────────────────
-
 #[derive(SttPlugin)]
 #[provider(kind = "test-stt", models = "model-x", formats = "wav, flac")]
 pub struct TestSttProvider;
@@ -151,8 +145,6 @@ fn stt_capabilities_match_attributes() {
 fn stt_provider_kind_const() {
     assert_eq!(TestSttProvider::STT_PROVIDER_KIND, "test-stt");
 }
-
-// ── VadPlugin ────────────────────────────────────────────────────────────
 
 #[derive(VadPlugin)]
 #[provider(
@@ -193,8 +185,6 @@ fn vad_capabilities_match_attributes() {
 fn vad_provider_kind_const() {
     assert_eq!(TestVadProvider::VAD_PROVIDER_KIND, "test-vad");
 }
-
-// ── Defaults ─────────────────────────────────────────────────────────────
 
 #[derive(LlmPlugin)]
 #[provider(kind = "test-default", models = "model-d")]
@@ -264,8 +254,6 @@ fn partial_concurrency_keeps_default_queue_depth() {
         ConcurrencyHint::default().queue_depth
     );
 }
-
-// ── Compound provider (TTS/STT rehearsal) ────────────────────────────────
 
 #[derive(LlmPlugin, TtsPlugin)]
 #[provider(

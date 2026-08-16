@@ -1,4 +1,3 @@
-//! Window lifecycle messages.
 use bevy_ecs::prelude::*;
 
 /// User clicked the window's close button. The runtime exits on

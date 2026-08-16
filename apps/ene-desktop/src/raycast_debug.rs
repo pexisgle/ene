@@ -32,21 +32,10 @@ pub const IDLE_COLOR: glam::Vec4 = glam::Vec4::new(0.2, 0.85, 1.0, 0.5);
 /// "this is the one".
 pub const HIT_COLOR: glam::Vec4 = glam::Vec4::new(1.0, 0.85, 0.2, 0.9);
 
-/// Colour for the hit-point cross. Red at 95 % alpha.
 pub const HIT_POINT_COLOR: glam::Vec4 = glam::Vec4::new(1.0, 0.3, 0.3, 0.95);
 
 /// Build the line list for the character-window debug
 /// overlay.
-///
-/// - For every collider in `colliders`, push a wireframe sphere
-///   (or Y-axis capsule) of the collider's radius / half-height
-///   at the collider's current world position, rotated to match
-///   the collider's current orientation.
-/// - The collider whose handle matches `hit_collider` (if any)
-///   is coloured yellow; the rest are cyan.
-/// - When `hit_collider` is `Some`, push a 3-axis cross at
-///   `hit_point` so the precise impact location is obvious.
-///
 /// The function never reads the GPU or the surface — it
 /// is pure CPU and is safe to call from anywhere in the
 /// per-frame pipeline. The runtime is responsible for passing
@@ -92,11 +81,6 @@ pub fn push_lines(
             position.translation.y,
             position.translation.z,
         );
-        // Convert the collider's nalgebra quaternion to a
-        // `glam::Quat` so the capsule wireframe helper can
-        // apply it to its local +Y. `position.rotation`
-        // returns a `UnitQuaternion`; `.quaternion()`
-        // exposes the raw `Quaternion` (i, j, k, w).
         let q = position.rotation;
         let orientation = q;
         let color = if Some(*handle) == hit_collider {
@@ -162,8 +146,6 @@ mod tests {
         (physics, reg.colliders)
     }
 
-    /// With no colliders, the output is empty (no spheres, no
-    /// cross).
     #[test]
     fn empty_when_no_colliders() {
         let (physics, _) = setup();
@@ -172,9 +154,6 @@ mod tests {
         assert!(out.is_empty(), "no colliders => no lines");
     }
 
-    /// Two bone colliders must produce the expected number
-    /// of lines: `2 * (longitudes² + (latitudes + 1) * longitudes)`.
-    /// No hit => no cross.
     #[test]
     fn two_colliders_produces_expected_line_count() {
         let (physics, colliders) = setup();
@@ -185,9 +164,6 @@ mod tests {
         assert_eq!(out.len(), 2 * per_sphere);
     }
 
-    /// A hit-point cross adds exactly 3 segments (one per
-    /// axis) to the line list, regardless of how many
-    /// colliders are registered.
     #[test]
     fn hit_point_adds_three_cross_segments() {
         let mut physics = PhysicsWorld::new();
@@ -216,9 +192,7 @@ mod tests {
         assert_eq!(out.len(), per_sphere + 3);
     }
 
-    /// A capsule collider must produce capsule wireframe
-    /// lines (caps + meridians), not zero lines. Guards
-    /// against future refactors that drop capsule support
+    /// Guards against future refactors that drop capsule support
     /// and leave limbs / trunk invisible in the overlay.
     #[test]
     fn capsule_collider_produces_wireframe_lines() {

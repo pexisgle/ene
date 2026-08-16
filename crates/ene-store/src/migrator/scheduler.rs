@@ -8,7 +8,6 @@
 
 use sea_orm_migration::prelude::*;
 
-/// Adds the persistent scheduler tables.
 pub struct SchedulerMigration;
 
 impl MigrationName for SchedulerMigration {

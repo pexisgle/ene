@@ -1,5 +1,3 @@
-//! Managed-mode engine lifecycle: spawn, health-check, terminate.
-
 use std::time::Duration;
 
 use ene_plugin::PluginError;

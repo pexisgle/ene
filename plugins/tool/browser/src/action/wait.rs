@@ -10,7 +10,6 @@ use std::sync::Arc;
     keywords_primary = "wait, delay, sleep"
 )]
 pub struct WaitAction {
-    /// Milliseconds to wait (default: 1000).
     #[arg(default = "1000", minimum = 0)]
     wait_ms: Option<u64>,
 }

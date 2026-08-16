@@ -2,7 +2,6 @@
 //!
 //! Plugin binary providing random generation tools: random numbers,
 //! UUID v4 values, list picks, and hex colors.
-#![warn(missing_docs)]
 #![expect(
     clippy::unused_async,
     reason = "tool IPC handlers are async for uniform provider dispatch"
@@ -15,9 +14,7 @@
     )
 )]
 
-/// Action modules for each tool.
 pub mod action;
-/// Tool lifecycle and provider integration.
 pub mod provider;
 
 mod error;

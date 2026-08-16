@@ -1,10 +1,7 @@
-//! Per-frame timing state.
 use std::time::Instant;
 
 use bevy_ecs::prelude::*;
 
-/// Per-frame timing snapshot.
-///
 /// The fields are read by any system that needs `delta` (animation
 /// blending, drag integration, FPS counter) or `elapsed` (AI bridge
 /// timeout, emotion queue scheduling).

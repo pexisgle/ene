@@ -10,11 +10,8 @@ use crate::error::{ArtifactError, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
-    /// A plugin binary.
     Plugin,
-    /// A sidecar binary (e.g. a llama.cpp server).
     Sidecar,
-    /// A model file (GGUF, ONNX, …).
     Model,
 }
 
@@ -64,19 +61,15 @@ pub const DEFAULT_UNPACK_LIMIT: u64 = 8 * 1024 * 1024 * 1024;
 /// Maximum number of entries accepted in an extracted archive.
 pub const MAX_ARCHIVE_ENTRIES: usize = 4096;
 
-/// One installable artifact version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactTarget {
     /// Exact version string (compared segment-wise numerically, so `1.10`
     /// sorts after `1.9`).
     pub version: String,
-    /// Artifact kind.
     pub kind: ArtifactKind,
     /// Ordered mirror URLs (https only). The first reachable URL wins.
     pub urls: Vec<String>,
-    /// Hex SHA-256 of the artifact bytes.
     pub sha256: String,
-    /// Exact artifact size in bytes.
     pub size: u64,
     /// Payload format for the artifact bytes. `None`/`raw` keeps the
     /// original single-file behavior.
@@ -120,11 +113,9 @@ pub struct CatalogMetadata {
     /// Expiry as Unix milliseconds. Expired catalogs are rejected regardless
     /// of signature validity.
     pub expires_at_ms: u64,
-    /// `artifact_id` → target.
     pub artifacts: BTreeMap<String, ArtifactTarget>,
 }
 
-/// A catalog payload plus its Ed25519 signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedCatalog {
     /// The exact canonical JSON bytes that were signed.
@@ -135,13 +126,10 @@ pub struct SignedCatalog {
     pub key_id: String,
 }
 
-/// Serializes metadata to the canonical byte form that gets signed.
 pub fn canonical_catalog_bytes(metadata: &CatalogMetadata) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(metadata)?)
 }
 
-/// Signs catalog metadata with an Ed25519 signing key (host tooling, tests,
-/// and the publisher side of the distribution pipeline).
 pub fn sign_catalog(
     metadata: &CatalogMetadata,
     key_id: String,
@@ -156,14 +144,12 @@ pub fn sign_catalog(
     })
 }
 
-/// Trusted catalog keys: hex-encoded Ed25519 verifying keys by key id.
 #[derive(Debug, Clone, Default)]
 pub struct TrustedCatalogKeys {
     keys: BTreeMap<String, VerifyingKey>,
 }
 
 impl TrustedCatalogKeys {
-    /// Builds the registry from `(key_id, hex_verifying_key)` pairs.
     pub fn from_hex(keys: &[(String, String)]) -> Result<Self> {
         let mut parsed = BTreeMap::new();
         for (key_id, hex_key) in keys {
@@ -181,7 +167,6 @@ impl TrustedCatalogKeys {
         Ok(Self { keys: parsed })
     }
 
-    /// Whether any keys are registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
@@ -233,14 +218,12 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// Verifies signed catalogs against trusted keys and the installed state.
 #[derive(Debug)]
 pub struct CatalogVerifier {
     keys: TrustedCatalogKeys,
 }
 
 impl CatalogVerifier {
-    /// Builds a verifier over the trusted keys.
     #[must_use]
     pub fn new(keys: TrustedCatalogKeys) -> Self {
         Self { keys }
@@ -281,7 +264,6 @@ impl CatalogVerifier {
         Ok(metadata)
     }
 
-    /// All artifact ids present in a catalog (for update checks).
     #[must_use]
     pub fn artifact_ids(&self, metadata: &CatalogMetadata) -> BTreeSet<String> {
         metadata.artifacts.keys().cloned().collect()
@@ -438,7 +420,6 @@ mod tests {
         let meta = metadata(2, &[("fs", "1.2.0")]);
         let signed = sign_catalog(&meta, key.0.clone(), &key.1).expect("sign");
         let verifier = CatalogVerifier::new(trusted(&key));
-        // Installed digest differs from the catalog's (ab*32).
         let installed =
             BTreeMap::from([("fs".to_string(), ("1.2.0".to_string(), "cd".repeat(32)))]);
         assert!(matches!(

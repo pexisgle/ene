@@ -12,9 +12,7 @@ use ene_plugin_proto::{HostServiceId, SandboxConfigData, ToolError};
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
-/// One mediated HTTP response.
 pub struct FetchOutcome {
-    /// HTTP status code.
     pub status: u16,
     /// Response headers (authorization/cookie headers are stripped by the
     /// host).
@@ -72,7 +70,6 @@ impl WebBroker {
         self.token.write().clone_from(&sandbox.db_auth_token);
     }
 
-    /// Sends one mediated HTTP request.
     pub async fn fetch(
         &self,
         method: HttpMethod,

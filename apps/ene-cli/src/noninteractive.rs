@@ -82,8 +82,6 @@ pub async fn execute(cmd: &Command, ctx: &mut AppContext) -> i32 {
     }
 }
 
-/// Runs a `catalog` subcommand without touching the runtime (pure
-/// publisher-side tooling: key generation, signing, and verification).
 fn catalog_command(action: &CatalogAction, json: bool) -> Result<i32, OutputError> {
     crate::catalog::run(action, json)
 }
@@ -94,8 +92,6 @@ fn emit_error(err: &OutputError, format: OutputFormat) {
     }
     eprintln!("error: {err}");
 }
-
-// ── run ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 struct ToolCallRecord {
@@ -449,8 +445,6 @@ const fn cue_source_label(source: CueSource) -> &'static str {
     }
 }
 
-// ── tool ────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Serialize)]
 struct ToolCallOutput {
     name: String,
@@ -540,8 +534,6 @@ fn print_tool_list(tools: &[ene_runtime::ToolSpec]) {
         println!("- {}: {}", tool.name.as_str(), tool.description);
     }
 }
-
-// ── session ─────────────────────────────────────────────────────────────────
 
 async fn session_command(
     ctx: &mut AppContext,
@@ -673,8 +665,6 @@ fn print_session_search(matches: &[(String, ene_runtime::PublicExportedMessage)]
     }
 }
 
-// ── characters ──────────────────────────────────────────────────────────────
-
 fn characters_command(
     _ctx: &mut AppContext,
     action: &CharactersAction,
@@ -716,8 +706,6 @@ fn print_character_list(characters: &[ene_card::CharacterEntry]) {
         println!("- {} ({})", entry.name, entry.card_path);
     }
 }
-
-// ── memory ──────────────────────────────────────────────────────────────────
 
 async fn memory_command(
     ctx: &mut AppContext,
@@ -827,8 +815,6 @@ fn parse_kind(kind: Option<&str>) -> Result<Option<ene_store::MemoryKind>, Outpu
         .map(Some)
 }
 
-// ── doctor ──────────────────────────────────────────────────────────────────
-
 async fn doctor_command(ctx: &mut AppContext, json: bool) -> Result<i32, OutputError> {
     // Reuse the interactive /doctor implementation, which already supports a
     // `--json` report. We locate it through the shared command registry to
@@ -850,8 +836,6 @@ async fn doctor_command(ctx: &mut AppContext, json: bool) -> Result<i32, OutputE
         Err(e) => Err(OutputError::new(ErrorCode::Runtime, e.to_string())),
     }
 }
-
-// ── store ───────────────────────────────────────────────────────────────────
 
 async fn store_command(
     ctx: &mut AppContext,

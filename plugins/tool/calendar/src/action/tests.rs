@@ -1,7 +1,3 @@
-//! End-to-end action tests through the approval gate: gate ordering
-//! (permission prompt before any store mutation), retry request-id matching
-//! after approval, and the preview content delivered to the user.
-
 use super::*;
 use crate::approval::actions;
 use crate::state::CalendarState;

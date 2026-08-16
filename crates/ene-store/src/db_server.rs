@@ -64,32 +64,20 @@ use tracing::{debug, error, info, warn};
 /// long time. Requests above this limit are rejected up front.
 const MAX_BATCH_OPS: usize = 10_000;
 
-/// Errors from the DB IPC server.
 #[derive(Debug, thiserror::Error)]
 pub enum DbServerError {
-    /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    /// JSON serialization/deserialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-    /// `SeaORM` database error.
     #[error("Database error: {0}")]
     Db(#[from] sea_orm::DbErr),
-    /// The tool does not have permission to access the resource.
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
-    /// The specified table is unknown or not declared.
     #[error("Unknown table: {0}")]
     UnknownTable(String),
-    /// The specified column is unknown.
     #[error("Unknown column: {table}.{column}")]
-    UnknownColumn {
-        /// Table name.
-        table: String,
-        /// Column name.
-        column: String,
-    },
+    UnknownColumn { table: String, column: String },
     /// An operation inside a [`DbRequest::Batch`] failed at `index`.
     ///
     /// Wraps the underlying error so the failing operation index can be
@@ -98,9 +86,7 @@ pub enum DbServerError {
     /// get from a standalone request still catch it.
     #[error("batch op {index}: {source}")]
     BatchOp {
-        /// Index of the failing operation within the batch.
         index: usize,
-        /// The underlying error.
         source: Box<DbServerError>,
     },
     /// The declared schema conflicts with the one already stored for this
@@ -115,7 +101,6 @@ pub enum DbServerError {
     /// permitted so the plugin can free space.
     #[error("Storage quota exceeded: {0}")]
     QuotaExceeded(String),
-    /// An internal server error.
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -152,15 +137,11 @@ impl DbServerError {
     }
 }
 
-/// Serves authenticated DB IPC streams.
-///
 /// Stateless namespace: every connection is authenticated by the
 /// host-service `Open` gate before it reaches these helpers.
 pub struct DbIpcServer;
 
 impl DbIpcServer {
-    /// Serves an already-authenticated DB IPC stream.
-    ///
     /// Used by the multiplexed host-service acceptor after
     /// [`HostServiceRequest::Open`] succeeds.
     pub(crate) async fn serve_authenticated_connection(
@@ -712,7 +693,6 @@ impl DbIpcServer {
         Self::reject_if_over_quota(tool_name, prefix, used, quota_bytes)
     }
 
-    /// Shared quota gate used by standalone writes and the batch running estimate.
     fn reject_if_over_quota(
         tool_name: &str,
         prefix: &str,
@@ -1304,7 +1284,6 @@ impl DbIpcServer {
             DbType::Blob => "BLOB",
         });
 
-        // SQLite requires a DEFAULT for a NOT NULL column added via ALTER.
         if !column.nullable && column.default.is_some() {
             sql.push_str(" NOT NULL");
         }
@@ -2135,7 +2114,6 @@ mod tests {
         (db, declared_tables, declared_columns, last_rowid)
     }
 
-    /// Counts rows in `fs_test` via the request dispatcher.
     async fn count_test_rows(
         db: &sea_orm::DatabaseConnection,
         declared_tables: &mut HashMap<String, ene_plugin_db::DbTable>,
@@ -2162,9 +2140,6 @@ mod tests {
         }
     }
 
-    /// A batch of valid writes commits atomically: every operation is applied
-    /// and one [`ene_plugin_db::DbBatchOpResult`] is returned per operation, in
-    /// request order.
     #[tokio::test]
     async fn batch_commits_all_ops_atomically() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -2241,9 +2216,6 @@ mod tests {
         );
     }
 
-    /// A failing statement rolls the whole batch back: the valid insert that
-    /// preceded the NOT NULL violation is not persisted, and the error names
-    /// the failing operation index.
     #[tokio::test]
     async fn batch_rolls_back_on_failing_statement() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -2302,9 +2274,6 @@ mod tests {
         );
     }
 
-    /// Schema validation runs before any statement executes, so a batch that
-    /// references an undeclared table is rejected wholesale and nothing — not
-    /// even the valid operations before it — is applied.
     #[tokio::test]
     async fn batch_rejects_undeclared_table_before_executing() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -2359,8 +2328,6 @@ mod tests {
         );
     }
 
-    /// A committed batch updates the connection-scoped `LastInsertRowId` cell
-    /// to the batch's final insert rowid, matching standalone `Insert` behavior.
     #[tokio::test]
     async fn batch_updates_last_insert_rowid() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -2421,7 +2388,6 @@ mod tests {
         assert_eq!(lookup_id, second_rowid);
     }
 
-    /// An empty batch is a no-op that commits successfully with no results.
     #[tokio::test]
     async fn empty_batch_commits_nothing() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -2444,8 +2410,6 @@ mod tests {
         }
     }
 
-    /// A batch larger than [`MAX_BATCH_OPS`] is rejected up front so a plugin
-    /// cannot pin the write lock and memory for an arbitrarily long time.
     #[tokio::test]
     async fn oversized_batch_is_rejected() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -2607,8 +2571,6 @@ mod tests {
         assert_eq!(lookup_id, insert_rowid);
     }
 
-    // --- Schema fingerprint / evolution tests ---
-
     fn test_column(name: &str, ty: ene_plugin_db::DbType) -> ene_plugin_db::DbColumn {
         ene_plugin_db::DbColumn {
             name: name.to_string(),
@@ -2635,7 +2597,6 @@ mod tests {
         }
     }
 
-    /// Creates an in-memory DB with the `__tool_schemas` bookkeeping table.
     async fn test_db_with_tool_schemas() -> sea_orm::DatabaseConnection {
         let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
         db.execute_unprepared(
@@ -2713,8 +2674,6 @@ mod tests {
         .await
     }
 
-    /// Registering a changed schema refreshes the stored row (fingerprint +
-    /// `schema_json`) and applies the new column to the existing table.
     #[tokio::test]
     async fn changed_schema_updates_stored_row_and_applies_column() {
         let db = test_db_with_tool_schemas().await;
@@ -2748,7 +2707,6 @@ mod tests {
         );
     }
 
-    /// Re-declaring an identical schema must not rewrite the stored row.
     #[tokio::test]
     async fn unchanged_schema_does_not_rewrite_stored_row() {
         let db = test_db_with_tool_schemas().await;
@@ -2769,7 +2727,6 @@ mod tests {
         assert_eq!(first.created_at, second.created_at);
     }
 
-    /// A column type change cannot be applied in place and is rejected.
     #[tokio::test]
     async fn type_change_is_rejected_as_conflict() {
         let db = test_db_with_tool_schemas().await;
@@ -2798,10 +2755,6 @@ mod tests {
         assert_eq!(before.schema_json, after.schema_json);
     }
 
-    /// Adding a NOT NULL column without a DEFAULT is rejected: `SQLite` cannot
-    /// add such a column via `ALTER TABLE` (existing rows would violate the
-    /// constraint), and silently dropping the constraint would let validation
-    /// and storage diverge.
     #[tokio::test]
     async fn not_null_column_without_default_is_rejected_as_conflict() {
         let db = test_db_with_tool_schemas().await;
@@ -2831,8 +2784,6 @@ mod tests {
         assert_eq!(before.fingerprint, after.fingerprint);
     }
 
-    /// Removing a previously declared table is rejected rather than silently
-    /// leaving the physical table orphaned.
     #[tokio::test]
     async fn removed_table_is_rejected_as_conflict() {
         let db = test_db_with_tool_schemas().await;
@@ -2859,8 +2810,6 @@ mod tests {
         );
     }
 
-    /// Removing a column from an existing table is rejected rather than
-    /// leaving the physical column orphaned.
     #[tokio::test]
     async fn removed_column_is_rejected_as_conflict() {
         let db = test_db_with_tool_schemas().await;
@@ -2884,8 +2833,6 @@ mod tests {
         );
     }
 
-    /// Adding a column that carries a `UNIQUE` constraint is rejected, since
-    /// `SQLite` cannot add a constrained column via `ALTER TABLE`.
     #[tokio::test]
     async fn added_unique_column_is_rejected_as_conflict() {
         let db = test_db_with_tool_schemas().await;
@@ -2911,8 +2858,6 @@ mod tests {
         );
     }
 
-    /// An additive migration preserves existing rows and accepts new data in
-    /// the added column.
     #[tokio::test]
     async fn additive_migration_preserves_existing_rows() {
         let db = test_db_with_tool_schemas().await;
@@ -3002,11 +2947,6 @@ mod tests {
         );
     }
 
-    // --- Schema validation regression tests ---
-
-    /// A standalone upsert whose `conflict_columns` reference an undeclared
-    /// column is rejected with a structured `UnknownColumn` error before
-    /// anything reaches the database.
     #[tokio::test]
     async fn upsert_with_undeclared_conflict_column_is_rejected() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -3054,8 +2994,6 @@ mod tests {
         );
     }
 
-    /// A batch upsert with an undeclared conflict column is rejected up front
-    /// (before the transaction runs) and names the failing operation.
     #[tokio::test]
     async fn batch_upsert_with_undeclared_conflict_column_is_rejected() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -3105,9 +3043,6 @@ mod tests {
         );
     }
 
-    /// A declared column whose `DEFAULT` is a non-finite float is rejected
-    /// explicitly (`NaN`/`inf` have no valid `SQLite` literal) rather than
-    /// producing an opaque database syntax error.
     #[tokio::test]
     async fn declare_schema_rejects_non_finite_default() {
         let db = test_db_with_tool_schemas().await;
@@ -3138,7 +3073,6 @@ mod tests {
         }
     }
 
-    /// Finite float defaults render valid DDL; non-finite ones are refused.
     #[test]
     fn db_value_to_sql_rejects_non_finite_floats() {
         assert!(DbIpcServer::db_value_to_sql(&ene_plugin_db::DbValue::Float(1.5)).is_ok());
@@ -3152,9 +3086,6 @@ mod tests {
         );
     }
 
-    /// An index name that does not carry the tool's prefix is rejected, so a
-    /// plugin cannot squat a database-global index name a core migration may
-    /// later need.
     #[tokio::test]
     async fn declare_schema_rejects_index_without_prefix() {
         let db = test_db_with_tool_schemas().await;
@@ -3187,8 +3118,6 @@ mod tests {
         );
     }
 
-    /// An index name carrying the tool's prefix (the established
-    /// `idx_<prefix>...` convention) is accepted.
     #[tokio::test]
     async fn declare_schema_accepts_prefixed_index() {
         let db = test_db_with_tool_schemas().await;
@@ -3214,8 +3143,6 @@ mod tests {
         );
     }
 
-    /// A column whose stored value does not decode as its declared type reads
-    /// back as `Null`, with the mismatch surfaced via a warning log.
     #[tokio::test]
     async fn select_type_mismatch_reads_back_as_null() {
         use sea_orm::ConnectionTrait;
@@ -3288,8 +3215,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get("qty"), Some(&ene_plugin_db::DbValue::Null));
     }
-
-    // --- Per-plugin DB storage quota tests ---
 
     /// Dispatches a single request against the batch fixture with an explicit
     /// per-plugin quota, so quota tests can exercise the real enforcement path
@@ -3371,7 +3296,6 @@ mod tests {
         (db, declared_tables, declared_columns, last_rowid)
     }
 
-    /// An `Insert` of a `size`-byte BLOB into `fs_blob`.
     fn blob_insert(size: usize) -> ene_plugin_db::DbRequest {
         ene_plugin_db::DbRequest::Insert {
             table: "fs_blob".to_string(),
@@ -3382,7 +3306,6 @@ mod tests {
         }
     }
 
-    /// Counts rows in `fs_blob` via the request dispatcher.
     async fn count_blob_rows(
         db: &sea_orm::DatabaseConnection,
         declared_tables: &mut HashMap<String, ene_plugin_db::DbTable>,
@@ -3416,8 +3339,6 @@ mod tests {
     /// A quota far above one payload: a single insert always fits.
     const QUOTA_LOOSE: u64 = 1_000_000;
 
-    /// With no quota configured (`None`), writes are never gated — plugins
-    /// that opt out of a cap are unbounded.
     #[tokio::test]
     async fn insert_succeeds_when_quota_is_unbounded() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -3439,7 +3360,6 @@ mod tests {
         );
     }
 
-    /// A write that keeps the plugin under its quota succeeds.
     #[tokio::test]
     async fn insert_under_quota_succeeds() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -3472,9 +3392,6 @@ mod tests {
         );
     }
 
-    /// Once the plugin's measured footprint reaches its quota, further inserts
-    /// are refused with a structured `QuotaExceeded` error and nothing is
-    /// persisted.
     #[tokio::test]
     async fn insert_over_quota_is_rejected() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -3530,8 +3447,6 @@ mod tests {
         );
     }
 
-    /// A plugin at its quota can still delete rows (to free space) and read —
-    /// only storage-growing writes are gated.
     #[tokio::test]
     async fn delete_and_select_still_allowed_over_quota() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -3600,8 +3515,6 @@ mod tests {
         );
     }
 
-    /// A batch whose cumulative inserts would exceed the quota is rolled back
-    /// atomically: the failing operation is named and nothing is persisted.
     #[tokio::test]
     async fn batch_insert_over_quota_rolls_back() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =

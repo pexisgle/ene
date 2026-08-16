@@ -1,5 +1,3 @@
-//! Configuration for the persistent scheduler.
-//!
 //! Lives under the `scheduler.*` settings section, owned here because the
 //! scheduler is a runtime concern (like `tools.*` for tool admission caps).
 
@@ -18,8 +16,6 @@ const fn default_confirmation_timeout_secs() -> u64 {
 ene_config::define_config!(
     settings,
     "scheduler",
-    /// Persistent scheduler policy.
-    ///
     /// The scheduler only runs when the memory store is enabled (schedule
     /// definitions and run history persist in the store's database).
     pub struct SchedulerConfig {

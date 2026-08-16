@@ -276,7 +276,6 @@ pub fn tool_action(attr: TokenStream, input: TokenStream) -> TokenStream {
     quote! { #item }.into()
 }
 
-/// Parses `args = MyArgs` from the attribute tokens.
 struct ToolActionAttr(syn::Type);
 
 impl Parse for ToolActionAttr {
@@ -382,14 +381,11 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
             /// the LLM-visible identifier are guaranteed to agree.
             pub const TOOL_NAME: &'static str = #tool_name_str;
 
-            /// Short human-friendly display name.
             pub const DISPLAY_NAME: &'static str = #display_name;
 
             /// One-line summary used as the primary embedding field.
             pub const SUMMARY: &'static str = #summary;
 
-            /// Construct a `ToolSpec` for this args type.
-            ///
             /// Emits the LLM-facing fields (`name`, `description`,
             /// `parameters`) plus the host-execution metadata
             /// `background_capable` and `side_effects` (the latter drives the
@@ -430,7 +426,6 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                 }
             }
 
-            /// Construct the host/RAG metadata profile for this args type.
             pub fn rag_profile() -> ::ene_plugin_proto::ToolRagProfile {
                 use ::ene_plugin_proto::{
                     KeywordSet, ToolName, ToolRagProfile, ToolVersion,
@@ -552,8 +547,6 @@ fn collect_field_instructions(
     Ok(out)
 }
 
-/// Walk `#[serde(rename = "...", alias = "...")]` on a field and update
-/// the `FieldInstr` in place.
 fn apply_serde_attrs(f: &syn::Field, instr: &mut FieldInstr) {
     for attr in &f.attrs {
         if !attr.path().is_ident("serde") {

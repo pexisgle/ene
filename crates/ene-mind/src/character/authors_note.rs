@@ -1,5 +1,3 @@
-//! Author's Note: depth-based instruction injection for roleplay.
-
 #![expect(
     clippy::arithmetic_side_effects,
     reason = "mind pipeline uses intentional turn/score/index arithmetic"
@@ -17,16 +15,13 @@ use crate::lifecycle::HistoryEntry;
 /// clean while enforcing late-session behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorsNote {
-    /// The instruction text to inject.
     pub content: String,
     /// Insert at this depth from end of history (0 = most recent assistant turn).
     pub depth: usize,
-    /// Whether the note is currently active.
     pub active: bool,
 }
 
 impl AuthorsNote {
-    /// Create a new active author's note.
     pub fn new(content: impl Into<String>, depth: usize) -> Self {
         Self {
             content: content.into(),
@@ -35,8 +30,6 @@ impl AuthorsNote {
         }
     }
 
-    /// Create an empty (inactive) author's note.
-    ///
     /// Uses `depth: 0` (most recent position) as a neutral default. When
     /// activated, the caller should set an appropriate depth (typically 3–5
     /// turns back from the end).
@@ -152,7 +145,6 @@ mod tests {
                 content: "reply2".into(),
             },
         ];
-        // depth=1 means insert 2 positions from end (before reply2)
         apply_authors_note(&mut history, &note);
         assert_eq!(history.len(), 5);
         assert_eq!(history[2].role, Role::User);

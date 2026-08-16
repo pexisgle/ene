@@ -10,8 +10,8 @@ use super::components;
 use super::draft::SettingsDraft;
 use super::schema_form::{SchemaFormOptions, schema_object_form};
 
-/// Renders the advanced page. `show_advanced` reveals `x-ene-ui.advanced`
-/// fields (the window-level search activates it).
+/// `show_advanced` reveals `x-ene-ui.advanced` fields (the window-level
+/// search activates it).
 pub fn render(ui: &mut egui::Ui, draft: &mut SettingsDraft, show_advanced: bool) {
     ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "advanced-hint"));
     ui.add_space(6.0);

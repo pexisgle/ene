@@ -33,7 +33,6 @@ const EMBED_JOB_TIMEOUT: Duration = Duration::from_secs(30);
 /// merely slow (but healthy) embedding as a wedged worker.
 const EMBED_STALL_TIMEOUT: Option<Duration> = None;
 
-/// Local embedding provider using GGUF weights via llama.cpp.
 pub struct GgufEmbeddingProvider {
     handle: EngineHandle<LlamaEmbedModel>,
     resource: ResourceClass,

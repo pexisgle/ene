@@ -27,10 +27,8 @@ use ene_config::PromptLibrary;
 use ene_core::KeyFact;
 use serde::{Deserialize, Serialize};
 
-/// Structured conversation summary returned by the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSummaryResult {
-    /// Natural-language conversation summary
     pub summary: String,
     /// Important facts about the user (key-value format)
     pub key_facts: Vec<KeyFact>,
@@ -61,8 +59,6 @@ pub async fn summarize_conversation(
 
     let prompts = PromptLibrary::load(language);
 
-    // Build conversation text from message history (tool messages excluded —
-    // their content is already attributed to the assistant turn).
     let estimated_len = history
         .iter()
         .map(|m| match m {

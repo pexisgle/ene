@@ -22,7 +22,6 @@ use std::io::Cursor;
 /// is only reachable for payloads that fit on the wire.
 pub const MAX_WAV_BYTES: usize = 32 * 1024 * 1024;
 
-/// Decoded PCM audio.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedWav {
     /// Interleaved mono PCM samples normalized to `[-1.0, 1.0]`.
@@ -159,7 +158,6 @@ fn map_decode_error(e: &hound::Error) -> AudioProviderError {
 mod tests {
     use super::*;
 
-    /// Builds a WAV byte stream for the given mono/stereo interleaved samples.
     fn build_wav(
         encoding: u16,
         channels: u16,

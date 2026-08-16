@@ -1,6 +1,3 @@
-//! Local ONNX provider plugin: Silero VAD sessions and capability
-//! declarations.
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -17,7 +14,6 @@ use crate::config::VadConfig;
 pub(crate) type EngineBuilder =
     Arc<dyn Fn(&VadConfig) -> Result<Box<dyn VadEngine>, PluginError> + Send + Sync>;
 
-/// Maps a host-side VAD event onto the wire representation.
 fn map_event_wire(event: HostVadEvent) -> VadEvent {
     match event {
         HostVadEvent::SpeechStart => VadEvent::SpeechStart,
@@ -212,7 +208,6 @@ pub fn requires() -> Vec<CapabilityRequirement> {
 mod tests {
     use super::*;
 
-    /// A scripted engine with deterministic events.
     struct ScriptedVad {
         events: Vec<HostVadEvent>,
         resets: u32,

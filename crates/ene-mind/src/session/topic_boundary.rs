@@ -76,7 +76,6 @@ impl TopicBoundarySignal {
 }
 
 impl TopicBoundaryTracker {
-    /// Creates an empty tracker with no established topic.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -86,13 +85,11 @@ impl TopicBoundaryTracker {
         }
     }
 
-    /// Number of completed turns accumulated under the current topic.
     #[must_use]
     pub const fn turns_in_topic(&self) -> usize {
         self.turns_in_topic
     }
 
-    /// Whether a topic centroid has been established yet.
     #[must_use]
     pub const fn has_centroid(&self) -> bool {
         self.centroid.is_some()
@@ -158,7 +155,6 @@ impl TopicBoundaryTracker {
         let boundary = score >= config.boundary_threshold;
 
         if boundary {
-            // The utterance that crossed the boundary opens the new topic.
             self.seed_new_topic(embedding, now);
         } else {
             self.update_centroid(embedding, config);
@@ -175,7 +171,6 @@ impl TopicBoundaryTracker {
         }
     }
 
-    /// Starts a fresh topic seeded from `embedding`.
     fn seed_new_topic(&mut self, embedding: &[f32], now: DateTime<Utc>) {
         self.centroid = Some(embedding.to_vec());
         self.turns_in_topic = 1;

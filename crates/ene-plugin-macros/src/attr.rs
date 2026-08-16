@@ -7,14 +7,11 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{DeriveInput, Path};
 
-/// Extract a readable string from a `Path` for error messages.
 pub(crate) fn path_ident_str(path: &Path) -> String {
     path.get_ident()
         .map_or_else(|| format!("{path:?}"), ToString::to_string)
 }
 
-/// Parse a boolean from a parse-nested-meta position.
-///
 /// `background_capable` (bare) → `true`
 /// `background_capable = true` → `true`
 /// `background_capable = false` → `false`
@@ -84,16 +81,12 @@ pub struct ArgAttrs {
     /// Maximum (inclusive) for numeric fields.
     pub maximum: Option<i64>,
 
-    /// Minimum length for string fields.
     pub min_length: Option<usize>,
 
-    /// Maximum length for string fields.
     pub max_length: Option<usize>,
 
-    /// Minimum number of array items.
     pub min_items: Option<usize>,
 
-    /// Maximum number of array items.
     pub max_items: Option<usize>,
 
     /// Free-form description override.
@@ -164,8 +157,7 @@ impl ArgAttrs {
     }
 }
 
-/// Check if a field has `#[tool(skip)]`. Recognizes
-/// `#[tool(skip)]` standalone and `#[tool(skip, name = "…")]`
+/// Recognizes `#[tool(skip)]` standalone and `#[tool(skip, name = "…")]`
 /// where `skip` is the first path segment.
 pub fn has_tool_skip(field: &syn::Field) -> bool {
     for attr in &field.attrs {

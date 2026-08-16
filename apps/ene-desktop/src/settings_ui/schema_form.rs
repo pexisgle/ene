@@ -17,7 +17,6 @@ use std::collections::BTreeMap;
 pub(crate) const BUILTIN_PROVIDER_GROUP_IDS: &[&str] =
     &["connection", "engine", "model", "runtime", "voice"];
 
-/// `x-ene-ui` field metadata extracted from a property schema.
 #[derive(Debug, Clone, Default)]
 pub struct UiMetadata {
     pub group: Option<String>,
@@ -34,7 +33,6 @@ pub struct UiMetadata {
 }
 
 impl UiMetadata {
-    /// Reads `x-ene-ui` (or the legacy `x-ene-secret`) from a schema node.
     #[must_use]
     pub fn from_schema(schema: &serde_json::Value) -> Self {
         let mut meta = schema
@@ -96,20 +94,16 @@ impl UiMetadata {
         meta
     }
 
-    /// Whether `x-ene-ui.advanced` is set (hidden until search reveals it).
     #[must_use]
     pub const fn is_advanced(&self) -> bool {
         self.advanced
     }
 }
 
-/// Options for one form pass.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SchemaFormOptions<'a> {
-    /// Whether advanced (`x-ene-ui.advanced`) fields are rendered. Search
-    /// results set this to reveal hidden fields automatically.
+    /// Set by search results to reveal advanced (`x-ene-ui.advanced`) fields.
     pub show_advanced: bool,
-    /// Whether to draw the impact badge next to fields.
     pub show_impact: bool,
     /// Draft epoch that scopes transient edit buffers (e.g. secret
     /// replacement text). Bump it on every apply so a committed secret is
@@ -121,7 +115,6 @@ pub struct SchemaFormOptions<'a> {
     pub options: Option<&'a BTreeMap<String, Vec<(String, String)>>>,
 }
 
-/// Returns the `x-ene-profiles-schema` extension of a plugin config schema.
 #[must_use]
 pub fn profiles_schema(schema: &serde_json::Value) -> Option<&serde_json::Value> {
     schema
@@ -129,8 +122,6 @@ pub fn profiles_schema(schema: &serde_json::Value) -> Option<&serde_json::Value>
         .or_else(|| schema.get("properties")?.get("profiles"))
 }
 
-/// Renders a whole object schema into `value` in place.
-///
 /// Returns `true` when any control changed the value. `path` is the dotted
 /// config path used for stable egui ids and issue display.
 pub fn schema_object_form(
@@ -264,7 +255,6 @@ fn render_property(
     });
     let mut changed = render_value(ui, property_schema, entry, &path, options);
 
-    // Reset-to-default affordance.
     if let Some(default) = property_schema.get("default")
         && entry != default
         && ui
@@ -302,9 +292,6 @@ fn property_description(schema: &serde_json::Value, meta: &UiMetadata) -> Option
         |key| Some(crate::i18n::loader().get(key)),
     )
 }
-
-/// Renders a value against its schema node. The `_path` is used for stable
-/// ids; `secret` handling is delegated to the caller via metadata.
 fn render_value(
     ui: &mut egui::Ui,
     schema: &serde_json::Value,
@@ -627,9 +614,6 @@ fn string_form(
         && !entries.is_empty()
     {
         let current = value.as_str().unwrap_or_default().to_string();
-        // Same out-of-list preservation as the enum branch above: a stored
-        // value the plugin no longer offers is shown as-is and only changes
-        // when the user picks another option.
         let mut display: Vec<(String, String)> = entries.clone();
         if !current.is_empty()
             && !display
@@ -1255,14 +1239,12 @@ mod tests {
             super::super::draft::SECRET_PLACEHOLDER
         );
 
-        // Unchanged placeholder restores the old value.
         let mut parsed: serde_json::Value =
             serde_json::from_str(&redacted_text).expect("redacted text parses");
         unredact_by_schema(&value, &mut parsed, &schema, None);
         assert_eq!(parsed["api_key"], "sk-super-secret");
         assert_eq!(parsed["accounts"][1]["secret"], "two");
 
-        // A user-supplied replacement wins over the old value.
         let mut replaced: serde_json::Value =
             serde_json::from_str(&redacted_text).expect("redacted text parses");
         replaced["api_key"] = json!("sk-new");
@@ -1273,14 +1255,9 @@ mod tests {
     #[test]
     fn secret_input_clear_returns_to_unchanged() {
         let placeholder = json!(super::super::draft::SECRET_PLACEHOLDER);
-        // Typing supplies a replacement…
         assert_eq!(secret_input_next(&placeholder, "sk-new"), json!("sk-new"));
-        // …and clearing the buffer returns to the placeholder (unchanged),
-        // never to an empty string.
         assert_eq!(secret_input_next(&json!("sk-new"), ""), placeholder);
-        // Clearing over the placeholder keeps it.
         assert_eq!(secret_input_next(&placeholder, ""), placeholder);
-        // An explicit deletion stays null.
         assert_eq!(secret_input_next(&json!(null), ""), json!(null));
     }
 

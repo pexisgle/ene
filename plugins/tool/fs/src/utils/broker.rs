@@ -17,10 +17,8 @@ use ene_plugin_proto::{HostServiceId, ToolError};
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
-/// File metadata mirror for broker results.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileMeta {
-    /// Whether the entry is a directory.
     pub is_dir: bool,
     /// Size in bytes (0 for directories).
     pub size: u64,
@@ -28,7 +26,6 @@ pub struct FileMeta {
     pub modified_ms: u64,
 }
 
-/// Outcome of a read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadOutcome {
     /// Bytes read (possibly truncated at the cap).
@@ -37,18 +34,13 @@ pub struct ReadOutcome {
     pub truncated: bool,
 }
 
-/// One directory entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
-    /// Entry name.
     pub name: String,
-    /// Full path as requested.
     pub path: String,
-    /// Whether the entry is a directory.
     pub is_dir: bool,
 }
 
-/// Process spawn outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessOutcome {
     /// Host-assigned pid.
@@ -61,7 +53,6 @@ pub struct ProcessOutcome {
     pub stderr: String,
 }
 
-/// The broker channel shared by every fs action.
 pub struct FileBroker {
     socket: RwLock<Option<String>>,
     token: RwLock<Option<String>>,
@@ -93,14 +84,11 @@ impl FileBroker {
         Arc::new(Self::default())
     }
 
-    /// Captures the broker socket and auth token from the host sandbox
-    /// config (protocol v8).
     pub fn configure(&self, socket: Option<&str>, token: Option<&str>) {
         self.socket.write().clone_from(&socket.map(str::to_string));
         self.token.write().clone_from(&token.map(str::to_string));
     }
 
-    /// Whether this broker is configured to reach a host.
     pub fn is_configured(&self) -> bool {
         self.local || self.socket.read().is_some()
     }
@@ -144,7 +132,7 @@ impl FileBroker {
             .map_err(|e| ToolError::execution_failed(format!("broker request failed: {e}")))
     }
 
-    /// Reads a file (absolute or grant-resolved path).
+    /// The path is absolute or grant-resolved.
     pub async fn read(&self, path: &str, max_bytes: u64) -> Result<ReadOutcome, ToolError> {
         if self.local {
             let data = std::fs::read(path)
@@ -176,14 +164,12 @@ impl FileBroker {
         }
     }
 
-    /// Reads a UTF-8 text file.
     pub async fn read_text(&self, path: &str, max_bytes: u64) -> Result<String, ToolError> {
         let outcome = self.read(path, max_bytes).await?;
         String::from_utf8(outcome.data)
             .map_err(|e| ToolError::execution_failed(format!("Cannot read {path} as UTF-8: {e}")))
     }
 
-    /// Writes bytes to a file.
     pub async fn write(
         &self,
         path: &str,
@@ -227,7 +213,7 @@ impl FileBroker {
         }
     }
 
-    /// Deletes a file (or a directory tree when `recursive`).
+    /// Or a directory tree when `recursive`.
     pub async fn delete(&self, path: &str, recursive: bool) -> Result<(), ToolError> {
         if self.local {
             let result = if recursive {
@@ -255,7 +241,7 @@ impl FileBroker {
         }
     }
 
-    /// Creates a directory (with parents when `recursive`).
+    /// With parents when `recursive`.
     pub async fn create_dir(&self, path: &str, recursive: bool) -> Result<(), ToolError> {
         if self.local {
             let result = if recursive {
@@ -284,7 +270,6 @@ impl FileBroker {
         }
     }
 
-    /// Lists a directory.
     pub async fn list(&self, path: &str) -> Result<Vec<DirEntry>, ToolError> {
         if self.local {
             let mut entries = Vec::new();
@@ -327,7 +312,7 @@ impl FileBroker {
         }
     }
 
-    /// Stats a path; `None` when absent.
+    /// `None` when absent.
     pub async fn stat(&self, path: &str) -> Result<Option<FileMeta>, ToolError> {
         if self.local {
             return match std::fs::metadata(path) {
@@ -366,7 +351,6 @@ impl FileBroker {
         }
     }
 
-    /// Moves/renames a path.
     pub async fn move_path(&self, from: &str, to: &str) -> Result<(), ToolError> {
         if self.local {
             return std::fs::rename(from, to).map_err(|e| {
@@ -390,7 +374,6 @@ impl FileBroker {
         }
     }
 
-    /// Spawns a process through the host.
     pub async fn spawn_process(
         &self,
         argv: Vec<String>,

@@ -1,5 +1,3 @@
-//! The framework's error type.
-
 use std::time::Duration;
 
 /// Everything [`crate::EngineHandle::submit`] can fail with.
@@ -13,18 +11,12 @@ pub enum EngineError<E: std::error::Error> {
     /// The bounded queue was full; the job was never accepted. Enqueue
     /// contention only — the engine itself is fine.
     #[error("engine busy: queue depth {queue_depth} exceeded")]
-    Busy {
-        /// The engine's configured queue depth at the time of the call.
-        queue_depth: usize,
-    },
+    Busy { queue_depth: usize },
 
     /// [`crate::EngineConfig::job_timeout`] elapsed while the job was
     /// executing and the model honored [`crate::JobContext::should_stop`].
     #[error("job timed out after {after:?}")]
-    Timeout {
-        /// How long the job ran before the deadline fired.
-        after: Duration,
-    },
+    Timeout { after: Duration },
 
     /// The [`tokio_util::sync::CancellationToken`] passed to `submit` was
     /// cancelled and the model honored it.

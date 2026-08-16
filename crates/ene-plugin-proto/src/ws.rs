@@ -9,7 +9,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Requests a plugin sends on a WebSocket passenger session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WebSocketRequest {
     /// Opens a WebSocket connection. Must be the first frame of a session.
@@ -24,17 +23,12 @@ pub enum WebSocketRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential: Option<String>,
     },
-    /// Sends a text frame to the peer.
     SendText {
-        /// UTF-8 frame payload.
         data: String,
     },
-    /// Sends a binary frame to the peer.
     SendBinary {
-        /// Frame payload.
         data: Vec<u8>,
     },
-    /// Starts the close handshake with the given status code and reason.
     Close {
         /// WebSocket close code (e.g. 1000).
         code: u16,
@@ -43,7 +37,6 @@ pub enum WebSocketRequest {
     },
 }
 
-/// Frames the host pushes to a plugin WebSocket session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WebSocketResponse {
     /// The connection opened. First frame of a successful session.
@@ -51,21 +44,16 @@ pub enum WebSocketResponse {
         /// Final URL after any host-side validation.
         final_url: String,
     },
-    /// One text message from the peer.
     MessageText {
-        /// UTF-8 payload.
         data: String,
     },
-    /// One binary message from the peer.
     MessageBinary {
-        /// Payload.
         data: Vec<u8>,
     },
     /// The connection closed (peer-initiated, host-initiated, or error).
     Closed {
         /// Close code (`1006` for abnormal closure).
         code: u16,
-        /// Close reason.
         reason: String,
     },
     /// A session error; the session is terminated after this frame.
@@ -73,7 +61,6 @@ pub enum WebSocketResponse {
         /// HTTP status when the handshake failed on the wire, else `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<u16>,
-        /// Human-readable detail.
         message: String,
     },
 }

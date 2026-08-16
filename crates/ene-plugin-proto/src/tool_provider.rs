@@ -1,13 +1,9 @@
-//! Tool provider trait and deferred outcome types.
-
 use crate::sandbox::SandboxConfigData;
 use crate::tool_error::ToolError;
 use crate::tool_ipc::{CallContext, DeferredStatus};
 use crate::tool_types::{ToolRagProfile, ToolResult, ToolSpec};
 use async_trait::async_trait;
 
-/// Outcome of a deferred (background) tool call.
-///
 /// Returned by [`ToolProvider::call_tool_deferred`]. A background-capable
 /// tool returns [`DeferredOutcome::Deferred`] with a unique `task_id` and
 /// delivers the result later out-of-band; any other tool falls back to
@@ -23,11 +19,6 @@ pub enum DeferredOutcome {
     },
 }
 
-/// Tool provider trait — implemented by each tool crate.
-///
-/// Each provider on the host side implements this trait; the host-side
-/// `IpcToolRegistry` calls through IPC to the tool binary.
-///
 /// ## Setter-call ordering contract
 ///
 /// During the IPC handshake the server calls [`set_sandbox`](Self::set_sandbox)
@@ -42,25 +33,18 @@ pub enum DeferredOutcome {
 /// ⚠️ **Deprecated** — implement [`ene_plugin::ToolPlugin`] directly instead.
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
-    /// Returns the list of tool specs this provider exposes.
-    ///
     /// Mega-tools return N specs, one per action (e.g. `filesystem.read`,
     /// `filesystem.write`, ...).
     fn list_specs(&self) -> Vec<ToolSpec>;
 
-    /// Returns host/RAG metadata for each callable tool.
-    ///
     /// Default is empty so hand-written providers keep compiling; prefer
     /// emitting profiles from `#[derive(ToolSpec)]` / `ActionSetProvider`.
     fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
         Vec::new()
     }
 
-    /// Executes a tool by name with the given JSON arguments.
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
 
-    /// Executes a tool in deferred (background) mode.
-    ///
     /// A background-capable tool should start the work asynchronously and
     /// return [`DeferredOutcome::Deferred`] with a unique `task_id`; the
     /// completion is delivered later out-of-band. Tools that do not support
@@ -77,8 +61,6 @@ pub trait ToolProvider: Send + Sync {
         )))
     }
 
-    /// Polls the status of a deferred (background) task by id.
-    ///
     /// The default returns [`DeferredStatus::Unknown`] for tools that do
     /// not support deferral; background-capable tools should track their
     /// tasks and report the real status.
@@ -86,13 +68,9 @@ pub trait ToolProvider: Send + Sync {
         DeferredStatus::Unknown
     }
 
-    /// Cancels a deferred (background) task by id.
-    ///
     /// The default is a no-op for tools that do not support deferral.
     fn cancel_deferred(&self, _task_id: &str) {}
 
-    /// Sets the call context (conversation + turn identifiers).
-    ///
     /// Tools that want session-scoped state (e.g. undo checkpoints)
     /// should override this method and use `conversation_id` and/or
     /// `turn_id` as appropriate.
@@ -110,10 +88,8 @@ pub trait ToolProvider: Send + Sync {
     /// Revokes a previously granted session-wide permission allow pattern.
     fn revoke_pattern(&self, _action: &str, _target_pattern: &str) {}
 
-    /// Receives tool-specific configuration (called once during Handshake).
     fn set_config(&self, _config: &serde_json::Value) {}
 
-    /// Returns the JSON Schema for the configuration this tool accepts.
     fn config_schema(&self) -> Option<serde_json::Value> {
         None
     }

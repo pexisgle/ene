@@ -45,13 +45,9 @@ use crate::tts_factory::IpcTtsProviderFactory;
 use ene_connector::declaration::{CredentialDeclaration, ScopeDecision};
 use ene_connector::identity::CredentialId;
 
-/// Maximum restarts allowed inside [`RESTART_WINDOW`] before a plugin is disabled.
 const MAX_RESTARTS: usize = 5;
-/// Rolling window over which [`MAX_RESTARTS`] is counted.
 const RESTART_WINDOW: Duration = Duration::from_mins(5);
-/// Base delay for exponential backoff between restarts.
 const BASE_DELAY_MS: u64 = 500;
-/// Maximum delay cap for exponential backoff.
 const MAX_DELAY_MS: u64 = 30_000;
 
 /// The checksum a plugin binary is pinned to for restart-time verification.
@@ -75,7 +71,6 @@ enum PinnedChecksum {
 }
 
 impl PinnedChecksum {
-    /// The pinned checksum as a hex string, regardless of how it was pinned.
     fn hex(&self) -> &str {
         match self {
             Self::Configured(hex) | Self::Tofu(hex) => hex,
@@ -83,13 +78,11 @@ impl PinnedChecksum {
     }
 }
 
-/// A supervised plugin process and its IPC connection.
 struct SupervisedPlugin {
     name: String,
     child: std::process::Child,
     socket_path: PathBuf,
     binary_path: PathBuf,
-    /// The checksum the binary is pinned to, re-verified on every restart.
     /// Always present for plugins started via `start_plugin`: either the
     /// user-configured checksum ([`PinnedChecksum::Configured`]) or the
     /// trust-on-first-use checksum computed at startup and kept in memory
@@ -98,10 +91,7 @@ struct SupervisedPlugin {
     /// on disk to restart. There is no "no checksum" state, so no fail-open
     /// path.
     pinned_checksum: PinnedChecksum,
-    /// Environment variable names to copy from the host on restart.
     env_passthrough: Vec<String>,
-    /// Timestamps of restarts inside the rolling [`RESTART_WINDOW`].
-    ///
     /// Entries older than the window are dropped on each budget check, so a
     /// plugin that crashes occasionally never exhausts the budget, while a
     /// crash loop within the window is disabled. Healthy probes and tool
@@ -132,8 +122,7 @@ impl SupervisedPlugin {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Drops restart timestamps older than [`RESTART_WINDOW`] and returns how
-    /// many remain. Sole source of the restart-budget length.
+    /// Sole source of the restart-budget length.
     fn prune_restart_window(&mut self, now: Instant) -> usize {
         while self
             .restart_times
@@ -145,13 +134,10 @@ impl SupervisedPlugin {
         self.restart_times.len()
     }
 
-    /// Restarts counted inside the current rolling window (after pruning).
     fn recent_restart_count(&mut self) -> usize {
         self.prune_restart_window(Instant::now())
     }
 
-    /// Attempts a restart, recording it against the rolling window budget.
-    ///
     /// Returns [`PluginHostError::ExecutionFailed`] when [`MAX_RESTARTS`]
     /// restarts have already occurred inside [`RESTART_WINDOW`]. This is the
     /// only place the budget limit is enforced; the supervisor treats any
@@ -193,8 +179,6 @@ impl SupervisedPlugin {
         if let Err(e) =
             verify_plugin_checksum(&self.name, &self.binary_path, self.pinned_checksum.hex())
         {
-            // Reap the dead/hung child and clean up the socket before
-            // surfacing the mismatch, avoiding zombies and stale sockets.
             drop(self.child.kill());
             drop(self.child.wait());
             ene_plugin_proto::cleanup_path(&self.socket_path);
@@ -272,14 +256,11 @@ struct StartedPlugin {
     capabilities: ene_plugin_proto::PluginCapabilities,
 }
 
-/// Pure-function form of the per-restart backoff delay.
 fn delay_for_restart(restart_count: usize) -> Duration {
     let delay_ms = BASE_DELAY_MS.saturating_mul(2u64.saturating_pow(restart_count as u32));
     Duration::from_millis(delay_ms.min(MAX_DELAY_MS))
 }
 
-/// Sleeps for the restart backoff appropriate for `restart_count`.
-///
 /// Extracted so tests can substitute a controllable stand-in for the real
 /// sleep; production simply awaits `tokio::time::sleep`.
 async fn backoff_before_restart(restart_count: usize) {
@@ -303,9 +284,7 @@ const ENV_PASSTHROUGH_DENYLIST: &[&str] = &[
 /// this, allowing the env-hardening logic to be shared between the plugin
 /// spawn path (std) and the MCP stdio spawn path (tokio).
 pub(crate) trait EnvCommand {
-    /// Clears the entire inherited environment.
     fn clear_env(&mut self);
-    /// Sets a single environment variable.
     fn set_env(&mut self, key: &str, val: &str);
 }
 
@@ -327,8 +306,6 @@ impl EnvCommand for tokio::process::Command {
     }
 }
 
-/// Applies the hardened environment to a command.
-///
 /// Clears the inherited environment (`env_clear()`) and forwards only an
 /// explicit whitelist of essential platform variables, plus any
 /// caller-supplied `env_passthrough` entries (filtered against a denylist).
@@ -338,25 +315,21 @@ impl EnvCommand for tokio::process::Command {
 pub(crate) fn apply_hardened_env(cmd: &mut impl EnvCommand, env_passthrough: &[String]) {
     cmd.clear_env();
 
-    // Essential platform variables (Unix + general).
     for var in ["PATH", "HOME", "TMPDIR", "LANG"] {
         if let Ok(val) = std::env::var(var) {
             cmd.set_env(var, &val);
         }
     }
 
-    // Timezone: forward only when set.
     if let Ok(tz) = std::env::var("TZ") {
         cmd.set_env("TZ", &tz);
     }
 
-    // Shared library path on Linux.
     #[cfg(target_os = "linux")]
     if let Ok(val) = std::env::var("LD_LIBRARY_PATH") {
         cmd.set_env("LD_LIBRARY_PATH", &val);
     }
 
-    // Windows requires these for basic process operation.
     #[cfg(windows)]
     for var in ["SystemRoot", "USERPROFILE", "APPDATA", "TEMP", "PATHEXT"] {
         if let Ok(val) = std::env::var(var) {
@@ -364,7 +337,6 @@ pub(crate) fn apply_hardened_env(cmd: &mut impl EnvCommand, env_passthrough: &[S
         }
     }
 
-    // Per-plugin explicit passthrough, filtered against the denylist.
     for var in env_passthrough {
         if ENV_PASSTHROUGH_DENYLIST
             .iter()
@@ -383,9 +355,6 @@ pub(crate) fn apply_hardened_env(cmd: &mut impl EnvCommand, env_passthrough: &[S
     }
 }
 
-/// Builds a [`std::process::Command`] for a plugin with a hardened
-/// environment.
-///
 /// The inherited environment is cleared (`env_clear()`) and only an
 /// explicit whitelist of essential variables is forwarded:
 ///
@@ -408,14 +377,12 @@ fn build_plugin_command(
     let mut cmd = std::process::Command::new(binary_path);
     apply_hardened_env(&mut cmd, env_passthrough);
 
-    // IPC socket — the primary communication channel.
     cmd.env("ENE_PLUGIN_SOCKET", socket_path);
 
     cmd
 }
 
-/// Builds the OS sandbox spec for a plugin, or `None` when the plugin opted
-/// out. Enabled specs are fail-closed: an uninitializable layer aborts the
+/// Enabled specs are fail-closed: an uninitializable layer aborts the
 /// spawn (see [`apply_sandbox_to_command`]).
 pub(crate) fn build_plugin_sandbox(
     name: &str,
@@ -536,8 +503,6 @@ fn sandbox_fs_grants(
         .collect()
 }
 
-/// Applies a sandbox spec to a command's child (Linux `pre_exec`, Windows
-/// `CREATE_SUSPENDED`). Returns `Ok` when the spec is `None`.
 fn apply_sandbox_to_command(
     command: &mut std::process::Command,
     spec: Option<&ene_sandbox::SandboxSpec>,
@@ -556,7 +521,6 @@ fn apply_sandbox_to_command(
     Ok(())
 }
 
-/// Attaches a suspended child to its Windows sandbox job and resumes it.
 #[cfg(windows)]
 fn attach_windows_sandbox(
     child: &mut std::process::Child,
@@ -576,7 +540,6 @@ fn attach_windows_sandbox(
 /// A `ToolRegistry` adapter that routes tool calls to a plugin over IPC,
 /// guarded by a per-plugin circuit breaker.
 struct PluginToolRegistry {
-    /// Name of the plugin that owns these tools (used for health events).
     plugin_name: String,
     conn: Arc<IpcPluginConnection>,
     tools: Vec<ene_plugin_proto::ToolSpec>,
@@ -797,55 +760,38 @@ impl ToolRegistry for PluginToolRegistry {
 /// can retain factory identity while grouping entries by plugin.
 pub type LlmFactoryHandle = Arc<dyn ene_ai::LlmProviderFactory>;
 
-/// LLM provider factories grouped by the plugin that provides them.
 pub type LlmFactoriesByPlugin = HashMap<String, Vec<(String, LlmFactoryHandle)>>;
 
-/// Embedding provider factories grouped by the plugin that provides them.
 pub type EmbeddingFactoriesByPlugin = HashMap<String, Vec<(String, EmbeddingFactoryHandle)>>;
 
-/// A handle to a plugin-provided embedding factory.
 pub type EmbeddingFactoryHandle = Arc<dyn ene_ai::EmbeddingProviderFactory>;
 
-/// A handle to a plugin-provided TTS factory.
 pub type TtsFactoryHandle = Arc<dyn ene_ai::TtsProviderFactory>;
 
-/// TTS provider factories grouped by the plugin that provides them.
 pub type TtsFactoriesByPlugin = HashMap<String, Vec<(String, TtsFactoryHandle)>>;
 
-/// A handle to a plugin-provided STT factory.
 pub type SttFactoryHandle = Arc<dyn ene_ai::SttProviderFactory>;
 
-/// STT provider factories grouped by the plugin that provides them.
 pub type SttFactoriesByPlugin = HashMap<String, Vec<(String, SttFactoryHandle)>>;
 
-/// A handle to a plugin-provided VAD factory.
 pub type VadFactoryHandle = Arc<dyn ene_ai::VadFactory>;
 
-/// VAD engine factories grouped by the plugin that provides them.
 pub type VadFactoriesByPlugin = HashMap<String, Vec<(String, VadFactoryHandle)>>;
 
 /// What [`PluginHostManager::remove_provider_factories`] evicted for one
 /// plugin, per modality.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderFactoryRemoval {
-    /// Number of LLM factories removed.
     pub llm: usize,
-    /// Number of local-engine LLM factories removed.
     pub local_llm: usize,
-    /// Number of embedding factories removed.
     pub embedding: usize,
-    /// Number of local-engine embedding factories removed.
     pub local_embedding: usize,
-    /// Number of TTS factories removed.
     pub tts: usize,
-    /// Number of STT factories removed.
     pub stt: usize,
-    /// Number of VAD factories removed.
     pub vad: usize,
 }
 
 impl ProviderFactoryRemoval {
-    /// Whether any factory was removed.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.llm == 0
@@ -866,20 +812,13 @@ impl ProviderFactoryRemoval {
 /// cannot evict the new host's live factories.
 #[derive(Clone, Default)]
 pub struct PluginFactoryHandles {
-    /// LLM factory handles by provider kind.
     pub llm: Vec<(String, LlmFactoryHandle)>,
-    /// Embedding factory handles by provider kind.
     pub embedding: Vec<(String, EmbeddingFactoryHandle)>,
-    /// TTS factory handles by provider kind.
     pub tts: Vec<(String, TtsFactoryHandle)>,
-    /// STT factory handles by provider kind.
     pub stt: Vec<(String, SttFactoryHandle)>,
-    /// VAD factory handles by engine kind.
     pub vad: Vec<(String, VadFactoryHandle)>,
 }
 
-/// Removes the factory for each kind whose stored `Arc` is the exact handle
-/// `expected` names, from both the factory map and its owner map.
 fn remove_matching_factories<X: ?Sized>(
     factories: &mut HashMap<String, Arc<X>>,
     factory_plugins: &mut HashMap<String, String>,
@@ -1114,8 +1053,6 @@ pub struct PluginHostManager {
     /// Empty when health probes are disabled or no plugins are supervised.
     health_tasks: Vec<tokio::task::JoinHandle<()>>,
     health_rx: Option<mpsc::UnboundedReceiver<PluginHealthEvent>>,
-    /// When true (default), Drop will attempt a best-effort graceful shutdown
-    /// by killing child processes with a brief wait for reaping.
     shutdown_on_drop: bool,
     /// Host-side artifact services (signed catalog + CAS). `None` when the
     /// artifact system is disabled or not configured. Shared (`Arc`) so
@@ -1301,9 +1238,6 @@ impl PluginHostManager {
             );
         }
 
-        // Pass 1: handshake every plugin and collect its declarations. Tool
-        // and provider registration is deferred to pass 2 so the capability
-        // gate can decide which plugins are registered at all.
         let mut started: Vec<StartedPlugin> = Vec::new();
         for name in startup_order(plugin_config.list.keys()) {
             let entry = &plugin_config.list[name];
@@ -1458,8 +1392,6 @@ impl PluginHostManager {
             }
         }
 
-        // Pass 2: register the tools and providers of every plugin that
-        // passed the gate.
         for started_plugin in &started {
             if disabled_by_requirements.contains(&started_plugin.name) {
                 continue;
@@ -1829,13 +1761,10 @@ impl PluginHostManager {
         Ok(manager)
     }
 
-    /// Returns the tool registries contributed by plugins and MCP servers.
     pub fn tool_registries(&self) -> &[Arc<dyn ToolRegistry>] {
         &self.tool_registries
     }
 
-    /// Returns the LLM provider factories contributed by plugins, keyed by
-    /// provider kind.
     pub fn llm_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> {
         &self.llm_factories
     }
@@ -1890,16 +1819,12 @@ impl PluginHostManager {
         removal
     }
 
-    /// Returns the embedding provider factories contributed by plugins,
-    /// keyed by provider kind.
     pub fn embedding_factories(
         &self,
     ) -> &HashMap<String, Arc<dyn ene_ai::EmbeddingProviderFactory>> {
         &self.embedding_factories
     }
 
-    /// Returns the embedding factories grouped by the plugin that provides
-    /// them, mirroring [`llm_factories_by_plugin`](Self::llm_factories_by_plugin).
     pub fn embedding_factories_by_plugin(&self) -> EmbeddingFactoriesByPlugin {
         let mut grouped = EmbeddingFactoriesByPlugin::new();
         for (kind, factory) in &self.embedding_factories {
@@ -1922,14 +1847,10 @@ impl PluginHostManager {
         grouped
     }
 
-    /// Returns the TTS provider factories contributed by plugins, keyed by
-    /// provider kind.
     pub fn tts_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::TtsProviderFactory>> {
         &self.tts_factories
     }
 
-    /// Returns the TTS factories grouped by the plugin that provides them,
-    /// mirroring [`llm_factories_by_plugin`](Self::llm_factories_by_plugin).
     pub fn tts_factories_by_plugin(&self) -> TtsFactoriesByPlugin {
         let mut grouped = TtsFactoriesByPlugin::new();
         for (kind, factory) in &self.tts_factories {
@@ -1943,14 +1864,10 @@ impl PluginHostManager {
         grouped
     }
 
-    /// Returns the STT provider factories contributed by plugins, keyed by
-    /// provider kind.
     pub fn stt_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::SttProviderFactory>> {
         &self.stt_factories
     }
 
-    /// Returns the STT factories grouped by the plugin that provides them,
-    /// mirroring [`tts_factories_by_plugin`](Self::tts_factories_by_plugin).
     pub fn stt_factories_by_plugin(&self) -> SttFactoriesByPlugin {
         let mut grouped = SttFactoriesByPlugin::new();
         for (kind, factory) in &self.stt_factories {
@@ -1964,14 +1881,10 @@ impl PluginHostManager {
         grouped
     }
 
-    /// Returns the VAD engine factories contributed by plugins, keyed by
-    /// engine kind.
     pub fn vad_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::VadFactory>> {
         &self.vad_factories
     }
 
-    /// Returns the VAD factories grouped by the plugin that provides them,
-    /// mirroring [`tts_factories_by_plugin`](Self::tts_factories_by_plugin).
     pub fn vad_factories_by_plugin(&self) -> VadFactoriesByPlugin {
         let mut grouped = VadFactoriesByPlugin::new();
         for (kind, factory) in &self.vad_factories {
@@ -1985,8 +1898,6 @@ impl PluginHostManager {
         grouped
     }
 
-    /// Returns the LLM factories grouped by the plugin that provides them.
-    ///
     /// The factory handles are included so consumers can deregister only the
     /// exact entries owned by this host, rather than removing a replacement
     /// installed by another runtime handle.
@@ -2012,8 +1923,6 @@ impl PluginHostManager {
         grouped
     }
 
-    /// Takes ownership of the health-event receiver.
-    ///
     /// The runtime calls this once after startup to bridge plugin health
     /// events into its diagnostics channel. Returns `None` on subsequent
     /// calls.
@@ -2021,16 +1930,11 @@ impl PluginHostManager {
         self.health_rx.take()
     }
 
-    /// Returns the capability registry built from the handshake declarations
-    /// of every started plugin (after the startup gate removed plugins with
-    /// unmet hard requirements).
     #[must_use]
     pub fn capability_registry(&self) -> &CapabilityRegistry {
         &self.capability_registry
     }
 
-    /// Returns the connection for `name`, if that plugin started.
-    ///
     /// The capability mediation layer resolves a provider name from the
     /// capability registry and uses this accessor to reach its connection.
     #[must_use]
@@ -2053,8 +1957,6 @@ impl PluginHostManager {
             .register_from_schema(plugin, schema);
     }
 
-    /// Returns the credential declarations registered for `plugin`.
-    ///
     /// Empty when the plugin declared none or its schema could not be
     /// fetched at startup.
     #[must_use]
@@ -2062,14 +1964,11 @@ impl PluginHostManager {
         self.credential_registry.declarations(plugin)
     }
 
-    /// Resolves whether `plugin` may access credential `id`, per the
-    /// declarations registered at startup.
     #[must_use]
     pub fn resolve_credential_scope(&self, plugin: &str, id: &CredentialId) -> ScopeDecision {
         self.credential_registry.resolve_scope(plugin, id)
     }
 
-    /// Controls whether Drop attempts best-effort shutdown.
     /// Set to false if the caller will handle shutdown explicitly.
     pub fn set_shutdown_on_drop(&mut self, value: bool) {
         self.shutdown_on_drop = value;
@@ -2219,7 +2118,6 @@ impl PluginHostManager {
         Ok(())
     }
 
-    /// Force-refreshes the signed catalog and returns its version.
     pub async fn refresh_catalog(&self) -> Result<u64, String> {
         let state = self
             .artifact
@@ -2427,8 +2325,6 @@ impl PluginHostManager {
         discovered
     }
 
-    /// Redacts every profile in the `profiles` blob (name → value) with the
-    /// profile schema when one is declared.
     fn redact_profiles(
         profiles: &serde_json::Value,
         profile_schema: Option<&serde_json::Value>,
@@ -2448,7 +2344,6 @@ impl PluginHostManager {
         }
     }
 
-    /// Derives the UI health state for one configured plugin.
     async fn health_state(&self, name: &str, enabled: bool) -> PluginHealthState {
         if !enabled {
             return PluginHealthState::Stopped;
@@ -2473,7 +2368,6 @@ impl PluginHostManager {
         PluginHealthState::Stopped
     }
 
-    /// Liveness status of every connected MCP server.
     #[must_use]
     pub fn mcp_statuses(&self) -> Vec<crate::mcp_registry::McpServerStatus> {
         self.mcp_registries
@@ -2690,10 +2584,6 @@ impl PluginHostManager {
             }
         };
 
-        // The pinned checksum for restart-time verification: the configured
-        // checksum when present, otherwise the trust-on-first-use checksum
-        // computed at startup (in-memory only). Either way the binary that
-        // was verified at startup is pinned and re-verified on every restart.
         let pinned_checksum = match expected_checksum {
             Some(configured) => PinnedChecksum::Configured(configured),
             None => match tofu_checksum.clone() {
@@ -2792,8 +2682,6 @@ fn discover_plugins() -> Vec<String> {
                 .unwrap_or(&file_name)
                 .to_string();
 
-            // Only the `ene-plugin-{name}` convention is accepted; the bare
-            // `{name}` fallback is intentionally omitted (see fn docs).
             let Some(plugin_name) = stem.strip_prefix("ene-plugin-") else {
                 continue;
             };
@@ -2808,8 +2696,6 @@ fn discover_plugins() -> Vec<String> {
     names
 }
 
-/// Returns `true` when `path` has an executable permission bit set.
-///
 /// On Unix this checks the mode bits; on non-Unix targets every existing
 /// file is considered executable (the `.exe` suffix already gates matching
 /// there).
@@ -2827,8 +2713,6 @@ fn is_executable(path: &std::path::Path) -> bool {
     }
 }
 
-/// Validates that a plugin name is safe for use in filesystem paths.
-///
 /// Rejects names containing path separators, parent-directory traversal
 /// (`..`), or characters outside the safe set `[a-zA-Z0-9_-]`. This
 /// prevents config keys like `x/../../etc/evil` from escaping the plugin
@@ -2899,8 +2783,7 @@ pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] = &[
     "whisper",
 ];
 
-/// Returns `true` when the plugin is one of the trusted built-ins that ship
-/// with Ene. Used by the API key trust gate: only builtin or explicitly
+/// Used by the API key trust gate: only builtin or explicitly
 /// configured plugins receive resolved credentials.
 ///
 /// This matches against the compiled-in [`BUILTIN_PLUGIN_NAMES`] list rather
@@ -2909,8 +2792,6 @@ pub(crate) fn is_builtin_plugin(name: &str) -> bool {
     BUILTIN_PLUGIN_NAMES.contains(&name)
 }
 
-/// Returns whether a VAD provider spec may be registered as a factory.
-///
 /// Two gates: the peer must have negotiated protocol v7 (`ProcessVadChunk`
 /// did not exist before it, so a v6 peer would fail to deserialize the
 /// request), and the spec must carry a non-zero `frame_size` and
@@ -3040,7 +2921,6 @@ async fn supervise_plugin<F>(
     F: std::future::Future<Output = ()>,
 {
     let mut ticker = tokio::time::interval(interval);
-    // Skip the immediate first tick.
     ticker.tick().await;
     loop {
         ticker.tick().await;
@@ -3216,10 +3096,6 @@ fn compute_binary_checksum(
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// Verifies a plugin binary against an expected checksum.
-///
-/// Computes the streaming SHA-256 hash of the binary and returns
-/// [`PluginHostError::ChecksumMismatch`] if it doesn't match `expected`.
 /// There is no "no checksum" path: callers always have a pinned checksum
 /// (configured or trust-on-first-use), so verification never fails open.
 fn verify_plugin_checksum(
@@ -3243,14 +3119,7 @@ fn verify_plugin_checksum(
     Ok(())
 }
 
-/// Verifies the plugin binary checksum at startup and computes a TOFU
-/// checksum when none is configured yet.
-///
-/// When `expected` is `Some`, verifies via [`verify_plugin_checksum`] and
-/// returns `Ok(None)` (nothing new to pin). When `expected` is `None`,
-/// computes the checksum and returns it as `Ok(Some(checksum))` so the
-/// caller can pin it in memory for restart-time verification. The checksum
-/// is deliberately never written back to configuration: binaries legitimately
+/// The checksum is deliberately never written back to configuration: binaries legitimately
 /// change between builds (debug builds differ per environment), so a
 /// persisted pin would fail startup after any rebuild.
 fn verify_or_compute_checksum(
@@ -3706,9 +3575,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn restart_verifies_checksum_when_matching() {
-        // `binary_path` is a genuine executable script so the matching-checksum
-        // path can actually re-spawn it. The shebang uses `/usr/bin/env sh`,
-        // which exists on NixOS (unlike `/bin/true`).
         let dir = temp_plugin_dir("match");
         let binary_path = dir.join("ene-plugin-fake");
         write_dummy_script(&binary_path);
@@ -3859,15 +3725,11 @@ mod tests {
         // ENE_PLUGIN_SOCKET must not be overridable via passthrough.
         let cmd = build_plugin_command(binary, socket, &["ENE_PLUGIN_SOCKET".to_string()]);
         let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
-        // The socket is set by build_plugin_command itself, not by passthrough.
-        // Verify it points to the expected socket path.
         assert_eq!(
             envs.get(OsStr::new("ENE_PLUGIN_SOCKET")),
             Some(&Some(std::ffi::OsStr::new("/tmp/test.sock")))
         );
     }
-
-    // ── Per-plugin supervisor isolation ──────────────────────────────────
 
     /// A mock plugin that answers the handshake and replies to every `Ping`,
     /// incrementing `pings` on each probe. Accepts connections in a loop so a
@@ -3985,7 +3847,6 @@ mod tests {
                         .await,
                     );
                 }
-                // Dropping the halves here closes the connection.
             });
         }
     }
@@ -4253,8 +4114,6 @@ mod tests {
             },
         ));
 
-        // Wait until the dead supervisor has reached its (parked) backoff and
-        // the healthy supervisor has pinged at least twice.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             if dead_backoffs.load(Ordering::SeqCst) >= 1
@@ -4282,7 +4141,6 @@ mod tests {
              restart backoff (before={before}, after={after})"
         );
 
-        // The dead plugin was flagged unhealthy on its way into the backoff.
         let mut saw_unhealthy = false;
         while let Ok(event) = rx.try_recv() {
             if matches!(event, PluginHealthEvent::Unhealthy { .. }) {
@@ -4313,8 +4171,6 @@ mod tests {
         dead_task.abort();
         healthy_server.abort();
         dead_server.abort();
-        // The socket files and dummy binaries live under `temp` and are
-        // removed when the `TempDir` drops at the end of the test.
     }
 
     /// A healthy probe round-trip must not clear the rolling restart window.
@@ -4337,7 +4193,6 @@ mod tests {
             sock.clone(),
             true, // stays alive so the probe sees a healthy round-trip
         )));
-        // Simulate a full window of recent restarts.
         {
             let mut p = plugin.lock().await;
             let now = Instant::now();
@@ -4368,7 +4223,6 @@ mod tests {
             |_count| async {},
         ));
 
-        // Wait until at least one healthy probe has run.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             if pings.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
@@ -4444,8 +4298,6 @@ mod tests {
             |_count| async {},
         ));
 
-        // The supervisor must observe the dead plugin, see the exhausted
-        // budget inside `restart()`, and disable it rather than restarting.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             if plugin.lock().await.disabled {

@@ -18,8 +18,6 @@ use bevy_ecs::prelude::*;
 
 use crate::event::ui_action::SettingsActionEvent;
 
-/// Drain every `SettingsActionEvent` queued this frame.
-///
 /// The runtime's `dispatch_settings_action` writes one
 /// `SettingsActionEvent` and then immediately calls
 /// `apply_action` so the per-frame mutation lands on

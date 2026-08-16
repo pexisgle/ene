@@ -52,7 +52,6 @@ use wayland_client::{
 #[cfg(target_os = "linux")]
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
 
-/// Outcome of the layer-shell detection probe.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum LayerShellStatus {
     /// The compositor does not advertise `zwlr_layer_shell_v1`
@@ -67,14 +66,8 @@ pub enum LayerShellStatus {
     Available(Arc<u32>),
 }
 
-/// Shared state for the layer-shell detection probe. The probe
-/// itself runs once (lazily) on the first call to
-/// [`LayerShellContext::status`]; subsequent calls return the
-/// cached [`LayerShellStatus`].
 #[derive(Debug, Default)]
 pub struct LayerShellContext {
-    /// The cached detection result. `None` until the first call
-    /// to [`Self::status`].
     cached: Option<LayerShellStatus>,
 }
 
@@ -83,18 +76,10 @@ impl LayerShellContext {
         Self { cached: None }
     }
 
-    /// Return the cached detection result, or run the probe now
-    /// against the supplied connection.
-    ///
     /// `connection` is `None` when the runtime is not running
     /// under Wayland (X11, Windows, or the Wayland input-region
     /// context failed to construct). The probe is a no-op in
     /// that case and returns [`LayerShellStatus::Unavailable`].
-    ///
-    /// The probe is cheap: a single `wl_display::get_registry`
-    /// round-trip followed by a one-shot `dispatch_pending` to
-    /// drain the `global` event. Subsequent calls return the
-    /// cached result.
     pub fn status(&mut self, connection: Option<&Connection>) -> LayerShellStatus {
         if let Some(cached) = self.cached.as_ref() {
             return cached.clone();
@@ -107,8 +92,7 @@ impl LayerShellContext {
         result
     }
 
-    /// Force a re-probe on the next [`Self::status`] call. The
-    /// runtime uses this when the connection has been replaced
+    /// Used when the runtime's connection has been replaced
     /// (e.g. after a `wl_display` disconnect). Not currently
     /// wired up — the connection is a long-lived handle for
     /// the lifetime of the process.
@@ -117,8 +101,6 @@ impl LayerShellContext {
         self.cached = None;
     }
 
-    /// Borrow the cached detection result without triggering a
-    /// probe. Returns `None` if the probe has not run yet.
     /// The runtime uses this for the first-dispatch log so
     /// the log carries whether the cache has been populated.
     pub const fn cached(&self) -> Option<&LayerShellStatus> {
@@ -126,12 +108,6 @@ impl LayerShellContext {
     }
 }
 
-/// Run the detection probe. Uses `wayland_client::globals::registry_queue_init`
-/// to spin up a transient event queue + `WlRegistry`, drains
-/// globals, and looks for `zwlr_layer_shell_v1` by interface
-/// name. Returns [`LayerShellStatus::Available`] (with the
-/// advertised version) if found, otherwise
-/// [`LayerShellStatus::Unavailable`].
 pub fn probe_layer_shell(connection: &Connection) -> LayerShellStatus {
     let Ok((globals, mut event_queue)) =
         wayland_client::globals::registry_queue_init::<LayerShellAppData>(connection)
@@ -157,8 +133,6 @@ pub fn probe_layer_shell(connection: &Connection) -> LayerShellStatus {
     }
 }
 
-/// Application data type for the transient event queue used by
-/// the layer-shell detection probe.
 #[derive(Debug)]
 struct LayerShellAppData;
 
@@ -174,7 +148,6 @@ impl Dispatch<WlRegistry, wayland_client::globals::GlobalListContents> for Layer
     }
 }
 
-/// Shared, thread-safe wrapper around [`LayerShellContext`].
 pub type LayerShellState = Arc<Mutex<LayerShellContext>>;
 
 pub fn new_layer_shell_state() -> LayerShellState {

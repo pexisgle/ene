@@ -87,7 +87,6 @@ use std::sync::OnceLock;
 /// new migration step.
 pub const CURRENT_CONFIG_VERSION: u32 = 7;
 
-/// The JSON key holding the schema version in `settings.json`.
 const VERSION_KEY: &str = "version";
 
 /// Plugin list keys the v1→v2 migration relocates settings into.
@@ -255,8 +254,6 @@ pub(crate) fn document_version(doc: &serde_json::Value) -> u32 {
     read_version(doc).unwrap_or(1)
 }
 
-/// Writes the `version` field on a raw settings document, creating the root
-/// object if the document is `null`.
 fn set_version(doc: &mut serde_json::Value, version: u32) -> Result<(), EneConfigError> {
     if doc.is_null() {
         *doc = serde_json::json!({});
@@ -345,8 +342,6 @@ fn has_value(v: &serde_json::Value) -> bool {
     }
 }
 
-/// Sets `plugins.list.<plugin>.config.<key>` to `value`, creating the
-/// intermediate objects as needed.
 fn set_plugin_config_key(
     doc: &mut serde_json::Value,
     plugin: &str,
@@ -374,8 +369,6 @@ fn set_plugin_config_key(
     Ok(())
 }
 
-/// Sets `plugins.list.<plugin>.profiles.<profile>.<key>` to `value`, creating
-/// the intermediate objects as needed.
 fn set_plugin_profile_key(
     doc: &mut serde_json::Value,
     plugin: &str,
@@ -408,7 +401,6 @@ fn set_plugin_profile_key(
     Ok(())
 }
 
-/// Returns the object stored under `key` in `parent`, creating it when absent.
 fn object_at<'a>(
     parent: &'a mut serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -457,7 +449,6 @@ fn move_first_local_model_key(
     set_plugin_config_key(doc, LLAMA_CPP_PLUGIN, key, value)
 }
 
-/// Moves `ai.ort_dylib_path` into `plugins.list.onnx.config.ort_dylib_path`.
 fn move_ort_dylib_path(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
     let Some(value) = doc
         .pointer("/ai/ort_dylib_path")
@@ -475,8 +466,6 @@ fn move_ort_dylib_path(doc: &mut serde_json::Value) -> Result<(), EneConfigError
     set_plugin_config_key(doc, ONNX_PLUGIN, "ort_dylib_path", value)
 }
 
-/// Moves `ai.tts.voices_path` into
-/// `plugins.list.kokoro.profiles.kokoro.voices_path`.
 fn move_voices_path(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
     let Some(value) = doc
         .pointer("/ai/tts/voices_path")
@@ -500,9 +489,6 @@ fn move_voices_path(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
     )
 }
 
-/// Moves one `ai.<section>.<key>` value into
-/// `plugins.list.<plugin>.config.<key>`, removing it from `ai` afterwards.
-///
 /// A no-op when the old key is absent, `null`, or an empty string (the same
 /// "present" convention as the v1→v2 relocation).
 fn move_ai_key_to_plugin_config(
@@ -573,8 +559,6 @@ pub(crate) fn migrate_v1_to_v2(doc: &mut serde_json::Value) -> Result<(), EneCon
     Ok(())
 }
 
-/// Returns the existing `plugins.list.<plugin>.profiles.<model>.<key>`
-/// value, or `None` when any level of the path is absent.
 fn existing_plugin_profile_value<'a>(
     doc: &'a serde_json::Value,
     plugin: &str,
@@ -641,7 +625,6 @@ fn mirror_local_models_into_plugin_profiles(
     Ok(())
 }
 
-/// v2 → v3: mirrors `ai.local_models` into the llama-cpp plugin profiles.
 pub(crate) fn migrate_v2_to_v3(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
     mirror_local_models_into_plugin_profiles(doc, LLAMA_CPP_PLUGIN)
 }
@@ -659,8 +642,6 @@ pub(crate) fn migrate_v3_to_v4(doc: &mut serde_json::Value) -> Result<(), EneCon
     mirror_local_models_into_plugin_profiles(doc, LLAMA_CPP_PLUGIN)
 }
 
-/// Writes `plugins.list.<plugin>.config.<key>` only when the slot is absent
-/// or empty (existing explicit values win over the mirror).
 fn fill_plugin_config_key(
     doc: &mut serde_json::Value,
     plugin: &str,
@@ -674,8 +655,6 @@ fn fill_plugin_config_key(
     set_plugin_config_key(doc, plugin, key, value)
 }
 
-/// Writes `plugins.list.<plugin>.profiles.<model>.<key>` only when the slot
-/// is absent or empty.
 fn fill_plugin_profile_key(
     doc: &mut serde_json::Value,
     plugin: &str,
@@ -1022,7 +1001,6 @@ pub(crate) mod tests {
         APPLIED.store(saved_applied, std::sync::atomic::Ordering::Release);
     }
 
-    /// A document already at the current version passes through unchanged.
     #[test]
     fn current_version_is_untouched() {
         with_test_version(1, || {
@@ -1070,7 +1048,6 @@ pub(crate) mod tests {
     #[test]
     fn old_version_is_migrated_to_current() {
         with_test_version(2, || {
-            // v1 -> v2: rename `name` to `user_name`.
             register_migration(1, |doc| {
                 if let Some(obj) = doc.as_object_mut()
                     && let Some(name) = obj.remove("name")
@@ -1139,7 +1116,6 @@ pub(crate) mod tests {
     #[test]
     fn missing_intermediate_step_errors() {
         with_test_version(3, || {
-            // Register 1 -> 2 but not 2 -> 3.
             register_migration(1, |_| Ok(())).expect("registration below current version succeeds");
 
             let doc = serde_json::json!({ "version": 1 });
@@ -1183,8 +1159,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// A full v1 document with every relocated key becomes a v2 document with
-    /// the keys at their new `plugins.list.*` locations and the old keys gone.
     #[test]
     fn v1_to_v2_moves_relocated_settings() {
         with_test_version(2, || {
@@ -1228,7 +1202,6 @@ pub(crate) mod tests {
                 doc.pointer("/plugins/list/kokoro/profiles/kokoro/voices_path"),
                 Some(&serde_json::json!("/data/voices.bin"))
             );
-            // The old per-model and ai-level keys are removed.
             assert!(
                 doc.pointer("/ai/local_models/gemma-4-e4b/mmproj_url")
                     .is_none(),
@@ -1252,7 +1225,6 @@ pub(crate) mod tests {
                 doc.pointer("/ai/tts/voices_path").is_none(),
                 "old ai.tts.voices_path must be deleted"
             );
-            // The untouched model fields survive.
             assert_eq!(
                 doc.pointer("/ai/local_models/gemma-4-e4b/url"),
                 Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf"))
@@ -1260,8 +1232,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// The v4→v5 step relocates the voice engine settings into the plugins
-    /// that now own them, and leaves the selection fields behind.
     #[test]
     fn v4_to_v5_moves_voice_engine_settings() {
         with_test_version(5, || {
@@ -1304,7 +1274,6 @@ pub(crate) mod tests {
             assert!(doc.pointer("/ai/vad/model").is_none());
             assert!(doc.pointer("/ai/vad/model_path").is_none());
             assert!(doc.pointer("/ai/vad/threshold").is_none());
-            // Selection fields stay in `ai.*`.
             assert_eq!(
                 doc.pointer("/ai/stt/provider"),
                 Some(&serde_json::json!("whisper"))
@@ -1316,7 +1285,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// Empty-string / `null` old values and absent sections are left alone.
     #[test]
     fn v4_to_v5_empty_values_are_not_moved() {
         with_test_version(5, || {
@@ -1333,9 +1301,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// The v5→v6 step mirrors the llama-cpp config and profiles into
-    /// llama-server and re-runs the `ai.local_models` mirror, leaving the
-    /// llama-cpp section untouched.
     #[test]
     fn v5_to_v6_mirrors_llama_cpp_into_llama_server() {
         with_test_version(6, || {
@@ -1384,13 +1349,10 @@ pub(crate) mod tests {
                 doc.pointer("/plugins/list/llama-server/profiles/gemma-4-e4b/context_size"),
                 Some(&serde_json::json!(4096))
             );
-            // The ai.local_models mirror fills keys the llama-cpp profile did
-            // not carry.
             assert_eq!(
                 doc.pointer("/plugins/list/llama-server/profiles/gemma-4-e4b/dimensions"),
                 Some(&serde_json::json!(1024))
             );
-            // The source section is untouched.
             assert_eq!(
                 doc.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
                 Some(&serde_json::json!("https://cdn.example/mmproj.gguf"))
@@ -1402,8 +1364,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// Existing non-empty llama-server values win; empty slots are still
-    /// filled. A document with no llama-cpp section is a no-op.
     #[test]
     fn v5_to_v6_fills_only_missing_keys() {
         with_test_version(6, || {
@@ -1438,7 +1398,6 @@ pub(crate) mod tests {
             });
             migrate_v5_to_v6(&mut doc).expect("v5->v6 migration succeeds");
 
-            // Existing non-empty values win.
             assert_eq!(
                 doc.pointer("/plugins/list/llama-server/config/mmproj_url"),
                 Some(&serde_json::json!("https://cdn.example/custom-mmproj.gguf"))
@@ -1447,7 +1406,6 @@ pub(crate) mod tests {
                 doc.pointer("/plugins/list/llama-server/profiles/gemma-4-e4b/url"),
                 Some(&serde_json::json!("https://cdn.example/custom.gguf"))
             );
-            // Empty / missing slots are filled.
             assert_eq!(
                 doc.pointer("/plugins/list/llama-server/config/acceleration"),
                 Some(&serde_json::json!("cuda"))
@@ -1465,9 +1423,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// The first model (in JSON iteration order) carrying a non-empty value
-    /// wins, regardless of which model that happens to be: when only one model
-    /// has `mmproj_url`, that value is the one relocated.
     #[test]
     fn v1_to_v2_first_non_empty_model_wins() {
         with_test_version(2, || {
@@ -1494,8 +1449,6 @@ pub(crate) mod tests {
             });
             migrate_v1_to_v2(&mut doc).expect("v1->v2 migration succeeds");
 
-            // model-b is the first entry with a non-empty mmproj_url; model-c's
-            // later value must not win.
             assert_eq!(
                 doc.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
                 Some(&serde_json::json!("https://cdn.example/b-mmproj.gguf"))
@@ -1504,7 +1457,6 @@ pub(crate) mod tests {
                 doc.pointer("/plugins/list/llama-cpp/config/mmproj_path"),
                 Some(&serde_json::json!("/data/b-mmproj.gguf"))
             );
-            // The key is removed from every model, empty-valued or not.
             for model in ["model-a", "model-b", "model-c"] {
                 assert!(
                     doc.pointer(&format!("/ai/local_models/{model}/mmproj_url"))
@@ -1515,8 +1467,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// Empty-string and null values are "no value": they are neither moved nor
-    /// do they clobber an existing plugin config.
     #[test]
     fn v1_to_v2_empty_values_are_not_moved() {
         with_test_version(2, || {
@@ -1536,7 +1486,6 @@ pub(crate) mod tests {
             });
             migrate_v1_to_v2(&mut doc).expect("v1->v2 migration succeeds");
 
-            // Empty/null values are not relocated.
             assert!(
                 doc.pointer("/plugins/list/llama-cpp/config/mmproj_url")
                     .is_none(),
@@ -1563,8 +1512,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// A document without an `ai` section has nothing to migrate and is left
-    /// untouched (still `Ok`).
     #[test]
     fn v1_to_v2_without_ai_section_is_noop() {
         with_test_version(2, || {
@@ -1578,8 +1525,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// Existing `plugins.list.<name>.config` values are left alone when the
-    /// old document carries no corresponding key (config wins over defaults).
     #[test]
     fn v1_to_v2_preserves_existing_plugin_config_when_old_key_absent() {
         with_test_version(2, || {
@@ -1621,8 +1566,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// The end-to-end chain: a v1 document with the old keys reaches version 2
-    /// via [`apply_migrations`] and the relocated values are in place.
     #[test]
     fn apply_migrations_migrates_v1_to_v2() {
         with_test_version(2, || {
@@ -1648,11 +1591,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// A v2 document's `ai.local_models` entries are mirrored into
-    /// `plugins.list.llama-cpp.profiles.<name>` without touching the originals
-    /// (routing still reads them). `context_size` and `dimensions` are
-    /// mirrored too: the plugin sizes its chat KV cache from the profile's
-    /// `context_size`, and `dimensions` is the host's store-schema value.
     #[test]
     fn v2_to_v3_mirrors_local_models_into_profiles() {
         with_test_version(3, || {
@@ -1697,7 +1635,6 @@ pub(crate) mod tests {
                 doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/dimensions"),
                 Some(&serde_json::json!(1024))
             );
-            // The source entry and the routing-only field survive untouched.
             assert_eq!(
                 doc.pointer("/ai/local_models/gemma-4-e4b/url"),
                 Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf"))
@@ -1713,9 +1650,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// A v3 document whose profiles were mirrored before `context_size` /
-    /// `dimensions` joined the key set is refilled by the v3→v4 step; the
-    /// step is a no-op when the keys are already present.
     #[test]
     fn v3_to_v4_refills_missing_profile_keys() {
         with_test_version(4, || {
@@ -1760,15 +1694,12 @@ pub(crate) mod tests {
                 doc.pointer("/plugins/list/llama-cpp/profiles/gemma-4-e4b/url"),
                 Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf"))
             );
-            // A second run must not change anything (idempotent).
             let before = doc.clone();
             migrate_v3_to_v4(&mut doc).expect("v3->v4 re-run succeeds");
             assert_eq!(doc, before);
         });
     }
 
-    /// An existing non-empty profile value wins over the v3→v4 refill, the
-    /// same fill-only-missing-keys semantics as the v2→v3 step.
     #[test]
     fn v3_to_v4_preserves_existing_profile_values() {
         with_test_version(4, || {
@@ -1809,8 +1740,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// An existing profile value wins over the mirror: the migration never
-    /// overwrites explicitly configured plugin profiles.
     #[test]
     fn v2_to_v3_preserves_existing_profile_values() {
         with_test_version(3, || {
@@ -1851,8 +1780,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// Empty-string / `null` model fields are not mirrored (the v1→v2
-    /// convention: defaults are not values).
     #[test]
     fn v2_to_v3_skips_empty_values() {
         with_test_version(3, || {
@@ -1887,7 +1814,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// A document without local models is left untouched.
     #[test]
     fn v2_to_v3_without_local_models_is_noop() {
         with_test_version(3, || {
@@ -1905,8 +1831,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// The full chain: a v1 document reaches version 3 with both the
-    /// v1→v2 relocations and the v2→v3 profile mirror in place.
     #[test]
     fn apply_migrations_migrates_v1_to_v3() {
         with_test_version(3, || {

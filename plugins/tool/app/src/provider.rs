@@ -3,15 +3,12 @@ use async_trait::async_trait;
 use ene_plugin::{ActionSetProvider, ToolAction};
 use ene_plugin_proto::{ToolError, ToolProvider, ToolSpec};
 
-/// App tool provider managing GUI automation tasks.
-///
 /// Dispatch is handled by [`ActionSetProvider`].
 pub struct AppToolProvider {
     inner: ActionSetProvider,
 }
 
 impl AppToolProvider {
-    /// Creates a new `AppToolProvider` and registers all app tool actions.
     pub fn new() -> Self {
         let actions: Vec<Box<dyn ToolAction>> = vec![
             Box::new(action::ListWindowsAction::default()),

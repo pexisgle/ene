@@ -35,7 +35,6 @@ pub struct IpcEmbeddingProvider {
 }
 
 impl IpcEmbeddingProvider {
-    /// Creates a new IPC-backed embedding provider.
     pub fn new(
         kind: String,
         conn: Arc<IpcPluginConnection>,
@@ -166,8 +165,6 @@ fn validate_embeddings(
     Ok(())
 }
 
-/// Factory that creates [`IpcEmbeddingProvider`] instances for a provider
-/// kind served by a plugin binary.
 pub struct IpcEmbeddingProviderFactory {
     kind: String,
     conn: Arc<IpcPluginConnection>,
@@ -200,7 +197,6 @@ impl IpcEmbeddingProviderFactory {
         }
     }
 
-    /// Whether this plugin is trusted to receive resolved API credentials.
     fn is_trusted(&self, plugin_config: &PluginConfig) -> bool {
         self.builtin || plugin_config.list.contains_key(&self.plugin_name)
     }

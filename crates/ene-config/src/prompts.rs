@@ -84,7 +84,6 @@ pub fn resolve_system_language(locale: Option<&str>) -> String {
     }
 }
 
-/// Whether `code` has a compile-time embedded pack to fall back to.
 pub(crate) fn is_embedded_language(code: &str) -> bool {
     SUPPORTED_LANGUAGES.contains(&code)
 }
@@ -105,23 +104,14 @@ fn parse_embedded_metadata(json: &str) -> RawPromptLibraryData {
 /// Strongly typed prompt library layout mapping to `assets/lang/{lang}/prompts.json`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PromptLibraryData {
-    /// System prompts configuration.
     pub system: SystemPrompts,
-    /// Emotion prompts configuration.
     pub emotion: EmotionPrompts,
-    /// Memory prompts configuration.
     pub memory: MemoryPrompts,
-    /// Summarizer prompts configuration.
     pub summarizer: SummarizerPrompts,
-    /// Session split prompts configuration.
     pub split: SplitPrompts,
-    /// Memory extractor prompts configuration.
     pub extractor: ExtractorPrompts,
-    /// Affect classifier prompts configuration.
     pub affect_classifier: AffectClassifierPrompts,
-    /// Proactive speech / screen-summary prompts.
     pub proactive: ProactivePrompts,
-    /// Compression summarizer prompts.
     pub compression: CompressionPrompts,
 }
 
@@ -145,24 +135,17 @@ struct RawPromptLibraryData {
     compression: RawCompressionPrompts,
 }
 
-/// Prompt templates for the system prompt.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SystemPrompts {
     /// Mascot roleplay framing.
     pub mascot_context: String,
     /// Localized instruction appended to the `CharacterState` section scaffold.
     pub affect_pre_utterance_note: String,
-    /// Header for rules list.
     pub behavior_rules_header: String,
-    /// Header for character identity.
     pub character_header: String,
-    /// Header for character personality.
     pub personality_header: String,
-    /// Header for character background.
     pub background_header: String,
-    /// Header for scene scenario.
     pub scene_header: String,
-    /// Header for chat examples.
     pub examples_header: String,
 }
 
@@ -192,26 +175,17 @@ impl SystemPrompts {
     }
 }
 
-/// Prompt templates for emotion rules.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EmotionPrompts {
     /// Header for emotion output rule.
     pub header: String,
-    /// The rule itself.
     pub rule: String,
-    /// Token list label.
     pub token_header: String,
-    /// Examples list label.
     pub examples_header: String,
-    /// Happy example string.
     pub example_happy: String,
-    /// Sad example string.
     pub example_sad: String,
-    /// Angry example string.
     pub example_angry: String,
-    /// Neutral example string.
     pub example_neutral: String,
-    /// Natural-dialogue output contract for engine-managed expression.
     pub natural_dialogue_contract: String,
 }
 
@@ -236,11 +210,9 @@ struct RawEmotionPrompts {
 /// Prompt templates for episodic memory.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MemoryPrompts {
-    /// Header for recalled summaries list.
     pub summaries_header: String,
     /// Format template for a summary item.
     pub summary_item: String,
-    /// Header for known user facts list.
     pub facts_header: String,
 }
 
@@ -256,7 +228,6 @@ impl MemoryPrompts {
     }
 }
 
-/// Prompt templates for LLM summarization.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SummarizerPrompts {
     /// System prompt for summarizer agent.
@@ -279,7 +250,6 @@ struct RawSummarizerPrompts {
 }
 
 impl SummarizerPrompts {
-    /// Renders the summarizer system prompt.
     pub fn render_system(
         &self,
         user_name: &str,
@@ -298,7 +268,6 @@ impl SummarizerPrompts {
         )
     }
 
-    /// Renders the summarizer user prompt.
     pub fn render_user_prompt(
         &self,
         user_name: &str,
@@ -319,15 +288,10 @@ impl SummarizerPrompts {
 /// Prompt templates for session split reasons.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SplitPrompts {
-    /// Timeout split reason message.
     pub reason_timeout: String,
-    /// Topic change split reason message.
     pub reason_topic: String,
-    /// Context pressure split reason message.
     pub reason_context: String,
-    /// Composite score split reason message.
     pub reason_composite: String,
-    /// Manual split reason message.
     pub reason_manual: String,
 }
 
@@ -364,7 +328,6 @@ impl ExtractorPrompts {
     }
 }
 
-/// Prompt templates for the LLM affect classifier.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AffectClassifierPrompts {
     /// System prompt for the affect classifier.
@@ -675,17 +638,14 @@ impl ProactivePrompts {
 }
 
 impl SplitPrompts {
-    /// Renders the split reason timeout message.
     pub fn render_reason_timeout(&self, minutes: &str) -> String {
         substitute(&self.reason_timeout, &[("minutes", minutes)])
     }
 
-    /// Renders the split reason topic change message.
     pub fn render_reason_topic(&self, similarity: &str) -> String {
         substitute(&self.reason_topic, &[("similarity", similarity)])
     }
 
-    /// Renders the split reason composite score message.
     pub fn render_reason_composite(&self, score: &str) -> String {
         substitute(&self.reason_composite, &[("score", score)])
     }
@@ -1005,8 +965,6 @@ impl PromptLibrary {
         }
     }
 
-    /// Reads and parses the runtime prompt pack for `code` from
-    /// `base/lang/{code}/prompts.json`.
     fn load_from_assets(base: &std::path::Path, code: &str) -> Result<Self, crate::EneConfigError> {
         let path = crate::paths::prompt_pack_path_in(base, code);
         let contents = std::fs::read_to_string(&path).map_err(|source| {
@@ -1036,69 +994,50 @@ impl PromptLibrary {
         }
     }
 
-    /// Returns the built-in compile-time English defaults.
-    ///
-    /// These are the same strings shipped in `assets/lang/en/prompts.json` but
-    /// embedded at compile time as a fallback so the application works even
-    /// when assets are missing (e.g. during unit tests or CI).
     pub fn built_in_english() -> Self {
         embedded_pack!("en")
     }
 
-    /// Returns the built-in compile-time Japanese defaults.
-    ///
-    /// These are the same strings shipped in `assets/lang/ja/prompts.json` but
-    /// embedded at compile time as a fallback.
     pub fn built_in_japanese() -> Self {
         embedded_pack!("ja")
     }
 
-    /// Language code (e.g. `"en"` or `"ja"`) for this prompt library instance.
     pub fn lang(&self) -> &str {
         &self.lang
     }
 
-    /// System-level prompts for the configured language.
     pub const fn system(&self) -> &SystemPrompts {
         &self.data.system
     }
 
-    /// Returns reference to emotion prompts.
     pub const fn emotion(&self) -> &EmotionPrompts {
         &self.data.emotion
     }
 
-    /// Returns reference to memory prompts.
     pub const fn memory(&self) -> &MemoryPrompts {
         &self.data.memory
     }
 
-    /// Returns reference to summarizer prompts.
     pub const fn summarizer(&self) -> &SummarizerPrompts {
         &self.data.summarizer
     }
 
-    /// Returns reference to split prompts.
     pub const fn split(&self) -> &SplitPrompts {
         &self.data.split
     }
 
-    /// Returns reference to extractor prompts.
     pub const fn extractor(&self) -> &ExtractorPrompts {
         &self.data.extractor
     }
 
-    /// Returns reference to affect classifier prompts.
     pub const fn affect_classifier(&self) -> &AffectClassifierPrompts {
         &self.data.affect_classifier
     }
 
-    /// Returns reference to proactive speech prompts.
     pub const fn proactive(&self) -> &ProactivePrompts {
         &self.data.proactive
     }
 
-    /// Returns reference to compression summarizer prompts.
     pub const fn compression(&self) -> &CompressionPrompts {
         &self.data.compression
     }

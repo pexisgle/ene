@@ -48,7 +48,6 @@ struct LocationResponse {
     keywords_primary = "location, geolocation, ip, address, country, city, coordinates, where",
     side_effects = "Network { external: true }"
 )]
-/// Action to look up the location of an IP address.
 pub struct LocationAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
@@ -59,7 +58,6 @@ pub struct LocationAction {
 }
 
 impl LocationAction {
-    /// Creates a new `LocationAction` with the given shared state.
     #[must_use]
     pub fn new(state: Arc<GeoState>) -> Self {
         Self { state, ip: None }
@@ -87,7 +85,6 @@ impl LocationAction {
     }
 }
 
-/// Builds the ipapi.co request URL.
 fn build_location_url(ip: Option<&str>) -> Result<url::Url, GeoError> {
     let base = if let Some(ip) = ip {
         let parsed: IpAddr = ip

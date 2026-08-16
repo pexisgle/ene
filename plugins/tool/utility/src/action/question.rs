@@ -13,7 +13,6 @@ use uuid::Uuid;
     category = "Utility",
     keywords_primary = "question, ask, clarify, confirm, input"
 )]
-/// Action to ask the user one or more questions.
 pub struct AskQuestionAction {
     /// One or more questions to present to the user. Each item renders
     /// its own input control in the UI; answers are returned in the

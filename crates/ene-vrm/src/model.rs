@@ -20,16 +20,11 @@ use crate::mtoon::{MToonGpuTextures, MToonMaterial};
 use crate::node_constraint::NodeConstraintRegistry;
 use crate::spring_bone::SpringBoneProperties;
 
-/// A single mesh primitive loaded from the VRM.
 #[derive(Debug)]
 pub struct VrmPrimitive {
-    /// Per-vertex data (`MeshVertex`, including joints and weights).
     pub vertex_buf: wgpu::Buffer,
-    /// Number of vertices in `vertex_buf`.
     pub vertex_count: u32,
-    /// 32-bit index buffer.
     pub index_buf: wgpu::Buffer,
-    /// Number of indices to draw.
     pub index_count: u32,
     /// CPU-side mirror of the vertex data, kept after the GPU
     /// upload so CPU consumers ( collider builder, future
@@ -88,10 +83,6 @@ pub enum AlphaMode {
 }
 
 impl AlphaMode {
-    /// Render phase index for draw-ordering.
-    ///
-    /// - `0` — opaque / mask (depth write on, drawn first).
-    /// - `1` — blend (depth write off, drawn after opaque).
     #[inline]
     pub const fn render_phase(self) -> u8 {
         match self {
@@ -108,21 +99,17 @@ impl AlphaMode {
 /// Loading only `meshes[0]` would render the head/face area only.
 #[derive(Debug, Default)]
 pub struct VrmMesh {
-    /// All primitives that make up this mesh.
     pub primitives: Vec<VrmPrimitive>,
 }
 
-/// A single GPU texture plus its sampler.
 #[derive(Debug)]
 pub struct VrmTexture {
-    /// The texture itself.
     pub texture: wgpu::Texture,
     /// Default sampler (linear filtering, clamp-to-edge).
     pub sampler: wgpu::Sampler,
     /// Bind group layout `(1)` — used by the renderer to build the
     /// per-primitive bind group.
     pub bind_group_layout: wgpu::BindGroupLayout,
-    /// Bind group `(1)` — used by the renderer.
     pub bind_group: wgpu::BindGroup,
 }
 
@@ -160,7 +147,6 @@ pub struct Skeleton {
 }
 
 impl Skeleton {
-    /// Number of joints in the skeleton. Zero for models with no skin.
     pub const fn joint_count(&self) -> usize {
         self.inverse_bind.len()
     }
@@ -237,7 +223,6 @@ pub struct NodeHierarchy {
 }
 
 impl NodeHierarchy {
-    /// Number of glTF nodes captured.
     pub const fn len(&self) -> usize {
         self.local_rotations.len()
     }
@@ -386,18 +371,17 @@ impl VrmModel {
         (n(self.aabb_min), n(self.aabb_max))
     }
 
-    /// Number of joints in the skeleton. Zero for models with no skin.
     pub const fn joint_count(&self) -> usize {
         self.skeleton.joint_count()
     }
 
-    /// Borrow the expression layer. The runtime writes into
+    /// The runtime writes into
     /// `expressions.weights` every frame; the renderer reads it.
     pub const fn expressions(&self) -> &ExpressionLayer {
         &self.expressions
     }
 
-    /// Mutable access to the expression layer. Used by
+    /// Used by
     /// `CharacterRenderer::apply_emotions` in
     /// `apps/ene-desktop-v2` to push the latest emotion weights
     /// into the model.
@@ -405,7 +389,7 @@ impl VrmModel {
         &mut self.expressions
     }
 
-    /// Borrow the look-at properties. `None` for models
+    /// `None` for models
     /// without the `VRMC_vrm.lookAt` block (e.g. legacy
     /// VRM 0.x). The desktop runtime supplies the spec
     /// default in that case via
@@ -709,11 +693,8 @@ pub const MAX_JOINTS_PER_VERTEX: usize = 4;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct MeshVertex {
-    /// Position in object space.
     pub position: [f32; 3],
-    /// Texture coordinates.
     pub uv: [f32; 2],
-    /// Normal in object space.
     pub normal: [f32; 3],
     /// Per-vertex joint indices, up to `MAX_JOINTS_PER_VERTEX`.
     /// Stored as `u32` so 256+-joint humanoid models (e.g. models
@@ -749,7 +730,6 @@ impl MeshVertex {
         ],
     };
 
-    /// Reinterpret a slice of vertices as `&[u8]` for buffer upload.
     pub fn as_bytes(vertices: &[Self]) -> &[u8] {
         bytemuck::cast_slice(vertices)
     }
@@ -887,10 +867,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // NodeHierarchy::compute_world_transforms
-    // -----------------------------------------------------------------
-
     /// A single root node should have its world transform
     /// equal to its local transform after the walk. The
     /// pre-existing world buffer was zeroed out to detect
@@ -957,20 +933,11 @@ mod tests {
         ]);
         h.compute_world_transforms();
         assert_eq!(h.world_positions[0], Vec3::new(1.0, 0.0, 0.0));
-        // The child's local translation is the offset in
-        // the parent's frame, so the parent's rotation
-        // (which is identity here) doesn't apply. The
-        // child's world position is therefore
-        // parent_pos + R_parent * t_local = (2, 0, 0).
         assert!(
             (h.world_positions[1] - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-5,
             "expected child world pos (2, 0, 0), got {:?}",
             h.world_positions[1]
         );
-        // The world rotation is the composition of the
-        // parent's world rotation and the child's local
-        // rotation. The parent is identity, so the world
-        // rotation equals the child's local rotation.
         let expected_rot = rot_y90;
         let actual = h.world_rotations[1];
         let dot = actual.dot(expected_rot).abs();
@@ -996,10 +963,6 @@ mod tests {
         assert_eq!(h.world_positions[1], Vec3::new(0.0, 2.0, 0.0));
         assert_eq!(h.world_positions[2], Vec3::new(0.0, 3.0, 0.0));
     }
-
-    // -----------------------------------------------------------------
-    // VrmModel::update_skin_palette
-    // -----------------------------------------------------------------
 
     /// A model with zero skeleton joints must return an
     /// empty `Vec` (the renderer's static identity palette
@@ -1162,7 +1125,6 @@ mod tests {
         };
         let (owned, palette) = model_palette(model, &frame);
         assert_eq!(palette.len(), 2);
-        // Joint 0 (hips): world position (0, 1, 0).
         let p0 = palette[0].transform_point3(Vec3::ZERO);
         assert!(
             (p0 - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-5,
@@ -1331,10 +1293,6 @@ mod tests {
         (model, palette)
     }
 
-    // -----------------------------------------------------------------
-    // VrmModel::update_skin_palette — LookAt composition
-    // -----------------------------------------------------------------
-
     /// A `LookAt` delta on the `head` bone must rotate the
     /// head's local transform to `rest * delta` and the
     /// resulting world rotation must reach the palette.
@@ -1402,10 +1360,8 @@ mod tests {
         let mut model =
             single_joint_model(humanoid, single_node_hierarchy(Quat::IDENTITY, Vec3::ZERO));
         let mut frame = VrmaFrame::default();
-        // VRMA rotates the head 90° around X.
         let vrma = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
         frame.bone_rotations.insert("head".into(), vrma);
-        // LookAt rotates the head 90° around Y.
         let look_delta = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
         let look_at = LookAtBoneOutput {
             head: LookAtBoneDelta { delta: look_delta },
@@ -1469,7 +1425,6 @@ mod tests {
     /// `index out of bounds` panic.
     #[test]
     fn update_skin_palette_look_at_ignores_missing_humanoid_bones() {
-        // Empty humanoid registry (no head / leftEye / rightEye).
         let humanoid = HumanoidBoneRegistry::new();
         let mut model =
             single_joint_model(humanoid, single_node_hierarchy(Quat::IDENTITY, Vec3::ZERO));
@@ -1494,7 +1449,6 @@ mod tests {
     }
 }
 
-/// One skinning matrix per joint.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct SkinMatrix(pub [[f32; 4]; 4]);

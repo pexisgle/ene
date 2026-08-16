@@ -53,11 +53,6 @@ pub struct UserInputPrompt {
 }
 
 impl UserInputPrompt {
-    /// Construct a new prompt, validating that at least one question item
-    /// is present.
-    ///
-    /// # Errors
-    /// Returns [`ToolError::InvalidArguments`] when `items` is empty.
     pub fn new(items: Vec<QuestionItem>) -> Result<Self, ToolError> {
         if items.is_empty() {
             return Err(ToolError::InvalidArguments {
@@ -93,15 +88,10 @@ impl std::fmt::Display for UserInputPrompt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
-    /// Tool execution failed.
     ExecutionFailed,
-    /// A sandbox policy was violated.
     SandboxViolation,
-    /// Permission was denied for a destructive operation.
     PermissionDenied,
-    /// An I/O error occurred.
     IoError,
-    /// The tool call timed out.
     Timeout,
     /// An internal error occurred on the **tool side** — the tool binary
     /// encountered an unexpected condition (e.g. a logic bug, an
@@ -109,9 +99,7 @@ pub enum ErrorKind {
     /// kind. Prefer this over [`Other`](Self::Other) for tool-side
     /// failures; `Other` is reserved for host-side catch-alls.
     Internal,
-    /// An IPC transport error occurred.
     IpcTransport,
-    /// An IPC client (host-side) error.
     IpcClient,
     /// Catch-all for **host-side** failures that don't fit any specific
     /// category. Prefer [`Internal`](Self::Internal) for tool-side errors.
@@ -156,9 +144,7 @@ impl std::fmt::Display for ErrorKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(into = "ToolErrorWire", from = "ToolErrorWire")]
 pub enum ToolError {
-    /// The requested tool was not found.
     NotFound {
-        /// Name of the tool that was not found.
         tool_name: String,
     },
     /// The tool name supplied by the caller was invalid (empty,
@@ -174,17 +160,14 @@ pub enum ToolError {
     /// Name collision is a hard error at provider registration
     /// time — first-wins silent overwrite is not allowed.
     DuplicateName {
-        /// Colliding tool name.
         tool_name: String,
     },
-    /// Invalid arguments were passed to a tool call.
     InvalidArguments {
         /// Description of what was invalid.
         message: String,
     },
     /// A generic message-only error, discriminated by [`ErrorKind`].
     Generic {
-        /// The error category.
         kind: ErrorKind,
         /// Human-readable error details.
         message: String,
@@ -207,35 +190,26 @@ pub enum ToolError {
         /// The prompt describing the question, options, and input constraints.
         prompt: UserInputPrompt,
     },
-    /// The requested file was not found on disk.
     FileNotFound {
-        /// Path that was not found.
         path: String,
     },
-    /// A file exceeded the configured size limit.
     FileTooLarge {
-        /// Path of the offending file.
         path: String,
         /// Actual size in bytes.
         size: u64,
         /// Maximum allowed size in bytes.
         limit: u64,
     },
-    /// A shell command was blocked by sandbox policy.
     CommandBlocked {
-        /// The command that was blocked.
         command: String,
         /// Reason for the block.
         reason: String,
     },
-    /// A shell command timed out.
     ShellTimeout {
-        /// The command that was running.
         command: String,
         /// Timeout in milliseconds.
         timeout_ms: u64,
     },
-    /// Shell output exceeded the maximum size limit.
     ShellOutputTooLarge {
         /// Number of bytes produced.
         size: u64,
@@ -245,8 +219,6 @@ pub enum ToolError {
 }
 
 impl ToolError {
-    /// Creates a [`Generic`](Self::Generic) error with kind
-    /// [`ExecutionFailed`](ErrorKind::ExecutionFailed).
     pub fn execution_failed(message: impl Into<String>) -> Self {
         Self::Generic {
             kind: ErrorKind::ExecutionFailed,
@@ -254,8 +226,6 @@ impl ToolError {
         }
     }
 
-    /// Creates a [`Generic`](Self::Generic) error with kind
-    /// [`SandboxViolation`](ErrorKind::SandboxViolation).
     pub fn sandbox_violation(message: impl Into<String>) -> Self {
         Self::Generic {
             kind: ErrorKind::SandboxViolation,
@@ -263,8 +233,6 @@ impl ToolError {
         }
     }
 
-    /// Creates a [`Generic`](Self::Generic) error with kind
-    /// [`PermissionDenied`](ErrorKind::PermissionDenied).
     pub fn permission_denied(message: impl Into<String>) -> Self {
         Self::Generic {
             kind: ErrorKind::PermissionDenied,
@@ -272,8 +240,6 @@ impl ToolError {
         }
     }
 
-    /// Creates a [`Generic`](Self::Generic) error with kind
-    /// [`IoError`](ErrorKind::IoError).
     pub fn io_error(message: impl Into<String>) -> Self {
         Self::Generic {
             kind: ErrorKind::IoError,
@@ -281,8 +247,6 @@ impl ToolError {
         }
     }
 
-    /// Creates a [`Generic`](Self::Generic) error with kind
-    /// [`Timeout`](ErrorKind::Timeout).
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Generic {
             kind: ErrorKind::Timeout,
@@ -290,8 +254,6 @@ impl ToolError {
         }
     }
 
-    /// Creates a [`Generic`](Self::Generic) error with kind
-    /// [`Internal`](ErrorKind::Internal).
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Generic {
             kind: ErrorKind::Internal,
@@ -299,8 +261,6 @@ impl ToolError {
         }
     }
 
-    /// Creates a [`Generic`](Self::Generic) error with kind
-    /// [`IpcTransport`](ErrorKind::IpcTransport).
     pub fn ipc_transport(message: impl Into<String>) -> Self {
         Self::Generic {
             kind: ErrorKind::IpcTransport,
@@ -308,8 +268,6 @@ impl ToolError {
         }
     }
 
-    /// Creates a [`Generic`](Self::Generic) error with kind
-    /// [`IpcClient`](ErrorKind::IpcClient).
     pub fn ipc_client(message: impl Into<String>) -> Self {
         Self::Generic {
             kind: ErrorKind::IpcClient,
@@ -317,8 +275,6 @@ impl ToolError {
         }
     }
 
-    /// Creates a [`Generic`](Self::Generic) error with kind
-    /// [`Other`](ErrorKind::Other).
     #[deprecated(
         since = "0.1.0",
         note = "Use `ToolError::internal` for tool-side errors; `other` is kept only for backward-compatible host-side catch-alls."
@@ -404,8 +360,6 @@ impl From<std::io::Error> for ToolError {
     }
 }
 
-// ── Serde wire compatibility ─────────────────────────────────────────────
-//
 // The public `ToolError` carries message-only errors as `Generic { kind, message }`.
 // To preserve the externally-tagged JSON wire format expected by older tool
 // binaries (e.g. `{"ExecutionFailed":{"message":"…"}}`), serialization goes

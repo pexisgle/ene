@@ -1,5 +1,3 @@
-//! Model load helpers (GPU offload + GGUF path validation + optional mtmd).
-
 use super::backend::with_backend;
 use super::map_llama_err;
 use ene_ai::ResourceClass;
@@ -14,7 +12,6 @@ use llama_cpp_4::mtmd::{MtmdContext, MtmdContextParams};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
-/// GPU offload plan derived from [`ProactiveAcceleration`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GpuOffload {
     pub n_gpu_layers: u32,
@@ -22,7 +19,6 @@ pub(crate) struct GpuOffload {
     pub use_main_gpu: bool,
 }
 
-/// Parameters for loading a GGUF into llama.cpp.
 #[derive(Debug, Clone)]
 pub(crate) struct LoadSpec {
     pub model_path: PathBuf,
@@ -124,7 +120,6 @@ pub(crate) fn resource_class_for(spec: &LoadSpec) -> Result<ResourceClass, LlmPr
     })
 }
 
-/// Owned loaded model + optional multimodal projector context.
 pub(crate) struct LoadedModel {
     pub model: LlamaModel,
     pub context_size: NonZeroU32,

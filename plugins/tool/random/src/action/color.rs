@@ -1,6 +1,5 @@
 use ene_plugin::prelude::*;
 
-/// Generates a random color.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "random",
@@ -19,7 +18,6 @@ impl ColorAction {
     }
 }
 
-/// Builds a `#rrggbb` string from three uniform random bytes.
 fn random_hex_color() -> String {
     let r: u8 = rand::random();
     let g: u8 = rand::random();

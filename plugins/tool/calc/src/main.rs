@@ -3,7 +3,6 @@
 //! Plugin binary providing calculation tools:
 //! math expression evaluation, unit conversion, currency conversion,
 //! and color format conversion.
-#![warn(missing_docs)]
 #![expect(
     clippy::arithmetic_side_effects,
     reason = "evaluation and conversion tools perform intentional f64 arithmetic"
@@ -20,11 +19,9 @@
     )
 )]
 
-/// Action modules for each tool.
 pub mod action;
 /// Host-mediated network broker session.
 pub mod broker;
-/// Tool lifecycle and provider integration.
 pub mod provider;
 
 use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};

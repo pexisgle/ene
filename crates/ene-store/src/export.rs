@@ -19,7 +19,6 @@ use crate::session::SessionMeta;
 /// [`SessionExport::from_json`] rejects any other version.
 pub const SESSION_EXPORT_FORMAT_VERSION: u32 = 1;
 
-/// Placeholder substituted for any redacted secret material.
 const REDACTED: &str = "[redacted]";
 
 /// A complete, self-contained export of one session.
@@ -27,9 +26,7 @@ const REDACTED: &str = "[redacted]";
 pub struct SessionExport {
     /// Format version; must equal [`SESSION_EXPORT_FORMAT_VERSION`].
     pub format_version: u32,
-    /// When the export was produced.
     pub exported_at: DateTime<Utc>,
-    /// Session metadata.
     pub session: SessionMeta,
     /// Conversation messages, oldest first.
     pub messages: Vec<ExportedMessage>,
@@ -38,19 +35,11 @@ pub struct SessionExport {
 }
 
 impl SessionExport {
-    /// Serializes the export to pretty-printed JSON.
-    ///
-    /// # Errors
-    ///
     /// Returns [`EneMemoryError::SerializationError`] if serialization fails.
     pub fn to_json(&self) -> Result<String, EneMemoryError> {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
-    /// Parses an export from JSON, rejecting unknown format versions.
-    ///
-    /// # Errors
-    ///
     /// Returns [`EneMemoryError::SerializationError`] on malformed JSON and
     /// [`EneMemoryError::UnsupportedFormatVersion`] when `format_version` does
     /// not equal [`SESSION_EXPORT_FORMAT_VERSION`].
@@ -72,7 +61,6 @@ pub struct ExportedMessage {
     pub role: String,
     /// Message content (secrets redacted).
     pub content: String,
-    /// When the message was recorded.
     pub created_at: DateTime<Utc>,
 }
 
@@ -83,17 +71,13 @@ pub struct ExportedToolLog {
     pub turn_id: String,
     /// Namespaced tool name.
     pub tool_name: String,
-    /// Action label.
     pub action: String,
-    /// Target resource.
     pub target: String,
     /// Permission decision string.
     pub decision: String,
-    /// Whether the call succeeded.
     pub success: bool,
     /// Redacted argument JSON.
     pub redacted_args: String,
-    /// When the call was recorded.
     pub created_at: DateTime<Utc>,
 }
 

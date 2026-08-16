@@ -1,5 +1,3 @@
-//! Workspace document index command (`/workspace`).
-
 use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use crate::style;

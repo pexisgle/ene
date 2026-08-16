@@ -2,7 +2,6 @@
 //!
 //! Plugin binary providing read-only git repository inspection tools:
 //! status, diff, log, branch, remote, and blame.
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(
@@ -13,17 +12,12 @@
     )
 )]
 
-/// Action modules for each git tool.
 pub mod action;
 /// Host-mediated process broker session.
 pub mod broker;
-/// Shared error type and `ToolError` mapping.
 pub mod error;
-/// JSON output structs and date formatting.
 pub mod output;
-/// Tool lifecycle and provider integration.
 pub mod provider;
-/// Workspace path validation for repository access.
 pub mod sandbox;
 
 #[cfg(test)]

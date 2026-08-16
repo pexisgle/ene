@@ -86,38 +86,26 @@ pub struct BudgetMeta {
 /// Result of packing a prompt under budget constraints.
 #[derive(Debug, Clone)]
 pub struct PackedPrompt {
-    /// Final packet ready for LLM conversion.
     pub packet: PromptPacket,
-    /// Budget metadata for tracing/tests.
     pub meta: BudgetMeta,
 }
 
 /// Inputs for building and packing a prompt packet.
 #[derive(Debug, Clone)]
 pub struct PackInput {
-    /// Desktop/platform contract block.
     pub platform_contract: Option<String>,
-    /// Compiled identity kernel.
     pub identity_kernel: IdentityKernel,
-    /// Style examples selected for this turn.
     pub style_examples: Vec<StyleExample>,
-    /// Recalled typed memories.
     pub recalled: Vec<RecalledMemory>,
-    /// Retrieved workspace document chunks with citations.
     pub workspace_documents: Vec<WorkspaceChunkHit>,
-    /// Active commitments.
     pub commitments: Vec<ActiveCommitmentPrompt>,
-    /// Affect summary line.
     pub affect_summary: Option<String>,
     /// Localized instruction appended to the `CharacterState` section.
     pub character_state_note: Option<String>,
     /// Active scene summary from rolling compression.
     pub scene_summary: Option<String>,
-    /// Recent conversation history.
     pub history: Vec<HistoryEntry>,
-    /// Expression PHI / output contract block.
     pub output_contract: Option<String>,
-    /// Note about a previously interrupted response.
     pub interruption_note: Option<String>,
     /// Author's note: depth-based instruction injection (roleplay enhancement).
     pub authors_note: Option<AuthorsNote>,
@@ -146,7 +134,6 @@ pub struct PackInput {
     /// minimum). Detachment is a prompt-construction-time operation only:
     /// nothing is removed from the session or DB history.
     pub compression_pending: bool,
-    /// Current user input.
     pub user_input: String,
     /// Section-renderer language (resolved classifier language from the mind
     /// config): "ja" selects Japanese wording, anything else falls back to
@@ -220,7 +207,6 @@ struct MemorySurvivors {
 }
 
 impl MemorySurvivors {
-    /// Clear the survivors for `kind`, mirroring that section being dropped.
     fn clear_kind(&mut self, kind: PromptSectionKind) {
         match kind {
             PromptSectionKind::SemanticContext => self.semantic.clear(),
@@ -237,7 +223,6 @@ fn history_entry_tokens_for(content: &str) -> usize {
     estimate_tokens(content).saturating_add(4)
 }
 
-/// Token cost of a single history entry (content estimate + per-message overhead).
 fn history_entry_tokens(entry: &HistoryEntry) -> usize {
     history_entry_tokens_for(&entry.content)
 }
@@ -302,7 +287,6 @@ fn insert_lorebook_messages(history: &mut Vec<HistoryEntry>, messages: &[Loreboo
     *history = rebuilt;
 }
 
-/// Map a decorator role onto a history message role.
 fn message_role(role: DecoratorRole) -> ene_ai::Role {
     match role {
         DecoratorRole::Assistant => ene_ai::Role::Assistant,
@@ -311,8 +295,7 @@ fn message_role(role: DecoratorRole) -> ene_ai::Role {
     }
 }
 
-/// Estimate the total token cost of a history slice (per-entry content
-/// estimate plus per-message overhead). Shared by prompt packing and the
+/// Shared by prompt packing and the
 /// token-based window-pressure compression trigger.
 pub fn estimate_history_tokens(history: &[HistoryEntry]) -> usize {
     history.iter().map(history_entry_tokens).sum()
@@ -346,7 +329,7 @@ fn trim_history_to_budget(history: &mut Vec<HistoryEntry>, max_tokens: usize) ->
             hi = mid;
         }
     }
-    // `lo` is the smallest drop count where the remainder fits; ensure we actually needed trimming.
+    // `lo` is the smallest drop count where the remainder fits.
     if lo == 0 && remaining_tokens(0) <= max_tokens {
         return 0;
     }
@@ -603,8 +586,6 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
     }
 
     if total > packing_ceiling {
-        // Shed whole droppable sections, lowest priority first. Required
-        // sections are never candidates.
         let mut order: Vec<usize> = (0..sections.len())
             .filter(|&i| !sections[i].required)
             .collect();
@@ -804,8 +785,7 @@ mod tests {
 
     #[test]
     fn injected_memory_ids_empty_when_section_dropped() {
-        // A recalled memory whose section is dropped by the budget must
-        // not be reported as injected. A tiny total budget plus a large
+        // A tiny total budget plus a large
         // episodic section guarantees the drop regardless of exact token
         // estimates.
         let budget = ContextBudget::with_capacity(30);
@@ -857,11 +837,6 @@ mod tests {
 
     #[test]
     fn over_capacity_drops_lowest_priority_section_whole() {
-        // An over-capacity prompt sheds whole sections lowest-priority first
-        // rather than trimming within a section. The survivor vectors and the
-        // rendered body must agree: a dropped section's memories are never
-        // reported injected.
-        //
         // Kernel ("KERNEL" = 2 tokens) + user input ("hello" = 2) = 4 tokens of
         // required overhead. A 10-token window cannot also fit the ~27-token
         // episodic section, so the whole section is dropped.
@@ -999,11 +974,6 @@ mod tests {
 
     #[test]
     fn dropped_section_stays_empty_when_total_still_over_budget() {
-        // When a memory section is dropped but the total is still over budget
-        // (an oversized *required* section keeps it over), the dropped section
-        // must stay empty and its memories must not be reported injected.
-        // Clearing the survivors at drop time keeps the section's (now empty)
-        // survivor vector consistent with the rendered content.
         let budget = ContextBudget::with_capacity(10);
         let input = PackInput {
             workspace_documents: vec![],
@@ -1279,7 +1249,6 @@ mod tests {
         assert!(kernel_section.content.contains("KERNEL"));
     }
 
-    /// A commitment prompt row for the priority-ordering tests.
     fn sample_commitment() -> ActiveCommitmentPrompt {
         ActiveCommitmentPrompt {
             id: 1,
@@ -1337,9 +1306,6 @@ mod tests {
 
     #[test]
     fn required_sections_survive_a_window_smaller_than_the_prompt() {
-        // Required sections (platform contract, identity kernel, output
-        // contract, user input) are never dropped, even when the window is far
-        // smaller than the assembled prompt.
         let budget = ContextBudget::with_capacity(5);
         let input = PackInput {
             workspace_documents: vec![],
@@ -1392,8 +1358,6 @@ mod tests {
 
     #[test]
     fn higher_priority_section_survives_over_lower_priority_one() {
-        // Given two droppable sections that cannot both fit, the
-        // higher-priority one is kept and the lower-priority one is dropped.
         // ActiveCommitments (60) outranks StyleExamples (20).
         let budget = ContextBudget::with_capacity(30);
         let input = PackInput {
@@ -1425,8 +1389,6 @@ mod tests {
         );
     }
 
-    /// An alternating user/assistant history of `turns` exchanges for the
-    /// detachment tests.
     fn exchanges(turns: usize) -> Vec<crate::lifecycle::HistoryEntry> {
         let mut history = Vec::with_capacity(turns * 2);
         for i in 0..turns {
@@ -1726,8 +1688,6 @@ mod tests {
             .iter()
             .map(|e| e.content.as_str())
             .collect();
-        // reverse_depth 2 → index 1 (after the oldest); depth 1 → index 3
-        // (before the newest).
         assert_eq!(
             contents,
             vec![

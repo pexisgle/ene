@@ -1,7 +1,7 @@
 //! File-level `SQLite` backup, restore, and integrity helpers.
 //!
 //! Migration recovery uses **pre-migration file copies** rather than
-//! `Migrator::down()`. `SQLite` + SeaORM cannot safely roll a half-applied
+//! `Migrator::down()`. `SQLite` + `SeaORM` cannot safely roll a half-applied
 //! schema change back in-process; restoring a known-good file is the
 //! durable recovery path.
 
@@ -18,7 +18,6 @@ use crate::error::EneMemoryError;
 /// Given `memory.db`, backups look like `memory.db.bak.1710000000`.
 pub const BACKUP_SUFFIX: &str = ".bak.";
 
-/// Options controlling open-time backup / integrity behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenOptions {
     /// Create a file backup before applying pending migrations.
@@ -49,7 +48,6 @@ impl From<&crate::StoreConfig> for OpenOptions {
     }
 }
 
-/// Build the backup path for `db_path` using the current unix timestamp.
 #[must_use]
 pub fn backup_path_for(db_path: &Path) -> PathBuf {
     let ts = SystemTime::now()
@@ -67,7 +65,6 @@ pub fn backup_path_for(db_path: &Path) -> PathBuf {
     }
 }
 
-/// Return whether `path` looks like a backup of `db_path`.
 #[must_use]
 pub fn is_backup_of(db_path: &Path, path: &Path) -> bool {
     let Some(db_name) = db_path.file_name().and_then(|s| s.to_str()) else {
@@ -88,7 +85,6 @@ pub fn is_backup_of(db_path: &Path, path: &Path) -> bool {
         .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// List backup files for `db_path`, newest first.
 pub fn list_backups(db_path: &Path) -> Result<Vec<PathBuf>, EneMemoryError> {
     let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
     if !parent.exists() {
@@ -108,7 +104,6 @@ pub fn list_backups(db_path: &Path) -> Result<Vec<PathBuf>, EneMemoryError> {
     Ok(backups)
 }
 
-/// Delete oldest backups until at most `max_backups` remain.
 pub fn prune_backups(db_path: &Path, max_backups: usize) -> Result<(), EneMemoryError> {
     let max = max_backups.max(1);
     let backups = list_backups(db_path)?;
@@ -170,7 +165,6 @@ async fn vacuum_into(db: &DatabaseConnection, dest: &Path) -> Result<(), EneMemo
     Ok(())
 }
 
-/// Best-effort file copy used only when no connection is available.
 fn copy_database_file(db_path: &Path, dest: &Path) -> Result<(), EneMemoryError> {
     fs::copy(db_path, dest).map_err(|e| {
         EneMemoryError::BackupError(format!(
@@ -283,7 +277,6 @@ pub async fn checkpoint_wal(db: &DatabaseConnection) -> Result<(), EneMemoryErro
     Ok(())
 }
 
-/// Run `PRAGMA integrity_check` and return Ok when the result is `ok`.
 pub async fn check_integrity(db: &DatabaseConnection) -> Result<(), EneMemoryError> {
     let rows = db
         .query_all_raw(Statement::from_string(

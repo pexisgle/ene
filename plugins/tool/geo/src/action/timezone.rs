@@ -16,7 +16,6 @@ use ene_plugin::prelude::*;
     keywords_primary = "timezone, utc, offset, longitude, time, solar",
     side_effects = "ReadOnly"
 )]
-/// Action to calculate the solar UTC offset for a longitude.
 pub struct TimezoneAction {
     /// Longitude in degrees, -180 to 180 (positive = east).
     longitude: f64,

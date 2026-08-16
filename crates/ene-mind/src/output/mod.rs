@@ -18,7 +18,6 @@ use crate::config::EmotionConfig;
 
 use self::arbiter::resolve_expression;
 
-/// Output Arbiter: expression validation, hysteresis, output mapping.
 pub struct OutputArbiter;
 
 impl OutputArbiter {

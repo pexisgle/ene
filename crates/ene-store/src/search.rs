@@ -1,5 +1,3 @@
-//! Hybrid memory search scoring — re-exported from `ene-rag`.
-//!
 //! The scoring policy (weighted hybrid scoring, recency decay, lexical overlap)
 //! lives in `ene-rag` (the RAG policy layer). Only the items store code reaches
 //! through a `crate::search::*` path are re-exported here, at the narrowest

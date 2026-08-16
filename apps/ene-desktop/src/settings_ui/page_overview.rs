@@ -1,6 +1,3 @@
-//! Overview page: setup needs, health issues, restart-pending changes, and
-//! missing credentials, each linking to the page that resolves it.
-
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
 
@@ -10,7 +7,7 @@ use super::{ApplyFeedback, PageKind};
 use ene_plugin_host::PluginHealthState;
 use std::sync::Arc;
 
-/// Renders the overview page. `current_page` lets the page navigate directly.
+/// `current_page` lets the page navigate directly.
 pub fn render(
     ui: &mut egui::Ui,
     settings: &CharacterSettings,

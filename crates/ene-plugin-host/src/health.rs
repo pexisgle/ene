@@ -11,7 +11,6 @@
 /// surfaced to diagnostics consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisabledReason {
-    /// The restart budget was exhausted (too many consecutive restarts).
     RestartBudgetExhausted,
     /// A restart-time binary checksum verification failed: the on-disk binary
     /// changed since it was pinned at startup.
@@ -28,43 +27,29 @@ impl std::fmt::Display for DisabledReason {
     }
 }
 
-/// A health/lifecycle event for a supervised plugin process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginHealthEvent {
-    /// A plugin was detected unhealthy (hung or dead) and is about to restart.
     Unhealthy {
-        /// Plugin name.
         plugin: String,
         /// Stable reason code: `"unresponsive"` (ping timeout) or `"dead"` (process exited).
         reason: String,
     },
-    /// A plugin process is being restarted.
     Restarting {
-        /// Plugin name.
         plugin: String,
         /// Restart attempt number (1-based).
         attempt: usize,
     },
-    /// A plugin process was restarted and reconnected successfully.
     Restarted {
-        /// Plugin name.
         plugin: String,
     },
-    /// A previously unhealthy plugin responded to a health probe again.
     Recovered {
-        /// Plugin name.
         plugin: String,
     },
-    /// The circuit breaker opened after consecutive failures; calls are paused.
     CircuitOpened {
-        /// Plugin name.
         plugin: String,
-        /// Consecutive failure count that tripped the breaker.
         consecutive_failures: u32,
     },
-    /// The circuit breaker closed after a successful call.
     CircuitClosed {
-        /// Plugin name.
         plugin: String,
     },
     /// A plugin was permanently disabled and will not be restarted again.
@@ -74,9 +59,7 @@ pub enum PluginHealthEvent {
     /// it was last verified). The plugin stays stopped; the user must
     /// intervene.
     Disabled {
-        /// Plugin name.
         plugin: String,
-        /// Why the plugin was disabled.
         reason: DisabledReason,
     },
     /// A plugin was not registered because its hard capability requirements
@@ -88,7 +71,6 @@ pub enum PluginHealthEvent {
     /// present). Soft requirements never produce this event — the plugin
     /// starts and is expected to fall back.
     RequirementsUnmet {
-        /// Plugin name.
         plugin: String,
         /// The unmet hard requirements, as `name@[^]major` strings.
         requirements: Vec<String>,
@@ -96,7 +78,6 @@ pub enum PluginHealthEvent {
 }
 
 impl PluginHealthEvent {
-    /// The plugin name this event concerns.
     pub const fn plugin(&self) -> &String {
         match self {
             Self::Unhealthy { plugin, .. }

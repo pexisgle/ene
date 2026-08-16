@@ -12,11 +12,8 @@ use super::lorebook::stable_entry_id;
 /// Role for a decorator-injected message (`@@role`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoratorRole {
-    /// `assistant`
     Assistant,
-    /// `system`
     System,
-    /// `user`
     User,
 }
 
@@ -44,7 +41,6 @@ pub enum EntryPlacement {
     /// oldest message (1-based); depths beyond the history length land at the
     /// front.
     MessageDepthFromOldest(usize),
-    /// `@@position` semantic section.
     Semantic(SemanticPosition),
     /// Depth-0 fallback slot: Ene does not support prefill, so the spec's
     /// high-priority-position fallback applies (front of the lorebook section).
@@ -69,7 +65,6 @@ pub struct ActivationContext {
     pub greeting_index: Option<u32>,
 }
 
-/// Parsed decorators of a single lorebook entry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EntryDecorators {
     /// `@@activate_only_after N` — only match once the assistant message count
@@ -94,7 +89,6 @@ pub struct EntryDecorators {
     /// (`SPEC_V3.md`, "Decorators"); Ene follows `SillyTavern`'s reading of it
     /// (count from the oldest) so cards relying on ST behavior keep working.
     pub reverse_depth: Option<i64>,
-    /// `@@position` semantic insertion position.
     pub position: Option<SemanticPosition>,
     /// `@@scan_depth N` — per-entry scan depth override.
     pub scan_depth: Option<u32>,
@@ -204,7 +198,6 @@ impl EntryDecorators {
         true
     }
 
-    /// Effective scan depth: the `@@scan_depth` override or `book_default`.
     #[must_use]
     pub fn effective_scan_depth(&self, book_default: u32) -> u32 {
         self.scan_depth.unwrap_or(book_default)
@@ -282,8 +275,6 @@ impl ChainGroup {
         }
         for (fallback_name, fallback_value) in std::mem::take(&mut self.fallbacks) {
             if seen_names.contains(&fallback_name) {
-                // A repeated decorator name is ignored — except
-                // `additional_keys`, which the spec allows multiple times.
                 if fallback_name == "additional_keys"
                     && let Some(values) = split_values(fallback_value.as_deref())
                 {
@@ -323,7 +314,6 @@ enum ResolvedDecorator {
     IgnoreOnMaxContext,
 }
 
-/// Split a decorator line into its name and optional value.
 fn split_name_value(rest: &str) -> (String, Option<String>) {
     let mut parts = rest.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or_default().trim().to_string();
@@ -331,7 +321,6 @@ fn split_name_value(rest: &str) -> (String, Option<String>) {
     (name, value.filter(|v| !v.is_empty()))
 }
 
-/// Split a comma-separated decorator value into trimmed pieces.
 fn split_values(value: Option<&str>) -> Option<Vec<String>> {
     value.map(|v| {
         v.split(',')
@@ -417,7 +406,6 @@ fn resolve_decorator(
     }
 }
 
-/// Fold a resolved decorator into the parsed state.
 fn apply_resolved(decorators: &mut EntryDecorators, resolved: ResolvedDecorator) {
     match resolved {
         ResolvedDecorator::ActivateOnlyAfter(value) => decorators.activate_only_after = Some(value),

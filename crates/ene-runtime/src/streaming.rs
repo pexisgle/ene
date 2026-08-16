@@ -128,7 +128,6 @@ pub(crate) struct ToolExecutionContext<'a> {
     pub deferred_tool_tx: &'a mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
 }
 
-/// Output of one tool execution round.
 #[derive(Debug, Default)]
 pub(crate) struct ToolExecutionOutput {
     /// Assistant/tool messages fed back to the LLM loop.
@@ -532,7 +531,6 @@ pub(crate) fn emit_terminal(
     }
 }
 
-/// Configuration for a single AI streaming run.
 #[doc(hidden)]
 pub struct StreamContext {
     pub config: EneConfig,
@@ -717,9 +715,6 @@ pub(crate) async fn perform_tool_executions(
         turn_id: ctx.turn.to_string(),
     };
 
-    // Phase 1 — run side-effect-free calls concurrently (bounded). Results are
-    // collected in the original order so Phase 2 can finalize deterministically.
-    //
     // Parallelism applies only when the whole round is side-effect-free: a
     // mixed round runs strictly sequentially in original order so a read can
     // never overtake an earlier write from the same response.
@@ -786,14 +781,10 @@ pub(crate) async fn perform_tool_executions(
             .collect()
     };
 
-    // Phase 2 — finalize in the original order, preserving event / undo /
-    // summary / message ordering and resolving interactive prompts serially.
     for (idx, call) in tool_calls.into_iter().enumerate() {
         let name = call.name.clone();
         let args = call.arguments.clone();
 
-        // Sequential rounds announce each call here, where it actually starts;
-        // a parallel round already announced the whole batch before dispatch.
         if !parallel_round {
             drop(ctx.event_tx.send(EneEvent::ToolCallStart {
                 turn: ctx.turn.clone(),
@@ -2146,8 +2137,6 @@ mod tests {
         );
     }
 
-    /// Unit coverage for [`await_permission_decision`]: a timeout with no
-    /// response yields `None` (fail-safe deny) rather than blocking.
     #[tokio::test]
     async fn await_permission_decision_times_out_to_none() {
         let (_tx, rx) = oneshot::channel::<PermissionDecision>();
@@ -2159,8 +2148,6 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
-    /// Unit coverage for [`await_permission_decision`]: a fired cancel token
-    /// resolves the wait to `None` immediately, ahead of the timeout.
     #[tokio::test]
     async fn await_permission_decision_cancel_resolves_immediately() {
         let (_tx, rx) = oneshot::channel::<PermissionDecision>();
@@ -2173,8 +2160,6 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_millis(500));
     }
 
-    /// Unit coverage for [`await_permission_decision`]: a genuine decision is
-    /// passed through unchanged.
     #[tokio::test]
     async fn await_permission_decision_passes_through_approval() {
         let (tx, rx) = oneshot::channel::<PermissionDecision>();
@@ -2195,8 +2180,6 @@ mod tests {
         assert_eq!(decision, Some(PermissionDecision::AllowOnce));
     }
 
-    /// Unit coverage for [`await_user_input_response`]: a timeout with no
-    /// response yields `None` (fail-safe cancel) rather than blocking.
     #[tokio::test]
     async fn await_user_input_response_times_out_to_none() {
         let (_tx, rx) = oneshot::channel::<UserInputResponse>();
@@ -2208,8 +2191,6 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
-    /// Unit coverage for [`await_user_input_response`]: a genuine multi-answer
-    /// is passed through unchanged.
     #[tokio::test]
     async fn await_user_input_response_passes_through_answers() {
         let (tx, rx) = oneshot::channel::<UserInputResponse>();

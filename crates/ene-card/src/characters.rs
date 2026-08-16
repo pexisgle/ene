@@ -201,7 +201,6 @@ fn has_path_separator(name: &str) -> bool {
     name.contains(['/', '\\'])
 }
 
-/// `true` when any component (split on `/` or `\`) is `..`.
 fn contains_traversal(name: &str) -> bool {
     let is_separator = |c: char| c == '/' || c == '\\';
     name.split(is_separator).any(|component| component == "..")
@@ -278,7 +277,6 @@ fn is_regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
-/// Reads the per-character default motion from `character_settings.json`.
 fn read_default_motion(assets_dir: &Path, folder: &str) -> Option<String> {
     let settings_path = paths::character_settings_path_in(assets_dir, folder);
     if settings_path.exists() {

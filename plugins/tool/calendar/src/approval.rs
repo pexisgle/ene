@@ -21,8 +21,6 @@ pub type AllowedPatterns = Arc<RwLock<HashSet<(String, String)>>>;
 /// Conversation and turn of the most recent call context.
 pub type CallContextState = Arc<RwLock<Option<(String, Option<String>)>>>;
 
-/// Fail-closed gate for calendar write operations.
-///
 /// Every mutating calendar action passes its target and a human-readable
 /// preview through [`Self::check`] *before* touching the store. The call
 /// proceeds only when the user already approved the exact request id, or a
@@ -36,7 +34,6 @@ pub struct ApprovalGate {
 }
 
 impl ApprovalGate {
-    /// Creates an empty gate (deny-by-default).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -46,29 +43,24 @@ impl ApprovalGate {
         }
     }
 
-    /// Records a user approval for the given request id.
     pub fn approve_request(&self, request_id: &str) {
         self.approved_requests
             .write()
             .insert(request_id.to_string());
     }
 
-    /// Records a session-wide allow pattern.
     pub fn allow_pattern(&self, action: &str, target_pattern: &str) {
         self.allowed_patterns
             .write()
             .insert((action.to_string(), target_pattern.to_string()));
     }
 
-    /// Removes a session-wide allow pattern.
     pub fn revoke_pattern(&self, action: &str, target_pattern: &str) {
         self.allowed_patterns
             .write()
             .remove(&(action.to_string(), target_pattern.to_string()));
     }
 
-    /// Tracks the host's per-call context, expiring turn-scoped approvals.
-    ///
     /// The host calls this before every tool invocation with the current
     /// conversation and turn identifiers. A new turn clears the approved
     /// requests ("approved for this turn" must not outlive the turn); a new
@@ -132,8 +124,6 @@ impl ApprovalGate {
     }
 }
 
-/// Stable request id for an (action, target, description) triple.
-///
 /// Namespaced under the URL namespace to keep ids globally unique; the
 /// SHA-1 digest is deterministic, which is the whole point (see
 /// [`ApprovalGate::check`]). The id is a one-way digest, so the event

@@ -28,9 +28,7 @@ use serde::Deserialize;
     version = "1.2.0"
 )]
 pub struct ReadArgs {
-    /// Path to the file to read.
     pub path: String,
-    /// Optional maximum number of bytes to read.
     pub max_bytes: Option<u64>,
 }
 

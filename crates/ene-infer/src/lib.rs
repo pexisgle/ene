@@ -49,7 +49,6 @@
 //! limit of the design, not an oversight: providers whose native
 //! dependencies abort on invariant violations are expected to validate
 //! inputs before they reach that code.
-#![warn(missing_docs)]
 #![cfg_attr(
     all(test, feature = "test-util"),
     expect(

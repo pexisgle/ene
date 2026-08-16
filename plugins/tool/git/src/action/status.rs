@@ -4,7 +4,6 @@ use ene_plugin::prelude::*;
 
 const MAX_STATUS_ENTRIES: usize = 2000;
 
-/// Shows the working tree status of a git repository.
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[serde(rename_all = "camelCase")]
 #[tool(
@@ -17,14 +16,12 @@ const MAX_STATUS_ENTRIES: usize = 2000;
     side_effects = "ReadOnly"
 )]
 pub struct StatusAction {
-    /// Path to the git repository working tree (default: current directory).
     #[serde(default)]
     #[arg(
         default = ".",
         description = "Path to the git repository (default: current directory)."
     )]
     path: Option<String>,
-    /// Whether to include untracked files in the output.
     #[serde(default = "default_true")]
     #[arg(default = "true")]
     include_untracked: bool,
@@ -39,7 +36,6 @@ const fn default_true() -> bool {
 }
 
 impl StatusAction {
-    /// Creates a status action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,
@@ -101,7 +97,6 @@ impl StatusAction {
     }
 }
 
-/// One parsed `--porcelain=v1` line.
 struct ParsedStatus {
     path: String,
     staged: Option<&'static str>,

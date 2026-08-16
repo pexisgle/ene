@@ -36,11 +36,8 @@ use super::truncate_chars;
 pub struct PendingConfirmationPrompt {
     /// `pending_candidates` row id; the resolution target.
     pub id: i64,
-    /// Candidate title (short label).
     pub title: String,
-    /// Full candidate content.
     pub content: String,
-    /// Age of the candidate in fractional days at selection time.
     pub age_days: f64,
 }
 
@@ -133,7 +130,6 @@ fn asked_within_backoff<S: BuildHasher>(
         .is_some_and(|asked| age_days(*asked, now) < f64::from(config.reask_after_days))
 }
 
-/// Verdict on whether the user's reply resolves the asked candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingResolutionVerdict {
     /// The reply confirms the candidate; it may be persisted.
@@ -144,7 +140,6 @@ pub enum PendingResolutionVerdict {
     Unclear,
 }
 
-/// Plain JSON Schema for the reply-classification structured output.
 #[must_use]
 pub fn resolution_schema_object() -> Value {
     json!({
@@ -157,7 +152,6 @@ pub fn resolution_schema_object() -> Value {
     })
 }
 
-/// Build the classification messages for a user reply to a confirmation.
 #[must_use]
 pub fn build_resolution_messages(
     candidate: &PendingConfirmationPrompt,
@@ -436,7 +430,6 @@ mod tests {
         .expect("due candidate loads");
         assert_eq!(picked.id, 1);
 
-        // A cache hit returns the same row without another store read.
         let again = load_due_pending_confirmation(
             Some(&cache),
             &store,

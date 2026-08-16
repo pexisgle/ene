@@ -16,15 +16,10 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpMethod {
-    /// GET.
     Get,
-    /// POST.
     Post,
-    /// PUT.
     Put,
-    /// DELETE.
     Delete,
-    /// HEAD.
     Head,
 }
 
@@ -42,11 +37,8 @@ pub enum ConflictMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireArtifactKind {
-    /// Plugin binary.
     Plugin,
-    /// Sidecar binary.
     Sidecar,
-    /// Model file.
     Model,
 }
 
@@ -57,7 +49,6 @@ pub struct FileEntry {
     pub name: String,
     /// Logical path as requested.
     pub path: String,
-    /// Whether this is a directory.
     pub is_dir: bool,
     /// File size in bytes (0 for directories).
     pub size: u64,
@@ -68,11 +59,8 @@ pub struct FileEntry {
 /// One artifact as reported by the `Artifact` broker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ArtifactInfo {
-    /// Artifact id.
     pub artifact_id: String,
-    /// Active version.
     pub version: String,
-    /// Kind.
     pub kind: WireArtifactKind,
     /// Hex SHA-256 of the active object.
     pub sha256: String,
@@ -103,7 +91,6 @@ pub enum BrokerErrorCode {
 /// Requests a plugin sends to a broker passenger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum BrokerRequest {
-    // ── File broker ────────────────────────────────────────────────────
     /// Reads a file through an approved logical slot.
     FileRead {
         /// Path relative to the approved slot (or the slot name alone).
@@ -115,7 +102,6 @@ pub enum BrokerRequest {
     FileWrite {
         /// Path relative to the approved slot.
         path: String,
-        /// Bytes to write.
         data: Vec<u8>,
         /// Create the file when absent (fail when false and absent).
         create: bool,
@@ -166,10 +152,8 @@ pub enum BrokerRequest {
         conflict: ConflictMode,
     },
 
-    // ── Network broker ─────────────────────────────────────────────────
     /// Fetches a URL with the host's approved origins, returning the body.
     NetworkFetch {
-        /// HTTP method.
         method: HttpMethod,
         /// Absolute URL (https by default; http needs a separate approval).
         url: String,
@@ -207,7 +191,6 @@ pub enum BrokerRequest {
     /// [`BrokerRequest::NetworkFetch`]: SSRF, origin approval, redirect
     /// re-validation, size cap.
     NetworkFetchStream {
-        /// HTTP method.
         method: HttpMethod,
         /// Absolute URL.
         url: String,
@@ -222,14 +205,12 @@ pub enum BrokerRequest {
         /// [`BrokerRequest::NetworkFetch::credential_header`]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential_header: Option<String>,
-        /// Request body (form/JSON payloads).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<Vec<u8>>,
         /// Byte cap for the whole stream.
         max_bytes: Option<u64>,
     },
 
-    // ── Process broker ─────────────────────────────────────────────────
     /// Spawns a child process with the host's sandbox and limits.
     ProcessSpawn {
         /// Program + arguments (absolute path or name resolved by the host).
@@ -251,7 +232,6 @@ pub enum BrokerRequest {
         signal: u32,
     },
 
-    // ── Credential broker ──────────────────────────────────────────────
     /// Reads a credential value (key name only is ever audited).
     CredentialGet {
         /// Credential key declared in the plugin config/schema.
@@ -260,40 +240,32 @@ pub enum BrokerRequest {
     /// Lists the credential keys this plugin may use.
     CredentialListKeys,
 
-    // ── Artifact broker ────────────────────────────────────────────────
     /// Resolves an artifact requirement to the installed catalog target.
     ArtifactResolve {
-        /// Artifact id.
         artifact_id: String,
         /// Optional pinned version.
         version: Option<String>,
     },
     /// Installs (or updates) an artifact through the signed catalog.
     ArtifactInstall {
-        /// Artifact id.
         artifact_id: String,
-        /// Target version.
         version: String,
     },
     /// Rolls the active artifact back one generation.
     ArtifactRollback {
-        /// Artifact id.
         artifact_id: String,
     },
-    /// Lists installed artifacts.
     ArtifactList,
     /// Forces a catalog re-fetch (manual refresh); re-verifies signature,
     /// expiry, and rollback rules before replacing the cached metadata.
     ArtifactRefresh,
 
-    // ── Platform broker ────────────────────────────────────────────────
     /// Current wall-clock time.
     PlatformNow,
     /// Host locale/language.
     PlatformLocale,
     /// Opens a URL in the user's browser (subject to `Platform` approval).
     PlatformOpenExternal {
-        /// URL to open.
         url: String,
     },
 }
@@ -337,7 +309,6 @@ pub enum BrokerResponse {
         path: String,
         /// Hex SHA-256 of the saved bytes.
         sha256: String,
-        /// Saved size.
         size: u64,
     },
     /// [`BrokerRequest::NetworkFetch`] succeeded.
@@ -355,7 +326,6 @@ pub enum BrokerResponse {
         temp_id: String,
         /// Final URL after redirects.
         final_url: String,
-        /// Downloaded size.
         size: u64,
         /// Hex SHA-256 of the downloaded bytes.
         sha256: String,
@@ -370,10 +340,7 @@ pub enum BrokerResponse {
         headers: Vec<(String, String)>,
     },
     /// Body chunk of a streamed response.
-    StreamChunk {
-        /// Raw bytes.
-        data: Vec<u8>,
-    },
+    StreamChunk { data: Vec<u8> },
     /// Terminal frame of a streamed response.
     StreamEnd,
     /// [`BrokerRequest::ProcessSpawn`] succeeded.
@@ -390,20 +357,14 @@ pub enum BrokerResponse {
     /// [`BrokerRequest::ProcessSignal`] succeeded.
     ProcessSignalOk,
     /// [`BrokerRequest::CredentialGet`] succeeded.
-    CredentialGetOk {
-        /// The credential value.
-        value: String,
-    },
+    CredentialGetOk { value: String },
     /// [`BrokerRequest::CredentialListKeys`] succeeded.
     CredentialListKeysOk {
         /// Key names only (never values).
         keys: Vec<String>,
     },
     /// [`BrokerRequest::ArtifactResolve`] succeeded.
-    ArtifactResolveOk {
-        /// Resolved artifact.
-        artifact: ArtifactInfo,
-    },
+    ArtifactResolveOk { artifact: ArtifactInfo },
     /// [`BrokerRequest::ArtifactInstall`] succeeded.
     ArtifactInstallOk {
         /// Newly active artifact.
@@ -425,10 +386,7 @@ pub enum BrokerResponse {
         catalog_version: u64,
     },
     /// [`BrokerRequest::PlatformNow`] succeeded.
-    PlatformNowOk {
-        /// Unix milliseconds.
-        unix_ms: u64,
-    },
+    PlatformNowOk { unix_ms: u64 },
     /// [`BrokerRequest::PlatformLocale`] succeeded.
     PlatformLocaleOk {
         /// BCP-47 language tag.
@@ -438,7 +396,6 @@ pub enum BrokerResponse {
     PlatformOpenExternalOk,
     /// Any broker request failed.
     Error {
-        /// Structured code.
         code: BrokerErrorCode,
         /// Human-readable detail.
         message: String,
@@ -446,7 +403,6 @@ pub enum BrokerResponse {
 }
 
 impl BrokerResponse {
-    /// Builds a [`BrokerResponse::Error`].
     #[must_use]
     pub fn error(code: BrokerErrorCode, message: impl Into<String>) -> Self {
         Self::Error {
@@ -465,7 +421,6 @@ impl BrokerResponse {
 /// produce [`BrokerResponse::Error`].
 #[async_trait::async_trait]
 pub trait BrokerHandler: Send + Sync {
-    /// Handles one broker request from `plugin`.
     async fn handle(&self, plugin: &str, request: BrokerRequest) -> BrokerResponse;
 
     /// Handles a request that produces multiple response frames.
@@ -509,11 +464,9 @@ pub trait BrokerHandler: Send + Sync {
 /// loop implements this over the framed socket).
 #[async_trait::async_trait]
 pub trait BrokerSink: Send {
-    /// Writes one response frame.
     async fn write(&mut self, response: &BrokerResponse) -> std::io::Result<()>;
 }
 
-/// Convenience alias for sharing a broker handler.
 pub type SharedBrokerHandler = Arc<dyn BrokerHandler>;
 
 #[cfg(test)]

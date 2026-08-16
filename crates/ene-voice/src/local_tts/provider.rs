@@ -201,8 +201,6 @@ impl KokoroModel {
         })
     }
 
-    /// Run Kokoro inference over pre-tokenized phoneme ids and return the full
-    /// PCM buffer.
     fn run_inference(&mut self, tokens: &[i64]) -> Result<Vec<f32>, KokoroError> {
         if tokens.is_empty() {
             return Ok(Vec::new());

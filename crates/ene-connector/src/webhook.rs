@@ -1,5 +1,3 @@
-//! Webhook request validation: HMAC signature check and replay window.
-
 use crate::error::ConnectorError;
 use chrono::{DateTime, Duration, Utc};
 use hmac::{Hmac, KeyInit, Mac};
@@ -22,14 +20,11 @@ pub struct WebhookValidator {
 }
 
 impl WebhookValidator {
-    /// Creates a validator with the given shared secret and replay window.
     #[must_use]
     pub fn new(secret: SecretString, max_age: StdDuration) -> Self {
         Self { secret, max_age }
     }
 
-    /// Validates a delivery.
-    ///
     /// `signature` is the `sha256=<hex>` header value, `timestamp` an RFC 3339
     /// instant, and `body` the raw request body. Comparison is constant-time.
     ///

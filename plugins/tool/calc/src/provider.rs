@@ -6,7 +6,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
-/// Configuration for the calc plugin.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, rename_all = "snake_case")]
 pub struct CalcConfig {
@@ -31,19 +30,14 @@ fn generate_calc_schema() -> serde_json::Value {
     serde_json::to_value(schema).expect("CalcConfig schema should always serialize")
 }
 
-/// Built-in calculation tool provider.
-///
-/// Exposes `evaluate`, `unit_convert`, `currency_convert`, and
-/// `color_convert` via [`ActionSetProvider`]. The exchangerate.host
-/// access key is threaded into the currency action through the
-/// `set_config` hook; a `RwLock` lets a live reconfigure update the key
-/// without restarting the tool binary.
+/// The exchangerate.host access key is threaded into the currency action
+/// through the `set_config` hook; a `RwLock` lets a live reconfigure
+/// update the key without restarting the tool binary.
 pub struct CalcToolProvider {
     inner: ActionSetProvider,
 }
 
 impl CalcToolProvider {
-    /// Creates a new `CalcToolProvider`.
     #[must_use]
     pub fn new() -> Self {
         let config = Arc::new(RwLock::new(CalcConfig::default()));

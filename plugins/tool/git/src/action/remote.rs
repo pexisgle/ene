@@ -2,7 +2,6 @@ use crate::output::{RemoteEntry, RemoteOutput, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
 
-/// Lists the configured remotes of a git repository.
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[serde(rename_all = "camelCase")]
 #[tool(
@@ -15,7 +14,6 @@ use ene_plugin::prelude::*;
     side_effects = "ReadOnly"
 )]
 pub struct RemoteAction {
-    /// Path to the git repository working tree (default: current directory).
     #[serde(default)]
     #[arg(
         default = ".",
@@ -29,7 +27,6 @@ pub struct RemoteAction {
 }
 
 impl RemoteAction {
-    /// Creates a remote action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,

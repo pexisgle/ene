@@ -1,5 +1,3 @@
-//! Cursor state resource.
-//!
 //! Holds the per-frame window-local cursor position so the
 //! `apply_linux_click_through_system` and the raycast hit-test
 //! can both read it without touching `AppState`.

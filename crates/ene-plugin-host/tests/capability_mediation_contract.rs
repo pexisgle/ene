@@ -35,14 +35,11 @@ use ene_store::host_service::{DbPluginRegistration, HostServiceServer};
 use sea_orm::Database;
 use serde_json::{Value, json};
 
-/// Handshake timeout used by the integration tests.
 const TEST_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-/// Concurrency bound passed to [`IpcPluginConnection::connect`] in tests.
 const TEST_MAX_CONCURRENT: usize = 8;
 
 static SOCKET_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// Returns a unique socket path for a test.
 fn test_socket_path(name: &str) -> PathBuf {
     let id = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("ene-m-{}-{id}-{name}.sock", std::process::id()))

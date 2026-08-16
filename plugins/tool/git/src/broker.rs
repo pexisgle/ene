@@ -13,24 +13,19 @@ use ene_plugin_proto::{HostServiceId, SandboxConfigData, ToolError};
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
-/// Default per-command timeout (milliseconds).
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// Default stdout/stderr cap per command (8 MiB, the host caps at 10 MiB).
 const DEFAULT_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// One completed process run.
 #[derive(Debug)]
 pub struct GitRun {
     /// Exit code (`None` when the host reported none).
     pub exit_code: Option<i32>,
-    /// Captured stdout.
     pub stdout: String,
-    /// Captured stderr.
     pub stderr: String,
 }
 
 impl GitRun {
-    /// Whether the command succeeded.
     #[must_use]
     pub fn ok(&self) -> bool {
         self.exit_code == Some(0)
@@ -45,7 +40,6 @@ pub struct GitBroker {
 }
 
 impl GitBroker {
-    /// A broker with no connection configuration yet.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -108,7 +102,6 @@ impl GitBroker {
         }
     }
 
-    /// Opens the broker session on first use.
     async fn session(
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, Option<BrokerClient>>, ToolError> {
@@ -145,12 +138,10 @@ impl Default for GitBroker {
 /// `set_sandbox` before any request runs.
 static BROKER_ARC: std::sync::OnceLock<Arc<GitBroker>> = std::sync::OnceLock::new();
 
-/// Returns the shared broker, initializing the handle on first use.
 pub(crate) fn broker() -> Arc<GitBroker> {
     Arc::clone(BROKER_ARC.get_or_init(|| Arc::new(GitBroker::new())))
 }
 
-/// Configures the shared broker from the host sandbox data.
 pub(crate) fn configure_broker(sandbox: &SandboxConfigData) {
     broker().configure(sandbox);
 }
@@ -181,7 +172,6 @@ pub(crate) mod tests {
     }
 
     impl MockGitBroker {
-        /// Spawns the mock on a fresh unix socket.
         #[must_use]
         pub fn spawn() -> Self {
             let dir = tempfile::tempdir().expect("tempdir");

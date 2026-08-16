@@ -53,7 +53,6 @@ fn track_press(held: &mut bool, state: EventState) -> bool {
     }
 }
 
-/// Registered global Alt+Space shortcut.
 pub struct HotkeyState {
     manager: Option<GlobalHotKeyManager>,
     hotkey: HotKey,

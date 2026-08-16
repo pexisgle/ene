@@ -34,7 +34,6 @@ impl Default for HomeAssistantConfig {
 }
 
 impl HomeAssistantConfig {
-    /// Returns the configured token, failing when it is missing.
     pub fn token(&self) -> Result<&str, HomeAssistantError> {
         if self.token.trim().is_empty() {
             return Err(HomeAssistantError::NotConfigured(

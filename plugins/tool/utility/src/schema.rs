@@ -1,6 +1,5 @@
 use ene_plugin_db::{DbColumn, DbIndex, DbSchema, DbTable, DbType, DbValue};
 
-/// Returns the DB schema for the utility tool's todo tables.
 pub fn utility_db_schema() -> DbSchema {
     DbSchema {
         prefix: "utility_".to_string(),

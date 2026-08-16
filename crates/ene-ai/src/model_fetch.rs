@@ -78,10 +78,6 @@ fn http_client() -> Result<&'static reqwest::Client, ModelFetchError> {
         .map_err(|e| ModelFetchError::ClientInit(e.clone()))
 }
 
-// ---------------------------------------------------------------------
-// Progress reporting
-// ---------------------------------------------------------------------
-
 struct DownloadEntry {
     downloaded: u64,
     total: Option<u64>,
@@ -273,10 +269,6 @@ impl Drop for ProgressSession {
     }
 }
 
-// ---------------------------------------------------------------------
-// `.part` cleanup
-// ---------------------------------------------------------------------
-
 /// Removes `path` on drop unless [`PartCleanup::disarm`] is called.
 ///
 /// Guarantees the `.part` file never lingers on any failure exit (an error
@@ -303,10 +295,6 @@ impl Drop for PartCleanup {
     }
 }
 
-// ---------------------------------------------------------------------
-// URL utilities
-// ---------------------------------------------------------------------
-
 /// Reject non-HTTPS URLs (docs require HTTPS; blocks `file://` / cleartext
 /// MITM). Used both for the initial request and every redirect hop.
 pub fn validate_https_url(url: &str) -> Result<(), ModelFetchError> {
@@ -327,8 +315,6 @@ pub fn validate_https_url(url: &str) -> Result<(), ModelFetchError> {
     Ok(())
 }
 
-/// Strip scheme, query string, and fragment from `url`, returning just the
-/// path portion (e.g. `models/foo.gguf?download=true` → `models/foo.gguf`).
 pub fn strip_url_path(url: &str) -> &str {
     let without_scheme = url
         .trim()
@@ -375,10 +361,6 @@ pub fn sanitize_basename(segment: &str) -> Result<String, ModelFetchError> {
     Ok(safe)
 }
 
-// ---------------------------------------------------------------------
-// Validators
-// ---------------------------------------------------------------------
-
 /// Pluggable post-download (and cache-hit) validity check for a model file.
 ///
 /// [`ModelFetcher`] calls this both to re-validate a pre-existing cache hit
@@ -400,8 +382,6 @@ pub trait ModelValidator: Send + Sync {
     async fn validate(&self, path: &Path) -> bool;
 }
 
-/// Validates a file by comparing its leading bytes against a fixed magic
-/// sequence (e.g. GGUF's `b"GGUF"`).
 #[derive(Debug, Clone, Copy)]
 pub struct MagicBytesValidator {
     format_name: &'static str,
@@ -409,7 +389,6 @@ pub struct MagicBytesValidator {
 }
 
 impl MagicBytesValidator {
-    /// Build a validator that checks `path` starts with `magic`.
     #[must_use]
     pub const fn new(format_name: &'static str, magic: &'static [u8]) -> Self {
         Self { format_name, magic }
@@ -445,8 +424,6 @@ pub struct SizeMultipleValidator {
 }
 
 impl SizeMultipleValidator {
-    /// Build a validator requiring at least `min_bytes` and a length evenly
-    /// divisible by `element_bytes`.
     #[must_use]
     pub const fn new(format_name: &'static str, element_bytes: u64, min_bytes: u64) -> Self {
         Self {
@@ -494,8 +471,6 @@ impl std::fmt::Debug for PrefixPredicateValidator {
 }
 
 impl PrefixPredicateValidator {
-    /// Build a validator requiring at least `min_bytes` and a leading
-    /// `prefix_len`-byte window that satisfies `predicate`.
     #[must_use]
     pub const fn new(
         format_name: &'static str,
@@ -539,10 +514,6 @@ impl ModelValidator for PrefixPredicateValidator {
     }
 }
 
-// ---------------------------------------------------------------------
-// ModelFetcher
-// ---------------------------------------------------------------------
-
 /// Shared, safe model-file downloader.
 ///
 /// Stateless from the caller's perspective: the in-flight coalescing map
@@ -554,7 +525,6 @@ impl ModelValidator for PrefixPredicateValidator {
 pub struct ModelFetcher;
 
 impl ModelFetcher {
-    /// Construct a fetcher. Holds no per-instance state.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -793,10 +763,6 @@ fn resolve_https_redirect(base: &str, location: &str) -> Result<String, ModelFet
     Ok(joined.to_string())
 }
 
-// ---------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------
-
 /// Errors from [`ModelFetcher::fetch`] and its supporting URL utilities.
 ///
 /// A dedicated error type at the `ene-ai` boundary rather than reusing
@@ -818,7 +784,6 @@ pub enum ModelFetchError {
     /// body stream errored mid-transfer.
     #[error("model fetch network error: {0}")]
     Network(String),
-    /// The shared HTTP client failed to initialize.
     #[error("model fetch HTTP client init failed: {0}")]
     ClientInit(String),
     /// The server responded with a non-success, non-redirect HTTP status.
@@ -828,48 +793,27 @@ pub enum ModelFetchError {
     /// unbounded, unverifiable transfer.
     #[error("model fetch response missing Content-Length; refusing incomplete transfer")]
     MissingContentLength,
-    /// The response declared a zero-byte body.
     #[error("model fetch Content-Length is zero")]
     EmptyContentLength,
     /// The declared `Content-Length` exceeds the shared 30 GiB download cap.
     #[error("model fetch Content-Length {total} exceeds max {max} bytes")]
-    TooLarge {
-        /// Declared content length, in bytes.
-        total: u64,
-        /// The configured maximum, in bytes.
-        max: u64,
-    },
-    /// The server sent more bytes than it declared in `Content-Length`.
+    TooLarge { total: u64, max: u64 },
     #[error("model fetch exceeded Content-Length ({downloaded} > {total})")]
-    OverLength {
-        /// Bytes received so far.
-        downloaded: u64,
-        /// Declared content length.
-        total: u64,
-    },
-    /// The stream ended before `Content-Length` bytes were received.
+    OverLength { downloaded: u64, total: u64 },
     #[error("model fetch incomplete: got {downloaded} bytes, expected {total}")]
-    Incomplete {
-        /// Bytes actually received.
-        downloaded: u64,
-        /// Declared content length.
-        total: u64,
-    },
+    Incomplete { downloaded: u64, total: u64 },
     /// The downloaded (or cached) file failed the caller-supplied
     /// [`ModelValidator`].
     #[error("downloaded file failed {format} validation at {path}")]
     Validation {
         /// The validator's [`ModelValidator::format_name`].
         format: &'static str,
-        /// The file that failed validation.
         path: PathBuf,
     },
     /// A redirect could not be followed (missing/invalid `Location`, too
     /// many hops, or a non-HTTPS target).
     #[error("model fetch redirect error: {0}")]
     Redirect(String),
-    /// Too many HTTPS redirect hops were followed without reaching a
-    /// non-redirect response.
     #[error("model fetch exceeded {0} HTTPS redirects")]
     TooManyRedirects(usize),
     /// A URL path segment could not be turned into a safe filename

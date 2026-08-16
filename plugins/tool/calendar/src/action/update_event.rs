@@ -19,25 +19,19 @@ fn default_state() -> Arc<CalendarState> {
     keywords_primary = "calendar, update, edit, change, modify, reschedule, event",
     side_effects = "Network { external: false }"
 )]
-/// Action to update an existing calendar event.
 pub struct UpdateEventAction {
     /// Id of the calendar returned by ``calendar.list_calendars``.
     calendar_id: String,
     /// Id of the event returned by ``calendar.list_events``.
     event_id: String,
-    /// New title.
     title: Option<String>,
-    /// New notes.
     description: Option<String>,
-    /// New location.
     location: Option<String>,
     /// New start time (RFC3339 with offset).
     start: Option<String>,
     /// New end time (RFC3339 with offset).
     end: Option<String>,
-    /// New timezone label.
     timezone: Option<String>,
-    /// New attendee list.
     attendees: Option<Vec<String>>,
     /// New status: 'confirmed', 'tentative', or 'cancelled'.
     status: Option<String>,
@@ -48,7 +42,6 @@ pub struct UpdateEventAction {
 }
 
 impl UpdateEventAction {
-    /// Creates a new `UpdateEventAction`.
     #[must_use]
     pub const fn new(state: Arc<CalendarState>) -> Self {
         Self {

@@ -268,9 +268,7 @@ enum UpstreamError {
     Network(String),
     /// Non-success HTTP status with the (possibly truncated) response body.
     Http {
-        /// HTTP status code.
         status: u16,
-        /// Response body bytes.
         body: Vec<u8>,
         /// `Retry-After` header value, if present and parseable.
         retry_after: Option<u64>,
@@ -278,7 +276,6 @@ enum UpstreamError {
 }
 
 impl UpstreamError {
-    /// Whether the retry budget should spend an attempt on this error.
     fn is_retryable(&self) -> bool {
         match self {
             Self::Network(_) => true,
@@ -286,7 +283,6 @@ impl UpstreamError {
         }
     }
 
-    /// The `Retry-After` value, when the failure carries one.
     fn retry_after(&self) -> Option<u64> {
         match self {
             Self::Http { retry_after, .. } => *retry_after,
@@ -294,7 +290,6 @@ impl UpstreamError {
         }
     }
 
-    /// Maps to a typed [`PluginError`] (see [`map_http_error`]).
     fn into_plugin_error(self) -> PluginError {
         match self {
             Self::Network(message) => PluginError::provider(message),
@@ -303,8 +298,7 @@ impl UpstreamError {
     }
 }
 
-/// Whether a status code is worth spending a retry attempt on: client
-/// timeout, rate limit, and server-side failures.
+/// Client timeout, rate limit, and server-side failures.
 #[must_use]
 pub(crate) fn is_transient_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
@@ -341,7 +335,6 @@ pub(crate) fn retry_delay(retry_after: Option<u64>, retry_index: u32) -> Duratio
     .min(MAX_DELAY)
 }
 
-/// Jittered exponential backoff for retry attempt `retry_index` (0-indexed).
 #[must_use]
 pub(crate) fn backoff_delay(retry_index: u32) -> Duration {
     let base_ms = BASE_DELAY.as_millis() as u64;

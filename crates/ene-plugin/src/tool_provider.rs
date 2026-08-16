@@ -158,7 +158,6 @@ pub struct ActionSetProvider {
 }
 
 impl ActionSetProvider {
-    /// Creates a provider dispatching over the given actions.
     #[must_use]
     pub fn new(actions: Vec<Box<dyn ToolAction>>) -> Self {
         Self {
@@ -167,7 +166,6 @@ impl ActionSetProvider {
         }
     }
 
-    /// Registers a callback invoked on `ToolProvider::set_call_context`.
     #[must_use]
     pub fn with_set_call_context_hook(
         mut self,
@@ -177,7 +175,6 @@ impl ActionSetProvider {
         self
     }
 
-    /// Registers a callback invoked on `ToolProvider::set_sandbox`.
     #[must_use]
     pub fn with_sandbox_hook(
         mut self,
@@ -187,7 +184,6 @@ impl ActionSetProvider {
         self
     }
 
-    /// Registers a callback invoked on `ToolProvider::approve_permission`.
     #[must_use]
     pub fn with_approve_permission_hook(
         mut self,
@@ -197,7 +193,6 @@ impl ActionSetProvider {
         self
     }
 
-    /// Registers a callback invoked on `ToolProvider::allow_pattern`.
     #[must_use]
     pub fn with_allow_pattern_hook(
         mut self,
@@ -207,7 +202,6 @@ impl ActionSetProvider {
         self
     }
 
-    /// Registers a callback invoked on `ToolProvider::revoke_pattern`.
     #[must_use]
     pub fn with_revoke_pattern_hook(
         mut self,
@@ -217,7 +211,6 @@ impl ActionSetProvider {
         self
     }
 
-    /// Registers a callback invoked on `ToolProvider::set_config`.
     #[must_use]
     pub fn with_set_config_hook(
         mut self,
@@ -227,7 +220,6 @@ impl ActionSetProvider {
         self
     }
 
-    /// Registers a callback that returns the tool's config JSON Schema.
     #[must_use]
     pub fn with_config_schema_hook(
         mut self,
@@ -375,7 +367,6 @@ pub struct SingleActionProvider {
 }
 
 impl SingleActionProvider {
-    /// Creates a provider for a single action.
     #[must_use]
     pub fn new(action: Box<dyn ToolAction>) -> Self {
         Self {
@@ -383,7 +374,6 @@ impl SingleActionProvider {
         }
     }
 
-    /// Registers a callback invoked on `ToolProvider::set_call_context`.
     #[must_use]
     pub fn with_set_call_context_hook(
         mut self,
@@ -393,7 +383,6 @@ impl SingleActionProvider {
         self
     }
 
-    /// Registers a callback invoked on `ToolProvider::set_sandbox`.
     #[must_use]
     pub fn with_sandbox_hook(
         mut self,
@@ -403,7 +392,6 @@ impl SingleActionProvider {
         self
     }
 
-    /// Registers a callback invoked on `ToolProvider::approve_permission`.
     #[must_use]
     pub fn with_approve_permission_hook(
         mut self,
@@ -413,7 +401,6 @@ impl SingleActionProvider {
         self
     }
 
-    /// Registers a callback invoked on `ToolProvider::allow_pattern`.
     #[must_use]
     pub fn with_allow_pattern_hook(
         mut self,
@@ -423,7 +410,6 @@ impl SingleActionProvider {
         self
     }
 
-    /// Registers a callback invoked on `ToolProvider::revoke_pattern`.
     #[must_use]
     pub fn with_revoke_pattern_hook(
         mut self,
@@ -433,7 +419,6 @@ impl SingleActionProvider {
         self
     }
 
-    /// Registers a callback invoked on `ToolProvider::set_config`.
     #[must_use]
     pub fn with_set_config_hook(
         mut self,
@@ -443,7 +428,6 @@ impl SingleActionProvider {
         self
     }
 
-    /// Registers a callback that returns the tool's config JSON Schema.
     #[must_use]
     pub fn with_config_schema_hook(
         mut self,

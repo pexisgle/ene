@@ -50,7 +50,6 @@ pub struct CredentialDeclaration {
     pub help_url: Option<String>,
 }
 
-/// The presentation kind of a declared credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialKind {
     /// A static secret the plugin receives as a header value.

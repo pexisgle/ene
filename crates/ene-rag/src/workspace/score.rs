@@ -1,5 +1,3 @@
-//! Hybrid chunk scoring — vector similarity blended with lexical overlap.
-
 use crate::scoring::lexical_overlap_score;
 
 /// Hybrid relevance for one chunk in `[0, 1]`.

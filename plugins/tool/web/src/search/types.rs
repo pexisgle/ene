@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::search::error::SearchError;
 
-/// A normalized web search hit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub url: String,
@@ -16,7 +15,6 @@ pub struct SearchResult {
     pub raw: Option<serde_json::Value>,
 }
 
-/// Provider-agnostic search request.
 #[derive(Debug)]
 pub struct SearchOptions {
     pub query: String,

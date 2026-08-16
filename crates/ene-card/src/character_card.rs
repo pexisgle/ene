@@ -17,7 +17,6 @@ pub struct CharacterCardV3 {
     /// Spec version (e.g. `"3.0"`).
     #[serde(default = "default_spec_version")]
     pub spec_version: String,
-    /// The card's data payload.
     pub data: CharacterCardData,
 }
 
@@ -42,21 +41,15 @@ impl Default for CharacterCardV3 {
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
-/// The core data payload of a V3 character card.
 pub struct CharacterCardData {
-    /// The character's primary name.
     #[serde(default)]
     pub name: String,
-    /// A short description of the character.
     #[serde(default)]
     pub description: String,
-    /// Tags / categories for discovery.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Who created this card.
     #[serde(default)]
     pub creator: String,
-    /// Version string for this character definition.
     #[serde(default)]
     pub character_version: String,
     /// Example dialogue shown to the LLM on the first turn.
@@ -65,28 +58,22 @@ pub struct CharacterCardData {
     /// Extension key-value store (expressions, ene metadata, etc.).
     #[serde(default)]
     pub extensions: Extensions,
-    /// The character's system prompt.
     #[serde(default)]
     pub system_prompt: String,
-    /// Instructions appended after the conversation history (PHI).
     #[serde(default)]
     pub post_history_instructions: String,
-    /// The character's opening message.
     #[serde(default)]
     pub first_mes: String,
     /// Alternate greeting messages that can replace `first_mes`.
     #[serde(default)]
     pub alternate_greetings: Vec<String>,
-    /// Personality traits description.
     #[serde(default)]
     pub personality: String,
-    /// Scenario / setting description.
     #[serde(default)]
     pub scenario: String,
     /// Notes from the card creator (`CCv2`+).
     #[serde(default)]
     pub creator_notes: String,
-    /// Optional lorebook for world-building context.
     #[serde(default)]
     pub character_book: Option<Lorebook>,
     /// References to external assets (VRM, VRMA, etc.).
@@ -95,10 +82,8 @@ pub struct CharacterCardData {
     /// An alternative display name (preferred over `name` when non-empty).
     #[serde(default)]
     pub nickname: String,
-    /// Multilingual creator notes.
     #[serde(default)]
     pub creator_notes_multilingual: Option<HashMap<String, String>>,
-    /// Attribution sources for the card.
     #[serde(default)]
     pub source: Option<Vec<String>>,
     /// Alternative greetings shown only in group chats.
@@ -134,7 +119,6 @@ pub struct CharacterCardData {
     pub extra: IndexMap<String, serde_json::Value>,
 }
 
-/// Typed extension store for character cards.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(crate = "crate::serde")]
 pub struct Extensions {
@@ -197,8 +181,6 @@ impl schemars::JsonSchema for Extensions {
             },
             "additionalProperties": true
         });
-        // The JSON literal above is a known-good object; `from_value` is
-        // infallible for this shape.
         #[expect(
             clippy::unwrap_used,
             reason = "known-good JSON literal constructed inline; cannot fail"
@@ -210,7 +192,6 @@ impl schemars::JsonSchema for Extensions {
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
-/// A reference to an external asset (VRM model, VRMA animation, etc.).
 pub struct CharacterAsset {
     /// The type of asset (e.g. `"vrm"`, `"vrma"`, `"png"`).
     #[serde(default, rename = "type")]
@@ -218,7 +199,6 @@ pub struct CharacterAsset {
     /// URI pointing to the asset file.
     #[serde(default)]
     pub uri: String,
-    /// Human-readable name for the asset.
     #[serde(default)]
     pub name: String,
     /// File extension (e.g. `"vrm"`, `"vrma"`).
@@ -232,12 +212,9 @@ pub struct CharacterAsset {
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
-/// A lorebook (world-info) attached to a character card.
 pub struct Lorebook {
-    /// Optional name for this lorebook.
     #[serde(default)]
     pub name: Option<String>,
-    /// Optional description of the lorebook's purpose.
     #[serde(default)]
     pub description: Option<String>,
     /// How many messages back to scan for trigger keys.
@@ -249,50 +226,40 @@ pub struct Lorebook {
     /// Whether scanning should recurse into previously matched entries.
     #[serde(default)]
     pub recursive_scanning: Option<bool>,
-    /// Extension data for the lorebook.
     #[serde(default)]
     pub extensions: HashMap<String, serde_json::Value>,
     /// Catch-all for vendor lorebook fields this build does not model.
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
-    /// The list of lorebook entries.
     pub entries: Vec<LorebookEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
-/// A single entry inside a lorebook.
 pub struct LorebookEntry {
     /// Trigger key-words / phrases that activate this entry.
     pub keys: Vec<String>,
     /// The content injected when this entry is activated.
     pub content: String,
-    /// Extension data for this entry.
     #[serde(default)]
     pub extensions: HashMap<String, serde_json::Value>,
-    /// Whether this entry is enabled.
     pub enabled: bool,
     /// Positional ordering among entries (lower = earlier).
     pub insertion_order: i32,
-    /// Whether key matching is case-sensitive.
     #[serde(default)]
     pub case_sensitive: Option<bool>,
-    /// Whether the keys should be treated as regular expressions.
     pub use_regex: bool,
     /// If true, this entry is always injected regardless of key matching.
     #[serde(default)]
     pub constant: Option<bool>,
-    /// Optional display name for the entry.
     #[serde(default)]
     pub name: Option<String>,
-    /// Priority override for ordering.
     #[serde(default)]
     pub priority: Option<i32>,
     /// Unique identifier (type varies by implementation).
     #[serde(default)]
     pub id: Option<serde_json::Value>,
-    /// Free-form comment about this entry.
     #[serde(default)]
     pub comment: Option<String>,
     /// Whether secondary keys are used for matching.
@@ -347,14 +314,11 @@ pub struct ExpressionAffect {
     pub fatigue: f32,
 }
 
-/// A single expression override in `extensions.expressions`.
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct ExpressionDefinition {
-    /// The expression name (e.g. `"happy"`, `"sad"`).
     pub name: String,
-    /// A human-readable description of what this expression conveys.
     #[serde(default)]
     pub description: String,
     /// VRM blend-shape weights to set when this expression fires.
@@ -373,13 +337,10 @@ pub struct ExpressionDefinition {
 /// A fully resolved expression ready for use at runtime.
 #[derive(Debug, Clone)]
 pub struct ResolvedExpression {
-    /// The expression name (e.g. `"happy"`, `"sad"`).
     pub name: String,
-    /// A human-readable description of what this expression conveys.
     pub description: String,
     /// VRM blend-shape weights: `expression_name` → weight.
     pub vrm: HashMap<String, f32>,
-    /// Affect point used for affect-to-expression mapping.
     pub affect: Option<ExpressionAffect>,
 }
 
@@ -516,8 +477,6 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
 }
 
 impl CharacterCardData {
-    /// Returns the display name for this character.
-    ///
     /// Prefers `nickname` over `name` when `nickname` is non-empty.
     pub fn get_character_name(&self) -> &str {
         if self.nickname.is_empty() {
@@ -554,7 +513,6 @@ impl CharacterCardData {
         &self.name
     }
 
-    /// Returns the `EneExtension` object if defined under `extensions.ene`.
     pub fn get_ene_extension(&self) -> Option<EneExtension> {
         self.extensions.ene.clone()
     }
@@ -571,7 +529,6 @@ impl CharacterCardData {
         serde_json::from_value(value.clone()).unwrap_or_default()
     }
 
-    /// Returns the author's note configuration, or `None` if no note is set.
     pub fn get_authors_note(&self) -> Option<(&str, usize)> {
         let note = self.authors_note.as_deref()?;
         if note.trim().is_empty() {
@@ -691,8 +648,6 @@ pub struct AffectBaseline {
 }
 
 impl AffectBaseline {
-    /// Clamp all dimensions to their valid ranges.
-    ///
     /// NaN and infinite inputs are replaced with 0.0.
     #[must_use]
     pub fn clamp(mut self) -> Self {
@@ -723,7 +678,6 @@ pub struct EneExtension {
     /// Structured motion catalog with layer classification.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_catalog: Option<crate::character_config::MotionCatalog>,
-    /// Optional expressions list
     #[schemars(default = "default_ene_expressions")]
     pub expressions: Option<Vec<ExpressionDefinition>>,
     /// Resting affect that decay converges toward; all zeros when absent.
@@ -787,12 +741,9 @@ impl EneExtension {
 #[serde(crate = "crate::serde", rename_all = "snake_case")]
 #[schemars(crate = "crate::schemars")]
 pub enum SpeechLength {
-    /// Short, clipped replies.
     Short,
-    /// Average-length replies.
     #[default]
     Normal,
-    /// Longer, fuller replies.
     Long,
 }
 
@@ -801,12 +752,9 @@ pub enum SpeechLength {
 #[serde(crate = "crate::serde", rename_all = "snake_case")]
 #[schemars(crate = "crate::schemars")]
 pub enum PolitenessLevel {
-    /// Casual, friendly register.
     #[default]
     Casual,
-    /// Polite register.
     Polite,
-    /// Formal register.
     Formal,
 }
 
@@ -819,7 +767,6 @@ pub enum PolitenessLevel {
 #[serde(crate = "crate::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "crate::schemars")]
 pub struct SpeechStyleDefinition {
-    /// Preferred reply length.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub length: Option<SpeechLength>,
     /// The character's first-person pronoun (e.g. `"私"`).
@@ -828,7 +775,6 @@ pub struct SpeechStyleDefinition {
     /// How the character addresses the user (e.g. `"きみ"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub second_person: Option<String>,
-    /// Politeness register.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub politeness: Option<PolitenessLevel>,
     /// Recurring verbal tics / sentence-ending particles (e.g. `"〜だよね"`).
@@ -856,7 +802,6 @@ pub struct LabeledStyleExample {
     pub intent: Option<String>,
     /// Situation label (e.g. `"angry"`, `"first_meeting"`, `"怒っているとき"`).
     pub label: String,
-    /// Example dialogue text.
     pub text: String,
 }
 
@@ -874,7 +819,6 @@ pub struct RelationshipStage {
     pub threshold: f32,
     /// Stage name (e.g. `"stranger"`, `"close friend"`).
     pub label: String,
-    /// Tone instruction for this stage.
     pub tone: String,
 }
 
@@ -921,7 +865,6 @@ pub struct SceneBehavior {
     /// Scene keywords; any match activates the behavior.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
-    /// Behavior instruction for the matching scene.
     pub behavior: String,
 }
 
@@ -957,7 +900,6 @@ pub struct MacroContext<'a> {
 }
 
 impl<'a> MacroContext<'a> {
-    /// A minimal context with just the two display names.
     #[must_use]
     pub fn names(char_name: &'a str, user_name: &'a str) -> Self {
         Self {
@@ -1275,7 +1217,6 @@ mod tests {
             "saving the same card twice must produce identical bytes"
         );
 
-        // The insertion order (not alphabetical) is what survives.
         let value: serde_json::Value = serde_json::from_str(&first).expect("valid JSON");
         let ext = value
             .pointer("/data/extensions")
@@ -1341,7 +1282,6 @@ mod tests {
             back.data.extra.get("vendor_flag"),
             Some(&serde_json::json!(true))
         );
-        // Unknown keys keep parse order relative to each other.
         assert_eq!(
             back.data.extra.keys().collect::<Vec<_>>(),
             vec!["vendor_block", "vendor_flag"]
@@ -1378,7 +1318,6 @@ mod tests {
         assert!(back.data.extra.is_empty());
     }
 
-    /// A fixed instant for the time-macro tests (2026-08-01 09:05:07 local).
     fn fixed_now() -> DateTime<Local> {
         use chrono::TimeZone;
         Local
@@ -1414,8 +1353,6 @@ mod tests {
 
     #[test]
     fn pick_differs_across_seeds_for_some_input() {
-        // With five options and two distinct seeds, at least one of several
-        // option lists should resolve to a different choice.
         let lists = ["a,b,c,d,e", "v,w,x,y,z", "1,2,3,4,5", "p,q,r,s,t"];
         let mut any_differ = false;
         for list in lists {
@@ -1559,7 +1496,6 @@ mod tests {
                 (3, "Three.".to_string())
             ]
         );
-        // A card without greetings yields no options.
         assert!(CharacterCardData::default().greeting_options().is_empty());
     }
 

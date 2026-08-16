@@ -5,8 +5,6 @@ use std::sync::Arc;
 
 use crate::sandbox::{RepoScope, SandboxRef};
 
-/// Built-in read-only git tool provider.
-///
 /// Dispatch is handled by [`ActionSetProvider`]; the workspace sandbox scope
 /// is threaded through hooks.
 pub struct GitToolProvider {
@@ -14,7 +12,6 @@ pub struct GitToolProvider {
 }
 
 impl GitToolProvider {
-    /// Creates the read-only git tool provider and its shared sandbox scope.
     pub fn new() -> Self {
         let scope: SandboxRef = Arc::new(std::sync::RwLock::new(None));
         let actions: Vec<Box<dyn ToolAction>> = vec![

@@ -72,7 +72,6 @@ use crate::model::Skeleton;
 /// [`HumanoidBoneRegistry`] rather than this raw name table.
 #[doc(hidden)]
 pub const HUMANOID_BONE_NAMES: &[&str] = &[
-    // Trunk + head (9)
     "hips",
     "spine",
     "chest",
@@ -82,7 +81,6 @@ pub const HUMANOID_BONE_NAMES: &[&str] = &[
     "jaw",
     "lefteye",
     "righteye",
-    // Arms (8)
     "leftshoulder",
     "leftupperarm",
     "leftlowerarm",
@@ -91,42 +89,36 @@ pub const HUMANOID_BONE_NAMES: &[&str] = &[
     "rightupperarm",
     "rightlowerarm",
     "righthand",
-    // Thumbs (6)
     "leftthumbmetacarpal",
     "leftthumbproximal",
     "leftthumbdistal",
     "rightthumbmetacarpal",
     "rightthumbproximal",
     "rightthumbdistal",
-    // Index fingers (6)
     "leftindexproximal",
     "leftindexintermediate",
     "leftindexdistal",
     "rightindexproximal",
     "rightindexintermediate",
     "rightindexdistal",
-    // Middle fingers (6)
     "leftmiddleproximal",
     "leftmiddleintermediate",
     "leftmiddledistal",
     "rightmiddleproximal",
     "rightmiddleintermediate",
     "rightmiddledistal",
-    // Ring fingers (6)
     "leftringproximal",
     "leftringintermediate",
     "leftringdistal",
     "rightringproximal",
     "rightringintermediate",
     "rightringdistal",
-    // Little fingers (6)
     "leftlittleproximal",
     "leftlittleintermediate",
     "leftlittledistal",
     "rightlittleproximal",
     "rightlittleintermediate",
     "rightlittledistal",
-    // Legs (8)
     "leftupperleg",
     "leftlowerleg",
     "leftfoot",
@@ -145,7 +137,6 @@ pub const HUMANOID_BONE_NAMES: &[&str] = &[
 pub struct VrmBone(pub String);
 
 impl VrmBone {
-    /// Borrow the inner canonical string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -213,7 +204,6 @@ pub struct HumanoidBoneEntry {
     /// (rare but spec-legal — e.g. an `_experimental` bone
     /// that the exporter didn't register with the skin).
     pub joint: Option<usize>,
-    /// Local rest-pose transform.
     pub rest: BoneRestTransform,
 }
 
@@ -261,7 +251,6 @@ impl HumanoidBoneRegistry {
         self.entries.get(&bone)
     }
 
-    /// Convenience accessor for the `head` bone.
     pub fn head(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("head")
     }
@@ -279,17 +268,14 @@ impl HumanoidBoneRegistry {
         self.by_name("chest")
     }
 
-    /// Convenience accessor for the `jaw` bone.
     pub fn jaw(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("jaw")
     }
 
-    /// Convenience accessor for the `leftEye` bone.
     pub fn left_eye(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("lefteye")
     }
 
-    /// Convenience accessor for the `rightEye` bone.
     pub fn right_eye(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("righteye")
     }
@@ -304,12 +290,10 @@ impl HumanoidBoneRegistry {
         self.entries.keys().cloned().collect()
     }
 
-    /// Number of registered bones.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// `true` when no bones are registered.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -333,9 +317,6 @@ impl HumanoidBoneRegistry {
 /// `ene-desktop` never needs to canonicalize a raw bone name itself.
 #[doc(hidden)]
 pub fn canonicalize_bone_name(raw: &str) -> Option<VrmBone> {
-    // First normalise: drop separators and lowercase. This
-    // collapses "Hips" / "hips" / "HIPS" / "left_upper_arm" /
-    // "left-upper-arm" / "LeftUpperArm" to "leftupperarm".
     let mut normalised = String::with_capacity(raw.len());
     for ch in raw.chars() {
         if ch == '_' || ch == '-' || ch == ' ' {
@@ -345,9 +326,6 @@ pub fn canonicalize_bone_name(raw: &str) -> Option<VrmBone> {
             normalised.push(lower);
         }
     }
-    // Then look up the spec form. The match arm is the
-    // canonical name; we only need to verify it is in the
-    // `HUMANOID_BONE_NAMES` set.
     if HUMANOID_BONE_NAMES.contains(&normalised.as_str()) {
         Some(VrmBone(normalised))
     } else {
@@ -410,7 +388,6 @@ pub fn load_humanoid_bones(gltf: &gltf::Gltf, skel: &Skeleton) -> HumanoidBoneRe
         // None when the bone is outside the skin — legal but rare; keep the entry.
         let joint = skel.joint_to_node.iter().position(|&n| n == node_idx);
 
-        // A missing / out-of-range node is logged and falls back to the identity transform.
         let rest = if let Some(node) = gltf.document.nodes().nth(node_idx) {
             // gltf 1.4's `Transform` exposes
             // `decomposed() -> ([f32;3], [f32;4], [f32;3])`
@@ -618,9 +595,6 @@ mod tests {
     /// document).
     #[test]
     fn registry_built_from_canonicalize_then_insert() {
-        // Simulate what `load_humanoid_bones` does for
-        // each entry: canonicalise the bone name, then
-        // insert the resolved entry.
         let mut reg = HumanoidBoneRegistry::new();
         for raw in ["Hips", "Head", "LeftUpperArm", "left_eye", "right_eye"] {
             let canonical = canonicalize_bone_name(raw).expect("known bone");

@@ -2,7 +2,6 @@
 //!
 //! Plugin binary providing utility operations:
 //! question prompting, todo list management, time, and system info.
-#![warn(missing_docs)]
 #![expect(
     clippy::unused_async,
     clippy::option_option,
@@ -21,17 +20,11 @@
     )
 )]
 
-/// Action modules for each tool.
 pub mod action;
-/// Tool lifecycle and provider integration.
 pub mod provider;
-/// Shared result formatting helpers.
 pub mod result;
-/// DB schema declaration for utility tables.
 pub mod schema;
-/// Background task registry for timers and notifications.
 pub mod task_registry;
-/// DB-backed todo store.
 pub mod todo_store;
 
 use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};

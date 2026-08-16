@@ -24,7 +24,6 @@ use serde::Deserialize;
 use crate::cli::CatalogAction;
 use crate::output::{ErrorCode, OutputError};
 
-/// Parsed `--spec` file: catalog metadata plus one entry per artifact.
 #[derive(Debug, Deserialize)]
 struct CatalogSpec {
     /// Catalog version; `--version` on the CLI overrides this.
@@ -40,7 +39,6 @@ struct CatalogSpec {
 #[derive(Debug, Clone, Deserialize)]
 struct SpecArtifact {
     id: String,
-    /// `plugin`, `sidecar`, or `model`.
     kind: String,
     version: String,
     /// Ordered HTTPS mirror URLs; the first reachable one wins.
@@ -77,7 +75,6 @@ fn default_version() -> u64 {
     1
 }
 
-/// Runs one `catalog` subcommand.
 pub fn run(action: &CatalogAction, json: bool) -> Result<i32, OutputError> {
     let result = match action {
         CatalogAction::Keygen { out_dir } => keygen(out_dir),
@@ -123,7 +120,6 @@ pub fn run(action: &CatalogAction, json: bool) -> Result<i32, OutputError> {
     Ok(0)
 }
 
-/// Machine-readable result of a successful catalog operation.
 #[derive(Debug, serde::Serialize)]
 struct CatalogResult {
     op: &'static str,

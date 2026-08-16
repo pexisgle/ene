@@ -27,31 +27,24 @@ pub enum EneCognitionError {
     #[error(transparent)]
     MemoryPort(#[from] ene_core::MemoryPortError),
 
-    /// Configuration error.
     #[error(transparent)]
     Config(#[from] ene_config::EneConfigError),
 
-    /// Provider error.
     #[error(transparent)]
     Provider(#[from] ene_ai::LlmProviderError),
 
-    /// Embedding provider error.
     #[error(transparent)]
     Embedding(#[from] ene_ai::EmbeddingError),
 
-    /// Memory extraction failed.
     #[error("Memory extraction failed: {0}")]
     ExtractionFailed(String),
 
-    /// Memory arbitration failed.
     #[error("Memory arbitration failed: {0}")]
     ArbitrationFailed(String),
 
-    /// Recall planning failed.
     #[error("Recall planning failed: {0}")]
     RecallFailed(String),
 
-    /// Emotion computation failed.
     #[error("Emotion computation failed: {0}")]
     EmotionFailed(String),
 
@@ -59,15 +52,12 @@ pub enum EneCognitionError {
     #[error(transparent)]
     Classifier(#[from] crate::emotion::classifier::ClassifierError),
 
-    /// Prompt composition failed.
     #[error("Prompt composition failed: {0}")]
     PromptBuildError(String),
 
-    /// Context budget exceeded.
     #[error("Context budget exceeded: {0}")]
     BudgetExceeded(String),
 
-    /// Invalid state transition.
     #[error("Invalid state transition: {0}")]
     InvalidState(String),
 
@@ -112,11 +102,8 @@ pub type CognitionError = EneCognitionError;
 /// that can never occur there.
 #[derive(Error, Debug)]
 pub enum MindError {
-    /// Cognitive pipeline failure — see [`EneCognitionError`].
     #[error(transparent)]
     Cognition(#[from] EneCognitionError),
-    /// Session / split / compression failure — see
-    /// [`crate::session::EneSessionError`].
     #[error(transparent)]
     Session(#[from] crate::session::EneSessionError),
 }

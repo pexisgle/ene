@@ -47,13 +47,10 @@ const DECISION_COMPLETION_TIMEOUT_SECS: u64 = 20;
 pub(crate) struct LlamaServerPlugin;
 
 impl ene_plugin::ConfigurablePlugin for LlamaServerPlugin {
-    /// Receives the plugin configuration blob from the host at handshake
-    /// time (`plugins.list.llama-server.config`).
     fn set_config(&self, config: &Value) {
         config::set_config(config);
     }
 
-    /// Receives the per-model profile map (`plugins.list.llama-server.profiles`).
     fn set_profiles(&self, profiles: &Value) {
         config::set_profiles(profiles);
     }
@@ -362,9 +359,6 @@ mod tests {
         .with_capability_declarations(super::LlamaServerPlugin::provides(), Vec::new())
     }
 
-    /// The full host round-trip: handshake (with config + profiles) →
-    /// capability declarations → live `SetConfig` → `GetConfigSchema` →
-    /// inference error for an unconfigured model.
     #[tokio::test]
     async fn handshake_declares_capabilities_and_round_trips_config() {
         let socket_path = test_socket_path("contract");
@@ -428,8 +422,6 @@ mod tests {
         };
         assert_eq!(version, PLUGIN_IPC_PROTOCOL_VERSION);
 
-        // Capability declaration: kind `"local"` provider spec + embedding
-        // kind + the same `provides` contract as the in-process plugin.
         assert_eq!(capabilities.llm_providers.len(), 1);
         let spec = &capabilities.llm_providers[0];
         assert_eq!(spec.kind, "local");
@@ -492,8 +484,6 @@ mod tests {
         assert!(schema.pointer("/properties/server_args").is_some());
         assert!(schema.pointer("/properties/startup_timeout_secs").is_some());
 
-        // Inference for an unconfigured model fails typed (no sidecar spawn,
-        // no panic) — exercises the real profile-lookup path.
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::CreateChatStream {
@@ -557,7 +547,6 @@ mod tests {
             ]
         );
 
-        // The resource class follows the delivered acceleration config.
         super::config::set_config(&serde_json::json!({"acceleration": "vulkan"}));
         let spec = super::LlamaServerPlugin.llm_capabilities();
         assert_eq!(

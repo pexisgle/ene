@@ -1,5 +1,3 @@
-//! Session, conversation-log, and export/import queries.
-
 use super::{ConversationLogEntry, EneMemoryError, MemoryStore};
 use crate::entities;
 use chrono::Utc;
@@ -37,7 +35,6 @@ fn escape_like_pattern(query: &str) -> String {
 }
 
 impl MemoryStore {
-    /// Inserts a conversation log entry.
     pub async fn insert_log(
         &self,
         session_id: &str,
@@ -101,8 +98,6 @@ impl MemoryStore {
         Ok((user_res.id, assistant_res.id))
     }
 
-    /// Spawns a fire-and-forget task that inserts a conversation log entry.
-    ///
     /// Errors are logged at the `error` tracing level. Takes an `Arc<Self>`
     /// so the store outlives the spawned task.
     pub fn spawn_insert_log(
@@ -127,7 +122,6 @@ impl MemoryStore {
         });
     }
 
-    /// Returns all conversation logs for a session.
     pub async fn get_logs_by_session(
         &self,
         session_id: &str,
@@ -148,9 +142,6 @@ impl MemoryStore {
             .collect())
     }
 
-    /// Inserts a session metadata row, or refreshes `updated_at` if the
-    /// `session_id` already exists.
-    ///
     /// Only `updated_at` is bumped on conflict; `card_name`, `title`,
     /// `turn_count`, and `archived` are left untouched. Returns the row id.
     pub async fn upsert_session(
@@ -187,8 +178,6 @@ impl MemoryStore {
         Ok(row.id)
     }
 
-    /// Updates a session's `updated_at` timestamp and `turn_count`.
-    ///
     /// No-op if the session does not exist.
     pub async fn touch_session(
         &self,
@@ -211,7 +200,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Returns the metadata for a single session, if present.
     pub async fn get_session(
         &self,
         session_id: &str,
@@ -224,8 +212,6 @@ impl MemoryStore {
         Ok(row.map(Into::into))
     }
 
-    /// Lists sessions, newest `updated_at` first.
-    ///
     /// Archived sessions are excluded unless `include_archived` is set.
     pub async fn list_sessions(
         &self,
@@ -245,8 +231,6 @@ impl MemoryStore {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    /// Sets the archive flag for a session.
-    ///
     /// Returns whether a row was actually updated (i.e. the session exists).
     pub async fn set_session_archived(
         &self,
@@ -265,7 +249,6 @@ impl MemoryStore {
         Ok(res.rows_affected > 0)
     }
 
-    /// Returns all conversation messages for a session, oldest first.
     pub async fn list_messages(
         &self,
         session_id: &str,

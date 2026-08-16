@@ -19,12 +19,10 @@ pub use ene_plugin_proto::ResourceClass;
 pub struct EngineId(String);
 
 impl EngineId {
-    /// Builds an id from any string-like value.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
-    /// The id as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -49,8 +47,6 @@ impl From<String> for EngineId {
     }
 }
 
-/// One capability an engine may declare support for.
-///
 /// Kept as a fieldless enum (rather than separate `bool` flags on
 /// [`EngineDescriptor`]) so [`CapabilitySet`] can store and query them
 /// uniformly, and so adding a new capability later is one new variant, not a
@@ -58,28 +54,19 @@ impl From<String> for EngineId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Capability {
-    /// Text chat completion.
     Chat,
-    /// Accepts image input in chat messages.
     Vision,
-    /// Produces vector embeddings.
     Embed,
-    /// Text-to-speech synthesis.
     Tts,
-    /// Speech-to-text transcription.
     Stt,
     /// Grammar / JSON-schema constrained output.
     Grammar,
-    /// Accepts tool/function-calling definitions.
     Tools,
-    /// Delivers output incrementally rather than only as one final result.
     Streaming,
 }
 
 const CAPABILITY_COUNT: u32 = 8;
 
-/// A small bitset of [`Capability`] values.
-///
 /// A hand-rolled `u16` bitset rather than a `bitflags` dependency: the
 /// workspace does not otherwise depend on `bitflags`, and eight fixed,
 /// crate-owned variants do not need an extensibility mechanism a macro would
@@ -88,25 +75,21 @@ const CAPABILITY_COUNT: u32 = 8;
 pub struct CapabilitySet(u16);
 
 impl CapabilitySet {
-    /// The empty set.
     #[must_use]
     pub const fn empty() -> Self {
         Self(0)
     }
 
-    /// Returns a copy of this set with `cap` added.
     #[must_use]
     pub const fn with(self, cap: Capability) -> Self {
         Self(self.0 | (1 << cap as u16))
     }
 
-    /// Whether `cap` is in this set.
     #[must_use]
     pub const fn contains(self, cap: Capability) -> bool {
         self.0 & (1 << cap as u16) != 0
     }
 
-    /// Builds a set from an iterator of capabilities.
     #[must_use]
     pub fn from_capabilities(caps: impl IntoIterator<Item = Capability>) -> Self {
         caps.into_iter().fold(Self::empty(), Self::with)
@@ -131,10 +114,8 @@ const _: () = assert!(
 /// when a caller constructs the underlying handle.
 #[derive(Debug, Clone, Copy)]
 pub struct ConcurrencyHint {
-    /// Advisory: how many jobs for this engine should be allowed to run at
-    /// once. Not enforced by a single [`ene_infer::EngineHandle`] today.
+    /// Not enforced by a single [`ene_infer::EngineHandle`] today.
     pub max_in_flight: usize,
-    /// Suggested [`ene_infer::EngineConfig::queue_depth`] for this engine.
     pub queue_depth: usize,
 }
 
@@ -169,14 +150,10 @@ impl TryFrom<ConcurrencyHint> for ene_plugin_proto::ConcurrencyHint {
     }
 }
 
-/// Declared capability, concurrency, and resource metadata for one engine.
 #[derive(Debug, Clone)]
 pub struct EngineDescriptor {
-    /// Stable identifier for this engine instance.
     pub id: EngineId,
-    /// What this engine can do.
     pub capabilities: CapabilitySet,
-    /// Advisory concurrency sizing.
     pub concurrency: ConcurrencyHint,
     /// The physical resource this engine's jobs contend on — the key
     /// [`crate::engine_adapter::resource::ResourceRegistry`] uses to share an
@@ -185,9 +162,6 @@ pub struct EngineDescriptor {
 }
 
 impl EngineDescriptor {
-    /// Builds a descriptor with [`ConcurrencyHint::default`] (the
-    /// conservative local-model default) and the given id, capabilities, and
-    /// resource class.
     #[must_use]
     pub fn new(
         id: impl Into<EngineId>,
@@ -202,7 +176,6 @@ impl EngineDescriptor {
         }
     }
 
-    /// Sets an explicit [`ConcurrencyHint`], overriding the default.
     #[must_use]
     pub fn with_concurrency(mut self, concurrency: ConcurrencyHint) -> Self {
         self.concurrency = concurrency;
@@ -210,9 +183,6 @@ impl EngineDescriptor {
     }
 }
 
-/// Per-[`ResourceClass`] semaphore permit overrides, applied at process
-/// startup before any engine is spawned.
-///
 /// A thin, explicit alternative to hidden global mutable state: callers that
 /// want non-default budgets build one of these and hand it to
 /// [`crate::engine_adapter::resource::ResourceRegistry::configure_all`] once,
@@ -221,14 +191,11 @@ impl EngineDescriptor {
 pub struct ResourceBudgets(pub(crate) HashMap<ResourceClass, usize>);
 
 impl ResourceBudgets {
-    /// An empty override set — every class uses
-    /// [`crate::engine_adapter::resource::default_permits`].
     #[must_use]
     pub fn new() -> Self {
         Self(HashMap::new())
     }
 
-    /// Overrides the permit count for `class`.
     #[must_use]
     pub fn with_permits(mut self, class: ResourceClass, permits: usize) -> Self {
         self.0.insert(class, permits.max(1));

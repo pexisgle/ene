@@ -57,7 +57,6 @@
 //! a relevance-driven multiplicative form, and the tool-selection score is a
 //! normalized, field-count-independent weighted average with a negative-example
 //! gate. Both policies live here so the memory and tool sides cannot diverge.
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")

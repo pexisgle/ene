@@ -17,17 +17,12 @@ use crate::error::VrmResult;
 /// `ScalingMode::FixedVertical { viewport_height: 2.6 }`).
 pub const VIEWPORT_HEIGHT: f32 = 2.6;
 
-/// Default camera position.
 pub const DEFAULT_EYE: [f32; 3] = [0.0, 0.3, 3.0];
 
-/// Default look-at target.
 pub const DEFAULT_TARGET: [f32; 3] = [0.0, 0.0, 0.0];
 
-/// Up vector.
 pub const DEFAULT_UP: [f32; 3] = [0.0, 1.0, 0.0];
 
-/// CPU-side orthographic camera that builds a per-frame
-/// [`CameraUniform`].
 #[derive(Debug, Clone)]
 pub struct OrthographicCamera {
     eye: [f32; 3],
@@ -52,26 +47,19 @@ impl Default for OrthographicCamera {
 }
 
 impl OrthographicCamera {
-    /// Set the aspect ratio (width / height). Called every frame by
-    /// the renderer from the wgpu surface size.
     pub const fn set_aspect(&mut self, aspect: f32) {
         self.aspect = aspect.max(0.0001);
     }
 
-    /// Update the camera eye and target. The runtime wires
-    /// these to `CharacterState::character_position` and the
-    /// `LookAt` target.
     pub const fn look_at(&mut self, eye: [f32; 3], target: [f32; 3]) {
         self.eye = eye;
         self.target = target;
     }
 
-    #[expect(missing_docs, reason = "field name is self-documenting")]
     pub const fn eye(&self) -> [f32; 3] {
         self.eye
     }
 
-    #[expect(missing_docs, reason = "field name is self-documenting")]
     pub const fn target(&self) -> [f32; 3] {
         self.target
     }
@@ -107,7 +95,6 @@ impl OrthographicCamera {
         scale_x.min(scale_y).max(0.0001)
     }
 
-    /// Build the per-frame uniform.
     pub fn uniform(&self) -> VrmResult<CameraUniform> {
         let view = self.debug_view();
         let half_h = self.viewport_height * 0.5;
@@ -234,10 +221,6 @@ pub fn pixel_to_ndc(px: f32, py: f32, viewport: (u32, u32)) -> Vec2 {
     Vec2::new((px / w).mul_add(2.0, -1.0), -(py / h).mul_add(2.0, -1.0))
 }
 
-/// Convert NDC to a view-space position on the orthographic
-/// camera's near plane, deriving the aspect from `viewport`.
-/// Use this overload when you have the viewport but not the
-/// aspect pre-computed.
 pub fn ndc_to_view_pos(ndc: Vec2, viewport: (u32, u32), view_z: f32) -> Vec3 {
     let aspect = (viewport.0.max(1) as f32 / viewport.1.max(1) as f32).max(MIN_ASPECT);
     ndc_to_view_pos_with_aspect(ndc, aspect, view_z)
@@ -256,10 +239,6 @@ pub fn ndc_to_view_pos_with_aspect(ndc: Vec2, aspect: f32, view_z: f32) -> Vec3 
     Vec3::new(ndc.x * half_w, ndc.y * half_h, view_z)
 }
 
-/// Inverse-transform a view-space point back to world space
-/// using the camera's `view` matrix. Convenience wrapper around
-/// `view.inverse().transform_point3(p)` so callers do not have
-/// to think about the inverse.
 pub fn view_pos_to_world(view_pos: Vec3, view: Mat4) -> Vec3 {
     view.inverse().transform_point3(view_pos)
 }

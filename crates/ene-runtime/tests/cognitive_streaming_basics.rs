@@ -1,5 +1,3 @@
-//! Basic integration tests for cognitive runtime streaming.
-
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,

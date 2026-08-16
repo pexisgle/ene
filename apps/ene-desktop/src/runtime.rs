@@ -35,7 +35,6 @@ use device_query::DeviceQuery;
 /// model's normalized bounds so it is not flush against the viewport edges.
 const CHARACTER_AUTO_FIT_MARGIN: f32 = 0.9;
 
-/// Top-level runtime. One per process.
 pub struct Runtime {
     state: AppState,
     event_tx: AppEventSender,
@@ -442,8 +441,6 @@ impl Runtime {
 }
 
 impl ApplicationHandler for Runtime {
-    /// Create the winit windows, init GPU surfaces, load the VRM, and set
-    /// up platform-specific click-through / tray.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
 
@@ -703,9 +700,6 @@ impl ApplicationHandler for Runtime {
 }
 
 impl Runtime {
-    /// Push the persisted theme preference into the shared theme state,
-    /// then propagate a resolved-theme change to every window's native
-    /// decorations exactly once.
     fn sync_theme(&mut self) {
         crate::theme::set_preference(self.state.settings.theme());
         let preference = self.state.settings.theme();
@@ -1128,9 +1122,7 @@ impl Runtime {
         }
     }
 
-    /// Schedule the next winit wake-up based on
-    /// `settings.graphics.target_fps`. `0` means "poll
-    /// continuously".
+    /// `0` means "poll continuously".
     fn set_frame_deadline(&mut self, event_loop: &ActiveEventLoop) {
         let target_fps = self.state.settings.graphics().resolved().target_fps;
         if target_fps == 0 {
@@ -1534,8 +1526,6 @@ impl Runtime {
             }
         }
 
-        // Beat sync: drain pulses relayed through the runtime chat bus and
-        // drive the avatar's procedural sway + locomotion speed sync.
         {
             // A capture thread that died (device unplug, stream error) must
             // not leave the avatar waiting for pulses that will never come;
@@ -1631,18 +1621,12 @@ impl Runtime {
             layer.apply_overrides(&expressions_meta);
         }
 
-        // Viseme lip-sync: while TTS audio is playing, read the smoothed
-        // mouth-shape weights from the shared viseme driver and apply them
-        // on top of the current expression, then re-run overrides so the
-        // morph targets uploaded to the GPU reflect the viseme blend.
         #[cfg(feature = "voice")]
         {
             let tts_playing = app
                 .world()
                 .get_resource::<crate::audio::AudioState>()
                 .is_some_and(crate::audio::AudioState::is_tts_playing);
-            // Consume queued PCM up to the current playback position so the
-            // analyzer only sees samples that are actually playing.
             if tts_playing
                 && let Some(viseme) = app.world().get_resource::<crate::audio::VisemeState>()
             {
@@ -2025,7 +2009,6 @@ fn cw_char_window_has_focus(cw: &CharacterWindow) -> bool {
     cw.window.has_focus()
 }
 
-/// Compute the cursor's 2D world position for the drag hit-test.
 fn cursor_world_2d_for_char_window(
     cw: &CharacterWindow,
     eye: [f32; 3],
@@ -2053,7 +2036,6 @@ fn cursor_world_2d_for_char_window(
     )
 }
 
-/// Per-frame click-through update for the character window.
 fn update_char_window_cursor_and_hittest(
     state: &mut AppState,
     device_state: &device_query::DeviceState,
@@ -2301,8 +2283,6 @@ impl CharacterWindow {
         self.surface.configure(device, &self.config);
     }
 
-    /// Acquire the current surface texture, hand the resulting
-    /// `TextureView` to `draw_fn`, and present the frame.
     fn with_surface_view(
         &self,
         draw_fn: impl FnOnce(&wgpu::TextureView),

@@ -17,9 +17,7 @@ use crate::event::settings::OpenSettings;
 use crate::events::{AiStreamUpdate, AppEvent};
 use crate::resource::{event_channels::EventChannels, exit::ExitRequested};
 
-/// Drains the `AppEvent` bus and writes typed [`Message`]s.
-/// Runs in the `First` stage so any `Update` systems see fresh
-/// events.
+/// Runs in the `First` stage so any `Update` systems see fresh events.
 ///
 /// This pump is the single producer of every typed `Message` the
 /// desktop runtime consumes; per-frame actions are handled by the

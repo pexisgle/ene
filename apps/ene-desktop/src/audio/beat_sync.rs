@@ -54,13 +54,10 @@ use rustfft::{Fft, FftPlanner};
 
 use crate::ai_bridge::AiBridge;
 
-/// FFT window size in samples (~85 ms at 48 kHz).
 const FFT_WINDOW: usize = 4096;
 
-/// Samples advanced between FFTs (~21 ms at 48 kHz).
 const FFT_HOP: usize = 1024;
 
-/// Low-frequency ("kick") band analyzed for beat onsets, in Hz.
 const KICK_BAND_HZ: (f32, f32) = (20.0, 150.0);
 
 /// Upper bound of the reference low band the kick band is compared against.
@@ -89,22 +86,17 @@ const ENERGY_FLOOR: f32 = 1e-4;
 /// so a continuous tone starting at capture time is not an onset.
 const WARMUP_ANALYSES: u8 = 3;
 
-/// How many recent inter-onset intervals the BPM estimate keeps.
 const INTERVAL_HISTORY: usize = 8;
 
-/// How many of the most recent intervals the median BPM uses.
 const BPM_MEDIAN_WINDOW: usize = 4;
 
-/// Plausible tempo range the BPM estimate is clamped to.
 const BPM_RANGE: Range<f32> = 60.0..180.0;
 
-/// How long the capture loop polls the shutdown flag before joining.
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A single detected beat, normalized for the runtime relay.
 #[derive(Debug, Clone, Copy)]
 pub struct BeatPulse {
-    /// Estimated tempo in beats per minute.
     pub bpm: f32,
     /// Normalized onset strength in `[0, 1]`.
     pub intensity: f32,
@@ -113,16 +105,12 @@ pub struct BeatPulse {
 /// Errors returned when the beat-sync capture thread cannot start.
 #[derive(Debug, thiserror::Error)]
 pub enum BeatSyncError {
-    /// The OS refused to spawn the capture thread.
     #[error("failed to spawn beat sync thread: {0}")]
     Spawn(String),
-    /// No loopback candidate device exists (see the module docs).
     #[error("no loopback (monitor) audio device found")]
     NoLoopbackDevice,
-    /// The loopback device reported no supported input configuration.
     #[error("loopback device has no supported input configuration: {0}")]
     NoSupportedConfig(String),
-    /// The negotiated format is not linear PCM (e.g. raw DSD).
     #[error("unsupported loopback sample format: {0}")]
     UnsupportedFormat(String),
 }
@@ -151,7 +139,6 @@ impl BeatSyncHandle {
         }
     }
 
-    /// Whether the capture stream is currently running.
     #[must_use]
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Relaxed)
@@ -269,7 +256,6 @@ fn beat_sync_loop(
     }
 }
 
-/// Open the loopback capture device and its default input configuration.
 fn open_loopback(
     configured: Option<&str>,
 ) -> Result<(cpal::Device, cpal::StreamConfig, cpal::SampleFormat), BeatSyncError> {
@@ -330,7 +316,6 @@ fn pick_loopback_device<'a>(
         .map(str::to_string)
 }
 
-/// Whether `format` is linear PCM the detector can decode.
 fn is_linear_pcm(format: cpal::SampleFormat) -> bool {
     matches!(
         format,
@@ -397,7 +382,6 @@ impl CaptureState {
     }
 }
 
-/// Decode a cpal data buffer into mono `f32`, reusing the caller's scratch.
 fn decode_to_mono<T: cpal::SizedSample>(data: &cpal::Data, channels: usize, mono: &mut Vec<f32>)
 where
     f32: cpal::FromSample<T>,
@@ -439,7 +423,6 @@ pub struct BeatDetector {
 }
 
 impl BeatDetector {
-    /// Build a detector for audio at `sample_rate` Hz.
     pub fn new(sample_rate: u32) -> Self {
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(FFT_WINDOW);
@@ -474,7 +457,6 @@ impl BeatDetector {
         }
     }
 
-    /// Feed mono PCM and return a detected beat, if any.
     pub fn process(&mut self, samples: &[f32], sample_rate: u32) -> Option<BeatPulse> {
         let mut pulse = None;
         for &sample in samples {
@@ -597,7 +579,6 @@ impl LowPass {
     }
 }
 
-/// FFT bins covered by [`KICK_BAND_HZ`] at `sample_rate`, DC excluded.
 fn kick_band_bins(sample_rate: u32) -> Range<usize> {
     let bin_width = sample_rate as f32 / FFT_WINDOW as f32;
     let start = ((KICK_BAND_HZ.0 / bin_width).ceil() as usize).max(1);
@@ -605,7 +586,6 @@ fn kick_band_bins(sample_rate: u32) -> Range<usize> {
     start..end
 }
 
-/// FFT bins covered by 20 Hz up to [`LOW_BAND_HZ`] at `sample_rate`.
 fn low_band_bins(sample_rate: u32) -> Range<usize> {
     let bin_width = sample_rate as f32 / FFT_WINDOW as f32;
     let start = ((KICK_BAND_HZ.0 / bin_width).ceil() as usize).max(1);

@@ -1,5 +1,3 @@
-//! AI plugin.
-//!
 //! Owns the [`AiBridgeResource`] / [`ProcessingFlag`]
 //! resources and the per-action AI consumer systems.
 //!

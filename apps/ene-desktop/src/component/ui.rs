@@ -23,7 +23,7 @@ use crate::settings_ui::{PageKind, input::SettingsInputState};
 #[derive(Component, Default)]
 pub struct UiWindow;
 
-/// Currently-visible page; mirrors `SettingsUi::current_page`.
+/// Mirrors `SettingsUi::current_page`.
 #[derive(Component, Default)]
 #[cfg_attr(
     not(test),
@@ -31,9 +31,8 @@ pub struct UiWindow;
 )]
 pub struct UiPage(pub PageKind);
 
-/// Editable text-field buffers; mirrors `SettingsUi::input`. Synced
-/// from the on-disk `CharacterSettings` via `sync_from_settings` when
-/// the window transitions hidden → visible.
+/// Mirrors `SettingsUi::input`; synced from the on-disk `CharacterSettings`
+/// via `sync_from_settings` when the window transitions hidden → visible.
 #[derive(Component, Default)]
 #[cfg_attr(
     not(test),
@@ -41,20 +40,17 @@ pub struct UiPage(pub PageKind);
 )]
 pub struct UiInputDrafts(pub SettingsInputState);
 
-/// Animation play / pause toggle; mirrors `SettingsUi::animation`.
+/// Mirrors `SettingsUi::animation`.
 #[derive(Component, Default)]
 pub struct UiAnimation(pub AnimationControl);
 
-/// Pending emotion commands emitted by the AI bridge or the
-/// settings UI's manual-expression buttons; mirrors
-/// `SettingsUi::emotion_queue`. The `apply_emotions_system` (in
+/// Mirrors `SettingsUi::emotion_queue`; `apply_emotions_system` (in
 /// `AiPlugin`) drains this queue into `EmotionPipelineState::pending`.
 #[derive(Component, Default)]
 pub struct UiEmotionQueue(pub EmotionQueue);
 
-/// Runtime-startup `Instant` so that `now_secs` used by
-/// `apply_action` is consistent across systems; mirrors
-/// `SettingsUi::started_at`.
+/// Keeps `now_secs` used by `apply_action` consistent across systems;
+/// mirrors `SettingsUi::started_at`.
 #[derive(Component)]
 #[cfg_attr(
     not(test),
@@ -79,9 +75,8 @@ impl Default for UiStartedAt {
 #[derive(Component, Default)]
 pub struct UiStateComponent(pub UiState);
 
-/// Bundle that assembles every UI component on a single entity.
-/// `SettingsUiPlugin::build` adds a startup system that spawns one
-/// of these into the bevy world.
+/// `SettingsUiPlugin::build` adds a startup system that spawns one of these
+/// into the bevy world.
 #[derive(Bundle, Default)]
 pub struct SettingsUiBundle {
     pub window: UiWindow,

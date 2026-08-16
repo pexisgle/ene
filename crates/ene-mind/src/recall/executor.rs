@@ -1,15 +1,11 @@
-//! Maps hybrid search output from `ene-store` into explainable recall results.
-
 use ene_core::ScoredMemory;
 
 use super::result::{RecalledMemory, explain_scored_memories};
 
-/// Maps hybrid search results into explainable recalled memories.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RecallResultMapper;
 
 impl RecallResultMapper {
-    /// Convert hybrid search results into explainable recalled memories.
     pub fn map(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory> {
         explain_scored_memories(scored)
     }

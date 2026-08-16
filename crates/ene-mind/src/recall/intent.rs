@@ -12,8 +12,6 @@ pub enum RecallIntent {
     Procedure,
 }
 
-/// Infers heuristic recall intents from the current turn.
-///
 /// Keyword matching is driven by the language pack for `lang` (see
 /// [`ene_config::PatternLibrary`]) — its `intent_keywords` section in
 /// particular — so tuning the corpus or adding a language needs no Rust
@@ -157,7 +155,7 @@ mod tests {
     fn keywords_are_per_language_not_a_union() {
         // Keyword matching is narrowed: it follows the pack for the configured
         // language only. A Japanese topic must not trigger intents via the
-        // English pack, and vice versa — the previous en+ja union is gone.
+        // English pack, and vice versa.
         assert_eq!(
             infer_intents("I like coffee", None, "ja"),
             vec![RecallIntent::Semantic]

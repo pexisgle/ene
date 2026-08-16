@@ -75,13 +75,13 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Sets an env var. Test-only; callers must hold [`ENV_LOCK`].
+    /// Test-only; callers must hold [`ENV_LOCK`].
     fn set_env(key: &'static str, val: &str) {
         // SAFETY: serialized by ENV_LOCK; no concurrent readers of these vars.
         unsafe { std::env::set_var(key, val) }
     }
 
-    /// Removes an env var. Test-only; callers must hold [`ENV_LOCK`].
+    /// Test-only; callers must hold [`ENV_LOCK`].
     fn remove_env(key: &'static str) {
         // SAFETY: serialized by ENV_LOCK; no concurrent readers of these vars.
         unsafe { std::env::remove_var(key) }

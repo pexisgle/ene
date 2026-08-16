@@ -49,28 +49,17 @@ fn restart_editor() -> Pin<Box<impl Future<Output = Option<String>>>> {
 /// (which borrow the editor and the event receiver) can run *after* the
 /// `select!` completes and releases its borrows.
 enum ReplStep {
-    /// Shut down with the interrupted exit code.
     Interrupt,
-    /// The runtime is gone; drain and exit.
     Disconnected,
-    /// A proactive (spontaneous) turn started while idle.
     Proactive(TurnId),
-    /// A scheduled turn started while idle.
     Scheduled(TurnId),
-    /// A scheduled run wants a confirmation decision.
     ScheduledPermission {
-        /// Request id for the decision.
         request_id: RequestId,
-        /// Operation label from the event.
         action: String,
-        /// Target label from the event.
         target: String,
-        /// Human-readable description from the event.
         description: String,
     },
-    /// The line editor produced input (or `None` on EOF).
     Input(Option<String>),
-    /// A stray chat-bus event with nothing to render; loop again.
     Skip,
 }
 
@@ -310,9 +299,6 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
                             }
                         }
                     } else {
-                        // `rx` was subscribed before the loop, so no
-                        // events are missed between `run` and
-                        // `process_stream`.
                         match ctx.handle.run(&input) {
                             Ok(turn) => {
                                 tracing::info!(%turn, "Turn started");
@@ -411,7 +397,6 @@ mod tests {
         ));
     }
 
-    /// A scheduled turn surfaces while idle like a proactive one.
     #[tokio::test]
     async fn scheduled_turn_surfaces_while_idle() {
         let mut editor = Box::pin(pending::<Option<String>>());
@@ -421,7 +406,6 @@ mod tests {
         ));
     }
 
-    /// A scheduled confirmation surfaces the request details for the dialog.
     #[tokio::test]
     async fn scheduled_permission_surfaces_while_idle() {
         let mut editor = Box::pin(pending::<Option<String>>());

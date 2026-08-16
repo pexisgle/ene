@@ -356,13 +356,7 @@ fn build_min_max_int(
     if let (Some(min_v), Some(max_v)) = (min_value, max_value) {
         if min_v < 0 && max_v < 0 {
             out.push_str("\"-\" (");
-            build_min_max_int(
-                Some(-max_v),
-                Some(-min_v),
-                out,
-                decimals_left,
-                /* top_level= */ true,
-            );
+            build_min_max_int(Some(-max_v), Some(-min_v), out, decimals_left, true);
             out.push(')');
             return;
         }
@@ -370,13 +364,7 @@ fn build_min_max_int(
         let mut current_min = min_v;
         if current_min < 0 {
             out.push_str("\"-\" (");
-            build_min_max_int(
-                Some(0),
-                Some(-current_min),
-                out,
-                decimals_left,
-                /* top_level= */ true,
-            );
+            build_min_max_int(Some(0), Some(-current_min), out, decimals_left, true);
             out.push_str(") | ");
             current_min = 0;
         }
@@ -414,13 +402,7 @@ fn build_min_max_int(
     if let Some(min_v) = min_value {
         if min_v < 0 {
             out.push_str("\"-\" (");
-            build_min_max_int(
-                Some(i64::MIN),
-                Some(-min_v),
-                out,
-                decimals_left,
-                /* top_level= */ false,
-            );
+            build_min_max_int(Some(i64::MIN), Some(-min_v), out, decimals_left, false);
             out.push_str(") | [0] | [1-9] ");
             more_digits(out, 0, decimals_left.saturating_sub(1));
         } else if min_v == 0 {
@@ -456,13 +438,7 @@ fn build_min_max_int(
                 digit_range(out, c, c);
                 out.push_str(" (");
                 let sub_val = min_s[1..].parse::<i64>().unwrap_or(0);
-                build_min_max_int(
-                    Some(sub_val),
-                    Some(i64::MAX),
-                    out,
-                    less_decimals,
-                    /* top_level= */ false,
-                );
+                build_min_max_int(Some(sub_val), Some(i64::MAX), out, less_decimals, false);
                 out.push(')');
                 if c < '9' {
                     out.push_str(" | ");
@@ -482,22 +458,10 @@ fn build_min_max_int(
                 more_digits(out, 0, less_decimals);
                 out.push_str(" | ");
             }
-            build_min_max_int(
-                Some(0),
-                Some(max_v),
-                out,
-                decimals_left,
-                /* top_level= */ true,
-            );
+            build_min_max_int(Some(0), Some(max_v), out, decimals_left, true);
         } else {
             out.push_str("\"-\" (");
-            build_min_max_int(
-                Some(-max_v),
-                Some(i64::MAX),
-                out,
-                decimals_left,
-                /* top_level= */ false,
-            );
+            build_min_max_int(Some(-max_v), Some(i64::MAX), out, decimals_left, false);
             out.push(')');
         }
     }
@@ -1571,7 +1535,6 @@ impl SchemaConverter {
     }
 }
 
-/// Convert a JSON Schema document to a GBNF grammar string.
 pub(crate) fn json_schema_to_grammar(schema_json: &str) -> Result<String, LlmProviderError> {
     let mut schema: Value = serde_json::from_str(schema_json)
         .map_err(|e| LlmProviderError::LocalLlm(format!("invalid JSON schema: {e}")))?;

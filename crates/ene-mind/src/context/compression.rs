@@ -1,5 +1,3 @@
-//! Rolling context compression.
-
 #![expect(
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
@@ -143,7 +141,6 @@ pub async fn execute_compression(
     run_compression(store, provider, input).await
 }
 
-/// Spawn a background compression task.
 pub fn spawn_compression_task(
     pending: &mut Option<PendingCompressionTask>,
     store: Arc<dyn MemoryPort>,
@@ -159,7 +156,6 @@ pub fn spawn_compression_task(
     });
 }
 
-/// Poll a pending compression task; returns `Some(result)` when complete.
 pub fn poll_compression_result(
     pending: &mut Option<PendingCompressionTask>,
 ) -> Option<Result<CompressionResult, CognitionError>> {
@@ -268,7 +264,6 @@ pub fn plan_retroactive_compression(
     })
 }
 
-/// Load the active scene summary for prompt injection.
 pub async fn load_active_scene_summary(
     store: &dyn MemoryPort,
     session_id: &str,
@@ -502,7 +497,6 @@ mod tests {
                 history_tokens: 100
             })
         ));
-        // Below the token ceiling and the turn threshold: no trigger.
         assert!(evaluate_compression_trigger(&config, 1, 99).is_none());
     }
 
@@ -544,7 +538,6 @@ mod tests {
         let mut history = exchanges(3);
         history.push(entry(ene_ai::Role::User, "partial"));
         let plan = plan_retroactive_compression(&history, 3).expect("span before boundary");
-        // boundary_start = len - 1 (partial); compress everything before it.
         assert_eq!(plan.drop_leading, 6);
         assert_eq!(plan.turns.len(), 6);
     }

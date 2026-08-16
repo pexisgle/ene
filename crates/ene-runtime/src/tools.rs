@@ -79,7 +79,6 @@ impl ToolHandle {
         rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
-    /// Call a tool directly by name with JSON-encoded arguments.
     pub async fn call_tool(
         &self,
         name: String,

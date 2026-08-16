@@ -9,7 +9,6 @@ use std::path::Path;
 
 use super::config::SidecarProfiles;
 
-/// Writes the engine preset file and returns its path.
 pub fn write_presets(
     work_dir: &Path,
     profiles: &SidecarProfiles,

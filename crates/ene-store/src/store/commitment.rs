@@ -1,12 +1,9 @@
-//! Commitment ledger queries.
-
 use super::{EneMemoryError, MemoryStore};
 use crate::entities;
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait};
 
-/// Convert a commitment model row to a [`crate::Commitment`].
 #[expect(
     clippy::unnecessary_wraps,
     reason = "store helper signature returns Result for uniform error propagation"
@@ -30,7 +27,6 @@ fn model_to_commitment(
 }
 
 impl MemoryStore {
-    /// Insert a new commitment row and return its assigned ID.
     pub async fn insert_commitment(
         &self,
         item: &crate::NewCommitment,
@@ -56,7 +52,6 @@ impl MemoryStore {
         Ok(res.id)
     }
 
-    /// Retrieve a commitment by its ID.
     pub async fn get_commitment(
         &self,
         id: i64,
@@ -216,13 +211,11 @@ impl MemoryStore {
         Ok(result.rows_affected > 0)
     }
 
-    /// Mark a commitment as done.
     pub async fn complete_commitment(&self, id: i64) -> Result<bool, EneMemoryError> {
         self.update_commitment_status(id, crate::CommitmentStatus::Done)
             .await
     }
 
-    /// Mark a commitment as cancelled.
     pub async fn cancel_commitment(&self, id: i64) -> Result<bool, EneMemoryError> {
         self.update_commitment_status(id, crate::CommitmentStatus::Cancelled)
             .await

@@ -20,66 +20,50 @@
 
 use std::collections::HashMap;
 
-/// A named expression weight-map from the character card.
 #[derive(Debug, Clone)]
 pub struct CardExpression {
-    /// Expression name (e.g. `"happy"`, `"neutral"`).
     pub name: String,
     /// Blend-shape → weight map (e.g. `"happy" → 0.8`).
     pub weights: HashMap<String, f32>,
 }
 
-/// Merges card-defined expression weights with runtime overrides.
 #[derive(Debug, Default)]
 pub struct ExpressionCompositor {
-    /// Loaded card expressions, keyed by name.
     card_expressions: HashMap<String, CardExpression>,
-    /// Currently selected active expression name.
     active_base: Option<String>,
-    /// Runtime overrides (blend-shape name → weight).
     overrides: HashMap<String, f32>,
 }
 
 impl ExpressionCompositor {
-    /// Load a card-defined expression into the compositor.
     pub fn load_card_expression(&mut self, name: String, weights: HashMap<String, f32>) {
         self.card_expressions
             .insert(name.clone(), CardExpression { name, weights });
     }
 
-    /// Select which card expression to use as the base layer.
     /// Pass `None` to clear the selection.
     pub fn set_active_expression<S: AsRef<str>>(&mut self, name: Option<S>) {
         self.active_base = name.map(|n| n.as_ref().to_string());
     }
 
-    /// Set a runtime override for a specific blend-shape.
-    ///
     /// Overrides take precedence over the active card expression
     /// for the same blend-shape key.
     pub fn set_override(&mut self, blend_shape: String, weight: f32) {
         self.overrides.insert(blend_shape, weight.clamp(0.0, 1.0));
     }
 
-    /// Remove a single runtime override.
     pub fn remove_override(&mut self, blend_shape: &str) {
         self.overrides.remove(blend_shape);
     }
 
-    /// Clear all runtime overrides.
     pub fn clear_overrides(&mut self) {
         self.overrides.clear();
     }
 
-    /// Clear all loaded card expressions.
     pub fn clear_card_expressions(&mut self) {
         self.card_expressions.clear();
         self.active_base = None;
     }
 
-    /// Compose the final weight map by merging the active card
-    /// expression's weights with runtime overrides.
-    ///
     /// Override keys win over card keys. All weights are clamped
     /// to `[0, 1]`.
     pub fn compose(&self) -> HashMap<String, f32> {
@@ -100,12 +84,10 @@ impl ExpressionCompositor {
         result
     }
 
-    /// Name of the currently active base expression, if any.
     pub fn active_expression_name(&self) -> Option<&str> {
         self.active_base.as_deref()
     }
 
-    /// Names of all loaded card expressions.
     pub fn loaded_expression_names(&self) -> Vec<&str> {
         self.card_expressions
             .keys()

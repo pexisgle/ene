@@ -36,7 +36,6 @@
 //!   [`IpcLlmProvider`] / [`IpcLlmProviderFactory`] implement, and the
 //!   `TtsProvider` / `TtsProviderFactory` traits that [`IpcTtsProvider`] /
 //!   [`IpcTtsProviderFactory`] implement.
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(
@@ -65,7 +64,6 @@ pub mod capability_registry;
 pub mod capability_service;
 /// Per-plugin circuit breaker for consecutive-failure fail-fast.
 pub mod circuit_breaker;
-/// Plugin system configuration section.
 pub mod config;
 /// Public plugin settings snapshot for the plugin center UI.
 pub mod snapshot;
@@ -76,7 +74,6 @@ pub use snapshot::{
 pub mod credential_registry;
 /// IPC-backed embedding provider bridging to `ene_ai::EmbeddingProvider`.
 pub mod embedding;
-/// Plugin host error types.
 pub mod error;
 /// LLM provider factory backed by a plugin IPC connection.
 pub mod factory;
@@ -96,7 +93,6 @@ pub mod ipc_vad;
 pub mod manager;
 /// Plugin manifest verification and built-in manifests.
 pub mod manifest;
-/// MCP server configuration types.
 pub mod mcp_config;
 /// MCP client for external server connections.
 pub mod mcp_registry;
@@ -123,21 +119,17 @@ pub use capability_service::{
     CapabilityCallHandler, CapabilityMediator, ManagerCapabilityHandler,
     ensure_capability_calls_supported, resolve_capability_provider,
 };
-/// Per-plugin circuit breaker.
 pub use circuit_breaker::{BreakerState, CircuitBreaker};
-/// Plugin system configuration.
 pub use config::{PluginConfig, PluginEntry};
 /// Host-side registry of per-plugin credential declarations.
 pub use credential_registry::CredentialRegistry;
 /// IPC-backed embedding provider and factory.
 pub use embedding::{IpcEmbeddingProvider, IpcEmbeddingProviderFactory};
-/// Plugin host error type.
 pub use error::PluginHostError;
 /// Backward-compatible alias for [`PluginHostError`].
 pub use error::ToolHostError;
 /// LLM provider factory for plugin-provided providers.
 pub use factory::IpcLlmProviderFactory;
-/// Plugin health events.
 pub use health::{DisabledReason, PluginHealthEvent};
 /// IPC connection to a single plugin binary.
 pub use ipc_plugin::{IpcPluginConnection, SetConfigOutcome};
@@ -149,14 +141,12 @@ pub use ipc_stt::IpcSttProvider;
 pub use ipc_tts::IpcTtsProvider;
 /// IPC-backed VAD engine and factory.
 pub use ipc_vad::{IpcVadEngine, IpcVadFactory};
-/// Plugin host manager.
 pub use manager::{
     EmbeddingFactoriesByPlugin, EmbeddingFactoryHandle, LlmFactoriesByPlugin, LlmFactoryHandle,
     PluginFactoryHandles, PluginHostManager, ProviderFactoryRemoval, SttFactoriesByPlugin,
     SttFactoryHandle, TtsFactoriesByPlugin, TtsFactoryHandle, VadFactoriesByPlugin,
     VadFactoryHandle,
 };
-/// MCP server configuration types.
 pub use mcp_config::{McpServerConfig, McpTransport};
 /// MCP client for external servers.
 pub use mcp_registry::McpToolRegistry;

@@ -31,8 +31,7 @@ use rapier3d::prelude::*;
 
 use crate::character::{BonePose, BoneShapeSpec};
 
-/// Per-entity transform attached to the character entity. Kept while
-/// the ECS migration is incomplete.
+/// Kept while the ECS migration is incomplete.
 #[derive(Clone, Copy, Debug)]
 pub struct Transform {
     pub translation: Vec3,
@@ -46,8 +45,7 @@ pub struct RayHit {
     pub toi: f32,
     /// World-space point of the hit (`origin + dir * toi`).
     pub point: Vec3,
-    /// The Rapier `ColliderHandle` that was hit. The caller can
-    /// resolve this to a bevy `Entity` via
+    /// The caller can resolve this to a bevy `Entity` via
     /// `Query<(Entity, &PhysicsColliders)>`.
     pub collider: ColliderHandle,
 }
@@ -250,7 +248,6 @@ impl PhysicsWorld {
     }
 }
 
-/// Build the Rapier [`ColliderBuilder`] for one [`BoneShapeSpec`].
 fn build_collider_for_shape(spec: &BoneShapeSpec) -> ColliderBuilder {
     let mut builder = match spec.shape {
         crate::character::collider::BoneShape::Sphere { radius } => ColliderBuilder::ball(radius),
@@ -293,8 +290,6 @@ mod tests {
         PhysicsWorld::new()
     }
 
-    /// Two bone specs: a "chest" sphere at the origin and a
-    /// "head" sphere at (0, 0.5, 0).
     fn two_bone_specs() -> Vec<BoneShapeSpec> {
         vec![
             BoneShapeSpec {
@@ -429,14 +424,6 @@ mod tests {
         assert!(hit.is_none(), "ray above head must miss all bone colliders");
     }
 
-    /// `cast_ray` must also return the world-space hit point
-    /// (`origin + dir * toi`) and the collider handle so the
-    /// debug overlay can highlight the exact collider that was
-    /// hit.
-    /// `cast_ray` must also return the world-space hit point
-    /// (`origin + dir * toi`) and the collider handle so the
-    /// debug overlay can highlight the exact collider that was
-    /// hit.
     #[test]
     fn cast_ray_returns_point_and_collider() {
         let mut physics = setup();

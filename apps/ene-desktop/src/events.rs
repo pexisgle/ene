@@ -14,15 +14,11 @@ pub type AppEventSender = mpsc::UnboundedSender<AppEvent>;
 /// `try_recv` loops.
 pub type AppEventReceiver = mpsc::UnboundedReceiver<AppEvent>;
 
-/// Top-level event enum. Variants are split by producer for clarity
-/// but share the same bus.
+/// Variants are split by producer for clarity but share the same bus.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
-    /// System tray (or future global hotkey) actions.
     Tray(TrayAction),
-    /// Streamed AI events mirrored from [`ene_runtime::EneEvent`].
     Ai(AiStreamUpdate),
-    /// Raw performance cue name from [`ene_runtime::EneEvent::Performance`].
     /// Desktop maps this to VRM playback; the API v1 event stream does not
     /// include `SpecialToken` / Expression events.
     #[cfg_attr(
@@ -33,8 +29,6 @@ pub enum AppEvent {
         )
     )]
     PerformanceCue(String),
-    /// Motion cue with layer routing information.
-    ///
     /// `layer` carries the canonical [`ene_card::MotionLayer`] from the
     /// performance cue; the consumer converts it to the rendering-side
     /// `ene_vrm::MotionLayer` at the boundary.
@@ -44,9 +38,6 @@ pub enum AppEvent {
         priority: u8,
         duration: f32,
     },
-    /// Expression cue with weight, hold duration, and scheduled application
-    /// time.
-    ///
     /// `target_time` is seconds on a monotonic clock shared with the emotion
     /// pipeline (see [`EmotionCommand`](crate::character_state::EmotionCommand)).
     /// `0.0` applies the cue immediately; a positive value schedules it for
@@ -57,22 +48,27 @@ pub enum AppEvent {
         hold_secs: f64,
         target_time: f64,
     },
-    /// Cancel cue.
-    CancelCue { scope: String },
-    /// `LookAt` cue — gaze target hint from LLM performance markers.
-    /// Forwarded to VRM gaze when the gaze system is implemented.
-    LookAtCue { target: String },
-    /// Beat pulse from system audio (Beat Sync), relayed through the
-    /// runtime chat bus from [`ene_runtime::EneEvent::BeatPulse`].
-    BeatPulse { bpm: f32, intensity: f32 },
-    /// Microphone capture started (`active = true`) or stopped
-    /// (`active = false`). Emitted by the audio capture subsystem so
-    /// the chat UI can refresh its mic-toggle indicator.
+    CancelCue {
+        scope: String,
+    },
+    /// Gaze target hint from LLM performance markers. Forwarded to
+    /// VRM gaze when the gaze system is implemented.
+    LookAtCue {
+        target: String,
+    },
+    /// Relayed through the runtime chat bus from
+    /// [`ene_runtime::EneEvent::BeatPulse`].
+    BeatPulse {
+        bpm: f32,
+        intensity: f32,
+    },
+    /// Emitted by the audio capture subsystem so the chat UI can refresh
+    /// its mic-toggle indicator.
     #[cfg(feature = "voice")]
-    MicStateChanged { active: bool },
-    /// Request the event loop to exit.
+    MicStateChanged {
+        active: bool,
+    },
     Quit,
-    /// The runtime actor broadcast channel closed.
     RuntimeDisconnected,
     /// Pending memory candidates available for user approval.
     PendingCandidatesCount(usize),

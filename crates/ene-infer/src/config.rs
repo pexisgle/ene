@@ -1,5 +1,3 @@
-//! Worker configuration.
-
 use std::time::Duration;
 
 /// Configuration for one [`crate::EngineHandle`].
@@ -59,8 +57,6 @@ pub struct EngineConfig {
 }
 
 impl EngineConfig {
-    /// Builds a config with the given queue depth and job timeout, and no
-    /// stall detection.
     #[must_use]
     pub fn new(queue_depth: usize, job_timeout: Duration) -> Self {
         Self {
@@ -71,19 +67,14 @@ impl EngineConfig {
         }
     }
 
-    /// The default [`Self::stall_escalation_factor`]: a suspected stall
-    /// must persist for three multiples of [`Self::stall_timeout`] before
-    /// the engine is permanently disabled.
     const DEFAULT_STALL_ESCALATION_FACTOR: u32 = 3;
 
-    /// Sets [`Self::stall_timeout`].
     #[must_use]
     pub fn with_stall_timeout(mut self, stall_timeout: Duration) -> Self {
         self.stall_timeout = Some(stall_timeout);
         self
     }
 
-    /// Sets [`Self::stall_escalation_factor`]. Coerced up to at least 1.
     #[must_use]
     pub fn with_stall_escalation_factor(mut self, factor: u32) -> Self {
         self.stall_escalation_factor = factor.max(1);
@@ -92,7 +83,6 @@ impl EngineConfig {
 }
 
 impl Default for EngineConfig {
-    /// 8 queued jobs, a 30 second job timeout, and no stall detection.
     fn default() -> Self {
         Self::new(8, Duration::from_secs(30))
     }

@@ -2,7 +2,6 @@
 //!
 //! Plugin binary providing Home Assistant smart home tools: entity state
 //! reads, switch/light/plug control, and climate temperature setting.
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(
@@ -13,15 +12,10 @@
     )
 )]
 
-/// Action modules for each tool.
 pub mod action;
-/// Permission approval gate for state-changing actions.
 pub mod approval;
-/// Plugin configuration and schema generation.
 pub mod config;
-/// Shared error type for parse, format, and validation failures.
 pub mod error;
-/// Tool lifecycle and provider integration.
 pub mod provider;
 
 use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};

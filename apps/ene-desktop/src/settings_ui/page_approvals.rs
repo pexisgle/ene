@@ -1,7 +1,3 @@
-//! Plugin approval policy settings page.
-//!
-//! Shows the global per-category policy table, per-plugin overrides, the
-//! high-risk warning, the emergency stop, and the one-click reset to `Ask`.
 //! Every change is persisted through the normal settings section path; the
 //! broker hub rebuilds its resolver from the same config on the next start.
 
@@ -98,8 +94,8 @@ pub fn render(
     );
 }
 
-/// Renders one category × mode row grid. With `plugin` set, edits the
-/// per-plugin override; without, edits the global policy.
+/// With `plugin` set, edits the per-plugin override; without, edits the
+/// global policy.
 fn render_category_table(
     ui: &mut egui::Ui,
     config: &mut PluginConfig,

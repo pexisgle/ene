@@ -1,5 +1,3 @@
-//! Tray icon glue.
-//!
 //! `tray_icon::TrayIcon` is not `Send + Sync`, so it cannot
 //! be inserted as a bevy `Resource` (the `Resource` trait
 //! requires `Component`, which requires `Send + Sync`); the icon
@@ -7,8 +5,6 @@
 //! below is invoked from
 //! [`crate::runtime::Runtime::about_to_wait`] directly.
 
-/// Linux-only: pump pending GTK events while the tray is
-/// active.
 #[cfg(target_os = "linux")]
 pub fn tick_gtk() {
     while gtk::events_pending() {
@@ -16,6 +12,5 @@ pub fn tick_gtk() {
     }
 }
 
-/// Non-Linux no-op.
 #[cfg(not(target_os = "linux"))]
 pub fn tick_gtk() {}

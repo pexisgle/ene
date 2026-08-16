@@ -9,8 +9,6 @@ use std::sync::OnceLock;
 #[folder = "i18n/"]
 struct Localizations;
 
-/// Returns the process-wide Fluent loader, initializing it on first use.
-///
 /// The loader negotiates the active language with the system locale. Use
 /// [`select_language`] to override the negotiated language (e.g. from the
 /// `--lang` CLI flag).
@@ -28,8 +26,6 @@ pub fn loader() -> &'static FluentLanguageLoader {
     })
 }
 
-/// Overrides the active Fluent language catalog.
-///
 /// Accepts `en`/`en-US` for English and `ja` for Japanese; any other value
 /// falls back to the system-negotiated language without changing it.
 pub fn select_language(lang: &str) {

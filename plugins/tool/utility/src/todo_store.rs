@@ -59,7 +59,6 @@ pub enum TodoStoreError {
     CorruptRow {
         /// The row's `id` (0 if the `id` column itself is missing).
         id: i64,
-        /// The missing column name.
         column: String,
     },
 }
@@ -67,13 +66,10 @@ pub enum TodoStoreError {
 /// A single todo item returned from the store.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TodoItem {
-    /// Unique identifier.
     pub id: i64,
-    /// Session this item belongs to.
     pub session_id: String,
     /// Parent todo ID for hierarchy.
     pub parent_id: Option<i64>,
-    /// Task description.
     pub content: String,
     /// Status: pending, `in_progress`, completed, cancelled.
     pub status: String,
@@ -171,7 +167,6 @@ impl TodoStore {
         })
     }
 
-    /// Lists all todos for the given session.
     pub async fn list(&self, session_id: &str) -> Result<Vec<TodoItem>, TodoStoreError> {
         let mut client = self.client.lock().await;
         let filter = DbFilter::eq("session_id", DbValue::Text(session_id.to_string()));
@@ -188,7 +183,6 @@ impl TodoStore {
         rows.iter().map(TodoItem::from_row).collect()
     }
 
-    /// Adds a new todo item.
     pub async fn add(
         &self,
         session_id: &str,
@@ -777,7 +771,6 @@ mod tests {
             .unwrap();
         assert_eq!(updated.parent_id, Some(parent.id));
 
-        // Detach back to top-level.
         let detached = store
             .update("s", child.id, None, None, None, Some(None))
             .await

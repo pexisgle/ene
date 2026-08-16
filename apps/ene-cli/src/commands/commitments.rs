@@ -28,8 +28,6 @@ impl CliCommand for CommitmentsCommand {
             .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
         let card_name = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.as_str();
-        // The snapshot no longer carries the memory handle; it lives on
-        // the diagnostics facade, which is the documented access path.
         let memory = diag.memory();
         match sub {
             "list" => match memory

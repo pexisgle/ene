@@ -17,21 +17,17 @@ use crate::policy::ResolutionReason;
 pub struct AuditLogEntry {
     /// Unix millisecond timestamp of the resolution.
     pub ts_ms: u64,
-    /// Plugin that made the request.
     pub plugin: String,
     /// Digest of the plugin's signed manifest, when one was loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_digest: Option<String>,
-    /// Category of the request.
     pub category: ApprovalCategory,
     /// Audit-safe target description (origin, path, artifact, key name…).
     pub target: String,
     /// Which layer decided (`emergency_stop`, `plugin_override`,
     /// `global_policy`, `default_ask`).
     pub reason: String,
-    /// The rule text that applied.
     pub rule: String,
-    /// The effective decision.
     pub decision: ResolvedMode,
 }
 
@@ -57,13 +53,11 @@ impl AuditLog {
         }
     }
 
-    /// The log file path.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Appends one entry as a JSON line.
     pub fn record(&self, entry: &AuditLogEntry) -> std::io::Result<()> {
         let mut guard = self.writer.lock();
         if guard.is_none() {
@@ -88,7 +82,6 @@ impl AuditLog {
 }
 
 impl AuditLogEntry {
-    /// Builds an entry from a resolution.
     #[must_use]
     pub fn new(
         ts_ms: u64,

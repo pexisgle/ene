@@ -226,12 +226,10 @@ enum UpstreamError {
 }
 
 impl UpstreamError {
-    /// Whether the retry budget should spend an attempt on this error.
     fn is_retryable(&self) -> bool {
         matches!(self, Self::Network(_) | Self::Http { status: 429, .. })
     }
 
-    /// Maps to a [`PluginError::Provider`] with a status-aware message.
     fn into_plugin_error(self) -> PluginError {
         match self {
             Self::Network(message) => PluginError::provider(message),
@@ -435,8 +433,6 @@ fn build_chat_body(
             obj.insert("tools".to_string(), Value::Array(tools));
         }
         if let Some(schema) = json_schema {
-            // Accept either a raw JSON Schema object or a `{ "schema": ... }`
-            // wrapper.
             let schema = schema.get("schema").cloned().unwrap_or(schema);
             obj.insert(
                 "response_format".to_string(),

@@ -1,4 +1,4 @@
-// Issue #19: unlit variant of `mtoon_skinned.wgsl`.
+// Unlit variant of `mtoon_skinned.wgsl`.
 //
 // KHR_materials_unlit materials skip all lighting calculations
 // and output the base color directly. Used for emissive panels,

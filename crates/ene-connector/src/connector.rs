@@ -47,7 +47,6 @@ pub struct ConnectorAction {
 }
 
 impl ConnectorAction {
-    /// Declares a side-effecting action that prompts for approval.
     #[must_use]
     pub const fn side_effecting(name: &'static str, description: &'static str) -> Self {
         Self {
@@ -57,7 +56,6 @@ impl ConnectorAction {
         }
     }
 
-    /// Declares a read-only action that never prompts on its own.
     #[must_use]
     pub const fn read_only(name: &'static str, description: &'static str) -> Self {
         Self {
@@ -89,7 +87,6 @@ pub struct AuthenticatedAccount {
     pub id: String,
     /// Human-readable account label.
     pub label: String,
-    /// Authentication kind used for this account.
     pub auth: AccountAuthKind,
     /// Permission scopes granted during authentication.
     pub scopes: Vec<String>,
@@ -98,7 +95,6 @@ pub struct AuthenticatedAccount {
 }
 
 impl AuthenticatedAccount {
-    /// Creates an account snapshot.
     #[must_use]
     pub fn new(
         id: impl Into<String>,
@@ -151,33 +147,25 @@ pub enum ConnectionState {
 /// read-only consumers never trigger connector I/O through this type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectorStatus {
-    /// Display metadata.
     pub identity: ConnectorIdentity,
-    /// Current connection state.
     pub connection: ConnectionState,
     /// Last connectivity check result, when one ran.
     pub health: Option<HealthStatus>,
-    /// Authenticated accounts.
     pub accounts: Vec<AuthenticatedAccount>,
 }
 
 /// Lightweight entry for [`ConnectorRegistry::list`], I/O-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectorSummary {
-    /// Display metadata.
     pub identity: ConnectorIdentity,
-    /// Current connection state.
     pub connection: ConnectionState,
-    /// Number of authenticated accounts.
     pub account_count: usize,
-    /// Number of declared actions.
     pub action_count: usize,
 }
 
 /// A standing per-action permission grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionGrant {
-    /// Granted action name.
     pub action: String,
     /// Target prefix the grant covers.
     pub target_pattern: String,
@@ -202,7 +190,6 @@ pub struct PermissionGrant {
 /// the service, so per-action grants and revokes apply beyond lifecycle.
 #[async_trait]
 pub trait Connector: Send + Sync {
-    /// Stable identity and display metadata.
     fn identity(&self) -> &ConnectorIdentity;
 
     /// Declared permission surface: every user-visible action, so grants
@@ -240,7 +227,6 @@ pub trait Connector: Send + Sync {
     async fn disconnect(&self, account: &AuthenticatedAccount) -> Result<(), ConnectorError>;
 }
 
-/// Default policy helpers shared by connectors.
 impl ConnectorPolicy {
     /// A 15-second per-operation timeout with no retries or rate limiting.
     #[must_use]
@@ -252,21 +238,18 @@ impl ConnectorPolicy {
         }
     }
 
-    /// Sets the per-operation timeout.
     #[must_use]
     pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Sets the backoff retry policy.
     #[must_use]
     pub const fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = Some(retry);
         self
     }
 
-    /// Sets the rate-limit policy.
     #[must_use]
     pub const fn with_rate_limit(mut self, rate_limit: RateLimitPolicy) -> Self {
         self.rate_limit = Some(rate_limit);

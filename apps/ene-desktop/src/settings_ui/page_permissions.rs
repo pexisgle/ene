@@ -1,12 +1,4 @@
-//! Permission Center settings page.
-//!
-//! * **Pending approvals** — destructive operations the actor is blocked on
-//!   (from [`crate::event::ai::AiPermissionRequested`] into
-//!   [`crate::settings::UiState::permission_requests`]); each row offers
-//!   Approve (once) / Approve (session) / Deny.
-//! * **Granted scopes** — standing session-wide grants, loaded
-//!   asynchronously (never blocking the render thread), each revocable,
-//!   plus a "reset all" action.
+//! Granted scopes load asynchronously and never block the render thread.
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
@@ -158,8 +150,6 @@ fn render_pending_row(
         });
 }
 
-/// Forward a decision (a non-blocking channel send), drop the request from
-/// the pending list, and refresh the granted scopes asynchronously.
 fn decide(
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
@@ -229,8 +219,6 @@ fn spawn_message<T: std::fmt::Display + Send + 'static>(
     })
 }
 
-/// Granted-scope section: refreshable table with per-row revoke and a
-/// reset-all action. The list is fetched asynchronously.
 fn render_granted(ui: &mut egui::Ui, ai: &Arc<AiBridge>, input: &mut SettingsInputState) {
     setting_row(
         ui,

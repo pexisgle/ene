@@ -22,7 +22,6 @@ use std::collections::BTreeMap;
     side_effects = "Idempotent"
 )]
 pub struct EvaluateAction {
-    /// The expression to evaluate, e.g. "2+3*sin(deg(45))".
     expression: String,
     /// Optional variable bindings referenced by the expression,
     /// e.g. {"x": 2, "y": 3} for "x^y". Variable names must start

@@ -61,8 +61,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-/// Wall-clock source for quiet-hours evaluation; injectable so tests pin
-/// deterministic instants.
 type QuietHoursClock = Arc<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync>;
 
 /// Global monotonic counter used to generate unique DB IPC auth tokens.
@@ -128,14 +126,11 @@ pub(super) struct TurnActor {
     /// Schedule runs waiting for a user confirmation decision, keyed by the
     /// `request_id` carried in the emitted `PermissionRequired` event.
     pending_schedule_confirmations: HashMap<RequestId, PendingScheduleConfirmation>,
-    /// The schedule run currently executing (prompt stream or tool task).
     active_scheduled_run: Option<ActiveScheduledRun>,
     /// Wakes the scheduler timer task after any schedule-state mutation.
     pub(super) scheduler_notify: watch::Sender<()>,
     /// Receiver handed to the timer task when it is spawned.
     scheduler_notify_rx: Option<watch::Receiver<()>>,
-    /// Wall-clock source for scheduler due-time evaluation (injectable in
-    /// tests so scheduler integration tests advance virtual time).
     scheduler_clock: crate::scheduler::SchedulerClock,
     /// Cancellation tokens for in-flight artifact installs, keyed by
     /// artifact id (Engines page cancel button).
@@ -198,7 +193,6 @@ pub(super) struct TurnActor {
     proactive_decision_handle: Option<tokio::task::JoinHandle<()>>,
     proactive_resolution_rx: Option<oneshot::Receiver<crate::proactive::PendingResolutionResult>>,
     proactive_resolution_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Wall-clock source for quiet-hours evaluation (injectable in tests).
     quiet_hours_clock: QuietHoursClock,
     /// True while a proactive turn runs with notifications suppressed, so the
     /// matching `Idle` announcement is suppressed too.
@@ -270,7 +264,6 @@ pub(super) struct TurnActor {
     shared: Arc<SharedActorState>,
 }
 
-/// A schedule run waiting for a user confirmation decision.
 struct PendingScheduleConfirmation {
     schedule_id: i64,
     run_id: i64,
@@ -279,14 +272,12 @@ struct PendingScheduleConfirmation {
     timeout: CancellationToken,
 }
 
-/// The schedule run currently executing (prompt stream or tool task).
 struct ActiveScheduledRun {
     schedule_id: i64,
     run_id: i64,
 }
 
 impl TurnActor {
-    /// Constructs a ready `TurnActor`. Called once from [`crate::EneHandle::open`].
     #[expect(
         clippy::too_many_arguments,
         reason = "single internal constructor call site (EneHandle::open); grouping the \
@@ -842,7 +833,7 @@ impl TurnActor {
                                     break;
                                 }
                             }
-                            None => break, // All senders dropped
+                            None => break,
                         }
                     }
                     res = &mut *rx => {
@@ -1113,13 +1104,6 @@ impl TurnActor {
     /// running the heavy I/O in `bg_command_tasks` so the actor loop is never
     /// blocked.
     ///
-    /// Shuts down the live host (stopping disabled plugins), spawns fresh DB
-    /// IPC servers for the newly-detected plugin set, starts a new host with
-    /// the updated configuration, removes only old factories that the new
-    /// host does not replace, re-registers new plugin-provided LLM factories,
-    /// re-bridges health events into diagnostics, and rebuilds the tool
-    /// registry from the new host.
-    ///
     /// The shared `plugin_host` and `health_bridge_handle` mutexes are updated
     /// directly by the background task. The actor-only fields (`self.registry`,
     /// `self.plugin_tool_registries`) are updated when the background task
@@ -1170,7 +1154,6 @@ impl TurnActor {
         });
     }
 
-    /// Pushes updated plugin config/profiles blobs to live IPC connections.
     fn spawn_push_plugin_configs(
         &mut self,
         updates: HashMap<String, (Option<serde_json::Value>, Option<serde_json::Value>)>,
@@ -1307,7 +1290,6 @@ impl TurnActor {
 
         self.ensure_proactive_llm_non_blocking();
 
-        // Fast path: handles already loaded — complete synchronously.
         if let Some(handles) = self.proactive_llm.get() {
             let result = finish_vision_prep(handles, &prompt_language, task, &app_label, &hints);
             if result.is_ok() {
@@ -1327,7 +1309,6 @@ impl TurnActor {
             return;
         }
 
-        // Slow path: handles still loading — hand off to bg_command_tasks.
         // Deduplicate concurrent slow-path requests: the screen-capture
         // driven proactive flow can fire `PrepareVisionSummary` several times
         // during the GGUF loading window, and each call would otherwise spawn
@@ -1505,9 +1486,6 @@ impl TurnActor {
         self.proactive_decision_handle = Some(handle);
     }
 
-    /// Load the live session inputs a proactive decision needs: history,
-    /// observation, affect, active commitments, and standing rules. Shared
-    /// by the decision spawn path and the quiet-hours opportunity check.
     async fn proactive_context_inputs(
         &self,
         mind: &ene_mind::MindConfig,
@@ -2178,7 +2156,6 @@ impl TurnActor {
         }
     }
 
-    /// Spawn the scheduler timer task when the store and config allow it.
     fn spawn_scheduler_task(&mut self) {
         let Some(store) = self.concrete_store.clone() else {
             return;
@@ -2202,8 +2179,6 @@ impl TurnActor {
 
     /// Wake the scheduler timer task so it re-derives due times.
     fn notify_scheduler(&self) {
-        // The error value is `Copy` (it wraps `()`), so `drop()` would trip
-        // `clippy::dropping_copy_types`.
         #[expect(
             clippy::let_underscore_must_use,
             reason = "watch send error is Copy; drop() would trip dropping_copy_types"
@@ -2211,8 +2186,6 @@ impl TurnActor {
         let _ = self.scheduler_notify.send(());
     }
 
-    /// Process one due schedule fire: apply the late-execution and busy
-    /// policies, claim the occurrence atomically, then execute or wait.
     async fn handle_schedule_fire(
         &mut self,
         schedule_id: i64,
@@ -2625,7 +2598,6 @@ impl TurnActor {
         });
     }
 
-    /// Record a terminal run outcome and wake the timer task.
     async fn finish_scheduled_run(
         &mut self,
         schedule_id: i64,
@@ -2813,13 +2785,7 @@ impl TurnActor {
                 true
             }
             EneCommand::Shutdown => {
-                // Cooperative cancel first: aux workers watching the turn's
-                // token (the TTS pipeline) exit gracefully instead of being
-                // force-aborted mid-flight.
                 self.cancel_token.cancel();
-                // Admit aux handles that arrived after the run loop's last
-                // drain so shutdown aborts them rather than dropping them
-                // (which would only detach, not cancel, the worker).
                 self.admit_aux_handles();
                 self.abort_all_join_sets();
                 self.abort_proactive_decision();
@@ -2869,8 +2835,6 @@ impl TurnActor {
                         );
                     }
                 }
-                // When screen_summary is enabled, each observe cycle (fresh
-                // capture → vision) drives the decision LLM immediately.
                 if mind.is_some_and(|m| m.proactive.enabled && m.proactive.sources.screen_summary) {
                     self.maybe_spawn_proactive_decision().await;
                 }
@@ -3191,10 +3155,6 @@ impl TurnActor {
                     self.connectors
                         .revoke_pattern(&scope.action, &scope.target_pattern);
                 }
-                // A oneshot send error is `Copy` here (it's just the unsent
-                // `bool`), so `drop()` would itself trip
-                // `clippy::dropping_copy_types`; a dropped receiver just
-                // means the caller stopped waiting.
                 #[expect(
                     clippy::let_underscore_must_use,
                     reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
@@ -3215,10 +3175,6 @@ impl TurnActor {
                     self.connectors
                         .revoke_pattern(&scope.action, &scope.target_pattern);
                 }
-                // A oneshot send error is `Copy` here (it's just the unsent
-                // `usize`), so `drop()` would itself trip
-                // `clippy::dropping_copy_types`; a dropped receiver just
-                // means the caller stopped waiting.
                 #[expect(
                     clippy::let_underscore_must_use,
                     reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
@@ -3506,9 +3462,6 @@ impl TurnActor {
                         .map_err(EneRuntimeError::from),
                     None => Err(EneRuntimeError::StoreRequired),
                 };
-                // A oneshot `Sender<Result<..>>::send` error is `Copy` (the
-                // unsent `Result`), so `drop()` would itself trip
-                // `clippy::dropping_copy_types`.
                 #[expect(
                     clippy::let_underscore_must_use,
                     reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
@@ -3614,10 +3567,7 @@ impl TurnActor {
                     &self.diag_tx,
                 ) {
                     // Best-effort like the success path below: report "not
-                    // cancelled" rather than growing the queue. A oneshot
-                    // send error is `Copy` here (it's just the unsent
-                    // `bool`), so `drop()` would itself trip
-                    // `clippy::dropping_copy_types`.
+                    // cancelled" rather than growing the queue.
                     #[expect(
                         clippy::let_underscore_must_use,
                         reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
@@ -3630,10 +3580,7 @@ impl TurnActor {
                     registry.cancel_deferred(&tool_name, &task_id).await;
                     // The tool-side cancel is best-effort; report success
                     // optimistically since we cannot distinguish "cancelled"
-                    // from "already finished" without a follow-up poll. A
-                    // oneshot send error is `Copy` here (it's just the
-                    // unsent `bool`), so `drop()` would itself trip
-                    // `clippy::dropping_copy_types`.
+                    // from "already finished" without a follow-up poll.
                     #[expect(
                         clippy::let_underscore_must_use,
                         reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
@@ -3866,10 +3813,6 @@ impl TurnActor {
             }
             EneCommand::SetCcv3MemoryHash { hash, reply } => {
                 self.session.memory.ccv3_memory_hash = Some(hash);
-                // A oneshot send error is `Copy` here (it's just the unsent
-                // `()`), so `drop()` would itself trip
-                // `clippy::dropping_copy_types`; a dropped receiver just
-                // means the caller stopped waiting.
                 #[expect(
                     clippy::let_underscore_must_use,
                     reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
@@ -3920,8 +3863,6 @@ impl TurnActor {
                         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     });
                 }
-                // A oneshot `Sender<()>::send` error is `Copy` (the unsent
-                // `()`), so `drop()` would trip `clippy::dropping_copy_types`.
                 #[expect(
                     clippy::let_underscore_must_use,
                     reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
@@ -4151,7 +4092,6 @@ impl TurnActor {
             .get_section::<ene_ai::AiConfig>()
             .unwrap_or_default();
 
-        // Fast path: failover disabled → use the configured chat task directly.
         if !ai_config.fallback.enabled {
             return create_task_chat_provider(
                 &self.config,
@@ -4163,8 +4103,7 @@ impl TurnActor {
             .map_err(EneRuntimeError::from);
         }
 
-        // Failover path: probe candidates in priority order and pick the first
-        // healthy one. Probes send no user data.
+        // Probes send no user data.
         let candidates = ai_config.resolve_chat_candidates();
         if candidates.is_empty() {
             return create_task_chat_provider(
@@ -4268,9 +4207,6 @@ impl TurnActor {
         let config = self.config.clone();
         let diag_tx = self.diag_tx.clone();
         tokio::spawn(async move {
-            // Fresh probes of every candidate: unlike failover selection,
-            // this must not stop at the first healthy provider, and it must
-            // not warm the turn-path cache.
             let reports = if ai_config.fallback.enabled {
                 ene_ai::probe_chat_candidates(&candidates, provider_host.as_ref(), &config, timeout)
                     .await
@@ -4288,8 +4224,6 @@ impl TurnActor {
             drop(reply.send(reports));
         });
     }
-
-    // ── Undo management ──
 
     /// Undo the most recent reversible tool operation.
     ///
@@ -4316,8 +4250,6 @@ impl TurnActor {
             },
         }
     }
-
-    // ── Connector framework ──
 
     /// Spawns a connector lifecycle operation (check / connect / disconnect)
     /// as a background task and replies when it resolves.
@@ -4367,7 +4299,6 @@ impl TurnActor {
         });
     }
 
-    /// Records a per-action connector grant (explicit user command, audited).
     fn connector_grant(
         &self,
         id: &ene_connector::ConnectorId,
@@ -4388,7 +4319,6 @@ impl TurnActor {
         result
     }
 
-    /// Removes a per-action connector grant (explicit user command, audited).
     fn connector_revoke(
         &self,
         id: &ene_connector::ConnectorId,
@@ -4408,8 +4338,6 @@ impl TurnActor {
         );
         result
     }
-
-    // ── Split management ──
 
     /// Opens the session with the greeting at `index` (`0` = `first_mes`,
     /// `i+1` = `alternate_greetings[i]`).
@@ -4703,10 +4631,6 @@ impl TurnActor {
     async fn resolve_permission(&mut self, request_id: RequestId, decision: PermissionDecision) {
         let mut guard = self.pending_permissions.lock().await;
         if let Some(tx) = guard.remove(&request_id) {
-            // A oneshot `Sender<PermissionDecision>::send` error is `Copy`
-            // (it's just the unsent value), so `drop()` would itself trip
-            // `clippy::dropping_copy_types`; a dropped receiver just means
-            // the caller stopped waiting.
             #[expect(
                 clippy::let_underscore_must_use,
                 reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
@@ -4733,7 +4657,6 @@ impl TurnActor {
         }
     }
 
-    /// Fetches settings snapshots for every configured plugin.
     async fn plugin_snapshots(&self) -> Vec<ene_plugin_host::PluginSettingsSnapshot> {
         let config = self.config.clone();
         let mut host = self.plugin_host.lock().await;
@@ -4743,8 +4666,6 @@ impl TurnActor {
         }
     }
 
-    /// Host-side artifact snapshot for the Engines page (empty when the
-    /// artifact system is not configured).
     async fn artifact_snapshot(&self) -> Vec<ene_plugin_host::ArtifactSnapshot> {
         let mut host = self.plugin_host.lock().await;
         match host.as_mut() {
@@ -4879,7 +4800,6 @@ impl TurnActor {
         });
     }
 
-    /// Force-refreshes the signed catalog.
     async fn refresh_catalog(&self) -> Result<u64, String> {
         let mut host = self.plugin_host.lock().await;
         match host.as_mut() {
@@ -4905,7 +4825,6 @@ impl TurnActor {
         }
     }
 
-    /// Validates a plugin config value through the plugin's own validator.
     async fn validate_plugin_config(
         &self,
         plugin: &str,
@@ -5412,8 +5331,6 @@ where
 ///
 /// Keeps the actor's background task sets from growing without bound while
 /// surfacing panics through structured diagnostics.
-/// A `tokio::task::JoinHandle` that aborts its task when dropped.
-///
 /// A bare `JoinHandle` is "detach on drop": dropping it (for example because
 /// the wrapper task that owned it was aborted by `JoinSet::abort_all()` on
 /// shutdown) stops *supervising* the task but does not cancel it. Wrapping
@@ -5575,10 +5492,6 @@ pub(super) fn admit_task(
     detail: Option<String>,
     diag_tx: &broadcast::Sender<DiagnosticEvent>,
 ) -> bool {
-    // Drop finished-but-unjoined tasks so `len()` reflects only tasks that
-    // are actually still running. Without this, a burst that
-    // completed during the actor's `select!` block would over-count and
-    // spuriously reject the next admission.
     reap_join_set(set, component, "background task panicked", diag_tx);
     let queue_depth = set.len();
     if queue_depth < cap {
@@ -5675,8 +5588,6 @@ async fn poll_deferred_task(
         max_polls
     );
 }
-
-// ── Factory / init helpers ──
 
 pub(super) async fn warmup_character_memories_ready(
     config: &EneConfig,

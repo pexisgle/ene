@@ -25,20 +25,14 @@ use tokio::sync::{mpsc, oneshot};
 /// `ene-store`.
 pub use ene_store::PendingCandidateEdit;
 
-/// Summary of a pending memory candidate for the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingCandidateSummary {
-    /// Database primary key.
     pub id: i64,
-    /// Short title or label.
     pub title: String,
-    /// Full candidate content.
     pub content: String,
-    /// Memory kind as string (e.g. "episodic", "semantic").
     pub kind: String,
     /// Confidence score (0.0 .. 1.0).
     pub confidence: f32,
-    /// Human-readable reason for the extraction.
     pub reason_detail: String,
     /// Title of an existing memory this candidate would supersede, if any.
     pub existing_memory_title: Option<String>,
@@ -76,9 +70,6 @@ impl From<&PendingCandidate> for PendingCandidateSummary {
     }
 }
 
-/// Handle over the pending memory-candidate approval flow
-/// (list / inspect / history / approve / edit / reject).
-///
 /// Obtained via [`crate::EneHandle::candidates`]. Cheap to clone (wraps an
 /// optional `Arc` plus a shared card-name lock).
 #[derive(Clone)]
@@ -110,8 +101,6 @@ impl MemoryCandidateHandle {
         })
     }
 
-    /// List pending memory candidates awaiting user approval.
-    ///
     /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`.
     pub async fn list_pending(&self) -> Result<Vec<PendingCandidateSummary>, PublicApiError> {
@@ -126,8 +115,6 @@ impl MemoryCandidateHandle {
         Ok(summaries)
     }
 
-    /// Inspect a single pending candidate (any status) by id.
-    ///
     /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`. `Ok(None)` when no
     /// such candidate exists.
@@ -144,8 +131,6 @@ impl MemoryCandidateHandle {
         Ok(Some(summary))
     }
 
-    /// List resolved candidates (approved / rejected), newest first.
-    ///
     /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`. The resolved
     /// queue is bounded by the retention sweep (`pending_candidate_retention`).
@@ -178,7 +163,7 @@ impl MemoryCandidateHandle {
         Ok(summaries)
     }
 
-    /// Approve a pending memory candidate, persisting it as a typed memory.
+    /// Persists the candidate as a typed memory.
     ///
     /// Routes through the actor mailbox with the active `TurnId` and emits a
     /// [`LifecycleEvent::CandidateChanged`](crate::handle::event::LifecycleEvent::CandidateChanged)
@@ -188,8 +173,6 @@ impl MemoryCandidateHandle {
             .await
     }
 
-    /// Reject a pending memory candidate.
-    ///
     /// Routes through the actor mailbox with the active `TurnId` and emits a
     /// [`LifecycleEvent::CandidateChanged`](crate::handle::event::LifecycleEvent::CandidateChanged)
     /// audit event on success.
@@ -198,8 +181,6 @@ impl MemoryCandidateHandle {
             .await
     }
 
-    /// Edit a still-pending candidate's user-editable fields.
-    ///
     /// Validation happens in the store before any write, so an invalid edit
     /// leaves the original candidate untouched. Routes through the actor
     /// mailbox with the active `TurnId` and emits a

@@ -1,5 +1,3 @@
-//! Integration tests for [`MemoryStore`].
-
 use super::memory::strip_tags_footer;
 use chrono::{DateTime, Utc};
 
@@ -2995,7 +2993,6 @@ async fn file_backup_restore_and_integrity_roundtrip() {
     let backup = store.backup().await.expect("backup");
     drop(store);
 
-    // Corrupt the live DB, then restore from the backup.
     std::fs::write(&path, b"not-a-sqlite-database").expect("corrupt");
     crate::backup::restore_database(&backup, &path).expect("restore");
     let store = MemoryStore::open(&path, 4).await.expect("reopen");
@@ -3405,8 +3402,6 @@ async fn pending_candidates_persist_across_instances_and_isolate_per_character()
     assert_eq!(mira.len(), 1);
     assert_eq!(mira[0].title, "mira fact");
 }
-
-// ── Pending-candidate retention policy ──
 
 #[tokio::test]
 async fn pending_candidate_age_prune_removes_expired() {
@@ -3854,8 +3849,6 @@ async fn pending_candidate_concurrent_approve_inserts_once() {
     assert_eq!(approved.len(), 1);
 }
 
-// ── PRAGMAs must reach every pooled connection ──
-
 /// The per-connection PRAGMAs must set
 /// `foreign_keys=ON` (and the other safety PRAGMAs) on **every**
 /// connection in the pool, not just the first one. A file-backed
@@ -3906,9 +3899,6 @@ async fn pragmas_apply_to_all_pool_connections() {
     }
 }
 
-// ── FK cascade and unique index correctness ──
-
-/// Builds a minimal [`crate::NewMemoryItem`] for test use.
 fn test_memory_item(title: &str, content: &str) -> crate::NewMemoryItem {
     crate::NewMemoryItem {
         scope: crate::MemoryScope::Character,
@@ -4024,8 +4014,6 @@ async fn upsert_memory_embedding_does_not_create_duplicates() {
         "stored embedding must be the second (updated) value"
     );
 }
-
-// ── vec0 ANN index tests ──
 
 /// The vec0 indexed search must return the same results as the brute-force
 /// scan for a small dataset where both paths are exhaustive.
@@ -4343,9 +4331,6 @@ async fn vec0_dimension_change_rebuilds_empty_not_fail() {
     assert_eq!(results.len(), 1, "new vectors must be searchable");
 }
 
-// ── audit_log session_id and session export tool history ──
-
-/// Builds a [`crate::NewAuditEntry`] for test use.
 fn test_audit_entry(session_id: &str, tool_name: &str) -> crate::NewAuditEntry {
     crate::NewAuditEntry {
         turn_id: format!("turn-{tool_name}"),

@@ -59,7 +59,6 @@ pub struct CurrencyConvertAction {
     #[tool(skip)]
     #[serde(skip, default = "default_config")]
     config: Arc<RwLock<CalcConfig>>,
-    /// The amount to convert.
     amount: f64,
     /// The source currency code (ISO 4217), e.g. "USD".
     from: String,
@@ -68,7 +67,6 @@ pub struct CurrencyConvertAction {
 }
 
 impl CurrencyConvertAction {
-    /// Creates a new action with the given shared config.
     #[must_use]
     pub fn new(config: Arc<RwLock<CalcConfig>>) -> Self {
         Self {

@@ -56,12 +56,9 @@ impl MotionLayer {
     }
 }
 
-/// A motion slot tracking a playing animation on one layer.
 #[derive(Debug, Clone)]
 struct MotionSlot {
-    /// Motion / clip name (for lookup).
     pub name: String,
-    /// Playback state.
     pub player: VrmaPlayer,
     /// Priority (higher = more important).
     pub priority: u8,
@@ -69,7 +66,6 @@ struct MotionSlot {
     pub duration: f32,
 }
 
-/// An expression entry with weight and priority.
 #[derive(Debug, Clone)]
 struct ExpressionEntry {
     pub weight: f32,
@@ -83,10 +79,8 @@ struct ExpressionEntry {
     pub priority: u8,
 }
 
-/// Composite frame result from the active layers.
 #[derive(Debug, Clone, Default)]
 pub struct ComposedFrame {
-    /// Active motion names per layer.
     pub active_motions: Vec<String>,
     /// Expression weights (name → weight).
     pub expressions: HashMap<String, f32>,
@@ -94,8 +88,6 @@ pub struct ComposedFrame {
     pub full_body_active: bool,
 }
 
-/// Manages motion playback across Upper/Lower/Full body layers
-/// with priority-based collision resolution.
 #[derive(Debug, Default)]
 pub struct LayerComposer {
     upper: Option<MotionSlot>,
@@ -105,9 +97,6 @@ pub struct LayerComposer {
 }
 
 impl LayerComposer {
-    /// Accept a motion cue, placing it on the appropriate layer with
-    /// priority-based replacement.
-    ///
     /// `priority` should follow the convention: 4 = llm, 3 = affect,
     /// 2 = hysteresis, 1 = fallback.
     pub fn accept_motion(
@@ -136,7 +125,6 @@ impl LayerComposer {
         }
     }
 
-    /// Cancel a motion on a specific layer.
     pub fn cancel_motion(&mut self, layer: MotionLayer) {
         match layer {
             MotionLayer::Upper => self.upper = None,
@@ -145,15 +133,12 @@ impl LayerComposer {
         }
     }
 
-    /// Cancel all motions across all layers.
     pub fn cancel_all_motions(&mut self) {
         self.upper = None;
         self.lower = None;
         self.full = None;
     }
 
-    /// Set or update an expression weight with priority semantics.
-    ///
     /// Higher-priority updates replace lower-priority ones for the
     /// same expression name.
     #[cfg_attr(
@@ -204,8 +189,6 @@ impl LayerComposer {
         self.expressions.clear();
     }
 
-    /// Tick all active motion players by `dt` seconds.
-    ///
     /// Full preempts Upper and Lower — when Full is active, only
     /// the Full slot advances and Upper/Lower clocks are paused.
     /// Slots are auto-cleared when their playback finishes.
@@ -253,10 +236,6 @@ impl LayerComposer {
         names
     }
 
-    /// Compose the current layer state into a [`ComposedFrame`].
-    ///
-    /// The consumer uses this to know which clips to evaluate and
-    /// which expressions to apply.
     pub fn compose(&self) -> ComposedFrame {
         let full_body_active = self.full.is_some();
         let mut active_motions = Vec::with_capacity(2);

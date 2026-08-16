@@ -16,7 +16,7 @@ const EMBED_TIMEOUT: Duration = Duration::from_secs(30);
 /// decision completions in a tighter budget.
 const COMPLETION_TIMEOUT: Duration = Duration::from_mins(5);
 
-/// Chat client pinned to one sidecar instance.
+/// Pinned to one sidecar instance.
 #[derive(Clone)]
 pub(crate) struct LlamaServerClient {
     http: reqwest::Client,
@@ -168,8 +168,6 @@ impl LlamaServerClient {
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
-    /// Embeds every item in one request, in order.
-    ///
     /// # Errors
     ///
     /// Returns a provider error when the sidecar is unreachable or rejects
@@ -258,7 +256,6 @@ impl LlamaServerClient {
     }
 }
 
-/// Drains one SSE response into the plugin stream channel.
 async fn drain_sse(
     response: reqwest::Response,
     tx: tokio::sync::mpsc::Sender<Result<PluginStreamChunk, PluginError>>,

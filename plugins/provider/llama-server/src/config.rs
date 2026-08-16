@@ -1,5 +1,3 @@
-//! Host-delivered config and per-model profiles for the llama-server provider.
-
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
@@ -37,7 +35,6 @@ const DEFAULT_QUANTIZATION: &str = "F16";
 /// spawning it.
 const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 60;
 
-/// The host-delivered plugin config blob (`plugins.list.llama-server.config`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
 pub(crate) struct HostConfig {
@@ -46,7 +43,6 @@ pub(crate) struct HostConfig {
     pub(crate) server_path: Option<String>,
     /// Extra command-line arguments passed to the sidecar on spawn.
     pub(crate) server_args: Vec<String>,
-    /// How long to wait for the sidecar health check after spawning it.
     pub(crate) startup_timeout_secs: Option<u64>,
     pub(crate) mmproj_url: Option<String>,
     pub(crate) mmproj_path: Option<String>,

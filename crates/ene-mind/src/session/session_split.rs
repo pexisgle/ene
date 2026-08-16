@@ -49,7 +49,6 @@ pub struct SplitResult {
     pub snapshot_len: usize,
 }
 
-/// Generates a unique session identifier.
 #[must_use]
 pub fn generate_session_id() -> SessionId {
     SessionId::from(format!("session_{}", uuid::Uuid::new_v4()))

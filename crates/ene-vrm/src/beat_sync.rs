@@ -33,7 +33,6 @@ const MIN_SPEED: f32 = 0.85;
 /// Maximum playback speed when the detected tempo is faster than reference.
 const MAX_SPEED: f32 = 1.2;
 
-/// Stateful beat-locked sway driven by `{ bpm, intensity }` pulses.
 #[derive(Debug, Clone)]
 pub struct BeatSway {
     bpm: f32,
@@ -68,8 +67,6 @@ impl BeatSway {
         self.since_pulse = 0.0;
     }
 
-    /// Advance the sway clock by `dt_secs`.
-    ///
     /// The phase advances at the current BPM; the intensity decays toward
     /// zero so the body settles between beats and fully rests after the
     /// pulse tail.
@@ -83,13 +80,10 @@ impl BeatSway {
         self.intensity *= (-INTENSITY_DECAY_PER_SEC * dt_secs).exp();
     }
 
-    /// Whether a recent beat still drives motion.
     pub fn is_active(&self) -> bool {
         self.since_pulse <= PULSE_TAIL_SECS && self.intensity > 0.001
     }
 
-    /// Playback-speed multiplier for locomotion clips.
-    ///
     /// Scales the clip toward the reference tempo (120 BPM); returns `1.0`
     /// once the sway tail expires so a dead beat never freezes the avatar
     /// at the last detected tempo.
@@ -100,8 +94,6 @@ impl BeatSway {
         (self.bpm / REFERENCE_BPM).clamp(MIN_SPEED, MAX_SPEED)
     }
 
-    /// Compose the sway onto `frame` as additive bone rotations.
-    ///
     /// Bones already posed by the clip keep their rotation (sway multiplies
     /// on top); unposed bones gain a sway-only rotation, so the reaction
     /// works without any motion asset.

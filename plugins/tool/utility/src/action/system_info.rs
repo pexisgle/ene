@@ -9,7 +9,6 @@ use ene_plugin::prelude::*;
     category = "Utility",
     keywords_primary = "system, os, platform, arch, info"
 )]
-/// Action to get basic system information.
 pub struct GetSystemInfoAction {}
 
 impl GetSystemInfoAction {

@@ -47,8 +47,6 @@ pub use config::{FieldWeightsConfig, ToolRagConfig};
 pub use error::ToolRagError;
 pub use hybrid::{HybridRerankProvider, hybrid_embed, hyde_document, rerank_tool_specs};
 
-// ── Per-field similarity weights ──────────────────────────────────────────
-
 /// Controls how strongly each embedding field contributes to the per-tool
 /// relevance score.
 ///
@@ -138,8 +136,6 @@ impl From<crate::tool::config::FieldWeightsConfig> for FieldWeights {
     }
 }
 
-// ── Runtime options (derived from config) ─────────────────────────────────
-
 /// Runtime options for the `ToolRag` pipeline, resolved from
 /// [`crate::tool::config::ToolRagConfig`].
 #[derive(Debug, Clone)]
@@ -207,7 +203,7 @@ impl TryFrom<crate::tool::config::ToolRagConfig> for ToolRagOptions {
 }
 
 impl ToolRagOptions {
-    /// Builds options from config. Invalid `forced` names fail construction.
+    /// Invalid `forced` names fail construction.
     pub fn from_config(
         c: crate::tool::config::ToolRagConfig,
     ) -> Result<Self, crate::tool::ToolRagError> {
@@ -238,8 +234,6 @@ impl ToolRagOptions {
         })
     }
 }
-
-// ── Pipeline ──────────────────────────────────────────────────────────────
 
 /// The Tool RAG pipeline: embed → weighted field similarity →
 /// optional cosine rerank → top-N.
@@ -272,8 +266,6 @@ pub struct ToolRag {
 }
 
 impl ToolRag {
-    /// Creates a new `ToolRag` instance with the given embedder, optional
-    /// embedding store, and options.
     pub fn new(
         embedder: Arc<dyn EmbeddingProvider>,
         store: Option<Arc<dyn EmbeddingStorePort>>,
@@ -302,8 +294,6 @@ impl ToolRag {
         self
     }
 
-    /// Construct from a config-level `ToolRagConfig`.
-    ///
     /// Invalid `forced` names fail construction.
     pub fn from_config(
         embedder: Arc<dyn EmbeddingProvider>,
@@ -325,12 +315,10 @@ impl ToolRag {
         result
     }
 
-    /// Returns a reference to the runtime options.
     pub const fn opts(&self) -> &ToolRagOptions {
         &self.opts
     }
 
-    /// Whether the pipeline has a backing embedding store.
     pub const fn has_store(&self) -> bool {
         self.store.is_some()
     }
@@ -380,8 +368,6 @@ impl ToolRag {
             }
         }
     }
-
-    // ── Indexing ───────────────────────────────────────────────────────
 
     /// Ensures every tool is embedded and stored using matching profiles.
     ///
@@ -575,8 +561,6 @@ impl ToolRag {
         )
         .await
     }
-
-    // ── Selection ──────────────────────────────────────────────────────
 
     /// Select the most relevant tools for the given query.
     ///
@@ -773,8 +757,6 @@ impl ToolRag {
         result
     }
 
-    // ── Background indexing ─────────────────────────────────────────────
-
     /// Spawns a background task that warms the index with the given specs and profiles.
     /// Returns immediately; the indexing runs asynchronously.
     pub fn start_background_indexer(
@@ -795,8 +777,6 @@ impl ToolRag {
             }
         });
     }
-
-    // ── Debug ──────────────────────────────────────────────────────────
 
     /// Returns a per-query `ToolRagStats` summary.
     pub async fn stats(&self) -> ToolRagStats {
@@ -824,8 +804,6 @@ impl ToolRag {
         }
     }
 }
-
-// ── Helpers ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 struct CachedFieldRow {
@@ -1003,7 +981,6 @@ fn field_version_hash(field_name: &str, text: &str) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-/// Check whether a cached (hash, model) pair matches the current values.
 fn is_cached(
     cached: &HashMap<(String, String, String), (String, String)>,
     key: &(String, String, String),
@@ -1170,8 +1147,6 @@ mod tests {
         assert!(!opts.use_rerank);
     }
 
-    // ── score_tools / selection pipeline tests ─────────────────────────────
-
     fn row(tool: &str, field: EmbeddingField, embedding: Vec<f32>) -> CachedFieldRow {
         CachedFieldRow {
             tool_name: tool.into(),
@@ -1190,7 +1165,6 @@ mod tests {
 
     #[test]
     fn score_tools_ranks_by_weighted_similarity() {
-        // query points along the x-axis.
         let query = vec![1.0, 0.0];
         let rows = vec![
             row("a", EmbeddingField::Summary, vec![1.0, 0.0]),
@@ -1393,8 +1367,6 @@ mod tests {
             many[0].1
         );
     }
-
-    // ── failure-feedback tests ─────────────────────────────────────────────
 
     #[test]
     fn apply_failure_penalty_downweights_failed_tool() {

@@ -7,7 +7,6 @@
 
 use sea_orm_migration::prelude::*;
 
-/// Base tables for the document/workspace RAG index.
 pub struct WorkspaceDocumentsMigration;
 
 impl MigrationName for WorkspaceDocumentsMigration {

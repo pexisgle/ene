@@ -20,8 +20,6 @@ fn api_key_env_var(id: &str) -> String {
     format!("ENE_CONNECTOR_{sanitized}_API_KEY")
 }
 
-/// Renders one permission prompt and submits the decision.
-///
 /// Connector commands run while the REPL select loop is not polling the
 /// event bus, so they must answer their own prompts; this mirrors the
 /// numbered prompt `stream.rs` renders during turns.
@@ -50,9 +48,6 @@ fn answer_prompt(ctx: &AppContext, request_id: &ene_runtime::RequestId) {
     drop(ctx.handle.decide_permission(request_id.clone(), decision));
 }
 
-/// Awaits a connector operation while answering any permission prompts the
-/// actor emits for it.
-///
 /// The bus subscription is created *before* the operation future is polled
 /// so a prompt emitted immediately after the command reaches the actor can
 /// never be missed (broadcast receivers only see events sent after

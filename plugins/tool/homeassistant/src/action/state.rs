@@ -34,7 +34,6 @@ struct StateResponse {
     keywords_primary = "home assistant, smart home, entity, state, sensor, value, read",
     side_effects = "Network { external: true }"
 )]
-/// Action to read an entity's state.
 pub struct StateAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
@@ -44,7 +43,6 @@ pub struct StateAction {
 }
 
 impl StateAction {
-    /// Creates a new `StateAction` with the given shared state.
     #[must_use]
     pub fn new(state: Arc<HomeAssistantState>) -> Self {
         Self {

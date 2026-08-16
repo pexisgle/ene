@@ -1,5 +1,3 @@
-//! Application startup sequence for ene-desktop.
-//!
 //! [`first_launch_setup`] runs once per install (release asset copy);
 //! [`load_desktop_settings`] / [`init_app_state`] run at every process
 //! start; async runtime warmup happens in [`AiBridge`] via
@@ -15,11 +13,10 @@ use crate::state::{AppState, AppStateError};
 
 /// Paths resolved during first-launch asset deployment + CLI overrides.
 pub struct FirstLaunchPaths {
-    /// Absolute path to the assets directory.
     pub assets_dir: PathBuf,
-    /// Default VRM path (CLI arg 1 or built-in default).
+    /// CLI arg 1, else the built-in default.
     pub default_vrm: String,
-    /// Default VRMA path (CLI arg 2 or built-in default).
+    /// CLI arg 2, else the built-in default.
     #[expect(
         dead_code,
         reason = "default VRMA path retained for CLI override API completeness"
@@ -27,7 +24,6 @@ pub struct FirstLaunchPaths {
     pub default_vrma: String,
 }
 
-/// Deploy default assets on first launch (release) and read CLI overrides.
 pub fn first_launch_setup() -> Result<FirstLaunchPaths, AppStateError> {
     let assets_dir =
         ene_config::ensure_resource_dirs().map_err(|e| AppStateError::AssetsDir(e.to_string()))?;
@@ -44,12 +40,10 @@ pub fn first_launch_setup() -> Result<FirstLaunchPaths, AppStateError> {
     })
 }
 
-/// Discover characters on disk and load persisted settings once.
 pub fn load_desktop_settings(paths: &FirstLaunchPaths) -> CharacterSettings {
     CharacterSettings::discover(&paths.assets_dir, &paths.default_vrm)
 }
 
-/// Construct [`AppState`] with GPU context and the AI bridge.
 pub fn init_app_state(
     gpu: GpuContext,
     settings: CharacterSettings,

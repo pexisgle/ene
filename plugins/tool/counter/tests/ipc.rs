@@ -84,7 +84,6 @@ impl TestPeer<'_> {
         }
     }
 
-    /// Performs the handshake on a raw stream and returns the capabilities.
     async fn handshake(&mut self) -> PluginCapabilities {
         write_plugin_request(
             self.stream,
@@ -120,7 +119,6 @@ impl TestPeer<'_> {
         }
     }
 
-    /// Sends a request and reads the single response.
     async fn round_trip(&mut self, req: &PluginIpcRequest) -> PluginIpcResponse {
         write_plugin_request(self.stream, req, self.format)
             .await

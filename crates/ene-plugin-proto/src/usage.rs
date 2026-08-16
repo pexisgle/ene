@@ -20,13 +20,10 @@ use serde::{Deserialize, Serialize};
 /// that happens to be missing one count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// Tokens in the prompt (input), if reported.
     #[serde(default)]
     pub prompt_tokens: Option<u32>,
-    /// Tokens in the completion (output), if reported.
     #[serde(default)]
     pub completion_tokens: Option<u32>,
-    /// Total tokens (prompt + completion), if reported.
     #[serde(default)]
     pub total_tokens: Option<u32>,
 }

@@ -26,7 +26,6 @@
 //! applied to which request. Secrets, request bodies, and user file contents
 //! are never recorded.
 
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(
@@ -37,15 +36,10 @@
 
 /// Append-only audit log for every resolved request.
 pub mod audit;
-/// The operation categories the approval system can gate.
 pub mod category;
-/// The manifest layer: what a plugin may request.
 pub mod manifest;
-/// Configured and resolved approval modes.
 pub mod mode;
-/// Global/per-plugin policies and the resolution order.
 pub mod policy;
-/// The request object exchanged with confirmation UI.
 pub mod request;
 
 pub use audit::{AuditLog, AuditLogEntry};

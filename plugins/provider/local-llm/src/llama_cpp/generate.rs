@@ -35,7 +35,6 @@ const MAX_VISION_TOKENS: i32 = 256;
 /// end-of-generation token or the max-token cap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Generated {
-    /// The full detokenized assistant text.
     pub(crate) text: String,
     /// Tokens the prompt occupied in the context.
     pub(crate) prompt_tokens: u32,
@@ -44,7 +43,6 @@ pub(crate) struct Generated {
 }
 
 impl Generated {
-    /// The exact token usage this generation observed.
     pub(crate) fn usage(&self) -> ene_ai::TokenUsage {
         ene_ai::TokenUsage::new(
             self.prompt_tokens,
@@ -54,8 +52,6 @@ impl Generated {
     }
 }
 
-/// One incremental unit a streaming llama.cpp chat job hands back.
-///
 /// Mostly detokenized text pieces — exactly what [`sample_tokens`] produces
 /// per token — plus a single trailing
 /// [`LlamaStreamChunk::Usage`] carrying the generation's exact token counts,
@@ -65,15 +61,11 @@ impl Generated {
 /// usage arrives on the final chunk" contract without a second round trip.
 #[derive(Debug, Clone)]
 pub(crate) enum LlamaStreamChunk {
-    /// A detokenized text piece.
     Delta(String),
     /// Token usage for the whole completion, sent once as the final chunk.
     Usage(ene_ai::TokenUsage),
 }
 
-/// Generate a completion for `messages` on the caller's cached `ctx`,
-/// optionally constrained by JSON schema grammar.
-///
 /// `sink`, when `Some`, receives each detokenized piece as it is sampled (see
 /// [`sample_tokens`]) in addition to the full text still being returned —
 /// `None` reproduces this function's pre-streaming behavior exactly, used by
@@ -288,16 +280,11 @@ fn generate_chat_vision_with_bitmaps(
     Ok(generated)
 }
 
-/// The output of [`sample_tokens`]: the accumulated text plus how many tokens
-/// were sampled to produce it.
 struct Sampled {
     text: String,
     completion_tokens: u32,
 }
 
-/// Samples tokens one at a time until an end-of-generation token or
-/// `max_tokens` is reached, always returning the full accumulated text.
-///
 /// `sink`, when `Some`, additionally receives each non-empty detokenized
 /// piece as it is produced; a caller passing `None` (every call site via
 /// [`crate::local_llm::model::LlamaChatModel::run`]) gets the plain one-shot

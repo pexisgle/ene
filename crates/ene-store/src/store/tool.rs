@@ -1,5 +1,3 @@
-//! Tool-embedding index queries.
-
 use super::{
     EneMemoryError, MemoryStore, ToolEmbeddingFieldRow, bytes_to_embedding, embedding_to_bytes,
     validate_embedding,

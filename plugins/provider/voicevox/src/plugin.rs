@@ -1,5 +1,3 @@
-//! VOICEVOX-compatible TTS plugin: capabilities and synthesis handler.
-
 use async_trait::async_trait;
 use ene_plugin::prelude::*;
 use serde_json::{Value, json};
@@ -9,8 +7,6 @@ use crate::client;
 use crate::config::VoicevoxConfig;
 use crate::engine::{EngineProcess, ensure_engine};
 
-/// TTS plugin serving the VOICEVOX / Aivis Speech HTTP API.
-///
 /// The static capability data (`tts_spec()` / `TTS_PROVIDER_KIND`) is
 /// generated from the `#[provider(...)]` attribute; synthesis is
 /// hand-written.

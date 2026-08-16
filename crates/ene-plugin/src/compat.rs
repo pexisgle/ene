@@ -57,7 +57,6 @@ pub struct ToolProviderPlugin<T: ToolProvider> {
 }
 
 impl<T: ToolProvider> ToolProviderPlugin<T> {
-    /// Wraps a [`ToolProvider`] into a [`ToolProviderPlugin`].
     pub fn new(provider: T) -> Self {
         Self {
             provider,
@@ -84,8 +83,6 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
         args: &str,
         context: Option<&CallContext>,
     ) -> Result<ToolResult, ToolError> {
-        // Guard held across the await: `tokio::sync::Mutex` yields rather than
-        // blocking the worker thread, so serialization is deadlock-free.
         let _lock = self.call_mutex.lock().await;
         if let Some(ctx) = context {
             self.provider.set_call_context(ctx);
@@ -102,7 +99,6 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
         arguments: &str,
         context: Option<&CallContext>,
     ) -> Result<DeferredOutcome, ToolError> {
-        // Guard held across the await (see `call_tool`).
         let _lock = self.call_mutex.lock().await;
         if let Some(ctx) = context {
             self.provider.set_call_context(ctx);

@@ -59,16 +59,11 @@ pub fn sidecar_ids_for(plugin: &str, manifest: Option<&PluginManifest>) -> Vec<S
     ids
 }
 
-/// Installed artifact view for the settings UI.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct InstalledArtifactView {
-    /// Active version.
     pub version: String,
-    /// Artifact kind (`plugin`, `sidecar`, or `model`).
     pub kind: String,
-    /// Hex SHA-256 of the active object.
     pub sha256: String,
-    /// Size in bytes.
     pub size: u64,
     /// Executable path inside the generation root for extracted payloads.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,31 +97,21 @@ impl InstalledArtifactView {
     }
 }
 
-/// Catalog target view for the settings UI.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CatalogTargetView {
-    /// Catalog version for the artifact.
     pub version: String,
-    /// Artifact kind.
     pub kind: String,
-    /// Hex SHA-256 of the artifact bytes.
     pub sha256: String,
-    /// Size in bytes.
     pub size: u64,
-    /// Ordered mirror URLs.
     pub urls: Vec<String>,
 }
 
-/// One artifact row for the Engines page.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ArtifactSnapshot {
-    /// Artifact id from the catalog.
     pub artifact_id: String,
-    /// Installed generation, when present.
     pub installed: Option<InstalledArtifactView>,
     /// Catalog target, when the catalog is reachable and lists the id.
     pub catalog: Option<CatalogTargetView>,
-    /// Whether the catalog offers a newer version than installed.
     pub update_available: bool,
     /// Catalog-level error (unreachable / signature / rollback).
     pub error: Option<String>,
@@ -233,7 +218,6 @@ impl ArtifactState {
         }
     }
 
-    /// Snapshot of every installed artifact plus catalog targets.
     pub async fn snapshot(&self) -> Vec<ArtifactSnapshot> {
         let installed = self.installer.state();
         let (metadata, error) = match self.catalog_metadata(false).await {
@@ -293,7 +277,6 @@ impl ArtifactState {
             .collect()
     }
 
-    /// Installs (or updates) `id` from the catalog and returns the new view.
     pub async fn install(
         &self,
         id: &str,
@@ -347,7 +330,6 @@ impl ArtifactState {
         ))
     }
 
-    /// Rolls the artifact back one generation.
     pub fn rollback(&self, id: &str) -> Result<InstalledArtifactView, String> {
         let installed = self.installer.rollback(id).map_err(|e| e.to_string())?;
         Ok(InstalledArtifactView::from_artifact(
@@ -361,7 +343,6 @@ impl ArtifactState {
         self.installer.uninstall(id).map_err(|e| e.to_string())
     }
 
-    /// Force-refreshes the catalog and returns its version.
     pub async fn refresh_catalog(&self) -> Result<u64, String> {
         self.catalog_metadata(true).await.map(|m| m.version)
     }

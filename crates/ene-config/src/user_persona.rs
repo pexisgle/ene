@@ -1,23 +1,17 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Structured user persona for roleplay context.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct UserPersona {
-    /// User's display name.
     pub name: String,
-    /// Physical description of the user.
     #[serde(default)]
     pub description: Option<String>,
-    /// Relationship to the character.
     #[serde(default)]
     pub relationship: Option<String>,
-    /// Preferred pronouns.
     #[serde(default)]
     pub pronouns: Option<String>,
-    /// Custom notes/additional context about the user.
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -35,8 +29,6 @@ impl Default for UserPersona {
 }
 
 impl UserPersona {
-    /// Render the persona as labeled lines, each prefixed with `line_prefix`.
-    ///
     /// Single canonical field rendering shared by CBS `{{user_persona}}` macro
     /// expansion (empty prefix) and prompt-budget injection (`"- "` bullets) so
     /// the two never diverge. Empty optional fields are omitted.

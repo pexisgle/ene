@@ -72,7 +72,6 @@ pub fn identity_kernel_budget_tokens(available_window: usize) -> usize {
     scaled.clamp(MIN_IDENTITY_KERNEL_TOKENS, MAX_IDENTITY_KERNEL_TOKENS)
 }
 
-/// Compiles `CCv3` character fields into a compact Identity Kernel.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CharacterCompiler;
 
@@ -117,7 +116,6 @@ impl CharacterCompiler {
         )
     }
 
-    /// Compile an Identity Kernel with per-turn roleplay context.
     #[must_use]
     pub fn compile_with_context(
         card: &CharacterCardV3,
@@ -433,8 +431,6 @@ fn render_relationship_tone(
     })
 }
 
-/// Local-time period for an hour of day (05–10 morning, 11–16 afternoon,
-/// 17–20 evening, 21–04 night).
 const fn time_period_for_hour(hour: u32) -> TimePeriod {
     match hour {
         5..=10 => TimePeriod::Morning,
@@ -444,8 +440,6 @@ const fn time_period_for_hour(hour: u32) -> TimePeriod {
     }
 }
 
-/// Renders the time-of-day behavior line when `now` falls in a defined
-/// period; blank behaviors are omitted.
 fn render_time_behavior(
     card: &CharacterCardV3,
     now: Option<DateTime<Local>>,
@@ -471,8 +465,6 @@ fn render_time_behavior(
     Some(format!("{header}: {behavior}"))
 }
 
-/// Renders the scene behavior line when any keyword appears in the active
-/// scene text; blank keywords or behaviors are omitted.
 fn render_scene_behavior(
     card: &CharacterCardV3,
     scene_text: Option<&str>,
@@ -1023,7 +1015,6 @@ mod tests {
             .post_history_instructions
             .expect("post_history present");
         assert!(phi.contains("Stay in character."));
-        // Anti-impersonation reinforcement is appended and expanded at compile time.
         assert!(
             phi.contains("Important: You are Ene"),
             "phi should contain 'Important: You are Ene' but was: {phi}"

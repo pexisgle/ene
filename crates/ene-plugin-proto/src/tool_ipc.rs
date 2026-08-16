@@ -23,28 +23,17 @@ pub const IPC_PROTOCOL_VERSION: u32 = 2;
     reason = "Handshake carries the full SandboxConfigData (grew with broker_socket/plugin_temp_dir); boxing would churn every construction site for a wire type whose size is irrelevant"
 )]
 pub enum IpcRequest {
-    /// Handshake to negotiate protocol version, exchange sandbox config,
-    /// and push tool-specific configuration.
     Handshake {
-        /// Client's supported protocol version.
         version: u32,
-        /// Sandbox configuration to apply.
         #[serde(default)]
         sandbox: SandboxConfigData,
-        /// Tool-specific configuration JSON.
         tool_config: Option<serde_json::Value>,
     },
-    /// List all available tool specs.
     ListTools,
-    /// List host/RAG metadata profiles for indexed tools.
     ListRagProfiles,
-    /// Request the tool's config JSON Schema (documented exception).
     GetConfigSchema,
-    /// Execute a tool by name with JSON arguments.
     CallTool {
-        /// Tool name to call.
         name: String,
-        /// JSON-encoded arguments.
         arguments: String,
         /// When `true`, request deferred (background) execution.
         ///
@@ -69,46 +58,29 @@ pub enum IpcRequest {
     SetCallContext {
         /// Conversation-level identifier (session ID).
         conversation_id: String,
-        /// Turn-level identifier within the conversation.
         turn_id: String,
     },
-    /// Approve a pending permission request.
     ApprovePermission {
-        /// ID of the request to approve.
         request_id: String,
     },
-    /// Register a session-wide permission allow pattern.
     AllowPattern {
         /// Action pattern (e.g. "`filesystem_write`").
         action: String,
-        /// Target glob pattern.
         target_pattern: String,
     },
-    /// Revoke a previously granted session-wide permission allow pattern.
     RevokePattern {
-        /// Action pattern to revoke.
         action: String,
-        /// Target glob pattern to revoke.
         target_pattern: String,
     },
-    /// Graceful shutdown.
     Shutdown,
     /// Liveness probe. The server must reply with [`IpcResponse::Pong`]
     /// promptly; a hung tool that fails to answer within the probe timeout
     /// is considered unhealthy and restarted by the host.
     Ping,
-    /// Poll the status of a deferred (background) task by id.
-    ///
-    /// The server replies with [`IpcResponse::DeferredStatus`].
     PollDeferred {
-        /// The `task_id` returned by a prior [`IpcResponse::DeferredAccepted`].
         task_id: String,
     },
-    /// Cancel a deferred (background) task by id.
-    ///
-    /// The server replies with [`IpcResponse::Ack`].
     CancelDeferred {
-        /// The `task_id` of the background task to cancel.
         task_id: String,
     },
 }
@@ -116,31 +88,21 @@ pub enum IpcRequest {
 /// IPC response — host → core
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IpcResponse {
-    /// Handshake acknowledgment with negotiated version.
     HandshakeAck {
-        /// Agreed protocol version.
         version: u32,
     },
     /// Acknowledgment (for `ApprovePermission`, `AllowPattern`, etc.).
     Ack,
-    /// List of tool specs.
     Tools {
-        /// The structured tool specs.
         tools: Vec<ToolSpec>,
     },
-    /// Host/RAG metadata profiles.
     RagProfiles {
-        /// Per-tool RAG profiles matching `Tools`.
         profiles: Vec<ToolRagProfile>,
     },
-    /// The tool's config JSON Schema.
     ConfigSchema {
-        /// The schema, or None if not provided.
         schema: Option<serde_json::Value>,
     },
-    /// Result of a tool call.
     CallResult {
-        /// The result, or an error.
         result: Result<String, ToolError>,
     },
     /// Acknowledgment of a deferred (background) tool call.
@@ -150,23 +112,14 @@ pub enum IpcResponse {
     /// result is delivered later out-of-band; the host tracks the task
     /// by `task_id`.
     DeferredAccepted {
-        /// Unique identifier for the queued background task.
         task_id: String,
     },
-    /// Error response.
     Error {
-        /// Error description.
         message: String,
     },
-    /// Reply to a [`IpcRequest::Ping`] liveness probe.
     Pong,
-    /// Status of a deferred (background) task.
-    ///
-    /// Returned in response to [`IpcRequest::PollDeferred`].
     DeferredStatus {
-        /// The polled task id.
         task_id: String,
-        /// Current status of the task.
         status: DeferredStatus,
     },
 }
@@ -182,21 +135,10 @@ pub enum IpcResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeferredStatus {
-    /// The task is still running.
     Pending,
-    /// The task finished successfully with `result`.
-    Completed {
-        /// The tool's structured output.
-        result: ToolResult,
-    },
-    /// The task failed with `error`.
-    Failed {
-        /// Human-readable failure description.
-        error: String,
-    },
-    /// The task was cancelled before completing.
+    Completed { result: ToolResult },
+    Failed { error: String },
     Cancelled,
-    /// No task with the polled id is known to the tool.
     Unknown,
 }
 
@@ -209,7 +151,6 @@ pub enum DeferredStatus {
 pub struct CallContext {
     /// Conversation-level identifier (session ID).
     pub conversation_id: String,
-    /// Turn-level identifier within the conversation.
     pub turn_id: String,
 }
 
@@ -224,7 +165,6 @@ pub struct ToolConfigAccessor {
 }
 
 impl ToolConfigAccessor {
-    /// Wraps an initial JSON config value for shared read/write access.
     pub fn new(initial_config: serde_json::Value) -> Self {
         Self {
             config: std::sync::Arc::new(tokio::sync::RwLock::new(initial_config)),
@@ -243,7 +183,6 @@ impl ToolConfigAccessor {
         })
     }
 
-    /// Overwrite the stored config with a new serializable value.
     #[expect(
         clippy::future_not_send,
         reason = "IPC transport uses single-threaded runtime on some targets"
@@ -290,7 +229,6 @@ pub async fn read_ipc_request<R: AsyncReadExt + Unpin>(
     Ok(Some(req))
 }
 
-/// Writes an `IpcRequest` as 4-byte length-prefixed JSON
 pub async fn write_ipc_request<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     req: &IpcRequest,
@@ -341,7 +279,6 @@ pub async fn read_ipc_response<R: AsyncReadExt + Unpin>(
     Ok(Some(resp))
 }
 
-/// Writes an `IpcResponse` as 4-byte length-prefixed JSON
 pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     resp: &IpcResponse,

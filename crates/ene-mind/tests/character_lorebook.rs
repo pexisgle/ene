@@ -1,5 +1,3 @@
-//! Character lorebook and style integration tests.
-
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,

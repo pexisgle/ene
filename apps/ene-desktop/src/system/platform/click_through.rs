@@ -1,31 +1,8 @@
-//! Linux-only click-through dispatcher system.
-//!
-//! Reads the latest [`CursorState`] + [`MaskCapture`] rects and
-//! drives the Wayland / X11 input-region policy through
-//! [`crate::platform::apply_linux_click_through`]. Mirrors the
-//! Windows path's `Window::set_cursor_hittest` call but routes
-//! through the per-display-server `apply_linux_click_through`
-//! function so bevy systems own the policy decision.
+//! Mirrors the Windows path's `Window::set_cursor_hittest` call but routes
+//! through the per-display-server `apply_linux_click_through` function so
+//! bevy systems own the policy decision.
 //!
 //! On non-Linux builds the system is a no-op.
-//!
-//! Inputs:
-//! - [`ShouldRenderDebug`] — gate from the cross-platform
-//!   `should_render_debug_system`. Skips the dispatch when the
-//!   debug overlay is throttled.
-//! - [`DragActive`] — the user is currently dragging the
-//!   character.
-//! - [`CursorState`] — last known cursor position in window-local
-//!   pixels.
-//! - [`WaylandInputRegion`] / [`X11ContextRes`] / [`LayerShell`] /
-//!   [`LayerShellFreeze`] / [`MaskCapture`] — read-only inputs
-//!   into the platform function.
-//! - [`TransparentWindow`] — whether the character window is
-//!   currently in "transparent" mode (Space hotkey).
-//!
-//! Outputs:
-//! - [`LastAppliedInputRects`] / [`LastInputSource`] — read by
-//!   the F9 debug overlay.
 #[cfg(target_os = "linux")]
 mod imp {
     use bevy_ecs::prelude::*;
@@ -40,11 +17,6 @@ mod imp {
         DragActive, ShouldRenderDebug, TransparentWindow,
     };
 
-    /// Per-frame input-region / click-through update. Reads the
-    /// current cursor + drag state, decides whether the
-    /// character window should accept input, and pushes the
-    /// matching policy into the Wayland / X11 contexts.
-    ///
     /// Skipped when [`ShouldRenderDebug`] is `false` (FPS
     /// throttle) — the per-frame input region only needs to be
     /// refreshed as often as the debug overlay.

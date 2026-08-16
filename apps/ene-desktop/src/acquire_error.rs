@@ -1,5 +1,3 @@
-//! Shared surface acquire outcomes for wgpu presentation.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcquireError {
     Reconfigure,

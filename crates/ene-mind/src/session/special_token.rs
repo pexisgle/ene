@@ -16,9 +16,7 @@ use crate::output::{MotionLayer, PerformanceCue};
 /// `<|perf:…|>` marker token, in the order they appeared in the stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamPiece {
-    /// Clean text (markers removed).
     Text(String),
-    /// A complete `<|…|>` marker token.
     Marker(String),
 }
 
@@ -80,8 +78,6 @@ pub fn split_text_and_special_tokens_ordered(carry: &mut String, chunk: &str) ->
     pieces
 }
 
-/// Splits streaming text into normal text deltas and special tokens (like `<|perf:expr=happy|>`).
-/// Handles partial tokens that span across chunks via a carry buffer.
 pub fn split_text_and_special_tokens(
     carry: &mut String,
     chunk: &str,
@@ -97,9 +93,6 @@ pub fn split_text_and_special_tokens(
     (text_deltas, special_tokens)
 }
 
-/// Strips special markers from text and returns the cleaned string.
-///
-/// All `<|…|>` tokens are removed; plain text between them is concatenated.
 pub fn strip_markers(text: &str) -> String {
     let mut carry = String::new();
     let (text_deltas, _tokens) = split_text_and_special_tokens(&mut carry, text);

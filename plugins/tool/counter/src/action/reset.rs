@@ -3,7 +3,6 @@ use crate::provider::CounterState;
 use ene_plugin::prelude::*;
 use std::sync::Arc;
 
-/// Resets the session counter to zero.
 #[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "counter",
@@ -21,7 +20,6 @@ pub struct ResetAction {
 }
 
 impl ResetAction {
-    /// Creates a new `ResetAction`.
     #[must_use]
     pub const fn new(state: Arc<CounterState>) -> Self {
         Self { state }

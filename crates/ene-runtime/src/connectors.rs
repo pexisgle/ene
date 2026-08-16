@@ -20,13 +20,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
-/// Error returned by connector operations through the handle.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectorHandleError {
-    /// The actor mailbox is gone.
     #[error("actor unavailable")]
     ActorDead,
-    /// The connector operation failed.
     #[error(transparent)]
     Connector(#[from] ConnectorError),
 }
@@ -37,8 +34,6 @@ impl From<PublicApiError> for ConnectorHandleError {
     }
 }
 
-/// Handle for connector registration, queries, and lifecycle operations.
-///
 /// Obtained from [`crate::EneHandle::connectors`]. Clone freely.
 #[derive(Clone)]
 pub struct ConnectorHandle {
@@ -54,8 +49,6 @@ impl ConnectorHandle {
         Self { registry, cmd_tx }
     }
 
-    /// Registers a connector with the framework.
-    ///
     /// # Errors
     /// Returns [`ConnectorError::Internal`] when the id is already
     /// registered.
@@ -63,27 +56,21 @@ impl ConnectorHandle {
         self.registry.register(connector)
     }
 
-    /// Removes a registered connector.
     pub fn unregister(&self, id: &ConnectorId) -> bool {
         self.registry.unregister(id)
     }
 
-    /// Lists cached connector summaries; performs no connector I/O.
     #[must_use]
     pub fn list(&self) -> Vec<ConnectorSummary> {
         self.registry.list()
     }
 
-    /// Returns the cached status snapshot; performs no connector I/O.
-    ///
     /// # Errors
     /// Returns [`ConnectorError::NotFound`] for an unknown id.
     pub fn status(&self, id: &ConnectorId) -> Result<ConnectorStatus, ConnectorError> {
         self.registry.status(id)
     }
 
-    /// Lists the standing per-action grants of a connector.
-    ///
     /// # Errors
     /// Returns [`ConnectorError::NotFound`] for an unknown id.
     pub fn permissions(&self, id: &ConnectorId) -> Result<Vec<PermissionGrant>, ConnectorError> {
@@ -378,8 +365,6 @@ where
     result
 }
 
-/// Records a connector operation in the tool-permission audit trail.
-///
 /// Arguments are empty by construction — connector ops carry no payload —
 /// and the store redacts argument JSON as a second layer. Out-of-band ops
 /// (no active turn) record an empty `turn_id`; session linkage is preserved

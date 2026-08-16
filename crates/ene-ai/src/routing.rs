@@ -12,7 +12,6 @@ use crate::traits::{LlmProvider, ProviderHost};
 /// Cognitive task kinds that map to [`AiConfig::tasks`] entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiTaskKind {
-    /// Main conversation chat.
     Chat,
     /// Post-turn affect classifier.
     Classifier,

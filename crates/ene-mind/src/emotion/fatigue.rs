@@ -4,13 +4,10 @@ use ene_core::AffectState;
 
 use super::types::{AffectDelta, AffectUpdateReason};
 
-/// Threshold of recent user turns before long-conversation fatigue applies.
 const LONG_CONVERSATION_TURN_THRESHOLD: usize = 16;
 
-/// Fatigue increment per turn beyond the long-conversation threshold.
 const LONG_CONVERSATION_FATIGUE_DELTA: f32 = 0.03;
 
-/// Apply a small fatigue bump when the conversation has many recent user turns.
 pub fn apply_conversation_fatigue(
     state: &mut AffectState,
     recent_turn_count: usize,

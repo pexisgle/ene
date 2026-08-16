@@ -18,7 +18,6 @@ pub(crate) async fn with_broker() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
-/// A scope whose only allowed directory is `path`.
 pub(crate) fn scope_allowing(path: &str) -> RepoScope {
     let data = SandboxConfigData {
         allowed_directories: vec![path.to_string()],
@@ -27,12 +26,10 @@ pub(crate) fn scope_allowing(path: &str) -> RepoScope {
     RepoScope::new(data)
 }
 
-/// Wraps a scope in the same shared handle the provider uses.
 pub(crate) fn sandbox_ref(scope: RepoScope) -> SandboxRef {
     Arc::new(std::sync::RwLock::new(Some(Arc::new(scope))))
 }
 
-/// A throwaway git repository with a fixed local identity, for unit tests.
 pub(crate) struct RepoFixture {
     pub(crate) dir: tempfile::TempDir,
     pub(crate) repo: Repository,

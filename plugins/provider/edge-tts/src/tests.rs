@@ -1,6 +1,4 @@
-//! Plugin tests: full synthesize round-trips against an in-process mock
-//! Edge WebSocket server, reconnect behavior, and error mapping. The real
-//! Microsoft service is never contacted.
+//! The real Microsoft service is never contacted.
 #![expect(
     clippy::expect_used,
     reason = "unit tests use expect for concise assertions"
@@ -67,8 +65,6 @@ async fn next_text(
     }
 }
 
-/// Serves `chunk_count` chunks: speech.config once, then per chunk an ssml
-/// request followed by audio and turn.end.
 async fn serve_chunks(ws: WebSocketStream<TcpStream>, chunk_count: usize) {
     let (mut sink, mut stream) = ws.split();
     let speech = next_text(&mut stream).await.expect("speech.config");

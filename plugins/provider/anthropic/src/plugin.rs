@@ -184,7 +184,6 @@ fn schema_to_forced_tool(schema: &Value) -> Result<Value, PluginError> {
     }))
 }
 
-/// Extracts concatenated text content from a non-streaming Anthropic response.
 fn extract_text_content(body: &Value) -> Result<String, PluginError> {
     let content = body
         .get("content")
@@ -753,7 +752,6 @@ mod tests {
         assert!(result.text_delta.is_none());
         let deltas = result.tool_calls_delta.unwrap();
         assert_eq!(deltas.len(), 1);
-        // Content-block index 1 is the first tool → dense index 0.
         assert_eq!(deltas[0]["index"], 0);
         assert_eq!(deltas[0]["arguments"], "{\"loc");
     }
@@ -775,7 +773,6 @@ mod tests {
         assert!(result.text_delta.is_none());
         let deltas = result.tool_calls_delta.unwrap();
         assert_eq!(deltas.len(), 1);
-        // Content-block index 1 is the first tool → dense index 0.
         assert_eq!(deltas[0]["index"], 0);
         assert_eq!(deltas[0]["id"], "toolu_abc");
         assert_eq!(deltas[0]["name"], "get_weather");
@@ -786,19 +783,16 @@ mod tests {
     fn sse_tool_indices_are_dense_across_text_blocks() {
         let mut state = ToolCallState::default();
 
-        // Block 0 is text → ignored and consumes no tool index.
         let text_start =
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
         assert!(process_sse_event("content_block_start", text_start, &mut state).is_none());
 
-        // Block 1 is the first tool → dense index 0.
         let tool1_start = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_a","name":"a"}}"#;
         let chunk = process_sse_event("content_block_start", tool1_start, &mut state)
             .unwrap()
             .unwrap();
         assert_eq!(chunk.tool_calls_delta.unwrap()[0]["index"], 0);
 
-        // Block 2 is the second tool → dense index 1.
         let tool2_start = r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_b","name":"b"}}"#;
         let chunk = process_sse_event("content_block_start", tool2_start, &mut state)
             .unwrap()

@@ -1,5 +1,3 @@
-//! Memory forgetting lifecycle: status transitions and decay scoring.
-//!
 //! Decay scoring and thresholds live in `ene-rag` (the RAG policy layer); this
 //! module is `pub(crate)`; [`active_decay_anchor`] is re-exported with
 //! `pub(crate) use` so store code keeps its `crate::forgetting::*` paths, and
@@ -16,9 +14,7 @@ pub(crate) use ene_rag::active_decay_anchor;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("Invalid memory status transition: {from:?} -> {to:?}")]
 pub struct InvalidTransition {
-    /// Current status.
     pub from: MemoryStatus,
-    /// Requested target status.
     pub to: MemoryStatus,
 }
 
@@ -33,7 +29,6 @@ pub const fn user_restorable_statuses() -> &'static [MemoryStatus] {
     ]
 }
 
-/// Validate whether a user-driven restore to [`MemoryStatus::Active`] is permitted.
 pub fn validate_user_restore(from: MemoryStatus) -> Result<(), InvalidTransition> {
     if user_restorable_statuses().contains(&from) {
         Ok(())
@@ -45,7 +40,7 @@ pub fn validate_user_restore(from: MemoryStatus) -> Result<(), InvalidTransition
     }
 }
 
-/// Validate whether a single-step lifecycle transition is permitted.
+/// Only single-step lifecycle transitions are permitted.
 pub const fn validate_transition(
     from: MemoryStatus,
     to: MemoryStatus,

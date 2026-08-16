@@ -11,9 +11,9 @@ publish = false
 crate-type = ["lib"]
 
 # NOTE: `ene-config` and `ene-plugin-proto` are deliberately NOT dependencies.
-# Per #308, exposing config/proto weight through this crate would propagate it
-# to every plugin that sees these credential types. The dependency direction is
-# `ene-plugin-host` knows both connector and proto, never the reverse (#412).
+# Exposing config/proto weight through this crate would propagate it to every
+# plugin that sees these credential types. The dependency direction is
+# `ene-plugin-host` knows both connector and proto, never the reverse.
 [dependencies]
 thiserror = { workspace = true }
 chrono = { workspace = true }

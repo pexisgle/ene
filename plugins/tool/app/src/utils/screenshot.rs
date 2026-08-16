@@ -3,7 +3,6 @@ use ene_plugin_proto::ToolError;
 use image::DynamicImage;
 use std::io::Cursor;
 
-/// Shared helper to encode `DynamicImage` into a Base64 PNG data URI.
 pub fn encode_image_to_data_uri(image: &DynamicImage) -> Result<String, ToolError> {
     let mut buf = Cursor::new(Vec::new());
     image

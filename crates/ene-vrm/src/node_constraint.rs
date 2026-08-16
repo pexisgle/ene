@@ -35,11 +35,8 @@ use serde_json::Value;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RollAxis {
-    /// Local X axis.
     X,
-    /// Local Y axis.
     Y,
-    /// Local Z axis.
     Z,
 }
 
@@ -66,17 +63,11 @@ impl RollAxis {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AimAxis {
-    /// World +X direction.
     PositiveX,
-    /// World -X direction.
     NegativeX,
-    /// World +Y direction.
     PositiveY,
-    /// World -Y direction.
     NegativeY,
-    /// World +Z direction.
     PositiveZ,
-    /// World -Z direction.
     NegativeZ,
 }
 
@@ -139,7 +130,6 @@ pub enum NodeConstraint {
 }
 
 impl NodeConstraint {
-    /// The glTF node index of the source (driver) bone.
     pub const fn source_node(&self) -> usize {
         match self {
             Self::Rotation { source_node, .. }
@@ -148,7 +138,6 @@ impl NodeConstraint {
         }
     }
 
-    /// Constraint weight in `[0.0, 1.0]`.
     pub const fn weight(&self) -> f32 {
         match self {
             Self::Rotation { weight, .. }
@@ -163,7 +152,6 @@ impl NodeConstraint {
 pub struct ConstraintEntry {
     /// The glTF node index of the destination (driven) bone.
     pub dest_node: usize,
-    /// The constraint to apply.
     pub constraint: NodeConstraint,
 }
 
@@ -179,12 +167,10 @@ pub struct NodeConstraintRegistry {
 }
 
 impl NodeConstraintRegistry {
-    /// Number of constraints in the registry.
     pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether the registry is empty.
     pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -373,7 +359,6 @@ pub fn load_node_constraints(gltf: &gltf::Gltf) -> NodeConstraintRegistry {
     NodeConstraintRegistry { entries }
 }
 
-/// Parse a single constraint from its JSON value.
 fn parse_constraint(json: &Value) -> Option<NodeConstraint> {
     let obj = json.as_object()?;
     let constraint = obj.get("constraint")?.as_object()?;

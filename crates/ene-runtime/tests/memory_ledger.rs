@@ -1,5 +1,3 @@
-//! Integration tests for the interactive memory/commitment ledger surface.
-
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,

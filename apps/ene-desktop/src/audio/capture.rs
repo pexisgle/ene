@@ -41,22 +41,16 @@ const BARGE_IN_ENERGY_FACTOR: f32 = 2.0;
 /// barge-in gate. Calibrated for 16-bit-equivalent float audio.
 const SILENCE_RMS: f32 = 0.01;
 
-/// Errors returned when microphone capture cannot start.
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
-    /// No usable input device was found.
     #[error("no input audio device available")]
     NoInputDevice,
-    /// The device reported no supported input configuration.
     #[error("input device has no supported input configuration: {0}")]
     NoSupportedConfig(String),
-    /// `cpal` failed to build the input stream.
     #[error("failed to build input stream: {0}")]
     BuildStream(String),
 }
 
-/// Handle to a running microphone capture stream.
-///
 /// Dropping the handle (or calling [`stop`](Self::stop)) closes the
 /// `cpal` stream and clears the `mic_active` flag.
 pub struct MicHandle {
@@ -83,8 +77,6 @@ impl Drop for MicHandle {
     }
 }
 
-/// Stateful linear resampler from the device rate to [`CAPTURE_SAMPLE_RATE`].
-///
 /// Carries a fractional input position across callbacks so the output
 /// stream stays continuous.
 struct Resampler {
@@ -101,8 +93,6 @@ impl Resampler {
         }
     }
 
-    /// Resample `input` (mono, device rate) into 16 kHz, appending to `out`.
-    ///
     /// Interpolates between `input[idx]` and `input[idx + 1]` at `frac`
     /// (standard convention). When `idx + 1` is out of bounds the
     /// output is clamped to `input[idx]`.
@@ -194,8 +184,6 @@ impl CaptureState {
             // earlier callbacks.
             let mut resampled = Vec::new();
             self.resampler.process(&mono, &mut resampled);
-            // Energy gate: only process frames that are loud enough to
-            // plausibly be user speech over the speaker output.
             let rms = rms_energy(&resampled);
             if rms < SILENCE_RMS * BARGE_IN_ENERGY_FACTOR {
                 return;
@@ -274,8 +262,6 @@ impl CaptureState {
                 self.speaking = true;
                 self.speech.clear();
                 self.speech.extend_from_slice(frame);
-                // Barge-in: if TTS is playing and we detect speech start,
-                // cancel the current turn so the user can speak.
                 if self.tts_playing.load(Ordering::Relaxed) {
                     tracing::info!(
                         component = "MicCapture",
@@ -301,7 +287,6 @@ impl CaptureState {
         }
     }
 
-    /// Transcribe a completed utterance and run it as a user turn.
     fn dispatch_utterance(&self, pcm: Vec<f32>) {
         if pcm.is_empty() {
             return;
@@ -342,14 +327,6 @@ fn rms_energy(samples: &[f32]) -> f32 {
     (sum_sq / samples.len() as f32).sqrt()
 }
 
-/// Start microphone capture, returning a [`MicHandle`] that keeps the
-/// stream alive.
-///
-/// # Errors
-///
-/// Returns [`CaptureError`] when no input device is available, the
-/// device has no supported input configuration, or `cpal` cannot build
-/// the stream.
 pub fn start_mic_capture(
     audio_state: &AudioState,
     stt: Arc<dyn SttProvider>,
@@ -438,7 +415,6 @@ pub fn start_mic_capture(
     })
 }
 
-/// Find an input device whose name matches `name` (case-sensitive).
 fn select_device_by_name(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
     let devices = host.input_devices().ok()?;
     devices
@@ -451,8 +427,6 @@ fn select_device_by_name(host: &cpal::Host, name: &str) -> Option<cpal::Device> 
         .map(|(_, d)| d)
 }
 
-/// Enumerate the names of all input devices the default host can see.
-///
 /// Used by the settings UI to offer a microphone picker. The list is a
 /// snapshot; devices may be added or removed between enumeration and capture.
 pub fn list_input_device_names() -> Vec<String> {
@@ -467,7 +441,6 @@ pub fn list_input_device_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Whether a given [`SampleFormat`] is one the capture path can decode.
 #[cfg(test)]
 const fn supported_format(format: SampleFormat) -> bool {
     matches!(
@@ -510,7 +483,6 @@ mod tests {
 
     #[test]
     fn resampler_interpolates_forward() {
-        // Verify interpolation uses input[idx] and input[idx+1].
         // With ratio 1.5 (24 kHz -> 16 kHz), output positions are
         // 0, 1.5, 3.0 — the second sample interpolates between
         // input[1] and input[2] at frac=0.5.

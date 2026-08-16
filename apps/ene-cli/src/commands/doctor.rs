@@ -1,8 +1,4 @@
-//! Doctor diagnostic command.
-//!
-//! Checks environment health across runtime, config, AI provider,
-//! embedding, store, tool registry, and assets categories. Secrets
-//! (API keys, private paths) are masked in all output.
+//! Secrets (API keys, private paths) are masked in all output.
 
 use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
@@ -148,7 +144,6 @@ impl DoctorSummary {
     }
 }
 
-/// Mask an absolute path by replacing the home directory with `~`.
 fn mask_path(path: &std::path::Path) -> String {
     let path_str = path.display().to_string();
     for var in ["HOME", "USERPROFILE"] {

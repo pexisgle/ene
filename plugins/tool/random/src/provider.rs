@@ -3,17 +3,13 @@ use async_trait::async_trait;
 use ene_plugin::{ActionSetProvider, ToolAction};
 use ene_plugin_proto::{ToolError, ToolProvider, ToolSpec};
 
-/// Built-in random generation tool provider.
-///
-/// Exposes `number`, `uuid`, `pick`, and `color` via
-/// [`ActionSetProvider`]. Every action is pure: it reads no state and
-/// mutates nothing, so the provider needs no config or sandbox hooks.
+/// Every action is pure: it reads no state and mutates nothing, so the
+/// provider needs no config or sandbox hooks.
 pub struct RandomToolProvider {
     inner: ActionSetProvider,
 }
 
 impl RandomToolProvider {
-    /// Creates a new `RandomToolProvider`.
     #[must_use]
     pub fn new() -> Self {
         let actions: Vec<Box<dyn ToolAction>> = vec![

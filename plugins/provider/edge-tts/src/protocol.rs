@@ -7,7 +7,6 @@
 
 use crate::error::EdgeError;
 
-/// A parsed binary frame.
 #[derive(Debug)]
 pub struct BinaryFrame<'a> {
     /// Value of the `Path` header line.
@@ -53,7 +52,6 @@ pub fn parse_binary_frame(bytes: &[u8]) -> Result<BinaryFrame<'_>, EdgeError> {
     })
 }
 
-/// Extracts the `Path` value from a text frame's header block.
 #[must_use]
 pub fn text_path(text: &str) -> Option<&str> {
     let header = text.split_once("\r\n\r\n").map_or(text, |(h, _)| h);

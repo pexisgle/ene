@@ -15,7 +15,6 @@
 //! - `truncate` (default) — Smart string truncation helpers ([`Truncate`]).
 //! - `html` — HTML-to-Markdown conversion and content extraction
 //!   (pulls in `htmd`, `scraper`, `ego-tree`, `regex`).
-#![warn(missing_docs)]
 
 #[cfg(feature = "truncate")]
 /// Smart content truncation helpers (by chars, lines, and tail).

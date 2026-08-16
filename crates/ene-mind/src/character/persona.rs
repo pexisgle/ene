@@ -13,7 +13,6 @@
     reason = "persona parser tracks line counters and computes quote-end byte offsets"
 )]
 
-/// Persona text shape detected by [`PersonaFormatParser`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersonaFormat {
     /// `[character("Name"){Attribute("value")...}]` pseudo-structure.
@@ -24,20 +23,15 @@ pub enum PersonaFormat {
     Yaml,
 }
 
-/// Dense persona attributes extracted from a recognized persona format.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StructuredPersona {
-    /// Physical appearance.
     pub appearance: Option<String>,
-    /// Personality traits.
     pub personality: Option<String>,
     /// Inner thoughts and mental model.
     pub mind: Option<String>,
-    /// Speech pattern.
     pub speech: Option<String>,
-    /// Background story.
     pub background: Option<String>,
-    /// Long-form description (also the core-personality fallback).
+    /// Also the core-personality fallback.
     pub description: Option<String>,
     /// Remaining attributes with their original labels, in source order.
     pub extra: Vec<(String, String)>,
@@ -90,12 +84,10 @@ fn push_attr(lines: &mut Vec<String>, label: &str, value: Option<&str>) {
     }
 }
 
-/// Detects and parses `W++` / `AliChat` / `YAML` persona text.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PersonaFormatParser;
 
 impl PersonaFormatParser {
-    /// Parse recognized persona text into a dense [`StructuredPersona`];
     /// `None` when the text is not a recognized shape, so callers can fall
     /// back to the raw text.
     #[must_use]
@@ -103,8 +95,6 @@ impl PersonaFormatParser {
         Self::parse_with_format(text).map(|(_, persona)| persona)
     }
 
-    /// Parse recognized persona text, also reporting which format was
-    /// detected.
     #[must_use]
     pub fn parse_with_format(text: &str) -> Option<(PersonaFormat, StructuredPersona)> {
         if text.trim().is_empty() {
@@ -117,8 +107,6 @@ impl PersonaFormatParser {
     }
 }
 
-/// Parse a `[character("Name"){Attribute("value")...}]` block.
-///
 /// Attribute values may repeat (`Personality("A", "B")`), span lines, use
 /// either quote character, and contain backslash escapes. Any deviation from
 /// the shape (missing braces, unquoted values, trailing text, no attributes)
@@ -169,8 +157,6 @@ fn strip_prefix_ascii_case_insensitive<'a>(s: &'a str, prefix: &str) -> Option<&
         .then_some(&s[prefix.len()..])
 }
 
-/// Parse one `Attribute("value", ...)` pair, returning the trimmed key, the
-/// comma-joined values, and the rest of the input.
 fn parse_wpp_attribute(s: &str) -> Option<(String, String, &str)> {
     let mut key = String::new();
     for c in s.chars() {
@@ -195,7 +181,6 @@ const fn is_wpp_key_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '\'')
 }
 
-/// Parse the comma-separated quoted value list of a W++ attribute.
 fn parse_wpp_values(s: &str) -> Option<(Vec<String>, &str)> {
     let mut rest = s;
     let mut values = Vec::new();
@@ -215,8 +200,6 @@ fn parse_wpp_values(s: &str) -> Option<(Vec<String>, &str)> {
     }
 }
 
-/// Parse a quoted string (`"..."` or `'...'`), unescaping backslash-escaped
-/// characters, and return the rest of the input after the closing quote.
 fn parse_quoted(s: &str) -> Option<(String, &str)> {
     let mut chars = s.char_indices();
     let (_, open) = chars.next()?;
@@ -240,8 +223,6 @@ fn parse_quoted(s: &str) -> Option<(String, &str)> {
     None
 }
 
-/// Parse a flat `key: value` mapping (`AliChat` or `YAML` subset).
-///
 /// Every line must be a recognized persona-key line or a continuation of the
 /// previous entry's value (bullets and prose alike, so `Example messages:`
 /// dialogue survives verbatim). A syntactically key-like line whose key is
@@ -296,8 +277,6 @@ fn parse_mapping(text: &str) -> Option<(PersonaFormat, StructuredPersona)> {
     Some((format, build_persona(entries)))
 }
 
-/// Split a `key: value` line; the key must start with an ASCII letter and
-/// contain only letters, digits, spaces, `_`, `-`, and `'`.
 fn parse_mapping_line(line: &str) -> Option<(&str, &str)> {
     let (key, value) = line.split_once(':')?;
     let key = key.trim();
@@ -332,7 +311,6 @@ fn block_scalar_indicator(value: &str) -> &str {
     }
 }
 
-/// Strip one pair of matching surrounding quotes from a mapping value.
 fn unquote(value: &str) -> &str {
     let value = value.trim();
     let mut chars = value.chars();
@@ -415,7 +393,6 @@ fn build_persona(entries: Vec<(String, String)>) -> StructuredPersona {
     persona
 }
 
-/// Store one attribute; returns whether a non-empty value was stored.
 fn set_attribute(persona: &mut StructuredPersona, key: &str, value: &str) -> bool {
     let value = value.trim().to_string();
     if value.is_empty() {

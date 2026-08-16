@@ -81,11 +81,8 @@ pub fn ensure_capability_calls_supported(
     }
 }
 
-/// Executes one authenticated capability call on behalf of a consumer.
 #[async_trait]
 pub trait CapabilityCallHandler: Send + Sync {
-    /// Resolves and executes `call` for `consumer`, returning the provider's
-    /// JSON result or a typed capability error.
     async fn call(
         &self,
         consumer: &str,
@@ -104,7 +101,6 @@ pub struct ManagerCapabilityHandler {
 }
 
 impl ManagerCapabilityHandler {
-    /// Wraps the shared plugin-host handle the actor owns.
     #[must_use]
     pub fn new(host: Arc<tokio::sync::Mutex<Option<PluginHostManager>>>) -> Self {
         Self { host }
@@ -148,7 +144,6 @@ pub struct CapabilityMediator {
 }
 
 impl CapabilityMediator {
-    /// Creates a mediator backed by the live plugin host.
     #[must_use]
     pub fn new(host: Arc<tokio::sync::Mutex<Option<PluginHostManager>>>) -> Self {
         Self {
@@ -156,7 +151,7 @@ impl CapabilityMediator {
         }
     }
 
-    /// Creates a mediator over an explicit handler (tests, alternative hosts).
+    /// For tests and alternative hosts.
     #[must_use]
     pub fn with_handler(handler: Arc<dyn CapabilityCallHandler>) -> Self {
         Self { handler }

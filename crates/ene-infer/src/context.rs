@@ -1,5 +1,3 @@
-//! Per-job stop conditions and progress heartbeat.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -52,7 +50,6 @@ pub struct JobContext {
 }
 
 impl JobContext {
-    /// Builds a context for a job that starts executing now.
     pub(crate) fn new(
         job_timeout: Duration,
         cancel: CancellationToken,
@@ -92,7 +89,6 @@ impl JobContext {
         None
     }
 
-    /// Wall-clock time this job has been executing for.
     pub(crate) fn elapsed(&self) -> Duration {
         self.started_at.elapsed()
     }

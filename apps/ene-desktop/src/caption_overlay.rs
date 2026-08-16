@@ -23,7 +23,6 @@ use crate::gpu::{WindowSurfaceError, pick_format_and_alpha};
 /// Characters revealed per second by the typewriter effect.
 const CAPTION_CHARS_PER_SECOND: f32 = 48.0;
 
-/// Stream state for the caption feed.
 #[derive(Resource, Default, Clone)]
 pub struct CaptionFeed {
     /// `true` after `AiStreamFinished` until the next turn's first
@@ -33,8 +32,6 @@ pub struct CaptionFeed {
     pub emote: Option<String>,
 }
 
-/// Accumulate streamed assistant text into `UiState::caption_text`.
-///
 /// Runs alongside the chat consumer systems; bevy `Message` queues
 /// support multiple readers, so both get every event.
 pub fn feed_caption_overlay_system(
@@ -63,7 +60,6 @@ pub fn feed_caption_overlay_system(
     }
 }
 
-/// Frameless translucent window shell for the caption overlay.
 pub struct CaptionOverlayWindow {
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,

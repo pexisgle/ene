@@ -266,7 +266,6 @@ pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, 
     side_effects = "FileSystem { mutates: true }"
 )]
 pub struct FsPatchAction {
-    /// Full patch text in the custom patch format.
     patch_text: String,
 
     #[tool(skip)]

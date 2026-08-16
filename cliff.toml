@@ -1,4 +1,3 @@
-# git-cliff configuration — Conventional Commits → release changelog.
 # https://git-cliff.org/docs/configuration
 
 [changelog]

@@ -1,5 +1,3 @@
-//! Memory store usage example.
-//!
 //! Demonstrates the current typed-memory API: inserting memories via
 //! `NewMemoryItem`, searching via `Query`, and lifecycle management.
 //! Legacy conversation summaries / keyfacts APIs are unsupported.

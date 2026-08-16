@@ -92,7 +92,6 @@ pub(crate) async fn unload(model: &str) {
     }
 }
 
-/// Cached probe-based dimensionality for `model`.
 async fn embed_dims(client: &LlamaServerClient, model: &str) -> Result<usize, PluginError> {
     if let Some(dims) = EMBED_DIMS
         .lock()

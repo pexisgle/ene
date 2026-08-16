@@ -1,5 +1,3 @@
-//! Style example chunking and retrieval.
-
 use std::sync::Arc;
 
 use ene_ai::EmbeddingProvider;
@@ -67,12 +65,10 @@ pub struct StyleExample {
     pub intent: StyleIntent,
 }
 
-/// Compiles and selects `CCv3` dialogue style examples.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StyleExampleSelector;
 
 impl StyleExampleSelector {
-    /// Split `mes_example` into dialogue chunks.
     pub fn chunk_mes_example(
         raw: &str,
         char_name: &str,
@@ -105,7 +101,6 @@ impl StyleExampleSelector {
             .collect()
     }
 
-    /// Compile style chunks into typed memory items for indexing.
     pub fn compile_items(card: &CharacterCardV3, user_name: &str) -> Vec<NewMemoryItem> {
         let char_name = card.data.get_character_name();
         let character_id = card.data.get_character_id().to_string();
@@ -170,7 +165,6 @@ impl StyleExampleSelector {
             .collect()
     }
 
-    /// Select up to `max_examples` style examples for the current turn.
     pub async fn select(
         card: &CharacterCardV3,
         user_name: &str,

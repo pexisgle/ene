@@ -2,7 +2,6 @@ use crate::output::{BranchEntry, BranchOutput, to_json};
 use crate::sandbox::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_plugin::prelude::*;
 
-/// Lists the branches of a git repository.
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[serde(rename_all = "camelCase")]
 #[tool(
@@ -15,7 +14,6 @@ use ene_plugin::prelude::*;
     side_effects = "ReadOnly"
 )]
 pub struct BranchAction {
-    /// Path to the git repository working tree (default: current directory).
     #[serde(default)]
     #[arg(
         default = ".",
@@ -33,7 +31,6 @@ pub struct BranchAction {
 }
 
 impl BranchAction {
-    /// Creates a branch action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,

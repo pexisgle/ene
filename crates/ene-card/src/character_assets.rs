@@ -18,7 +18,6 @@ pub const DEFAULT_VRM_PATH: &str = "characters/Alicia/AliciaSolid.vrm";
 /// Default VRMA motion shipped with the app; `ccdefault:` for `x_vrma`.
 pub const DEFAULT_VRMA_PATH: &str = "characters/Alicia/motions/VRMA_01.vrma";
 
-/// Ene-specific asset kinds consumed from a card's `assets` array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EneAssetKind {
     /// VRM 1.0 model (`x_vrm`).

@@ -12,39 +12,21 @@ pub enum ScheduleError {
     /// A required field is missing for the schedule kind.
     #[error("{field} is required for {kind} schedules")]
     MissingField {
-        /// Missing field name.
         field: &'static str,
-        /// Schedule kind requiring the field.
         kind: &'static str,
     },
     /// The timezone name is not a valid IANA zone.
     #[error("invalid timezone `{value}`: {detail}")]
-    InvalidTimezone {
-        /// The offending value.
-        value: String,
-        /// Underlying parse error.
-        detail: String,
-    },
+    InvalidTimezone { value: String, detail: String },
     /// The cron expression is not valid.
     #[error("invalid cron expression `{value}`: {detail}")]
-    InvalidCron {
-        /// The offending value.
-        value: String,
-        /// Underlying parse error.
-        detail: String,
-    },
+    InvalidCron { value: String, detail: String },
     /// The interval must be positive.
     #[error("interval must be at least 1 second (got {value})")]
-    InvalidInterval {
-        /// The offending value.
-        value: i64,
-    },
+    InvalidInterval { value: i64 },
     /// A one-shot `start_at` must lie in the future.
     #[error("one-shot start_at must be in the future (got {value})")]
-    InvalidStartAt {
-        /// The offending value.
-        value: DateTime<Utc>,
-    },
+    InvalidStartAt { value: DateTime<Utc> },
     /// No occurrence exists (e.g. a cron expression that never fires).
     #[error("schedule has no upcoming occurrence")]
     NoNextOccurrence,
@@ -66,7 +48,6 @@ pub enum ScheduleKind {
 }
 
 impl ScheduleKind {
-    /// Returns the `snake_case` string representation for storage/DB use.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OneShot => "one_shot",
@@ -76,7 +57,6 @@ impl ScheduleKind {
         }
     }
 
-    /// Parse from a `snake_case` string, logging a warning on unrecognized values.
     pub fn from_db_str(s: &str) -> Self {
         match s {
             "one_shot" => Self::OneShot,
@@ -106,7 +86,6 @@ pub enum ScheduleConfirmation {
 }
 
 impl ScheduleConfirmation {
-    /// Returns the `snake_case` string representation for storage/DB use.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
@@ -114,7 +93,6 @@ impl ScheduleConfirmation {
         }
     }
 
-    /// Parse from a `snake_case` string, logging a warning on unrecognized values.
     pub fn from_db_str(s: &str) -> Self {
         match s {
             "none" => Self::None,
@@ -145,7 +123,6 @@ pub enum ScheduleAction {
     Prompt {
         /// The prompt text composed into the turn.
         text: String,
-        /// Whether the turn may call tools.
         allow_tools: bool,
     },
 }
@@ -153,13 +130,10 @@ pub enum ScheduleAction {
 /// A persistent schedule row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Schedule {
-    /// Primary key.
     pub id: i64,
     /// Unique display/reference name.
     pub name: String,
-    /// Firing kind.
     pub kind: ScheduleKind,
-    /// Whether the schedule currently fires.
     pub enabled: bool,
     /// IANA timezone name (e.g. `Asia/Tokyo`); used for cron evaluation.
     pub timezone: String,
@@ -169,9 +143,7 @@ pub struct Schedule {
     pub interval_secs: Option<i64>,
     /// Anchor instant: fire time for `OneShot`, rate anchor for `Interval`.
     pub start_at: Option<DateTime<Utc>>,
-    /// What the run executes.
     pub action: ScheduleAction,
-    /// Confirmation policy.
     pub confirmation: ScheduleConfirmation,
     /// Extra attempts after a failed run (0 = no retries).
     pub max_retries: i64,
@@ -183,15 +155,11 @@ pub struct Schedule {
     pub pending_retry_of_run_id: Option<i64>,
     /// When the last run attempt was claimed.
     pub last_run_at: Option<DateTime<Utc>>,
-    /// Status of the last run attempt.
     pub last_status: Option<ScheduleRunStatus>,
     /// Total claimed run attempts (including skips).
     pub run_count: i64,
-    /// Failed run attempts.
     pub fail_count: i64,
-    /// Row creation time.
     pub created_at: DateTime<Utc>,
-    /// Last row update time.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -200,7 +168,6 @@ pub struct Schedule {
 pub struct NewSchedule {
     /// Unique display/reference name.
     pub name: String,
-    /// Firing kind.
     pub kind: ScheduleKind,
     /// IANA timezone name.
     pub timezone: String,
@@ -210,9 +177,7 @@ pub struct NewSchedule {
     pub interval_secs: Option<i64>,
     /// Anchor instant for `OneShot` / `Interval` schedules.
     pub start_at: Option<DateTime<Utc>>,
-    /// What the run executes.
     pub action: ScheduleAction,
-    /// Confirmation policy.
     pub confirmation: ScheduleConfirmation,
     /// Extra attempts after a failed run.
     pub max_retries: i64,
@@ -246,7 +211,6 @@ pub enum ScheduleRunStatus {
 }
 
 impl ScheduleRunStatus {
-    /// Returns the `snake_case` string representation for storage/DB use.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -261,7 +225,6 @@ impl ScheduleRunStatus {
         }
     }
 
-    /// Parse from a `snake_case` string, logging a warning on unrecognized values.
     pub fn from_db_str(s: &str) -> Self {
         match s {
             "running" => Self::Running,
@@ -283,7 +246,6 @@ impl ScheduleRunStatus {
         }
     }
 
-    /// Whether the attempt counts as a finished (terminal) state.
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -301,9 +263,7 @@ impl ScheduleRunStatus {
 /// One attempt row in the schedule run history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScheduleRun {
-    /// Primary key.
     pub id: i64,
-    /// Owning schedule.
     pub schedule_id: i64,
     /// The occurrence instant this attempt was claimed for.
     pub scheduled_at: DateTime<Utc>,
@@ -311,7 +271,6 @@ pub struct ScheduleRun {
     pub started_at: Option<DateTime<Utc>>,
     /// When the attempt reached a terminal status.
     pub finished_at: Option<DateTime<Utc>>,
-    /// Attempt outcome.
     pub status: ScheduleRunStatus,
     /// The failed attempt this attempt retries (chain head for the first attempt).
     pub retry_of_run_id: Option<i64>,
@@ -319,6 +278,5 @@ pub struct ScheduleRun {
     pub retries: i64,
     /// Failure detail for `Failed` attempts.
     pub error: Option<String>,
-    /// Row creation time.
     pub created_at: DateTime<Utc>,
 }

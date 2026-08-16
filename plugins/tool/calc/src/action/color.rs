@@ -2,7 +2,6 @@ use ene_plugin::prelude::*;
 
 use super::format_number;
 
-/// An RGBA color with 8-bit channels and a normalized alpha.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Rgba {
     r: u8,
@@ -11,15 +10,6 @@ struct Rgba {
     a: f64,
 }
 
-/// Converts a color between hex, rgb, and hsl representations.
-///
-/// Input may be hex (`#ff0000`, `#f00`, with or without `#`, 3/4/6/8
-/// digits), `rgb(...)` / `rgba(...)` (channels 0-255, optional
-/// percentages, alpha 0-1), `hsl(...)` / `hsla(...)` (hue 0-360,
-/// saturation/lightness 0-100% with `%`), or a bare `r, g, b` triple.
-/// Output: hex (`#rrggbb`, `#rrggbbaa` when alpha < 1), rgb
-/// (`rgb(r, g, b)` / `rgba(r, g, b, a)`), or hsl
-/// (`hsl(h, s%, l%)` / `hsla(h, s%, l%, a)`).
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "calc",
@@ -31,9 +21,7 @@ struct Rgba {
     side_effects = "Idempotent"
 )]
 pub struct ColorConvertAction {
-    /// The color to convert, in any supported format.
     color: String,
-    /// The output format.
     #[arg(enum_values = "hex, rgb, rgba, hsl, hsla")]
     to: String,
 }

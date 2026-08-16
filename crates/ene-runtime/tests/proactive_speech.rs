@@ -1,5 +1,3 @@
-//! Proactive speech runtime integration tests.
-
 #![expect(
     clippy::expect_used,
     clippy::field_reassign_with_default,

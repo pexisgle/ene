@@ -1,5 +1,3 @@
-//! Physics-related components.
-//!
 //! Each component mirrors a piece of the Rapier state for a single
 //! character entity. The [`crate::plugin::PhysicsPlugin`]
 //! populates these from the [`crate::component::character::BoneColliders`]

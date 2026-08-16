@@ -41,8 +41,6 @@ async fn inference_contract_round_trip() {
     });
     let mut session = PluginSession::start(&profiles).await;
 
-    // 1. Real token-by-token streaming: more than one text delta and usage
-    // on the final chunk.
     write_plugin_request(
         &mut session.stream,
         &PluginIpcRequest::CreateChatStream {
@@ -73,7 +71,6 @@ async fn inference_contract_round_trip() {
         "expected non-empty streamed text"
     );
 
-    // 2. Non-streaming completion constrained by a JSON schema (grammar path).
     let completion = session
         .request(PluginIpcRequest::ChatCompletion {
             request_id: "req-completion".to_string(),
@@ -99,7 +96,6 @@ async fn inference_contract_round_trip() {
     );
     assert!(usage.is_some(), "local completion reports token usage");
 
-    // 3. GGUF embeddings: one vector per item, model dims, finite values.
     let embedded = session
         .request(PluginIpcRequest::EmbedBatch {
             request_id: "req-embed".to_string(),
@@ -125,8 +121,6 @@ async fn inference_contract_round_trip() {
         );
     }
 
-    // 4. Typed failures, then a successful request proves the process
-    // survived each one (no panics, no crashes).
     let unknown = session
         .request(PluginIpcRequest::CreateChatStream {
             request_id: "req-unknown".to_string(),

@@ -34,7 +34,6 @@ fn fl(key: &str) -> String {
     crate::i18n::loader().get(key)
 }
 
-/// Renders the Engines page.
 pub fn render(
     ui: &mut egui::Ui,
     draft: &mut SettingsDraft,
@@ -81,8 +80,6 @@ pub fn render(
     });
 }
 
-/// Catalog configuration: enable flag, URL, trusted Ed25519 keys, storage
-/// root, and refresh controls.
 fn render_catalog(
     ui: &mut egui::Ui,
     draft: &mut SettingsDraft,
@@ -284,7 +281,6 @@ fn render_engine(
     render_config_form(ui, draft, ai, input, snapshot);
 }
 
-/// Model files section: profile list with paths, sizes, and removal.
 fn render_models(
     ui: &mut egui::Ui,
     draft: &mut SettingsDraft,
@@ -407,7 +403,6 @@ fn render_models(
         });
 }
 
-/// Schema-driven config form for the engine's plugin config.
 fn render_config_form(
     ui: &mut egui::Ui,
     draft: &mut SettingsDraft,

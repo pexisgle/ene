@@ -1,5 +1,3 @@
-//! Plugin system configuration section.
-
 use std::collections::HashMap;
 
 use ene_approval::{ApprovalPolicy, PluginApprovalPolicy, SignedManifest};
@@ -34,8 +32,6 @@ const fn default_parallel_tool_calls_max() -> usize {
     4
 }
 
-/// Default per-plugin DB storage quota, in MiB.
-///
 /// `256` is deliberately generous: every built-in stateful plugin (`fs`,
 /// `utility`, `browser`) stores kilobytes-to-low-megabytes of bookkeeping, so
 /// the cap never constrains legitimate first-party use, while still bounding
@@ -63,12 +59,9 @@ const fn default_max_temp_mb() -> u64 {
     1024
 }
 
-/// Per-plugin OS sandbox settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct SandboxEntryConfig {
-    /// Whether the OS sandbox is applied to this plugin.
-    ///
     /// Defaults to `false` until every built-in plugin has been migrated to
     /// the broker channel; enabled plugins fail to start (never degrade)
     /// when a required layer cannot be initialized.
@@ -135,9 +128,7 @@ pub struct FsGrantConfig {
     /// Real path the user chose for this slot. Stored as configured and
     /// canonicalized at load time.
     pub path: String,
-    /// Grant read access.
     pub read: bool,
-    /// Grant write access.
     pub write: bool,
 }
 
@@ -159,7 +150,6 @@ pub struct CatalogKeyConfig {
     pub public_key_hex: String,
 }
 
-/// Signed artifact catalog configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ArtifactConfig {
@@ -168,19 +158,16 @@ pub struct ArtifactConfig {
     pub enabled: bool,
     /// HTTPS URL of the signed catalog metadata.
     pub catalog_url: Option<String>,
-    /// Catalog signing keys.
     pub catalog_keys: Vec<CatalogKeyConfig>,
     /// Root directory for the CAS + installation state. Defaults to
     /// `app_data_dir()/artifacts`.
     pub root_dir: Option<String>,
-    /// Maximum artifact size in bytes.
     pub max_bytes: u64,
     /// Catalog refresh interval in hours (startup + manual refresh always
     /// happen).
     pub refresh_hours: u64,
     /// Per-hop download timeout in milliseconds.
     pub timeout_ms: u64,
-    /// Maximum redirect hops per download.
     pub max_redirects: usize,
 }
 
@@ -203,9 +190,7 @@ impl Default for ArtifactConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct DownloadConfig {
-    /// Maximum bytes per download.
     pub max_bytes: u64,
-    /// Maximum redirect hops.
     pub max_redirects: usize,
     /// Optional auto-save preset. When set, `WebFileSave=Allow` saves without
     /// a prompt; when unset, even `Allow` still shows the confirmation
@@ -226,9 +211,7 @@ impl Default for DownloadConfig {
 /// Auto-save preset for browsing downloads.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AutoSaveConfig {
-    /// Destination directory.
     pub dir: String,
-    /// Maximum bytes accepted by the preset.
     pub max_bytes: u64,
     /// Name-conflict handling (never overwrite automatically).
     pub conflict: ene_plugin_proto::ConflictMode,
@@ -399,7 +382,6 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PluginEntry {
-    /// Whether this plugin is enabled.
     pub enable: bool,
     /// Expected SHA-256 checksum of the plugin binary (hex-encoded).
     /// When set, the binary is verified before launch and on every restart;
@@ -558,15 +540,12 @@ impl PluginEntry {
         config
     }
 
-    /// Builds the profiles blob delivered to the plugin, or `None` when empty.
     pub fn delivered_profiles(&self) -> Option<serde_json::Value> {
         (!self.profiles.is_empty())
             .then(|| serde_json::Value::Object(self.profiles.clone().into_iter().collect()))
     }
 }
 
-/// Emits a warning when a plugin-delivered config object contains keys that
-/// collide with host-owned [`PluginEntry`] fields.
 fn warn_reserved_config_keys(plugin_name: &str, config: &serde_json::Value) {
     let Some(obj) = config.as_object() else {
         return;
@@ -638,7 +617,6 @@ ene_config::define_config!(
     "plugins",
     /// Plugin system configuration.
     pub struct PluginConfig {
-        /// Enable the plugin system.
         pub enabled: bool = true,
         /// Named plugin entries (tools and providers).
         #[serde(default = "default_plugin_list")]
@@ -728,7 +706,6 @@ ene_config::define_config!(
         /// This opt-in never relaxes the link-local block: cloud-metadata
         /// addresses (`169.254.0.0/16`, `fe80::/10`) are always refused.
         pub mcp_allow_insecure_urls: bool = false,
-        /// MCP servers to connect to.
         pub mcp_servers: Vec<crate::mcp_config::McpServerConfig> = Vec::new(),
         /// Per-`ResourceClass` admission budgets for provider requests.
         ///
@@ -826,7 +803,6 @@ mod tests {
             entry.profiles.get("kokoro"),
             Some(&serde_json::json!({"voices_path": "/data/voices.bin"}))
         );
-        // Unknown entry-level key lands in the flattened catch-all.
         assert_eq!(
             entry
                 .extra

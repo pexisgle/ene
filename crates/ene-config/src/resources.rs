@@ -4,10 +4,6 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-/// Initializes the app's data directory. On first launch, copies default assets
-/// from the distribution location into the OS-standard data directory.
-/// Returns the absolute path to the initialized assets directory.
-///
 /// In debug builds the source-tree `assets/` is used directly. In release
 /// builds, the assets are copied from a location next to the binary into
 /// the OS-standard data directory on first launch.

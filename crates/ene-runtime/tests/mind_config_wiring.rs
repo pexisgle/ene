@@ -1,5 +1,3 @@
-//! Integration tests for the mind runtime configuration wiring.
-//!
 //! Public `MindConfig` exposes `emotion`, `proactive`, `memory_limits`, and
 //! `memory_approval`; `context` / `memory` / `character` remain code defaults
 //! (serde-skipped).

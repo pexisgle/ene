@@ -63,7 +63,6 @@ mod tests {
     fn crop_center_of_large_image() {
         let img = DynamicImage::new_rgba8(1920, 1080);
         let cropped = crop_roi(&img, (960, 540), (0, 0)).expect("should crop");
-        // 512x512 fits comfortably inside 1920x1080
         assert_eq!(cropped.width(), 512);
         assert_eq!(cropped.height(), 512);
     }
@@ -72,7 +71,6 @@ mod tests {
     fn crop_near_top_left_corner() {
         let img = DynamicImage::new_rgba8(1920, 1080);
         let cropped = crop_roi(&img, (10, 10), (0, 0)).expect("should crop");
-        // Clamped: x=0, y=0, roi fits 512x512
         assert_eq!(cropped.width(), 512);
         assert_eq!(cropped.height(), 512);
     }
@@ -81,7 +79,6 @@ mod tests {
     fn crop_near_bottom_right_corner() {
         let img = DynamicImage::new_rgba8(1920, 1080);
         let cropped = crop_roi(&img, (1900, 1060), (0, 0)).expect("should crop");
-        // Clamped so it stays within bounds
         assert!(cropped.width() <= 512);
         assert!(cropped.height() <= 512);
         assert!(cropped.width() > 0);
@@ -97,7 +94,6 @@ mod tests {
     #[test]
     fn crop_translates_global_origin() {
         let img = DynamicImage::new_rgba8(1920, 1080);
-        // Window at (100, 50); cursor at global (110, 60) lands at (10, 10).
         let cropped = crop_roi(&img, (110, 60), (100, 50)).expect("should crop");
         assert_eq!(cropped.width(), 512);
         assert_eq!(cropped.height(), 512);
@@ -113,8 +109,6 @@ mod tests {
 
     #[test]
     fn crop_rejects_cursor_left_of_window_on_second_monitor() {
-        // Multi-monitor: window starts at x=-1920; cursor at -1900 is inside,
-        // cursor at 100 is outside.
         let img = DynamicImage::new_rgba8(1920, 1080);
         assert!(crop_roi(&img, (-1900, 500), (-1920, 0)).is_some());
         assert!(crop_roi(&img, (100, 500), (-1920, 0)).is_none());

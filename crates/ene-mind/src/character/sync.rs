@@ -1,5 +1,3 @@
-//! `CCv3` character memory index synchronization.
-
 #![expect(
     clippy::arithmetic_side_effects,
     reason = "mind pipeline uses intentional turn/score/index arithmetic"
@@ -17,14 +15,11 @@ use crate::error::CognitionError;
 use super::lorebook::{LOREBOOK_SOURCE_PREFIX, LorebookIndexer};
 use super::style::{STYLE_SOURCE_PREFIX, StyleExampleSelector};
 
-/// Result of synchronizing CCv3-derived typed memories.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CharacterMemorySyncReport {
-    /// Lorebook rows inserted.
     pub lorebook_inserted: usize,
     /// Lorebook rows superseded after content change.
     pub lorebook_updated: usize,
-    /// Style example rows inserted.
     pub style_inserted: usize,
     /// Style example rows superseded after content change.
     pub style_updated: usize,
@@ -163,8 +158,6 @@ pub async fn sync_character_memories(
     ))
 }
 
-/// Combined content hash for `CCv3` lorebook + style indices.
-///
 /// Used to skip per-turn sync when the session already holds a matching hash.
 #[must_use]
 pub fn compute_card_memory_hash(card: &CharacterCardV3) -> u64 {

@@ -9,7 +9,6 @@ use ene_plugin::prelude::*;
     category = "Utility",
     keywords_primary = "time, date, now, today"
 )]
-/// Action to get the current date and time.
 pub struct GetCurrentTimeAction {}
 
 impl GetCurrentTimeAction {

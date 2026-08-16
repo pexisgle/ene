@@ -207,16 +207,6 @@ pub fn load_vrm(
     ))
 }
 
-/// Load every triangle-list primitive of every glTF `Mesh` in the
-/// document. Returns a `Vec<VrmMesh>` — one entry per glTF `Mesh`.
-/// Each primitive gets its own vertex / index buffers and (when
-/// its material has one) its own base-color texture, so the body,
-/// clothes, face, hair, and accessories all render.
-///
-/// The third return value is the per-primitive morph-target data,
-/// aligned 1:1 with the linearized primitive list
-/// `(mesh_idx, prim_idx)`. The fourth and fifth are the
-/// post-normalize AABB `(min, max)`.
 type Aabb = ([f32; 3], [f32; 3]);
 
 /// Aggregate return of [`load_all_meshes`]: the per-primitive
@@ -1245,7 +1235,6 @@ fn load_mtoon_gpu_textures(
     Ok(Some(gpu_tex))
 }
 
-/// A single GPU texture + sampler for `MToon`.
 struct MToonGpuTexture {
     #[expect(
         dead_code,
@@ -1450,8 +1439,6 @@ mod tests {
     /// at least one vertex has any non-zero joint index.
     #[test]
     fn nonzero_joint_detector_trips_on_nontrivial_indices() {
-        // The four shapes `load_all_meshes` produces, plus the
-        // all-zero default.
         let cases: Vec<([u32; 4], bool)> = vec![
             ([0, 0, 0, 0], false),
             ([1, 0, 0, 0], true),

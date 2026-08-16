@@ -3,7 +3,6 @@
 //! Centralized JSON-based configuration management and schema generation for the ene AI character platform.
 //!
 //! Re-exports `serde`, `schemars`, and `ctor` for use by downstream crates.
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(
@@ -19,9 +18,7 @@ extern crate self as ene_config;
 
 /// Configuration loading, schema generation, and the global config registry.
 pub mod config;
-/// Configuration-related error types.
 pub mod error;
-/// Config-version migration for `settings.json`.
 pub mod migration;
 /// Platform-aware directory and file path resolution.
 pub mod paths;
@@ -69,7 +66,6 @@ pub use ctor::__support;
 pub use schemars;
 pub use serde;
 
-/// Helper macro to handle default values for config struct fields.
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __field_default {
@@ -81,8 +77,6 @@ macro_rules! __field_default {
     };
 }
 
-/// Declarative macro for defining Config structs with zero boilerplate.
-///
 /// Each field uses `= default_value` inline syntax (optional).
 #[macro_export]
 macro_rules! define_config {
@@ -252,7 +246,6 @@ macro_rules! define_config {
     };
 }
 
-/// Declarative macro for defining tool configuration schemas.
 #[macro_export]
 macro_rules! define_tool_config {
     (
@@ -299,8 +292,6 @@ macro_rules! define_tool_config {
     };
 }
 
-/// Declarative macro for defining labeled enums with a consistent API.
-///
 /// The **first variant** listed becomes the `Default` for the enum (via
 /// `#[derive(Default)]`). Ensure the most common or safest variant is listed
 /// first.
@@ -328,7 +319,6 @@ macro_rules! define_label_enum {
         }
 
         impl $name {
-            /// Returns the display label for this variant.
             pub fn label(&self) -> &'static str {
                 match self {
                     $(
@@ -337,7 +327,6 @@ macro_rules! define_label_enum {
                 }
             }
 
-            /// Returns extra data associated with this variant.
             pub fn $method(&self) -> $val_type {
                 match self {
                     $(
@@ -369,7 +358,6 @@ macro_rules! define_label_enum {
         }
 
         impl $name {
-            /// Returns the display label for this variant.
             pub fn label(&self) -> &'static str {
                 match self {
                     $(

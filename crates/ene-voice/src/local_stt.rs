@@ -39,7 +39,6 @@ pub const PROVIDER_NAME: &str = "whisper";
 #[cfg(feature = "local-stt")]
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
-/// Number of taps for the anti-aliasing FIR low-pass filter.
 #[cfg(feature = "local-stt")]
 const FIR_TAPS: usize = 16;
 
@@ -107,7 +106,6 @@ fn resample_to_whisper(pcm: &[f32], sample_rate: u32) -> Vec<f32> {
     if sample_rate == WHISPER_SAMPLE_RATE || pcm.is_empty() || sample_rate == 0 {
         return pcm.to_vec();
     }
-    // Anti-aliasing: low-pass before decimation when downsampling.
     let filtered = if sample_rate > WHISPER_SAMPLE_RATE {
         let coeffs = low_pass_coefficients(sample_rate);
         apply_fir(pcm, &coeffs)
@@ -140,7 +138,6 @@ pub enum WhisperError {
     /// startup or when rebuilding the model after a panic.
     #[error("whisper state init failed: {0}")]
     StateInit(String),
-    /// The `state.full()` inference call itself failed.
     #[error("whisper inference failed: {0}")]
     Inference(String),
     /// [`ene_infer::JobContext::should_stop`] had already fired before

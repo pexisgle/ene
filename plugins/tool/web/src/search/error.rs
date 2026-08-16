@@ -1,6 +1,5 @@
 use thiserror::Error;
 
-/// Search backend failure.
 #[derive(Debug, Error)]
 pub enum SearchError {
     #[error("invalid input: {0}")]

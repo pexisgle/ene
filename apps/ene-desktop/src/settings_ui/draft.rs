@@ -115,7 +115,6 @@ pub struct DraftIssue {
     pub message: String,
 }
 
-/// The draft itself.
 #[derive(Debug)]
 pub struct SettingsDraft {
     /// Config the draft was last synced from (persisted values).
@@ -156,7 +155,6 @@ impl SettingsDraft {
         }
     }
 
-    /// The working copy being edited.
     #[must_use]
     pub const fn editing(&self) -> &EneConfig {
         &self.editing
@@ -168,7 +166,6 @@ impl SettingsDraft {
         &self.persisted
     }
 
-    /// Reads a typed section from the working copy.
     #[must_use]
     pub fn section<T>(&self) -> T
     where
@@ -241,37 +238,31 @@ impl SettingsDraft {
         self.revision = self.revision.saturating_add(1);
     }
 
-    /// Dotted paths edited since the last sync/apply.
     #[must_use]
     pub fn dirty_paths(&self) -> &BTreeSet<String> {
         &self.dirty_paths
     }
 
-    /// Whether any edit is pending an apply.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
         !self.dirty_paths.is_empty()
     }
 
-    /// Current revision (bumped on every edit).
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
     }
 
-    /// Revision of the last successful apply.
     #[must_use]
     pub const fn applied_revision(&self) -> u64 {
         self.applied_revision
     }
 
-    /// The actor-side settings revision this draft was based on.
     #[must_use]
     pub const fn actor_revision(&self) -> u64 {
         self.actor_revision
     }
 
-    /// Records the actor's revision reported by an apply result.
     pub fn set_actor_revision(&mut self, actor_revision: u64) {
         self.actor_revision = actor_revision;
     }
@@ -288,7 +279,6 @@ impl SettingsDraft {
             .retain(|_, state| *state == SecretState::Unchanged);
     }
 
-    /// Replaces the persisted baseline and the working copy.
     pub fn resync(&mut self, persisted: EneConfig) {
         let redacted = redact_config_for_draft(&persisted);
         self.persisted = redacted.clone();
@@ -308,7 +298,6 @@ impl SettingsDraft {
         self.persisted = redact_config_for_draft(&persisted);
     }
 
-    /// Records a secret state for `path`.
     pub fn set_secret(&mut self, path: &str, state: SecretState) {
         if state == SecretState::None {
             self.secrets.remove(path);
@@ -317,7 +306,7 @@ impl SettingsDraft {
         }
     }
 
-    /// Secret state for `path`, defaulting to [`SecretState::None`].
+    /// Defaults to [`SecretState::None`].
     #[must_use]
     pub fn secret(&self, path: &str) -> SecretState {
         self.secrets.get(path).copied().unwrap_or_default()
@@ -340,7 +329,6 @@ impl SettingsDraft {
         }
     }
 
-    /// Validation issues for a section key, if any.
     #[must_use]
     pub fn issues_for(&self, section_key: &str) -> &[String] {
         self.validation
@@ -349,13 +337,12 @@ impl SettingsDraft {
             .unwrap_or_default()
     }
 
-    /// Whether any validation issue is pending.
     #[must_use]
     pub fn has_issues(&self) -> bool {
         !self.validation.is_empty()
     }
 
-    /// All pending issues in deterministic order.
+    /// Returned in deterministic order.
     #[must_use]
     pub fn all_issues(&self) -> Vec<DraftIssue> {
         self.validation

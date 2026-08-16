@@ -1,5 +1,3 @@
-//! Tool-result grounding helpers.
-
 use crate::config::ToolGroundingConfig;
 use crate::memory_writer::candidate::{MemoryCandidate, ToolResultSummary};
 use ene_core::MemoryKind;
@@ -25,7 +23,6 @@ pub fn summarize_tool_result(
     }
 }
 
-/// Classify tool summaries into memory candidates with guardrails.
 pub fn extract_tool_candidates(
     tool_results: &[ToolResultSummary],
     cfg: &ToolGroundingConfig,

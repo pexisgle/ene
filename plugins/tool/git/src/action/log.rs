@@ -8,7 +8,6 @@ const MAX_BODY_CHARS: usize = 4096;
 const FIELD_SEP: char = '\u{0}';
 const RECORD_SEP: char = '\u{1e}';
 
-/// Lists the commit history of a git repository.
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[serde(rename_all = "camelCase")]
 #[tool(
@@ -21,14 +20,12 @@ const RECORD_SEP: char = '\u{1e}';
     side_effects = "ReadOnly"
 )]
 pub struct LogAction {
-    /// Path to the git repository working tree (default: current directory).
     #[serde(default)]
     #[arg(
         default = ".",
         description = "Path to the git repository (default: current directory)."
     )]
     path: Option<String>,
-    /// Maximum number of commits to return (1-100, default 30).
     #[serde(default)]
     #[arg(default = "30", minimum = 1, maximum = 100)]
     max_count: Option<u32>,
@@ -42,7 +39,6 @@ pub struct LogAction {
 }
 
 impl LogAction {
-    /// Creates a log action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,
@@ -93,7 +89,6 @@ impl LogAction {
     }
 }
 
-/// Parses the `--format` output into log entries.
 fn parse_log(output: &str) -> Vec<LogEntry> {
     output
         .split(RECORD_SEP)

@@ -1,11 +1,9 @@
 use ene_plugin_proto::ToolError;
 
-/// Returns the current branch shorthand and, when detached, the short `HEAD`
-/// oid.
 pub(crate) async fn head_info(workdir: &str) -> (Option<String>, Option<String>) {
     let broker = crate::broker::broker();
     // An unborn `HEAD` has no commit to resolve; report neither branch nor
-    // detached oid, matching the pre-broker behavior.
+    // detached oid.
     let Ok(verify) = broker
         .run_git(workdir, &["rev-parse", "--verify", "HEAD"])
         .await

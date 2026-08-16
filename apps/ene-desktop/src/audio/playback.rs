@@ -72,13 +72,10 @@ impl PlaybackTimeline {
             .map(|anchor| anchor + Duration::from_secs_f64(self.appended_secs))
     }
 
-    /// Records that a PCM chunk of `pcm_len` samples at `sample_rate` was
-    /// appended to the sink.
     fn append(&mut self, pcm_len: usize, sample_rate: u32) {
         self.appended_secs += pcm_len as f64 / f64::from(sample_rate);
     }
 
-    /// Ends the current segment (final marker); the next chunk starts fresh.
     fn reset(&mut self) {
         self.segment_started_at = None;
         self.appended_secs = 0.0;
@@ -128,8 +125,6 @@ struct AudioSink {
     _stream: cpal::Stream,
 }
 
-/// Open the default output device and set up a rodio mixer + player backed
-/// by a raw cpal output stream.
 fn open_audio_sink() -> Result<AudioSink, String> {
     use std::num::NonZero;
 
@@ -276,7 +271,8 @@ fn playback_loop(
     };
 
     let Some(sink) = sink else {
-        // No audio backend: drain and discard so the sender never blocks.
+        // No audio backend: keep draining so the bounded channel sender
+        // never blocks.
         drain_until_shutdown(&rx, &viseme, &shutdown, &cue_events, clock_origin);
         return;
     };
@@ -352,7 +348,6 @@ fn playback_loop(
         }
     }
 
-    // Channel closed or shutdown requested: stop any in-flight audio.
     tts_playing.store(false, Ordering::Relaxed);
     viseme.reset();
 }
@@ -432,7 +427,6 @@ impl PlaybackState {
     }
 }
 
-/// Action the playback loop should take for a given chunk.
 #[derive(Debug, PartialEq, Eq)]
 enum PlaybackAction {
     /// Chunk is a final marker; `was_speaking` indicates whether the
@@ -505,7 +499,6 @@ mod tests {
         timeline.append(24_000, 24_000);
         timeline.reset();
         assert!(timeline.next_chunk_start().is_none());
-        // A fresh segment restarts the timeline at zero.
         timeline.on_segment_start(now + Duration::from_secs(5));
         assert_eq!(
             timeline.next_chunk_start(),
@@ -732,11 +725,9 @@ mod tests {
             drain_until_shutdown(&rx, &drain_viseme, &drain_shutdown, &cue_tx, Instant::now());
         });
 
-        // Send a chunk, then raise the shutdown flag.
         drop(tx.send(chunk(vec![0.1; 100], 24_000, false)));
         std::thread::sleep(Duration::from_millis(50));
         shutdown.store(true, Ordering::Relaxed);
-        // The drain loop should exit within the poll interval.
         drop(handle.join());
     }
 

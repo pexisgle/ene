@@ -231,12 +231,10 @@ async fn read_directory(
     side_effects = "ReadOnly"
 )]
 pub struct FsReadAction {
-    /// Absolute path to the file or directory.
     file_path: String,
     /// 1-indexed line number to start reading from.
     #[serde(default)]
     offset: Option<u64>,
-    /// Maximum number of lines to read (default 2000).
     #[serde(default)]
     limit: Option<u64>,
 

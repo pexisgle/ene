@@ -1,5 +1,3 @@
-//! Tool RAG configuration types.
-
 use ene_config::{ConfigTarget, HasConfigKey};
 use std::collections::HashMap;
 
@@ -13,9 +11,7 @@ fn default_forced() -> Vec<String> {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-/// Tool RAG pipeline configuration.
 pub struct ToolRagConfig {
-    /// Whether Tool RAG is enabled.
     pub enabled: bool,
     /// Number of candidates to retrieve from the vector index (pre-rerank).
     pub top_k: usize,
@@ -28,11 +24,9 @@ pub struct ToolRagConfig {
     /// `rerank_candidates` description re-embeddings per query are not worth
     /// their cost by default. Opt in to evaluate reranking on a workload.
     pub use_rerank: bool,
-    /// Number of candidates to pass to the reranker.
     pub rerank_candidates: usize,
     /// Minimum normalized similarity (`[-1, 1]`) for a tool to be considered.
     pub min_similarity: f32,
-    /// Whether to warm the index at startup in a background task.
     pub background_index_on_startup: bool,
     /// Tool names that are always included regardless of relevance.
     pub forced: Vec<String>,
@@ -88,7 +82,6 @@ const fn default_failure_penalty() -> f32 {
     0.5
 }
 
-/// Serializable field weights.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FieldWeightsConfig {

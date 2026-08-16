@@ -161,9 +161,7 @@ enum UpstreamError {
     Network(String),
     /// Non-success HTTP status with the (possibly truncated) response body.
     Http {
-        /// HTTP status code.
         status: u16,
-        /// Response body bytes.
         body: Vec<u8>,
         /// `Retry-After` header value, if present and parseable.
         retry_after: Option<u64>,
@@ -171,12 +169,10 @@ enum UpstreamError {
 }
 
 impl UpstreamError {
-    /// Whether the retry budget should spend an attempt on this error.
     fn is_retryable(&self) -> bool {
         matches!(self, Self::Network(_) | Self::Http { status: 429, .. })
     }
 
-    /// Maps to a typed [`PluginError`] (see [`map_http_error`]).
     fn into_plugin_error(self) -> PluginError {
         match self {
             Self::Network(message) => PluginError::provider(message),
@@ -185,7 +181,6 @@ impl UpstreamError {
     }
 }
 
-/// Parses a `Retry-After` response header (seconds) if present and valid.
 fn retry_after_secs(headers: &[(String, String)]) -> Option<u64> {
     headers
         .iter()

@@ -1,5 +1,3 @@
-//! Integration smoke test for cognitive streaming via `run_stream`.
-
 #![expect(
     clippy::unwrap_used,
     clippy::expect_used,

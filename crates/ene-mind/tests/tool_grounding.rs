@@ -1,5 +1,3 @@
-//! Tool grounding integration tests (result summarization, memory writer persistence).
-
 #![expect(
     clippy::expect_used,
     reason = "integration tests use expect for store setup assertions"

@@ -8,7 +8,6 @@
 
 use sea_orm_migration::prelude::*;
 
-/// Adds `source_turn` and `resolved_at` to the pending-candidate queue.
 pub struct PendingCandidatesSourceTurnMigration;
 
 impl MigrationName for PendingCandidatesSourceTurnMigration {

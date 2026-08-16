@@ -13,11 +13,9 @@ use super::lorebook_decorators::EntryDecorators;
 /// Prefix for lorebook-derived `source_ref` values.
 pub const LOREBOOK_SOURCE_PREFIX: &str = "ccv3:lorebook:";
 
-/// Compiles lorebook entries into typed memory payloads.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LorebookIndexer;
 
-/// Produce a stable `u64` hash from arbitrary bytes using `blake3`.
 fn stable_hash_u64(data: &[u8]) -> u64 {
     let hash = blake3::hash(data);
     let bytes = hash.as_bytes();
@@ -40,7 +38,7 @@ impl Hasher for StableHasher<'_> {
 }
 
 impl LorebookIndexer {
-    /// Compile enabled lorebook entries into new memory items (no DB writes).
+    /// Compiles without writing to the DB.
     pub fn compile_entries(card: &CharacterCardV3, user_name: &str) -> Vec<NewMemoryItem> {
         let Some(book) = card.data.character_book.as_ref() else {
             return Vec::new();
@@ -154,7 +152,6 @@ pub fn stable_entry_id(entry: &LorebookEntry, index: usize) -> String {
     format!("{}:{:x}", entry.insertion_order, stable_hash_u64(&buf))
 }
 
-/// Internal helper: check if a single key matches the scan text.
 fn key_matches(
     key: &str,
     scan_text: &str,
@@ -215,12 +212,10 @@ pub fn entry_keys_match_with_cache(
     scan_text: &str,
     regex_cache: Option<&std::collections::HashMap<String, regex::Regex>>,
 ) -> bool {
-    // Constant entries always match regardless of keys
     if entry.constant.unwrap_or(false) {
         return true;
     }
 
-    // An entry with no keys and no constant flag cannot match
     if entry.keys.is_empty() {
         return false;
     }
@@ -228,7 +223,6 @@ pub fn entry_keys_match_with_cache(
     let case_sensitive = entry.case_sensitive.unwrap_or(false);
     let entry_id = stable_entry_id(entry, entry_index);
 
-    // Selective mode: ALL keys must match (AND logic)
     if entry.selective.unwrap_or(false) && !entry.keys.is_empty() {
         return entry.keys.iter().all(|key| {
             key_matches(
@@ -242,7 +236,6 @@ pub fn entry_keys_match_with_cache(
         });
     }
 
-    // Secondary keys mode: at least one primary AND at least one secondary must match
     if let Some(ref secondary_keys) = entry.secondary_keys
         && !secondary_keys.is_empty()
     {
@@ -272,7 +265,6 @@ pub fn entry_keys_match_with_cache(
         return secondary_match;
     }
 
-    // Default: any key matches (OR logic)
     entry.keys.iter().any(|key| {
         key_matches(
             key,
@@ -285,7 +277,6 @@ pub fn entry_keys_match_with_cache(
     })
 }
 
-/// Precompile regex patterns for enabled lorebook entries.
 pub fn compile_lorebook_regex_cache(
     book: &ene_card::Lorebook,
 ) -> std::collections::HashMap<String, regex::Regex> {
@@ -346,7 +337,6 @@ pub fn compile_lorebook_regex_cache(
     cache
 }
 
-/// Build scan text from recent turns and the current user message.
 pub fn build_lorebook_scan_text(
     user_input: &str,
     recent_turns: &[crate::recall::RecallTurn<'_>],

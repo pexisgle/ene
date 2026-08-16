@@ -1,11 +1,8 @@
-//! Types for the Expression Arbiter.
-
 use std::time::Duration;
 
 use ene_card::ResolvedExpression;
 use ene_core::AffectState;
 
-/// Source of the resolved expression decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpressionSource {
     /// LLM proposal is canonical when present.
@@ -31,7 +28,6 @@ impl ExpressionSource {
     }
 }
 
-/// Input for expression resolution.
 pub struct ExpressionInput<'a> {
     /// Current affect state after pre-turn update.
     pub affect: &'a AffectState,
@@ -50,7 +46,6 @@ pub struct ExpressionInput<'a> {
     pub irritation_spike: bool,
 }
 
-/// Resolved expression output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpressionDecision {
     /// Normalized expression name.

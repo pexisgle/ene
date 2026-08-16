@@ -31,20 +31,14 @@ use ene_config::EneConfig;
 use crate::config::ProactiveAcceleration;
 use ene_config::schemars;
 
-/// Plugin list key for the llama.cpp local-inference plugin.
 pub const LLAMA_CPP_PLUGIN: &str = "llama-cpp";
-/// Plugin list key for the ONNX (TTS/VAD) plugin.
 pub const ONNX_PLUGIN: &str = "onnx";
-/// Plugin list key for the Kokoro TTS plugin.
 pub const KOKORO_PLUGIN: &str = "kokoro";
-/// Plugin list key for the whisper.cpp STT plugin.
 pub const WHISPER_PLUGIN: &str = "whisper";
 /// Default profile name under `plugins.list.kokoro.profiles` for the single
 /// Kokoro voice set shipped today.
 pub const KOKORO_DEFAULT_PROFILE: &str = "kokoro";
 
-/// Reads an opaque `plugins.list.<name>.config` blob from a config document.
-///
 /// Returns `None` when the blob is absent or `null`.
 #[must_use]
 pub fn plugin_config_blob(config: &EneConfig, name: &str) -> Option<serde_json::Value> {
@@ -53,8 +47,7 @@ pub fn plugin_config_blob(config: &EneConfig, name: &str) -> Option<serde_json::
         .filter(|v| !v.is_null())
 }
 
-/// Reads an opaque `plugins.list.<name>.profiles.<profile>` blob from a
-/// config document. Returns `None` when the profile is absent or `null`.
+/// Returns `None` when the profile is absent or `null`.
 #[must_use]
 pub fn plugin_profile_blob(
     config: &EneConfig,
@@ -66,15 +59,13 @@ pub fn plugin_profile_blob(
         .filter(|v| !v.is_null())
 }
 
-/// Reads a `plugins.list.<name>.config` blob from the global config
-/// singleton. See the module docs for the staleness caveat.
+/// See the module docs for the staleness caveat.
 #[must_use]
 pub fn global_plugin_config_blob(name: &str) -> Option<serde_json::Value> {
     plugin_config_blob(&ene_config::get_global_config(), name)
 }
 
-/// Reads a `plugins.list.<name>.profiles.<profile>` blob from the global
-/// config singleton. See the module docs for the staleness caveat.
+/// See the module docs for the staleness caveat.
 #[must_use]
 pub fn global_plugin_profile_blob(name: &str, profile: &str) -> Option<serde_json::Value> {
     plugin_profile_blob(&ene_config::get_global_config(), name, profile)
@@ -97,7 +88,6 @@ pub struct LlamaCppPluginConfig {
     /// Optional filesystem path for `mmproj` (skips download when non-empty).
     #[serde(default)]
     pub mmproj_path: String,
-    /// Preferred acceleration backend.
     #[serde(default)]
     pub acceleration: ProactiveAcceleration,
 }
@@ -113,7 +103,6 @@ impl Default for LlamaCppPluginConfig {
 }
 
 impl LlamaCppPluginConfig {
-    /// Reads the llama.cpp plugin config from a specific config document.
     #[must_use]
     pub fn from_config(config: &EneConfig) -> Self {
         match plugin_config_blob(config, LLAMA_CPP_PLUGIN) {
@@ -134,7 +123,6 @@ impl LlamaCppPluginConfig {
         }
     }
 
-    /// Reads the llama.cpp plugin config from the global config singleton.
     #[must_use]
     pub fn global() -> Self {
         Self::from_config(&ene_config::get_global_config())

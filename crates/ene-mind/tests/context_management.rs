@@ -1,4 +1,3 @@
-//! Context management integration tests (compression, prompt packing, topic boundaries).
 #![expect(
     clippy::expect_used,
     reason = "integration tests use expect for concise assertions"
@@ -31,14 +30,12 @@ fn compression_trigger_is_token_based_not_message_count() {
         context_pressure_tokens: 500,
         ..ContextConfig::default()
     };
-    // At/above the token ceiling: window-pressure trigger fires.
     assert!(matches!(
         evaluate_compression_trigger(&config, 1, 500),
         Some(ene_mind::CompressionReason::ContextPressure {
             history_tokens: 500
         })
     ));
-    // Below the ceiling: nothing fires regardless of message count.
     assert!(evaluate_compression_trigger(&config, 1, 499).is_none());
 }
 
@@ -149,10 +146,6 @@ fn pack_prompt_counts_history_toward_total_budget() {
     );
     assert!(packed.meta.packed_tokens <= budget.total_tokens);
 }
-
-// ──────────────────────────────────────────────────────────────────────────
-// Synchronous history detachment during the async compression gap
-// ──────────────────────────────────────────────────────────────────────────
 
 /// An alternating user/assistant history of `turns` exchanges, each long
 /// enough to dominate the window budgets below (~19 tokens per message).
@@ -280,7 +273,7 @@ async fn window_pressure_detaches_oldest_span_without_waiting_for_summary() {
     });
     let mut manager = ene_mind::ContextManager::default();
     let config = window_pressure_config();
-    let history = exchanges(5); // ~190 tokens
+    let history = exchanges(5);
 
     manager.check_and_trigger(
         &config,

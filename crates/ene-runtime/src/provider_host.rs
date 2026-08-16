@@ -1,5 +1,3 @@
-//! Live provider catalog: routes provider creation to the current plugin host.
-//!
 //! Wraps the shared plugin-host slot so callers hold one
 //! `Arc<dyn ene_ai::ProviderHost>` regardless of host restarts: each call
 //! locks the slot and delegates to the manager's [`ene_ai::ProviderHost`]
@@ -12,20 +10,16 @@ use std::sync::Arc;
 use ene_plugin_host::PluginHostManager;
 use tokio::sync::Mutex;
 
-/// Shared slot holding the current plugin host manager, if any.
-///
 /// `None` while the host has not started yet or after startup failed; the
 /// actor swaps the manager in place during plugin reconfiguration.
 pub(crate) type PluginHostSlot = Arc<Mutex<Option<PluginHostManager>>>;
 
-/// [`ene_ai::ProviderHost`] implementation backed by a [`PluginHostSlot`].
 #[derive(Clone)]
 pub(crate) struct LiveProviderCatalog {
     slot: PluginHostSlot,
 }
 
 impl LiveProviderCatalog {
-    /// Creates a catalog delegating to whatever manager the slot holds.
     #[must_use]
     pub(crate) fn new(slot: PluginHostSlot) -> Self {
         Self { slot }

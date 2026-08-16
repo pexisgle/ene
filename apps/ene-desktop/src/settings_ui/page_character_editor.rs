@@ -32,7 +32,6 @@ pub fn render(
         return;
     };
 
-    // ── Auto-load on first render ──
     let needs_load = world
         .get::<UiStateComponent>(ui_entity)
         .is_some_and(|s| !s.0.character_editor_loaded);
@@ -52,7 +51,6 @@ pub fn render(
         );
     }
 
-    // ── Grab a snapshot of the UiState for rendering ──
     let Some(snapshot) = world
         .get::<UiStateComponent>(ui_entity)
         .map(|s| s.0.clone())
@@ -61,7 +59,6 @@ pub fn render(
     };
 
     ui.vertical(|ui| {
-        // ── Modified warning ──
         if snapshot.character_editor_modified {
             warning_box(
                 ui,
@@ -69,7 +66,6 @@ pub fn render(
             );
         }
 
-        // ── Locale-diff notice ──
         if !snapshot.character_editor_locale_diffs.is_empty() {
             warning_box(
                 ui,
@@ -81,7 +77,6 @@ pub fn render(
             );
         }
 
-        // ── Validation issues ──
         if !snapshot.character_editor_validation_errors.is_empty() {
             egui::Frame::group(ui.style())
                 .corner_radius(egui::CornerRadius::same(6))
@@ -111,7 +106,6 @@ pub fn render(
             ui.separator();
         }
 
-        // ── Sections ──
         section(
             ui,
             "editor-identity",
@@ -236,7 +230,6 @@ pub fn render(
             |ui| motion_editor(ui, world, ui_entity),
         );
 
-        // ── Action buttons ──
         ui.separator();
         ui.horizontal(|ui| {
             if ui
@@ -380,20 +373,17 @@ pub fn render_discard_dialog(
     }
 }
 
-/// Resolve the on-disk paths to the current character's `character.json` and
-/// the assets directory.
 fn resolve_card_path(settings: &CharacterSettings) -> Option<(PathBuf, PathBuf)> {
     settings
         .current_character_card()
         .map(|rel| (settings.assets_dir.join(rel), settings.assets_dir.clone()))
 }
 
-/// A collapsible section; open by default so the whole card is visible.
+/// Open by default so the whole card is visible.
 fn section(ui: &mut egui::Ui, id: &str, title: String, add: impl FnOnce(&mut egui::Ui)) {
     section_card_collapsible(ui, id, &title, true, add);
 }
 
-/// Render a single-line text field bound to a `String` field on [`UiState`].
 fn text_field(
     ui: &mut egui::Ui,
     world: &mut World,
@@ -419,7 +409,6 @@ fn text_field(
     });
 }
 
-/// Render a multi-line text area bound to a `String` field on [`UiState`].
 fn text_area(
     ui: &mut egui::Ui,
     world: &mut World,
@@ -455,7 +444,6 @@ fn text_area(
     });
 }
 
-/// Editable list of `data.alternate_greetings`.
 fn alternate_greetings_editor(ui: &mut egui::Ui, world: &mut World, ui_entity: Entity) {
     let Some(mut state) = world
         .get::<UiStateComponent>(ui_entity)
@@ -519,7 +507,6 @@ fn alternate_greetings_editor(ui: &mut egui::Ui, world: &mut World, ui_entity: E
     }
 }
 
-/// Structured row editor for `data.character_book.entries`.
 fn lorebook_editor(ui: &mut egui::Ui, world: &mut World, ui_entity: Entity) {
     let Some(mut state) = world
         .get::<UiStateComponent>(ui_entity)
@@ -782,7 +769,6 @@ fn lorebook_editor(ui: &mut egui::Ui, world: &mut World, ui_entity: Entity) {
     }
 }
 
-/// Row editor for `extensions.ene.motion_catalog`.
 fn motion_editor(ui: &mut egui::Ui, world: &mut World, ui_entity: Entity) {
     let Some(mut state) = world
         .get::<UiStateComponent>(ui_entity)
@@ -953,8 +939,7 @@ fn motion_editor(ui: &mut egui::Ui, world: &mut World, ui_entity: Entity) {
     }
 }
 
-/// A new motion row with empty fields; the validation pass flags a missing
-/// name/path until the user fills them in.
+/// The validation pass flags a missing name/path until the user fills them in.
 fn new_motion_entry() -> MotionEntry {
     MotionEntry {
         name: String::new(),
@@ -964,8 +949,7 @@ fn new_motion_entry() -> MotionEntry {
     }
 }
 
-/// A new lorebook entry with sensible defaults; `insertion_order` places it
-/// after the entries already present.
+/// `insertion_order` places the entry after those already present.
 fn new_lorebook_entry(insertion_order: usize) -> LorebookEntry {
     LorebookEntry {
         keys: Vec::new(),
@@ -987,8 +971,6 @@ fn new_lorebook_entry(insertion_order: usize) -> LorebookEntry {
     }
 }
 
-/// A single-line field bound to a string owned by the caller; returns whether
-/// the value changed so the caller can mark the card modified.
 fn singleline_field(ui: &mut egui::Ui, label: String, value: &mut String) -> bool {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -998,7 +980,6 @@ fn singleline_field(ui: &mut egui::Ui, label: String, value: &mut String) -> boo
     .inner
 }
 
-/// A multi-line field bound to a string owned by the caller.
 fn multiline_field(ui: &mut egui::Ui, label: String, value: &mut String) -> bool {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -1012,8 +993,6 @@ fn multiline_field(ui: &mut egui::Ui, label: String, value: &mut String) -> bool
     .inner
 }
 
-/// Newline-separated list field (trigger keys, secondary keys). Blank lines
-/// are dropped on write.
 fn key_list_field(ui: &mut egui::Ui, label: String, keys: &mut Vec<String>) -> bool {
     let joined = keys.join("\n");
     let mut edited = joined;
@@ -1041,7 +1020,6 @@ fn key_list_field(ui: &mut egui::Ui, label: String, keys: &mut Vec<String>) -> b
     changed
 }
 
-/// Localized label for a motion layer (or the default when unset).
 fn layer_label(layer: Option<MotionLayer>) -> String {
     match layer {
         Some(MotionLayer::Upper) => {

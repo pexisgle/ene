@@ -279,13 +279,9 @@ use crate::utils::default_sandbox;
     side_effects = "FileSystem { mutates: true }"
 )]
 pub struct FsEditAction {
-    /// Absolute path to the file to edit.
     file_path: String,
-    /// Text to find and replace.
     old_string: String,
-    /// Replacement text.
     new_string: String,
-    /// Replace all occurrences (default false).
     #[serde(default)]
     replace_all: Option<bool>,
 

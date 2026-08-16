@@ -3,7 +3,6 @@
 //! Plugin binary providing geographic information tools:
 //! IP-based location, current weather, timezone offset calculation,
 //! and sunrise/sunset times.
-#![warn(missing_docs)]
 #![expect(
     clippy::unused_async,
     reason = "tool IPC handlers are async for uniform provider dispatch"
@@ -18,15 +17,11 @@
     )
 )]
 
-/// Action modules for each tool.
 pub mod action;
-/// Permission gate for privacy-relevant lookups.
 pub mod approval;
 /// Host-mediated network broker session.
 pub mod broker;
-/// Shared error type for parse, format, and validation failures.
 pub mod error;
-/// Tool lifecycle and provider integration.
 pub mod provider;
 
 use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};

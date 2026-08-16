@@ -50,8 +50,6 @@ fn generate_web_search_schema() -> serde_json::Value {
     serde_json::to_value(schema).expect("WebSearchConfig schema should always serialize")
 }
 
-/// Built-in web tool provider.
-///
 /// Exposes `webfetch` and `websearch` tools via [`ActionSetProvider`].
 pub struct WebToolProvider {
     inner: ActionSetProvider,

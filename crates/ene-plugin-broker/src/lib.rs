@@ -10,8 +10,6 @@
 //! Everything is mediated: the plugin never opens sockets, user files, or
 //! processes directly.
 
-#![warn(missing_docs)]
-
 use std::path::Path;
 
 pub use ene_plugin_proto::ws::{WebSocketRequest, WebSocketResponse};
@@ -22,65 +20,46 @@ pub use ene_plugin_proto::{
 };
 use tokio::io::AsyncWriteExt;
 
-/// Errors from the broker channel.
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerClientError {
-    /// The socket connection failed.
     #[error("broker connect failed: {0}")]
     Connect(String),
-    /// The `Open` handshake was rejected.
     #[error("broker open rejected: {message} ({code:?})")]
     OpenRejected {
-        /// Error code from the host.
         code: HostServiceErrorCode,
-        /// Human-readable detail.
         message: String,
     },
-    /// A broker request failed.
     #[error("broker request failed: {0}")]
     Request(String),
-    /// The host returned a structured broker error.
     #[error("broker error {code:?}: {message}")]
     Denied {
-        /// Structured code.
         code: ene_plugin_proto::BrokerErrorCode,
-        /// Human-readable detail.
         message: String,
     },
-    /// A WebSocket handshake failed with an HTTP status.
     #[error("WebSocket handshake failed: {message}")]
     HttpStatus {
         /// HTTP status from the peer (`None` when unknown).
         status: Option<u16>,
-        /// Human-readable detail.
         message: String,
     },
-    /// I/O failure on the channel.
     #[error("broker I/O error: {0}")]
     Io(#[from] std::io::Error),
-    /// The peer closed the channel.
     #[error("broker channel closed by host")]
     Closed,
 }
 
-/// One authenticated broker session.
 pub struct BrokerClient {
     stream: IpcStream,
 }
 
-/// A collected streamed response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamResponse {
-    /// HTTP status.
     pub status: u16,
-    /// Response headers.
     pub headers: Vec<(String, String)>,
-    /// All body chunks in order.
     pub chunks: Vec<Vec<u8>>,
 }
 
 impl StreamResponse {
-    /// Concatenated body bytes.
     #[must_use]
     pub fn body(&self) -> Vec<u8> {
         let len = self.chunks.iter().map(Vec::len).sum();
@@ -92,8 +71,6 @@ impl StreamResponse {
     }
 }
 
-/// Consumes streamed broker events as they arrive.
-///
 /// The methods are async so a sink can forward chunks with backpressure;
 /// each returned future borrows `&mut self` only for its own execution
 /// (RPITIT), so a sink can hold channels and other owned state without
@@ -114,7 +91,6 @@ pub trait StreamSink {
     ) -> impl std::future::Future<Output = Result<(), BrokerClientError>> + Send + '_;
 }
 
-/// [`StreamSink`] that buffers a whole streamed response.
 #[derive(Default)]
 struct Collector {
     status: Option<u16>,
@@ -146,7 +122,6 @@ impl std::fmt::Debug for BrokerClient {
 }
 
 impl BrokerClient {
-    /// Connects to the host-service socket and opens `service`.
     pub async fn connect(
         socket_path: &Path,
         token: &str,
@@ -172,7 +147,6 @@ impl BrokerClient {
         }
     }
 
-    /// Sends one request and returns the matching response.
     pub async fn request(
         &mut self,
         request: &BrokerRequest,
@@ -187,8 +161,6 @@ impl BrokerClient {
         }
     }
 
-    /// Sends a streaming request and collects `StreamStart` / `StreamChunk` /
-    /// `StreamEnd` frames until the terminal frame.
     pub async fn collect_stream(
         &mut self,
         request: &BrokerRequest,
@@ -204,9 +176,6 @@ impl BrokerClient {
         })
     }
 
-    /// Sends a streaming request and feeds `StreamStart` / `StreamChunk`
-    /// frames to `sink` as they arrive.
-    ///
     /// The sink's futures are awaited between socket reads, so a slow sink
     /// applies backpressure to the channel. Returning `Err` from a sink
     /// method aborts the exchange.
@@ -238,37 +207,28 @@ impl BrokerClient {
         }
     }
 
-    /// Shuts the session down cleanly.
     pub async fn shutdown(&mut self) -> std::io::Result<()> {
         self.stream.shutdown().await
     }
 }
 
-/// One event received on a host-mediated WebSocket session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebSocketEvent {
-    /// A text message from the peer.
     Text(String),
-    /// A binary message from the peer.
     Binary(Vec<u8>),
     /// The connection closed; the session is finished.
     Closed {
-        /// Close code.
         code: u16,
-        /// Close reason.
         reason: String,
     },
     /// A session error; the session is finished.
     Error {
         /// HTTP status when the handshake failed on the wire, else `None`.
         status: Option<u16>,
-        /// Human-readable detail.
         message: String,
     },
 }
 
-/// A host-mediated WebSocket session.
-///
 /// The host validates SSRF and origin approvals, injects the named
 /// credential, and relays frames; the plugin only sends and receives
 /// [`WebSocketEvent`]s. Sends are fire-and-forget: [`recv`](Self::recv)
@@ -278,8 +238,6 @@ pub struct WebSocketSession {
 }
 
 impl WebSocketSession {
-    /// Opens a session on the host-service socket and completes the
-    /// WebSocket handshake for `url`.
     pub async fn connect(
         socket_path: &Path,
         token: &str,
@@ -326,7 +284,6 @@ impl WebSocketSession {
         }
     }
 
-    /// Sends a text frame (fire-and-forget).
     pub async fn send_text(&mut self, data: &str) -> Result<(), BrokerClientError> {
         write_framed_json(
             &mut self.stream,
@@ -338,7 +295,6 @@ impl WebSocketSession {
         Ok(())
     }
 
-    /// Sends a binary frame (fire-and-forget).
     pub async fn send_binary(&mut self, data: &[u8]) -> Result<(), BrokerClientError> {
         write_framed_json(
             &mut self.stream,
@@ -350,7 +306,6 @@ impl WebSocketSession {
         Ok(())
     }
 
-    /// Starts the close handshake.
     pub async fn close(&mut self, code: u16, reason: &str) -> Result<(), BrokerClientError> {
         write_framed_json(
             &mut self.stream,
@@ -363,8 +318,7 @@ impl WebSocketSession {
         Ok(())
     }
 
-    /// Reads the next pushed frame. `Closed` / `Error` events are terminal:
-    /// no further reads succeed.
+    /// `Closed` / `Error` events are terminal: no further reads succeed.
     pub async fn recv(&mut self) -> Result<WebSocketEvent, BrokerClientError> {
         match read_framed_json(&mut self.stream).await? {
             Some(WebSocketResponse::MessageText { data }) => Ok(WebSocketEvent::Text(data)),
@@ -382,7 +336,6 @@ impl WebSocketSession {
         }
     }
 
-    /// Shuts the session down cleanly.
     pub async fn shutdown(&mut self) -> std::io::Result<()> {
         self.stream.shutdown().await
     }

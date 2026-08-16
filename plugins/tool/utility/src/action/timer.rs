@@ -18,12 +18,10 @@ fn default_registry() -> Arc<TaskRegistry> {
     keywords_primary = "timer, countdown, alarm, remind, notification",
     background_capable
 )]
-/// Action to start a countdown timer with a desktop notification.
 pub struct TimerStartAction {
     /// Name identifying this timer; used by `utility.timer_stop`.
     #[arg(min_length = 1)]
     name: String,
-    /// Countdown duration in seconds.
     #[arg(minimum = 1)]
     seconds: u64,
 }
@@ -54,7 +52,6 @@ impl TimerStartAction {
     category = "Utility",
     keywords_primary = "timer, countdown, alarm, stop, cancel, status, confirm"
 )]
-/// Action to stop a timer or check timer status.
 pub struct TimerStopAction {
     #[tool(skip)]
     #[serde(skip, default = "default_registry")]
@@ -65,7 +62,6 @@ pub struct TimerStopAction {
 }
 
 impl TimerStopAction {
-    /// Creates a new `TimerStopAction` sharing the given registry.
     #[must_use]
     pub const fn new(registry: Arc<TaskRegistry>) -> Self {
         Self {

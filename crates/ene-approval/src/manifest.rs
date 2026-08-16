@@ -4,20 +4,14 @@ use serde::{Deserialize, Serialize};
 use crate::category::ApprovalCategory;
 use crate::mode::ApprovalMode;
 
-/// Logical filesystem slot a plugin may request access to.
-///
 /// Slots are **logical** (`workspace`, `media`, `downloads`, …): the manifest
 /// never records a real path. The host binds a slot to a canonical path only
 /// through a user-approved grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsSlotDecl {
-    /// Logical slot name (`workspace`, `media`, …).
     pub name: String,
-    /// Human-readable purpose shown during grant approval.
     pub purpose: String,
-    /// Whether the slot may be granted read access.
     pub read: bool,
-    /// Whether the slot may be granted write access.
     pub write: bool,
 }
 
@@ -27,7 +21,6 @@ pub struct FsSlotDecl {
 /// query, or fragment. Only `https` origins are declarable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OriginDecl {
-    /// Exact origin (`https://api.example.com` or `https://api.example.com:8443`).
     pub origin: String,
 }
 
@@ -35,7 +28,6 @@ pub struct OriginDecl {
 /// host resolves through the signed catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ArtifactRequirement {
-    /// Artifact id from the signed catalog.
     pub artifact_id: String,
     /// Version constraint (`=1.2.0`, `>=1.0`, `^1`). The host compares
     /// against the installed catalog target.
@@ -46,7 +38,6 @@ pub struct ArtifactRequirement {
 /// install and keep running (e.g. a llama.cpp server).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SidecarRequirement {
-    /// Sidecar artifact id from the signed catalog.
     pub artifact_id: String,
     /// Version constraint, same syntax as [`ArtifactRequirement`].
     pub version_constraint: String,
@@ -70,30 +61,22 @@ pub struct ResourceLimits {
     pub max_network_bytes_per_request: u64,
 }
 
-/// Declared side effects. The host uses these for audit labeling and for
-/// matching approvals to the manifest; they are declarations, not grants.
+/// The host uses these for audit labeling and for matching approvals to the
+/// manifest; they are declarations, not grants.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ManifestSideEffects {
-    /// The plugin modifies user files.
     pub modifies_fs: bool,
-    /// The plugin spawns child processes.
     pub spawns_processes: bool,
-    /// The plugin talks to the network.
     pub uses_network: bool,
-    /// The plugin controls a browser.
     pub controls_browser: bool,
-    /// The plugin reads credentials.
     pub reads_credentials: bool,
 }
 
-/// One requestable capability: the maximum mode a category may reach.
-///
 /// A capability that is not declared here can never be approved, even by an
 /// `Allow` policy — the manifest layer is enforced before the approval layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ManifestPermission {
-    /// The category this entry covers.
     pub category: ApprovalCategory,
     /// Maximum mode the plugin may be granted (`Allow` here does **not**
     /// grant anything; it only makes automatic approval reachable).
@@ -109,70 +92,53 @@ pub struct ManifestPermission {
 /// against a trusted publisher key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SignedManifest {
-    /// The exact canonical JSON bytes that were signed.
     pub payload: Vec<u8>,
     /// Ed25519 signature (64 bytes), absent for built-in manifests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<Vec<u8>>,
-    /// Which trusted publisher key signed this manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
 }
 
-/// The plugin's maximum capability surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PluginManifest {
-    /// Manifest schema version (currently `1`).
     pub schema_version: u32,
     /// Stable plugin id (matches `plugins.list.<name>` for built-ins).
     pub plugin_id: String,
-    /// Display name.
     pub name: String,
     /// Publisher identifier; per-plugin approvals are bound to it.
     pub publisher: String,
-    /// Plugin version.
     pub version: String,
-    /// One-line description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Logical FS slots the plugin may request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fs_slots: Vec<FsSlotDecl>,
-    /// Exact fixed origins the plugin may talk to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fixed_origins: Vec<OriginDecl>,
-    /// Whether the plugin may request dynamic access to arbitrary public sites.
     #[serde(default)]
     pub dynamic_web: bool,
-    /// Executable artifacts the plugin requires.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactRequirement>,
-    /// Sidecar artifacts the plugin requires.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sidecars: Vec<SidecarRequirement>,
     /// Host services (brokers) the plugin may open.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_services: Vec<String>,
-    /// Declared side effects.
     #[serde(default)]
     pub side_effects: ManifestSideEffects,
-    /// Resource ceilings.
     #[serde(default)]
     pub resource_limits: ResourceLimits,
-    /// Requestable capabilities (the manifest layer).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permissions: Vec<ManifestPermission>,
 }
 
-/// Serializes a manifest to the canonical byte form that gets signed and
-/// digested. All fields are declared struct fields (no maps), so output is
+/// All fields are declared struct fields (no maps), so output is
 /// deterministic across processes and serde versions.
 pub fn canonical_manifest_bytes(manifest: &PluginManifest) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(manifest)
 }
 
-/// Hex SHA-256 of a manifest's canonical bytes — the `manifest_digest` that
-/// FS grants and approvals are bound to.
+/// The `manifest_digest` that FS grants and approvals are bound to.
 pub fn manifest_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))

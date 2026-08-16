@@ -43,7 +43,6 @@ impl NumberAction {
     }
 }
 
-/// Samples a float uniformly from `[min, max)`.
 fn random_float(min: f64, max: f64) -> Result<f64, RandomError> {
     if !min.is_finite() || !max.is_finite() {
         return Err(RandomError::NonFiniteBound { min, max });
@@ -54,7 +53,6 @@ fn random_float(min: f64, max: f64) -> Result<f64, RandomError> {
     Ok(rand::random_range(min..max))
 }
 
-/// Samples an integer uniformly from `[ceil(min), floor(max)]`.
 fn random_integer(min: f64, max: f64) -> Result<i64, RandomError> {
     if !min.is_finite() || !max.is_finite() {
         return Err(RandomError::NonFiniteBound { min, max });

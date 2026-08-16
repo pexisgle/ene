@@ -9,7 +9,6 @@ use ene_plugin_proto::{
 };
 use std::sync::Arc;
 
-/// Shared state for the todo actions.
 #[derive(Clone)]
 pub struct UtilityState {
     /// Lazily-initialized todo store. Uses `tokio::sync::Mutex` so the
@@ -23,7 +22,6 @@ pub struct UtilityState {
 }
 
 impl UtilityState {
-    /// Creates a new `UtilityState`.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -34,12 +32,10 @@ impl UtilityState {
         }
     }
 
-    /// Returns the current session ID.
     pub fn session_id(&self) -> String {
         self.session_id.read().clone()
     }
 
-    /// Sets the session ID.
     pub fn set_session_id(&self, session_id: &str) {
         *self.session_id.write() = session_id.to_string();
     }
@@ -62,13 +58,10 @@ impl UtilityState {
         }
     }
 
-    /// Sets the DB IPC auth token used to authenticate the connection.
     pub fn set_db_auth_token(&self, token: Option<String>) {
         *self.db_auth_token.write() = token;
     }
 
-    /// Lazily connects to the DB IPC server and returns the `TodoStore`.
-    ///
     /// The `tokio::sync::Mutex` guard is held across the entire
     /// initialization (socket read → connect → store) so concurrent
     /// callers serialize on the lock rather than racing to create
@@ -125,7 +118,6 @@ pub struct UtilityToolProvider {
 }
 
 impl UtilityToolProvider {
-    /// Creates a new `UtilityToolProvider`.
     #[must_use]
     pub fn new() -> Self {
         let state = Arc::new(UtilityState::new());

@@ -11,18 +11,12 @@ use serde::{Deserialize, Serialize};
 use crate::config::WorldStateConfig;
 use crate::proactive::{ProactiveObservation, truncate_chars};
 
-/// Label length cap applied when a snapshot is built from an observation.
 const MAX_LABEL_CHARS: usize = 120;
-/// Change-description length cap applied when a snapshot is built from an
-/// observation.
 const MAX_CHANGE_CHARS: usize = 160;
 
-/// One structured world-state snapshot at a point in time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldStateSnapshot {
-    /// When the snapshot was captured (unix millis).
     pub captured_at_unix_ms: u64,
-    /// Seconds since the last OS activity signal when the host measures it.
     pub idle_seconds: Option<u64>,
     /// Privacy-safe label of the focused window (app name, optionally a
     /// redacted title).
@@ -66,33 +60,24 @@ impl WorldStateSnapshot {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdleTrend {
-    /// Latest idle is larger than the previous snapshot.
     Rising,
-    /// Latest idle is smaller than the previous snapshot.
     Falling,
-    /// Both values are present and equal.
     Steady,
-    /// Idle is unmeasured on this host or no pair of values exists.
     #[default]
     Unknown,
 }
 
-/// Computed world-state analysis for one decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldStateSummary {
-    /// Idle direction in the latest snapshot pair (see [`IdleTrend`]).
     pub idle_trend: IdleTrend,
     /// Snapshots with a window switch inside the recent change window.
     pub window_changes: usize,
-    /// True when the latest snapshot shows the user actively working.
     pub engaged: bool,
     /// Truncated privacy-safe label of the latest focused window.
     pub latest_window: String,
-    /// Number of snapshots the analysis is based on.
     pub snapshot_count: usize,
 }
 
-/// Bounded in-memory ring of world-state snapshots, oldest first.
 #[derive(Debug, Clone, Default)]
 pub struct WorldStateMemory {
     snapshots: VecDeque<WorldStateSnapshot>,
@@ -110,30 +95,25 @@ impl WorldStateMemory {
         self.snapshots.push_back(snapshot);
     }
 
-    /// Drop all snapshots (session / character change).
     pub fn clear(&mut self) {
         self.snapshots.clear();
     }
 
-    /// Number of retained snapshots.
     #[must_use]
     pub fn len(&self) -> usize {
         self.snapshots.len()
     }
 
-    /// Whether the ring holds no snapshots.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.snapshots.is_empty()
     }
 
-    /// The most recent snapshot, if any.
     #[must_use]
     pub fn latest(&self) -> Option<&WorldStateSnapshot> {
         self.snapshots.back()
     }
 
-    /// Snapshots in capture order (oldest first).
     pub fn iter(&self) -> impl Iterator<Item = &WorldStateSnapshot> {
         self.snapshots.iter()
     }

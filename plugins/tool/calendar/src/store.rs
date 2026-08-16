@@ -45,12 +45,10 @@ pub struct CalendarAccount {
     pub updated_at: String,
 }
 
-/// A single calendar event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalendarEvent {
     /// Stable event identifier (unique per account).
     pub id: String,
-    /// Owning account.
     pub account_id: String,
     /// Human-readable title.
     pub title: String,
@@ -132,7 +130,6 @@ pub struct FreeSlot {
     pub duration_min: u64,
 }
 
-/// Errors from the calendar store.
 #[derive(Debug, thiserror::Error)]
 pub enum CalendarStoreError {
     /// Underlying DB/transport error.
@@ -187,14 +184,12 @@ pub enum CalendarStoreError {
     CorruptRow(String),
 }
 
-/// Parses an RFC3339 timestamp into epoch milliseconds.
 pub fn parse_rfc3339_ms(value: &str) -> Result<i64, CalendarStoreError> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.timestamp_millis())
         .map_err(|_| CalendarStoreError::InvalidTimestamp(value.to_string()))
 }
 
-/// Returns the offset label (e.g. `+09:00`) of an RFC3339 timestamp.
 fn offset_label(value: &str) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
@@ -241,7 +236,6 @@ impl CalendarStore {
         rows.iter().map(CalendarAccount::from_row).collect()
     }
 
-    /// Fetches a single account by id.
     pub async fn get_account(&self, id: &str) -> Result<CalendarAccount, CalendarStoreError> {
         let rows = self
             .client()
@@ -260,7 +254,6 @@ impl CalendarStore {
         CalendarAccount::from_row(row)
     }
 
-    /// Resolves a calendar by name.
     pub async fn find_account_by_name(
         &self,
         name: &str,
@@ -438,7 +431,6 @@ impl CalendarStore {
         rows.iter().map(CalendarEvent::from_row).collect()
     }
 
-    /// Fetches one event of an account.
     pub async fn get_event(
         &self,
         account_id: &str,
@@ -505,7 +497,6 @@ impl CalendarStore {
         rows.iter().map(CalendarEvent::from_row).collect()
     }
 
-    /// Creates an event in an account.
     pub async fn create_event(
         &self,
         account_id: &str,

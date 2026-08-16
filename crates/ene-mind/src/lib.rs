@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(
@@ -73,7 +72,6 @@ pub mod summarizer;
 /// Shared title matching for subject identity (contradictions, commitments).
 mod title_match;
 
-/// Mind runtime configuration section.
 pub mod config;
 /// Central cognitive engine facade.
 pub mod engine;
@@ -84,7 +82,6 @@ pub mod lifecycle;
 
 #[doc(no_inline)]
 pub use commitments::{CommitmentLedger, CommitmentSyncContext};
-/// Mind configuration section.
 pub use config::{
     CONFIRMATION_CONFIDENCE_OFFSET, CharacterMemoryConfig, ContextConfig, EmotionConfig,
     MemoryApprovalConfig, MindConfig, MindMemoryConfig, MindMemoryLimitsConfig, ProactiveConfig,
@@ -93,7 +90,6 @@ pub use config::{
     SessionConfig, ToolGroundingConfig, TopicBoundaryConfig, WindowTitleLevel,
     validate_proactive_intervals, warn_on_proactive_interval_issues,
 };
-/// Context budget and compression types.
 #[doc(no_inline)]
 pub use context::{
     ActiveSceneSummary, CompressionLevel, CompressionReason, CompressionResult,
@@ -103,17 +99,13 @@ pub use context::{
     execute_compression, load_active_scene_summary, maybe_roll_up_chapter, pack_prompt,
     plan_retroactive_compression, poll_compression_result, spawn_compression_task,
 };
-/// Emotion engine types.
 #[doc(no_inline)]
 pub use emotion::{AffectProposal, EmotionEngine, TurnAffectInput};
 /// Re-export commitment domain types from ene-core for consumers.
 #[doc(no_inline)]
 pub use ene_core::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
-/// Central cognitive engine facade.
 pub use engine::{CognitionEngine, MemoryWriteOutcome};
-/// Cognitive runtime error type.
 pub use error::{CognitionError, EneCognitionError, MindError};
-/// Turn lifecycle types for streaming integration.
 pub use lifecycle::{
     ComposePrefetch, ComposedPrompt, HistoryEntry, OwnedPostTurnInput, OwnedTurnInput,
     PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext, interruption_note,
@@ -121,7 +113,6 @@ pub use lifecycle::{
 /// Journal-style scored memory search.
 #[doc(no_inline)]
 pub use memory_journal::MemoryJournal;
-/// Memory arbiter and related decision types.
 #[doc(no_inline)]
 pub use memory_writer::{
     AppliedDecision, ArbiterAction, ArbiterContext, ArbiterOptions, ArbiterReason,
@@ -134,7 +125,6 @@ pub use output::{
     CueSource, DEFAULT_EXPRESSION_HOLD_SECS, DEFAULT_EXPRESSION_WEIGHT, MotionLayer, PerfKind,
     PerformanceCue, cue_source_priority,
 };
-/// Expression arbiter types.
 #[doc(no_inline)]
 pub use output::{
     ExpressionDecision, ExpressionInput, ExpressionSource, OutputArbiter, PerformanceArbiter,
@@ -152,13 +142,11 @@ pub use proactive::{
     load_proactive_memory_notes, parse_decision_json, parse_resolution_json,
     resolution_schema_object, select_due_pending_candidate,
 };
-/// Prompt packet section types.
 #[doc(no_inline)]
 pub use prompt_packet::{PromptPacket, PromptSection, PromptSectionKind};
 /// L1 in-memory recall cache (multi-tier with `ene-store` as L2).
 #[doc(no_inline)]
 pub use recall::MemoryRecallCache;
-/// Recall planning types.
 #[doc(no_inline)]
 pub use recall::{
     EMOTIONAL_MATCH_REASON_THRESHOLD, MemoryDiversifyOptions, MemoryDiversifyPipeline,
@@ -167,7 +155,6 @@ pub use recall::{
     RecalledMemory, explain_scored_memories, format_recalled_content, infer_recall_reason,
     recall_content_qualifier,
 };
-/// Session types for conversation state and splitting.
 #[doc(no_inline)]
 pub use session::{
     CardName, CharacterAsset, CharacterCardData, CharacterCardV3, ConversationSession,
@@ -180,7 +167,6 @@ pub use session::{
 #[doc(no_inline)]
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
 
-/// Returns `true` if `haystack` contains any of `needles` as a substring.
 pub(crate) fn contains_any<I, S>(haystack: &str, needles: I) -> bool
 where
     I: IntoIterator<Item = S>,

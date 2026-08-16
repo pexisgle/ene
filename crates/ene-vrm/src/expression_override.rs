@@ -56,26 +56,18 @@ use crate::expression::ExpressionName;
 #[doc(hidden)]
 pub const MOUTH_TARGET_NAMES: &[&str] = &["aa", "ih", "ou", "ee", "oh"];
 
-/// Procedural blink target names.
 #[doc(hidden)]
 pub const BLINK_TARGET_NAMES: &[&str] = &["blink", "blinkLeft", "blinkRight"];
 
-/// Procedural gaze target names.
 #[doc(hidden)]
 pub const GAZE_TARGET_NAMES: &[&str] = &["lookUp", "lookDown", "lookLeft", "lookRight"];
 
-/// All procedural expression names. Pre-built so callers can
-/// quickly check whether a name is a known procedural target.
-///
-/// Used internally by [`apply_overrides`]; hidden from the "Supported API" docs.
 #[doc(hidden)]
 pub fn is_procedural(name: &str) -> bool {
     MOUTH_TARGET_NAMES.contains(&name)
         || BLINK_TARGET_NAMES.contains(&name)
         || GAZE_TARGET_NAMES.contains(&name)
 }
-
-// ---- Types ----
 
 /// How an expression overrides a procedural expression category.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -132,7 +124,6 @@ pub struct MorphTargetBind {
 pub struct ExpressionDefinition {
     /// Expression name (e.g. `happy`, `sad`).
     pub name: ExpressionName,
-    /// Override settings for this expression.
     pub overrides: ExpressionOverrideSettings,
     /// `weight > 0.5` -> 1.0, else 0.0.
     pub is_binary: bool,
@@ -154,8 +145,6 @@ impl ExpressionDefinition {
         }
     }
 }
-
-// ---- Override evaluator ----
 
 /// Evaluate the `isBinary` clamp and the
 /// `overrideMouth/Blink/LookAt` block / blend semantics against
@@ -194,7 +183,6 @@ pub fn apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[Expr
         return;
     }
 
-    // ---- Phase 1: isBinary clamp ----
     for def in defs {
         if def.is_binary
             && let Some(w) = weights.get(&def.name)
@@ -204,7 +192,6 @@ pub fn apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[Expr
         }
     }
 
-    // ---- Phase 2: collect override contributions ----
     // Keyed by target name: (blend_sum, is_blocked). Block wins
     // over blend.
     let mut factors: BTreeMap<ExpressionName, (f32, bool)> = BTreeMap::new();
@@ -215,7 +202,6 @@ pub fn apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[Expr
             continue;
         }
 
-        // Per-field override → target-set mapping.
         let fields: [(ExpressionOverrideType, &[&str]); 3] = [
             (def.overrides.mouth, MOUTH_TARGET_NAMES),
             (def.overrides.blink, BLINK_TARGET_NAMES),
@@ -249,7 +235,6 @@ pub fn apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[Expr
         }
     }
 
-    // ---- Phase 3: apply factors ----
     for (target_name, (blend_sum, is_blocked)) in &factors {
         let original = weights.get(target_name).copied().unwrap_or(0.0);
         if original == 0.0 {
@@ -279,8 +264,6 @@ pub fn apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[Expr
         }
     }
 }
-
-// ---- Loader ----
 
 /// Walk the `VRMC_vrm.expressions.{preset,custom}.<name>` tree
 /// and collect the per-expression `{ isBinary, overrideMouth,
@@ -385,8 +368,6 @@ pub fn load_expression_overrides(gltf: &gltf::Gltf) -> Vec<ExpressionDefinition>
     defs
 }
 
-// ---- Extension on ExpressionLayer ----
-
 use crate::expression::{ExpressionLayer, MAX_MORPH_TARGETS_PER_PRIMITIVE};
 
 impl ExpressionLayer {
@@ -474,8 +455,6 @@ mod tests {
         ExpressionDefinition::new(name)
     }
 
-    // ---- isBinary ----
-
     #[test]
     fn is_binary_clamps_above_half_to_one() {
         let mut w = mk_map(&[("happy", 0.51)]);
@@ -518,8 +497,6 @@ mod tests {
         assert_eq!(w.get(&mk("happy")), Some(&0.75));
     }
 
-    // ---- block ----
-
     #[test]
     fn block_zeros_target_when_source_active() {
         let mut w = mk_map(&[("happy", 0.8), ("blink", 0.6)]);
@@ -554,8 +531,6 @@ mod tests {
         apply_overrides(&mut w, &defs);
         assert_eq!(w.get(&mk("blink")), Some(&0.6));
     }
-
-    // ---- blend ----
 
     #[test]
     fn blend_attenuates_target_by_source_weight() {
@@ -627,8 +602,6 @@ mod tests {
         assert_eq!(w.get(&mk("blink")), Some(&0.0));
     }
 
-    // ---- block wins over blend ----
-
     #[test]
     fn block_wins_over_blend_when_both_affect_same_target() {
         let mut w = mk_map(&[("happy", 0.5), ("angry", 0.5), ("blink", 0.8)]);
@@ -652,8 +625,6 @@ mod tests {
         apply_overrides(&mut w, &defs);
         assert_eq!(w.get(&mk("blink")), Some(&0.0));
     }
-
-    // ---- blend-shape graph (v1-aligned) ----
 
     /// v1-aligned test: an emotion that sets `overrideBlink = block`
     /// must zero **every** blink-family expression — the synthetic
@@ -684,8 +655,6 @@ mod tests {
         apply_overrides(&mut w, &defs);
         // happy is not a blink family member — stays.
         assert_eq!(w.get(&mk("happy")), Some(&0.8));
-        // All three blink-family members are zeroed by
-        // happy.overrideBlink = block.
         assert_eq!(w.get(&mk("blink")), Some(&0.0));
         assert_eq!(w.get(&mk("blinkLeft")), Some(&0.0));
         assert_eq!(w.get(&mk("blinkRight")), Some(&0.0));
@@ -725,8 +694,6 @@ mod tests {
         assert_eq!(w.get(&mk("lookRight")), Some(&0.0));
     }
 
-    // ---- same-kind skip ----
-
     #[test]
     fn same_kind_override_is_ignored() {
         let mut w = mk_map(&[("blink", 0.5)]);
@@ -740,8 +707,6 @@ mod tests {
         apply_overrides(&mut w, &defs);
         assert_eq!(w.get(&mk("blink")), Some(&0.5));
     }
-
-    // ---- isBinary + override source ----
 
     #[test]
     fn is_binary_source_uses_binary_output_for_override() {
@@ -780,8 +745,6 @@ mod tests {
         assert_eq!(w.get(&mk("blink")), Some(&0.8));
     }
 
-    // ---- isBinary + overridden ----
-
     #[test]
     fn is_binary_target_suppressed_when_overridden() {
         let mut w = mk_map(&[("happy", 0.6), ("blink", 0.5)]);
@@ -805,8 +768,6 @@ mod tests {
         // blink.is_binary = true + blend_sum > 0 → suppress to 0
         assert_eq!(w.get(&mk("blink")), Some(&0.0));
     }
-
-    // ---- isBinary target + isBinary source ----
 
     #[test]
     fn is_binary_target_suppressed_by_is_binary_source() {
@@ -832,8 +793,6 @@ mod tests {
         // blink.is_binary = true + blend_sum > 0 → suppress
         assert_eq!(w.get(&mk("blink")), Some(&0.0));
     }
-
-    // ---- procedural targets each affected by correct override ----
 
     #[test]
     fn override_mouth_affects_only_mouth_targets() {
@@ -893,8 +852,6 @@ mod tests {
         assert_eq!(w.get(&mk("aa")), Some(&0.5));
     }
 
-    // ---- multiple targets behind a single override ----
-
     #[test]
     fn blink_override_affects_blink_left_and_right() {
         let mut w = mk_map(&[
@@ -921,8 +878,6 @@ mod tests {
         assert_eq!(w.get(&mk("blinkRight")), Some(&0.0));
     }
 
-    // ---- empty path ----
-
     #[test]
     fn empty_defs_is_no_op() {
         let mut w = mk_map(&[("happy", 0.5), ("blink", 0.5)]);
@@ -946,8 +901,6 @@ mod tests {
         assert!(w.is_empty());
     }
 
-    // ---- custom expressions with overrides ----
-
     #[test]
     fn custom_expression_can_override_procedural() {
         let mut w = mk_map(&[("custom_smile", 0.8), ("blink", 0.5)]);
@@ -964,8 +917,6 @@ mod tests {
         apply_overrides(&mut w, &defs);
         assert_eq!(w.get(&mk("blink")), Some(&0.0));
     }
-
-    // ---- ExpressionOverrideType parsing ----
 
     #[test]
     fn override_type_from_json_str_block() {
@@ -999,8 +950,6 @@ mod tests {
         );
     }
 
-    // ---- is_procedural ----
-
     #[test]
     fn is_procedural_recognises_all_targets() {
         for &name in MOUTH_TARGET_NAMES
@@ -1013,8 +962,6 @@ mod tests {
         assert!(!is_procedural("happy"));
         assert!(!is_procedural("sad"));
     }
-
-    // ---- load_expression_overrides (unit test with inline JSON) ----
 
     /// Wrap a `VRMC_vrm` extension block in a minimal glTF 2.0
     /// document and parse it. Mirrors the pattern in the
@@ -1157,8 +1104,6 @@ mod tests {
         let defs = load_expression_overrides(&gltf);
         assert!(defs[0].is_binary);
     }
-
-    // ---- end-to-end: layers + overrides ----
 
     #[test]
     fn apply_overrides_on_direct_weight_map() {

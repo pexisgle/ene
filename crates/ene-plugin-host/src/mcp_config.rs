@@ -1,6 +1,3 @@
-//! MCP server configuration types.
-
-/// Configuration for an MCP server connection.
 #[derive(
     Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema,
 )]
@@ -8,9 +5,7 @@
 pub struct McpServerConfig {
     /// Server name (used for display and routing).
     pub name: String,
-    /// Whether this MCP server is enabled.
     pub enabled: bool,
-    /// Transport configuration.
     pub transport: McpTransport,
     /// Environment variable names to pass through from the host process
     /// to the MCP server child process (stdio transport only). All other
@@ -28,7 +23,6 @@ pub struct McpServerConfig {
     pub sandbox: Option<crate::config::SandboxEntryConfig>,
 }
 
-/// MCP server transport type.
 #[derive(
     Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema,
 )]
@@ -36,15 +30,9 @@ pub struct McpServerConfig {
 #[schemars(crate = "::ene_config::schemars")]
 pub enum McpTransport {
     /// Spawn a child process with stdio transport.
-    Stdio {
-        /// The command to run.
-        command: String,
-        /// Arguments for the command.
-        args: Vec<String>,
-    },
+    Stdio { command: String, args: Vec<String> },
     /// Connect via HTTP (SSE).
     Http {
-        /// Server URL.
         url: String,
         /// Optional HTTP header for authentication (e.g., "Bearer <token>").
         #[serde(default)]

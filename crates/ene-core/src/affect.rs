@@ -3,21 +3,16 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Discrete emotional label with intensity.
-///
 /// Paired with [`AffectState`] to provide both dimensional
 /// (valence/arousal/dominance) and categorical affect representation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiscreteEmotion {
-    /// Emotion label (e.g., "joy", "sadness", "anger", "fear", "surprise", "neutral").
     pub label: String,
     /// Intensity of the emotion (0.0–1.0).
     pub intensity: f32,
 }
 
 impl DiscreteEmotion {
-    /// Create a new discrete emotion with intensity clamped to [0.0, 1.0].
-    ///
     /// NaN and infinite inputs are clamped to 0.0.
     pub fn new(label: impl Into<String>, intensity: f32) -> Self {
         let intensity = if intensity.is_finite() {
@@ -32,12 +27,8 @@ impl DiscreteEmotion {
     }
 }
 
-/// Persistent affective / emotional state tracking three PAD dimensions
-/// (Pleasure–Arousal–Dominance), relationship metrics, and optional discrete
-/// emotion intensities.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AffectState {
-    /// Character identifier.
     pub character_id: String,
     /// User identifier (empty for character-global state).
     #[serde(default)]
@@ -58,13 +49,10 @@ pub struct AffectState {
     pub curiosity: f32,
     /// Fatigue / energy depletion (0.0 ..= 1.0).
     pub fatigue: f32,
-    /// Human-readable mood label (e.g. "cheerful", "anxious").
     #[serde(default)]
     pub mood_label: String,
-    /// Natural-language description of the last expression/behaviour.
     #[serde(default)]
     pub last_expression: String,
-    /// Discrete emotion intensities (joy, sadness, etc.).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discrete_emotions: Vec<DiscreteEmotion>,
     /// Last persistence timestamp (used for time-based decay).
@@ -75,15 +63,11 @@ pub struct AffectState {
 /// Serialized post-turn LLM classifier proposal waiting for next-turn merge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingAffectProposal {
-    /// Character identifier.
     pub character_id: String,
     /// User identifier (empty when global).
     pub user_id: String,
-    /// Turn index that produced this proposal.
     pub source_turn_id: i64,
-    /// Detected user emotion label.
     pub user_emotion: String,
-    /// Detected user intent label.
     pub user_intent: String,
     /// Estimated valence after the conversation (-1.0 ..= 1.0).
     pub valence: f32,
@@ -93,7 +77,6 @@ pub struct PendingAffectProposal {
     pub irritation: f32,
     /// Estimated affinity after the conversation (-1.0 ..= 1.0).
     pub affinity: f32,
-    /// Suggested expression name.
     pub recommended_expression: String,
     /// Proposal confidence in `[0.0, 1.0]`.
     pub confidence: f32,
@@ -104,7 +87,6 @@ pub struct PendingAffectProposal {
 }
 
 impl AffectState {
-    /// Create a neutral affect state.
     pub fn neutral(character_id: impl Into<String>) -> Self {
         Self {
             character_id: character_id.into(),
@@ -124,8 +106,6 @@ impl AffectState {
         }
     }
 
-    /// Clamp all PAD and metric values to their valid ranges.
-    ///
     /// NaN and infinite inputs are replaced with 0.0.
     pub fn clamp(&mut self) {
         const fn clamp_finite(v: &mut f32, min: f32, max: f32) {

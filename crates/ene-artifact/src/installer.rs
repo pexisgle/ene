@@ -16,9 +16,7 @@ use crate::extract;
 pub struct InstalledArtifact {
     /// Artifact id from the catalog.
     pub id: String,
-    /// Installed version.
     pub version: String,
-    /// Artifact kind.
     pub kind: ArtifactKind,
     /// Hex SHA-256 of the active object.
     pub sha256: String,
@@ -43,22 +41,18 @@ pub struct InstalledArtifact {
     pub previous: Option<Box<InstalledArtifact>>,
 }
 
-/// Persisted installation state: artifact id → active generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledState {
-    /// Active generations by artifact id.
     pub artifacts: BTreeMap<String, InstalledArtifact>,
     /// Highest verified catalog version seen by this installer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_version: Option<u64>,
 }
 
-/// Constructor inputs for [`ArtifactInstaller`].
 #[derive(Debug, Clone)]
 pub struct InstallerConfig {
-    /// CAS root directory.
     pub cas_root: PathBuf,
-    /// Where `state.json` lives (survives restarts).
+    /// The `state.json` file survives restarts.
     pub state_path: PathBuf,
 }
 
@@ -75,7 +69,6 @@ pub struct ArtifactInstaller {
 }
 
 impl ArtifactInstaller {
-    /// Opens (creating if needed) the installer and its state file.
     pub fn new(config: InstallerConfig) -> Result<Self> {
         let cas = Cas::new(&config.cas_root)?;
         let state = if config.state_path.is_file() {
@@ -91,20 +84,17 @@ impl ArtifactInstaller {
         })
     }
 
-    /// Snapshot of the current installation state.
     #[must_use]
     pub fn state(&self) -> InstalledState {
         self.state.lock().clone()
     }
 
-    /// The active generation for `id`, if installed.
     #[must_use]
     pub fn installed(&self, id: &str) -> Option<InstalledArtifact> {
         self.state.lock().artifacts.get(id).cloned()
     }
 
-    /// id → `(version, digest)` of the active generation, for catalog
-    /// rollback and digest-change checks.
+    /// Used for catalog rollback and digest-change checks.
     #[must_use]
     pub fn installed_refs(&self) -> BTreeMap<String, (String, String)> {
         self.state
@@ -120,7 +110,6 @@ impl ArtifactInstaller {
             .collect()
     }
 
-    /// Highest catalog version recorded by this installer.
     #[must_use]
     pub fn catalog_version(&self) -> Option<u64> {
         self.state.lock().catalog_version
@@ -145,9 +134,6 @@ impl ArtifactInstaller {
         self.persist_locked(&state)
     }
 
-    /// Downloads `target` (via the signed catalog's URL/digest/size) and
-    /// activates it. Mirrors are tried in order; the first successful
-    /// download wins.
     pub async fn install(
         &self,
         id: &str,
@@ -320,7 +306,7 @@ impl ArtifactInstaller {
         Ok(installed)
     }
 
-    /// Restores the previous generation for `id` (one-step rollback).
+    /// One-step rollback to the previous generation.
     pub fn rollback(&self, id: &str) -> Result<InstalledArtifact> {
         let mut state = self.state.lock();
         let Some(current) = state.artifacts.get(id) else {

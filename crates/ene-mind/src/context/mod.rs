@@ -1,5 +1,3 @@
-//! Context budget management and rolling compression.
-
 #![expect(
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
@@ -32,15 +30,13 @@ use crate::config::ContextConfig;
 use crate::error::CognitionError;
 use crate::lifecycle::{HistoryEntry, TurnContext};
 
-/// Context budget manager and rolling compression orchestrator.
 #[derive(Default)]
 pub struct ContextManager {
     pending_compression: Option<PendingCompressionTask>,
 }
 
 impl ContextManager {
-    /// Evaluate whether window-pressure compression should be triggered for the
-    /// current session state (token-based).
+    /// Token-based window-pressure trigger.
     pub fn evaluate_compression_trigger(
         config: &ContextConfig,
         turn_count: usize,
@@ -49,7 +45,7 @@ impl ContextManager {
         evaluate_compression_trigger(config, turn_count, history_tokens)
     }
 
-    /// Load the active scene summary for prompt injection.
+    /// Loaded for prompt injection.
     pub async fn load_scene_summary(
         ctx: TurnContext<'_>,
     ) -> Result<Option<ActiveSceneSummary>, CognitionError> {
@@ -59,7 +55,6 @@ impl ContextManager {
         load_active_scene_summary(store, ctx.session_id).await
     }
 
-    /// Whether a background compression task is in flight.
     pub fn has_pending(&self) -> bool {
         self.pending_compression.is_some()
     }
@@ -198,8 +193,7 @@ impl ContextManager {
         );
     }
 
-    /// Build a scene-level [`CompressionTaskInput`] and spawn it as the pending
-    /// task. Callers must have already checked [`Self::has_pending`].
+    /// Callers must have already checked [`Self::has_pending`].
     fn spawn_scene_compression(
         &mut self,
         config: &ContextConfig,
@@ -227,12 +221,11 @@ impl ContextManager {
         spawn_compression_task(&mut self.pending_compression, store, provider, input);
     }
 
-    /// Poll the pending compression task; returns `Some(result)` when complete.
     pub fn poll_pending(&mut self) -> Option<Result<CompressionResult, CognitionError>> {
         poll_compression_result(&mut self.pending_compression)
     }
 
-    /// Execute compression synchronously (for manual triggers).
+    /// For manual triggers.
     pub async fn execute_manual(
         store: Arc<dyn MemoryPort>,
         provider: Arc<dyn LlmProvider>,
@@ -241,7 +234,7 @@ impl ContextManager {
         execute_compression(store, provider, input).await
     }
 
-    /// Spawn a background chapter rollup task if scene span thresholds are exceeded.
+    /// When scene span thresholds are exceeded.
     pub fn spawn_chapter_rollup(
         store: Arc<dyn MemoryPort>,
         provider: Arc<dyn LlmProvider>,

@@ -9,9 +9,7 @@ const fn default_max_backups() -> usize {
 ene_config::define_config!(
     settings,
     "store",
-    /// Configuration for the persistence-only SQLite-vec store.
     pub struct StoreConfig {
-        /// Whether the store is enabled.
         pub enabled: bool = false,
         /// Create a file backup before applying pending migrations.
         pub backup_on_migrate: bool = true,
@@ -23,7 +21,6 @@ ene_config::define_config!(
         /// file under the character's directory. For tests and short-lived
         /// tooling; nothing is ever persisted.
         pub in_memory: bool = false,
-        /// Database path.
         #[serde(skip_deserializing, default, skip_serializing)]
         #[schemars(skip)]
         pub db_path: String = default_string(),

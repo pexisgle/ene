@@ -38,27 +38,24 @@ impl PermissionGate {
         Self::default()
     }
 
-    /// Records a user approval for the given request id (allow-once).
+    /// Allow-once.
     pub fn approve_request(&self, request_id: &str) {
         self.approved_requests
             .write()
             .insert(request_id.to_string());
     }
 
-    /// Expires a previously recorded allow-once approval.
     pub fn remove_approval(&self, request_id: &str) {
         self.approved_requests.write().remove(request_id);
     }
 
-    /// Records a conversation-scoped `(action, target-prefix)` pattern.
+    /// Conversation-scoped.
     pub fn allow_pattern(&self, action: &str, target_pattern: &str) {
         self.allowed_patterns
             .write()
             .insert((action.to_string(), target_pattern.to_string()), Utc::now());
     }
 
-    /// Removes a conversation-scoped pattern; returns `true` when a pattern
-    /// was present.
     pub fn revoke_pattern(&self, action: &str, target_pattern: &str) -> bool {
         self.allowed_patterns
             .write()
@@ -66,16 +63,15 @@ impl PermissionGate {
             .is_some()
     }
 
-    /// Removes every pattern for `action` whose target starts with
-    /// `target_prefix`; used by the unified permission center to revoke a
-    /// scope that may have been recorded with a different action spelling.
+    /// Used by the unified permission center to revoke a scope that may
+    /// have been recorded with a different action spelling.
     pub fn revoke_prefix(&self, action: &str, target_prefix: &str) {
         self.allowed_patterns
             .write()
             .retain(|(a, t), _| a != action || !t.starts_with(target_prefix));
     }
 
-    /// Lists the standing grants for permission-status display.
+    /// Used for permission-status display.
     #[must_use]
     pub fn patterns(&self) -> Vec<PermissionGrant> {
         self.allowed_patterns

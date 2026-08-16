@@ -12,9 +12,7 @@ use enigo::{Axis, Mouse};
     side_effects = "System { privileged: true }"
 )]
 pub struct MouseScrollAction {
-    /// Number of scroll steps.
     amount: i32,
-    /// Scroll direction (default: down).
     #[arg(enum_values = "up, down, left, right")]
     #[serde(default)]
     direction: Option<String>,

@@ -1,5 +1,3 @@
-//! Process-wide `LlamaBackend` initialization.
-
 use ene_ai::error::LlmProviderError;
 use llama_cpp_4::llama_backend::LlamaBackend;
 use llama_cpp_4::mtmd::MtmdContext;
@@ -17,9 +15,6 @@ use once_cell::sync::OnceCell;
 /// `get_or_try_init` already serializes concurrent callers on its own.
 static BACKEND: OnceCell<LlamaBackend> = OnceCell::new();
 
-/// Run `f` with the process-global backend (initialized once, retried on a
-/// prior failed attempt).
-///
 /// Each model instance (`LoadedModel`) maintains its own internal lock so separate
 /// models (e.g. embedding vs decision vs vision) do not block each other globally.
 pub(crate) fn with_backend<T, F>(f: F) -> Result<T, LlmProviderError>

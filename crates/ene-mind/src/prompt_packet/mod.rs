@@ -1,5 +1,3 @@
-//! Sectioned prompt packet composition.
-
 mod section;
 
 pub use section::{PromptSection, PromptSectionKind};
@@ -11,7 +9,6 @@ use ene_core::{ActiveCommitmentPrompt, MemoryKind, MemorySource, WorkspaceChunkH
 use crate::lifecycle::{HistoryEntry, PromptPacketMeta};
 use crate::recall::{RecallReason, RecalledMemory};
 
-/// A sectioned prompt structure with independent logical layers.
 #[derive(Debug, Clone, Default)]
 pub struct PromptPacket {
     /// Ordered prompt sections (system + user input metadata).
@@ -21,18 +18,15 @@ pub struct PromptPacket {
 }
 
 impl PromptPacket {
-    /// Look up a section by kind (first match).
     pub fn section(&self, kind: PromptSectionKind) -> Option<&PromptSection> {
         self.sections.iter().find(|s| s.kind == kind)
     }
 
-    /// Whether a section has non-empty content.
     pub fn section_included(&self, kind: PromptSectionKind) -> bool {
         self.section(kind)
             .is_some_and(|s| !s.content.trim().is_empty())
     }
 
-    /// Convert the packet into LLM messages (system + history + PHI + user).
     pub fn to_llm_messages(&self) -> (Vec<LlmMessage>, PromptPacketMeta) {
         let mut system_parts = Vec::new();
 
@@ -205,7 +199,6 @@ mod snapshot_tests {
     }
 }
 
-/// Split recalled memories into semantic, profile, and episodic buckets.
 pub fn classify_recalled_memories(
     recalled: &[RecalledMemory],
 ) -> (
@@ -738,8 +731,6 @@ mod tests {
 
     #[test]
     fn commitments_block_renders_future_due_at_as_relative() {
-        // A parsed `due_at` in the future becomes a relative expression
-        // anchored at the renderer's `now` (calendar-day offset).
         let now = chrono::Utc::now();
         let commitment = sample_commitment(
             "資料を確認する",
@@ -809,8 +800,6 @@ mod tests {
 
     #[test]
     fn commitments_block_marks_past_due_at_as_overdue() {
-        // A `due_at` before `now` is explicitly marked overdue, mirroring
-        // the ledger's `mark_stale_commitments` (`due_at < now`).
         let now = chrono::Utc::now();
         let commitment = sample_commitment(
             "report",
@@ -826,8 +815,6 @@ mod tests {
 
     #[test]
     fn commitments_block_renders_due_label_as_is() {
-        // Without a parseable `due_at`, the raw `due_label` is rendered
-        // verbatim ("期限: 明日"), because the label is the only deadline hint.
         let now = chrono::Utc::now();
         let commitment =
             sample_commitment("資料を確認する", "企画書のレビュー", Some("明日"), None);
@@ -842,8 +829,6 @@ mod tests {
 
     #[test]
     fn commitments_block_without_deadline_is_unchanged() {
-        // Commitments with neither `due_at` nor `due_label` keep the
-        // historical title/description-only rendering.
         let now = chrono::Utc::now();
         let commitment = sample_commitment("buy milk", "from the corner store", None, None);
         let rendered = render_commitments_block(&[commitment], "ja", now);
@@ -852,8 +837,6 @@ mod tests {
 
     #[test]
     fn commitments_block_prefers_due_at_over_due_label() {
-        // A parseable `due_at` wins over the raw label; the relative
-        // expression is not clobbered by a stale/conflicting label.
         let now = chrono::Utc::now();
         let commitment = sample_commitment(
             "資料を確認する",

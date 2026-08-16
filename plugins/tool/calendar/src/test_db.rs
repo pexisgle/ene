@@ -227,8 +227,6 @@ async fn write_framed(stream: &mut IpcStream, resp: &DbResponse) {
     stream.flush().await.expect("flush");
 }
 
-/// Spawns the mock DB server on a fresh socket; returns the socket path and
-/// the server task.
 pub async fn spawn_mock_db() -> (PathBuf, tokio::task::JoinHandle<()>) {
     let socket_path = std::env::temp_dir().join(format!(
         "ene-calendar-test-{}-{}.sock",
@@ -272,7 +270,6 @@ pub async fn spawn_mock_db() -> (PathBuf, tokio::task::JoinHandle<()>) {
     (socket_path, handle)
 }
 
-/// Connects a [`CalendarStore`] to a fresh mock DB server.
 pub async fn make_store() -> (CalendarStore, PathBuf, tokio::task::JoinHandle<()>) {
     let (path, handle) = spawn_mock_db().await;
     let store = CalendarStore::new(&path, Some("test-token"))

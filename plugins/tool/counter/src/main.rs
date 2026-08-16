@@ -3,7 +3,6 @@
 //! Sample tool plugin demonstrating the tool SDK end to end:
 //! derive-based action schemas, stateful DB IPC, and a
 //! permission-gated destructive action.
-#![warn(missing_docs)]
 #![cfg_attr(
     test,
     expect(
@@ -12,13 +11,9 @@
     )
 )]
 
-/// Action definitions.
 pub mod action;
-/// Permission approval gate.
 pub mod approval;
-/// Tool lifecycle and provider integration.
 pub mod provider;
-/// DB schema declaration for the counter table.
 pub mod schema;
 /// Counter storage backend (DB-backed plus an in-memory test double).
 pub mod store;

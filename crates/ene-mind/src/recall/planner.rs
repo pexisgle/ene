@@ -21,7 +21,6 @@ const DEFAULT_CANDIDATE_POOL_MULTIPLIER: usize = 4;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RecallPlanner;
 
-/// Options controlling deterministic recall-plan generation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallPlannerOptions {
     /// Maximum number of memory results requested by the plan.
@@ -35,7 +34,6 @@ pub struct RecallPlannerOptions {
 }
 
 impl RecallPlannerOptions {
-    /// Build recall-planner options from mind memory config.
     pub fn from_config(memory: &MindMemoryConfig) -> Self {
         Self {
             result_limit: memory.recall_result_limit.max(1),
@@ -53,7 +51,6 @@ impl Default for RecallPlannerOptions {
 }
 
 impl RecallPlanner {
-    /// Generate a recall plan from the current turn context.
     pub fn plan(
         input: &RecallPlannerInput<'_>,
         options: &RecallPlannerOptions,
@@ -453,9 +450,6 @@ mod tests {
             "recall queries must exclude reflection memories while the pipeline is enabled"
         );
 
-        // With the pipeline disabled the exclusion must be off too: reflections
-        // keep behaving as ordinary recall results, so enabling the pipeline is
-        // the only observable behavior change.
         let disabled_memory = MindMemoryConfig {
             reflection: crate::config::ReflectionConfig {
                 enabled: false,

@@ -43,23 +43,16 @@ use crate::system::event_pump::pump_legacy_events;
 /// [`IntoScheduleConfigs::after`].
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum AppSet {
-    /// Convert polled raw events into ECS [`Message`]s.
     EventDispatch,
-    /// Input handling (pointer, drag, look-at).
     Input,
-    /// Apply user-driven settings changes.
     Settings,
-    /// Per-frame logic: animation, emotion, spring bones, physics.
     Animation,
-    /// Build GPU staging data from current ECS state.
     Render,
-    /// Submit, present, and apply platform-specific post-frame work.
     Present,
 }
 
-/// Registers the per-stage ordering of the [`AppSet`] markers and the
-/// event pump. The schedule runs once per frame via [`App::update`]
-/// from `Runtime::about_to_wait`.
+/// The schedule runs once per frame via [`App::update`] from
+/// `Runtime::about_to_wait`.
 pub fn configure_schedule(app: &mut App) {
     app.configure_sets(First, AppSet::EventDispatch);
     app.configure_sets(
@@ -79,7 +72,6 @@ pub fn configure_schedule(app: &mut App) {
     );
 }
 
-/// `Startup` schedule marker: all one-shot setup systems are added here.
 pub fn configure_startup(app: &mut App) {
     app.configure_sets(Startup, AppSet::EventDispatch);
 }

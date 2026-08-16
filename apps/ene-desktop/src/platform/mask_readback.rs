@@ -32,13 +32,6 @@ use parking_lot::Mutex;
 
 use crate::platform::wayland_mask_capture::MaskCaptureCamera;
 
-/// Counter incremented every time the runtime schedules a
-/// readback. The worker thread reads the counter after
-/// `map_async` fires; if it has changed, the result is
-/// discarded (the next request will overwrite `last_readback`
-/// anyway). The counter doubles as a "readback pending" flag:
-/// when the worker is busy, the next `request_readback` short-
-/// circuits.
 pub struct MaskReadbackWorker {
     /// `MaskCaptureCamera` is already `Send` (its fields are
     /// `wgpu` handles); we wrap it in a `Mutex` so the worker
@@ -53,8 +46,6 @@ pub struct MaskReadbackWorker {
     /// differ (or live > captured + 1) the readback result is
     /// dropped.
     generation: Arc<AtomicU64>,
-    /// Flag indicating whether a readback thread is currently
-    /// in flight. Used to short-circuit `request_readback`.
     in_flight: Arc<AtomicBool>,
     /// `JoinHandle` for the worker thread. Held so the worker
     /// does not exit on the first idle. The runtime never
@@ -64,9 +55,7 @@ pub struct MaskReadbackWorker {
 }
 
 impl MaskReadbackWorker {
-    /// Spawn the background thread. Safe to call from
-    /// `Runtime::resumed`; the worker idles on
-    /// `mpsc::Receiver::recv()` until a request arrives.
+    /// Safe to call from `Runtime::resumed`.
     pub fn spawn(
         mask: Arc<Mutex<MaskCaptureCamera>>,
         device: Arc<wgpu::Device>,

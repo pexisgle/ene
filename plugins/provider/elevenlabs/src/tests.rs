@@ -1,6 +1,3 @@
-//! Plugin tests: synthesis against an in-process broker-frame fake, error
-//! paths, and capability/schema coverage.
-
 #![expect(
     clippy::await_holding_lock,
     clippy::expect_used,
@@ -54,7 +51,6 @@ fn config_json() -> Value {
     })
 }
 
-/// A small valid PCM payload.
 fn pcm_fixture() -> Vec<u8> {
     let samples = [0i16, 16_384, -16_384, 32_767, -32_768];
     samples
@@ -71,8 +67,6 @@ fn request_header<'a>(request: &'a RecordedRequest, name: &str) -> Option<&'a st
         .map(|(_, value)| value.as_str())
 }
 
-/// Asserts the returned bytes are a WAV wrapping exactly `expected_pcm` at
-/// `sample_rate`.
 fn assert_wav_payload(wav: &[u8], expected_pcm: &[u8], sample_rate: u32) {
     assert_eq!(&wav[0..4], b"RIFF");
     assert_eq!(&wav[8..12], b"WAVE");

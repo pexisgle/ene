@@ -1,5 +1,3 @@
-//! Conversion between the plugin wire format and the local engine types.
-
 use ene_ai::EmbeddingError;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk};
@@ -26,7 +24,6 @@ pub(crate) fn map_llm_error(err: &LlmProviderError) -> PluginError {
     PluginError::provider(err.to_string())
 }
 
-/// Maps embedding errors without panicking.
 pub(crate) fn map_embed_error(err: &EmbeddingError) -> PluginError {
     PluginError::provider(err.to_string())
 }

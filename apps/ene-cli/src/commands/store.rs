@@ -1,5 +1,3 @@
-//! Store backup / integrity diagnostic commands.
-
 use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use crate::style;

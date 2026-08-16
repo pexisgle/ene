@@ -31,7 +31,6 @@ pub struct Cas {
 }
 
 impl Cas {
-    /// Opens (creating if needed) a CAS rooted at `root`.
     pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(root.join("objects"))?;
@@ -39,7 +38,6 @@ impl Cas {
         Ok(Self { root })
     }
 
-    /// The store root.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -63,7 +61,6 @@ impl Cas {
         self.root.join("objects").join(prefix).join(remainder)
     }
 
-    /// Opens the object for reading.
     pub fn open(&self, sha256: &str) -> Result<File> {
         validate_digest(sha256)?;
         let path = self.object_path(sha256);
@@ -198,8 +195,6 @@ impl Cas {
         }
     }
 
-    /// Deletes every object whose digest is not in `keep`, returning the
-    /// number of removed objects.
     pub fn gc(&self, keep: &std::collections::HashSet<String>) -> Result<usize> {
         let mut removed = 0_usize;
         let objects = self.root.join("objects");
@@ -225,7 +220,6 @@ impl Cas {
     }
 }
 
-/// Convenience: hashes a byte slice and stores it via [`Cas::put`].
 #[cfg(test)]
 pub(crate) fn put_bytes(cas: &Cas, data: &[u8]) -> Result<CasEntry> {
     let digest = crate::digest::sha256_hex(data);

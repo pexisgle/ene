@@ -33,7 +33,7 @@ impl AnimationControl {
 /// next tick.
 #[derive(Clone, Debug)]
 pub struct EmotionCommand {
-    /// Expression name (e.g. `"happy"`, `"sad"`, `"blink_l"`).
+    /// Expression names include `"happy"`, `"sad"`, `"blink_l"`.
     pub emotion: String,
     /// Absolute time at which this command becomes active.
     pub target_time: f64,
@@ -50,7 +50,6 @@ pub struct EmotionQueue {
 }
 
 impl EmotionQueue {
-    /// Append a command to the back of the queue.
     pub fn push(&mut self, command: EmotionCommand) {
         self.commands.push_back(command);
     }
@@ -65,7 +64,6 @@ impl EmotionQueue {
 /// wins on a name change).
 #[derive(Clone, Debug)]
 pub struct ActiveEmotion {
-    /// Expression name of the active emotion.
     pub name: String,
     /// Target weight while in the hold window.
     pub weight: f32,

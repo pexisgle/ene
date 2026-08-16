@@ -202,9 +202,7 @@ pub struct LookAtProperties {
     /// `[x, y, z]` in the head's local frame; the convention
     /// is `(0, 0.06, 0)` so the origin sits between the eyes.
     pub offset_from_head_bone: [f32; 3],
-    /// Per-axis range maps.
     pub range_map: LookAtRangeMapSet,
-    /// `Bone` or `Expression` consumer.
     pub look_at_type: LookAtType,
 }
 
@@ -266,11 +264,8 @@ pub struct LookAtBoneDelta {
 /// independently of the head).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LookAtBoneOutput {
-    /// Head bone delta.
     pub head: LookAtBoneDelta,
-    /// Left-eye bone delta.
     pub left_eye: LookAtBoneDelta,
-    /// Right-eye bone delta.
     pub right_eye: LookAtBoneDelta,
 }
 
@@ -299,10 +294,7 @@ pub struct LookAtExpressionOutput {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum LookAtOutput {
-    /// Per-bone deltas for `"bone"`-type models.
     Bone(LookAtBoneOutput),
-    /// Per-expression morph weights for
-    /// `"expression"`-type models.
     Expression(LookAtExpressionOutput),
 }
 
@@ -598,8 +590,6 @@ pub fn load_look_at(gltf: &gltf::Gltf) -> Option<LookAtProperties> {
 
     let mut props = LookAtProperties::default();
 
-    // 1. `offsetFromHeadBone`: array of 3 floats. Missing or
-    //    wrong length → keep the spec default `[0, 0.06, 0]`.
     if let Some(arr) = look_at_obj
         .get("offsetFromHeadBone")
         .and_then(|v| v.as_array())
@@ -629,9 +619,6 @@ pub fn load_look_at(gltf: &gltf::Gltf) -> Option<LookAtProperties> {
         }
     }
 
-    // 2. The four range maps. Each is `{ inputMaxValue,
-    //    outputScale }`. The shared helper logs + falls
-    //    back on malformed entries.
     props.range_map.horizontal_inner = parse_range_map(
         look_at_obj,
         "rangeMapHorizontalInner",
@@ -653,8 +640,6 @@ pub fn load_look_at(gltf: &gltf::Gltf) -> Option<LookAtProperties> {
         props.range_map.vertical_up,
     );
 
-    // 3. `type`: string `"bone"` or `"expression"`. Missing
-    //    or unknown → spec default (`Bone`).
     if let Some(type_str) = look_at_obj.get("type").and_then(|v| v.as_str()) {
         props.look_at_type = match type_str {
             "bone" => LookAtType::Bone,
@@ -756,9 +741,7 @@ mod tests {
         assert!((m.apply(0.0)).abs() < 1e-6);
         assert!((m.apply(45.0) - 5.0).abs() < 1e-6);
         assert!((m.apply(90.0) - 10.0).abs() < 1e-6);
-        // Above the cap is clamped to `output_scale`.
         assert!((m.apply(180.0) - 10.0).abs() < 1e-6);
-        // Negative inputs are sign-preserved.
         assert!((m.apply(-45.0) + 5.0).abs() < 1e-6);
     }
 

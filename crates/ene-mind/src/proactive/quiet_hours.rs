@@ -7,10 +7,8 @@ use chrono_tz::Tz;
 
 use crate::config::QuietHoursConfig;
 
-/// Result of evaluating the quiet-hours window for one instant.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QuietHoursEval {
-    /// True when the configured window is active at the evaluated instant.
     pub active: bool,
     /// Local weekday (`monday`..`sunday`), stable English contract.
     pub weekday: String,

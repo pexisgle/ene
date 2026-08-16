@@ -1,5 +1,3 @@
-//! # ene-desktop
-//!
 //! Winit + wgpu shell for the ene AI character platform. Owns the
 //! `AiBridge`, system tray, character renderer, and the cross-subsystem
 //! [`AppEvent`] bus.

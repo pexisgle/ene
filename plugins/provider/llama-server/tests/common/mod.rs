@@ -27,7 +27,6 @@ use ene_plugin_proto::{
 };
 use serde_json::{Value, json};
 
-/// Re-exported for test bodies that clean up sockets directly.
 pub use ene_plugin_proto::cleanup_path;
 
 /// llama.cpp's canonical tiny chat model (~1.2 MB, real tensors).
@@ -46,12 +45,10 @@ pub const EMBED_FIXTURE_URL: &str = concat!(
 pub const EMBED_FIXTURE_BLAKE3: &str =
     "57949329d93364735b75d171b995a5b3facad284c0d246f38f2803ff335ec79e";
 
-/// GGUF magic validator shared by the fixture downloads.
 static GGUF_VALIDATOR: MagicBytesValidator = MagicBytesValidator::new("gguf", b"GGUF");
 
 static SOCKET_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// Path to the plugin binary cargo built for this test package.
 pub fn plugin_binary() -> &'static str {
     option_env!("CARGO_BIN_EXE_ene-plugin-llama-server")
         .or(option_env!("CARGO_BIN_EXE_ene_plugin_llama_server"))
@@ -149,7 +146,6 @@ impl Fixtures {
     }
 }
 
-/// Why a fixture is not usable.
 enum FixtureError {
     /// Transport-level failure (network down, CDN issue): skip the tests.
     Unavailable(String),
@@ -212,13 +208,12 @@ async fn fixture_hash_matches(path: &Path, expected_blake3: &str) -> bool {
 pub struct ChildGuard(Option<Child>);
 
 impl ChildGuard {
-    /// Wraps a spawned plugin process.
     #[must_use]
     pub fn new(child: Child) -> Self {
         Self(Some(child))
     }
 
-    /// SIGKILLs the plugin and reaps it, simulating an in-process crash.
+    /// Simulates an in-process crash.
     pub fn kill(&mut self) -> Option<std::process::ExitStatus> {
         let mut child = self.0.take()?;
         drop(child.kill());
@@ -232,7 +227,6 @@ impl Drop for ChildGuard {
     }
 }
 
-/// A spawned plugin process with a connected, handshaken IPC stream.
 pub struct PluginSession {
     pub child: ChildGuard,
     pub stream: IpcStream,
@@ -240,8 +234,6 @@ pub struct PluginSession {
 }
 
 impl PluginSession {
-    /// Spawns the real plugin binary and performs the handshake with the
-    /// given config and profiles.
     pub async fn start(profiles: &Value, config: &Value) -> Self {
         let socket_path = test_socket_path("session");
         cleanup_path(&socket_path);
@@ -289,12 +281,10 @@ impl PluginSession {
         }
     }
 
-    /// SIGKILLs the plugin process and reaps it, returning its exit status.
     pub fn kill_plugin(&mut self) -> Option<std::process::ExitStatus> {
         self.child.kill()
     }
 
-    /// Sends one request and reads its response (`MessagePack`).
     pub async fn request(&mut self, request: PluginIpcRequest) -> PluginIpcResponse {
         write_plugin_request(&mut self.stream, &request, WireFormat::MsgPack)
             .await

@@ -3,7 +3,6 @@
 /// Compiled immutable identity block for prompt injection.
 #[derive(Debug, Clone)]
 pub struct IdentityKernel {
-    /// Character display name.
     pub name: String,
     /// Rendered identity kernel text (always injected first; never truncated).
     pub text: String,

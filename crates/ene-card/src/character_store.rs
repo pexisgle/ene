@@ -45,7 +45,6 @@ impl Default for CharacterConfigStore {
 }
 
 impl CharacterConfigStore {
-    /// Returns a clone of the current per-character config.
     pub fn character_config(&self) -> CharacterConfig {
         self.character_config.read().clone()
     }
@@ -62,7 +61,6 @@ impl CharacterConfigStore {
         self.character_dirty.store(true, Ordering::Release);
     }
 
-    /// Replaces the per-character config and loads its state from disk for the given character.
     pub fn load_character_config(&self, character_name: &str) {
         let path = character_settings_path(character_name);
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -98,7 +96,6 @@ impl CharacterConfigStore {
         self.character_dirty.store(true, Ordering::Release);
     }
 
-    /// Reads a typed section from the per-character config.
     pub fn get_character_section<T>(&self) -> T
     where
         T: serde::de::DeserializeOwned + Default + HasConfigKey,
@@ -108,7 +105,6 @@ impl CharacterConfigStore {
             .unwrap_or_default()
     }
 
-    /// Writes a typed section into the per-character config and marks dirty.
     pub fn set_character_section<T>(&self, section: &T)
     where
         T: serde::Serialize + HasConfigKey,
@@ -141,19 +137,16 @@ impl CharacterConfigStore {
         Ok(false)
     }
 
-    /// Forces a save of the per-character config regardless of dirty state.
     pub fn flush(&self, character_name: Option<&str>) -> Result<(), EneConfigError> {
         self.character_dirty.store(true, Ordering::Release);
         self.flush_if_dirty(character_name)?;
         Ok(())
     }
 
-    /// Returns `true` if the per-character config has unsaved changes.
     pub fn is_dirty(&self) -> bool {
         self.character_dirty.load(Ordering::Acquire)
     }
 
-    /// Marks the per-character config as dirty without modifying it.
     pub fn mark_dirty(&self) {
         self.character_dirty.store(true, Ordering::Release);
     }

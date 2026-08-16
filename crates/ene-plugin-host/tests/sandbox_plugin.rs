@@ -1,5 +1,3 @@
-//! End-to-end smoke test: a real Rust binary starts under the OS sandbox.
-//!
 //! Spawns the package's `sandbox_fixture` binary with the same Landlock
 //! allowlist the host computes (binary/lib dirs, CA roots, assets, temp,
 //! socket dir) and proves the process survives past exec — a missing

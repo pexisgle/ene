@@ -395,7 +395,6 @@ fn entry_scan_text<'a>(
     }
 }
 
-/// Assistant message count of the current history.
 fn assistant_message_count(turns: &[RecallTurn<'_>]) -> u32 {
     turns
         .iter()
@@ -764,7 +763,6 @@ mod tests {
             ..Default::default()
         };
         let card = card_with(book);
-        // An earlier turn matched the key; the current turn does not.
         let history = history_of(&[
             ("my sword is here", Role::User),
             ("a reply", Role::Assistant),

@@ -25,7 +25,6 @@ pub struct HybridRerankProvider {
 }
 
 impl HybridRerankProvider {
-    /// Creates a wrapper that uses `embedder` for all embedding operations.
     pub fn new(embedder: Arc<dyn EmbeddingProvider>) -> Self {
         Self {
             embedder,
@@ -47,17 +46,14 @@ impl HybridRerankProvider {
         self
     }
 
-    /// Returns true when an LLM-backed reranker is configured.
     pub fn has_reranker(&self) -> bool {
         self.rerank_llm.is_some()
     }
 
-    /// Generate a hypothetical document for retrieval (`HyDE`).
     pub async fn hyde(&self, query: &str) -> Result<String, EmbeddingError> {
         hyde_document(self.hyde_llm.as_deref(), query).await
     }
 
-    /// Rerank tool candidates by relevance to `query`.
     pub async fn rerank(
         &self,
         query: &str,
@@ -72,7 +68,6 @@ impl HybridRerankProvider {
         .await
     }
 
-    /// Access the inner embedder.
     pub fn embedder(&self) -> &Arc<dyn EmbeddingProvider> {
         &self.embedder
     }
@@ -96,9 +91,7 @@ impl EmbeddingProvider for HybridRerankProvider {
     }
 }
 
-/// Generate a hypothetical document for retrieval.
-///
-/// When `llm` is `None`, echoes `query` unchanged (cheap local default).
+/// When `llm` is `None`, the query is echoed unchanged (cheap local default).
 pub async fn hyde_document(
     llm: Option<&dyn LlmProvider>,
     query: &str,
@@ -128,8 +121,8 @@ pub async fn hyde_document(
         .map_err(|e| EmbeddingError::Provider(e.to_string()))
 }
 
-/// Rerank tool candidates. Uses `rerank_llm` when present; otherwise cosine
-/// similarity between the query embedding and each candidate's description.
+/// Uses `rerank_llm` when present; otherwise scores by cosine similarity
+/// between the query embedding and each candidate's description.
 pub async fn rerank_tool_specs(
     embedder: &dyn EmbeddingProvider,
     rerank_llm: Option<&dyn LlmProvider>,
@@ -246,7 +239,6 @@ pub async fn rerank_tool_specs(
         .collect()
 }
 
-/// Convenience: embed a single text through a hybrid provider's inner embedder.
 pub async fn hybrid_embed(
     provider: &HybridRerankProvider,
     text: &str,

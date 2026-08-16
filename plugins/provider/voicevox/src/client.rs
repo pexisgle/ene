@@ -102,7 +102,6 @@ impl AudioQuery {
     }
 }
 
-/// Whether an engine is currently serving `GET /version` at `server_url`.
 pub async fn engine_reachable(config: &VoicevoxConfig) -> bool {
     let Ok(client) = http_client() else {
         return false;

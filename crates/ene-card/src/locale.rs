@@ -25,37 +25,28 @@ use crate::{CharacterCardV3, TimePeriod};
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedCharacterFields {
-    /// Localized `data.description`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Localized `data.personality`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub personality: Option<String>,
-    /// Localized `data.scenario`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scenario: Option<String>,
-    /// Localized `data.first_mes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_mes: Option<String>,
-    /// Localized `data.alternate_greetings` (full list replacement).
+    /// Full list replacement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alternate_greetings: Option<Vec<String>>,
-    /// Localized `data.mes_example`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mes_example: Option<String>,
-    /// Localized `data.system_prompt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
-    /// Localized `data.post_history_instructions`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_history_instructions: Option<String>,
-    /// Localized `data.creator_notes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator_notes: Option<String>,
-    /// Localized display name (`data.nickname`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
-    /// Localized `data.tags` (full list replacement).
+    /// Full list replacement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     /// Lorebook entry translations, matched against the base by entry `id`.
@@ -83,10 +74,9 @@ pub struct LocalizedCharacterFields {
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedEneRoleplay {
-    /// Localized speech-style text fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speech: Option<LocalizedSpeechStyle>,
-    /// Localized NG expressions (full list replacement).
+    /// Full list replacement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ng_expressions: Option<Vec<String>>,
     /// Localized labeled style examples, matched against the base by `id`.
@@ -112,13 +102,11 @@ pub struct LocalizedEneRoleplay {
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct LocalizedSpeechStyle {
-    /// Localized first-person pronoun.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_person: Option<String>,
-    /// Localized second-person address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub second_person: Option<String>,
-    /// Localized verbal tics (full list replacement).
+    /// Full list replacement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verbal_tics: Option<Vec<String>>,
 }
@@ -133,7 +121,6 @@ pub struct LocalizedStyleExample {
     /// Localized situation label (matched against user input).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// Localized example text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
@@ -145,10 +132,8 @@ pub struct LocalizedStyleExample {
 pub struct LocalizedRelationshipStage {
     /// The base stage's threshold (the non-translated matching key).
     pub threshold: f32,
-    /// Localized stage name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// Localized tone instruction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tone: Option<String>,
 }
@@ -160,7 +145,6 @@ pub struct LocalizedRelationshipStage {
 pub struct LocalizedTimePeriodBehavior {
     /// The base behavior's period (the non-translated matching key).
     pub period: TimePeriod,
-    /// Localized behavior instruction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behavior: Option<String>,
 }
@@ -172,10 +156,9 @@ pub struct LocalizedTimePeriodBehavior {
 pub struct LocalizedSceneBehavior {
     /// The base behavior's `name` (the non-translated matching key).
     pub name: String,
-    /// Localized scene keywords (matched against localized scene text).
+    /// Matched against localized scene text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keywords: Option<Vec<String>>,
-    /// Localized behavior instruction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behavior: Option<String>,
 }
@@ -198,7 +181,7 @@ pub struct LocalizedLorebookEntry {
     /// The base entry's `id`; entries without a matching base id are skipped
     /// with a warning instead of being appended.
     pub id: serde_json::Value,
-    /// Translated trigger keys (matched against conversation text).
+    /// Matched against conversation text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keys: Option<Vec<String>>,
     /// Translated secondary trigger keys; Ene's matcher requires at least
@@ -206,7 +189,6 @@ pub struct LocalizedLorebookEntry {
     /// `secondary_keys` would leave the entry dead in every other language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary_keys: Option<Vec<String>>,
-    /// Translated entry content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
 }

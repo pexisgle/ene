@@ -5,14 +5,12 @@ use ene_core::{ActiveCommitmentPrompt, AffectState};
 pub struct RecallTurn<'a> {
     /// Speaker role, typically `"user"` or `"assistant"`.
     pub role: &'a str,
-    /// Turn content.
     pub content: &'a str,
 }
 
 /// Inputs used to generate a recall plan for the current user turn.
 #[derive(Debug, Clone)]
 pub struct RecallPlannerInput<'a> {
-    /// Current user message.
     pub user_input: &'a str,
     /// Recent raw conversation turns, ordered oldest to newest.
     pub recent_turns: &'a [RecallTurn<'a>],
@@ -26,8 +24,6 @@ pub struct RecallPlannerInput<'a> {
     /// `"ja"`, `"ja-JP"`). Resolved with alias/fallback semantics by
     /// [`ene_config::PatternLibrary`]; unknown languages fall back to English.
     pub language: &'a str,
-    /// Character identifier for recall scope.
     pub character_id: &'a str,
-    /// Optional user identifier for recall scope.
     pub user_id: Option<&'a str>,
 }

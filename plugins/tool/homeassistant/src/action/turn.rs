@@ -21,7 +21,6 @@ fn default_state() -> Arc<HomeAssistantState> {
     keywords_primary = "home assistant, smart home, turn on, switch, light, plug, power",
     side_effects = "Network { external: true }"
 )]
-/// Action to turn an entity on.
 pub struct TurnOnAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
@@ -31,7 +30,6 @@ pub struct TurnOnAction {
 }
 
 impl TurnOnAction {
-    /// Creates a new `TurnOnAction` with the given shared state.
     #[must_use]
     pub fn new(state: Arc<HomeAssistantState>) -> Self {
         Self {
@@ -58,7 +56,6 @@ impl TurnOnAction {
     keywords_primary = "home assistant, smart home, turn off, switch, light, plug, power",
     side_effects = "Network { external: true }"
 )]
-/// Action to turn an entity off.
 pub struct TurnOffAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
@@ -68,7 +65,6 @@ pub struct TurnOffAction {
 }
 
 impl TurnOffAction {
-    /// Creates a new `TurnOffAction` with the given shared state.
     #[must_use]
     pub fn new(state: Arc<HomeAssistantState>) -> Self {
         Self {
@@ -82,8 +78,6 @@ impl TurnOffAction {
     }
 }
 
-/// Shared turn-on/turn-off flow: validate, gate, then call the generic
-/// `homeassistant.turn_on` / `homeassistant.turn_off` service.
 async fn run_turn(
     state: &HomeAssistantState,
     entity_id: &str,
@@ -118,7 +112,6 @@ async fn run_turn(
     Ok(payload.to_string())
 }
 
-/// The JSON body for the generic turn service call.
 fn service_body(entity_id: &str) -> serde_json::Value {
     serde_json::json!({ "entity_id": entity_id })
 }

@@ -56,7 +56,6 @@ impl HvacMode {
     keywords_primary = "home assistant, smart home, climate, temperature, air conditioner, thermostat, hvac",
     side_effects = "Network { external: true }"
 )]
-/// Action to set a climate entity's target temperature.
 pub struct SetTemperatureAction {
     #[tool(skip)]
     #[serde(skip, default = "default_state")]
@@ -71,7 +70,6 @@ pub struct SetTemperatureAction {
 }
 
 impl SetTemperatureAction {
-    /// Creates a new `SetTemperatureAction` with the given shared state.
     #[must_use]
     pub fn new(state: Arc<HomeAssistantState>) -> Self {
         Self {

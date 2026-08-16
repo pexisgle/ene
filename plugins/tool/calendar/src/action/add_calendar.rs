@@ -19,7 +19,6 @@ fn default_state() -> Arc<CalendarState> {
     keywords_primary = "calendar, add, create, new, account",
     side_effects = "Idempotent"
 )]
-/// Action to add a new calendar account.
 pub struct AddCalendarAction {
     /// Display name of the calendar; must be unique.
     name: String,
@@ -33,7 +32,6 @@ pub struct AddCalendarAction {
 }
 
 impl AddCalendarAction {
-    /// Creates a new `AddCalendarAction`.
     #[must_use]
     pub const fn new(state: Arc<CalendarState>) -> Self {
         Self {

@@ -1,8 +1,5 @@
-//! Character settings page.
-//!
-//! Sections for character/motion selection, scene transform, and manual
-//! expression testing. Numeric rows keep the commit-on-focus-loss
-//! contract of the editable buffers.
+//! Numeric rows keep the commit-on-focus-loss contract of the editable
+//! buffers.
 use super::components::{BadgeTone, section_card, setting_row, status_badge, warning_box};
 use super::input::SettingsInputState;
 use super::widgets::{SettingsAction, apply_action};

@@ -31,9 +31,7 @@ use std::sync::Arc;
 /// A secret-free reference to an authenticated account, safe for events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRef {
-    /// Stable account id.
     pub id: String,
-    /// Human-readable account label.
     pub label: String,
 }
 
@@ -43,53 +41,34 @@ pub struct AccountRef {
 /// material. Consumers persist these to the audit trail.
 #[derive(Debug, Clone)]
 pub struct ConnectorEvent {
-    /// Connector that changed.
     pub connector: ConnectorId,
-    /// When the event occurred.
     pub at: DateTime<Utc>,
-    /// What changed.
     pub kind: ConnectorEventKind,
 }
 
-/// Discriminator for a [`ConnectorEvent`].
 #[derive(Debug, Clone)]
 pub enum ConnectorEventKind {
-    /// A connector was registered.
     Registered,
-    /// A connector was unregistered.
     Unregistered,
-    /// A connectivity check completed.
     Checked {
-        /// Whether the service was reachable.
         healthy: bool,
     },
-    /// An authenticated session was established.
     Connected {
-        /// Accounts exposed by the session.
         accounts: Vec<AccountRef>,
     },
-    /// An authenticated session was torn down.
     Disconnected {
-        /// Account id that was disconnected.
         account: String,
     },
-    /// A per-action grant was recorded.
     Granted {
-        /// Granted action.
         action: String,
-        /// Covered target prefix.
         target_pattern: String,
     },
-    /// A per-action grant was removed.
     Revoked {
-        /// Revoked action.
         action: String,
-        /// Revoked target prefix.
         target_pattern: String,
     },
-    /// A lifecycle operation failed (permission denials are not failures).
+    /// Permission denials are not failures.
     Failed {
-        /// Operation that failed.
         action: String,
         /// Scrubbed error detail.
         error: String,
@@ -102,7 +81,6 @@ struct RegisteredConnector {
     status: RwLock<ConnectorStatus>,
 }
 
-/// Callback receiving scrubbed connector events.
 type EventSink = Arc<dyn Fn(ConnectorEvent) + Send + Sync>;
 
 /// Thread-safe registry of connectors keyed by [`ConnectorId`].
@@ -127,7 +105,6 @@ impl fmt::Debug for ConnectorRegistry {
 }
 
 impl ConnectorRegistry {
-    /// Creates an empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -177,7 +154,6 @@ impl ConnectorRegistry {
         Ok(())
     }
 
-    /// Removes a registered connector; returns `true` when one was removed.
     pub fn unregister(&self, id: &ConnectorId) -> bool {
         let removed = self.connectors.write().remove(id).is_some();
         if removed {
@@ -190,7 +166,6 @@ impl ConnectorRegistry {
         removed
     }
 
-    /// Returns the underlying connector, for direct use by hosts.
     #[must_use]
     pub fn get(&self, id: &ConnectorId) -> Option<Arc<dyn Connector>> {
         self.connectors
@@ -552,9 +527,6 @@ impl ConnectorRegistry {
         }
     }
 
-    /// Records a lifecycle failure: scrubs the error, caches it as the
-    /// connector's connection state, emits a `Failed` event, and returns
-    /// the scrubbed error for the caller.
     fn fail(&self, id: &ConnectorId, action: &str, error: ConnectorError) -> ConnectorError {
         let scrubbed = error.scrub();
         let message = scrubbed.to_string();

@@ -13,18 +13,14 @@ use parking_lot::RwLock;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 
-/// One mediated HTTP response body.
 #[derive(Debug)]
 pub struct FetchOutcome {
-    /// HTTP status.
     pub status: u16,
     /// Response body (size-capped by the host).
     pub body: Vec<u8>,
 }
 
-/// A streamed HTTP response: status plus body chunks.
 pub struct StreamSession {
-    /// HTTP status.
     pub status: u16,
     /// Body chunks in order; an `Err` item is terminal.
     pub chunks: ReceiverStream<Result<Vec<u8>, PluginError>>,
@@ -46,7 +42,6 @@ pub struct AnthropicBroker {
 }
 
 impl AnthropicBroker {
-    /// A broker with no connection configuration yet.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -56,14 +51,11 @@ impl AnthropicBroker {
         }
     }
 
-    /// Captures the broker socket and auth token from the host sandbox
-    /// config (protocol v8).
     pub fn configure(&self, sandbox: &SandboxConfigData) {
         self.socket.write().clone_from(&sandbox.broker_socket);
         self.token.write().clone_from(&sandbox.db_auth_token);
     }
 
-    /// Opens the broker session on first use.
     async fn session(
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, Option<BrokerClient>>, PluginError> {
@@ -89,7 +81,6 @@ impl AnthropicBroker {
         Ok(client)
     }
 
-    /// Sends one non-streaming request and returns the response.
     pub async fn fetch(
         &self,
         method: HttpMethod,
@@ -131,10 +122,9 @@ impl AnthropicBroker {
         }
     }
 
-    /// Starts a streamed request. The returned session carries the response
-    /// status and yields body chunks as they arrive; transport or
-    /// policy errors surface as the first `Err` chunk and/or a failed status
-    /// delivery.
+    /// The returned session carries the response status and yields body
+    /// chunks as they arrive; transport or policy errors surface as the
+    /// first `Err` chunk and/or a failed status delivery.
     pub async fn stream(
         self: &Arc<Self>,
         method: HttpMethod,
@@ -233,7 +223,6 @@ impl StreamSink for ChannelSink {
 }
 
 impl ChannelSink {
-    /// Delivers a terminal error to the caller and closes the chunk stream.
     async fn fail(&mut self, message: String) {
         if let Some(tx) = self.start.take() {
             drop(tx.send(Err(message.clone())));
@@ -253,12 +242,10 @@ impl ChannelSink {
 /// `set_sandbox` before any request runs.
 static BROKER_ARC: std::sync::OnceLock<Arc<AnthropicBroker>> = std::sync::OnceLock::new();
 
-/// Returns the shared broker, initializing the handle on first use.
 pub(crate) fn broker() -> Arc<AnthropicBroker> {
     Arc::clone(BROKER_ARC.get_or_init(|| Arc::new(AnthropicBroker::new())))
 }
 
-/// Configures the shared broker from the host sandbox data.
 pub(crate) fn configure_broker(sandbox: &SandboxConfigData) {
     broker().configure(sandbox);
 }

@@ -1,5 +1,3 @@
-//! Emotion engine integration tests (decay, fatigue, classifier).
-
 use std::time::Duration;
 
 use ene_card::AffectBaseline;

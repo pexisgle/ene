@@ -253,11 +253,11 @@ fn target_weights(rms: f32, zcr: f32, bands: [f32; 5]) -> VisemeWeights {
 
     // Per-vowel scores combine amplitude / zero-crossing character
     // with the spectral band that best identifies each vowel.
-    let open_score = e_low_mid * amp_high; // open mouth, low-mid energy
-    let smile_score = e_high * zcr_high; // smile, high frequency
-    let round_score = e_low * amp_low; // round, low frequency, quiet
-    let wide_score = e_mid_high * zcr_high; // wide, mid-high frequency
-    let small_round_score = e_low_mid * amp_mid; // small round, mid amplitude
+    let open_score = e_low_mid * amp_high;
+    let smile_score = e_high * zcr_high;
+    let round_score = e_low * amp_low;
+    let wide_score = e_mid_high * zcr_high;
+    let small_round_score = e_low_mid * amp_mid;
 
     let dist = distribute([
         open_score,
@@ -299,7 +299,6 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Apply the asymmetric EMA (fast attack, slower release) per field.
 fn smooth_weights(current: VisemeWeights, target: VisemeWeights) -> VisemeWeights {
     VisemeWeights {
         aa: smooth_field(current.aa, target.aa),

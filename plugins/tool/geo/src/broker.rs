@@ -11,10 +11,8 @@ use ene_plugin_proto::{HostServiceId, SandboxConfigData, ToolError};
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
-/// One mediated HTTP response body.
 #[derive(Debug)]
 pub struct FetchOutcome {
-    /// HTTP status.
     pub status: u16,
     /// Response body (size-capped by the host).
     pub body: Vec<u8>,
@@ -31,7 +29,6 @@ pub struct GeoBroker {
 }
 
 impl GeoBroker {
-    /// A broker with no connection configuration yet.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -56,7 +53,6 @@ impl GeoBroker {
         self.token.write().clone_from(&sandbox.db_auth_token);
     }
 
-    /// Sends one request and returns the response.
     pub async fn fetch(&self, url: &str) -> Result<FetchOutcome, ToolError> {
         let mut client = self
             .session()
@@ -89,7 +85,6 @@ impl GeoBroker {
         }
     }
 
-    /// Opens the broker session on first use.
     async fn session(
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, Option<BrokerClient>>, ToolError> {
@@ -120,12 +115,10 @@ impl GeoBroker {
 /// `set_sandbox` before any request runs.
 static BROKER_ARC: std::sync::OnceLock<Arc<GeoBroker>> = std::sync::OnceLock::new();
 
-/// Returns the shared broker, initializing the handle on first use.
 pub(crate) fn broker() -> Arc<GeoBroker> {
     Arc::clone(BROKER_ARC.get_or_init(|| Arc::new(GeoBroker::new())))
 }
 
-/// Configures the shared broker from the host sandbox data.
 pub(crate) fn configure_broker(sandbox: &SandboxConfigData) {
     broker().configure(sandbox);
 }
@@ -146,7 +139,6 @@ pub(crate) mod tests {
     }
 
     impl MockResponse {
-        /// A `200 OK` response with a fixed-length body.
         #[must_use]
         pub fn ok(body: Vec<u8>) -> Self {
             Self { status: 200, body }
@@ -163,7 +155,6 @@ pub(crate) mod tests {
     }
 
     impl MockBroker {
-        /// Spawns the mock on a fresh unix socket.
         #[must_use]
         pub fn spawn() -> Self {
             let dir = tempfile::tempdir().expect("tempdir");
@@ -182,7 +173,6 @@ pub(crate) mod tests {
             server
         }
 
-        /// Queues a response for the next request.
         pub fn push(&self, response: MockResponse) {
             self.responses
                 .lock()

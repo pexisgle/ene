@@ -32,7 +32,6 @@ fn parse_cron(value: &str) -> Result<CronSchedule, ScheduleError> {
     })
 }
 
-/// Validates a new schedule and computes its first `next_run_at`.
 pub fn first_run_at(new: &NewSchedule, now: DateTime<Utc>) -> Result<DateTime<Utc>, ScheduleError> {
     if new.name.trim().is_empty() {
         return Err(ScheduleError::EmptyName);
@@ -101,7 +100,6 @@ pub fn next_occurrence_after(s: &Schedule, after: DateTime<Utc>) -> Option<DateT
     }
 }
 
-/// The first fixed-rate tick at or after `after`, anchored on `anchor`.
 fn interval_tick_at_or_after(
     anchor: DateTime<Utc>,
     interval_secs: i64,
@@ -116,7 +114,6 @@ fn interval_tick_at_or_after(
     anchor + Duration::seconds(ticks * interval_secs)
 }
 
-/// The first fixed-rate tick strictly after `after`, anchored on `anchor`.
 fn interval_tick_strictly_after(
     anchor: DateTime<Utc>,
     interval_secs: i64,

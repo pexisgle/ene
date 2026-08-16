@@ -1,9 +1,6 @@
-//! Token estimation helpers for context budget management.
-
 /// Approximate characters per token for heuristic budgeting.
 pub const CHARS_PER_TOKEN: usize = 4;
 
-/// Estimate token count from text using the workspace heuristic.
 pub fn estimate_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
@@ -68,12 +65,10 @@ pub fn estimate_tokens_language_aware(text: &str) -> usize {
     units.div_ceil(TOKEN_UNITS).max(1)
 }
 
-/// Convert a token budget to an approximate character budget.
 pub const fn tokens_to_chars(tokens: usize) -> usize {
     tokens.saturating_mul(CHARS_PER_TOKEN)
 }
 
-/// Truncate text to fit within a token budget (character heuristic).
 pub fn truncate_to_tokens(text: &str, max_tokens: usize) -> String {
     if max_tokens == 0 {
         return String::new();

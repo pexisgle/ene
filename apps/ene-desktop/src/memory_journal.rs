@@ -1,5 +1,3 @@
-//! Memory Journal presenter: browse rows, action gating, and recall debug mapping.
-
 use ene_rag::decay::{ARCHIVE_THRESHOLD, FADE_THRESHOLD};
 use ene_store::{MemoryItem, MemoryStatus};
 
@@ -10,13 +8,10 @@ use crate::settings::{MemoryJournalRecallRow, MemoryJournalRow};
 pub enum MemoryJournalAction {
     /// Pin a memory against natural decay.
     Pin,
-    /// Remove pin.
     Unpin,
-    /// Archive a faded memory.
     Archive,
     /// User-driven forget (`Active` → `UserDeleted`).
     Forget,
-    /// Mark as disputed.
     Dispute,
     /// User-driven restore to active.
     Restore,
@@ -26,7 +21,7 @@ pub enum MemoryJournalAction {
 pub struct MemoryJournalPresenter;
 
 impl MemoryJournalPresenter {
-    /// Build a browse-mode row from a typed memory item.
+    /// Builds a browse-mode row.
     pub fn row_from_item(item: &MemoryItem) -> MemoryJournalRow {
         MemoryJournalRow {
             id: item.id.unwrap_or_default(),
@@ -43,7 +38,6 @@ impl MemoryJournalPresenter {
         }
     }
 
-    /// Browse-mode metadata (source and access count).
     pub fn browse_metadata(item: &MemoryItem) -> String {
         format!(
             "source={} access_count={}",
@@ -52,7 +46,6 @@ impl MemoryJournalPresenter {
         )
     }
 
-    /// Actions that should succeed for the given lifecycle state.
     pub fn available_actions(status: MemoryStatus, pinned: bool) -> Vec<MemoryJournalAction> {
         let mut actions = Vec::new();
         actions.push(if pinned {

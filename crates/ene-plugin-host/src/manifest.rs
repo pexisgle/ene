@@ -1,5 +1,3 @@
-//! Plugin manifest verification and the built-in manifest table.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -15,10 +13,8 @@ use crate::config::TrustedPublisherConfig;
 /// surface: an unverifiable manifest grants nothing.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
-    /// The manifest carries a signature but no key id.
     #[error("manifest for '{0}' has a signature but no key id")]
     MissingKeyId(String),
-    /// The manifest's publisher key is not trusted.
     #[error("manifest publisher '{publisher}' (key '{key_id}') is not trusted")]
     UntrustedPublisher {
         /// Publisher id from the manifest.
@@ -26,16 +22,12 @@ pub enum ManifestError {
         /// Key id referenced by the manifest.
         key_id: String,
     },
-    /// The signature did not verify.
     #[error("manifest signature verification failed for '{0}': {1}")]
     BadSignature(String, String),
-    /// A built-in manifest is missing its payload.
     #[error("built-in manifest '{0}' has no payload")]
     MissingPayload(String),
-    /// The manifest payload is not valid JSON.
     #[error("manifest payload for '{0}' is not valid JSON: {1}")]
     InvalidPayload(String, String),
-    /// The manifest's plugin id does not match the entry name.
     #[error("manifest plugin_id '{found}' does not match entry name '{expected}'")]
     IdMismatch {
         /// The plugin id from the manifest.
@@ -43,7 +35,6 @@ pub enum ManifestError {
         /// The entry name the manifest is attached to.
         expected: String,
     },
-    /// A signed manifest's publisher does not match the trusted key it used.
     #[error("manifest publisher '{publisher}' does not match signing key '{key_id}'")]
     PublisherMismatch {
         /// Publisher id from the manifest.
@@ -51,29 +42,22 @@ pub enum ManifestError {
         /// Trusted key id used to verify the signature.
         key_id: String,
     },
-    /// An unsigned manifest for a built-in name differs from the host copy.
     #[error("unsigned manifest for built-in '{0}' does not match the embedded manifest")]
     BuiltinMismatch(String),
-    /// A logical FS slot in the manifest was requested but never granted.
     #[error("plugin has no {access} grant for slot '{slot}'")]
     MissingGrant {
-        /// Plugin name.
         plugin: String,
-        /// Slot name.
         slot: String,
-        /// Required access.
         access: &'static str,
     },
 }
 
-/// Verified manifests plus the trusted-publisher key registry.
 #[derive(Debug, Default)]
 pub struct ManifestStore {
     keys: BTreeMap<String, VerifyingKey>,
 }
 
 impl ManifestStore {
-    /// Builds the key registry from configuration.
     #[must_use]
     pub fn new(publishers: &[TrustedPublisherConfig]) -> Self {
         let mut keys = BTreeMap::new();
@@ -97,8 +81,6 @@ impl ManifestStore {
         Self { keys }
     }
 
-    /// Verifies `signed` and parses the manifest.
-    ///
     /// Signed manifests must verify against a trusted publisher key.
     /// Unsigned manifests are accepted only for known built-in plugins (the
     /// host ships their manifests in its own binary).
@@ -168,21 +150,15 @@ impl ManifestStore {
     }
 }
 
-/// One approved filesystem grant for a plugin generation.
 #[derive(Debug, Clone)]
 pub struct FsGrant {
-    /// Logical slot name.
     pub slot: String,
     /// Canonical real path.
     pub path: PathBuf,
-    /// Read access granted.
     pub read: bool,
-    /// Write access granted.
     pub write: bool,
 }
 
-/// Resolves a logical path (`slot/rest/...`) against a plugin's grants.
-///
 /// `rest` must stay inside the granted directory: absolute paths, `..`
 /// traversal, and empty segments are rejected. The returned path is not yet
 /// canonicalized — callers canonicalize and re-check containment to defeat
@@ -228,8 +204,7 @@ pub fn resolve_grant_path<'a>(
     Ok((grant, grant.path.join(rest)))
 }
 
-/// Canonicalizes `candidate` and verifies it stays within `root` (symlink
-/// escapes are rejected). The root itself is canonicalized once.
+/// Symlink escapes are rejected.
 pub fn canonical_within(root: &Path, candidate: &Path) -> Option<PathBuf> {
     let root = root.canonicalize().ok()?;
     let canonical = candidate.canonicalize().ok()?;
@@ -261,8 +236,6 @@ pub fn canonicalize_or_nearest(path: &Path) -> PathBuf {
     }
 }
 
-/// Resolves an absolute path against a plugin's grants.
-///
 /// The canonicalized target (or its nearest existing ancestor for
 /// not-yet-created write targets) must lie inside a grant whose access
 /// includes the requested operation. Symlink escapes are rejected by the
@@ -287,8 +260,6 @@ pub fn resolve_grant_abs(
     Ok(canonical)
 }
 
-/// The manifest for a built-in plugin, shipped inside the host binary.
-///
 /// These are trusted by construction (no signature needed). Third-party
 /// plugins must supply a signed manifest in `plugins.list.<name>.manifest`.
 #[must_use]
@@ -687,7 +658,6 @@ mod tests {
             store.verify(&signed, "third-party"),
             Err(ManifestError::MissingPayload(_))
         ));
-        // A builtin name is fine unsigned.
         assert!(store.verify(&signed, "fs").is_ok());
     }
 
@@ -797,13 +767,11 @@ mod tests {
         )
         .expect("write target inside grant");
         assert!(new_target.ends_with("file.txt"));
-        // Outside the grant: rejected for both read and write.
         let outside = dir.path().join("other").join("secret.txt");
         std::fs::create_dir_all(outside.parent().expect("parent")).expect("mkdir");
         std::fs::write(&outside, b"secret").expect("write");
         assert!(resolve_grant_abs(&grants, &outside, false).is_err());
         assert!(resolve_grant_abs(&grants, &outside, true).is_err());
-        // Read-only grant rejects writes.
         let read_only = vec![FsGrant {
             slot: "workspace".into(),
             path: root.canonicalize().expect("canonical"),

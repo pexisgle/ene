@@ -1,7 +1,6 @@
 //! # ene-plugin-web
 //!
 //! Plugin binary providing web fetch and search capabilities.
-#![warn(missing_docs)]
 #![expect(
     clippy::arithmetic_side_effects,
     reason = "search result ranking uses intentional score arithmetic"

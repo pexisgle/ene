@@ -6,7 +6,6 @@ use ene_plugin::{ActionSetProvider, ToolAction};
 use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
 use std::sync::Arc;
 
-/// Shared state for the counter actions.
 #[derive(Clone)]
 pub struct CounterState {
     store: Arc<tokio::sync::Mutex<Option<Arc<dyn CounterStore>>>>,
@@ -45,22 +44,18 @@ impl CounterState {
         }
     }
 
-    /// Sets the DB IPC auth token used to authenticate the connection.
     pub fn set_db_auth_token(&self, token: Option<String>) {
         *self.db_auth_token.write() = token;
     }
 
-    /// Returns the current session ID.
     pub fn session_id(&self) -> String {
         self.session_id.read().clone()
     }
 
-    /// Sets the current session ID.
     pub fn set_session_id(&self, session_id: &str) {
         *self.session_id.write() = session_id.to_string();
     }
 
-    /// Returns the approval gate guarding destructive actions.
     #[must_use]
     pub fn gate(&self) -> &ApprovalGate {
         &self.gate
@@ -134,7 +129,6 @@ pub struct CounterToolProvider {
 }
 
 impl CounterToolProvider {
-    /// Creates a new `CounterToolProvider`.
     #[must_use]
     pub fn new() -> Self {
         let state = Arc::new(CounterState::new());

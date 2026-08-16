@@ -1,5 +1,3 @@
-//! Interactive broker-approval responder.
-//!
 //! Routes `Ask` resolutions from the plugin broker hub through the actor:
 //! [`EneCommand::BrokerApprovalRequested`] registers the request in the
 //! actor's `pending_permissions` map and broadcasts
@@ -23,7 +21,6 @@ pub struct ActorApprovalResponder {
 }
 
 impl ActorApprovalResponder {
-    /// Builds a responder that submits requests through the actor mailbox.
     #[must_use]
     pub fn new(cmd_tx: mpsc::UnboundedSender<EneCommand>, timeout: std::time::Duration) -> Self {
         Self { cmd_tx, timeout }
@@ -111,7 +108,6 @@ mod tests {
 
         assert_eq!(pending.await.expect("responder task"), ResolvedMode::Allow);
 
-        // Deny path.
         let pending = {
             let responder = std::sync::Arc::clone(&responder);
             tokio::spawn(async move {

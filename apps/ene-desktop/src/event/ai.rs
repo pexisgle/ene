@@ -38,7 +38,6 @@ pub struct AiUserInputRequested {
 #[derive(Message, Debug, Clone)]
 pub struct PerformanceCue(pub String);
 
-/// Compatibility alias for `PerformanceCue` (same type).
 pub use PerformanceCue as EmoteToken;
 
 /// Motion cue routed from [`ene_runtime::EneEvent::Performance`] when
@@ -78,12 +77,10 @@ pub struct CancelCommand(pub String);
 /// bus. Turn-independent; consumed by the beat-sync state resource.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct BeatPulse {
-    /// Estimated tempo in beats per minute.
     pub bpm: f32,
     /// Normalized onset strength in `[0, 1]`.
     pub intensity: f32,
 }
 
-/// Pending memory candidates count update.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct PendingCandidatesCount(pub usize);

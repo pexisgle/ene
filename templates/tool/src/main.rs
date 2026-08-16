@@ -1,7 +1,6 @@
 //! # ene-plugin-__PLUGIN_NAME__
 //!
 //! Plugin binary providing the `__NAMESPACE__` tool namespace.
-#![warn(missing_docs)]
 #![expect(
     clippy::unused_async,
     reason = "tool IPC handlers are async for uniform provider dispatch"
@@ -14,9 +13,7 @@
     )
 )]
 
-/// Action definitions.
 pub mod action;
-/// Tool lifecycle and provider integration.
 pub mod provider;
 
 use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};

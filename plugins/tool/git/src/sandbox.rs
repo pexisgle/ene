@@ -43,7 +43,6 @@ impl Default for RepoScope {
 }
 
 impl RepoScope {
-    /// Builds a scope from the host-delivered sandbox config.
     pub fn new(mut data: SandboxConfigData) -> Self {
         data.sanitize();
         Self {

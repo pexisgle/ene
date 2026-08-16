@@ -4,21 +4,16 @@ use ene_plugin::PluginError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Default Speech API model (low latency).
 pub const DEFAULT_MODEL: &str = "tts-1";
 /// Default voice when neither the request nor the config names one.
 pub const DEFAULT_VOICE: &str = "alloy";
-/// Default speech speed multiplier.
 pub const DEFAULT_SPEED: f32 = 1.0;
 /// Default output sample rate (the Speech API's `pcm` format is fixed).
 pub const DEFAULT_SAMPLE_RATE: u32 = 24_000;
 /// Largest sample rate whose 16-bit mono WAV byte rate fits in RIFF's u32 field.
 pub const MAX_SAMPLE_RATE: u32 = u32::MAX / 2;
-/// Default API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-/// Speed range accepted by the Speech API.
 pub const MIN_SPEED: f32 = 0.25;
-/// Speed range accepted by the Speech API.
 pub const MAX_SPEED: f32 = 4.0;
 /// Models advertised via `tts_spec` and accepted at runtime.
 pub const SUPPORTED_MODELS: &[&str] = &["tts-1", "tts-1-hd"];
@@ -42,7 +37,6 @@ pub struct OpenAiTtsConfig {
     /// Output sample rate written into the WAV header (the Speech API's
     /// `pcm` format is fixed at 24 kHz; override for compatible endpoints).
     pub sample_rate: u32,
-    /// API base URL override (defaults to `https://api.openai.com/v1`).
     pub base_url: String,
 }
 

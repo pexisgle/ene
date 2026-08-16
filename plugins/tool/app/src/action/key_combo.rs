@@ -12,7 +12,6 @@ use enigo::{Key, Keyboard};
     side_effects = "System { privileged: true }"
 )]
 pub struct KeyComboAction {
-    /// Key combination with '+' separator (e.g., 'ctrl+shift+s', 'ctrl+c').
     key_combo: String,
 }
 

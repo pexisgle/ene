@@ -257,7 +257,6 @@ fn test_config_memory_on(db_path: Option<&str>) -> (EneConfig, Arc<dyn ene_ai::P
     (config, host)
 }
 
-/// Open a memory-enabled runtime against the hanging stub host.
 async fn open_memory_on(db_path: Option<&str>, clock: &VirtualClock) -> EneHandle {
     let (config, host) = test_config_memory_on(db_path);
     let scheduler_clock: ene_runtime::handle::SchedulerClock = {
@@ -475,7 +474,6 @@ async fn scheduled_fire_never_interrupts_conversation() {
     drop(handle.shutdown(Duration::from_secs(2)).await);
 }
 
-/// A denied confirmation records `denied` and never executes the action.
 #[tokio::test]
 async fn confirmation_deny_records_denied_run() {
     let clock = VirtualClock::new();
@@ -499,7 +497,6 @@ async fn confirmation_deny_records_denied_run() {
     drop(handle.shutdown(Duration::from_secs(2)).await);
 }
 
-/// An approved confirmation executes the action and records success.
 #[tokio::test]
 async fn confirmation_approve_executes_run() {
     let clock = VirtualClock::new();
@@ -565,7 +562,6 @@ async fn schedules_and_history_restore_after_restart() {
     wait_for_run_status(&handle, schedule.id, ScheduleRunStatus::Success).await;
     drop(handle.shutdown(Duration::from_secs(2)).await);
 
-    // "Restart": reopen against the same database file.
     let clock = VirtualClock::new();
     let handle = open_memory_on(Some(&db_str), &clock).await;
     let schedules = handle.list_schedules().await.expect("list schedules");

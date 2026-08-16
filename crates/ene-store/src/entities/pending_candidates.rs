@@ -1,5 +1,3 @@
-//! Pending memory-candidate approval queue.
-//!
 //! Domain DTOs (`PendingCandidate`, `PendingCandidateStatus`) live in
 //! `ene-core`; this module owns only the `SeaORM` entity and the
 //! model-to-DTO conversion.
@@ -35,9 +33,6 @@ pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
-/// Convert a stored row into the domain DTO, failing closed on an
-/// unrecognized status label.
-///
 /// Returns `None` (logging a warning) when the stored status is not one of
 /// `pending` / `approved` / `rejected`, so a corrupted row is excluded from
 /// listings instead of being silently resurrected into the live pending queue

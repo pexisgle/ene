@@ -7,7 +7,6 @@
 
 use sea_orm_migration::prelude::*;
 
-/// Adds the `approval_parked` flag to `pending_candidates`.
 pub struct PendingCandidatesApprovalParkedMigration;
 
 impl MigrationName for PendingCandidatesApprovalParkedMigration {

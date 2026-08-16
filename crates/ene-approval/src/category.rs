@@ -33,17 +33,11 @@ pub enum ApprovalCategory {
     Loopback,
     /// Saving a downloaded web file to a user folder.
     WebFileSave,
-    /// Installing a plugin artifact.
     PluginInstall,
-    /// Updating a plugin artifact.
     PluginUpdate,
-    /// Installing a sidecar artifact.
     SidecarInstall,
-    /// Updating a sidecar artifact.
     SidecarUpdate,
-    /// Installing a model artifact.
     ModelInstall,
-    /// Updating a model artifact.
     ModelUpdate,
     /// Spawning a child process through the `Process` broker.
     ProcessSpawn,
@@ -104,7 +98,6 @@ pub const HIGH_RISK_CATEGORIES: &[ApprovalCategory] = &[
 ];
 
 impl ApprovalCategory {
-    /// Whether automatic allowance of this category is high-risk.
     #[must_use]
     pub const fn is_high_risk(self) -> bool {
         matches!(

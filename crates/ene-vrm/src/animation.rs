@@ -93,7 +93,6 @@ pub struct Sampler<T: Clone> {
     /// Keyframe values. For `CubicSpline`, the length is
     /// `3 * times.len()` (in-tangent, value, out-tangent per key).
     pub values: Vec<T>,
-    /// Interpolation mode.
     pub interpolation: Interpolation,
 }
 
@@ -103,7 +102,6 @@ impl<T: Clone> Sampler<T> {
         self.times.last().copied().unwrap_or(0.0)
     }
 
-    /// Number of keyframes.
     pub const fn keyframe_count(&self) -> usize {
         self.times.len()
     }
@@ -231,7 +229,6 @@ pub struct VrmaPlayer {
     pub speed: f32,
     /// Whether playback is active.
     pub playing: bool,
-    /// Repeat mode.
     pub repeat: RepeatMode,
 }
 
@@ -298,21 +295,14 @@ impl VrmaPlayer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Interpolation helpers
-// ---------------------------------------------------------------------------
-
-/// Sample a scalar sampler at time `t`.
 fn sample_scalar(sampler: &Sampler<f32>, t: f32) -> f32 {
     sample_keyframes(sampler, t, |a, b, alpha| a + (b - a) * alpha)
 }
 
-/// Sample a vec3 sampler at time `t`.
 fn sample_vec3(sampler: &Sampler<Vec3>, t: f32) -> Vec3 {
     sample_keyframes(sampler, t, |a, b, alpha| a.lerp(*b, alpha))
 }
 
-/// Sample a quaternion sampler at time `t` (slerp for Linear).
 fn sample_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
     match sampler.interpolation {
         Interpolation::Step => sample_step(&sampler.times, &sampler.values, t),
@@ -468,10 +458,6 @@ fn sample_cubic_spline_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
     if norm < 1e-9 { v0 } else { q / norm }
 }
 
-// ---------------------------------------------------------------------------
-// Retargeting
-// ---------------------------------------------------------------------------
-
 /// Retarget a rotation from source skeleton to destination skeleton
 /// using the VRM spec's NormalizedLocalRotation formula.
 ///
@@ -537,10 +523,6 @@ pub fn quat_to_yaw_pitch(q: Quat) -> (f32, f32) {
     (yaw.to_degrees(), pitch.to_degrees())
 }
 
-// ---------------------------------------------------------------------------
-// Evaluation
-// ---------------------------------------------------------------------------
-
 /// Evaluate a VRMA clip at time `t` and produce a [`VrmaFrame`].
 ///
 /// The frame contains raw (un-retargeted) bone rotations and
@@ -573,10 +555,6 @@ pub fn evaluate_clip(clip: &VrmaClip, t: f32) -> VrmaFrame {
 
     frame
 }
-
-// ---------------------------------------------------------------------------
-// Parser
-// ---------------------------------------------------------------------------
 
 /// Load a `.vrma` file from disk and parse it into a [`VrmaAsset`].
 ///

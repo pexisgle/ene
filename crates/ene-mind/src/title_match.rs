@@ -20,8 +20,6 @@ use ene_ai::{EmbeddingKind, EmbeddingProvider, cosine_similarity};
 use tracing::warn;
 use unicode_normalization::UnicodeNormalization;
 
-/// Normalize a title for exact-equality matching.
-///
 /// NFKC folds width and compatibility variants together (`ＡＢ` vs `AB`), then
 /// case, whitespace, and punctuation are dropped so that titles differing only
 /// in surface formatting compare equal. This is deliberately aggressive: the
@@ -36,8 +34,7 @@ pub(crate) fn normalize_title(s: &str) -> String {
         .collect()
 }
 
-/// Punctuation dropped by [`normalize_title`]: ASCII punctuation plus the
-/// CJK marks that carry no subject information.
+/// Drops ASCII punctuation plus the CJK marks that carry no subject information.
 pub(crate) const fn is_separator_punctuation(c: char) -> bool {
     c.is_ascii_punctuation()
         || matches!(
@@ -64,20 +61,14 @@ pub(crate) const fn is_separator_punctuation(c: char) -> bool {
         )
 }
 
-/// How [`TitleMatcher`] compares two titles for a single scan.
-///
 /// Pinned at scan start (after prefetch) so a mid-scan embedding failure cannot
 /// mix cosine-similarity matches with exact-title fallback inside one pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TitleMatchMode {
-    /// Compare by title-embedding cosine similarity against the threshold.
     Embedding,
-    /// Compare by normalized exact title equality.
     Exact,
 }
 
-/// Decides whether two titles refer to the same subject.
-///
 /// With an [`EmbeddingProvider`] configured, titles are compared by cosine
 /// similarity and match once they reach the configured threshold — this is what
 /// lets "資料をまとめる" and "資料作成" collapse into one subject without a
@@ -100,7 +91,6 @@ pub(crate) struct TitleMatcher<'a> {
 }
 
 impl<'a> TitleMatcher<'a> {
-    /// Create a matcher. Embeddings are computed lazily and cached.
     pub(crate) fn new(
         embedder: Option<&'a dyn EmbeddingProvider>,
         threshold: f32,
@@ -116,7 +106,6 @@ impl<'a> TitleMatcher<'a> {
         }
     }
 
-    /// The comparison mode to pin for a scan, based on current matcher health.
     pub(crate) fn match_mode(&self) -> TitleMatchMode {
         if self.use_embedding() {
             TitleMatchMode::Embedding
@@ -147,8 +136,6 @@ impl<'a> TitleMatcher<'a> {
         self.degraded = true;
     }
 
-    /// Embed every distinct title in `titles` with a single provider call.
-    ///
     /// Called once per scan with all titles about to be compared, so a scan
     /// issues one `embed_batch` instead of one round trip per title.
     pub(crate) async fn prefetch<'t>(&mut self, titles: impl IntoIterator<Item = &'t str>) {
@@ -193,7 +180,6 @@ impl<'a> TitleMatcher<'a> {
         }
     }
 
-    /// Ensure `title` has a cached embedding, embedding it on demand.
     async fn ensure_embedded(&mut self, title: &str) -> bool {
         if !self.use_embedding() {
             return false;
@@ -228,7 +214,6 @@ impl<'a> TitleMatcher<'a> {
         }
     }
 
-    /// Cosine similarity between two titles' embeddings, embedding on demand.
     async fn similarity(&mut self, left: &str, right: &str) -> Option<f32> {
         if !self.ensure_embedded(left).await || !self.ensure_embedded(right).await {
             return None;
@@ -238,8 +223,6 @@ impl<'a> TitleMatcher<'a> {
         Some(cosine_similarity(&left_embedding, &right_embedding))
     }
 
-    /// Whether two titles name the same subject under an explicit mode.
-    ///
     /// Callers pin the mode for a whole scan via [`Self::match_mode`] so a
     /// mid-scan failure cannot mix semantics; check [`Self::embedding_degraded`]
     /// afterwards and redo the scan under [`TitleMatchMode::Exact`] if set.
@@ -260,8 +243,6 @@ impl<'a> TitleMatcher<'a> {
         }
     }
 
-    /// Index of the title in `titles` that best matches `candidate_title`.
-    ///
     /// Under [`TitleMatchMode::Exact`] this is the first normalized equality;
     /// under [`TitleMatchMode::Embedding`] it is the highest similarity at or
     /// above the threshold. Returning the single best index (rather than every
@@ -391,7 +372,6 @@ mod tests {
             "a zero vector must be reported as a degrade so the caller can redo the scan"
         );
 
-        // Redoing the scan under the exact fallback recovers the true answer.
         let mode = matcher.match_mode();
         assert_eq!(mode, TitleMatchMode::Exact);
         assert!(matcher.is_match_with(mode, "資料", "資料").await);

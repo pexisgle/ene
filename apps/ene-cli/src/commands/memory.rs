@@ -34,8 +34,6 @@ impl CliCommand for MemoryCommand {
             .get_snapshot()
             .await
             .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
-        // The snapshot no longer carries the memory handle; it lives on
-        // the diagnostics facade, which is the documented access path.
         let memory = diag.memory();
 
         match subcmd {

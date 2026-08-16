@@ -2,7 +2,6 @@
 //!
 //! Plugin binary providing desktop application control:
 //! window management, input simulation, and portal overlay.
-#![warn(missing_docs)]
 #![expect(
     clippy::arithmetic_side_effects,
     reason = "app portal/input tools use intentional coordinate and timing arithmetic"

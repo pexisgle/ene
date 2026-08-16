@@ -4,7 +4,6 @@ use ene_plugin::prelude::*;
 
 const MAX_PATCH_CHARS: usize = 1_000_000;
 
-/// Shows the changes in a git repository as a unified diff and/or stat summary.
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[serde(rename_all = "camelCase")]
 #[tool(
@@ -17,7 +16,6 @@ const MAX_PATCH_CHARS: usize = 1_000_000;
     side_effects = "ReadOnly"
 )]
 pub struct DiffAction {
-    /// Path to the git repository working tree (default: current directory).
     #[serde(default)]
     #[arg(
         default = ".",
@@ -29,7 +27,6 @@ pub struct DiffAction {
     #[serde(default)]
     #[arg(default = "false")]
     staged: bool,
-    /// Output format: unified diff text, stat summary, or both.
     #[serde(default)]
     #[arg(default = "text", enum_values = "text, stat, both")]
     format: Option<String>,
@@ -43,7 +40,6 @@ pub struct DiffAction {
 }
 
 impl DiffAction {
-    /// Creates a diff action using the shared sandbox scope.
     pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             path: None,

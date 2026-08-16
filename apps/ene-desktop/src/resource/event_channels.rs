@@ -1,5 +1,3 @@
-//! Event channels resource.
-//!
 //! Holds the `tokio::sync::mpsc` halves used to communicate between
 //! async subsystems (AI bridge, tray event pump) and the winit event
 //! loop; `pump_legacy_events` drains the `rx`.
@@ -20,6 +18,6 @@ pub struct EventChannels {
         )
     )]
     pub tx: AppEventSender,
-    /// Receiver half. Drained by `pump_legacy_events`.
+    /// Drained by `pump_legacy_events`.
     pub rx: AppEventReceiver,
 }

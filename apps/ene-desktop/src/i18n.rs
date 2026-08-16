@@ -19,7 +19,6 @@ pub fn loader() -> &'static FluentLanguageLoader {
     })
 }
 
-/// Dynamically changes the active Fluent language catalog.
 pub fn select_language(lang: Language) {
     let loader = loader();
     let request_lang = match lang {

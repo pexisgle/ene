@@ -1,5 +1,3 @@
-//! Search-ordering index for `conversation_logs`.
-//!
 //! `MemoryStore::search_messages` filters with a leading-wildcard
 //! `LOWER(content) LIKE '%…%'`, which cannot use a B-tree index on
 //! `content` (that needs FTS5, tracked separately). The only other index
@@ -16,8 +14,6 @@
 
 use sea_orm_migration::prelude::*;
 
-/// Adds `idx_log_created_at` so session search can serve its
-/// `ORDER BY created_at DESC` + `LIMIT`/`OFFSET` from an index.
 pub struct ConversationLogsSearchIndexMigration;
 
 impl MigrationName for ConversationLogsSearchIndexMigration {

@@ -205,7 +205,6 @@ pub fn apply_emote_tokens_system(
     }
 }
 
-/// Feeds [`ExpressionCommand`] messages into the [`EmotionPipelineState`].
 pub fn apply_expression_commands_system(
     mut events: MessageReader<ExpressionCommand>,
     mut pipeline: ResMut<EmotionPipelineState>,
@@ -234,7 +233,6 @@ fn to_vrm_layer(layer: ene_card::MotionLayer) -> ene_vrm::MotionLayer {
     }
 }
 
-/// Applies [`CancelCommand`] to clear expression or motion state.
 pub fn apply_cancel_system(
     mut events: MessageReader<CancelCommand>,
     mut pipeline: ResMut<EmotionPipelineState>,
@@ -272,8 +270,6 @@ pub fn apply_cancel_system(
     }
 }
 
-/// Feeds [`MotionCommand`] messages into the [`MotionLayerState`].
-///
 /// Converts the canonical [`ene_card::MotionLayer`] carried on the command
 /// into the rendering-side [`ene_vrm::MotionLayer`] via [`to_vrm_layer`] — no
 /// string round-trip.
@@ -291,8 +287,6 @@ pub fn apply_motion_commands_system(
     }
 }
 
-/// Updates the pending-candidates badge in `UiState` when new candidates
-/// are available.
 pub fn apply_pending_candidates_count_system(
     mut events: MessageReader<PendingCandidatesCount>,
     mut ui_query: Query<&mut UiStateComponent, With<UiWindow>>,

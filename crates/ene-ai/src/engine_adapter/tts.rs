@@ -24,15 +24,13 @@ use super::descriptor::EngineDescriptor;
 use super::resource::ResourceRegistry;
 use crate::traits::{AudioProviderError, TtsChunk, TtsProvider};
 
-/// Owned text-to-speech synthesis request.
 #[derive(Debug, Clone)]
 pub struct TtsSynthesisRequest {
-    /// Text to synthesize.
     pub text: String,
 }
 
-/// A completed synthesis job's full PCM buffer, sliced into [`TtsChunk`]s at
-/// the adapter boundary (see this module's docs).
+/// Full PCM buffer of a completed synthesis job, sliced into [`TtsChunk`]s at
+/// the adapter boundary.
 #[derive(Debug, Clone)]
 pub struct TtsSynthesisResponse {
     /// Interleaved mono PCM samples normalized to `[-1.0, 1.0]`.
@@ -76,14 +74,11 @@ pub struct LocalTtsEngine<M: ene_infer::LocalModel> {
 }
 
 impl<M: ene_infer::LocalModel> LocalTtsEngine<M> {
-    /// Wraps an already-spawned [`EngineHandle`] with its descriptor, using
-    /// [`DEFAULT_CHUNK_SAMPLES`] for chunking.
     #[must_use]
     pub fn new(handle: EngineHandle<M>, descriptor: EngineDescriptor) -> Self {
         Self::with_chunk_samples(handle, descriptor, DEFAULT_CHUNK_SAMPLES)
     }
 
-    /// As [`Self::new`], with an explicit PCM samples-per-chunk size.
     #[must_use]
     pub fn with_chunk_samples(
         handle: EngineHandle<M>,
@@ -177,7 +172,6 @@ mod tests {
 
     #[derive(Debug, Clone)]
     enum MockTtsRequest {
-        /// Produces `samples` samples of silence.
         Silence(usize),
         Slow(Duration),
         Fail,

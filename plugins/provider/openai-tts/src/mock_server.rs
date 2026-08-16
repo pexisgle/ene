@@ -20,10 +20,8 @@ use ene_plugin_proto::{
     write_host_service_response,
 };
 
-/// A request the fake API received, for test assertions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordedRequest {
-    /// HTTP method.
     pub method: String,
     /// Absolute request URL.
     pub url: String,
@@ -47,7 +45,6 @@ pub struct MockResponse {
 }
 
 impl MockResponse {
-    /// A `200 OK` response with a fixed-length body.
     #[must_use]
     pub fn ok(body: Vec<u8>) -> Self {
         Self {
@@ -57,7 +54,6 @@ impl MockResponse {
         }
     }
 
-    /// A response with a custom status code.
     #[must_use]
     pub fn with_status(status: u16, body: Vec<u8>) -> Self {
         Self {
@@ -67,7 +63,6 @@ impl MockResponse {
         }
     }
 
-    /// Adds a response header.
     #[must_use]
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_string(), value.to_string()));
@@ -75,8 +70,6 @@ impl MockResponse {
     }
 }
 
-/// Broker-frame fake of the Speech API. Tests push scripted responses and
-/// inspect recorded requests.
 pub struct MockSpeechServer {
     socket: std::path::PathBuf,
     /// Recorded requests, in arrival order.
@@ -86,11 +79,6 @@ pub struct MockSpeechServer {
 }
 
 impl MockSpeechServer {
-    /// Spawns the mock on a fresh unix socket and returns its handle.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the socket cannot be bound.
     pub fn spawn() -> std::io::Result<Self> {
         let dir = tempfile::tempdir().map_err(std::io::Error::other)?;
         let socket = dir.path().join("mock-broker.sock");
@@ -117,13 +105,11 @@ impl MockSpeechServer {
         "https://api.openai.com/v1"
     }
 
-    /// The broker socket plugins should be configured with.
     #[must_use]
     pub fn socket_path(&self) -> &std::path::Path {
         &self.socket
     }
 
-    /// Queues a response for the next request.
     pub fn push(&self, response: MockResponse) {
         self.responses
             .lock()
