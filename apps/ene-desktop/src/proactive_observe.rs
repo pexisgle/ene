@@ -515,6 +515,7 @@ mod tests {
     fn looks_like_url_matches_scheme_and_www_only() {
         assert!(looks_like_url("https://example.com/page"));
         assert!(looks_like_url("www.example.com"));
+        // Bare domains are indistinguishable from filenames and must not match.
         assert!(!looks_like_url("report.docx"));
         assert!(!looks_like_url("example.com"));
     }

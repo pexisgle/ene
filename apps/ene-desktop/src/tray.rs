@@ -50,6 +50,9 @@ impl TrayHandle {
 
         #[cfg(target_os = "linux")]
         {
+            // GTK requires the icon to be built on the main thread; the
+            // Windows path builds it inside the message-pump thread instead
+            // (see `install_event_pump`), where the HWND must stay alive.
             if let Err(err) = gtk::init() {
                 tracing::warn!("Failed to initialize GTK for tray: {err}");
                 return None;

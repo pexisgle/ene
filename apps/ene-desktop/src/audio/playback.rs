@@ -271,6 +271,8 @@ fn playback_loop(
     };
 
     let Some(sink) = sink else {
+        // No audio backend: keep draining so the bounded channel sender
+        // never blocks.
         drain_until_shutdown(&rx, &viseme, &shutdown, &cue_events, clock_origin);
         return;
     };
