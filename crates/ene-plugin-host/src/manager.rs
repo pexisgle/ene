@@ -940,13 +940,23 @@ impl ene_ai::ProviderHost for PluginHostManager {
             if let Some(factory) = self.local_llm_factories.get(&engine) {
                 return factory.create_provider(config, task);
             }
-            if !self.local_llm_factories.is_empty() {
+            // The kind-keyed entry is evicted together with the
+            // first-registered plugin, so a disabled engine must fall back
+            // to the remaining local factories directly instead of the
+            // kind-keyed map. Min key reproduces the deterministic
+            // startup-order winner.
+            if let Some((_, factory)) = self
+                .local_llm_factories
+                .iter()
+                .min_by_key(|(name, _)| *name)
+            {
                 tracing::warn!(
                     component = "PluginHostManager",
                     engine = %engine,
                     "Configured local engine has no registered factory; \
                      using the first registered local backend"
                 );
+                return factory.create_provider(config, task);
             }
         }
         self.llm_factories
@@ -972,13 +982,21 @@ impl ene_ai::ProviderHost for PluginHostManager {
             if let Some(factory) = self.local_embedding_factories.get(&engine) {
                 return factory.create_embedding_provider(config);
             }
-            if !self.local_embedding_factories.is_empty() {
+            // See the LLM path: fall back to the remaining local factories
+            // directly, since the kind-keyed entry is evicted with the
+            // first-registered plugin.
+            if let Some((_, factory)) = self
+                .local_embedding_factories
+                .iter()
+                .min_by_key(|(name, _)| *name)
+            {
                 tracing::warn!(
                     component = "PluginHostManager",
                     engine = %engine,
                     "Configured local engine has no registered embedding factory; \
                      using the first registered local backend"
                 );
+                return factory.create_embedding_provider(config);
             }
         }
         self.embedding_factories
@@ -3502,6 +3520,52 @@ mod tests {
         };
         assert!(
             embed_err.contains("served by llama-cpp"),
+            "unexpected winner: {embed_err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_engine_routing_survives_eviction_of_first_registered_backend() {
+        let mut manager = PluginHostManager::test_instance();
+        manager.local_llm_factories.insert(
+            "llama-server".to_string(),
+            Arc::new(LocalEngineLlmFactory("llama-server")),
+        );
+        manager.local_embedding_factories.insert(
+            "llama-server".to_string(),
+            Arc::new(LocalEngineEmbeddingFactory("llama-server")),
+        );
+        // Simulates `PluginProviderDisabled` for the first-registered local
+        // backend: its kind-keyed entry is evicted with the plugin, and no
+        // other backend took its place in the kind-keyed map.
+
+        // The configured engine (`llama-cpp`, the default) is gone: routing
+        // must fall back to a remaining local backend instead of failing on
+        // the empty kind-keyed map.
+        let llm_err = match manager
+            .create_llm_provider(
+                ene_ai::LOCAL_PROVIDER,
+                &ene_config::EneConfig::default(),
+                &ene_ai::TaskRef::default(),
+            )
+            .await
+        {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            llm_err.contains("served by llama-server"),
+            "unexpected winner: {llm_err}"
+        );
+        let embed_err = match manager
+            .create_embedding_provider(ene_ai::LOCAL_PROVIDER, &ene_config::EneConfig::default())
+            .await
+        {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            embed_err.contains("served by llama-server"),
             "unexpected winner: {embed_err}"
         );
     }
