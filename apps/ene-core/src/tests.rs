@@ -1,11 +1,13 @@
 use crate::{BootOptions, CoreDaemon, CoreError};
-use ene_fiber::ProfileRow;
+use ene_fiber::{ProfileRow, discover_plugin_script};
 use ene_kernel::{ConversationModel, DisplayDepth, EchoModel, EventKind, EventPayload};
+use ene_registry::Layer;
 use ene_session::{
     Block, ClientId, NewEvent, NewSession, SessionCreatedBy, SessionKind, SessionStore, SoulId,
     Transaction, TurnId, TurnOrigin, TurnOutcome, TurnTrigger, abandoned_inbox, unclaimed_inbox,
     v1,
 };
+use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -227,6 +229,39 @@ async fn boot_installs_approval_plane_and_vault() {
     core.vault().put("k", b"secret").unwrap();
     assert_eq!(core.vault().export("k").unwrap(), b"secret");
     core.plane().audit().verify_chain().unwrap();
+}
+
+#[tokio::test]
+async fn dummy_plugin_and_harness_tools_share_registry() {
+    let dir = TempDir::new().unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    let sup = core.supervisor();
+    assert!(sup.registry().get("memory.recall").is_some());
+    let path = discover_plugin_script("plugin.py").expect("dummy plugin script must exist");
+    sup.activate_process(
+        &ProfileRow {
+            row_id: "r-dummy".to_owned(),
+            plugin: "tool.dummy".to_owned(),
+            requires: Vec::new(),
+            capabilities: Vec::new(),
+            sandbox_required: false,
+        },
+        &path,
+    )
+    .await
+    .unwrap();
+    let registry = sup.registry();
+    assert!(registry.get("dummy.ping").is_some());
+    let pong = registry
+        .execute("dummy.ping", json!({"message": "shared"}), Layer::Surface)
+        .await
+        .unwrap();
+    assert_eq!(pong.get("pong").and_then(|v| v.as_str()), Some("shared"));
+    sup.unload("r-dummy").await;
+    assert!(registry.get("memory.recall").is_some());
+    assert!(registry.get("dummy.ping").is_none());
 }
 
 #[tokio::test]

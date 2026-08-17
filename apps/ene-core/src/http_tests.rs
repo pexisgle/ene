@@ -4,11 +4,13 @@ use ene_api::{
     ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
     MessageMode, MessageRequest, ResourceKind,
 };
+use ene_companion::{content_digest, export_dir, pack_archive};
 use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
     spans_leak_content,
 };
 use ene_plane::{ApprovalMode, AuthzRequest, Sensitivity};
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -586,5 +588,83 @@ async fn boot_seeds_two_souls_and_session_ops() {
                 .err()
                 .is_some_and(|err| err.error_class() == "no_active_operation")
     );
+    server.shutdown().await;
+}
+
+fn sample_char_files() -> BTreeMap<String, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    files.insert(
+        "manifest.toml".into(),
+        b"[package]\nkind = \"character\"\nid = \"char.mychar\"\nversion = \"1.0.0\"\nformat_version = 1\ndisplay_name = \"My Character\"\n\n[contents]\nsoul = \"embedded\"\nbody = \"embedded\"\n\n[integrity]\ndigest = \"\"\n".to_vec(),
+    );
+    files.insert(
+        "soul/soul.toml".into(),
+        b"[identity]\nname = \"Ene\"\n\n[affect]\nbaseline = { valence = 0.2, arousal = 0.1, dominance = 0.0, trust = 0.3, affinity = 0.3, irritation = 0.0, curiosity = 0.4, fatigue = 0.0 }\n".to_vec(),
+    );
+    files.insert("soul/persona.md".into(), b"You are Ene.".to_vec());
+    files.insert(
+        "body/body.toml".into(),
+        b"[body]\nkind = \"text\"\n\n[expressions]\navailable = [\"happy\", \"calm\"]\n".to_vec(),
+    );
+    files
+}
+
+fn stamp_digest(mut files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>> {
+    let digest = content_digest(&files);
+    let manifest = String::from_utf8(files.get("manifest.toml").unwrap().clone()).unwrap();
+    files.insert(
+        "manifest.toml".into(),
+        manifest
+            .replace("digest = \"\"", &format!("digest = \"{digest}\""))
+            .into_bytes(),
+    );
+    files
+}
+
+#[tokio::test]
+async fn http_character_import_list_export_roundtrip() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let archive_dir = TempDir::new().unwrap();
+    let archive_path = archive_dir.path().join("roundtrip.enechar");
+    let zip = pack_archive(&stamp_digest(sample_char_files())).unwrap();
+    std::fs::write(&archive_path, zip).unwrap();
+
+    let imported = client
+        .import_character(archive_path.to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(imported.id, "char.mychar");
+    assert_eq!(imported.version, "1.0.0");
+    assert_eq!(imported.kind, "character");
+
+    let listed = client.list_characters().await.unwrap();
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.id == "char.mychar" && item.version == "1.0.0"),
+        "imported character must appear in list: {:?}",
+        listed.items
+    );
+
+    let exported = client.export_character("char.mychar").await.unwrap();
+    assert_eq!(
+        exported.get("id").and_then(|v| v.as_str()),
+        Some("char.mychar")
+    );
+    let install_path = exported
+        .get("path")
+        .and_then(|v| v.as_str())
+        .expect("export must return install path");
+    let reimport_path = archive_dir.path().join("reimport.enechar");
+    std::fs::write(&reimport_path, export_dir(std::path::Path::new(install_path)).unwrap()).unwrap();
+    std::fs::remove_dir_all(install_path).unwrap();
+
+    let again = client
+        .import_character(reimport_path.to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(again.id, "char.mychar");
+    assert_eq!(again.version, "1.0.0");
     server.shutdown().await;
 }

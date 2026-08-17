@@ -418,6 +418,58 @@ mod tests {
     }
 
     #[test]
+    fn plugin_cannot_write_outside_allowed_paths() {
+        if !landlock_supported() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plugin_temp = dir.path().join("plugin-tmp");
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&plugin_temp).expect("mkdir");
+        std::fs::create_dir_all(&workspace).expect("mkdir");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+
+        let mut read_paths = default_read_paths(&sh_path());
+        read_paths.push(workspace.clone());
+        let write_paths = vec![plugin_temp.clone()];
+        let spec = SandboxSpec {
+            allowed_read_paths: read_paths,
+            allowed_write_paths: write_paths,
+            limits: ResourceLimits::default(),
+            landlock: true,
+            seccomp: false,
+            no_new_privs: true,
+            network_namespace: false,
+            cgroup: None,
+            job_object: false,
+        };
+        let mut cmd = std::process::Command::new(sh_path());
+        cmd.arg("-c").arg(format!(
+            "echo allowed > {temp}/ok.txt; echo blocked > {workspace}/leak.txt 2>/dev/null; \
+             echo blocked > {outside}/leak.txt 2>/dev/null; exit 0",
+            temp = plugin_temp.display(),
+            workspace = workspace.display(),
+            outside = outside.display(),
+        ));
+        prepare_command(&mut cmd, &spec).expect("prepare");
+        let output = cmd.output().expect("run");
+        assert!(output.status.success());
+        assert_eq!(
+            std::fs::read_to_string(plugin_temp.join("ok.txt")).expect("read ok"),
+            "allowed\n"
+        );
+        assert!(
+            !workspace.join("leak.txt").exists(),
+            "plugin must not write outside its temp dir"
+        );
+        assert!(
+            !outside.join("leak.txt").exists(),
+            "plugin must not write outside the sandbox allowlist"
+        );
+    }
+
+    #[test]
     fn landlock_enforces_path_allowlist_when_supported() {
         if !landlock_supported() {
             return;
