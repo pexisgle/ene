@@ -7,6 +7,7 @@ use ene_plugin_ipc::{HostConn, HostHello, ProtoId, ProtocolRanges};
 use ene_sandbox::SandboxSpec;
 use tokio::net::UnixListener;
 use tokio::time::timeout;
+use uuid::Uuid;
 
 use crate::supervisor::SupervisorError;
 
@@ -25,19 +26,34 @@ pub(crate) struct SpawnOpts<'a> {
     pub row_id: &'a str,
     pub sandbox_required: bool,
     pub temp_dir: &'a Path,
-    pub workspace: &'a Path,
+}
+
+/// BLAKE3 digest of a plugin binary or script file (`blake3:<hex>`).
+///
+/// # Errors
+///
+/// Returns [`SupervisorError::Io`] when the file cannot be read.
+pub fn file_digest(path: &Path) -> Result<String, SupervisorError> {
+    let bytes = std::fs::read(path)?;
+    Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
 }
 
 pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, SupervisorError> {
     std::fs::create_dir_all(opts.socket_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(opts.socket_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     std::fs::create_dir_all(opts.temp_dir)?;
     let socket_path = opts.socket_dir.join(format!("{}.sock", opts.row_id));
     if socket_path.exists() {
         std::fs::remove_file(&socket_path)?;
     }
     let listener = UnixListener::bind(&socket_path)?;
+    let spawn_token = Uuid::now_v7().to_string();
     let sandbox = sandbox_for(&opts)?;
-    let mut command = plugin_command(opts.binary, &socket_path, opts.temp_dir);
+    let mut command = plugin_command(opts.binary, &socket_path, opts.temp_dir, &spawn_token);
     apply_sandbox(&mut command, sandbox.as_ref())?;
     let mut child = command
         .spawn()
@@ -56,6 +72,11 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
             ));
         }
     };
+    if child.try_wait()?.is_some() {
+        return Err(SupervisorError::Spawn(
+            "plugin exited before hello completed".to_owned(),
+        ));
+    }
     let hello = HostHello {
         host_name: "ene-core".to_owned(),
         host_version: "0.1.0".to_owned(),
@@ -65,7 +86,7 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
     };
     let handshake = timeout(
         HELLO_TIMEOUT,
-        HostConn::handshake(stream, hello, &[ProtoId::Core, ProtoId::Tool]),
+        HostConn::handshake(stream, hello, &[ProtoId::Core, ProtoId::Tool], &spawn_token),
     )
     .await;
     let conn = match handshake {
@@ -79,11 +100,21 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
             return Err(SupervisorError::Spawn("hello timeout".to_owned()));
         }
     };
+    if child.try_wait()?.is_some() {
+        return Err(SupervisorError::Spawn(
+            "plugin exited during hello".to_owned(),
+        ));
+    }
     tracing::debug!(plugin = opts.plugin_id, "plugin hello completed");
     Ok(SpawnedPlugin { child, conn })
 }
 
-fn plugin_command(binary: &Path, socket_path: &Path, temp_dir: &Path) -> Command {
+fn plugin_command(
+    binary: &Path,
+    socket_path: &Path,
+    temp_dir: &Path,
+    spawn_token: &str,
+) -> Command {
     let mut cmd = if let Some(interpreter) = script_interpreter(binary) {
         let mut command = Command::new(interpreter);
         command.arg(binary);
@@ -98,6 +129,7 @@ fn plugin_command(binary: &Path, socket_path: &Path, temp_dir: &Path) -> Command
         }
     }
     cmd.env("ENE_PLUGIN_SOCKET", socket_path);
+    cmd.env("ENE_PLUGIN_SPAWN_TOKEN", spawn_token);
     cmd.env("TMPDIR", temp_dir);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
@@ -140,11 +172,16 @@ fn sandbox_for(opts: &SpawnOpts<'_>) -> Result<Option<SandboxSpec>, SupervisorEr
         opts.binary,
         opts.socket_dir,
         opts.temp_dir,
-        opts.workspace,
+        opts.sandbox_required,
     )))
 }
 
-fn build_spec(binary: &Path, socket_dir: &Path, temp_dir: &Path, workspace: &Path) -> SandboxSpec {
+fn build_spec(
+    binary: &Path,
+    socket_dir: &Path,
+    temp_dir: &Path,
+    sandbox_required: bool,
+) -> SandboxSpec {
     let mut allowed_read = Vec::new();
     let mut allowed_write = Vec::new();
     #[cfg(target_os = "linux")]
@@ -157,7 +194,6 @@ fn build_spec(binary: &Path, socket_dir: &Path, temp_dir: &Path, workspace: &Pat
     }
     allowed_read.push(socket_dir.to_path_buf());
     allowed_read.push(temp_dir.to_path_buf());
-    allowed_read.push(workspace.to_path_buf());
     allowed_write.push(socket_dir.to_path_buf());
     allowed_write.push(temp_dir.to_path_buf());
     if let Some(parent) = binary.parent() {
@@ -170,7 +206,7 @@ fn build_spec(binary: &Path, socket_dir: &Path, temp_dir: &Path, workspace: &Pat
         landlock: cfg!(target_os = "linux"),
         seccomp: cfg!(target_os = "linux"),
         no_new_privs: cfg!(target_os = "linux"),
-        network_namespace: false,
+        network_namespace: sandbox_required,
         cgroup: None,
         job_object: false,
     }

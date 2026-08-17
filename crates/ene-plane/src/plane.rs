@@ -9,7 +9,7 @@ use crate::audit::AuditLog;
 use crate::config::{ApprovalMode, ApprovalSettings};
 use crate::error::PlaneError;
 use crate::policy::{PolicyDecision, PolicyFile, PolicyRule};
-use crate::popup::{PopupDecision, PopupSink, ask_with_timeout};
+use crate::popup::{PopupDecision, PopupSink};
 use crate::request::AuthzRequest;
 use crate::risk::Risk;
 
@@ -196,9 +196,18 @@ impl ApprovalPlane {
 
     async fn popup(&self, req: &AuthzRequest) -> Result<Decision, PlaneError> {
         let timeout = Duration::from_millis(self.settings.lock().popup.timeout_ms);
-        let decision = ask_with_timeout(self.popup.as_ref(), req, timeout).await;
+        let decision = self.popup.ask_timed(req, timeout).await;
         Ok(match decision {
-            PopupDecision::Allow | PopupDecision::AllowAndRemember => Decision::Allow,
+            PopupDecision::Allow => Decision::Allow,
+            PopupDecision::AllowAndRemember => {
+                let scope = req.in_workspace.then_some("workspace".to_owned());
+                self.policy.lock().rules.push(PolicyRule {
+                    tool: req.tool.clone(),
+                    scope,
+                    decision: PolicyDecision::Allow,
+                });
+                Decision::Allow
+            }
             PopupDecision::Deny => Decision::Deny,
         })
     }

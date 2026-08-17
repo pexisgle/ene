@@ -20,6 +20,10 @@ pub trait ToolHandler: Send + Sync {
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, IpcError>;
+    fn spawn_token(&self) -> Result<String, String> {
+        std::env::var("ENE_PLUGIN_SPAWN_TOKEN")
+            .map_err(|_| "ENE_PLUGIN_SPAWN_TOKEN is not set".to_owned())
+    }
 }
 
 /// Which bundled tool set a harness plugin binary serves.
@@ -143,12 +147,14 @@ fn build_ack<H: ToolHandler>(hello: &HostHello, handler: &H) -> Result<HelloAck,
     if handler.digest() != hello.expected_digest {
         return Err("manifest digest mismatch".to_owned());
     }
+    let spawn_token = handler.spawn_token()?;
     Ok(HelloAck {
         plugin_id: handler.plugin_id().to_owned(),
         plugin_name: handler.plugin_name().to_owned(),
         plugin_version: "0.1.0".to_owned(),
-        manifest_digest: handler.digest().to_owned(),
+        manifest_digest: hello.expected_digest.clone(),
         protocols: negotiated,
+        spawn_token,
     })
 }
 

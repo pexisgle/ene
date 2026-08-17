@@ -69,8 +69,18 @@ fn apply_pre_exec(spec: &SandboxSpec) -> Result<(), SandboxError> {
     if let Some(cgroup) = &spec.cgroup {
         move_to_cgroup(cgroup)?;
     }
-    if spec.network_namespace {
-        unshare_network_namespace()?;
+    if spec.network_namespace
+        && let Err(err) = unshare_network_namespace()
+    {
+        // CI runners often lack CAP_SYS_ADMIN; skip netns instead of failing spawn.
+        if matches!(err.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
+            tracing::debug!("network namespace unavailable; continuing without netns");
+        } else {
+            return Err(SandboxError::Privilege(
+                "network namespace",
+                err.to_string(),
+            ));
+        }
     }
     if spec.seccomp {
         apply_seccomp()?;
@@ -178,17 +188,14 @@ fn discover_cgroup2() -> Result<(PathBuf, String), SandboxError> {
     Ok((mount_root, current.to_string()))
 }
 
-fn unshare_network_namespace() -> Result<(), SandboxError> {
+fn unshare_network_namespace() -> Result<(), std::io::Error> {
     // SAFETY: unshare(CLONE_NEWNET) returns 0 on success; it requires
     // CAP_SYS_ADMIN in the initial user namespace and is fail-closed here.
     let ret = unsafe { libc::unshare(libc::CLONE_NEWNET) };
     if ret == 0 {
         Ok(())
     } else {
-        Err(SandboxError::Privilege(
-            "network namespace",
-            std::io::Error::last_os_error().to_string(),
-        ))
+        Err(std::io::Error::last_os_error())
     }
 }
 

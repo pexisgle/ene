@@ -101,6 +101,8 @@ pub struct HelloAck {
     pub plugin_version: String,
     pub manifest_digest: String,
     pub protocols: Negotiated,
+    #[serde(default)]
+    pub spawn_token: String,
 }
 
 /// Fatal handshake rejection (core overlap failed or digest mismatch).

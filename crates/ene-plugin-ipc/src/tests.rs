@@ -46,6 +46,9 @@ impl ToolHandler for EchoHandler {
             .unwrap_or("");
         Ok(json!({ "sha256": format!("{:x}", md5_stub(text)) }))
     }
+    fn spawn_token(&self) -> Result<String, String> {
+        Ok(SPAWN_TOKEN.to_owned())
+    }
 }
 
 fn md5_stub(text: &str) -> u64 {
@@ -55,6 +58,8 @@ fn md5_stub(text: &str) -> u64 {
     }
     h
 }
+
+const SPAWN_TOKEN: &str = "test-spawn-token";
 
 fn hello() -> HostHello {
     HostHello {
@@ -66,13 +71,22 @@ fn hello() -> HostHello {
     }
 }
 
+fn spawn_echo_plugin(plugin_side: UnixStream) -> tokio::task::JoinHandle<Result<(), IpcError>> {
+    tokio::spawn(async move { serve_plugin(plugin_side, EchoHandler).await })
+}
+
 #[tokio::test]
 async fn ping_and_tool_call_roundtrip() {
     let (host_side, plugin_side) = UnixStream::pair().unwrap();
-    let plugin = tokio::spawn(async move { serve_plugin(plugin_side, EchoHandler).await });
-    let mut host = HostConn::handshake(host_side, hello(), &[ProtoId::Core, ProtoId::Tool])
-        .await
-        .unwrap();
+    let plugin = spawn_echo_plugin(plugin_side);
+    let mut host = HostConn::handshake(
+        host_side,
+        hello(),
+        &[ProtoId::Core, ProtoId::Tool],
+        SPAWN_TOKEN,
+    )
+    .await
+    .unwrap();
     host.ping().await.unwrap();
     let specs = host.list_tools().await.unwrap();
     assert_eq!(specs[0].name, "utility.hash");
@@ -94,10 +108,10 @@ async fn ping_and_tool_call_roundtrip() {
 #[tokio::test]
 async fn tool_face_disabled_when_manifest_omits_it() {
     let (host_side, plugin_side) = UnixStream::pair().unwrap();
-    let plugin = tokio::spawn(async move { serve_plugin(plugin_side, EchoHandler).await });
+    let plugin = spawn_echo_plugin(plugin_side);
     let mut hello = hello();
     hello.declared_protocols = vec![ProtoId::Core];
-    let mut host = HostConn::handshake(host_side, hello, &[ProtoId::Core])
+    let mut host = HostConn::handshake(host_side, hello, &[ProtoId::Core], SPAWN_TOKEN)
         .await
         .unwrap();
     assert!(host.negotiated().tool.is_none());
@@ -121,14 +135,35 @@ async fn core_range_mismatch_rejects() {
         declared_protocols: vec![ProtoId::Core, ProtoId::Tool],
     };
     let (host_side, plugin_side) = UnixStream::pair().unwrap();
-    let plugin = tokio::spawn(async move { serve_plugin(plugin_side, EchoHandler).await });
-    let err = HostConn::handshake(host_side, hello, &[ProtoId::Core, ProtoId::Tool])
-        .await
-        .unwrap_err();
+    let plugin = spawn_echo_plugin(plugin_side);
+    let err = HostConn::handshake(
+        host_side,
+        hello,
+        &[ProtoId::Core, ProtoId::Tool],
+        SPAWN_TOKEN,
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(
         err,
         IpcError::Rejected(_) | IpcError::CoreIncompatible
     ));
+    drop(plugin);
+}
+
+#[tokio::test]
+async fn spawn_token_mismatch_rejects() {
+    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let plugin = spawn_echo_plugin(plugin_side);
+    let err = HostConn::handshake(
+        host_side,
+        hello(),
+        &[ProtoId::Core, ProtoId::Tool],
+        "wrong-token",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, IpcError::DigestMismatch));
     drop(plugin);
 }
 
@@ -140,10 +175,15 @@ fn record_baseline(name: &str, body: impl AsRef<[u8]>) {
 #[tokio::test]
 async fn ipc_baseline_ping_is_measurable() {
     let (host_side, plugin_side) = UnixStream::pair().unwrap();
-    let plugin = tokio::spawn(async move { serve_plugin(plugin_side, EchoHandler).await });
-    let mut host = HostConn::handshake(host_side, hello(), &[ProtoId::Core, ProtoId::Tool])
-        .await
-        .unwrap();
+    let plugin = spawn_echo_plugin(plugin_side);
+    let mut host = HostConn::handshake(
+        host_side,
+        hello(),
+        &[ProtoId::Core, ProtoId::Tool],
+        SPAWN_TOKEN,
+    )
+    .await
+    .unwrap();
     host.ping().await.unwrap();
     const N: u32 = 50;
     let ping_started = std::time::Instant::now();

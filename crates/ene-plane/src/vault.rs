@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use zeroize::Zeroize;
 
+const MAGIC: &[u8; 4] = b"ENV1";
+const SALT_LEN: usize = 16;
+const NONCE_LEN: usize = 16;
+const TAG_LEN: usize = 32;
+
 /// Vault failures.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -19,6 +24,8 @@ pub enum VaultError {
     Integrity,
     #[error("codec: {0}")]
     Codec(String),
+    #[error("passphrase must not be empty")]
+    EmptyPassphrase,
 }
 
 /// Host-only handle. Plugins never receive the secret bytes.
@@ -30,19 +37,48 @@ pub struct InjectRef {
 /// Passphrase-derived file vault (P-907). Plaintext never leaves the host.
 pub struct Vault {
     path: PathBuf,
-    key: Mutex<[u8; 32]>,
+    passphrase: Mutex<Vec<u8>>,
 }
 
 impl Vault {
     pub fn open_file(path: impl AsRef<Path>, passphrase: &str) -> Result<Self, VaultError> {
+        if passphrase.is_empty() {
+            return Err(VaultError::EmptyPassphrase);
+        }
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let key = derive_key(passphrase);
         let vault = Self {
             path,
-            key: Mutex::new(key),
+            passphrase: Mutex::new(passphrase.as_bytes().to_vec()),
+        };
+        if vault.path.exists() {
+            drop(vault.load()?);
+        } else {
+            vault.save(&HashMap::new())?;
+        }
+        Ok(vault)
+    }
+
+    /// Open a vault using passphrase bytes from `key_path`. Creates the key
+    /// file with 32 random bytes and mode `0600` when it is missing.
+    pub fn open_or_create_keyfile(
+        vault_path: impl AsRef<Path>,
+        key_path: impl AsRef<Path>,
+    ) -> Result<Self, VaultError> {
+        let key_path = key_path.as_ref();
+        let passphrase = read_or_create_keyfile(key_path)?;
+        if passphrase.is_empty() {
+            return Err(VaultError::EmptyPassphrase);
+        }
+        let path = vault_path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let vault = Self {
+            path,
+            passphrase: Mutex::new(passphrase),
         };
         if vault.path.exists() {
             drop(vault.load()?);
@@ -85,42 +121,72 @@ impl Vault {
 
 impl Drop for Vault {
     fn drop(&mut self) {
-        self.key.lock().zeroize();
+        self.passphrase.lock().zeroize();
     }
 }
 
 impl Vault {
     fn load(&self) -> Result<HashMap<String, Vec<u8>>, VaultError> {
         let sealed = std::fs::read(&self.path)?;
-        let key = *self.key.lock();
-        let plain = open(&key, &sealed)?;
+        let passphrase = self.passphrase.lock().clone();
+        let plain = open(&passphrase, &sealed)?;
         serde_json::from_slice(&plain).map_err(|err| VaultError::Codec(err.to_string()))
     }
 
     fn save(&self, map: &HashMap<String, Vec<u8>>) -> Result<(), VaultError> {
         let plain = serde_json::to_vec(map).map_err(|err| VaultError::Codec(err.to_string()))?;
-        let key = *self.key.lock();
-        let sealed = seal(&key, &plain)?;
-        let mut file = std::fs::File::create(&self.path)?;
+        let passphrase = self.passphrase.lock().clone();
+        let sealed = seal(&passphrase, &plain)?;
+        let tmp = self.path.with_extension("tmp");
+        let mut file = std::fs::File::create(&tmp)?;
         file.write_all(&sealed)?;
+        file.sync_all()?;
+        std::fs::rename(tmp, &self.path)?;
         Ok(())
     }
 }
 
-fn derive_key(passphrase: &str) -> [u8; 32] {
-    blake3::derive_key("ene-vault/v1", passphrase.as_bytes())
+fn read_or_create_keyfile(path: &Path) -> Result<Vec<u8>, VaultError> {
+    if path.exists() {
+        return std::fs::read(path).map_err(VaultError::from);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut bytes = [0_u8; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    std::fs::write(path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(bytes.to_vec())
 }
 
-fn random_nonce() -> Result<[u8; 16], VaultError> {
-    let mut buf = [0_u8; 16];
+fn derive_stream_key(passphrase: &[u8], salt: &[u8; SALT_LEN]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(passphrase);
+    hasher.update(salt);
+    *hasher.finalize().as_bytes()
+}
+
+fn random_bytes(len: usize) -> Result<Vec<u8>, VaultError> {
+    let mut buf = vec![0_u8; len];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
     Ok(buf)
 }
 
-fn seal(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, VaultError> {
-    let nonce = random_nonce()?;
+fn seal(passphrase: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, VaultError> {
+    let salt: [u8; SALT_LEN] = random_bytes(SALT_LEN)?
+        .try_into()
+        .map_err(|_| VaultError::Codec("invalid salt length".to_owned()))?;
+    let nonce: [u8; NONCE_LEN] = random_bytes(NONCE_LEN)?
+        .try_into()
+        .map_err(|_| VaultError::Codec("invalid nonce length".to_owned()))?;
+    let stream_key = derive_stream_key(passphrase, &salt);
     let mut hasher = blake3::Hasher::new_derive_key("ene-vault/stream");
-    hasher.update(key);
+    hasher.update(&stream_key);
     hasher.update(&nonce);
     let mut keystream = vec![0_u8; plaintext.len()];
     hasher.finalize_xof().fill(&mut keystream);
@@ -129,33 +195,41 @@ fn seal(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, VaultError> {
         *dst ^= src;
     }
     let mut mac = blake3::Hasher::new_derive_key("ene-vault/mac");
-    mac.update(key);
+    mac.update(&stream_key);
     mac.update(&nonce);
     mac.update(&ct);
     let tag: Hash = mac.finalize();
-    let mut out = Vec::with_capacity(16 + ct.len() + 32);
+    let mut out = Vec::with_capacity(MAGIC.len() + SALT_LEN + NONCE_LEN + ct.len() + TAG_LEN);
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&salt);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ct);
     out.extend_from_slice(tag.as_bytes());
     Ok(out)
 }
 
-fn open(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>, VaultError> {
-    if sealed.len() < 48 {
+fn open(passphrase: &[u8], sealed: &[u8]) -> Result<Vec<u8>, VaultError> {
+    if sealed.len() < MAGIC.len() + SALT_LEN + NONCE_LEN + TAG_LEN {
         return Err(VaultError::Integrity);
     }
-    let nonce = &sealed[..16];
-    let tag = &sealed[sealed.len() - 32..];
-    let ct = &sealed[16..sealed.len() - 32];
+    if &sealed[..MAGIC.len()] != MAGIC {
+        return Err(VaultError::Integrity);
+    }
+    let salt = &sealed[MAGIC.len()..MAGIC.len() + SALT_LEN];
+    let nonce = &sealed[MAGIC.len() + SALT_LEN..MAGIC.len() + SALT_LEN + NONCE_LEN];
+    let tag = &sealed[sealed.len() - TAG_LEN..];
+    let ct = &sealed[MAGIC.len() + SALT_LEN + NONCE_LEN..sealed.len() - TAG_LEN];
+    let salt_arr: [u8; SALT_LEN] = salt.try_into().map_err(|_| VaultError::Integrity)?;
+    let stream_key = derive_stream_key(passphrase, &salt_arr);
     let mut mac = blake3::Hasher::new_derive_key("ene-vault/mac");
-    mac.update(key);
+    mac.update(&stream_key);
     mac.update(nonce);
     mac.update(ct);
-    if mac.finalize().as_bytes() != tag {
+    if !constant_time_eq(mac.finalize().as_bytes(), tag) {
         return Err(VaultError::Integrity);
     }
     let mut hasher = blake3::Hasher::new_derive_key("ene-vault/stream");
-    hasher.update(key);
+    hasher.update(&stream_key);
     hasher.update(nonce);
     let mut keystream = vec![0_u8; ct.len()];
     hasher.finalize_xof().fill(&mut keystream);
@@ -164,4 +238,15 @@ fn open(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>, VaultError> {
         *dst ^= src;
     }
     Ok(plain)
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0_u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
 }

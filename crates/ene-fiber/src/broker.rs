@@ -2,7 +2,7 @@ use crate::fiber::FiberUid;
 use crate::sidecar::{self, LiveSidecar, SidecarHealth, SidecarId, SidecarRequest};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 /// Broker denial or path escape.
@@ -32,6 +32,98 @@ pub enum BrokerError {
 pub struct Grant {
     pub uid: FiberUid,
     pub op: String,
+}
+
+/// Resolve `path` under `workspace`. Parent directories are created only when
+/// `create_parent` is true and the parent lies inside the canonical workspace.
+///
+/// # Errors
+///
+/// Returns [`BrokerError::PathEscape`] when the resolved path would leave the
+/// workspace, and [`BrokerError::Io`] on filesystem failures.
+pub fn confine_path(
+    workspace: &Path,
+    path: &Path,
+    create_parent: bool,
+) -> Result<PathBuf, BrokerError> {
+    let base = workspace.canonicalize()?;
+    let requested = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    let file_name = requested
+        .file_name()
+        .ok_or_else(|| BrokerError::PathEscape(requested.display().to_string()))?;
+    if file_name == Component::CurDir.as_os_str()
+        || file_name == Component::ParentDir.as_os_str()
+        || file_name.to_string_lossy().contains('/')
+        || file_name.to_string_lossy().contains('\\')
+    {
+        return Err(BrokerError::PathEscape(requested.display().to_string()));
+    }
+    let parent = requested
+        .parent()
+        .ok_or_else(|| BrokerError::PathEscape(requested.display().to_string()))?;
+    let canonical_parent = canonicalize_parent(&base, parent, create_parent)?;
+    if !canonical_parent.starts_with(&base) {
+        return Err(BrokerError::PathEscape(requested.display().to_string()));
+    }
+    let resolved = canonical_parent.join(file_name);
+    if resolved.exists() {
+        let canonical = resolved.canonicalize()?;
+        if !canonical.starts_with(&base) {
+            return Err(BrokerError::PathEscape(canonical.display().to_string()));
+        }
+        return Ok(canonical);
+    }
+    Ok(resolved)
+}
+
+fn canonicalize_parent(
+    base: &Path,
+    parent: &Path,
+    create_parent: bool,
+) -> Result<PathBuf, BrokerError> {
+    if parent.exists() {
+        return parent
+            .canonicalize()
+            .map_err(|_| BrokerError::PathEscape(parent.display().to_string()));
+    }
+    if !create_parent {
+        return Err(BrokerError::PathEscape(parent.display().to_string()));
+    }
+    let mut existing = parent.to_path_buf();
+    let mut missing: Vec<PathBuf> = Vec::new();
+    while !existing.exists() {
+        missing.push(existing.clone());
+        let Some(next) = existing.parent() else {
+            return Err(BrokerError::PathEscape(parent.display().to_string()));
+        };
+        existing = next.to_path_buf();
+    }
+    let anchor = existing.canonicalize()?;
+    if !anchor.starts_with(base) {
+        return Err(BrokerError::PathEscape(parent.display().to_string()));
+    }
+    missing.reverse();
+    let mut current = anchor;
+    for segment in missing {
+        let Some(name) = segment.file_name() else {
+            return Err(BrokerError::PathEscape(parent.display().to_string()));
+        };
+        if name == Component::ParentDir.as_os_str() || name == Component::CurDir.as_os_str() {
+            return Err(BrokerError::PathEscape(parent.display().to_string()));
+        }
+        current = current.join(name);
+        if !current.starts_with(base) {
+            return Err(BrokerError::PathEscape(parent.display().to_string()));
+        }
+        if !current.exists() {
+            std::fs::create_dir(&current)?;
+        }
+    }
+    Ok(current)
 }
 
 /// Minimal fs/net/sidecar broker. Grants are per-fiber; undeclared ops are denied (I-48).
@@ -85,13 +177,13 @@ impl Broker {
 
     pub fn fs_read(&self, uid: FiberUid, path: &Path) -> Result<String, BrokerError> {
         self.require(uid, "fs.read")?;
-        let resolved = self.confine(path)?;
+        let resolved = confine_path(&self.workspace, path, false)?;
         std::fs::read_to_string(resolved).map_err(BrokerError::from)
     }
 
     pub fn fs_write(&self, uid: FiberUid, path: &Path, text: &str) -> Result<(), BrokerError> {
         self.require(uid, "fs.write")?;
-        let resolved = self.confine(path)?;
+        let resolved = confine_path(&self.workspace, path, true)?;
         std::fs::write(resolved, text).map_err(BrokerError::from)
     }
 
@@ -182,24 +274,6 @@ impl Broker {
                 uid: uid.to_string(),
                 op: op.to_owned(),
             })
-        }
-    }
-
-    fn confine(&self, path: &Path) -> Result<PathBuf, BrokerError> {
-        let requested = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.workspace.join(path)
-        };
-        let base = self
-            .workspace
-            .canonicalize()
-            .unwrap_or_else(|_| self.workspace.clone());
-        let resolved = requested.canonicalize().unwrap_or(requested);
-        if resolved.starts_with(&base) {
-            Ok(resolved)
-        } else {
-            Err(BrokerError::PathEscape(resolved.display().to_string()))
         }
     }
 }

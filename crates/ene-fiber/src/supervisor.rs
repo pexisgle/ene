@@ -6,9 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ene_plugin_ipc::{BuiltinKind, HostConn, ToolCall};
-use ene_registry::{
-    Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, builtin_digest, definitions_for,
-};
+use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for};
 use parking_lot::Mutex;
 use serde_json::Value;
 use thiserror::Error;
@@ -47,6 +45,7 @@ impl Default for CircuitBreakerConfig {
 
 struct SupervisorInner {
     fibers: Mutex<HashMap<String, Fiber>>,
+    profile_rows: Mutex<HashMap<String, ProfileRow>>,
     children: Mutex<HashMap<String, Child>>,
     sessions: Mutex<HashMap<String, Arc<PluginSession>>>,
     registry: Arc<ToolRegistry>,
@@ -182,6 +181,7 @@ impl Supervisor {
         Self {
             inner: Arc::new(SupervisorInner {
                 fibers: Mutex::new(HashMap::new()),
+                profile_rows: Mutex::new(HashMap::new()),
                 children: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
                 broker: Mutex::new(Broker::new(workspace.clone())),
@@ -342,6 +342,10 @@ impl Supervisor {
                 .record_failure(&row.row_id, &row.plugin, self.inner.circuit_breaker);
         } else {
             self.inner.reset_failures(&row.row_id);
+            self.inner
+                .profile_rows
+                .lock()
+                .insert(row.row_id.clone(), row.clone());
         }
         result
     }
@@ -373,6 +377,10 @@ impl Supervisor {
         finish_active(&mut fiber);
         let uid = fiber.uid;
         self.inner.fibers.lock().insert(row.row_id.clone(), fiber);
+        self.inner
+            .profile_rows
+            .lock()
+            .insert(row.row_id.clone(), row.clone());
         Ok(uid)
     }
 
@@ -388,8 +396,9 @@ impl Supervisor {
         if row.sandbox_required && !ene_sandbox::supported() {
             return Err(SupervisorError::SandboxRequired);
         }
-        let (plugin_id, digest) = resolve_plugin_meta(&row.plugin)
+        let plugin_id = resolve_plugin_id(&row.plugin)
             .ok_or_else(|| SupervisorError::UnknownPlugin(row.plugin.clone()))?;
+        let digest = crate::spawn::file_digest(binary)?;
         let mut fiber = Fiber::new(&row.row_id, &row.plugin);
         fiber.requires.clone_from(&row.requires);
         fiber.sandbox_required = row.sandbox_required;
@@ -402,7 +411,6 @@ impl Supervisor {
             row_id: &row.row_id,
             sandbox_required: row.sandbox_required,
             temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row.row_id),
-            workspace: &self.inner.workspace,
         })
         .await
         {
@@ -457,12 +465,25 @@ impl Supervisor {
         let source = ToolSource::Plugin {
             plugin_id: plugin_id.to_owned(),
         };
-        for spec in tools {
-            let def = ToolDefinition::from_wire(spec, source.clone());
-            fiber.push_effect(Effect::RegisterTool {
-                name: def.name.clone(),
-            });
-            self.inner.registry.register_with(def, Arc::clone(&invoke));
+        if let Some(kind) = plugin_kind(&row.plugin) {
+            for def in definitions_for(kind) {
+                fiber.push_effect(Effect::RegisterTool {
+                    name: def.name.clone(),
+                });
+                self.inner.registry.register_with(def, Arc::clone(&invoke));
+            }
+        } else if row.plugin == "tool.dummy" {
+            let allowed: Vec<_> = tools
+                .into_iter()
+                .filter(|spec| spec.name == "dummy.ping" && spec.side_effects.is_empty())
+                .collect();
+            for spec in allowed {
+                let def = ToolDefinition::from_wire(spec, source.clone());
+                fiber.push_effect(Effect::RegisterTool {
+                    name: def.name.clone(),
+                });
+                self.inner.registry.register_with(def, Arc::clone(&invoke));
+            }
         }
         {
             let mut broker = self.inner.broker.lock();
@@ -510,6 +531,11 @@ impl Supervisor {
     }
 
     #[must_use]
+    pub fn profile_row(&self, row_id: &str) -> Option<ProfileRow> {
+        self.inner.profile_rows.lock().get(row_id).cloned()
+    }
+
+    #[must_use]
     pub fn active_row_ids(&self) -> Vec<String> {
         self.inner
             .fibers
@@ -553,19 +579,23 @@ impl Drop for Supervisor {
     }
 }
 
-fn resolve_plugin_meta(plugin: &str) -> Option<(String, String)> {
+fn resolve_plugin_id(plugin: &str) -> Option<String> {
     if let Some(kind) = plugin_kind(plugin) {
-        return Some((kind.plugin_id().to_owned(), builtin_digest(kind)));
+        return Some(kind.plugin_id().to_owned());
     }
     if plugin == "tool.dummy" {
-        return Some((plugin.to_owned(), manifest_digest(plugin)));
+        return Some(plugin.to_owned());
     }
     None
 }
 
-#[must_use]
-pub fn manifest_digest(plugin_id: &str) -> String {
-    format!("sha256:{}", blake3::hash(plugin_id.as_bytes()).to_hex())
+/// BLAKE3 digest of a plugin script or binary (`blake3:<hex>`).
+///
+/// # Errors
+///
+/// Returns [`SupervisorError::Io`] when the file cannot be read.
+pub fn manifest_digest(path: &Path) -> Result<String, SupervisorError> {
+    crate::spawn::file_digest(path)
 }
 
 fn finish_active(fiber: &mut Fiber) {

@@ -41,6 +41,13 @@ impl PopupDecision {
 #[async_trait]
 pub trait PopupSink: Send + Sync {
     async fn ask(&self, req: &AuthzRequest) -> PopupDecision;
+
+    async fn ask_timed(&self, req: &AuthzRequest, timeout: Duration) -> PopupDecision {
+        match tokio::time::timeout(timeout, self.ask(req)).await {
+            Ok(decision) => decision,
+            Err(_) => PopupDecision::Deny,
+        }
+    }
 }
 
 /// Predetermined answers for tests. Exhaustion means timeout/deny.
@@ -128,6 +135,10 @@ impl PendingPopup {
         }
         Ok(())
     }
+
+    pub fn cancel_timed_out(&self, id: &str) {
+        self.inner.lock().remove(id);
+    }
 }
 
 impl Default for PendingPopup {
@@ -150,21 +161,44 @@ impl PopupSink for PendingPopup {
         self.inner
             .lock()
             .insert(id.clone(), PendingSlot { view, tx: Some(tx) });
-        let outcome = rx.await.unwrap_or(PopupDecision::Deny);
+        let outcome = match rx.await {
+            Ok(decision) => decision,
+            Err(_) => PopupDecision::Deny,
+        };
         self.inner.lock().remove(&id);
         self.resolved.lock().insert(id);
         outcome
     }
+
+    async fn ask_timed(&self, req: &AuthzRequest, timeout: Duration) -> PopupDecision {
+        let id = Uuid::now_v7().to_string();
+        let (tx, rx) = oneshot::channel();
+        let view = PendingApproval {
+            id: id.clone(),
+            tool: req.tool.clone(),
+            target: req.target.clone(),
+            side_effects: req.side_effects.clone(),
+        };
+        self.inner
+            .lock()
+            .insert(id.clone(), PendingSlot { view, tx: Some(tx) });
+        let decision = if let Ok(Ok(decision)) = tokio::time::timeout(timeout, rx).await {
+            decision
+        } else {
+            self.cancel_timed_out(&id);
+            PopupDecision::Deny
+        };
+        self.resolved.lock().insert(id);
+        decision
+    }
 }
 
 /// Wait up to `timeout` for a popup. Timeout is deny.
+#[expect(dead_code, reason = "public helper retained for external callers")]
 pub async fn ask_with_timeout(
     sink: &dyn PopupSink,
     req: &AuthzRequest,
     timeout: Duration,
 ) -> PopupDecision {
-    match tokio::time::timeout(timeout, sink.ask(req)).await {
-        Ok(decision) => decision,
-        Err(_) => PopupDecision::Deny,
-    }
+    sink.ask_timed(req, timeout).await
 }

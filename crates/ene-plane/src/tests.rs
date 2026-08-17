@@ -1,7 +1,7 @@
 use crate::{
     AiJudgement, ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, AuthzRequest,
-    PolicyDecision, PolicyFile, PolicyRule, PopupDecision, Risk, ScriptedAi, ScriptedPopup,
-    Sensitivity, Vault,
+    PolicyDecision, PolicyFile, PolicyRule, PopupDecision, PopupSettings, Risk, ScriptedAi,
+    ScriptedPopup, Sensitivity, Vault,
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -181,4 +181,74 @@ fn exec_is_higher_risk_than_workspace_fs_write() {
 fn risk_screenshot_is_medium_with_empty_side_effects() {
     let classified = req("app.screenshot", &[], Sensitivity::High, true);
     assert_eq!(Risk::classify(&classified), Risk::Medium);
+}
+
+#[test]
+fn risk_fs_read_outside_workspace_is_medium() {
+    let outside = req("fs.read", &[], Sensitivity::None, false);
+    assert_eq!(Risk::classify(&outside), Risk::Medium);
+    let inside = req("fs.read", &[], Sensitivity::None, true);
+    assert_eq!(Risk::classify(&inside), Risk::None);
+}
+
+#[tokio::test]
+async fn allow_and_remember_appends_policy_rule() {
+    let popup = Arc::new(ScriptedPopup::new([PopupDecision::AllowAndRemember]));
+    let (_dir, plane) = make_plane(popup, None);
+    plane
+        .authorize(&req("fs.write", &["fs.write"], Sensitivity::None, true))
+        .await
+        .unwrap();
+    assert_eq!(plane.policy().rules.len(), 1);
+    assert_eq!(plane.policy().rules[0].tool, "fs.write");
+    assert_eq!(plane.policy().rules[0].scope.as_deref(), Some("workspace"));
+}
+
+#[test]
+fn vault_rejects_empty_passphrase() {
+    let dir = TempDir::new().unwrap();
+    assert!(matches!(
+        Vault::open_file(dir.path().join("vault.bin"), ""),
+        Err(crate::VaultError::EmptyPassphrase)
+    ));
+}
+
+#[test]
+fn vault_open_or_create_keyfile_roundtrip() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::open_or_create_keyfile(dir.path().join("vault.bin"), dir.path().join("key"))
+        .unwrap();
+    let inject = vault.put("demo", b"secret-bytes").unwrap();
+    assert_eq!(vault.inject(&inject).unwrap(), b"secret-bytes");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.path().join("key"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+}
+
+#[tokio::test]
+async fn pending_popup_timeout_drops_stale_entry() {
+    let popup = Arc::new(crate::PendingPopup::new());
+    let plane = ApprovalPlane::new(
+        ApprovalSettings {
+            popup: PopupSettings { timeout_ms: 50 },
+            ..ApprovalSettings::default()
+        },
+        AuditLog::open(tempfile::TempDir::new().unwrap().path().join("audit.db")).unwrap(),
+        Arc::clone(&popup) as Arc<dyn crate::PopupSink>,
+        None,
+    );
+    let request = req("fs.write", &["fs.write"], Sensitivity::None, true);
+    let authorize = plane.authorize(&request);
+    let err = tokio::time::timeout(std::time::Duration::from_secs(1), authorize)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(err, crate::PlaneError::Denied { .. }));
+    assert!(popup.list().is_empty());
 }

@@ -68,11 +68,16 @@ pub(crate) fn resolve_binary(
         }
     }
     if !request.bundled_name.is_empty() {
-        let bundled = PathBuf::from(&request.bundled_name);
-        deny_remote(&bundled)?;
+        reject_unsafe_bundled_name(&request.bundled_name)?;
         let path = bundled_dir.join(&request.bundled_name);
+        deny_remote(&path)?;
         if path.is_file() {
-            return Ok(path);
+            let canonical_bundled = bundled_dir.canonicalize().map_err(BrokerError::from)?;
+            let canonical = path.canonicalize().map_err(BrokerError::from)?;
+            if !canonical.starts_with(&canonical_bundled) {
+                return Err(BrokerError::SidecarBinaryNotFound);
+            }
+            return Ok(canonical);
         }
     }
     Err(BrokerError::SidecarBinaryNotFound)
@@ -83,19 +88,39 @@ pub(crate) fn spawn_child(
     binary: &Path,
     args: &[String],
 ) -> Result<(LiveSidecar, SidecarId), BrokerError> {
-    let port = allocate_loopback_port()?;
+    // The listener is dropped before the child binds, so a peer could grab the
+    // port first. Sidecars should bind with SO_REUSEADDR; health polling verifies
+    // the expected child still owns the port after spawn.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
     let args = with_port(args, port);
-    let mut child = Command::new(binary)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let mut child = sidecar_command(binary, &args).spawn()?;
+    drop(listener);
     if !wait_healthy(port, &mut child) {
         terminate(&mut child);
         return Err(BrokerError::SidecarUnhealthy);
     }
+    if process_exited(&mut child) {
+        terminate(&mut child);
+        return Err(BrokerError::SidecarUnhealthy);
+    }
     Ok((LiveSidecar { uid, child, port }, SidecarId::new()))
+}
+
+fn sidecar_command(binary: &Path, args: &[String]) -> Command {
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
+    cmd.env_clear();
+    for key in ["PATH", "HOME", "LANG", "TMPDIR"] {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+    cmd
 }
 
 pub(crate) fn health_of(live: &mut LiveSidecar) -> SidecarHealth {
@@ -118,20 +143,24 @@ pub(crate) fn terminate(child: &mut Child) {
     drop(child.wait());
 }
 
-fn deny_remote(path: &Path) -> Result<(), BrokerError> {
-    let raw = path.to_string_lossy();
-    let lower = raw.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        return Err(BrokerError::RemoteBinaryForbidden);
+fn reject_unsafe_bundled_name(name: &str) -> Result<(), BrokerError> {
+    if name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || Path::new(name).is_absolute()
+    {
+        return Err(BrokerError::SidecarBinaryNotFound);
     }
     Ok(())
 }
 
-fn allocate_loopback_port() -> Result<u16, BrokerError> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+fn deny_remote(path: &Path) -> Result<(), BrokerError> {
+    let raw = path.to_string_lossy();
+    let lower = raw.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("file:") {
+        return Err(BrokerError::RemoteBinaryForbidden);
+    }
+    Ok(())
 }
 
 fn with_port(args: &[String], port: u16) -> Vec<String> {

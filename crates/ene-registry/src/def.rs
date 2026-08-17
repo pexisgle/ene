@@ -1,6 +1,7 @@
 use ene_plane::Sensitivity;
 use ene_plugin_ipc::ToolSpecWire;
-use serde_json::Value;
+
+use crate::builtins::host_spec_for;
 
 /// Who supplies the tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,8 +16,8 @@ pub enum ToolSource {
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
-    pub parameters: Value,
-    pub output: Value,
+    pub parameters: serde_json::Value,
+    pub output: serde_json::Value,
     pub side_effects: Vec<String>,
     pub source: ToolSource,
     pub timeout_ms: Option<u32>,
@@ -26,6 +27,18 @@ pub struct ToolDefinition {
 impl ToolDefinition {
     #[must_use]
     pub fn from_wire(spec: ToolSpecWire, source: ToolSource) -> Self {
+        if let Some(host) = host_spec_for(&spec.name) {
+            return Self {
+                name: spec.name,
+                description: host.description,
+                parameters: host.parameters,
+                output: host.output,
+                side_effects: host.side_effects,
+                source,
+                timeout_ms: None,
+                sensitivity: Sensitivity::None,
+            };
+        }
         Self {
             name: spec.name,
             description: spec.description,
@@ -44,7 +57,7 @@ impl ToolDefinition {
     }
 
     #[must_use]
-    pub fn model_schema(&self) -> Value {
+    pub fn model_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "name": self.name,
             "description": self.description,

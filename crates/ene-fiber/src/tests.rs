@@ -1,6 +1,6 @@
 use crate::{
     Broker, BrokerError, CircuitBreakerConfig, FiberState, FiberUid, ProfileRow, SidecarRequest,
-    Supervisor, discover_plugin_script, manifest_digest,
+    Supervisor, confine_path, discover_plugin_script, manifest_digest,
 };
 use ene_registry::{Layer, ToolRegistry};
 use serde_json::json;
@@ -71,7 +71,8 @@ async fn disabling_one_row_leaves_the_other_active() {
     let remaining = sup.fiber("r-web").unwrap();
     assert_eq!(remaining.uid, uid_web);
     assert_eq!(remaining.state, FiberState::Active);
-    assert!(sup.surface_has_tool("web.fetch"));
+    assert!(sup.registry().get("web.fetch").is_some());
+    assert!(!sup.surface_has_tool("web.fetch"));
     assert!(!sup.surface_has_tool("utility.hash"));
 }
 
@@ -108,7 +109,8 @@ async fn apply_profile_unloads_removed_rows_and_keeps_uid() {
     let util_uid = sup.activate(&row("r-util", "tool.utility", &[])).unwrap();
     sup.activate(&row("r-web", "tool.web", &[])).unwrap();
     assert!(sup.surface_has_tool("utility.hash"));
-    assert!(sup.surface_has_tool("web.fetch"));
+    assert!(sup.registry().get("web.fetch").is_some());
+    assert!(!sup.surface_has_tool("web.fetch"));
 
     let report = sup
         .apply_profile(&[row("r-util", "tool.utility", &[])])
@@ -120,6 +122,7 @@ async fn apply_profile_unloads_removed_rows_and_keeps_uid() {
     assert_eq!(util.uid, util_uid);
     assert_eq!(util.state, FiberState::Active);
     assert!(sup.surface_has_tool("utility.hash"));
+    assert!(sup.registry().get("web.fetch").is_none());
     assert!(!sup.surface_has_tool("web.fetch"));
     assert!(sup.fiber("r-web").is_none());
 }
@@ -145,7 +148,8 @@ async fn requires_unsatisfied_row_waits_without_error() {
         ])
         .await;
     assert!(report.activated.contains(&"r-web".to_owned()));
-    assert!(sup.surface_has_tool("web.fetch"));
+    assert!(sup.registry().get("web.fetch").is_some());
+    assert!(!sup.surface_has_tool("web.fetch"));
 }
 
 #[tokio::test]
@@ -175,14 +179,15 @@ async fn circuit_breaker_opens_after_spawn_failures() {
         CircuitBreakerConfig { max_failures: 3 },
     );
     let row = row("r-dummy", "tool.dummy", &[]);
-    let missing = dir.path().join("missing-plugin");
+    let bad = dir.path().join("bad-plugin.py");
+    std::fs::write(&bad, b"not a plugin").unwrap();
     for _ in 0..3 {
-        drop(sup.activate_process(&row, &missing).await);
+        drop(sup.activate_process(&row, &bad).await);
     }
     assert_eq!(sup.failure_count("r-dummy"), 3);
     assert!(sup.circuit_open("r-dummy"));
     assert!(!sup.surface_has_tool("dummy.ping"));
-    let err = sup.activate_process(&row, &missing).await.unwrap_err();
+    let err = sup.activate_process(&row, &bad).await.unwrap_err();
     assert!(matches!(
         err,
         crate::supervisor::SupervisorError::CircuitOpen(_)
@@ -191,9 +196,10 @@ async fn circuit_breaker_opens_after_spawn_failures() {
 
 #[test]
 fn manifest_digest_matches_python_plugin_contract() {
-    let digest = manifest_digest("tool.dummy");
-    assert!(digest.starts_with("sha256:"));
-    assert_eq!(digest.len(), "sha256:".len() + 64);
+    let path = dummy_plugin_path();
+    let digest = manifest_digest(&path).unwrap();
+    assert!(digest.starts_with("blake3:"));
+    assert_eq!(digest.len(), "blake3:".len() + 64);
 }
 
 fn dummy_plugin_path() -> PathBuf {
@@ -237,6 +243,40 @@ async fn dummy_plugin_handshake_without_provider_subprotocol() {
 }
 
 #[test]
+fn broker_write_via_parent_escape_is_path_escape() {
+    let dir = TempDir::new().unwrap();
+    let mut broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    broker.grant(uid, "fs.write");
+    assert!(matches!(
+        broker.fs_write(uid, PathBuf::from("../outside.txt").as_path(), "nope"),
+        Err(BrokerError::PathEscape(_))
+    ));
+}
+
+#[test]
+fn broker_write_inside_workspace_succeeds() {
+    let dir = TempDir::new().unwrap();
+    let mut broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    broker.grant(uid, "fs.write");
+    broker
+        .fs_write(uid, PathBuf::from("inside.txt").as_path(), "ok")
+        .unwrap();
+    let body = std::fs::read_to_string(dir.path().join("inside.txt")).unwrap();
+    assert_eq!(body, "ok");
+}
+
+#[test]
+fn confine_path_rejects_workspace_parent_escape_for_new_files() {
+    let dir = TempDir::new().unwrap();
+    assert!(matches!(
+        confine_path(dir.path(), PathBuf::from("../escape.txt").as_path(), true),
+        Err(BrokerError::PathEscape(_))
+    ));
+}
+
+#[test]
 fn sidecar_binary_resolves_config_then_cas_then_bundled_and_rejects_urls() {
     let dir = TempDir::new().unwrap();
     let bundled_dir = dir.path().join("bundled");
@@ -273,7 +313,7 @@ fn sidecar_binary_resolves_config_then_cas_then_bundled_and_rejects_urls() {
     };
     assert_eq!(
         broker.resolve_sidecar_binary(&bundled_only).unwrap(),
-        bundled
+        bundled.canonicalize().unwrap()
     );
 
     let remote = SidecarRequest {
@@ -285,6 +325,28 @@ fn sidecar_binary_resolves_config_then_cas_then_bundled_and_rejects_urls() {
     assert!(matches!(
         broker.resolve_sidecar_binary(&remote),
         Err(BrokerError::RemoteBinaryForbidden)
+    ));
+
+    let file_url = SidecarRequest {
+        config_path: Some(PathBuf::from("file:///etc/passwd")),
+        cas_path: None,
+        bundled_name: String::new(),
+        args: Vec::new(),
+    };
+    assert!(matches!(
+        broker.resolve_sidecar_binary(&file_url),
+        Err(BrokerError::RemoteBinaryForbidden)
+    ));
+
+    let evil = SidecarRequest {
+        config_path: None,
+        cas_path: None,
+        bundled_name: "../evil".into(),
+        args: Vec::new(),
+    };
+    assert!(matches!(
+        broker.resolve_sidecar_binary(&evil),
+        Err(BrokerError::SidecarBinaryNotFound)
     ));
 
     let missing = SidecarRequest {

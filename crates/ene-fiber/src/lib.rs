@@ -13,7 +13,7 @@ mod sidecar;
 mod spawn;
 mod supervisor;
 
-pub use broker::{Broker, BrokerError, Grant};
+pub use broker::{Broker, BrokerError, Grant, confine_path};
 pub use fiber::{Effect, Fiber, FiberState, FiberUid};
 pub use profile::ProfileApplyReport;
 pub use sidecar::{SidecarHealth, SidecarId, SidecarRequest};

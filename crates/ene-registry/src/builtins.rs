@@ -1,20 +1,28 @@
 use crate::def::{ToolDefinition, ToolSource};
-use async_trait::async_trait;
 use ene_plugin_ipc::{BuiltinKind, IpcError, ToolHandler, ToolSpecWire, serve_from_env};
 use serde_json::{Value, json};
+use std::path::Path;
 
-/// Manifest digest stand-in for bundled harness plugins (hash of plugin id).
-#[must_use]
-pub fn builtin_digest(kind: BuiltinKind) -> String {
-    format!(
-        "sha256:{}",
-        blake3::hash(kind.plugin_id().as_bytes()).to_hex()
-    )
+/// BLAKE3 digest of a plugin binary or script file (`blake3:<hex>`).
+///
+/// # Errors
+///
+/// Returns [`IpcError::Io`] when the file cannot be read.
+pub fn file_digest(path: &Path) -> Result<String, IpcError> {
+    let bytes = std::fs::read(path).map_err(IpcError::Io)?;
+    Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+}
+
+/// Legacy alias kept for callers that still name this `builtin_digest`.
+pub fn builtin_digest(_kind: BuiltinKind) -> Result<String, IpcError> {
+    let exe = std::env::current_exe().map_err(IpcError::Io)?;
+    file_digest(&exe)
 }
 
 /// Process entry for a bundled harness plugin binary.
 pub async fn run_plugin(kind: BuiltinKind) -> Result<(), IpcError> {
-    serve_from_env(BuiltinHandler::new(kind, builtin_digest(kind))).await
+    let digest = builtin_digest(kind)?;
+    serve_from_env(BuiltinHandler::new(kind, digest)).await
 }
 
 /// Executes bundled fs/exec/web/utility tools in-process (tests) or from a plugin binary.
@@ -50,6 +58,18 @@ fn fs_read(args: &Value) -> Result<Value, String> {
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing path".to_owned())?;
+    if let Ok(workspace) = std::env::var("ENE_WORKSPACE") {
+        let root = Path::new(&workspace);
+        if path.starts_with('/') {
+            let canonical = Path::new(path)
+                .canonicalize()
+                .map_err(|err| err.to_string())?;
+            let base = root.canonicalize().map_err(|err| err.to_string())?;
+            if !canonical.starts_with(&base) {
+                return Err("path outside workspace".to_owned());
+            }
+        }
+    }
     let body = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
     Ok(json!({ "text": body }))
 }
@@ -59,12 +79,41 @@ fn fs_write(args: &Value) -> Result<Value, String> {
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing path".to_owned())?;
+    if let Ok(workspace) = std::env::var("ENE_WORKSPACE") {
+        let root = Path::new(&workspace);
+        if path.starts_with('/') {
+            let canonical = Path::new(path)
+                .canonicalize()
+                .map_err(|err| err.to_string())?;
+            let base = root.canonicalize().map_err(|err| err.to_string())?;
+            if !canonical.starts_with(&base) {
+                return Err("path outside workspace".to_owned());
+            }
+        }
+    }
     let text = args
         .get("text")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing text".to_owned())?;
     std::fs::write(path, text).map_err(|err| err.to_string())?;
     Ok(json!({ "ok": true }))
+}
+
+#[must_use]
+pub fn host_spec_for(name: &str) -> Option<ToolSpecWire> {
+    for kind in [
+        BuiltinKind::Fs,
+        BuiltinKind::Exec,
+        BuiltinKind::Web,
+        BuiltinKind::Utility,
+    ] {
+        for spec in builtin_specs(kind) {
+            if spec.name == name {
+                return Some(spec);
+            }
+        }
+    }
+    None
 }
 
 /// Specs advertised by each harness plugin.
@@ -109,7 +158,7 @@ pub fn builtin_specs(kind: ene_plugin_ipc::BuiltinKind) -> Vec<ToolSpecWire> {
             "web.fetch",
             "Fetch a URL via the host broker",
             json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"],"additionalProperties":false}),
-            Vec::new(),
+            vec!["send".to_owned()],
         )],
     }
 }
@@ -156,7 +205,7 @@ impl BuiltinHandler {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ToolHandler for BuiltinHandler {
     fn plugin_id(&self) -> &str {
         self.kind.plugin_id()

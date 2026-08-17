@@ -5,7 +5,7 @@ use ene_plane::{ApprovalPlane, AuthzRequest};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -41,6 +41,8 @@ pub enum PipelineError {
     NotOnSurface(String),
     #[error("denied {name}: {reason}")]
     Denied { name: String, reason: String },
+    #[error("path escapes workspace: {0}")]
+    PathEscape(String),
     #[error(transparent)]
     Plane(#[from] ene_plane::PlaneError),
     #[error("execute: {0}")]
@@ -121,7 +123,7 @@ impl ToolRegistry {
     pub async fn execute(
         &self,
         name: &str,
-        args: Value,
+        mut args: Value,
         layer: Layer,
     ) -> Result<Value, PipelineError> {
         let (def, invoke) = {
@@ -134,16 +136,17 @@ impl ToolRegistry {
         if layer == Layer::Surface && !def.surface_visible() {
             return Err(PipelineError::NotOnSurface(name.to_owned()));
         }
+        let workspace = self.workspace.lock().clone();
+        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+        let in_workspace = path_in_workspace(workspace.as_deref(), path);
         let plane = self.plane.lock().clone();
         if let Some(plane) = plane {
-            let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-            let workspace = self.workspace.lock().clone();
             let req = AuthzRequest {
                 tool: name.to_owned(),
                 side_effects: def.side_effects.clone(),
                 sensitivity: def.sensitivity,
                 target: path.to_owned(),
-                in_workspace: path_in_workspace(workspace.as_deref(), path),
+                in_workspace,
             };
             plane.authorize(&req).await?;
         } else if !def.side_effects.is_empty() {
@@ -151,6 +154,28 @@ impl ToolRegistry {
                 name: name.to_owned(),
                 reason: "deny-by-default until approval plane".to_owned(),
             });
+        }
+        if name == "fs.read" || name == "fs.write" {
+            let Some(root) = workspace else {
+                return Err(PipelineError::Denied {
+                    name: name.to_owned(),
+                    reason: "workspace is not configured".to_owned(),
+                });
+            };
+            let raw =
+                args.get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| PipelineError::Denied {
+                        name: name.to_owned(),
+                        reason: "missing path".to_owned(),
+                    })?;
+            let confined = confine_tool_path(&root, Path::new(raw), name == "fs.write")?;
+            if let Some(obj) = args.as_object_mut() {
+                obj.insert(
+                    "path".to_owned(),
+                    Value::String(confined.display().to_string()),
+                );
+            }
         }
         invoke
             .invoke(name, args)
@@ -172,11 +197,97 @@ fn path_in_workspace(workspace: Option<&Path>, path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
-    let requested = Path::new(path);
-    let resolved = if requested.is_absolute() {
-        requested.to_path_buf()
+    confine_tool_path(root, Path::new(path), false).is_ok()
+}
+
+fn confine_tool_path(
+    workspace: &Path,
+    path: &Path,
+    create_parent: bool,
+) -> Result<PathBuf, PipelineError> {
+    let base = workspace
+        .canonicalize()
+        .map_err(|err| PipelineError::PathEscape(err.to_string()))?;
+    let requested = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        root.join(requested)
+        base.join(path)
     };
-    resolved.starts_with(root)
+    let file_name = requested
+        .file_name()
+        .ok_or_else(|| PipelineError::PathEscape(requested.display().to_string()))?;
+    if file_name == Component::CurDir.as_os_str()
+        || file_name == Component::ParentDir.as_os_str()
+        || file_name.to_string_lossy().contains('/')
+        || file_name.to_string_lossy().contains('\\')
+    {
+        return Err(PipelineError::PathEscape(requested.display().to_string()));
+    }
+    let parent = requested
+        .parent()
+        .ok_or_else(|| PipelineError::PathEscape(requested.display().to_string()))?;
+    let canonical_parent = canonicalize_parent(&base, parent, create_parent)?;
+    if !canonical_parent.starts_with(&base) {
+        return Err(PipelineError::PathEscape(requested.display().to_string()));
+    }
+    let resolved = canonical_parent.join(file_name);
+    if resolved.exists() {
+        let canonical = resolved
+            .canonicalize()
+            .map_err(|err| PipelineError::PathEscape(err.to_string()))?;
+        if !canonical.starts_with(&base) {
+            return Err(PipelineError::PathEscape(canonical.display().to_string()));
+        }
+        return Ok(canonical);
+    }
+    Ok(resolved)
+}
+
+fn canonicalize_parent(
+    base: &Path,
+    parent: &Path,
+    create_parent: bool,
+) -> Result<PathBuf, PipelineError> {
+    if parent.exists() {
+        return parent
+            .canonicalize()
+            .map_err(|_| PipelineError::PathEscape(parent.display().to_string()));
+    }
+    if !create_parent {
+        return Err(PipelineError::PathEscape(parent.display().to_string()));
+    }
+    let mut existing = parent.to_path_buf();
+    let mut missing: Vec<PathBuf> = Vec::new();
+    while !existing.exists() {
+        missing.push(existing.clone());
+        let Some(next) = existing.parent() else {
+            return Err(PipelineError::PathEscape(parent.display().to_string()));
+        };
+        existing = next.to_path_buf();
+    }
+    let anchor = existing
+        .canonicalize()
+        .map_err(|err| PipelineError::PathEscape(err.to_string()))?;
+    if !anchor.starts_with(base) {
+        return Err(PipelineError::PathEscape(parent.display().to_string()));
+    }
+    missing.reverse();
+    let mut current = anchor;
+    for segment in missing {
+        let Some(name) = segment.file_name() else {
+            return Err(PipelineError::PathEscape(parent.display().to_string()));
+        };
+        if name == Component::ParentDir.as_os_str() || name == Component::CurDir.as_os_str() {
+            return Err(PipelineError::PathEscape(parent.display().to_string()));
+        }
+        current = current.join(name);
+        if !current.starts_with(base) {
+            return Err(PipelineError::PathEscape(parent.display().to_string()));
+        }
+        if !current.exists() {
+            std::fs::create_dir(&current)
+                .map_err(|err| PipelineError::PathEscape(err.to_string()))?;
+        }
+    }
+    Ok(current)
 }

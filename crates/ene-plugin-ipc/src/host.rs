@@ -30,6 +30,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
         mut stream: S,
         hello: HostHello,
         plugin_declared: &[ProtoId],
+        expected_spawn_token: &str,
     ) -> Result<Self, IpcError> {
         write_frame(
             &mut stream,
@@ -43,7 +44,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
         let bytes = read_frame(&mut stream, MAX_FRAME_BYTES).await?;
         match Message::decode(&bytes)? {
             Message::HelloAck { body } => {
-                validate_ack(&hello, &body, plugin_declared)?;
+                validate_ack(&hello, &body, plugin_declared, expected_spawn_token)?;
                 Ok(Self {
                     stream,
                     next_id: 1,
@@ -123,8 +124,12 @@ pub(crate) fn validate_ack(
     hello: &HostHello,
     ack: &HelloAck,
     declared: &[ProtoId],
+    expected_spawn_token: &str,
 ) -> Result<(), IpcError> {
     if ack.manifest_digest != hello.expected_digest {
+        return Err(IpcError::DigestMismatch);
+    }
+    if ack.spawn_token != expected_spawn_token {
         return Err(IpcError::DigestMismatch);
     }
     if ack.protocols.tool.is_some() && !declared.contains(&ProtoId::Tool) {

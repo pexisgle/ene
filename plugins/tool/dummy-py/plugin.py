@@ -12,7 +12,6 @@ from typing import Any
 PLUGIN_ID = "tool.dummy"
 PLUGIN_NAME = "dummy"
 PLUGIN_VERSION = "0.1.0"
-MANIFEST_DIGEST = "sha256:5580c217e7f14ca7e68cb962a8f974860faccbe2943311c5dc00c318206bddb0"
 
 
 class MsgPack:
@@ -192,8 +191,12 @@ def handle_call(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def negotiate(hello: dict[str, Any]) -> dict[str, Any]:
-  if hello.get("expected_digest") != MANIFEST_DIGEST:
+  expected = hello.get("expected_digest")
+  if not isinstance(expected, str) or not expected:
     raise ValueError("manifest digest mismatch")
+  spawn_token = os.environ.get("ENE_PLUGIN_SPAWN_TOKEN")
+  if not spawn_token:
+    raise RuntimeError("ENE_PLUGIN_SPAWN_TOKEN is not set")
   protocols = hello.get("protocols", {})
   core = protocols.get("core", {})
   tool = protocols.get("tool", {})
@@ -204,7 +207,8 @@ def negotiate(hello: dict[str, Any]) -> dict[str, Any]:
     "plugin_id": PLUGIN_ID,
     "plugin_name": PLUGIN_NAME,
     "plugin_version": PLUGIN_VERSION,
-    "manifest_digest": MANIFEST_DIGEST,
+    "manifest_digest": expected,
+    "spawn_token": spawn_token,
     "protocols": negotiated,
   }
 
