@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +25,7 @@ pub enum Decision {
 pub struct ApprovalPlane {
     settings: Mutex<ApprovalSettings>,
     policy: Mutex<PolicyFile>,
+    policy_path: Mutex<Option<PathBuf>>,
     audit: AuditLog,
     popup: Arc<dyn PopupSink>,
     ai: Option<Arc<dyn ApproveModel>>,
@@ -40,6 +42,7 @@ impl ApprovalPlane {
         Self {
             settings: Mutex::new(settings),
             policy: Mutex::new(PolicyFile::default()),
+            policy_path: Mutex::new(None),
             audit,
             popup,
             ai,
@@ -48,6 +51,18 @@ impl ApprovalPlane {
 
     pub fn set_policy(&self, policy: PolicyFile) {
         *self.policy.lock() = policy;
+    }
+
+    pub fn set_policy_path(&self, path: PathBuf) {
+        *self.policy_path.lock() = Some(path);
+    }
+
+    fn persist_policy(&self) -> Result<(), PlaneError> {
+        let Some(path) = self.policy_path.lock().clone() else {
+            return Ok(());
+        };
+        self.policy.lock().save_json(&path)?;
+        Ok(())
     }
 
     pub fn set_mode(&self, mode: ApprovalMode) -> Result<(), PlaneError> {
@@ -117,6 +132,7 @@ impl ApprovalPlane {
             }
         }
         self.policy.lock().rules.push(rule.clone());
+        self.persist_policy()?;
         self.audit.append(
             "policy",
             &json!({
@@ -197,8 +213,8 @@ impl ApprovalPlane {
     async fn popup(&self, req: &AuthzRequest) -> Result<Decision, PlaneError> {
         let timeout = Duration::from_millis(self.settings.lock().popup.timeout_ms);
         let decision = self.popup.ask_timed(req, timeout).await;
-        Ok(match decision {
-            PopupDecision::Allow => Decision::Allow,
+        match decision {
+            PopupDecision::Allow => Ok(Decision::Allow),
             PopupDecision::AllowAndRemember => {
                 let scope = req.in_workspace.then_some("workspace".to_owned());
                 self.policy.lock().rules.push(PolicyRule {
@@ -206,9 +222,10 @@ impl ApprovalPlane {
                     scope,
                     decision: PolicyDecision::Allow,
                 });
-                Decision::Allow
+                self.persist_policy()?;
+                Ok(Decision::Allow)
             }
-            PopupDecision::Deny => Decision::Deny,
-        })
+            PopupDecision::Deny => Ok(Decision::Deny),
+        }
     }
 }

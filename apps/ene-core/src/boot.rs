@@ -117,9 +117,10 @@ impl CoreDaemon {
             Arc::clone(&popup) as Arc<dyn PopupSink>,
             None,
         ));
-        let policy_path = opts.data_dir.join("policy.json");
+        let policy_path = opts.data_dir.join(&approval_settings.policy_file);
         let policy = PolicyFile::load_json(&policy_path)?;
         plane.set_policy(policy);
+        plane.set_policy_path(policy_path);
         registry.set_plane(Arc::clone(&plane));
         let vault = Vault::open_or_create_keyfile(
             opts.data_dir.join("vault.bin"),
@@ -261,6 +262,7 @@ impl CoreDaemon {
         self.store.reload_reader(&sync)?;
         self.companions.reconnect()?;
         self.work.reconnect()?;
+        self.plane.audit().reconnect()?;
         Ok(())
     }
 

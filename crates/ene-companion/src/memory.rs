@@ -491,7 +491,7 @@ pub fn apply_forget_request(
             JournalAction::UserRequest,
             &serde_json::json!({ "target": target, "mode": "confirm" }),
         )?;
-        return Ok(0);
+        return Ok(1);
     }
     if target.len() < 3 {
         return Ok(0);

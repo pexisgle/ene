@@ -204,6 +204,23 @@ async fn allow_and_remember_appends_policy_rule() {
     assert_eq!(plane.policy().rules[0].scope.as_deref(), Some("workspace"));
 }
 
+#[tokio::test]
+async fn allow_and_remember_writes_policy_file() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("policy.json");
+    let popup = Arc::new(ScriptedPopup::new([PopupDecision::AllowAndRemember]));
+    let audit = AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = ApprovalPlane::new(ApprovalSettings::default(), audit, popup, None);
+    plane.set_policy_path(path.clone());
+    plane
+        .authorize(&req("fs.write", &["fs.write"], Sensitivity::None, true))
+        .await
+        .unwrap();
+    let loaded = PolicyFile::load_json(&path).unwrap();
+    assert_eq!(loaded.rules.len(), 1);
+    assert_eq!(loaded.rules[0].tool, "fs.write");
+}
+
 #[test]
 fn vault_rejects_empty_passphrase() {
     let dir = TempDir::new().unwrap();
@@ -228,6 +245,11 @@ fn vault_open_or_create_keyfile_roundtrip() {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+        let vault_mode = std::fs::metadata(dir.path().join("vault.bin"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(vault_mode & 0o777, 0o600);
     }
 }
 

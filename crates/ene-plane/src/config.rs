@@ -7,8 +7,8 @@ ene_config::define_config!(
     pub struct ApprovalSettings {
         pub mode: ApprovalMode,
         pub popup: PopupSettings,
-        pub policy_file: String,
-        pub audit_db: String,
+        pub policy_file: String = "policy.json".to_owned(),
+        pub audit_db: String = "audit.db".to_owned(),
     }
 );
 

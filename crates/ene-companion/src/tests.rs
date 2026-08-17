@@ -241,6 +241,47 @@ fn forget_request_removes_matching_memory_and_records_journal() {
 }
 
 #[test]
+fn forget_confirm_queues_candidate_without_deleting() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "trip".into(),
+            content: "planned a trip together".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    let n = crate::memory::apply_forget_request(
+        &store,
+        soul.id,
+        "forget trip",
+        crate::config::ForgettingMode::Confirm,
+    )
+    .unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(store.list_pending_candidates(soul.id).unwrap().len(), 1);
+    let hits = store
+        .recall(
+            soul.id,
+            "trip",
+            8,
+            &Utc::now().to_rfc3339(),
+            crate::store::RecallWeights::default(),
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+}
+
+#[test]
 fn sensitive_candidate_queues_for_approval() {
     let (_dir, store) = open_store();
     let soul = store
