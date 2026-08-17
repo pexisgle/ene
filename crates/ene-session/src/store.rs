@@ -434,6 +434,9 @@ fn init_schema(conn: &Connection) -> Result<(), SessionError> {
                     supported: STORAGE_VERSION,
                 });
             }
+            if found < STORAGE_VERSION {
+                apply_migrations(conn, found)?;
+            }
         }
     }
     let check: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -441,6 +444,33 @@ fn init_schema(conn: &Connection) -> Result<(), SessionError> {
         return Err(SessionError::IntegrityCheckFailed(check));
     }
     scan_seq_gaps(conn)?;
+    Ok(())
+}
+
+fn apply_migrations(conn: &Connection, from: u32) -> Result<(), SessionError> {
+    let mut version = from;
+    while version < STORAGE_VERSION {
+        let next = version + 1;
+        match next {
+            1 => migrate_to_v1(conn)?,
+            _ => {
+                return Err(SessionError::IntegrityCheckFailed(format!(
+                    "missing migration to storage_version {next}"
+                )));
+            }
+        }
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('storage_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [next.to_string()],
+        )?;
+        version = next;
+    }
+    Ok(())
+}
+
+fn migrate_to_v1(conn: &Connection) -> Result<(), SessionError> {
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     Ok(())
 }
 

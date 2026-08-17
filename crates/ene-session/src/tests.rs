@@ -1,8 +1,8 @@
 use crate::{
     Block, ClientId, CommitResult, DisplayDepth, EventKind, EventPayload, InboxCancelReason,
     InboxClass, InboxSource, InnerAspect, NewEvent, NewSession, NewUsage, ProjectOptions,
-    ProjectedMessage, SessionCreatedBy, SessionEndReason, SessionError, SessionId, SessionKind,
-    SessionStore, SoulId, Transaction, TurnId, TurnOrigin, TurnOutcome, TurnTrigger,
+    ProjectedMessage, STORAGE_VERSION, SessionCreatedBy, SessionEndReason, SessionError, SessionId,
+    SessionKind, SessionStore, SoulId, Transaction, TurnId, TurnOrigin, TurnOutcome, TurnTrigger,
     derive_messages, hash_projected, open_turns, surface_leaks_inner, unclaimed_inbox, v1,
 };
 use tempfile::TempDir;
@@ -485,6 +485,74 @@ async fn storage_too_new_is_rejected() {
         panic!("expected storage too new")
     };
     assert!(matches!(err, SessionError::StorageTooNew { found: 99, .. }));
+}
+
+#[tokio::test]
+async fn older_storage_migrates_and_interrupts_open_work() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.db");
+    let turn = TurnId::new();
+    let (soul, session) = {
+        let store = SessionStore::open(&path, "NORMAL").await.unwrap();
+        let (soul, session) = mk_session(&store).await;
+        store
+            .commit(Transaction {
+                entries: vec![
+                    NewEvent::new(
+                        session,
+                        EventKind::TurnStart,
+                        EventPayload::TurnStart {
+                            v: v1(),
+                            turn_id: turn,
+                            lane: "dialogue".to_owned(),
+                            origin: TurnOrigin::User,
+                            delegation_id: None,
+                            trigger: TurnTrigger::Text,
+                        },
+                    ),
+                    text_user(session, turn, "remember this"),
+                ],
+                usage: vec![],
+            })
+            .await
+            .unwrap();
+        (soul, session)
+    };
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = '0' WHERE key = 'storage_version'",
+            [],
+        )
+        .unwrap();
+    }
+    let store = SessionStore::open(&path, "NORMAL").await.unwrap();
+    let version: String = {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = 'storage_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(version, STORAGE_VERSION.to_string());
+    let meta = store.get_session(session).unwrap();
+    assert_eq!(meta.soul_id, soul);
+    let events = store.load_events(session, 0).unwrap();
+    assert!(!open_turns(&events).is_empty());
+    let reports = store.recover_interrupted().await.unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].interrupted_turns[0].turn_id, turn);
+    let events = store.load_events(session, 0).unwrap();
+    assert!(open_turns(&events).is_empty());
+    assert!(events.iter().any(|event| matches!(
+        event.payload,
+        EventPayload::TurnEnd {
+            outcome: TurnOutcome::Interrupted,
+            ..
+        }
+    )));
 }
 
 #[tokio::test]
