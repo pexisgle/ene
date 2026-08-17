@@ -3976,6 +3976,7 @@ dependencies = [
  "glam 0.33.3",
  "gltf",
  "image",
+ "pollster 1.0.1",
  "rayon",
  "rustfft",
  "serde",

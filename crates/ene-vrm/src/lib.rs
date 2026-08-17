@@ -62,6 +62,7 @@ pub mod humanoid;
 pub mod layer_composer;
 pub mod loader;
 pub mod look_at;
+pub mod minimal;
 
 pub mod model;
 pub mod mtoon;
