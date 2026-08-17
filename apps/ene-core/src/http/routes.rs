@@ -918,11 +918,22 @@ pub async fn export_character(
 pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
     let mut core = CoreSettings::default();
     core.data_dir = state.core.data_dir().display().to_string();
-    Json(json!({
+    let mut out = json!({
         "core": core,
         "harness": HarnessSettings::default(),
         "approval": { "mode": format!("{:?}", state.core.plane().mode()).to_ascii_lowercase() },
-    }))
+    });
+    let settings_path = state.core.data_dir().join("settings.json");
+    if settings_path.exists()
+        && let Ok(raw) = fs::read_to_string(&settings_path)
+        && let Ok(file) = serde_json::from_str::<Value>(&raw)
+        && let (Some(dst), Some(src)) = (out.as_object_mut(), file.as_object())
+    {
+        for (key, value) in src {
+            dst.insert(key.clone(), value.clone());
+        }
+    }
+    Json(out)
 }
 
 pub async fn patch_settings(

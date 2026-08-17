@@ -455,13 +455,23 @@ async fn http_forget_memory_is_audited() {
         .list_memories(&souls.items[0].id, None)
         .await
         .unwrap();
-    assert!(listed.items.iter().any(|item| item.id == memory.id.to_string()));
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.id == memory.id.to_string())
+    );
     client.delete_memory(&memory.id.to_string()).await.unwrap();
     let after = client
         .list_memories(&souls.items[0].id, None)
         .await
         .unwrap();
-    assert!(after.items.iter().all(|item| item.id != memory.id.to_string()));
+    assert!(
+        after
+            .items
+            .iter()
+            .all(|item| item.id != memory.id.to_string())
+    );
     let audit = client.audit().await.unwrap();
     let blob = audit.to_string();
     assert!(
@@ -571,10 +581,15 @@ fn web_ui_cannot_mutate_memory_or_settings() {
     );
     let stage_main = include_str!("../../ene-stage/src/main.rs");
     let stage_app = include_str!("../../ene-stage/src/stage_app.rs");
+    let stage_cargo = include_str!("../../ene-stage/Cargo.toml");
     assert!(stage_main.contains("eframe"));
     assert!(stage_app.contains("show_viewport_immediate"));
-    assert!(!stage_main.to_ascii_lowercase().contains("webview"));
-    assert!(!stage_app.to_ascii_lowercase().contains("webview"));
+    assert!(
+        !stage_cargo.to_ascii_lowercase().contains("webview")
+            && !stage_cargo.to_ascii_lowercase().contains("wry"),
+        "stage must stay on native eframe/wgpu without a WebView crate"
+    );
+    assert!(!stage_app.contains("web-view") && !stage_app.contains("wry::"));
 }
 
 #[tokio::test]
