@@ -4,186 +4,111 @@
 )]
 #![deny(unsafe_code)]
 
-use eframe::egui::{self, ViewportBuilder, ViewportId};
-use ene_api::{ApiClient, CreateSessionRequest, HistoryResponse, MessageMode, MessageRequest};
+mod core_spawn;
+mod filter;
+mod stage_app;
+mod vrm;
+
+use std::path::PathBuf;
+
+use eframe::egui::ViewportBuilder;
+use stage_app::StageApp;
 
 fn main() {
-    let url = std::env::var("ENE_API_URL").unwrap_or_else(|_| "http://127.0.0.1:0".to_owned());
-    let token = std::env::var("ENE_API_TOKEN").unwrap_or_default();
+    let text_only = std::env::var("ENE_STAGE_TEXT_ONLY")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let vrm_path = std::env::var("ENE_VRM_PATH")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
     let native = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_title("ene stage")
-            .with_inner_size([480.0, 640.0]),
+            .with_inner_size([960.0, 640.0]),
         ..Default::default()
     };
     if let Err(err) = eframe::run_native(
         "ene stage",
         native,
-        Box::new(move |cc| Ok(Box::new(StageApp::new(cc, url, token)))),
+        Box::new(move |cc| Ok(Box::new(StageApp::new(cc, text_only, vrm_path)))),
     ) {
         eprintln!("ene-stage: {err}");
         std::process::exit(1);
     }
 }
 
-struct StageApp {
-    client: ApiClient,
-    session: Option<String>,
-    draft: String,
-    surface: Vec<String>,
-    detail: Vec<String>,
-    error: Option<String>,
-    runtime: tokio::runtime::Runtime,
-}
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    unsafe_code,
+    reason = "unit tests assert concrete values and restore process environment"
+)]
+mod tests {
+    use super::core_spawn::{connection_from_ready, env_api_config, wait_for_api_json};
+    use super::filter::{surface_event_allowed, surface_history_line};
+    use serde_json::json;
+    use tempfile::TempDir;
 
-impl StageApp {
-    fn new(_cc: &eframe::CreationContext<'_>, url: String, token: String) -> Self {
-        let runtime = match tokio::runtime::Runtime::new() {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                eprintln!("ene-stage runtime: {err}");
-                std::process::exit(1);
-            }
-        };
-        let client = ApiClient::new(url, token, "stage");
-        let mut app = Self {
-            client,
-            session: None,
-            draft: String::new(),
-            surface: Vec::new(),
-            detail: Vec::new(),
-            error: None,
-            runtime,
-        };
-        app.bootstrap();
-        app
+    #[test]
+    fn surface_blocks_inner_and_thinking() {
+        assert!(!surface_event_allowed(
+            &json!({"type": "inner.message", "text": "x"})
+        ));
+        assert!(!surface_event_allowed(
+            &json!({"type": "thinking.delta", "text": "x"})
+        ));
+        assert!(surface_event_allowed(
+            &json!({"type": "text.delta", "text": "hi"})
+        ));
     }
 
-    fn bootstrap(&mut self) {
-        let client = self.client.clone();
-        match self.runtime.block_on(async move {
-            let health = client.health().await?;
-            let souls = client.list_souls().await?;
-            let soul_id = if let Some(soul) = souls.items.first() {
-                soul.id.clone()
-            } else {
-                return Ok((health.bind, None::<String>, None::<HistoryResponse>));
-            };
-            let sessions = client.list_sessions(Some(&soul_id)).await?;
-            let session = if let Some(existing) = sessions.items.first() {
-                existing.id.clone()
-            } else {
-                client
-                    .create_session(&CreateSessionRequest {
-                        soul_id,
-                        title: None,
-                    })
-                    .await?
-                    .id
-            };
-            let history = client.history(&session, "surface").await.ok();
-            Ok::<_, ene_api::ApiError>((health.bind, Some(session), history))
-        }) {
-            Ok((bind, session, history)) => {
-                self.surface.push(format!("connected {bind}"));
-                self.session = session;
-                if let Some(history) = history {
-                    for message in history.messages {
-                        self.surface
-                            .push(format!("{}: {}", message.role, message.text));
-                    }
-                }
-            }
-            Err(err) => self.error = Some(err.to_string()),
-        }
-    }
-
-    fn send(&mut self) {
-        let Some(session) = self.session.clone() else {
-            return;
-        };
-        let text = self.draft.trim().to_owned();
-        if text.is_empty() {
-            return;
-        }
-        self.draft.clear();
-        let client = self.client.clone();
-        match self.runtime.block_on(async move {
-            client
-                .send_message(
-                    &session,
-                    &MessageRequest {
-                        text: text.clone(),
-                        mode: MessageMode::Prompt,
-                        input_modality: None,
-                    },
-                    None,
-                )
-                .await?;
-            let surface = client.history(&session, "surface").await?;
-            let detail = client.history(&session, "detail").await?;
-            Ok::<_, ene_api::ApiError>((surface, detail))
-        }) {
-            Ok((surface, detail)) => {
-                self.surface = surface
-                    .messages
-                    .into_iter()
-                    .filter(|m| m.role != "inner")
-                    .map(|m| format!("{}: {}", m.role, m.text))
-                    .collect();
-                self.detail = detail
-                    .messages
-                    .into_iter()
-                    .map(|m| format!("{}: {}", m.role, m.text))
-                    .collect();
-            }
-            Err(err) => self.error = Some(err.to_string()),
-        }
-    }
-
-    fn surface_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Companion");
-        if let Some(err) = &self.error {
-            ui.colored_label(egui::Color32::RED, err);
-        }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for line in &self.surface {
-                ui.label(line);
-            }
-        });
-        ui.horizontal(|ui| {
-            let enter = ui.text_edit_singleline(&mut self.draft).lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Send").clicked() || enter {
-                self.send();
-            }
-        });
-    }
-}
-
-impl eframe::App for StageApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.surface_ui(ui);
-        });
-
-        let detail = self.detail.clone();
-        ui.ctx().show_viewport_immediate(
-            ViewportId::from_hash_of("detail"),
-            ViewportBuilder::default()
-                .with_title("ene detail")
-                .with_inner_size([520.0, 640.0]),
-            move |ui, _class| {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    ui.heading("Detail");
-                    ui.label("Inner, thinking, and tool arguments. Not shown on the stage.");
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for line in &detail {
-                            ui.label(line);
-                        }
-                    });
-                });
-            },
+    #[test]
+    fn surface_history_skips_inner_role() {
+        assert!(surface_history_line("inner", "secret").is_none());
+        assert_eq!(
+            surface_history_line("assistant", "hi").as_deref(),
+            Some("assistant: hi")
         );
+    }
+
+    #[test]
+    fn wait_for_api_json_reads_url_and_token() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("api.json");
+        std::fs::write(
+            &path,
+            r#"{"url":"http://127.0.0.1:9","token":"abc","bind":"127.0.0.1:9"}"#,
+        )
+        .expect("write");
+        let value = wait_for_api_json(&path).expect("ready");
+        let (url, token) = connection_from_ready(&value).expect("parse");
+        assert_eq!(url, "http://127.0.0.1:9");
+        assert_eq!(token, "abc");
+    }
+
+    #[test]
+    fn env_api_config_rejects_empty_and_zero_port() {
+        let saved = std::env::var("ENE_API_URL").ok();
+        unsafe {
+            std::env::set_var("ENE_API_URL", "");
+        }
+        assert!(env_api_config().is_none());
+        unsafe {
+            std::env::set_var("ENE_API_URL", "http://127.0.0.1:0");
+        }
+        assert!(env_api_config().is_none());
+        unsafe {
+            std::env::set_var("ENE_API_URL", "http://127.0.0.1:8080");
+        }
+        let (url, _) = env_api_config().expect("config");
+        assert_eq!(url, "http://127.0.0.1:8080");
+        match saved {
+            Some(value) => unsafe {
+                std::env::set_var("ENE_API_URL", value);
+            },
+            None => unsafe {
+                std::env::remove_var("ENE_API_URL");
+            },
+        }
     }
 }

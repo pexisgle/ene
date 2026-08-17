@@ -3904,13 +3904,15 @@ name = "ene-stage"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "egui",
+ "egui-wgpu",
  "ene-api",
- "ene-body",
  "ene-vrm",
  "serde_json",
  "tempfile",
  "tokio",
  "uuid",
+ "wgpu",
 ]
 
 [[package]]
