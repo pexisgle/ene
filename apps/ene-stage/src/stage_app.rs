@@ -9,7 +9,9 @@ use ene_api::{
 use serde_json::Value;
 
 use crate::core_spawn::{CoreChild, resolve_connection};
-use crate::filter::{format_event_line, surface_event_allowed, surface_history_line};
+use crate::filter::{
+    format_event_line, merge_soul_ids, surface_event_allowed, surface_history_line,
+};
 use crate::vrm;
 
 const DETAIL_VIEWPORT: &str = "detail";
@@ -163,18 +165,13 @@ impl StageApp {
     }
 
     fn bootstrap_companions(&mut self, souls: &[SoulView], stage: &StageView) {
-        let mut soul_ids: Vec<String> = stage
+        let occupant_ids: Vec<String> = stage
             .occupants
             .iter()
             .map(|occupant| occupant.soul_id.clone())
             .collect();
-        if soul_ids.len() < 2 {
-            for soul in souls {
-                if !soul_ids.contains(&soul.id) {
-                    soul_ids.push(soul.id.clone());
-                }
-            }
-        }
+        let extra_ids: Vec<String> = souls.iter().map(|soul| soul.id.clone()).collect();
+        let mut soul_ids = merge_soul_ids(&occupant_ids, &extra_ids);
         while soul_ids.len() < 2 {
             soul_ids.push(uuid::Uuid::new_v4().to_string());
         }

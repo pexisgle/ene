@@ -23,3 +23,15 @@ pub fn surface_history_line(role: &str, text: &str) -> Option<String> {
     }
     Some(format!("{role}: {text}"))
 }
+
+/// Occupants first, then remaining souls, de-duplicated (P-107 / P-405).
+#[must_use]
+pub fn merge_soul_ids(occupants: &[String], extras: &[String]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for id in occupants.iter().chain(extras) {
+        if !id.is_empty() && !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    ids
+}

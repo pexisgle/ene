@@ -58,7 +58,7 @@ mod tests {
     use super::core_spawn::{
         connection_from_ready, env_api_config, health_reachable, spawn_core, wait_for_api_json,
     };
-    use super::filter::{surface_event_allowed, surface_history_line};
+    use super::filter::{merge_soul_ids, surface_event_allowed, surface_history_line};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -90,6 +90,26 @@ mod tests {
             surface_history_line("assistant", "hi").as_deref(),
             Some("assistant: hi")
         );
+    }
+
+    #[test]
+    fn merge_soul_ids_keeps_two_occupants_in_order() {
+        let occupants = vec!["char.alpha@1".into(), "char.beta@1".into()];
+        let extras = vec!["char.alpha@1".into(), "char.gamma@1".into()];
+        let ids = merge_soul_ids(&occupants, &extras);
+        assert_eq!(ids, vec!["char.alpha@1", "char.beta@1", "char.gamma@1"]);
+        assert!(ids.len() >= 2);
+    }
+
+    #[test]
+    fn stage_hosts_two_vrm_panes_and_text_only_flag() {
+        let app = include_str!("stage_app.rs");
+        assert!(app.contains("companions: [CompanionPane; 2]"));
+        assert!(app.contains("vrm_left"));
+        assert!(app.contains("vrm_right"));
+        let main = include_str!("main.rs");
+        assert!(main.contains("ENE_STAGE_TEXT_ONLY"));
+        assert!(app.contains("text_only"));
     }
 
     #[test]
