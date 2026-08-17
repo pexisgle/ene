@@ -19,6 +19,7 @@ mod live;
 mod model;
 mod observe;
 mod router;
+mod waterfall;
 
 pub use config::{
     BackupSettings, ClientsSettings, CoreSettings, DelegationSettings, HarnessSettings,
@@ -32,6 +33,7 @@ pub use live::{LiveBus, LiveEvent, LiveSubscription};
 pub use model::{ConversationModel, EchoModel, ModelGeneration, ModelRequest, ToolCall};
 pub use observe::{ObserveHandle, Span, SpanGuard, SpanRing, spans_leak_content};
 pub use router::{SurfaceRouter, SurfaceToolOutcome};
+pub use waterfall::{EmitBus, HookEvent, LoopHooks, Waterfall, WaterfallNext};
 
 pub use ene_session::{
     DisplayDepth, EventKind, EventPayload, ProjectOptions, ProjectedHistory, RecoveryReport,

@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::{
-    CancelQueued, ConversationModel, DisplayDepth, EchoModel, EventKind, EventPayload,
+    CancelQueued, ConversationModel, DisplayDepth, EchoModel, EmitBus, EventKind, EventPayload,
     HarnessSettings, KernelError, LaneHandle, LaneOptions, LiveEvent, MindSettings,
-    ModelGeneration, ModelRequest, ProjectOptions, TurnId, derive_messages, hash_model_visible,
-    hash_projected, spans_leak_content,
+    ModelGeneration, ModelRequest, ProjectOptions, TurnId, Waterfall, derive_messages,
+    hash_model_visible, hash_projected, spans_leak_content,
 };
 use async_trait::async_trait;
 use ene_session::{
@@ -472,4 +472,56 @@ async fn voice_and_text_share_one_session_log() {
         .collect();
     assert!(texts.iter().any(|t| t == "typed hello"));
     assert!(texts.iter().any(|t| t == "spoken hello"));
+}
+
+#[test]
+fn waterfall_rewrites_by_calling_next_and_emit_cannot() {
+    let chain = Waterfall::new();
+    chain.listen(|mut n, next| {
+        n += 10;
+        let mut out = next(n);
+        out += 1;
+        out
+    });
+    chain.listen(|mut n, next| {
+        n *= 2;
+        next(n)
+    });
+    assert_eq!(chain.run(3), 27);
+
+    let intercepted = Waterfall::new();
+    intercepted.listen(|_n, _next| 99);
+    intercepted.listen(|_, next| next(1));
+    assert_eq!(intercepted.run(0), 99);
+
+    let bus = EmitBus::new();
+    let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let seen_for_listen = std::sync::Arc::clone(&seen);
+    bus.listen(move |value: &u32| seen_for_listen.lock().push(*value));
+    let mut payload = 5_u32;
+    bus.emit(&payload);
+    payload = 0;
+    assert_eq!(*seen.lock(), vec![5]);
+    assert_eq!(payload, 0);
+}
+
+#[tokio::test]
+async fn waterfall_pre_step_can_stop_the_model() {
+    let (_dir, _store, lane, model) = open_lane().await;
+    lane.hooks().pre_step.listen(|mut event, _next| {
+        event.proceed = false;
+        event.note = "blocked by waterfall".into();
+        event
+    });
+    lane.prompt("hello").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    assert!(model.last.lock().is_none());
+    let history = lane.project(DisplayDepth::Surface).unwrap();
+    let texts: Vec<String> = history
+        .messages
+        .iter()
+        .map(ene_session::ProjectedMessage::text)
+        .collect();
+    assert!(texts.iter().any(|t| t == "hello"));
+    assert!(texts.iter().any(|t| t.contains("blocked by waterfall")));
 }

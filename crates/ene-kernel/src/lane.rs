@@ -16,6 +16,7 @@ use crate::live::{LiveBus, LiveEvent, LiveSubscription};
 use crate::model::{ConversationModel, ModelGeneration, ModelRequest};
 use crate::observe::ObserveHandle;
 use crate::router::{SurfaceRouter, SurfaceToolOutcome};
+use crate::waterfall::{HookEvent, LoopHooks};
 use ene_session::{
     Block, CallId, ClientId, DelegationId, DisplayDepth, EventKind, EventPayload, InboxClass,
     InboxSource, LaneId, NewEvent, NewUsage, ProjectOptions, RecoveryReport, SessionId,
@@ -77,6 +78,7 @@ struct LaneState {
     model: Arc<dyn ConversationModel>,
     observe: ObserveHandle,
     live: LiveBus,
+    hooks: LoopHooks,
     mind: MindSettings,
     max_steps: u32,
     context: ContextRegistry,
@@ -118,6 +120,7 @@ pub struct LaneOptions {
 pub struct LaneHandle {
     tx: mpsc::UnboundedSender<LaneCmd>,
     live: LiveBus,
+    hooks: LoopHooks,
     observe: ObserveHandle,
     session: SessionId,
     store: Arc<SessionStore>,
@@ -128,6 +131,7 @@ impl LaneHandle {
     #[must_use]
     pub fn spawn(opts: LaneOptions) -> Self {
         let live = LiveBus::new();
+        let hooks = LoopHooks::new();
         let observe = ObserveHandle::new(256);
         let store = Arc::clone(&opts.store);
         let session = opts.session;
@@ -141,6 +145,7 @@ impl LaneHandle {
             model: opts.model,
             observe: observe.clone(),
             live: live.clone(),
+            hooks: hooks.clone(),
             mind: opts.mind,
             max_steps: opts.harness.loop_cfg.max_steps_per_turn,
             context,
@@ -154,6 +159,7 @@ impl LaneHandle {
         Self {
             tx,
             live,
+            hooks,
             observe,
             session,
             store,
@@ -170,6 +176,12 @@ impl LaneHandle {
     #[must_use]
     pub fn subscribe(&self, depth: DisplayDepth) -> LiveSubscription {
         self.live.subscribe(depth)
+    }
+
+    /// Kernel-owned waterfall hooks (P-1007). Fibers cannot register here.
+    #[must_use]
+    pub fn hooks(&self) -> LoopHooks {
+        self.hooks.clone()
     }
 
     /// Observe span ring.
@@ -585,6 +597,7 @@ async fn spawn_turn(
         model: Arc::clone(&state.model),
         observe: state.observe.clone(),
         live: state.live.clone(),
+        hooks: state.hooks.clone(),
         window: state.mind.inner.self_reference_window,
         derive_from_thinking: state.mind.inner.derive_from_thinking,
         max_steps: state.max_steps,
@@ -781,6 +794,7 @@ struct TurnCtx {
     model: Arc<dyn ConversationModel>,
     observe: ObserveHandle,
     live: LiveBus,
+    hooks: LoopHooks,
     window: u32,
     derive_from_thinking: bool,
     max_steps: u32,
@@ -822,6 +836,28 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             span.end();
             return Ok(());
         }
+        let pre = ctx.hooks.pre_step.run(HookEvent::default());
+        if !pre.proceed {
+            let text = if pre.note.is_empty() {
+                "I'll stay quiet.".to_owned()
+            } else {
+                pre.note
+            };
+            finish_speech(
+                &ctx,
+                &ModelGeneration {
+                    text,
+                    finish_reason: "stop".to_owned(),
+                    ..ModelGeneration::default()
+                },
+                step_index,
+                None,
+            )
+            .await?;
+            span.end();
+            return Ok(());
+        }
+
         if step_index >= ctx.max_steps.max(1) {
             finish_speech(
                 &ctx,
@@ -849,6 +885,28 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             logged_hash, request_hash,
             "model-visible must equal logged projection (L-1)"
         );
+
+        let request_hook = ctx.hooks.request.run(HookEvent::default());
+        if !request_hook.proceed {
+            let text = if request_hook.note.is_empty() {
+                "I'll stay quiet.".to_owned()
+            } else {
+                request_hook.note
+            };
+            finish_speech(
+                &ctx,
+                &ModelGeneration {
+                    text,
+                    finish_reason: "stop".to_owned(),
+                    ..ModelGeneration::default()
+                },
+                step_index,
+                None,
+            )
+            .await?;
+            span.end();
+            return Ok(());
+        }
 
         let generation = tokio::select! {
             () = ctx.cancel.notified() => {
