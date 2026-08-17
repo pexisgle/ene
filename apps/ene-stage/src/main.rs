@@ -55,7 +55,9 @@ fn main() {
     reason = "unit tests assert concrete values and restore process environment"
 )]
 mod tests {
-    use super::core_spawn::{connection_from_ready, env_api_config, wait_for_api_json};
+    use super::core_spawn::{
+        connection_from_ready, env_api_config, health_reachable, spawn_core, wait_for_api_json,
+    };
     use super::filter::{surface_event_allowed, surface_history_line};
     use serde_json::json;
     use tempfile::TempDir;
@@ -129,5 +131,21 @@ mod tests {
                 std::env::remove_var("ENE_API_URL");
             },
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_core_writes_api_json_and_health_succeeds() {
+        let Some(_) = super::core_spawn::ene_core_binary() else {
+            return;
+        };
+        let dir = TempDir::new().expect("tempdir");
+        let child = spawn_core(dir.path()).expect("spawn");
+        let ready = wait_for_api_json(&dir.path().join("api.json")).expect("ready");
+        let (url, token) = connection_from_ready(&ready).expect("connection");
+        let client = ene_api::ApiClient::new(url, token, "stage");
+        health_reachable(&client, std::time::Duration::from_secs(5))
+            .await
+            .expect("health");
+        drop(child);
     }
 }

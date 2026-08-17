@@ -2928,6 +2928,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ene-api",
+ "ene-daemon",
+ "ene-session",
  "reqwest",
  "serde",
  "serde_json",
