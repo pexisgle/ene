@@ -138,18 +138,24 @@ opencode の Unavailable Context に倣う。
 
 ## 7. compaction(P-506)
 
-- **起動**: 履歴トークンが有効窓の `compaction.trigger_ratio`(既定 0.75)を
-  超えたとき。**先回り実行**(設定 `compaction.wait`: 既定 `on_idle`)で
-  ターン中のストールを避ける。
+- **起動**: 履歴トークンが有効窓の `compaction.trigger_ratio` を超えたとき。
+  **先回り実行**でターン中のストールを避ける。
 - **内容**: 古いメッセージ群を**転がり scene summary** に畳む。
-  直近 `compaction.keep_recent`(既定 12)メッセージは原文保持。
+  直近 `compaction.keep_recent` メッセージは原文保持。
   要約は約束・決定事項・未完の話題を必ず保持する(要約プロンプトの契約)。
+- **実行主体**: 要約は**補助LLM**(D-15、P-524)が生成する。会話用モデルを
+  使わないのは、コンパクションがモデルの意思とは無関係にハーネスが起こす
+  内部処理だからである。ハーネス内部処理であってツールではないので、
+  ツールレジストリには現れない(D-10)。
 - **記録**: `session/summary` + `compaction/applied`(範囲指定)。
   元メッセージ行は削除しない(投影が置き換える、L-3)。
 - **通知**: `context_compressed` をライフサイクルイベントで通知。
-  UI では「記憶の整理」として最小限に表示する(機構の詳細は秘匿)。
+  表層UIには出さない(機構の詳細は表層の深さに含まれない、D-11)。
+  詳細画面には出る。
 - **失敗**: 要約生成の失敗は compaction 自体の失敗。履歴は原文のまま
   保たれ、次ターンで再試行する。履歴の破壊は起きない。
+- **セッションは分割しない**: 長い会話への対処は compaction であって
+  セッション分割ではない(D-8)。話題が変わっても履歴は続く。
 
 ### prune(compaction 前段の大出力刈り込み)
 
@@ -158,41 +164,46 @@ compaction は「古くなった履歴を要約する」が、**直近の大き�
 (opencode の prune に倣う)。prune は compaction の**前段**として走る:
 
 1. 履歴を新しい側から遡り、`tool/result` の原文トークンを積算する。
-2. 累積が `prune.protect_tokens`(既定 40000)以内の出力は**保護**(原文保持)。
-3. それより古い `tool/result` は、`prune.keep_chars`(既定 2000 文字)の
-   先頭+「以降は spill 参照」の注記で**置き換える**。
-   本体は既に content-addressed ファイルにある
-   ([§5](context-assembly.md#5-spill) の spill と同じストア)。
-4. 刈り込み量が `prune.minimum_tokens`(既定 20000)未満なら何もせず終わる
+2. 累積が `prune.protect_tokens` 以内の出力は**保護**(原文保持)。
+3. それより古い `tool/result` は、`prune.keep_chars` の先頭+
+   「以降は spill 参照」の注記で**置き換える**。本体は既に
+   content-addressed ファイルにある([§5](context-assembly.md#5-spill) の
+   spill と同じストア)。
+4. 刈り込み量が `prune.minimum_tokens` 未満なら何もせず終わる
    (小刻みな書き換えを避ける)。
 5. 置換は `tool/pruned` イベント(call_id・from_seq)で記録し、
    投影は置換後のブロックを使う。元行は消さない(L-3)。
 
-- prune は**compaction と同じ操作**(CompactionState の phase として走る)。
-  単独コマンドにはしない(閾値管理が二重になる)。
+- prune は**compaction と同じ操作**として走る。単独コマンドにはしない
+  (閾値管理が二重になる)。
 - 「保護されたツール」(skill 展開の結果等、再取得が不能なもの)は
-  累積に関係なく保護する(リスト: 設定 `prune.protected_tools`、既定 `[skill]`)。
-- **耐久機構**: compaction は構造変更の操作であり、ロック括弧・準備の
-  永続化・効果のサンドウィッチ・失敗分類は [operations.md §5](operations.md#5-compactionstate構造変更)
-  と [durability.md](durability.md) が定義する。この文書は「何をどう畳むか」のみ。
+  累積に関係なく保護する(リスト: 設定 `prune.protected_tools`)。
+- **v1.0 の耐久性**: compaction が中断されたら、次回起動時に検出して
+  破棄する。履歴は原文のまま残るので、やり直せば済む
+  ([agent-loop.md §12](agent-loop.md#12-中断の検出と報告p-515--d-5))。
+  構造変更をロック括弧と効果のサンドウィッチで守る設計は後継である
+  ([operations.md](operations.md)、[durability.md](durability.md)、P-525)。
 
-## 8. 設定キーと既定値
+## 8. 設定キー
 
-| キー | 既定 | 説明 |
-|---|---|---|
-| `harness.context.response_reserve_tokens` | `4096` | 応答予約 |
-| `harness.context.safety_margin_ratio` | `0.10` | 安全マージン |
-| `harness.context.token_estimation` | `auto` | `auto\|chars4\|cjk15` |
-| `compaction.trigger_ratio` | `0.75` | 起動比 |
-| `compaction.wait` | `on_idle` | `on_idle\|immediate` |
-| `compaction.keep_recent` | `12` | 保持メッセージ数 |
-| `compaction.prune.enabled` | `true` | prune 前段の有効化 |
-| `compaction.prune.protect_tokens` | `40000` | 直近ツール出力の保護枠 |
-| `compaction.prune.minimum_tokens` | `20000` | 刈り込み実行の最小効果 |
-| `compaction.prune.keep_chars` | `2000` | 刈り込み後の残存文字数 |
-| `compaction.prune.protected_tools` | `[skill]` | 無条件保護のツール |
-| `harness.tool_output.soft_limit_tokens` | `8000` | spill 候補閾値 |
-| `harness.tool_output.hard_limit_tokens` | `32000` | spill 必須閾値 |
+具体的な数値は実装しながら決める(D-29)。トークン閾値はモデルの窓サイズと
+実測の圧迫具合に依存するので、文書に固定すると嘘になる。
+
+| キー | 説明 |
+|---|---|
+| `harness.context.response_reserve_tokens` | 応答予約 |
+| `harness.context.safety_margin_ratio` | 安全マージン |
+| `harness.context.token_estimation` | `auto\|chars4\|cjk15` |
+| `compaction.trigger_ratio` | 有効窓に対する起動比 |
+| `compaction.wait` | `on_idle\|immediate` |
+| `compaction.keep_recent` | 原文保持するメッセージ数 |
+| `compaction.prune.enabled` | prune 前段の有効化 |
+| `compaction.prune.protect_tokens` | 直近ツール出力の保護枠 |
+| `compaction.prune.minimum_tokens` | 刈り込み実行の最小効果 |
+| `compaction.prune.keep_chars` | 刈り込み後の残存文字数 |
+| `compaction.prune.protected_tools` | 無条件保護のツール |
+| `harness.tool_output.soft_limit_tokens` | spill 候補閾値 |
+| `harness.tool_output.hard_limit_tokens` | spill 必須閾値 |
 
 ## 9. 障害モード
 

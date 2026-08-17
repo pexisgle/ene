@@ -36,8 +36,8 @@
 | message | `POST /sessions/{id}/messages`, `GET /sessions/{id}/history`, `DELETE /sessions/{id}/queued/{entry_id}` | 発話と履歴・キュー取消。messages はモード指定(`prompt\|steer\|follow_up`、既定 `prompt`)で [../core/lane-api.md](../core/lane-api.md) の3コマンドに対応 |
 | session-op | `POST /sessions/{id}/resume`, `POST /sessions/{id}/compact` | 回復の前進・手動 compaction([../core/lane-api.md §5](../core/lane-api.md#5-httpws-との対応)) |
 | turn | `POST /turns/{id}/cancel` | キャンセル |
-| memory | `GET /souls/{id}/memories`, `PATCH /memories/{id}`, `DELETE /memories/{id}`, `GET /spaces` | 記憶の閲覧/編集/削除・共有スペース |
-| job | `GET /jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel` | job の一覧/詳細/キャンセル |
+| memory | `GET /souls/{id}/memories`(`scope` で絞り込み), `PATCH /memories/{id}`, `DELETE /memories/{id}` | 記憶の閲覧/編集/削除。`scope` は `private\|shared`([../companion/memory.md §4](../companion/memory.md)) |
+| job | `GET /jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel` | タスクの一覧/詳細/キャンセル(API 上の名は job) |
 | schedule | `GET /schedules`, `POST /schedules`, `PATCH /schedules/{id}`, `DELETE /schedules/{id}` | スケジュール CRUD |
 | artifact | `GET /artifacts`, `GET /artifacts/{id}/content` | 成果物の一覧/取得/ダウンロード |
 | tool | `GET /tools`, `POST /tools/{name}/test`(開発用) | ツール面 |
@@ -60,21 +60,46 @@
 - 切断時は最終 cursor を返し、再接続でカーソル指定により
   欠落イベントを再送(永続ログから投影、欠損しない)。
 
-イベント種別(ライブバスの**非永続**イベントと、永続イベントの通知を混ぜる):
+### 購読の深さ(D-11)
 
-| 種別 | 内容 |
-|---|---|
-| `text.delta` | 発話テキストのチャンク |
-| `inner.delta` / `inner.message` | 内面のチャンク/確定 |
-| `tool.call` / `tool.progress` / `tool.result` | ツールの可視化([tools/registry.md §5](../tools/registry.md#5-ui-投影p-613)) |
-| `approval.asked` / `approval.resolved` | 承認の要求/解決 |
-| `question.asked` | ask-user([core/agent-loop.md §9](../core/agent-loop.md#9-人間協調面plan--ask-userp-511-p-512)) |
-| `audio.chunk` | TTS 音声(購読クライアントのみ。バイナリフレーム) |
-| `voice.state` | 音声状態機械の変化([body/voice.md §4](../body/voice.md#4-割り込み状態機械p-103)) |
-| `job.progress` / `job.completed` | job の進捗 |
-| `proactive.speech` | 能動発話の開始 |
-| `lifecycle.*` | プラグイン/プロバイダの状態変化・警告 |
-| `session.event` | 永続イベントの通知(カーソル付き) |
+**接続時に `depth` を指定する。** サーバは指定された深さのイベントだけを
+送る。深い情報を全クライアントに流してクライアント側で隠す方式は取らない。
+表示漏れが一箇所のバグで起きるうえ、常時流す帯域も無駄になるため。
+
+| depth | 送るもの | 使う面 |
+|---|---|---|
+| `surface` | 発話・音声・承認・質問・body・作業中の1行要約 | 表層UI(主画面) |
+| `detail` | 上記 + 内面・thinking・ツール引数と生出しの参照・感情の内部状態・層間メッセージ | 詳細画面(desktop / Web)、CLI の `--verbose` / `ene debug` |
+
+- 深さの判定はサーバ側の責務。`depth: surface` の接続に
+  `inner.delta` は届かない。
+- 同一クライアントが両方の面を持つ場合(desktop の主画面+詳細画面、
+  Web のチャット+詳細)、
+  **接続を2本張る**。1本で受けて振り分けると、上の保証が
+  クライアント実装に移ってしまう。
+- 詳細画面向けの接続は監査ログに残す(何が見られたかの記録)。
+
+### イベント種別
+
+ライブバスの**非永続**イベントと、永続イベントの通知を混ぜる。
+
+| 種別 | depth | 内容 |
+|---|---|---|
+| `text.delta` | surface | 発話テキストのチャンク |
+| `inner.delta` / `inner.message` | detail | 内面のチャンク/確定([companion/inner-channel.md](../companion/inner-channel.md)) |
+| `thinking.delta` | detail | モデルの thinking |
+| `tool.call` / `tool.progress` / `tool.result` | surface は要約、detail は引数と生出しの参照([tools/registry.md §5](../tools/registry.md#5-表示の投影p-613--d-11)) | ツールの可視化 |
+| `approval.asked` / `approval.resolved` | surface | 承認の要求/解決 |
+| `question.asked` | surface | ask-user([core/agent-loop.md §9](../core/agent-loop.md#9-人間協調面plan--ask-userp-511-p-512)) |
+| `audio.chunk` | surface | TTS 音声(購読クライアントのみ。バイナリフレーム) |
+| `voice.state` | surface | 音声状態機械の変化([body/voice.md §4](../body/voice.md#4-割り込み状態機械p-103)) |
+| `body.*` | surface | 表情・動作([body/body-and-performance.md](../body/body-and-performance.md)) |
+| `affect.state` | detail | 感情の内部状態(PAD)。表層へは body 経由でのみ出る(D-19) |
+| `job.progress` / `job.completed` | detail | タスクの進捗。**表層への伝達はコンパニオンの発話**であってこのイベントではない(D-13) |
+| `delegation.*` | detail | 層間メッセージ |
+| `proactive.speech` | surface | 能動発話の開始 |
+| `lifecycle.*` | detail | プラグイン/プロバイダの状態変化・警告 |
+| `session.event` | 種別による | 永続イベントの通知(カーソル付き) |
 
 - `audio.chunk` は**排他資源**(再生は1クライアントが主、
   [clients.md §3](clients.md))。他クライアントは購読だけ。
@@ -119,15 +144,16 @@
 | WS の切断 | cursor で再接続・再送。永続ログが正なので欠損しない |
 | 同時送信の競合 | Idempotency-Key で重複排除。キーなしの送信は先着を採用 |
 | 大量イベントの背圧 | WS の送信バッファ上限で、古いライブチャンクを間引き(永続通知は間引かない) |
+| `depth: detail` の接続が滞留 | 詳細向けの送信が遅れても `surface` の配信を妨げない。深い情報の配信は best-effort |
 | OpenAPI と実装の乖離 | CI の差分検出で失敗(生成 SDK が壊れるため) |
 
-## 9. 設定キーと既定値
+## 9. 設定キー
 
-| キー | 既定 | 説明 |
-|---|---|---|
-| `server.bind` | `127.0.0.1:0`(ランダムポート) | バインド。desktop が実ポートを取得 |
-| `server.auth.token_file` | `<data>/auth.token` | トークンの保存 |
-| `server.ws.send_buffer` | `8388608` | WS 送信バッファ(8 MiB) |
+| キー | 説明 |
+|---|---|
+| `server.bind` | バインド(既定は `127.0.0.1` のランダムポート。desktop が実ポートを取得) |
+| `server.auth.token_file` | トークンの保存先 |
+| `server.ws.send_buffer` | WS 送信バッファ |
 
 ---
 

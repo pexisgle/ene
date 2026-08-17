@@ -73,13 +73,22 @@ display_name = "My Character" # i18n される表示名
 soul = "embedded"             # embedded | ref:<soul_id>
 body = "embedded"             # embedded | ref:<body_id>
 
-[signature]
-digest = "sha256:..."
-signer = "community:alice"    # ene-official | community:<name> | unsigned
+[integrity]
+digest = "sha256:..."         # 内容ハッシュ。v1.0 はここまで(D-26)
+# signature / signer は将来の追加項目
+
+[license]
+spdx = "CC-BY-4.0"
+redistribute = true           # soul/body 単独の再配布可否
 
 [limits]
-max_asset_bytes = 536870912   # アバター資産の上限(既定 512 MiB)
+max_asset_bytes = 536870912   # アバター資産の上限
 ```
+
+**v1.0 は署名を要求しない**(D-26)。検証はハッシュ照合まで。
+`[integrity]` に `signature` / `signer` を後から足せる形にしてあり、
+署名を導入するときにマニフェストの構造・インストール先のレイアウト・
+参照形式を変えなくてよいことだけを保証する。
 
 ## 5. soul 定義(`soul.toml`)
 
@@ -105,8 +114,12 @@ provider_hint = "auto"        # TTS の推奨(ユーザーが上書き可能)
 voice_ref = "voice.default"
 
 [memory_policy]
-recall_budget = 8             # memory.md の recall.budget を soul ごとに上書き
+recall_budget = 8             # memory.md の recall budget を soul ごとに上書き
 forgetting = "auto"
+share_tendency = "normal"     # 共有記憶プールへ回しやすさ(D-7)
+
+[proactive]
+tendency = "normal"           # 能動発話のしやすさ。キャラクターの性格として設定する(D-14)
 
 [skills]
 refs = ["skill.travel", "skill.morning-brief"]  # tasks/skills.md のカタログ参照
@@ -118,6 +131,11 @@ refs = ["skill.travel", "skill.morning-brief"]  # tasks/skills.md のカタロ�
 - 感情ボキャブラリのカスタムは「ラベルの追加・ラベルごとの
   centroid 上書き」まで許す。コアの24種は常に利用可能
   (アバター写像の互換のため)。
+- `proactive.tendency` は、キャラクターごとに「話しかけやすさ」が
+  違うことを形式で支える(D-14)。ほとんどの場合は黙っているのが既定で、
+  この値は決定モデルの閾値を動かすだけ。**値を上げても、
+  決定的ゲート(cooldown・quiet hours)は貫通しない**
+  ([../companion/proactive.md](../companion/proactive.md))。
 
 ## 6. body 定義(`body.toml`)
 
@@ -164,16 +182,17 @@ motion_threshold = 0.7
 
 1. アーカイブ展開前に `manifest.toml` を読み、`format_version`・
    `kind` を確認。未知の世代は拒否。
-2. **容量検査**: エントリごとの上限(アバター 1 GiB、全体 2 GiB、
-   展開後合計 4 GiB)。圧縮爆弾対策。
+2. **容量検査**: エントリごとの上限と展開後合計の上限。圧縮爆弾対策。
 3. **スキーマ検証**: soul.toml/body.toml/emotion_map.toml を
    スキーマ(schemars 生成)で検証。
 4. **危険フィールド検査**: persona/asset 内の URL 埋め込み・
    スクリプト相当の記述は警告(キャラクターは**コードを実行しない**。
    スクリプト実行を要する拡張は skill 側で承認を得る、
    [../tasks/skills.md](../tasks/skills.md))。
-5. 署名確認: `unsigned` は起動前確認
+5. **ハッシュ照合**: `[integrity].digest` と実体を突き合わせる。
+   不一致は拒否。出所が不明なものは起動前にユーザー確認
    ([../plugins/manifest-and-profile.md §1](../plugins/manifest-and-profile.md))。
+   署名がない段階では、この確認とコード非実行の原則が関門になる。
 6. インストール先は `<data>/characters/<id>@<version>/`。
    soul/body の結合情報は `<data>/companions.db` の soul 行が持つ。
 
@@ -197,19 +216,28 @@ V3/PNG/CHARX は**読み込みのみ**で正規形式へ変換する。
 - 記憶・会話ログは**含めない**(別機能のエクスポート、
   [../core/session-log.md §8](../core/session-log.md#8-エクスポートp-110))。
 
-## 11. 配布仕様(P-806)
+## 11. 配布仕様(P-806 / D-26)
 
-マーケットの**土台**となる配布の形式(配信基盤自体は後継 M2)。
+コミュニティ形成は目標だが、v1.0 の要件は「そこへ大規模改修なしに
+到達できる形」であって、マーケットプレイスそのものではない。
+
+**v1.0 で固定するもの**(後から変えたくないもの):
 
 - 配布単位: `.enechar` / `.enesoul` / `.enebody` の各アーカイブ。
-- メタデータ: `manifest.toml` + 配信メタ(タイトル・説明文・
-  スクリーンショット・バージョン履歴)。配信メタはカタログ側に置く。
-- **チェックサム+署名**: `digest`(内容ハッシュ)と `signer`。
-  公式カタログ経由の配布は署名付き。
+- `manifest.toml` の構造。特に `[integrity]` と `[license]`。
+- インストール先のレイアウト(`<data>/characters/<id>@<version>/`)と
+  soul/body の結合情報の持ち方。
 - バージョン: semver。更新はユーザー操作+確認(自動更新なし)。
-- ライセンス: `manifest.toml` に `license` フィールド(SPDX)。
-  セット/単独販売を想定し、soul/body の**再配布可否**を
-  `redistribute = true|false` で宣言できる。
+- ライセンス: SPDX 識別子と、soul/body の**再配布可否**
+  (`redistribute = true|false`)。セット販売・単独販売の両方を想定する。
+
+**v1.0 で持たないもの**:
+
+- カタログ/マーケット。配布は「アーカイブ+公開されたハッシュ」で足りる。
+- 署名と署名者の信頼チェーン。`[integrity]` への追加項目として設計上の
+  席だけ空けておく。
+- 配信メタ(スクリーンショット・バージョン履歴)。カタログ側の関心事なので、
+  カタログを作るときに定義する。
 
 ## 12. 障害モード
 
@@ -219,17 +247,20 @@ V3/PNG/CHARX は**読み込みのみ**で正規形式へ変換する。
 | 容量超過 | 拒否。どのエントリが超えたかを報告 |
 | スキーマ検証失敗 | 拒否。違反フィールドを列挙 |
 | 写像表の欠落 | インストールは可、結合時に警告+フォールバック |
-| 署名なし+allow_unsigned=false | インストールは可、起動前確認を要求 |
+| digest 不一致 | 拒否。改竄としてユーザー通知 |
+| 出所不明 | インストールは可、起動前確認を要求 |
 | インポートの破損カード | 部分インポートはせず拒否(整合性優先) |
 
-## 13. 設定キーと既定値
+## 13. 設定キー
 
-| キー | 既定 | 説明 |
-|---|---|---|
-| `characters.home_dir` | `<data>/characters` | インストール先 |
-| `characters.import.v3` | `true` | V3/PNG/CHARX インポートの有効性 |
-| `characters.install.max_total_bytes` | `2147483648` | 展開後合計上限(2 GiB) |
-| `characters.redistribute.check` | `true` | 再配布可否の検査 |
+数値は実装しながら決める(D-29)。
+
+| キー | 説明 |
+|---|---|
+| `characters.home_dir` | インストール先(既定は `<data>/characters`) |
+| `characters.import.v3` | V3/PNG/CHARX インポートの有効性(既定 `true`) |
+| `characters.install.max_total_bytes` | 展開後合計上限 |
+| `characters.redistribute.check` | 再配布可否の検査(既定 `true`) |
 
 ---
 

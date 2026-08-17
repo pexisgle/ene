@@ -1,14 +1,18 @@
-# 操作状態機械
+# 操作状態機械(後継設計)
 
-> 実現する要件: **P-503**(turn/step の耐久性)、**P-504**(レーン)、
-> **P-510**(エラー回復の状態面)、P-103(アボート)。
+> **段階: 後継設計。v1.0 では実装しない**(D-4)。
+> 実現する要件: **P-525**(重複効果なしのクラッシュ回復)の状態面。
 > 参照: pi の OperationState(「durable program counter」)を Ene のレーン/ターン語彙に適合させる。
 
 [agent-loop.md](agent-loop.md) がループの**振る舞い**(claim・pre-step・
 パイプライン駆動)を定義するのに対し、この文書はループの**耐久状態**を
-定義する。クラッシュしても回復できるのは、この状態が
+定義する。任意のクラッシュ位置から回復できるのは、この状態が
 [storage-model.md](storage-model.md) の registers に total な形で
 永続化されているからである。
+
+v1.0 は進行中の操作を「中断を検出できる程度に」記録するだけで、
+ここで定義するプログラムカウンタは持たない
+([agent-loop.md §12](agent-loop.md#12-中断の検出と報告p-515--d-5))。
 
 ## 1. 操作(operation)とは
 
@@ -165,7 +169,7 @@ ask-user・承認ポップアップ・サイドカーヘルス待ちなど、
   `next_run`(現操作の終端後予約)は使わない。
 - `cancel_requested` のときに回答が来ても、新しい効果は始めない
   ([durability.md §3](durability.md#3-回復ポリシー))。
-- タイムアウトは通常の期限ポリシー([agent-loop.md §11](agent-loop.md#11-設定キーと既定値) の
+- タイムアウトは通常の期限ポリシー([agent-loop.md §11](agent-loop.md#11-設定キー) の
   `harness.ask_user.timeout`)で `cancelled` セットルメント。
 
 ### failure_drain(失敗の排水)
@@ -324,14 +328,14 @@ inbox の**種別は3つだけ**([agent-loop.md §3](agent-loop.md#3-inbox-と-c
   子の終端トランザクションが親レーンへの終端 wake を**同トランザクション**
   で書くため、報告が消える窓はない([delegation.md §8](delegation.md#8-耐久性))。
 
-## 8. 設定キーと既定値
+## 8. 設定キー
 
-| キー | 既定 | 説明 |
-|---|---|---|
-| `harness.queue.steering_mode` | `one_at_a_time` | inject(`steer`)の捌き方 |
-| `harness.operations.validation` | `strict` | ロード時検証。`strict`(拒否)/ `warn`(警告して継続) |
+| キー | 説明 |
+|---|---|
+| `harness.queue.steering_mode` | inject(`steer`)の捌き方 |
+| `harness.operations.validation` | ロード時検証。`strict`(拒否、既定)/ `warn`(警告して継続) |
 
-([agent-loop.md §11](agent-loop.md#11-設定キーと既定値) の既存キー
+([agent-loop.md §11](agent-loop.md#11-設定キー) の既存キー
 `harness.loop.*`・`harness.delegation.*` はそのまま有効。この文書は
 それらの耐久機構を定義する。`harness.jobs.*` は使わない。)
 

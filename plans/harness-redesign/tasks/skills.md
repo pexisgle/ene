@@ -75,7 +75,9 @@ description: 旅行の計画・しおり作成を支援する。行き先・日�
 ### 発動と実行
 
 1. モデルが依頼と skill の description を照合し、本文の読み込みを
-   要求(内部ツール `skill.load(name)`)。
+   要求(`skill.load(name)`。skill はハーネスのコンテキスト組み立てに
+   直結するので**ハーネス機能ツール**、
+   [../tools/registry.md §0.1](../tools/registry.md#01-ハーネス機能ツールホスト内))。
 2. ロードされた本文は `skills.active` Source に載り、
    ターンを跨いで保持(セッション中)。
 3. `references/` は必要時に `skill.read(name, path)` で読む
@@ -103,15 +105,17 @@ description: 旅行の計画・しおり作成を支援する。行き先・日�
 | 本文の窓超過 | 本文を要約版に切替(要約はインストール時に生成してキャッシュ) |
 | script の承認拒否 | skill は本文のみで継続(スクリプトなしでできる範囲で) |
 | MCP prompt の取得失敗 | その発動を諦め、ライフサイクル警告 |
-| 多数 skill のカタログ肥大 | カタログは name+description のみなので肥大しにくい。100 件超で警告 |
+| 多数 skill のカタログ肥大 | カタログは name+description のみなので肥大しにくい。上限超過で警告 |
 
-## 7. 設定キーと既定値
+## 7. 設定キー
 
-| キー | 既定 | 説明 |
-|---|---|---|
-| `skills.home_dir` | `<data>/skills` | インストール先 |
-| `skills.catalog.max_entries` | `200` | カタログ上限 |
-| `skills.scripts.require_approval` | `true` | script 実行の承認必須(変更不可の既定) |
+数値は実装しながら決める(D-29)。
+
+| キー | 説明 |
+|---|---|
+| `skills.home_dir` | インストール先(既定は `<data>/skills`) |
+| `skills.catalog.max_entries` | カタログ上限 |
+| `skills.scripts.require_approval` | script 実行の承認必須。**既定 `true` は変更不可** |
 
 ---
 

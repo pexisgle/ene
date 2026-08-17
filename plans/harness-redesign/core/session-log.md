@@ -53,7 +53,7 @@ UI の履歴表示・モデルへの提示・fork・リプレイ・エクスポ�
 | `session/start` | `soul_id`, `body_id?`, `created_by: client\|schedule\|import` | セッション開始。最初のイベント |
 | `session/title` | `title` | タイトル更新(上書き式) |
 | `session/summary` | `scope: session_end\|compaction_ref`, `summary` | 要約の記録。`session_end` はセッション境界の要約 |
-| `session/end` | `reason: explicit\|idle_timeout\|topic_boundary`, `summary_ref?` | セッション終了。再開時は tombstone 化する(§7) |
+| `session/end` | `reason: explicit\|idle_timeout`, `summary_ref?` | セッション終了。**話題境界による自動分割はしない**(D-8)——コンパニオンとの会話は本来連続的で、話題が変わるたびに割れると会話が分断された感覚を生む。長い会話は分割ではなく compaction で畳む。再開時は tombstone 化する(§7) |
 | `session/reopen` | `previous_end_seq` | 終了済みセッションへの追記開始。対応する `session/end` を tombstone する |
 | `session/archived` | `archived: bool` | アーカイブ状態の切替 |
 | `fork/point` | `source_session_id`, `boundary_seq` | **fork 先**セッションの先頭に置く。接頭辞の来歴 |
@@ -178,10 +178,11 @@ CREATE TABLE spill_objects (
   `busy_timeout=5000`。
 - 書き込みは**単一ライターアクター**に集約。読み取り(投影・一覧)は
   WAL のおかげで並行可能。
-- 同一 DB にはさらに `session_registers`(可変状態)と
-  `session_usage`(使用量台帳)の2テーブルがある。スキーマ・書き込み規律・
-  排他性規則は [storage-model.md](storage-model.md) の §3・§4 が
-  定義する(entries/registers/usage の3ストアで1つの永続モデル)。
+- 同一 DB には `session_usage`(使用量台帳)がある。スキーマと書き込み規律は
+  [storage-model.md §4](storage-model.md) が定義する。
+  台帳には補助LLM の消費も載る(D-15)。
+- `session_registers`(可変状態)は**後継設計**であり v1.0 では持たない
+  ([storage-model.md §1](storage-model.md))。
 
 ## 5. 投影(`derive_messages`)
 
@@ -189,23 +190,28 @@ CREATE TABLE spill_objects (
 
 - 入力: `session_id`、任意の `since_seq`、`InnerVisibility`、
   `ThinkingVisibility`、`redaction: apply`(既定)。
-- `InnerVisibility`: `self_reference`(モデル履歴向け、窓あり)か
-  `off`(UI/エクスポート既定)。
-- `ThinkingVisibility`: `provider`(モデル履歴向け。プロバイダ規約で返送)か
-  `off`(UI/エクスポート既定)。
+- `InnerVisibility`: `self_reference`(モデル履歴向け、窓あり)/
+  `full`(詳細画面向け)/ `off`(表層UI・エクスポート既定)。
+- `ThinkingVisibility`: `provider`(モデル履歴向け。プロバイダ規約で返送)/
+  `full`(詳細画面向け)/ `off`(表層UI・エクスポート既定)。
+- 表示面ごとの深さは [visibility.md](visibility.md) が決め、投影は
+  与えられたパラメータに従うだけ(D-11)。`full` を表層UIに渡す経路が
+  存在しないことは、呼び出し側の型で保証する。
 - 出力: `ProjectedHistory { messages: [ProjectedMessage], truncated_prefix: bool }`。
 
 規則:
 
 1. seq 昇順に走査し、`user/message`・`assistant/message`・
    `context/system_message` を時系列で採用する。
-   `assistant/thinking` は **ThinkingVisibility = `provider`** のときのみ、
-   対応する `assistant/message` の直後に隣接採用する
-   (モデル履歴向け。プロバイダの多ターン規約が thinking の返送を
-   要求するため)。UI 履歴とエクスポート既定では常に `off`。
-2. `inner/message` は `model_visible = true` かつ InnerVisibility が
-   `self_reference` のとき、**自己参照窓**(既定: 同一セッションの直近 24 件、
-   設定 `mind.inner.self_reference_window`)分だけを末尾側から含める。
+   `assistant/thinking` は ThinkingVisibility が `provider` または `full` の
+   ときのみ、対応する `assistant/message` の直後に隣接採用する
+   (`provider` はモデル履歴向け。プロバイダの多ターン規約が thinking の
+   返送を要求するため)。表層UIとエクスポート既定では `off`。
+2. `inner/message` は InnerVisibility が `self_reference` のとき、
+   `model_visible = true` のものを**自己参照窓**分だけ末尾側から含める
+   (窓サイズは `mind.inner.self_reference_window`)。
+   `full` のときは窓を適用せず全件含める(詳細画面は履歴の閲覧面であり、
+   モデルの窓とは目的が違う)。
    窓の判定は [context-assembly.md](context-assembly.md) が最終決定するが、
    投影自体は窓パラメータに従うだけ。
 3. `compaction/applied` が存在する場合、`[from_seq, to_seq)` のメッセージ群
@@ -251,25 +257,27 @@ CREATE TABLE spill_objects (
   (親の `delegation/*` 要約イベントは含まれる、§3.6)。
 - エクスポートは読み取りのみで、ログに変更を加えない。
 
-## 9. 設定キーと既定値
+## 9. 設定キー
 
-| キー | 既定 | 説明 |
-|---|---|---|
-| `store.sessions.db_path` | `<data>/sessions.db` | ログ DB パス |
-| `store.sessions.synchronous` | `NORMAL` | `FULL` に変更可(安全優先環境向け) |
-| `mind.inner.self_reference_window` | `24` | 内面自己参照窓(件数) |
-| `store.sessions.export.include_inner` | `false` | エクスポートに内面を含めるか |
-| `store.sessions.export.include_thinking` | `false` | エクスポートに thinking を含めるか(診断専用) |
-| `store.sessions.projection.thinking` | `provider` | モデル履歴投影の thinking 採用(`provider\|off`) |
+数値は実装しながら決める(D-29)。
+
+| キー | 説明 |
+|---|---|
+| `store.sessions.db_path` | ログ DB パス(既定は `<data>/sessions.db`) |
+| `store.sessions.synchronous` | `NORMAL`(既定)/ `FULL`(安全優先環境向け) |
+| `mind.inner.self_reference_window` | 内面自己参照窓の件数 |
+| `store.sessions.export.include_inner` | エクスポートに内面を含めるか(既定 `false`) |
+| `store.sessions.export.include_thinking` | エクスポートに thinking を含めるか(既定 `false`、診断専用) |
 
 ## 10. 障害モード
 
 | 障害 | 挙動 |
 |---|---|
-| イベント書き込み失敗 | 単一トランザクションなので部分書き込みは起きない。3回再試行後、ターンを `failed`(error_class=`log_write`)で終了し、ライフサイクルイベントで報告 |
+| イベント書き込み失敗 | 単一トランザクションなので部分書き込みは起きない。再試行後、ターンを `failed`(error_class=`log_write`)で終了し、ライフサイクルイベントで報告 |
 | DB 破損 | 起動時 `integrity_check` 失敗 → 起動を拒否し、最新バックアップからの復元を提案([../platform/process-model.md](../platform/process-model.md)) |
-| ディスク満杯 | 書き込みエラーとして上記と同じ経路。spill 書き込みは先に容量チェック(閾値: 空き 256 MiB) |
+| ディスク満杯 | 書き込みエラーとして上記と同じ経路。spill 書き込みは先に容量チェック |
 | 未知の `v` のイベント | 保存したまま読み飛ばし、起動ログに警告 |
+| 前回の異常終了で `turn/end` を欠くターン | 起動時に `interrupted` として確定(D-5)。投影では中断として表示される |
 
 ---
 

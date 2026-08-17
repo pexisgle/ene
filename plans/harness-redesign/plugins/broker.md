@@ -1,6 +1,7 @@
 # Broker(資源仲介)
 
-> 実現する要件: **P-902**(Broker 仲介)、P-604(コネクタの資格情報注入)、
+> 実現する要件: **P-902**(Broker 仲介)、P-604(外部連携の資格情報注入。
+> 連携自体は MCP に委ねるが、鍵の受け渡しはここを通る)、
 > P-907(資格情報ボールト接点)、P-1006(サイドカー)。
 
 プラグインは原則としてファイル・ネットワーク・資格情報に**直接**
@@ -19,8 +20,9 @@ Broker は「何ができるか」(capability)と「何を承認したか」(pla
 
 ## 2. Broker RPC メソッド一覧
 
-呼び出しは [ipc.md](ipc.md) の `broker.request{ method, params, capability_ref }`
-で届く。`capability_ref` は hello で付与された能力の参照であり、
+呼び出しは [ipc.md](ipc.md) の capability 副プロトコル
+(`request{ method, params, capability_ref }`)で届く。
+`capability_ref` は hello で付与された能力の参照であり、
 宣言外の操作は即 `denied`。
 
 ### ファイル
@@ -59,9 +61,12 @@ Broker は「何ができるか」(capability)と「何を承認したか」(pla
 
 - 資格情報の平文はプラグインプロセスに渡さない。ネットワーク操作と
   組み合わせ、ホスト側で注入して代行する(P-907)。
-- 例外: プロバイダプラグインの API キーは、プラグインが自分で HTTP を
-  行う必要があるため、`cred.export`(承認必須+監査+有効期限付き)で
-  注入できる。有効期限は既定 1 時間(`broker.cred.ttl`)。
+- 例外: プロバイダプラグインと MCP ブリッジの API キーは、
+  自分で HTTP を行う必要があるため `cred.export`
+  (承認必須+監査+有効期限付き)で注入できる。
+  外部サービス連携を MCP に委ねた(D-23)結果、この経路を通る鍵が
+  増える。設定ファイルに平文で書かせないことがこの経路の存在理由なので、
+  MCP サーバーの設定も例外にしない。
 
 ### プロセス(サイドカー)
 
@@ -84,8 +89,8 @@ broker.request → plane 判断 → broker.grant{ grant_id, fds }
 ```
 
 - 全委譲は `grant_id` で追跡し、プラグイン死亡時にホストが全回収する。
-- 委譲には既定で**有効期限**(ファイル: 30 分、ストリーム: 接続寿命、
-  資格情報: §2 の ttl)があり、延長は再要求。
+- 委譲には**有効期限**(ファイル・資格情報は時間、ストリームは接続寿命)が
+  あり、延長は再要求。
 - 各委譲は監査ログに記録(method・対象・grant_id・プラグイン id・承認経路)。
 
 ## 4. 障害モード
@@ -93,18 +98,20 @@ broker.request → plane 判断 → broker.grant{ grant_id, fds }
 | 障害 | 挙動 |
 |---|---|
 | capability 未宣言の操作 | 即 `denied`。監査ログに「宣言外要求」として記録(攻撃検知の材料) |
-| plane が保留中(ポップアップ待ち) | `broker.request` は保留キューに入り、決定までブロック。プラグイン側は `tool.progress` で待機を報告すべき |
+| plane が保留中(ポップアップ待ち) | 要求は保留キューに入り、決定までブロック。プラグイン側は `tool.progress` で待機を報告すべき |
 | fd 回収漏れ | 期限切れで強制 close。連続漏れはプラグインの欠陥としてライフサイクル警告 |
 | 委譲中の承認取り消し | 進行中操作は完了させるが、次の委譲から `denied`。取り消しは監査ログに記録 |
 
-## 5. 設定キーと既定値
+## 5. 設定キー
 
-| キー | 既定 | 説明 |
-|---|---|---|
-| `broker.fs.default_scope` | `workspace` | 未指定時の fs スコープ |
-| `broker.net.private_ranges` | `deny` | 私的アドレス帯の既定(`deny\|allow\|ask`) |
-| `broker.grant.file_ttl` | `1800` | ファイル委譲の有効秒 |
-| `broker.cred.ttl` | `3600` | 資格情報 export の有効秒 |
+数値は実装しながら決める(D-29)。
+
+| キー | 説明 |
+|---|---|
+| `broker.fs.default_scope` | 未指定時の fs スコープ(既定は `workspace`) |
+| `broker.net.private_ranges` | 私的アドレス帯の既定(`deny\|allow\|ask`。既定 `deny`) |
+| `broker.grant.file_ttl` | ファイル委譲の有効期間 |
+| `broker.cred.ttl` | 資格情報 export の有効期間 |
 
 ---
 

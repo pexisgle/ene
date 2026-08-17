@@ -3,7 +3,7 @@
 > 実現する要件: **P-605**(job)、**P-606**(スケジュール)、**P-607**(リマインダー)、
 > **P-608**(ワークフロー)、**P-609**(artifact)。
 
-対話の外で進む「仕事」の全体。ユーザーには「おつかい」として見える。
+対話の外で進む「仕事」の全体。**ユーザー向けの呼称は「タスク」**(D-12)。
 job は**非同期委譲の public モード**である——実体・ライフサイクル・
 親↔子メッセージ・耐久性は [../core/delegation.md](../core/delegation.md) が
 定義し、この文書はユーザー向けの job 面(定義・スケジュール・
@@ -39,9 +39,11 @@ created → queued → running → completed
 - job の実体は「目標+ツール集合+ターン列」。ワークフローは
   ステップを持つ job(§4)。
 - 進捗: 子の `progress` メッセージのうち `fraction`/`note` を持つものが
-  job の進捗になる。`job/progress` ライブイベントで配信し、
-  クライアントは「おつかい」のカードとして表示
-  (P-613/visibility の規則に従い、生内容は出さない)。
+  job の進捗になる。`job/progress` ライブイベントで配信する。
+  **進捗をユーザーに伝えるのはコンパニオンの発話**であって、
+  ステータスバーではない(D-13)。タスクの一覧・カードは詳細画面側に置き、
+  表層UIでは会話の中で語られる
+  ([../core/visibility.md](../core/visibility.md))。
 
 ### 定義フィールド
 
@@ -66,15 +68,29 @@ created → queued → running → completed
    「引き受けた」発話の後、裏で走る。job 定義(title 等)は
    親が同じ呼び出しで決める。
 2. **スケジュールの発火**(§4): `scheduled` origin のターンが job を生む。
-3. **ユーザーの直接作成**(UI): 「おつかい」画面からの作成(stretch の範囲で v1.0 最小)。
+3. **ユーザーの直接作成**(UI): タスク画面からの作成(stretch の範囲で v1.0 最小)。
 
 ### キャンセルと中断
 
-- `delegate.cancel`(UI では「おつかいの中止」): 進行中のターン列を
+- `delegate.cancel`(UI では「タスクの中止」): 進行中のターン列を
   停止(協調的キャンセル、[../core/delegation.md §4](../core/delegation.md#4-層間エンベロープと表層--裏層))。
   中間成果物は保持し、`cancelled` で確定。
-- アプリ終了時は `queued`/`running` の job を永続化し、
-  次回起動で `queued` から再開する(running 中のターンは破棄して再実行)。
+- **異常終了時**(D-5): `running` だった job は次回起動で
+  `interrupted` として検出される。**自動再開はしない。**
+  再開すると、どこまで副作用が及んだか分からないまま同じ操作を
+  繰り返す危険がある(ファイルを二度書く、メールを二度送る)。
+  v1.0 の扱いは以下:
+
+  1. 起動時に `running` のまま残った job を検出する。
+  2. workspace の一時ファイルなど、安全に消せるものを片付ける。
+  3. コンパニオンがユーザーに報告する
+     (「さっきの調べもの、途中で止まっちゃった。やり直す?」)。
+  4. 再開するかはユーザーが決める。再開は**新しい job として**始まる。
+
+  `queued` のまま未着手だった job は副作用が無いので、そのまま再投入する。
+
+  副作用の記録による安全な再開(effect sandwich)は後継設計
+  ([../core/durability.md](../core/durability.md))。
 
 ## 3. スケジュール(P-606)
 
@@ -127,8 +143,9 @@ CREATE INDEX idx_sched_next ON schedules (enabled, next_fire);
 - 実体: job の `goal` に加え、`plan` フィールド
   (ステップの配列: `{ id, description, status }`)を持つ。
 - ステップの進行はモデル自身が plan を更新しながら進める
-  (`todo_write` 相当の内部ツールで管理)。
-  コアはステップ列を UI に表示するだけ(進行の強制はしない)。
+  (`todo_write` 相当の**ハーネス機能ツール**で管理。plan はハーネス側の
+  job 状態なので、ホスト内で動く。[../tools/registry.md §0.1](../tools/registry.md#01-ハーネス機能ツールホスト内))。
+  コアはステップ列を詳細画面に表示するだけ(進行の強制はしない)。
 - ステップ間の成果物は workspace_dir に蓄積し、最終成果物を
   artifact として交付する。
 - ワークフロー専用エンジン(外部 DSL 等)は導入しない。
@@ -158,7 +175,7 @@ CREATE INDEX idx_art_soul ON artifacts (soul_id, created_at DESC);
 ### 生成と交付
 
 - **生成**: ツールが workspace_dir にファイルを書き、
-  `artifact.register` 内部ツールで登録する。
+  `artifact.register`(ハーネス機能ツール)で登録する。
 - **段階化**(確定済み): v1.0 は `text/markdown/csv`(テキスト系)を
   実装。`docx/xlsx/pptx/image/pdf` は**形式と接点を v1.0 で固定し、
   実装は後継**(プロバイダ/ツールとして追加できるようにする)。
@@ -166,7 +183,7 @@ CREATE INDEX idx_art_soul ON artifacts (soul_id, created_at DESC);
   クライアントはダウンロード/表示/共有の操作を提供。
   交付は `delivered` フラグで管理し、再提示はしない。
 - **巨大成果物**: spill とは別枠(成果物は交付物なので削らない)。
-  ただし登録時に容量チェック(単一 100 MiB 上限、`tasks.artifact.max_bytes`)。
+  ただし登録時に容量チェック(`tasks.artifact.max_bytes`)。
 
 ## 6. 自動化ルール(後継の接点)
 
@@ -174,27 +191,30 @@ CREATE INDEX idx_art_soul ON artifacts (soul_id, created_at DESC);
   スケジュール(`job` action)+ skill([skills.md](skills.md))の
   組合せで表現する。専用のルールエンジン DSL は導入しない
   (軽量原則)。
-- コネクタ受信イベント(カレンダー変更等)をトリガーにする
-  「イベント駆動の自動化」は後継(M1/M2 参照)。形式上の接点として、
-  スケジュールの `spec` に `on_event:<source>` を予約する。
+- 外部サービスの受信イベント(カレンダー変更等)をトリガーにする
+  「イベント駆動の自動化」は後継。受信元は MCP サーバーになる(D-23)ので、
+  形式上の接点として、スケジュールの `spec` に `on_event:<source>` を
+  予約する。
 
-## 7. 設定キーと既定値
+## 7. 設定キー
 
-| キー | 既定 | 説明 |
-|---|---|---|
-| (並行上限) | `harness.delegation.max_active`(既定 4) | [core/delegation.md §10](../core/delegation.md#10-設定キーと既定値) に統合。job は委譲なので独自キーを持たない |
-| `tasks.jobs.workspace_root` | `<data>/workspaces` | workspace 根 |
-| `tasks.schedules.timezone` | `system` | 既定タイムゾーン |
-| `tasks.artifact.max_bytes` | `104857600` | 成果物単一上限(100 MiB) |
-| `tasks.artifact.kinds` | `text,markdown,csv` | v1.0 の生成有効種別 |
+数値は実装しながら決める(D-29)。
+
+| キー | 説明 |
+|---|---|
+| (並行上限) | `harness.delegation.max_active` に統合([core/delegation.md](../core/delegation.md))。job は委譲なので独自キーを持たない |
+| `tasks.jobs.workspace_root` | workspace 根(既定は `<data>/workspaces`) |
+| `tasks.schedules.timezone` | 既定タイムゾーン(既定はシステム tz) |
+| `tasks.artifact.max_bytes` | 成果物単一上限 |
+| `tasks.artifact.kinds` | v1.0 の生成有効種別(テキスト系のみ) |
 
 ## 8. 障害モード
 
 | 障害 | 挙動 |
 |---|---|
 | job のターン列が失敗 | ステップ予算内で再試行。不能なら `failed` で確定し、**報告ターン**が親の対話レーンに届く([../core/delegation.md §6](../core/delegation.md#6-報告ターンp-521)) |
-| 子が親に質問を送った | job カードに「確認待ち」表示。親への wake は報告ターンで届き、親がユーザーに尋ねる(ask-user 経路の転送) |
-| アプリ終了時の running job | 永続化して次回再開。中断位置のターンは再実行 |
+| 子が親に質問を送った | 親への wake は報告ターンで届き、**親がユーザーに口頭で尋ねる**(ask-user 経路の転送)。詳細画面のタスク一覧では「確認待ち」表示 |
+| 異常終了時の running job | `interrupted` として検出し、片付けて報告。自動再開はしない(§2 キャンセルと中断) |
 | スケジュールの発火漏れ(停止中) | 起動時に `next_fire` が過去になっているものは**1回だけ**即時発火(繰り越しはしない) |
 | artifact 登録の容量超過 | 登録拒否+job に報告。モデルは分割/圧縮を判断 |
 | quiet hours 中の remind | 繰り下げ(`silent`)。`important` は貫通 |

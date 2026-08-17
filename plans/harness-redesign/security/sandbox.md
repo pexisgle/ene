@@ -7,11 +7,19 @@
 - プラグイン子プロセスはすべて OS 強制のサンドボックス内で動く。
   サンドボックス初期化に失敗する環境では、そのプラグインを
   **起動しない**(安全既定。`sandbox.required = true` の場合)。
+- **対象はアウトプロセスのツールとプロバイダのみ**。ハーネス機能ツール
+  (記憶想起・委譲など)はホスト内で動くので、この隔離の対象外
+  ([../tools/registry.md §0](../tools/registry.md#0-2軸の分類d-10))。
+  ホスト自身のコードを隔離しても意味がなく、隔離すべき「他人のコード」は
+  すべてプロセス境界の向こうにある。
 - 現行の成果(`plans/sandbox-and-downloads.md`、`plans/windows-appcontainer.md`、
-  `crates/ene-sandbox`)を継承し、新 IPC([../plugins/ipc.md](../plugins/ipc.md))の
-  全アウトプロセス構成に合わせて整理する。
-- サンドボックスは「进程の隔離」、Broker は「資源の仲介」。両方が
+  `crates/ene-sandbox`)を継承し、新 IPC([../plugins/ipc.md](../plugins/ipc.md))に
+  合わせて整理する。
+- サンドボックスは「プロセスの隔離」、Broker は「資源の仲介」。両方が
   揃って初めて安全になる(多層防御)。
+- **v1.0 は署名を持たない**(D-26)ため、サンドボックスと Broker が
+  実質的な唯一の防御線になる。「署名で信頼できるから緩めてよい」という
+  逃げ道が無いことを前提に設計する。
 
 ## 2. プラットフォーム別の強制手段
 
@@ -33,7 +41,7 @@
 | 資源 | 内容 |
 |---|---|
 | コード/アセット | 読み取り専用のプラグインディレクトリ(manifest 検証済み) |
-| temp | 容量制限付きの専用 temp(既定 256 MiB) |
+| temp | 容量制限付きの専用 temp |
 | IPC | ホストとのソケットのみ。DNS・直接 HTTP はなし |
 | 委譲 FD | Broker が渡すファイル/ストリームの FD(有効期限付き) |
 
@@ -78,18 +86,20 @@
 |---|---|
 | サンドボックス初期化失敗 | `sandbox.required` プラグインは起動せず報告。任意のプラグインは警告付きで通常起動(設定 `sandbox.allow_unconfined = false` が既定なので、既定では起動しない) |
 | 資源制限超過 | kill+報告。連続でブレーカー |
-| 脱出試行の検知 | 監査ログ+ライフサイクル警告。プラグインの信頼性低下(署名カタログのレビュー材料) |
+| 脱出試行の検知 | 監査ログ+ライフサイクル警告。以後そのプラグインを起動しない(ユーザーが明示的に解除するまで) |
 | Landlock ルールの適用失敗 | そのプラグインを起動しない(部分適用のまま動かさない) |
 
-## 8. 設定キーと既定値
+## 8. 設定キー
 
-| キー | 既定 | 説明 |
-|---|---|---|
-| `sandbox.required` | `true` | サンドボックス必須 |
-| `sandbox.allow_unconfined` | `false` | 非隔離起動の許可(開発時のみ) |
-| `sandbox.limits.memory_mib` | `1024` | プラグインのメモリ上限 |
-| `sandbox.limits.cpu_cores` | `2` | CPU 上限 |
-| `sandbox.temp.max_mib` | `256` | temp 容量上限 |
+数値は実装しながら決める(D-29)。
+
+| キー | 説明 |
+|---|---|
+| `sandbox.required` | サンドボックス必須(既定 `true`) |
+| `sandbox.allow_unconfined` | 非隔離起動の許可(開発時のみ。既定 `false`) |
+| `sandbox.limits.memory_mib` | プラグインのメモリ上限 |
+| `sandbox.limits.cpu_cores` | CPU 上限 |
+| `sandbox.temp.max_mib` | temp 容量上限 |
 
 ---
 

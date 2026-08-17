@@ -6,7 +6,17 @@
 |---|---|---|
 | [process-model.md](process-model.md) | コアデーモン・起動シーケンス・アクター配置・プラグイン監督・設定システム・バックアップ・性能予算 | P-701, P-708, P-709, P-1005 |
 | [server-api.md](server-api.md) | HTTP API・WS イベント・音声ストリーミング・SDK 生成・外部公開 | P-702, P-703 |
-| [clients.md](clients.md) | desktop(stage)/CLI/Web の責務分担・複数クライアントの排他資源調停 | P-704..P-707 |
+| [clients.md](clients.md) | desktop(stage)/CLI/Web の責務分担・表層UIと詳細画面・複数クライアントの排他資源調停 | P-704..P-707, P-712 |
+
+## この層に効く主な決定
+
+- **desktop はネイティブのみ**(D-21)。egui + wgpu で、WebView は使わない。
+  常駐アプリの起動時間・メモリ・配布サイズが価値に直結するため。
+- **詳細画面は desktop では別ウィンドウ**(D-11)。主画面は「そこに居る」場所で、
+  内部情報の表示面ではない。Web も同じ深さの詳細画面を持つが、
+  閲覧とデバッグに限り、変更は desktop のみ(D-31)。
+- **起動時に前回の中断を検出する**(D-5)。片付けまでがコアの仕事で、
+  報告は次のターンでコンパニオンが話す。
 
 ## 読み順
 
@@ -17,6 +27,6 @@
 ## 他フォルダとの接点
 
 - プラグインの輸送・監督対象 → [../plugins/ipc.md](../plugins/ipc.md)
+- 表示の深さ → [../core/visibility.md](../core/visibility.md)
 - 音声パイプラインの本体 → [../body/voice.md](../body/voice.md)
 - 承認の配信先 → [../security/approval.md](../security/approval.md)
-

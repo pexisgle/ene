@@ -13,9 +13,15 @@
 ([../product/vision.md](../product/vision.md#51-コアデーモン内の2層))。
 この文書は、その**層間の実行面**を定義する。
 
-このアプリの対話レーン(表層)は**会話のために空けておく**。実作業(調べ物、
-文書作成、コード作業、長い計算)は、対話レーンの外で走る
+このアプリの対話レーン(表層)は**会話のために空けておく**。複雑な作業
+(まとまった調べ物、文書作成、コード作業、長い計算)は、対話レーンの外で走る
 **委譲(delegation)** に移す。委譲の実行体が裏層ハーネスである。
+
+ただし**すべてを委譲するわけではない**。表層は副作用のない読み取り専用
+ツールを持ち、計画立案を要さない簡単な作業はその場で片付ける(D-1/D-2、
+[agent-loop.md §2.2](agent-loop.md#22-表層のツール面d-1--d-2))。
+「今何時?」のために委譲の往復を起こすのは、遅延と機構の重さに見合わない。
+見誤りは自動昇格(§4.1)で回収する。
 
 - **表層は仲介層である**: 通常のハーネスに存在しない層として、
   表層のエージェントは「裏で走る LLM 群(委譲・記憶抽出・
@@ -41,7 +47,7 @@
 | モード | ユーザーから | UI | ログの扱い |
 |---|---|---|---|
 | `internal` | **見えない**(秘匿サブエージェント) | なし。承認ポップアップは匿名化([../security/approval.md §4](../security/approval.md#4-リスク分類とポップアップp-905)) | 親セッションには `delegation/*` 要約イベントのみ。子セッションは診断専用 |
-| `public` | **job(「おつかい」)** として見える | job カード・進捗表示([../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md)) | 同上+`job/progress` ライブイベント |
+| `public` | **job(ユーザー向けの呼称は「タスク」)** として見える | コンパニオンの発話として進捗が届く(D-13、[../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md)) | 同上+`job/progress` ライブイベント |
 
 モードは委譲の開始時に決まり、途中で変えない。
 内部機構の非表示は [visibility.md](visibility.md) の規則に従う。
@@ -70,7 +76,7 @@ created → running → completed
 
 | 種別 | Codex v2 | 方向 | inbox | 載せるツール |
 |---|---|---|---|---|
-| `task` | `NEW_TASK`(spawn) | 表層 → 裏層 | wake | `delegate.start` |
+| `task` | `NEW_TASK`(spawn) | 表層 → 裏層 | wake | `delegate.start`(モデルが呼ぶ)、または §4.1 の自動昇格 |
 | `task` | `NEW_TASK`(followup) | 表層 → 裏層 | wake | `delegate.instruct` |
 | `message` | `MESSAGE` | 表層 → 裏層 | **inject**(ターンを起こさない) | `delegate.message` |
 | `message` | `MESSAGE` | 裏層 → 表層 | inject | `delegation.send{progress\|artifact_ready}` |
@@ -105,10 +111,28 @@ created → running → completed
   ([lane-api.md](lane-api.md) の `cancelQueued` と同じ思想)。
   失われた cancel を再送しても状態は壊れない。
 
+### 4.1 自動昇格(P-523 / D-3)
+
+委譲は、モデルが `delegate.start` を呼ぶ経路のほかに、**ハーネスが機構として
+起こす**経路を持つ。表層は簡単な作業を自分で片付けてよい(D-1)ので、
+「簡単だと思ったが実は複雑だった」場合の回収が必要になる。
+
+起点と手順は [agent-loop.md §2.3](agent-loop.md#23-委譲への自動切り替えp-523--d-3)。
+この文書の側で押さえるのは3点。
+
+- 昇格で作られる委譲は、モデルが呼んだものと**同じ実体**である。
+  別のライフサイクルや別の報告経路を作らない。
+- 委譲ブリーフは、モデルが書いた目標文ではなく、**それまでのステップの畳み込み**
+  から作る(何を調べ、何が分かり、次に何が必要か)。表層が既に得た結果を
+  裏層が最初からやり直さないため。
+- 昇格は `public` モードで起こす。ユーザーが依頼した作業の続きであり、
+  秘匿する理由がない。
+
 ## 5. 子 → 親(メールボックス)
 
-裏層は `delegation.send` 内部ツールで表層へメッセージを送る。
-種別と配送:
+裏層は `delegation.send`(ハーネス機能ツール、
+[../tools/registry.md §0.1](../tools/registry.md#01-ハーネス機能ツールホスト内))で
+表層へメッセージを送る。種別と配送:
 
 | 種別 | エンベロープ | 親 inbox での扱い | 用途 |
 |---|---|---|---|
@@ -175,46 +199,47 @@ created → running → completed
 
 ## 8. 耐久性
 
-- 子の実行本体は job レーンの操作であり、
-  [operations.md](operations.md)/[durability.md](durability.md) の
-  規則がそのまま適用する。
-- **メールボックスの耐久化**:
-  - 子→親の wake/inject は、親レーンの `pending.entry`
-    (1項目=予約 entry id)。クラッシュしても失われない。
-- 親→子の instruct/answer は、子レーンの
-  `delegation.inbox` レジスタに届き、子の次 claim で消費される。
-  `delegate.message` も同じレジスタへ **inject** として書き、
-  wake にはしない。
-- **終端の原子性**: 子の終端トランザクションは
-  「子の turn/end + 子セッションの `delegation/end` +
-  親レーンへの終端 wake(pending.entry)+ 進捗レジスタの掃除」を
-  **1トランザクション**でコミットする。報告が途中で消える窓はない。
-- 親が委譲を開始した直後にクラッシュした場合も、
-  受理トランザクション(LaneBusy 検査+`op.meta`/`op.state`)は
-  既存の受理規則そのもの([operations.md §1](operations.md#1-操作operationとは))。
+**v1.0 の保証**: 委譲は中断を検出できる形で記録される。プロセスが死んだら、
+再起動時に未完了の委譲が検出され、後始末され、コンパニオンがユーザーに
+中断を報告する([agent-loop.md §12](agent-loop.md#12-中断の検出と報告p-515--d-5))。
+中断された委譲は**自動再開しない**。
+
+メールボックスは、子→親の wake/inject が親レーンに予約された形で永続する。
+子の終端(turn/end + `delegation/end` + 親レーンへの終端 wake + 進捗の掃除)は
+**1トランザクション**でコミットする。報告が途中で消える窓を作らないため。
+これは v1.0 でも守る——効果の重複を防ぐ話ではなく、報告の欠落を防ぐ話であり、
+単一トランザクションで足りる。
+
+**後継設計**(P-525、D-4): 子の実行本体を
+[operations.md](operations.md)/[durability.md](durability.md) の操作状態機械に
+載せると、任意のクラッシュ位置から重複効果なしで再開できるようになる。
+v1.0 ではここまで踏み込まない。
 
 ## 9. 予算とガード
 
 | ガード | 規則 |
 |---|---|
-| 並行上限 | soul ごとの job レーン上限(`harness.delegation.max_active`: 既定 4)。超過時 `delegate.start` は `rejected{slots_full}` |
-| progress のレート制限 | 最小間隔 `harness.delegation.progress_min_interval`(既定 30 秒)。超過分は最新1件にまとめる |
-| 質問の同時数 | 複数可(上限 `harness.delegation.max_open_questions`: 既定 4)。上限超過時の質問は拒否(子はその場で自立判断)。親への配信は**結合**して届く(§6) |
-| 質問のタイムアウト | `harness.delegation.question_timeout`(既定 24 時間)。未回答の質問ごとに個別に数え、超過すると子は**仮定を置いて進み**、その仮定を progress で報告する。停止して腐らない |
+| 並行上限 | soul ごとの job レーン上限(`harness.delegation.max_active`)。超過時 `delegate.start` は `rejected{slots_full}` |
+| progress のレート制限 | 最小間隔を置き、超過分は最新1件にまとめる |
+| 質問の同時数 | 複数可(上限 `harness.delegation.max_open_questions`)。上限超過時の質問は拒否(子はその場で自立判断)。親への配信は**結合**して届く(§6) |
+| 質問のタイムアウト | 未回答の質問ごとに個別に数え、超過すると子は**仮定を置いて進み**、その仮定を progress で報告する。停止して腐らない |
 | ステップ/実時間予算 | §7。超過は `failed{budget}` |
+| 昇格ループ | 自動昇格(§4.1)は表層ターンごとに1回。同一ターンで再度起きたら、そのターンは委譲済みとして閉じる |
 
-## 10. 設定キーと既定値
+## 10. 設定キー
 
-| キー | 既定 | 説明 |
-|---|---|---|
-| `harness.delegation.max_active` | `4` | soul ごとの並行委譲上限 |
-| `harness.delegation.step_budget` | `128` | 子ターンの合計ステップ上限 |
-| `harness.delegation.wall_timeout` | `2h` | 委譲の実時間予算 |
-| `harness.delegation.progress_min_interval` | `30s` | progress 最小間隔 |
-| `harness.delegation.max_open_questions` | `4` | 委譲ごとの未回答質問の上限 |
-| `harness.delegation.max_depth` | `3` | 委譲の深さ上限(資源ガード、§7) |
-| `harness.delegation.question_timeout` | `24h` | 子の質問の親回答待ち上限 |
-| `harness.delegation.report_gates` | `true` | 報告ターンに quiet hours/疲労ゲートを適用 |
+具体的な数値は実装しながら決める(D-29)。
+
+| キー | 説明 |
+|---|---|
+| `harness.delegation.max_active` | soul ごとの並行委譲上限 |
+| `harness.delegation.step_budget` | 子ターンの合計ステップ上限 |
+| `harness.delegation.wall_timeout` | 委譲の実時間予算 |
+| `harness.delegation.progress_min_interval` | progress 最小間隔 |
+| `harness.delegation.max_open_questions` | 委譲ごとの未回答質問の上限 |
+| `harness.delegation.max_depth` | 委譲の深さ上限(資源ガード、§7) |
+| `harness.delegation.question_timeout` | 子の質問の親回答待ち上限 |
+| `harness.delegation.report_gates` | 報告ターンに quiet hours/疲労ゲートを適用するか |
 
 ## 11. 障害モード
 
