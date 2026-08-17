@@ -330,6 +330,17 @@ pub fn localized_display_name(files: &BTreeMap<String, Vec<u8>>, locale: &str) -
     manifest.package.display_name
 }
 
+/// Resolve a localized display name from an installed package directory.
+pub fn display_name_for_install(dir: &Path, locale: &str) -> Result<String, CompanionError> {
+    let mut files = BTreeMap::new();
+    collect_files(dir, dir, &mut files)?;
+    let name = localized_display_name(&files, locale);
+    if name.is_empty() {
+        return Err(CompanionError::package("missing display name"));
+    }
+    Ok(name)
+}
+
 /// Bind an installed soul package to an installed body package (P-402 / P-8xx).
 pub fn compose_soul_and_body(
     store: &CompanionStore,

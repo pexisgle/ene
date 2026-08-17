@@ -11,6 +11,7 @@ use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 
@@ -400,6 +401,17 @@ impl ApiClient {
         .await
     }
 
+    pub async fn import_character_archive_b64(
+        &self,
+        archive_b64: &str,
+    ) -> Result<CharacterView, ApiError> {
+        self.send_json(
+            self.request(Method::POST, "/api/v1/characters/import")
+                .json(&serde_json::json!({ "archive_b64": archive_b64 })),
+        )
+        .await
+    }
+
     pub async fn export_character(&self, id: &str) -> Result<Value, ApiError> {
         self.send_json(self.request(Method::GET, &format!("/api/v1/characters/{id}/export")))
             .await
@@ -512,7 +524,18 @@ impl ApiClient {
                 query.append_pair("session_id", session);
             }
         }
-        let (stream, _) = connect_async(url.as_str())
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|err| ApiError::Websocket(err.to_string()))?;
+        use reqwest::header::HeaderValue;
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            HeaderValue::from_str(&format!("bearer.{}", self.token)).map_err(
+                |err: reqwest::header::InvalidHeaderValue| ApiError::Websocket(err.to_string()),
+            )?,
+        );
+        let (stream, _) = connect_async(request)
             .await
             .map_err(|err| ApiError::Websocket(err.to_string()))?;
         Ok(EventSocket { stream })

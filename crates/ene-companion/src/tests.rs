@@ -219,7 +219,13 @@ fn forget_request_removes_matching_memory_and_records_journal() {
         })
         .unwrap();
     let journal_before = store.journal_len().unwrap();
-    let n = crate::memory::apply_forget_request(&store, soul.id, "forget trip").unwrap();
+    let n = crate::memory::apply_forget_request(
+        &store,
+        soul.id,
+        "forget trip",
+        crate::config::ForgettingMode::Immediate,
+    )
+    .unwrap();
     assert_eq!(n, 1);
     assert!(store.journal_len().unwrap() > journal_before);
     let hits = store

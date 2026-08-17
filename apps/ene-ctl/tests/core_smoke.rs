@@ -80,9 +80,17 @@ async fn ctl_client_lists_tools_and_debug_spans() {
     let (_child, client) = spawn_core(&dir).await;
     let tools = client.list_tools().await.unwrap();
     assert!(!tools.items.is_empty());
+    let soul_id = client
+        .list_souls()
+        .await
+        .unwrap()
+        .items
+        .first()
+        .map(|soul| soul.id.clone())
+        .expect("boot seeds souls");
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: Some("ctl picnic".into()),
         })
         .await
@@ -189,7 +197,13 @@ async fn cli_binary_starts_core_and_runs_session_ops() {
     assert!(status.status.success());
     assert!(String::from_utf8_lossy(&status.stdout).contains("ok"));
 
-    let soul_id = ene_session::SoulId::new().to_string();
+    let souls = run(&["soul", "list"]);
+    assert!(souls.status.success());
+    let soul_page: serde_json::Value = serde_json::from_slice(&souls.stdout).unwrap();
+    let soul_id = soul_page["items"][0]["id"]
+        .as_str()
+        .expect("seeded soul")
+        .to_owned();
     let create = run(&["session", "create", soul_id.as_str()]);
     assert!(
         create.status.success(),

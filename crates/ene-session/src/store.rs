@@ -111,6 +111,12 @@ enum WriteOp {
     Recover {
         reply: oneshot::Sender<Result<Vec<RecoveryReport>, SessionError>>,
     },
+    CloseWriter {
+        reply: oneshot::Sender<Result<(), SessionError>>,
+    },
+    ReopenWriter {
+        reply: oneshot::Sender<Result<(), SessionError>>,
+    },
     Shutdown,
 }
 
@@ -195,6 +201,28 @@ impl SessionStore {
             .send(WriteOp::Recover { reply })
             .map_err(|_| SessionError::WriterClosed)?;
         rx.await.map_err(|_| SessionError::WriterClosed)?
+    }
+
+    pub async fn close_writer(&self) -> Result<(), SessionError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(WriteOp::CloseWriter { reply })
+            .map_err(|_| SessionError::WriterClosed)?;
+        rx.await.map_err(|_| SessionError::WriterClosed)?
+    }
+
+    pub async fn reopen_writer(&self) -> Result<(), SessionError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(WriteOp::ReopenWriter { reply })
+            .map_err(|_| SessionError::WriterClosed)?;
+        rx.await.map_err(|_| SessionError::WriterClosed)?
+    }
+
+    pub fn reload_reader(&self, synchronous: &str) -> Result<(), SessionError> {
+        let conn = open_connection(&self.path, synchronous)?;
+        *self.reader.lock() = conn;
+        Ok(())
     }
 
     pub fn load_events(
@@ -306,7 +334,7 @@ fn writer_loop(
     let mut conn = match opened {
         Ok(conn) => {
             drop(ready.send(Ok(())));
-            conn
+            Some(conn)
         }
         Err(err) => {
             drop(ready.send(Err(err)));
@@ -316,21 +344,53 @@ fn writer_loop(
     while let Ok(op) = rx.recv() {
         match op {
             WriteOp::Shutdown => break,
+            WriteOp::CloseWriter { reply } => {
+                if let Some(open) = conn.take() {
+                    drop(open.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);"));
+                }
+                drop(reply.send(Ok(())));
+            }
+            WriteOp::ReopenWriter { reply } => {
+                let result = if conn.is_some() {
+                    Ok(())
+                } else {
+                    open_connection(&path, &synchronous).map(|opened| {
+                        conn = Some(opened);
+                    })
+                };
+                drop(reply.send(result));
+            }
             WriteOp::Create { spec, reply } => {
-                drop(reply.send(create_session_conn(&mut conn, spec)));
+                let result = conn
+                    .as_mut()
+                    .ok_or(SessionError::WriterClosed)
+                    .and_then(|open| create_session_conn(open, spec));
+                drop(reply.send(result));
             }
             WriteOp::Commit { tx, reply } => {
-                drop(reply.send(commit_conn(&mut conn, &tx)));
+                let result = conn
+                    .as_mut()
+                    .ok_or(SessionError::WriterClosed)
+                    .and_then(|open| commit_conn(open, &tx));
+                drop(reply.send(result));
             }
             WriteOp::Fork {
                 source,
                 boundary,
                 reply,
             } => {
-                drop(reply.send(fork_conn(&mut conn, source, boundary)));
+                let result = conn
+                    .as_mut()
+                    .ok_or(SessionError::WriterClosed)
+                    .and_then(|open| fork_conn(open, source, boundary));
+                drop(reply.send(result));
             }
             WriteOp::Recover { reply } => {
-                drop(reply.send(recover_conn(&mut conn)));
+                let result = conn
+                    .as_mut()
+                    .ok_or(SessionError::WriterClosed)
+                    .and_then(recover_conn);
+                drop(reply.send(result));
             }
         }
     }

@@ -172,8 +172,16 @@ impl StageApp {
             .collect();
         let extra_ids: Vec<String> = souls.iter().map(|soul| soul.id.clone()).collect();
         let mut soul_ids = merge_soul_ids(&occupant_ids, &extra_ids);
+        if soul_ids.is_empty() {
+            self.error = Some("no companions available".to_owned());
+            return;
+        }
         while soul_ids.len() < 2 {
-            soul_ids.push(uuid::Uuid::new_v4().to_string());
+            if let Some(extra) = extra_ids.iter().find(|id| !soul_ids.contains(id)) {
+                soul_ids.push(extra.clone());
+            } else {
+                break;
+            }
         }
         for (idx, soul_id) in soul_ids.iter().take(2).enumerate() {
             let soul_meta = souls.iter().find(|s| s.id == *soul_id);

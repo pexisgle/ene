@@ -102,6 +102,7 @@ pub struct VoiceRuntime {
     speaking: Option<BodyId>,
     playback_until_ms: u64,
     speech_started_ms: Option<u64>,
+    last_barge_ms: Option<u64>,
     last_output: Vec<f32>,
     lips: LipSyncAnalyzer,
     last_viseme: VisemeWeights,
@@ -119,6 +120,7 @@ impl VoiceRuntime {
             speaking: None,
             playback_until_ms: 0,
             speech_started_ms: None,
+            last_barge_ms: None,
             last_output: Vec::new(),
             lips: LipSyncAnalyzer::default(),
             last_viseme: VisemeWeights::default(),
@@ -234,6 +236,11 @@ impl VoiceRuntime {
         if !self.settings.barge_in.enabled {
             return InputEffect::IgnoredSelfVoice;
         }
+        if let Some(last) = self.last_barge_ms
+            && now_ms.saturating_sub(last) < self.settings.barge_in.debounce_ms
+        {
+            return InputEffect::IgnoredSelfVoice;
+        }
         let started = *self.speech_started_ms.get_or_insert(now_ms);
         let elapsed = now_ms.saturating_sub(started);
         if elapsed < self.settings.barge_in.min_speech_ms {
@@ -247,6 +254,7 @@ impl VoiceRuntime {
         self.playback_until_ms = now_ms;
         self.last_output.clear();
         self.speech_started_ms = Some(now_ms);
+        self.last_barge_ms = Some(now_ms);
         InputEffect::BargeIn { body }
     }
 

@@ -56,6 +56,8 @@ pub struct Health {
 pub struct SoulView {
     pub id: String,
     pub character_ref: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -82,7 +82,13 @@ impl CompanionRuntime {
         assistant_text: &str,
         classifier: Option<&dyn ClassifyModel>,
     ) -> Result<Vec<ArbitrateOutcome>, CompanionError> {
-        if apply_forget_request(&self.store, soul_id, user_text)? > 0 {
+        if apply_forget_request(
+            &self.store,
+            soul_id,
+            user_text,
+            self.settings.forgetting.mode,
+        )? > 0
+        {
             return Ok(Vec::new());
         }
         let cands = extract_turn(soul_id, user_text, assistant_text, classifier).await;

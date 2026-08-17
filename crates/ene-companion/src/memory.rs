@@ -467,10 +467,33 @@ pub fn apply_forget_request(
     store: &CompanionStore,
     soul_id: SoulId,
     text: &str,
+    mode: crate::config::ForgettingMode,
 ) -> Result<u32, CompanionError> {
     let lower = text.to_ascii_lowercase();
     let target = capture_after(&lower, &["forget ", "忘れて"]).unwrap_or_default();
     if target.is_empty() {
+        return Ok(0);
+    }
+    if mode == crate::config::ForgettingMode::Confirm {
+        let cand = candidate(
+            soul_id,
+            MemoryKind::Semantic,
+            "forget request",
+            text,
+            MemoryScope::Private,
+            0.9,
+            false,
+        );
+        store.insert_candidate(&cand)?;
+        store.journal(
+            None,
+            soul_id,
+            JournalAction::UserRequest,
+            &serde_json::json!({ "target": target, "mode": "confirm" }),
+        )?;
+        return Ok(0);
+    }
+    if target.len() < 3 {
         return Ok(0);
     }
     let hits = store.recall(
@@ -482,14 +505,22 @@ pub fn apply_forget_request(
     )?;
     let mut n = 0u32;
     for hit in hits {
-        if hit.title.to_ascii_lowercase().contains(&target)
-            || hit.content.to_ascii_lowercase().contains(&target)
-        {
+        if forget_target_matches(&hit.title, &target) {
             store.forget(hit.id, soul_id, JournalAction::UserRequest)?;
             n += 1;
         }
     }
     Ok(n)
+}
+
+fn forget_target_matches(title: &str, target: &str) -> bool {
+    let title_lower = title.to_ascii_lowercase();
+    let target_lower = target.to_ascii_lowercase();
+    title_lower == target_lower
+        || title_lower.starts_with(&target_lower)
+        || title_lower
+            .split(|ch: char| !ch.is_alphanumeric())
+            .any(|word| word == target_lower)
 }
 
 #[must_use]

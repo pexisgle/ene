@@ -42,6 +42,10 @@ enum Cmd {
     Status,
     /// Text turn (surface by default)
     Chat { session: String, text: String },
+    Soul {
+        #[command(subcommand)]
+        op: SoulCmd,
+    },
     Session {
         #[command(subcommand)]
         op: SessionCmd,
@@ -96,6 +100,12 @@ enum CoreCmd {
         #[arg(long)]
         data_dir: PathBuf,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SoulCmd {
+    List,
+    Show { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -230,6 +240,10 @@ async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiErro
                 println!("{}: {}", message.role, message.text);
             }
         }
+        Cmd::Soul { op } => match op {
+            SoulCmd::List => print_json(&client.list_souls().await?)?,
+            SoulCmd::Show { id } => print_json(&client.get_soul(id).await?)?,
+        },
         Cmd::Session { op } => match op {
             SessionCmd::List => print_json(&client.list_sessions(None).await?)?,
             SessionCmd::Show { id } => print_json(&client.get_session(id).await?)?,

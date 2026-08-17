@@ -16,6 +16,8 @@ pub enum CtlError {
     Codec(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("already running")]
+    AlreadyRunning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -58,11 +60,9 @@ pub fn find_ene_core_binary() -> Result<PathBuf, CtlError> {
         }
     }
 
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(std::path::MAIN_SEPARATOR) {
-            if let Some(path) = binary_in_dir(Path::new(dir)) {
-                return Ok(path);
-            }
+    for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        if let Some(path) = binary_in_dir(&dir) {
+            return Ok(path);
         }
     }
 
@@ -77,9 +77,22 @@ pub fn parse_api_json(text: &str) -> Result<ApiReady, CtlError> {
 
 pub fn read_api_ready(path: &Path) -> Result<ApiReady, CtlError> {
     let text = std::fs::read_to_string(path)?;
-    let ready = parse_api_json(&text)?;
+    let mut ready = parse_api_json(&text)?;
     if ready.url.is_empty() {
         return Err(CtlError::Ready("api.json missing url".to_owned()));
+    }
+    if ready.token.is_none() {
+        let token_path = path
+            .parent()
+            .ok_or_else(|| CtlError::Ready("api.json has no parent dir".to_owned()))?
+            .join(ready.token_file.as_deref().unwrap_or("api.token"));
+        if token_path.is_file() {
+            let token = std::fs::read_to_string(&token_path)?;
+            let token = token.trim();
+            if !token.is_empty() {
+                ready.token = Some(token.to_owned());
+            }
+        }
     }
     Ok(ready)
 }
@@ -102,12 +115,36 @@ pub async fn wait_for_api_json(path: &Path, timeout: Duration) -> Result<ApiRead
     }
 }
 
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(not(unix))]
+fn process_alive(pid: u32) -> bool {
+    let _ = pid;
+    false
+}
+
 pub async fn start_core(data_dir: &Path, foreground: bool) -> Result<(), CtlError> {
     std::fs::create_dir_all(data_dir)?;
+    let pid_path = pid_file_path(data_dir);
+    if pid_path.is_file()
+        && let Ok(text) = std::fs::read_to_string(&pid_path)
+        && let Ok(pid) = text.trim().parse::<u32>()
+        && process_alive(pid)
+    {
+        return Err(CtlError::AlreadyRunning);
+    }
+
     let bin = find_ene_core_binary()?;
     let api_json = data_dir.join("api.json");
+    if api_json.is_file() {
+        std::fs::remove_file(&api_json).map_err(CtlError::Io)?;
+    }
+    let token_path = data_dir.join("api.token");
 
-    let mut cmd = tokio::process::Command::new(&bin);
+    let mut cmd = std::process::Command::new(&bin);
     cmd.arg("--data-dir").arg(data_dir);
     if !foreground {
         cmd.stdin(std::process::Stdio::null())
@@ -118,25 +155,32 @@ pub async fn start_core(data_dir: &Path, foreground: bool) -> Result<(), CtlErro
     let mut child = cmd
         .spawn()
         .map_err(|err| CtlError::Spawn(err.to_string()))?;
-    let pid = child
-        .id()
-        .ok_or_else(|| CtlError::Spawn("spawned ene-core without a pid".to_owned()))?;
+    let pid = child.id();
 
     let ready = wait_for_api_json(&api_json, Duration::from_mins(1)).await?;
-    println!("{}", ready.url);
 
+    if !foreground {
+        if child.try_wait()?.is_some() {
+            return Err(CtlError::Spawn(
+                "ene-core exited before becoming ready".to_owned(),
+            ));
+        }
+        std::fs::write(&pid_path, format!("{pid}\n"))?;
+    }
+
+    println!("{}", ready.url);
     if foreground {
-        let status = child.wait().await?;
+        let status = child.wait()?;
         if !status.success() {
             return Err(CtlError::Spawn(format!("ene-core exited with {status}")));
         }
     } else {
-        std::fs::write(pid_file_path(data_dir), format!("{pid}\n"))?;
-        let token = ready.token.as_deref().unwrap_or("");
-        println!("pid {pid} ({})", pid_file_path(data_dir).display());
+        println!("pid {pid} ({})", pid_path.display());
+        println!("token file: {}", token_path.display());
         println!(
-            "Connect: ENE_API_URL={} ENE_API_TOKEN={token} ene-ctl status",
-            ready.url
+            "Connect: ENE_API_URL={} ENE_API_TOKEN=<read {}> ene-ctl status",
+            ready.url,
+            token_path.display()
         );
     }
     Ok(())
@@ -190,11 +234,26 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn parse_api_json_reads_url_and_token() {
-        let text = r#"{"bind":"127.0.0.1:8080","url":"http://127.0.0.1:8080","token":"abc"}"#;
+    fn parse_api_json_reads_url_and_token_file() {
+        let text =
+            r#"{"bind":"127.0.0.1:8080","url":"http://127.0.0.1:8080","token_file":"api.token"}"#;
         let ready = parse_api_json(text).unwrap();
         assert_eq!(ready.url, "http://127.0.0.1:8080");
-        assert_eq!(ready.token.as_deref(), Some("abc"));
+        assert_eq!(ready.token_file.as_deref(), Some("api.token"));
+    }
+
+    #[test]
+    fn read_api_ready_loads_token_from_sibling_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api.json");
+        std::fs::write(
+            &path,
+            r#"{"bind":"x","url":"http://x","token_file":"api.token"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("api.token"), "secret\n").unwrap();
+        let ready = read_api_ready(&path).unwrap();
+        assert_eq!(ready.token.as_deref(), Some("secret"));
     }
 
     #[test]

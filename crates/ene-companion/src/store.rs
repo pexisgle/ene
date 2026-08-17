@@ -119,6 +119,14 @@ impl CompanionStore {
         &self.path
     }
 
+    /// Reopen the on-disk database after restore (same path).
+    pub fn reconnect(&self) -> Result<(), CompanionError> {
+        let conn = Connection::open(&self.path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        *self.conn.lock() = conn;
+        Ok(())
+    }
+
     pub fn create_soul(&self, draft: &NewSoul) -> Result<Soul, CompanionError> {
         let id = SoulId::new();
         let now = Utc::now().to_rfc3339();

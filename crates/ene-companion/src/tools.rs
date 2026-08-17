@@ -1,5 +1,6 @@
+use crate::config::MindSettings;
 use crate::memory::{
-    MemoryKind, MemoryScope, MemorySource, NewMemory, RecalledMemory, recall_weights,
+    MemoryCandidate, MemoryKind, MemoryScope, RecalledMemory, arbitrate, recall_weights,
 };
 use crate::store::CompanionStore;
 use async_trait::async_trait;
@@ -35,6 +36,7 @@ pub fn register_memory_tools(registry: &ToolRegistry, store: Arc<CompanionStore>
         },
         Arc::new(MemoryInvoker {
             store: Arc::clone(&store),
+            bound_soul: None,
         }),
     );
     registry.register_with(
@@ -57,14 +59,20 @@ pub fn register_memory_tools(registry: &ToolRegistry, store: Arc<CompanionStore>
                 name: "memory".to_owned(),
             },
             timeout_ms: Some(5_000),
-            sensitivity: Sensitivity::None,
+            sensitivity: Sensitivity::High,
         },
-        Arc::new(MemoryInvoker { store }),
+        Arc::new(MemoryInvoker {
+            store,
+            bound_soul: None,
+        }),
     );
 }
 
+/// Tool-side memory access. HTTP routes use `CompanionStore` directly with path soul ids.
 struct MemoryInvoker {
     store: Arc<CompanionStore>,
+    /// When set, `args.soul_id` is ignored and this soul is always used.
+    bound_soul: Option<SoulId>,
 }
 
 #[async_trait]
@@ -76,7 +84,7 @@ impl ToolInvoke for MemoryInvoker {
                     .get("query")
                     .and_then(Value::as_str)
                     .ok_or("missing query")?;
-                let soul = soul_arg(&args)?;
+                let soul = self.resolve_soul(&args)?;
                 let hits = self
                     .store
                     .recall(
@@ -100,27 +108,46 @@ impl ToolInvoke for MemoryInvoker {
                     .get("content")
                     .and_then(Value::as_str)
                     .ok_or("missing content")?;
-                let soul = soul_arg(&args)?;
+                let soul = self.resolve_soul(&args)?;
                 let kind =
                     MemoryKind::parse(args.get("kind").and_then(Value::as_str).unwrap_or(""));
-                let record = self
-                    .store
-                    .insert_memory(NewMemory {
-                        soul_id: soul,
-                        scope: MemoryScope::Shared,
-                        kind,
-                        title: title.to_owned(),
-                        content: content.to_owned(),
-                        confidence: 1.0,
-                        salience: 0.8,
-                        source: MemorySource::Shared,
-                        source_seq: None,
-                        expires_at: None,
-                    })
-                    .map_err(|err| err.to_string())?;
-                Ok(json!({ "id": record.id.to_string() }))
+                let cand = MemoryCandidate {
+                    id: crate::ids::CandidateId::new(),
+                    soul_id: soul,
+                    kind,
+                    title: title.to_owned(),
+                    content: content.to_owned(),
+                    scope: MemoryScope::Shared,
+                    confidence: 0.9,
+                    salience: 0.8,
+                    sensitive: false,
+                };
+                let outcome =
+                    arbitrate(&self.store, &cand, &MindSettings::default().memory_approval)
+                        .map_err(|err| err.to_string())?;
+                Ok(json!({ "outcome": format!("{outcome:?}") }))
             }
             other => Err(format!("unknown memory tool {other}")),
+        }
+    }
+}
+
+impl MemoryInvoker {
+    fn resolve_soul(&self, args: &Value) -> Result<SoulId, String> {
+        if let Some(bound) = self.bound_soul {
+            return Ok(bound);
+        }
+        let soul = soul_arg(args)?;
+        let known = self
+            .store
+            .list_souls()
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .any(|row| row.id == soul);
+        if known {
+            Ok(soul)
+        } else {
+            Err("unknown soul_id".to_owned())
         }
     }
 }
