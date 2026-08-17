@@ -2755,7 +2755,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ene-config",
+ "ene-fiber",
  "ene-kernel",
+ "ene-registry",
  "ene-session",
  "fs2",
  "tempfile",
@@ -2833,6 +2835,76 @@ dependencies = [
  "winit",
  "x11rb",
  "xcap",
+]
+
+[[package]]
+name = "ene-fiber"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-plugin-ipc",
+ "ene-registry",
+ "ene-sandbox",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ene-harness-exec"
+version = "0.1.0"
+dependencies = [
+ "ene-plugin-ipc",
+ "ene-registry",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-harness-fs"
+version = "0.1.0"
+dependencies = [
+ "ene-fiber",
+ "ene-plugin-ipc",
+ "ene-registry",
+ "ene-sandbox",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-harness-utility"
+version = "0.1.0"
+dependencies = [
+ "ene-fiber",
+ "ene-plugin-ipc",
+ "ene-registry",
+ "ene-sandbox",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-harness-web"
+version = "0.1.0"
+dependencies = [
+ "ene-plugin-ipc",
+ "ene-registry",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3237,6 +3309,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-ipc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ene-plugin-kokoro"
 version = "0.1.0"
 dependencies = [
@@ -3500,6 +3587,22 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-normalization",
+]
+
+[[package]]
+name = "ene-registry"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "ene-plugin-ipc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

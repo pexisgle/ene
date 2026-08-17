@@ -4,6 +4,7 @@ members = [
     "apps/*",
     "plugins/provider/*",
     "plugins/tool/*",
+    "plugins/harness/*",
 ]
 default-members = [ "apps/ene-cli" ]
 resolver = "2"
@@ -153,8 +154,11 @@ ene-plugin = { path = "crates/ene-plugin" }
 ene-plugin-broker = { path = "crates/ene-plugin-broker" }
 ene-plugin-db = { path = "crates/ene-plugin-db" }
 ene-plugin-host = { path = "crates/ene-plugin-host" }
+ene-plugin-ipc = { path = "crates/ene-plugin-ipc" }
 ene-plugin-macros = { path = "crates/ene-plugin-macros" }
 ene-plugin-proto = { path = "crates/ene-plugin-proto" }
+ene-registry = { path = "crates/ene-registry" }
+ene-fiber = { path = "crates/ene-fiber" }
 ene-rag = { path = "crates/ene-rag" }
 ene-runtime = { path = "crates/ene-runtime" }
 ene-sandbox = { path = "crates/ene-sandbox" }

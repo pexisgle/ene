@@ -2,7 +2,9 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ene_fiber::Supervisor;
 use ene_kernel::{ConversationModel, LaneHandle, LaneOptions, format_recovery_note};
+use ene_registry::ToolRegistry;
 use ene_session::{RecoveryReport, SessionId, SessionStore, SoulId};
 use fs2::FileExt;
 use thiserror::Error;
@@ -41,12 +43,13 @@ pub enum CoreError {
     AlreadyRunning(String),
 }
 
-/// Running core: exclusive lock, session store, D-5 recovery reports.
+/// Running core: exclusive lock, session store, D-5 recovery reports, plugin supervisor.
 pub struct CoreDaemon {
     data_dir: PathBuf,
     _lock: File,
     store: Arc<SessionStore>,
     recovery: Vec<RecoveryReport>,
+    supervisor: Arc<Supervisor>,
 }
 
 impl CoreDaemon {
@@ -63,11 +66,14 @@ impl CoreDaemon {
                 "detected interrupted work; closed without resume"
             );
         }
+        let registry = Arc::new(ToolRegistry::new());
+        let supervisor = Arc::new(Supervisor::new(opts.data_dir.clone(), registry));
         Ok(Self {
             data_dir: opts.data_dir,
             _lock: lock,
             store: Arc::new(store),
             recovery,
+            supervisor,
         })
     }
 
@@ -84,6 +90,11 @@ impl CoreDaemon {
     #[must_use]
     pub fn recovery(&self) -> &[RecoveryReport] {
         &self.recovery
+    }
+
+    #[must_use]
+    pub fn supervisor(&self) -> Arc<Supervisor> {
+        Arc::clone(&self.supervisor)
     }
 
     /// Note injected into the next surface turn (D-13). `None` when nothing was interrupted.

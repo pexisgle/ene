@@ -1,4 +1,5 @@
 use crate::{BootOptions, CoreDaemon, CoreError};
+use ene_fiber::ProfileRow;
 use ene_kernel::{ConversationModel, DisplayDepth, EchoModel, EventKind, EventPayload};
 use ene_session::{
     Block, ClientId, NewEvent, NewSession, SessionCreatedBy, SessionKind, SessionStore, SoulId,
@@ -121,4 +122,55 @@ async fn exclusive_lock_rejects_second_boot() {
         panic!("expected already running")
     };
     assert!(matches!(err, CoreError::AlreadyRunning(_)));
+}
+
+#[tokio::test]
+async fn disabling_one_fiber_does_not_restart_the_core() {
+    let dir = TempDir::new().unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    let sup = core.supervisor();
+    sup.activate(&ProfileRow {
+        row_id: "r-util".to_owned(),
+        plugin: "tool.utility".to_owned(),
+        requires: Vec::new(),
+        capabilities: Vec::new(),
+        sandbox_required: false,
+    })
+    .unwrap();
+    let web = sup
+        .activate(&ProfileRow {
+            row_id: "r-web".to_owned(),
+            plugin: "tool.web".to_owned(),
+            requires: Vec::new(),
+            capabilities: Vec::new(),
+            sandbox_required: false,
+        })
+        .unwrap();
+    sup.disable_row("r-util").await;
+    assert!(sup.fiber("r-web").is_some());
+    assert_eq!(sup.fiber("r-web").unwrap().uid, web);
+    assert!(sup.surface_has_tool("web.fetch"));
+    assert!(!sup.surface_has_tool("utility.hash"));
+    assert_eq!(core.recovery().len(), 0);
+    let soul = SoulId::new();
+    let session = core
+        .store()
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = core.open_lane(
+        soul,
+        session,
+        Arc::new(EchoModel) as Arc<dyn ConversationModel>,
+    );
+    lane.prompt("still here").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
 }

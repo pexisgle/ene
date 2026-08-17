@@ -1,0 +1,24 @@
+[package]
+name = "ene-plugin-ipc"
+version.workspace = true
+edition.workspace = true
+description = "Split plugin IPC: length-prefixed MessagePack frames for core and tool subprotocols"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

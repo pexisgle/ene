@@ -1,0 +1,22 @@
+[package]
+name = "ene-harness-web"
+version.workspace = true
+edition.workspace = true
+description = "Harness web plugin: fetch via host broker"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ene-harness-web"
+path = "src/main.rs"
+
+[dependencies]
+ene-plugin-ipc = { workspace = true }
+ene-registry = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[lints]
+workspace = true
