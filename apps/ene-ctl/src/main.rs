@@ -5,8 +5,12 @@
 )]
 #![deny(unsafe_code)]
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use ene_api::{ApiClient, CreateSessionRequest, MessageMode, MessageRequest, ResourceKind};
+use ene_ctl::core;
+use ene_ctl::session;
 
 #[derive(Parser, Debug)]
 #[command(name = "ene-ctl", about = "Talk to ene-core over the public HTTP API")]
@@ -29,6 +33,11 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Manage the ene-core daemon process
+    Core {
+        #[command(subcommand)]
+        op: CoreCmd,
+    },
     /// GET /health
     Status,
     /// Text turn (surface by default)
@@ -37,6 +46,7 @@ enum Cmd {
         #[command(subcommand)]
         op: SessionCmd,
     },
+    /// List and cancel background tasks (jobs API)
     Task {
         #[command(subcommand)]
         op: TaskCmd,
@@ -72,13 +82,48 @@ enum Cmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum CoreCmd {
+    /// Spawn ene-core and wait until api.json is ready
+    Start {
+        #[arg(long)]
+        data_dir: PathBuf,
+        /// Stay attached to the child process
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Stop ene-core using the pid file written by start
+    Stop {
+        #[arg(long)]
+        data_dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum SessionCmd {
     List,
-    Show { id: String },
-    Create { soul_id: String },
-    Fork { id: String },
-    Export { id: String },
-    Compact { id: String },
+    Show {
+        id: String,
+    },
+    Create {
+        soul_id: String,
+    },
+    Fork {
+        id: String,
+    },
+    Export {
+        id: String,
+    },
+    Compact {
+        id: String,
+    },
+    /// Search sessions by title (server q= or client-side filter)
+    Search {
+        query: String,
+    },
+    /// Split a session at the current turn
+    Split {
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -125,14 +170,29 @@ enum ExclusiveCmd {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let client = ApiClient::new(&args.url, &args.token, &args.client_id);
-    if let Err(err) = run(&client, &args).await {
+    let result = if let Cmd::Core { op } = &args.cmd {
+        run_core(op).await.map_err(|err| err.to_string())
+    } else {
+        let client = ApiClient::new(&args.url, &args.token, &args.client_id);
+        run_api(&client, &args).await.map_err(|err| err.to_string())
+    };
+    if let Err(err) = result {
         eprintln!("{err}");
         std::process::exit(1);
     }
 }
 
-async fn run(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiError> {
+async fn run_core(op: &CoreCmd) -> Result<(), core::CtlError> {
+    match op {
+        CoreCmd::Start {
+            data_dir,
+            foreground,
+        } => core::start_core(data_dir, *foreground).await,
+        CoreCmd::Stop { data_dir } => core::stop_core(data_dir),
+    }
+}
+
+async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiError> {
     match &args.cmd {
         Cmd::Status => {
             let health = client.health().await?;
@@ -153,7 +213,8 @@ async fn run(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiError> {
             if args.verbose {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&sent).unwrap_or_default()
+                    serde_json::to_string_pretty(&sent)
+                        .map_err(|err| ene_api::ApiError::Codec(err.to_string()))?
                 );
             }
             let depth = if args.verbose { "detail" } else { "surface" };
@@ -179,6 +240,10 @@ async fn run(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiError> {
             SessionCmd::Fork { id } => print_json(&client.fork_session(id).await?)?,
             SessionCmd::Export { id } => print_json(&client.export_session(id).await?)?,
             SessionCmd::Compact { id } => print_json(&client.compact(id).await?)?,
+            SessionCmd::Search { query } => {
+                print_json(&session::search_sessions(client, query).await?)?;
+            }
+            SessionCmd::Split { id } => print_json(&session::split_session(client, id).await?)?,
         },
         Cmd::Task { op } => match op {
             TaskCmd::List => print_json(&client.list_jobs(None).await?)?,
@@ -232,6 +297,7 @@ async fn run(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiError> {
                 )?;
             }
         },
+        Cmd::Core { .. } => unreachable!("core commands are handled before run_api"),
     }
     Ok(())
 }
