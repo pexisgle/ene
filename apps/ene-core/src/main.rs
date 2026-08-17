@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use clap::Parser;
 use ene_daemon::{BootOptions, CoreDaemon};
 use tracing::info;
@@ -25,13 +27,24 @@ async fn main() {
         .unwrap_or_else(ene_config::paths::app_data_dir);
     match CoreDaemon::boot(BootOptions::new(data_dir)).await {
         Ok(core) => {
-            info!(
-                data_dir = %core.data_dir().display(),
-                recovered = core.recovery().len(),
-                "ene-core ready"
-            );
-            drop(tokio::signal::ctrl_c().await);
-            info!("ene-core shutting down");
+            let core = Arc::new(core);
+            match core.clone().serve().await {
+                Ok(server) => {
+                    info!(
+                        data_dir = %core.data_dir().display(),
+                        bind = %server.addr,
+                        recovered = core.recovery().len(),
+                        "ene-core ready"
+                    );
+                    drop(tokio::signal::ctrl_c().await);
+                    info!("ene-core shutting down");
+                    server.shutdown().await;
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "ene-core http failed to start");
+                    std::process::exit(1);
+                }
+            }
         }
         Err(err) => {
             tracing::error!(error = %err, "ene-core failed to start");

@@ -25,13 +25,27 @@ impl std::fmt::Display for FiberUid {
 }
 
 /// Fiber lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FiberState {
     Inactive,
     Loading,
     Active,
     Unloading,
     Failed,
+}
+
+impl FiberState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::Loading => "loading",
+            Self::Active => "active",
+            Self::Unloading => "unloading",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// Reversible host-context mutation. Inverse runs LIFO.

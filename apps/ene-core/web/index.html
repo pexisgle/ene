@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>ene web</title>
+  <style>
+    :root { color-scheme: light dark; font-family: sans-serif; }
+    body { margin: 0; display: grid; grid-template-columns: 1fr 1fr; min-height: 100vh; }
+    section { padding: 1rem; border-right: 1px solid #8884; display: flex; flex-direction: column; }
+    h1 { font-size: 1.1rem; }
+    #surface-log, #detail-log { flex: 1; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 13px; }
+    form { display: flex; gap: .5rem; margin-top: .5rem; }
+    input, button { font: inherit; }
+    input { flex: 1; }
+    .hint { color: #888; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <section>
+    <h1>Surface</h1>
+    <p class="hint">Speech only. Inner / thinking never appear here.</p>
+    <div id="surface-log"></div>
+    <form id="chat">
+      <input id="text" placeholder="Say something" autocomplete="off"/>
+      <button>Send</button>
+    </form>
+  </section>
+  <section>
+    <h1>Detail</h1>
+    <p class="hint">Inner, thinking, tasks, memories (read-only on Web).</p>
+    <div id="detail-log"></div>
+  </section>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const token = params.get("token") || prompt("API token") || "";
+    const clientId = "web";
+    let sessionId = null;
+    const headers = () => ({
+      "Authorization": "Bearer " + token,
+      "Content-Type": "application/json",
+      "X-Client-Id": clientId,
+    });
+    const log = (el, line) => { el.textContent += line + "\n"; el.scrollTop = el.scrollHeight; };
+    const surface = document.getElementById("surface-log");
+    const detail = document.getElementById("detail-log");
+
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      const body = await res.json();
+      if (!res.ok) throw body;
+      return body;
+    }
+
+    function ws(depth) {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const q = new URLSearchParams({ depth, client_id: clientId, access_token: token });
+      if (sessionId) q.set("session_id", sessionId);
+      const sock = new WebSocket(`${proto}://${location.host}/api/v1/events?` + q);
+      sock.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        const line = JSON.stringify(msg);
+        if (depth === "surface") {
+          if (msg.type === "inner.message" || msg.type === "thinking.delta") return;
+          log(surface, line);
+        } else {
+          log(detail, line);
+        }
+      };
+      return sock;
+    }
+
+    (async () => {
+      let souls = await api("/api/v1/souls", { headers: headers() });
+      let soulId;
+      if (!souls.items.length) {
+        const created = await api("/api/v1/sessions", {
+          method: "POST", headers: headers(),
+          body: JSON.stringify({ soul_id: crypto.randomUUID() }),
+        });
+        soulId = created.soul_id;
+        sessionId = created.id;
+      } else {
+        soulId = souls.items[0].id;
+        const sessions = await api("/api/v1/sessions?soul_id=" + soulId, { headers: headers() });
+        if (sessions.items.length) sessionId = sessions.items[0].id;
+        else {
+          const created = await api("/api/v1/sessions", {
+            method: "POST", headers: headers(),
+            body: JSON.stringify({ soul_id: soulId }),
+          });
+          sessionId = created.id;
+        }
+      }
+      log(surface, "session " + sessionId);
+      ws("surface");
+      ws("detail");
+      const memories = await api("/api/v1/souls/" + soulId + "/memories", { headers: headers() });
+      log(detail, "memories " + JSON.stringify(memories.items));
+      const jobs = await api("/api/v1/jobs", { headers: headers() });
+      log(detail, "tasks " + JSON.stringify(jobs.items));
+    })().catch((err) => log(surface, "error " + JSON.stringify(err)));
+
+    document.getElementById("chat").onsubmit = async (e) => {
+      e.preventDefault();
+      const text = document.getElementById("text").value;
+      document.getElementById("text").value = "";
+      if (!sessionId || !text) return;
+      await api("/api/v1/sessions/" + sessionId + "/messages", {
+        method: "POST", headers: headers(),
+        body: JSON.stringify({ text, mode: "prompt" }),
+      });
+    };
+  </script>
+</body>
+</html>

@@ -25,13 +25,31 @@ pub enum ThinkingVisibility {
 }
 
 /// Display-plane depth (D-11). Projection parameters follow from this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DisplayDepth {
     Surface,
     Detail,
 }
 
 impl DisplayDepth {
+    /// Parse `surface` / `detail`. Unknown values are rejected.
+    pub fn parse(raw: &str) -> Result<Self, SessionError> {
+        match raw {
+            "surface" => Ok(Self::Surface),
+            "detail" => Ok(Self::Detail),
+            other => Err(SessionError::InvalidId(format!("display depth {other}"))),
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Surface => "surface",
+            Self::Detail => "detail",
+        }
+    }
+
     #[must_use]
     pub const fn inner(self) -> InnerVisibility {
         match self {

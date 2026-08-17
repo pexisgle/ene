@@ -1,0 +1,20 @@
+[package]
+name = "ene-stage"
+version.workspace = true
+edition.workspace = true
+description = "Native stage client (egui+wgpu): surface window plus a separate detail window"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ene-stage"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "x11"] }
+ene-api = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

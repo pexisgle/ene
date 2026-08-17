@@ -277,6 +277,12 @@ impl Supervisor {
             .collect()
     }
 
+    /// Snapshot of every profile row the supervisor currently tracks.
+    #[must_use]
+    pub fn list_fibers(&self) -> Vec<Fiber> {
+        self.fibers.lock().values().cloned().collect()
+    }
+
     #[must_use]
     pub fn broker_has_grant(&self, uid: FiberUid, op: &str) -> bool {
         self.broker.lock().has_grant(uid, op)

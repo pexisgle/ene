@@ -20,7 +20,7 @@ pub use config::{ApprovalMode, ApprovalSettings, PopupSettings};
 pub use error::PlaneError;
 pub use plane::{ApprovalPlane, Decision};
 pub use policy::{PolicyDecision, PolicyFile, PolicyRule};
-pub use popup::{PopupDecision, PopupSink, ScriptedPopup};
+pub use popup::{PendingApproval, PendingPopup, PopupDecision, PopupSink, ScriptedPopup};
 pub use request::{AuthzRequest, Sensitivity};
 pub use risk::Risk;
 pub use vault::{InjectRef, Vault, VaultError};

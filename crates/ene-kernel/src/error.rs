@@ -39,6 +39,21 @@ impl KernelError {
             lane: lane.as_str(),
         }
     }
+
+    /// Wire `error_class` for HTTP problem+json (lane-api §5).
+    #[must_use]
+    pub fn error_class(&self) -> &'static str {
+        match self {
+            Self::LaneBusy { .. } => "lane_busy",
+            Self::NoActiveOperation { .. } => "no_active_operation",
+            Self::InvalidMessage(_) => "invalid_message",
+            Self::Closed | Self::ShuttingDown => "closed",
+            Self::NothingToCompact => "nothing_to_compact",
+            Self::QueuedNotFound => "not_found",
+            Self::Session(_) => "fault",
+            Self::Model(_) | Self::Tool(_) => "failed",
+        }
+    }
 }
 
 /// Three-way result of `cancel_queued` (I-27).

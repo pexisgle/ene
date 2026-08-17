@@ -172,6 +172,19 @@ impl CompanionStore {
             .map_err(CompanionError::from)
     }
 
+    pub fn list_souls(&self) -> Result<Vec<Soul>, CompanionError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, character_ref, body_ref, voice_ref, skill_refs, affect_baseline,
+                    valence, arousal, dominance, trust, affinity, irritation, curiosity,
+                    fatigue, mood_label, last_report_ts, created_at, updated_at
+             FROM souls ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], row_to_soul)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(CompanionError::from)
+    }
+
     pub fn save_affect(&self, id: SoulId, affect: &AffectState) -> Result<(), CompanionError> {
         let now = Utc::now().to_rfc3339();
         self.conn.lock().execute(
@@ -280,6 +293,36 @@ impl CompanionStore {
         stmt.query_row(params![id.to_string()], row_to_memory)
             .optional()
             .map_err(CompanionError::from)
+    }
+
+    pub fn list_memories(
+        &self,
+        soul_id: SoulId,
+        scope: Option<MemoryScope>,
+    ) -> Result<Vec<MemoryRecord>, CompanionError> {
+        let conn = self.conn.lock();
+        let sql = if scope.is_some() {
+            "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
+                    source, source_seq, created_at, last_access, access_count,
+                    superseded_by, expires_at, forgotten
+             FROM memories WHERE soul_id = ?1 AND scope = ?2 AND forgotten = 0
+             ORDER BY created_at DESC"
+        } else {
+            "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
+                    source, source_seq, created_at, last_access, access_count,
+                    superseded_by, expires_at, forgotten
+             FROM memories WHERE soul_id = ?1 AND forgotten = 0
+             ORDER BY created_at DESC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = if let Some(scope) = scope {
+            stmt.query_map(params![soul_id.to_string(), scope.as_str()], row_to_memory)?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(params![soul_id.to_string()], row_to_memory)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(rows)
     }
 
     pub fn update_memory_content(
@@ -668,6 +711,17 @@ impl CompanionStore {
         )
         .optional()
         .map_err(CompanionError::from)
+    }
+
+    pub fn list_packages(&self) -> Result<Vec<(String, String, String, String)>, CompanionError> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT id, version, kind, path FROM packages ORDER BY installed_at")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(CompanionError::from)
     }
 }
 

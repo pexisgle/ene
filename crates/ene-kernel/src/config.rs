@@ -76,8 +76,71 @@ ene_config::define_config!(
     pub struct CoreSettings {
         pub data_dir: String,
         pub diag: DiagSettings,
+        pub server: ServerSettings,
+        pub backup: BackupSettings,
+        pub clients: ClientsSettings,
     }
 );
+
+/// HTTP/WS bind and token file (relative to the data dir unless absolute).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct ServerSettings {
+    /// Bind address. Port `0` asks the OS for an ephemeral port.
+    pub bind: String,
+    /// Token file name or path. Generated at boot when missing.
+    pub token_file: String,
+    /// Live-bus / WS broadcast capacity.
+    pub ws_send_buffer: u32,
+}
+
+impl Default for ServerSettings {
+    fn default() -> Self {
+        Self {
+            bind: "127.0.0.1:0".to_owned(),
+            token_file: "api.token".to_owned(),
+            ws_send_buffer: 256,
+        }
+    }
+}
+
+/// Online backup of stores into `<data>/backups/<ts>/`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct BackupSettings {
+    pub auto: bool,
+    pub retention: u32,
+}
+
+impl Default for BackupSettings {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            retention: 7,
+        }
+    }
+}
+
+/// Multi-client exclusive-resource policy.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct ClientsSettings {
+    /// `explicit` (claim endpoint) or `last_used`.
+    pub audio_active_policy: String,
+    pub approval_broadcast: bool,
+}
+
+impl Default for ClientsSettings {
+    fn default() -> Self {
+        Self {
+            audio_active_policy: "explicit".to_owned(),
+            approval_broadcast: true,
+        }
+    }
+}
 
 /// Local span ring (P-517).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]

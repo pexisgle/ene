@@ -92,6 +92,15 @@ impl ToolRegistry {
         self.tools.lock().get(name).map(|row| row.def.clone())
     }
 
+    /// All registered tools, name-sorted.
+    #[must_use]
+    pub fn list(&self) -> Vec<ToolDefinition> {
+        let tools = self.tools.lock();
+        let mut defs: Vec<ToolDefinition> = tools.values().map(|row| row.def.clone()).collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
+    }
+
     /// Model-visible schemas for a layer. Host-only fields are excluded.
     #[must_use]
     pub fn schemas(&self, layer: Layer) -> Vec<Value> {

@@ -11,7 +11,7 @@ use ene_companion::{
 };
 use ene_fiber::Supervisor;
 use ene_kernel::{ConversationModel, LaneHandle, LaneOptions, SurfaceRouter, format_recovery_note};
-use ene_plane::{ApprovalPlane, ApprovalSettings, AuditLog, ScriptedPopup, Vault};
+use ene_plane::{ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PopupSink, Vault};
 use ene_registry::ToolRegistry;
 use ene_session::{RecoveryReport, SessionId, SessionStore, SoulId};
 use ene_work::{
@@ -63,6 +63,8 @@ pub enum CoreError {
     Body(#[from] BodyError),
     #[error(transparent)]
     Work(#[from] WorkError),
+    #[error("http: {0}")]
+    Http(String),
     #[error("another ene-core instance holds the data-directory lock at {0}")]
     AlreadyRunning(String),
 }
@@ -82,6 +84,7 @@ pub struct CoreDaemon {
     work: Arc<WorkStore>,
     host: Arc<DelegationHost>,
     job_reports: Vec<CompanionReport>,
+    popup: Arc<PendingPopup>,
 }
 
 impl CoreDaemon {
@@ -101,10 +104,11 @@ impl CoreDaemon {
         let registry = Arc::new(ToolRegistry::new());
         registry.set_workspace(opts.data_dir.clone());
         let audit = AuditLog::open(opts.data_dir.join("audit.db"))?;
+        let popup = Arc::new(PendingPopup::new());
         let plane = Arc::new(ApprovalPlane::new(
             ApprovalSettings::default(),
             audit,
-            ScriptedPopup::deny_all(),
+            Arc::clone(&popup) as Arc<dyn PopupSink>,
             None,
         ));
         registry.set_plane(Arc::clone(&plane));
@@ -149,6 +153,7 @@ impl CoreDaemon {
             work,
             host,
             job_reports,
+            popup,
         })
     }
 
@@ -210,6 +215,11 @@ impl CoreDaemon {
     #[must_use]
     pub fn job_reports(&self) -> &[CompanionReport] {
         &self.job_reports
+    }
+
+    #[must_use]
+    pub fn popup(&self) -> &Arc<PendingPopup> {
+        &self.popup
     }
 
     /// Bind a soul to a body (or text-only) and map affect onto the bus (D-19).

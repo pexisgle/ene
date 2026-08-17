@@ -12,6 +12,10 @@ pub enum PlaneError {
     Vault(#[from] crate::vault::VaultError),
     #[error("popup timeout")]
     PopupTimeout,
+    #[error("unknown approval {0}")]
+    UnknownApproval(String),
+    #[error("approval {0} already resolved")]
+    AlreadyResolved(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

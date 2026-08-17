@@ -284,6 +284,71 @@ impl WorkStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(WorkError::from)
     }
 
+    pub fn list_jobs_all(&self) -> Result<Vec<Job>, WorkError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, soul_id, title, goal, mode, status, progress_fraction, progress_note,
+                    workspace_dir, error_class, created_from_turn, plan, brief, created_at, ended_at
+             FROM jobs WHERE mode = 'public' ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], row_job)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(WorkError::from)
+    }
+
+    pub fn list_schedules(&self, soul: Option<SoulId>) -> Result<Vec<Schedule>, WorkError> {
+        let conn = self.conn.lock();
+        if let Some(soul) = soul {
+            let mut stmt = conn.prepare(
+                "SELECT id, soul_id, name, spec, timezone, action_kind, action_ref,
+                        enabled, important, last_fired, next_fire
+                 FROM schedules WHERE soul_id = ?1 ORDER BY name",
+            )?;
+            let rows = stmt.query_map(params![soul.to_string()], row_sched)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(WorkError::from)
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, soul_id, name, spec, timezone, action_kind, action_ref,
+                        enabled, important, last_fired, next_fire
+                 FROM schedules ORDER BY name",
+            )?;
+            let rows = stmt.query_map([], row_sched)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(WorkError::from)
+        }
+    }
+
+    pub fn set_schedule_enabled(&self, id: &str, enabled: bool) -> Result<(), WorkError> {
+        let n = self.conn.lock().execute(
+            "UPDATE schedules SET enabled = ?1 WHERE id = ?2",
+            params![i32::from(enabled), id],
+        )?;
+        if n == 0 {
+            return Err(WorkError::UnknownSchedule(id.to_owned()));
+        }
+        Ok(())
+    }
+
+    pub fn delete_schedule(&self, id: &str) -> Result<(), WorkError> {
+        let n = self
+            .conn
+            .lock()
+            .execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
+        if n == 0 {
+            return Err(WorkError::UnknownSchedule(id.to_owned()));
+        }
+        Ok(())
+    }
+
+    pub fn get_artifact(&self, id: &str) -> Result<Option<Artifact>, WorkError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, soul_id, job_id, kind, title, path, mime, size_bytes, created_at, delivered
+             FROM artifacts WHERE id = ?1",
+        )?;
+        stmt.query_row(params![id], row_art)
+            .optional()
+            .map_err(WorkError::from)
+    }
+
     pub fn count_active(&self, soul: SoulId) -> Result<u32, WorkError> {
         let n: i64 = self.conn.lock().query_row(
             "SELECT COUNT(*) FROM jobs

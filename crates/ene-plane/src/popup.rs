@@ -1,9 +1,12 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::oneshot;
+use uuid::Uuid;
 
+use crate::error::PlaneError;
 use crate::request::AuthzRequest;
 
 /// User (or test) answer to a popup.
@@ -12,6 +15,26 @@ pub enum PopupDecision {
     Allow,
     Deny,
     AllowAndRemember,
+}
+
+impl PopupDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::AllowAndRemember => "allow_and_remember",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, PlaneError> {
+        match raw {
+            "allow" => Ok(Self::Allow),
+            "deny" => Ok(Self::Deny),
+            "allow_and_remember" => Ok(Self::AllowAndRemember),
+            other => Err(PlaneError::UnknownApproval(other.to_owned())),
+        }
+    }
 }
 
 /// Delivers an approval popup to clients (P-905).
@@ -47,6 +70,90 @@ impl PopupSink for ScriptedPopup {
             .lock()
             .pop_front()
             .unwrap_or(PopupDecision::Deny)
+    }
+}
+
+/// One outstanding popup waiting for any connected client.
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    pub id: String,
+    pub tool: String,
+    pub target: String,
+    pub side_effects: Vec<String>,
+}
+
+struct PendingSlot {
+    view: PendingApproval,
+    tx: Option<oneshot::Sender<PopupDecision>>,
+}
+
+/// First-writer popup sink: every client sees the ask; the first `respond` wins.
+pub struct PendingPopup {
+    inner: Mutex<HashMap<String, PendingSlot>>,
+    resolved: Mutex<HashSet<String>>,
+}
+
+impl PendingPopup {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            resolved: Mutex::new(HashSet::new()),
+        }
+    }
+
+    #[must_use]
+    pub fn list(&self) -> Vec<PendingApproval> {
+        self.inner
+            .lock()
+            .values()
+            .map(|slot| slot.view.clone())
+            .collect()
+    }
+
+    pub fn respond(&self, id: &str, decision: PopupDecision) -> Result<(), PlaneError> {
+        if self.resolved.lock().contains(id) {
+            return Err(PlaneError::AlreadyResolved(id.to_owned()));
+        }
+        let mut inner = self.inner.lock();
+        let Some(mut slot) = inner.remove(id) else {
+            return Err(PlaneError::UnknownApproval(id.to_owned()));
+        };
+        drop(inner);
+        self.resolved.lock().insert(id.to_owned());
+        if let Some(tx) = slot.tx.take()
+            && tx.send(decision).is_err()
+        {
+            // Receiver already timed out.
+        }
+        Ok(())
+    }
+}
+
+impl Default for PendingPopup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl PopupSink for PendingPopup {
+    async fn ask(&self, req: &AuthzRequest) -> PopupDecision {
+        let id = Uuid::now_v7().to_string();
+        let (tx, rx) = oneshot::channel();
+        let view = PendingApproval {
+            id: id.clone(),
+            tool: req.tool.clone(),
+            target: req.target.clone(),
+            side_effects: req.side_effects.clone(),
+        };
+        self.inner
+            .lock()
+            .insert(id.clone(), PendingSlot { view, tx: Some(tx) });
+        let outcome = rx.await.unwrap_or(PopupDecision::Deny);
+        self.inner.lock().remove(&id);
+        self.resolved.lock().insert(id);
+        outcome
     }
 }
 

@@ -1,0 +1,487 @@
+use crate::error::ApiError;
+use crate::types::{
+    ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
+    CompactResponse, CreateScheduleRequest, CreateSessionRequest, ExclusiveSnapshot, Health,
+    HistoryResponse, JobView, MemoryPatch, MemoryView, MessageRequest, Page, PluginView, Problem,
+    QueuedCancel, ResourceKind, RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch,
+    SessionView, SoulPatch, SoulView, SpanView, ToolTestRequest, ToolView, UsageView,
+};
+use futures::{SinkExt, StreamExt};
+use reqwest::{Client, Method, RequestBuilder};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use url::Url;
+
+/// Typed HTTP + WebSocket client for `/api/v1`.
+#[derive(Clone)]
+pub struct ApiClient {
+    http: Client,
+    base: String,
+    token: String,
+    client_id: String,
+}
+
+impl ApiClient {
+    #[must_use]
+    pub fn new(
+        base: impl Into<String>,
+        token: impl Into<String>,
+        client_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            http: Client::new(),
+            base: base.into().trim_end_matches('/').to_owned(),
+            token: token.into(),
+            client_id: client_id.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    #[must_use]
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    #[must_use]
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    fn request(&self, method: Method, path: &str) -> RequestBuilder {
+        self.http
+            .request(method, format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .header("X-Client-Id", &self.client_id)
+    }
+
+    async fn send_json<T: DeserializeOwned>(&self, builder: RequestBuilder) -> Result<T, ApiError> {
+        let response = builder
+            .send()
+            .await
+            .map_err(|err| ApiError::Transport(err.to_string()))?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|err| ApiError::Transport(err.to_string()))?;
+        if status.is_success() {
+            serde_json::from_slice(&bytes).map_err(|err| ApiError::Codec(err.to_string()))
+        } else {
+            let problem = serde_json::from_slice::<Problem>(&bytes).unwrap_or_else(|_| {
+                Problem::new(
+                    status.as_u16(),
+                    "fault",
+                    std::str::from_utf8(&bytes).unwrap_or("request failed"),
+                )
+            });
+            Err(ApiError::from_problem(status.as_u16(), problem))
+        }
+    }
+
+    async fn send_empty(&self, builder: RequestBuilder) -> Result<(), ApiError> {
+        let _: Value = self.send_json(builder).await?;
+        Ok(())
+    }
+
+    pub async fn health(&self) -> Result<Health, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/health"))
+            .await
+    }
+
+    pub async fn list_souls(&self) -> Result<Page<SoulView>, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/souls"))
+            .await
+    }
+
+    pub async fn get_soul(&self, id: &str) -> Result<SoulView, ApiError> {
+        self.send_json(self.request(Method::GET, &format!("/api/v1/souls/{id}")))
+            .await
+    }
+
+    pub async fn patch_soul_body(&self, id: &str, patch: &SoulPatch) -> Result<SoulView, ApiError> {
+        self.send_json(
+            self.request(Method::PATCH, &format!("/api/v1/souls/{id}/body"))
+                .json(patch),
+        )
+        .await
+    }
+
+    pub async fn list_sessions(
+        &self,
+        soul_id: Option<&str>,
+    ) -> Result<Page<SessionView>, ApiError> {
+        let path = match soul_id {
+            Some(soul) => format!("/api/v1/sessions?soul_id={soul}"),
+            None => "/api/v1/sessions".to_owned(),
+        };
+        self.send_json(self.request(Method::GET, &path)).await
+    }
+
+    pub async fn create_session(
+        &self,
+        req: &CreateSessionRequest,
+    ) -> Result<SessionView, ApiError> {
+        self.send_json(self.request(Method::POST, "/api/v1/sessions").json(req))
+            .await
+    }
+
+    pub async fn get_session(&self, id: &str) -> Result<SessionView, ApiError> {
+        self.send_json(self.request(Method::GET, &format!("/api/v1/sessions/{id}")))
+            .await
+    }
+
+    pub async fn patch_session(
+        &self,
+        id: &str,
+        patch: &SessionPatch,
+    ) -> Result<SessionView, ApiError> {
+        self.send_json(
+            self.request(Method::PATCH, &format!("/api/v1/sessions/{id}"))
+                .json(patch),
+        )
+        .await
+    }
+
+    pub async fn fork_session(&self, id: &str) -> Result<SessionView, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/sessions/{id}/fork")))
+            .await
+    }
+
+    pub async fn export_session(&self, id: &str) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/sessions/{id}/export")))
+            .await
+    }
+
+    pub async fn send_message(
+        &self,
+        session_id: &str,
+        req: &MessageRequest,
+        idempotency_key: Option<&str>,
+    ) -> Result<SendMessageResponse, ApiError> {
+        let mut builder = self
+            .request(
+                Method::POST,
+                &format!("/api/v1/sessions/{session_id}/messages"),
+            )
+            .json(req);
+        if let Some(key) = idempotency_key {
+            builder = builder.header("Idempotency-Key", key);
+        }
+        self.send_json(builder).await
+    }
+
+    pub async fn history(
+        &self,
+        session_id: &str,
+        depth: &str,
+    ) -> Result<HistoryResponse, ApiError> {
+        self.send_json(self.request(
+            Method::GET,
+            &format!("/api/v1/sessions/{session_id}/history?depth={depth}"),
+        ))
+        .await
+    }
+
+    pub async fn cancel_queued(
+        &self,
+        session_id: &str,
+        entry_id: u64,
+    ) -> Result<QueuedCancel, ApiError> {
+        self.send_json(self.request(
+            Method::DELETE,
+            &format!("/api/v1/sessions/{session_id}/queued/{entry_id}"),
+        ))
+        .await
+    }
+
+    pub async fn compact(&self, session_id: &str) -> Result<CompactResponse, ApiError> {
+        self.send_json(self.request(
+            Method::POST,
+            &format!("/api/v1/sessions/{session_id}/compact"),
+        ))
+        .await
+    }
+
+    pub async fn cancel_turn(&self, turn_id: &str) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/turns/{turn_id}/cancel")))
+            .await
+    }
+
+    pub async fn list_jobs(&self, soul_id: Option<&str>) -> Result<Page<JobView>, ApiError> {
+        let path = match soul_id {
+            Some(soul) => format!("/api/v1/jobs?soul_id={soul}"),
+            None => "/api/v1/jobs".to_owned(),
+        };
+        self.send_json(self.request(Method::GET, &path)).await
+    }
+
+    pub async fn get_job(&self, id: &str) -> Result<JobView, ApiError> {
+        self.send_json(self.request(Method::GET, &format!("/api/v1/jobs/{id}")))
+            .await
+    }
+
+    pub async fn cancel_job(&self, id: &str) -> Result<JobView, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/jobs/{id}/cancel")))
+            .await
+    }
+
+    pub async fn list_schedules(&self) -> Result<Page<ScheduleView>, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/schedules"))
+            .await
+    }
+
+    pub async fn create_schedule(
+        &self,
+        req: &CreateScheduleRequest,
+    ) -> Result<ScheduleView, ApiError> {
+        self.send_json(self.request(Method::POST, "/api/v1/schedules").json(req))
+            .await
+    }
+
+    pub async fn patch_schedule(&self, id: &str, enabled: bool) -> Result<ScheduleView, ApiError> {
+        self.send_json(
+            self.request(Method::PATCH, &format!("/api/v1/schedules/{id}"))
+                .json(&serde_json::json!({ "enabled": enabled })),
+        )
+        .await
+    }
+
+    pub async fn delete_schedule(&self, id: &str) -> Result<(), ApiError> {
+        self.send_empty(self.request(Method::DELETE, &format!("/api/v1/schedules/{id}")))
+            .await
+    }
+
+    pub async fn list_artifacts(
+        &self,
+        soul_id: Option<&str>,
+    ) -> Result<Page<ArtifactView>, ApiError> {
+        let path = match soul_id {
+            Some(soul) => format!("/api/v1/artifacts?soul_id={soul}"),
+            None => "/api/v1/artifacts".to_owned(),
+        };
+        self.send_json(self.request(Method::GET, &path)).await
+    }
+
+    pub async fn artifact_content(&self, id: &str) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::GET, &format!("/api/v1/artifacts/{id}/content")))
+            .await
+    }
+
+    pub async fn list_memories(
+        &self,
+        soul_id: &str,
+        scope: Option<&str>,
+    ) -> Result<Page<MemoryView>, ApiError> {
+        let path = match scope {
+            Some(scope) => format!("/api/v1/souls/{soul_id}/memories?scope={scope}"),
+            None => format!("/api/v1/souls/{soul_id}/memories"),
+        };
+        self.send_json(self.request(Method::GET, &path)).await
+    }
+
+    pub async fn patch_memory(
+        &self,
+        id: &str,
+        patch: &MemoryPatch,
+    ) -> Result<MemoryView, ApiError> {
+        self.send_json(
+            self.request(Method::PATCH, &format!("/api/v1/memories/{id}"))
+                .json(patch),
+        )
+        .await
+    }
+
+    pub async fn delete_memory(&self, id: &str) -> Result<(), ApiError> {
+        self.send_empty(self.request(Method::DELETE, &format!("/api/v1/memories/{id}")))
+            .await
+    }
+
+    pub async fn list_tools(&self) -> Result<Page<ToolView>, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/tools"))
+            .await
+    }
+
+    pub async fn test_tool(&self, name: &str, req: &ToolTestRequest) -> Result<Value, ApiError> {
+        self.send_json(
+            self.request(Method::POST, &format!("/api/v1/tools/{name}/test"))
+                .json(req),
+        )
+        .await
+    }
+
+    pub async fn list_plugins(&self) -> Result<Page<PluginView>, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/plugins"))
+            .await
+    }
+
+    pub async fn restart_plugin(&self, id: &str) -> Result<PluginView, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/plugins/{id}/restart")))
+            .await
+    }
+
+    pub async fn list_approvals(&self) -> Result<Page<ApprovalView>, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/approvals"))
+            .await
+    }
+
+    pub async fn respond_approval(&self, id: &str, decision: &str) -> Result<Value, ApiError> {
+        self.send_json(
+            self.request(Method::POST, &format!("/api/v1/approvals/{id}/respond"))
+                .json(&serde_json::json!({ "decision": decision })),
+        )
+        .await
+    }
+
+    pub async fn list_characters(&self) -> Result<Page<CharacterView>, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/characters"))
+            .await
+    }
+
+    pub async fn settings(&self) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/settings"))
+            .await
+    }
+
+    pub async fn patch_settings(&self, body: &Value) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::PATCH, "/api/v1/settings").json(body))
+            .await
+    }
+
+    pub async fn settings_schema(&self) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/settings/schema"))
+            .await
+    }
+
+    pub async fn audit(&self) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/audit"))
+            .await
+    }
+
+    pub async fn usage(&self, session_id: Option<&str>) -> Result<UsageView, ApiError> {
+        let path = match session_id {
+            Some(id) => format!("/api/v1/usage?session_id={id}"),
+            None => "/api/v1/usage".to_owned(),
+        };
+        self.send_json(self.request(Method::GET, &path)).await
+    }
+
+    pub async fn diag_spans(&self) -> Result<Page<SpanView>, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/diag/spans"))
+            .await
+    }
+
+    pub async fn backup(&self) -> Result<BackupResponse, ApiError> {
+        self.send_json(self.request(Method::POST, "/api/v1/backup"))
+            .await
+    }
+
+    pub async fn restore(&self, req: &RestoreRequest) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::POST, "/api/v1/restore").json(req))
+            .await
+    }
+
+    pub async fn exclusive(&self) -> Result<ExclusiveSnapshot, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/exclusive"))
+            .await
+    }
+
+    pub async fn claim_resource(
+        &self,
+        kind: ResourceKind,
+        req: &ClaimResourceRequest,
+    ) -> Result<ExclusiveSnapshot, ApiError> {
+        self.send_json(
+            self.request(
+                Method::POST,
+                &format!("/api/v1/exclusive/{}", kind.as_str()),
+            )
+            .json(req),
+        )
+        .await
+    }
+
+    pub async fn release_resource(
+        &self,
+        kind: ResourceKind,
+    ) -> Result<ExclusiveSnapshot, ApiError> {
+        self.send_json(self.request(
+            Method::DELETE,
+            &format!(
+                "/api/v1/exclusive/{}?client_id={}",
+                kind.as_str(),
+                self.client_id
+            ),
+        ))
+        .await
+    }
+
+    pub async fn openapi(&self) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/openapi.json"))
+            .await
+    }
+
+    /// Open a depth-filtered event socket. `depth` is `surface` or `detail`.
+    pub async fn events(
+        &self,
+        depth: &str,
+        session_id: Option<&str>,
+    ) -> Result<EventSocket, ApiError> {
+        let ws_base = if let Some(rest) = self.base.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else if let Some(rest) = self.base.strip_prefix("http://") {
+            format!("ws://{rest}")
+        } else {
+            return Err(ApiError::Websocket("base URL must be http(s)".to_owned()));
+        };
+        let mut url = Url::parse(&format!("{ws_base}/api/v1/events"))
+            .map_err(|err| ApiError::Websocket(err.to_string()))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("depth", depth);
+            query.append_pair("client_id", &self.client_id);
+            query.append_pair("access_token", &self.token);
+            if let Some(session) = session_id {
+                query.append_pair("session_id", session);
+            }
+        }
+        let (stream, _) = connect_async(url.as_str())
+            .await
+            .map_err(|err| ApiError::Websocket(err.to_string()))?;
+        Ok(EventSocket { stream })
+    }
+}
+
+/// Live event stream (server already filtered by `depth`).
+pub struct EventSocket {
+    stream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+}
+
+impl EventSocket {
+    pub async fn recv_json(&mut self) -> Result<Option<Value>, ApiError> {
+        loop {
+            match self.stream.next().await {
+                Some(Err(err)) => return Err(ApiError::Websocket(err.to_string())),
+                Some(Ok(Message::Text(text))) => {
+                    let value = serde_json::from_str(text.as_ref())
+                        .map_err(|err| ApiError::Codec(err.to_string()))?;
+                    return Ok(Some(value));
+                }
+                Some(Ok(Message::Ping(payload))) => {
+                    self.stream
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|err| ApiError::Websocket(err.to_string()))?;
+                }
+                None | Some(Ok(Message::Close(_))) => return Ok(None),
+                Some(Ok(_)) => {}
+            }
+        }
+    }
+}

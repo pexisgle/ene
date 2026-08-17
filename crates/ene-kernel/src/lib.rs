@@ -20,7 +20,10 @@ mod model;
 mod observe;
 mod router;
 
-pub use config::{CoreSettings, DelegationSettings, HarnessSettings, MindSettings};
+pub use config::{
+    BackupSettings, ClientsSettings, CoreSettings, DelegationSettings, HarnessSettings,
+    MindSettings, ServerSettings,
+};
 pub use context::{ContextRegistry, format_recovery_note};
 pub use error::{CancelQueued, KernelError, RunOutcome};
 pub use inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};

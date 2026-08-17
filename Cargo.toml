@@ -72,6 +72,9 @@ http = "1"
 eventsource-stream = "0.2"
 percent-encoding = "2"
 reqwest = { version = "0.13", default-features = false }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+ene-api = { path = "crates/ene-api" }
 scraper = "0.27"
 quick-xml = { version = "0.41", features = ["serialize"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

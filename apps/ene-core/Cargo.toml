@@ -16,9 +16,12 @@ name = "ene-core"
 path = "src/main.rs"
 
 [dependencies]
+axum = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
-ene-companion = { workspace = true }
+ene-api = { workspace = true }
 ene-body = { workspace = true }
+ene-companion = { workspace = true }
 ene-config = { workspace = true }
 ene-fiber = { workspace = true }
 ene-kernel = { workspace = true }
@@ -27,13 +30,21 @@ ene-registry = { workspace = true }
 ene-session = { workspace = true }
 ene-work = { workspace = true }
 fs2 = { workspace = true }
+parking_lot = { workspace = true }
+rusqlite = { workspace = true, features = ["backup"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+uuid = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+ene-api = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true
