@@ -109,6 +109,7 @@ async fn spawned_core_offline_conversation_and_rss() {
             &MessageRequest {
                 text: "offline hello".into(),
                 mode: MessageMode::Prompt,
+                input_modality: None,
             },
             None,
         )

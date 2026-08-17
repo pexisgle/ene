@@ -18,9 +18,10 @@
     "/souls": { "get": { "summary": "List souls", "responses": { "200": { "description": "page" } } } },
     "/souls/{id}": { "get": { "summary": "Get soul", "responses": { "200": { "description": "soul" } } } },
     "/souls/{id}/body": { "patch": { "summary": "Hot-swap body binding", "responses": { "200": { "description": "soul" } } } },
+    "/souls/{id}/affect": { "get": { "summary": "PAD affect (detail)", "responses": { "200": { "description": "affect" } } } },
     "/souls/{id}/memories": { "get": { "summary": "List memories (scope filter)", "responses": { "200": { "description": "page" } } } },
     "/sessions": {
-      "get": { "summary": "List sessions", "responses": { "200": { "description": "page" } } },
+      "get": { "summary": "List sessions (q= surface text search)", "responses": { "200": { "description": "page" } } },
       "post": { "summary": "Create session", "responses": { "200": { "description": "session" } } }
     },
     "/sessions/{id}": {
@@ -28,6 +29,9 @@
       "patch": { "summary": "Title / archive", "responses": { "200": { "description": "session" } } }
     },
     "/sessions/{id}/fork": { "post": { "summary": "Fork at current seq", "responses": { "200": { "description": "session" } } } },
+    "/sessions/{id}/split": { "post": { "summary": "Explicit split: end current, open a new session for the same soul", "responses": { "200": { "description": "split" } } } },
+    "/sessions/{id}/end": { "post": { "summary": "End session (explicit or idle_timeout)", "responses": { "200": { "description": "session" } } } },
+    "/sessions/{id}/barge-in": { "post": { "summary": "Abort the running turn (voice barge-in)", "responses": { "200": { "description": "ok" } } } },
     "/sessions/{id}/export": { "post": { "summary": "JSON export", "responses": { "200": { "description": "export" } } } },
     "/sessions/{id}/messages": { "post": { "summary": "prompt | steer | follow_up", "responses": { "200": { "description": "accepted" }, "409": { "description": "lane_busy" } } } },
     "/sessions/{id}/history": { "get": { "summary": "Projected history", "parameters": [{ "name": "depth", "in": "query", "schema": { "enum": ["surface", "detail"] } }], "responses": { "200": { "description": "history" } } } },
@@ -75,6 +79,7 @@
       "post": { "summary": "Claim mic|speaker|notify", "responses": { "200": { "description": "snapshot" }, "409": { "description": "busy" } } },
       "delete": { "summary": "Release", "responses": { "200": { "description": "snapshot" } } }
     },
+    "/stage": { "get": { "summary": "Stage occupants", "responses": { "200": { "description": "stage" } } } },
     "/events": {
       "get": {
         "summary": "WebSocket event stream",

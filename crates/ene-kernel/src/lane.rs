@@ -26,6 +26,7 @@ use ene_session::{
 enum LaneCmd {
     Prompt {
         text: String,
+        modality: String,
         reply: oneshot::Sender<Result<TurnId, KernelError>>,
     },
     Steer {
@@ -191,8 +192,18 @@ impl LaneHandle {
 
     /// Start a user turn. Fails with [`KernelError::LaneBusy`] if a turn is running.
     pub async fn prompt(&self, text: impl Into<String>) -> Result<TurnId, KernelError> {
+        self.prompt_with_modality(text, "text").await
+    }
+
+    /// Start a user turn tagged with `text` or `voice` input modality.
+    pub async fn prompt_with_modality(
+        &self,
+        text: impl Into<String>,
+        modality: impl Into<String>,
+    ) -> Result<TurnId, KernelError> {
         self.ask(|reply| LaneCmd::Prompt {
             text: text.into(),
+            modality: normalize_input_modality(&modality.into()),
             reply,
         })
         .await
@@ -295,8 +306,12 @@ async fn dispatch_cmd(
     idle_waiters: &mut Vec<oneshot::Sender<Result<(), KernelError>>>,
 ) {
     match cmd {
-        LaneCmd::Prompt { text, reply } => {
-            let result = start_prompt(state, text, done_tx).await;
+        LaneCmd::Prompt {
+            text,
+            modality,
+            reply,
+        } => {
+            let result = start_prompt(state, text, modality, done_tx).await;
             drop(reply.send(result));
         }
         LaneCmd::Steer { text, reply } => {
@@ -370,9 +385,18 @@ async fn on_turn_finished(
     }
 }
 
+fn normalize_input_modality(raw: &str) -> String {
+    if raw.eq_ignore_ascii_case("voice") {
+        "voice".to_owned()
+    } else {
+        "text".to_owned()
+    }
+}
+
 async fn start_prompt(
     state: &mut LaneState,
     text: String,
+    modality: String,
     done_tx: &mpsc::UnboundedSender<TurnFinish>,
 ) -> Result<TurnId, KernelError> {
     if let Some(running) = &state.running {
@@ -388,7 +412,7 @@ async fn start_prompt(
                 v: v1(),
                 turn_id: Some(turn),
                 blocks: vec![Block::text(&text)],
-                input_modality: "text".to_owned(),
+                input_modality: modality,
                 client_id: ClientId::new(),
             },
         ),

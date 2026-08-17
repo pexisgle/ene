@@ -7,13 +7,16 @@ use ene_body::{
     VoiceSettings,
 };
 use ene_companion::{
-    CompanionRuntime, CompanionStore, MindSettings as CompanionMind, register_memory_tools,
+    CompanionRuntime, CompanionStore, MindSettings as CompanionMind, NewSoul, register_memory_tools,
 };
 use ene_fiber::Supervisor;
 use ene_kernel::{ConversationModel, LaneHandle, LaneOptions, SurfaceRouter, format_recovery_note};
 use ene_plane::{ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PopupSink, Vault};
 use ene_registry::ToolRegistry;
-use ene_session::{RecoveryReport, SessionId, SessionStore, SoulId};
+use ene_session::{
+    BodyId, EventKind, EventPayload, NewEvent, RecoveryReport, SessionEndReason, SessionId,
+    SessionStore, SessionsSettings, SoulId, Transaction, v1,
+};
 use ene_work::{
     CompanionReport, DelegationHost, PlaceholderScreenshot, WorkError, WorkStore,
     WorkSurfaceRouter, register_screenshot_tool, register_work_tools,
@@ -139,6 +142,7 @@ impl CoreDaemon {
             BodySettings::default(),
         ));
         let supervisor = Arc::new(Supervisor::new(opts.data_dir.clone(), registry));
+        seed_default_occupants(&companions, &stage)?;
         Ok(Self {
             data_dir: opts.data_dir,
             _lock: lock,
@@ -203,6 +207,11 @@ impl CoreDaemon {
     }
 
     #[must_use]
+    pub fn occupants(&self) -> Vec<(SoulId, Option<BodyId>)> {
+        self.stage.occupants()
+    }
+
+    #[must_use]
     pub fn work(&self) -> Arc<WorkStore> {
         Arc::clone(&self.work)
     }
@@ -261,6 +270,61 @@ impl CoreDaemon {
         })
     }
 
+    /// End conversations whose last event is older than `store.sessions.idle_timeout_secs`.
+    pub async fn end_idle_sessions(&self) -> Result<u32, CoreError> {
+        let timeout_secs = SessionsSettings::default().idle_timeout_secs;
+        if timeout_secs == 0 {
+            return Ok(0);
+        }
+        let now = chrono::Utc::now();
+        let mut ended = 0_u32;
+        for meta in self.store.list_sessions(None)? {
+            if meta.ended_at.is_some() {
+                continue;
+            }
+            let Some(ts) = self.store.last_event_ts(meta.id)? else {
+                continue;
+            };
+            let Ok(then) = chrono::DateTime::parse_from_rfc3339(&ts) else {
+                continue;
+            };
+            let age = now.signed_duration_since(then.with_timezone(&chrono::Utc));
+            if age.num_seconds() < i64::try_from(timeout_secs).unwrap_or(i64::MAX) {
+                continue;
+            }
+            self.end_session(meta.id, SessionEndReason::IdleTimeout)
+                .await?;
+            ended = ended.saturating_add(1);
+        }
+        Ok(ended)
+    }
+
+    pub async fn end_session(
+        &self,
+        session: SessionId,
+        reason: SessionEndReason,
+    ) -> Result<(), CoreError> {
+        let meta = self.store.get_session(session)?;
+        if meta.ended_at.is_some() {
+            return Ok(());
+        }
+        self.store
+            .commit(Transaction {
+                entries: vec![NewEvent::new(
+                    session,
+                    EventKind::SessionEnd,
+                    EventPayload::SessionEnd {
+                        v: v1(),
+                        reason,
+                        summary_ref: None,
+                    },
+                )],
+                usage: Vec::new(),
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Open a dialogue lane on an existing session, carrying recovery into context.
     #[must_use]
     pub fn open_lane(
@@ -287,6 +351,23 @@ impl CoreDaemon {
             router: Some(router as Arc<dyn SurfaceRouter>),
         })
     }
+}
+
+fn seed_default_occupants(companions: &CompanionStore, stage: &Stage) -> Result<(), CoreError> {
+    if !companions.list_souls()?.is_empty() {
+        return Ok(());
+    }
+    for character_ref in ["char.alpha@1", "char.beta@1"] {
+        let soul = companions.create_soul(&NewSoul {
+            character_ref: character_ref.to_owned(),
+            body_ref: Some(BodyId::new()),
+            voice_ref: None,
+            skill_refs: Vec::new(),
+            affect_baseline: ene_companion::AffectBaseline::default(),
+        })?;
+        stage.present(soul.id, soul.body_ref, BodyCatalog::vrm_default())?;
+    }
+    Ok(())
 }
 
 fn lock_data_dir(data_dir: &Path) -> Result<File, CoreError> {

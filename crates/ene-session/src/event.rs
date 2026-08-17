@@ -598,6 +598,19 @@ impl EventPayload {
     }
 
     #[must_use]
+    pub fn surface_search_text(&self) -> String {
+        match self {
+            Self::SessionTitle { title, .. } => title.clone(),
+            Self::UserMessage { blocks, .. } | Self::AssistantMessage { blocks, .. } => blocks
+                .iter()
+                .filter_map(Block::as_text)
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => String::new(),
+        }
+    }
+
+    #[must_use]
     pub fn turn_id(&self) -> Option<TurnId> {
         match *self {
             Self::TurnStart { turn_id, .. }

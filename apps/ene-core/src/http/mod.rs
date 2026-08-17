@@ -136,7 +136,9 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/souls", get(routes::list_souls))
         .route("/api/v1/souls/{id}", get(routes::get_soul))
         .route("/api/v1/souls/{id}/body", patch(routes::patch_soul_body))
+        .route("/api/v1/souls/{id}/affect", get(routes::get_soul_affect))
         .route("/api/v1/souls/{id}/memories", get(routes::list_memories))
+        .route("/api/v1/stage", get(routes::get_stage))
         .route(
             "/api/v1/sessions",
             get(routes::list_sessions).post(routes::create_session),
@@ -146,6 +148,9 @@ fn router(state: AppState) -> Router {
             get(routes::get_session).patch(routes::patch_session),
         )
         .route("/api/v1/sessions/{id}/fork", post(routes::fork_session))
+        .route("/api/v1/sessions/{id}/split", post(routes::split_session))
+        .route("/api/v1/sessions/{id}/end", post(routes::end_session))
+        .route("/api/v1/sessions/{id}/barge-in", post(routes::barge_in))
         .route("/api/v1/sessions/{id}/export", post(routes::export_session))
         .route("/api/v1/sessions/{id}/messages", post(routes::send_message))
         .route("/api/v1/sessions/{id}/history", get(routes::history))

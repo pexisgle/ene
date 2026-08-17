@@ -1,14 +1,15 @@
 use crate::{BootOptions, CoreDaemon};
 use async_trait::async_trait;
 use ene_api::{
-    ApiClient, ClaimResourceRequest, CreateSessionRequest, HistoryResponse, MessageMode,
-    MessageRequest, ResourceKind,
+    ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
+    MessageMode, MessageRequest, ResourceKind,
 };
 use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
     spans_leak_content,
 };
 use ene_plane::{ApprovalMode, AuthzRequest, Sensitivity};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -89,6 +90,7 @@ async fn surface_ws_never_sees_inner() {
             &MessageRequest {
                 text: "hello inner".into(),
                 mode: MessageMode::Prompt,
+                input_modality: None,
             },
             None,
         )
@@ -166,10 +168,12 @@ async fn concurrent_prompt_returns_lane_busy() {
     let req = MessageRequest {
         text: "one".into(),
         mode: MessageMode::Prompt,
+        input_modality: None,
     };
     let req_two = MessageRequest {
         text: "two".into(),
         mode: MessageMode::Prompt,
+        input_modality: None,
     };
     let first = client.send_message(&session.id, &req, None);
     let second = client.send_message(&session.id, &req_two, None);
@@ -196,6 +200,7 @@ async fn idempotency_key_dedupes_prompt() {
     let req = MessageRequest {
         text: "same".into(),
         mode: MessageMode::Prompt,
+        input_modality: None,
     };
     let a = client
         .send_message(&session.id, &req, Some("key-1"))
@@ -300,6 +305,7 @@ async fn export_default_omits_inner() {
             &MessageRequest {
                 text: "hello inner".into(),
                 mode: MessageMode::Prompt,
+                input_modality: None,
             },
             None,
         )
@@ -346,6 +352,7 @@ async fn fork_leaves_original_session_intact() {
             &MessageRequest {
                 text: "keep me".into(),
                 mode: MessageMode::Prompt,
+                input_modality: None,
             },
             None,
         )
@@ -397,6 +404,7 @@ async fn http_spans_and_schema_and_anon_health() {
             &MessageRequest {
                 text: "secret prompt text".into(),
                 mode: MessageMode::Prompt,
+                input_modality: None,
             },
             None,
         )
@@ -453,6 +461,7 @@ async fn minimal_http_baselines_are_measurable() {
             &MessageRequest {
                 text: "offline ping".into(),
                 mode: MessageMode::Prompt,
+                input_modality: None,
             },
             None,
         )
@@ -471,5 +480,108 @@ async fn minimal_http_baselines_are_measurable() {
     assert!(boot_ms < 5_000, "boot_to_ready_ms={boot_ms}");
     assert!(health_mean_us < 20_000, "health_mean_us={health_mean_us}");
     assert!(prompt_ms < 2_000, "echo_prompt_ms={prompt_ms}");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn boot_seeds_two_souls_and_session_ops() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    assert!(
+        souls.items.len() >= 2,
+        "boot must present two companions, got {}",
+        souls.items.len()
+    );
+    let stage = client.stage().await.unwrap();
+    assert!(stage.occupants.len() >= 2);
+    let affect = client.soul_affect(&souls.items[0].id).await.unwrap();
+    assert!(!affect.mood_label.is_empty());
+    assert!(affect.valence.is_finite());
+    assert!(affect.arousal.is_finite());
+    assert!(affect.dominance.is_finite());
+
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: souls.items[0].id.clone(),
+            title: Some("picnic plans".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "unique pineapple picnic".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "spoken weather".into(),
+                mode: MessageMode::Prompt,
+                input_modality: Some("voice".into()),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+
+    let sid = ene_session::SessionId::from_str(&session.id).unwrap();
+    let events = core.store().load_events(sid, 0).unwrap();
+    let modalities: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ene_session::EventPayload::UserMessage { input_modality, .. } => {
+                Some(input_modality.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(modalities.contains(&"text"));
+    assert!(modalities.contains(&"voice"));
+
+    let found = client
+        .search_sessions(None, Some("pineapple"))
+        .await
+        .unwrap();
+    assert!(
+        found.items.iter().any(|item| item.id == session.id),
+        "surface search must find the picnic turn"
+    );
+
+    let split = client.split_session(&session.id).await.unwrap();
+    assert_eq!(split.previous.id, session.id);
+    assert_eq!(split.previous.end_reason.as_deref(), Some("explicit"));
+    assert_ne!(split.session.id, session.id);
+    assert_eq!(split.session.soul_id, session.soul_id);
+    assert!(split.session.ended_at.is_none());
+
+    let ended = client
+        .end_session(
+            &split.session.id,
+            &EndSessionRequest {
+                reason: "idle_timeout".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ended.end_reason.as_deref(), Some("idle_timeout"));
+
+    let barge = client.barge_in(&split.session.id).await;
+    assert!(
+        barge.is_ok()
+            || barge
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.error_class() == "no_active_operation")
+    );
     server.shutdown().await;
 }

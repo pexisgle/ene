@@ -115,6 +115,7 @@ impl StageApp {
                     &MessageRequest {
                         text: text.clone(),
                         mode: MessageMode::Prompt,
+                        input_modality: None,
                     },
                     None,
                 )

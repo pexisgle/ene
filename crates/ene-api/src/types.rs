@@ -79,6 +79,10 @@ pub struct SessionView {
     pub created_at: String,
     pub archived: bool,
     pub next_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +114,8 @@ pub struct MessageRequest {
     pub text: String,
     #[serde(default)]
     pub mode: MessageMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_modality: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,4 +343,38 @@ pub struct ExclusiveSnapshot {
     pub speaker: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OccupantView {
+    pub soul_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageView {
+    pub occupants: Vec<OccupantView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AffectView {
+    pub valence: f32,
+    pub arousal: f32,
+    pub dominance: f32,
+    pub trust: f32,
+    pub affinity: f32,
+    pub mood_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EndSessionRequest {
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitSessionResponse {
+    pub previous: SessionView,
+    pub session: SessionView,
 }

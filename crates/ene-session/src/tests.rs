@@ -1,9 +1,9 @@
 use crate::{
     Block, ClientId, CommitResult, DisplayDepth, EventKind, EventPayload, InboxCancelReason,
     InboxClass, InboxSource, InnerAspect, NewEvent, NewSession, NewUsage, ProjectOptions,
-    ProjectedMessage, SessionCreatedBy, SessionError, SessionId, SessionKind, SessionStore, SoulId,
-    Transaction, TurnId, TurnOrigin, TurnOutcome, TurnTrigger, derive_messages, hash_projected,
-    open_turns, surface_leaks_inner, unclaimed_inbox, v1,
+    ProjectedMessage, SessionCreatedBy, SessionEndReason, SessionError, SessionId, SessionKind,
+    SessionStore, SoulId, Transaction, TurnId, TurnOrigin, TurnOutcome, TurnTrigger,
+    derive_messages, hash_projected, open_turns, surface_leaks_inner, unclaimed_inbox, v1,
 };
 use tempfile::TempDir;
 
@@ -485,4 +485,56 @@ async fn storage_too_new_is_rejected() {
         panic!("expected storage too new")
     };
     assert!(matches!(err, SessionError::StorageTooNew { found: 99, .. }));
+}
+
+#[tokio::test]
+async fn session_end_and_surface_search() {
+    let (_dir, store) = open_tmp().await;
+    let (soul, session) = mk_session(&store).await;
+    store
+        .commit(Transaction {
+            entries: vec![
+                NewEvent::new(
+                    session,
+                    EventKind::SessionTitle,
+                    EventPayload::SessionTitle {
+                        v: v1(),
+                        title: "picnic plans".to_owned(),
+                    },
+                ),
+                text_user(session, TurnId::new(), "bring sandwiches"),
+            ],
+            usage: vec![],
+        })
+        .await
+        .unwrap();
+    let events = store.load_events(session, 0).unwrap();
+    let haystack: String = events
+        .iter()
+        .map(|event| event.payload.surface_search_text())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(haystack.to_ascii_lowercase().contains("picnic"));
+    assert!(haystack.to_ascii_lowercase().contains("sandwiches"));
+    assert!(!haystack.to_ascii_lowercase().contains("thought"));
+    store
+        .commit(Transaction {
+            entries: vec![NewEvent::new(
+                session,
+                EventKind::SessionEnd,
+                EventPayload::SessionEnd {
+                    v: v1(),
+                    reason: SessionEndReason::Explicit,
+                    summary_ref: None,
+                },
+            )],
+            usage: vec![],
+        })
+        .await
+        .unwrap();
+    let meta = store.get_session(session).unwrap();
+    assert_eq!(meta.soul_id, soul);
+    assert!(meta.ended_at.is_some());
+    assert_eq!(meta.end_reason.as_deref(), Some("explicit"));
+    assert!(store.last_event_ts(session).unwrap().is_some());
 }

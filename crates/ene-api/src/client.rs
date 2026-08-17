@@ -1,10 +1,11 @@
 use crate::error::ApiError;
 use crate::types::{
-    ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
-    CompactResponse, CreateScheduleRequest, CreateSessionRequest, ExclusiveSnapshot, Health,
-    HistoryResponse, JobView, MemoryPatch, MemoryView, MessageRequest, Page, PluginView, Problem,
-    QueuedCancel, ResourceKind, RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch,
-    SessionView, SoulPatch, SoulView, SpanView, ToolTestRequest, ToolView, UsageView,
+    AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
+    CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
+    ExclusiveSnapshot, Health, HistoryResponse, JobView, MemoryPatch, MemoryView, MessageRequest,
+    Page, PluginView, Problem, QueuedCancel, ResourceKind, RestoreRequest, ScheduleView,
+    SendMessageResponse, SessionPatch, SessionView, SoulPatch, SoulView, SpanView,
+    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -115,9 +116,26 @@ impl ApiClient {
         &self,
         soul_id: Option<&str>,
     ) -> Result<Page<SessionView>, ApiError> {
-        let path = match soul_id {
-            Some(soul) => format!("/api/v1/sessions?soul_id={soul}"),
-            None => "/api/v1/sessions".to_owned(),
+        self.search_sessions(soul_id, None).await
+    }
+
+    pub async fn search_sessions(
+        &self,
+        soul_id: Option<&str>,
+        q: Option<&str>,
+    ) -> Result<Page<SessionView>, ApiError> {
+        let mut encoded = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(soul) = soul_id {
+            encoded.append_pair("soul_id", soul);
+        }
+        if let Some(q) = q {
+            encoded.append_pair("q", q);
+        }
+        let query = encoded.finish();
+        let path = if query.is_empty() {
+            "/api/v1/sessions".to_owned()
+        } else {
+            format!("/api/v1/sessions?{query}")
         };
         self.send_json(self.request(Method::GET, &path)).await
     }
@@ -149,6 +167,38 @@ impl ApiClient {
 
     pub async fn fork_session(&self, id: &str) -> Result<SessionView, ApiError> {
         self.send_json(self.request(Method::POST, &format!("/api/v1/sessions/{id}/fork")))
+            .await
+    }
+
+    pub async fn split_session(&self, id: &str) -> Result<SplitSessionResponse, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/sessions/{id}/split")))
+            .await
+    }
+
+    pub async fn end_session(
+        &self,
+        id: &str,
+        req: &EndSessionRequest,
+    ) -> Result<SessionView, ApiError> {
+        self.send_json(
+            self.request(Method::POST, &format!("/api/v1/sessions/{id}/end"))
+                .json(req),
+        )
+        .await
+    }
+
+    pub async fn barge_in(&self, id: &str) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/sessions/{id}/barge-in")))
+            .await
+    }
+
+    pub async fn stage(&self) -> Result<StageView, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/stage"))
+            .await
+    }
+
+    pub async fn soul_affect(&self, id: &str) -> Result<AffectView, ApiError> {
+        self.send_json(self.request(Method::GET, &format!("/api/v1/souls/{id}/affect")))
             .await
     }
 

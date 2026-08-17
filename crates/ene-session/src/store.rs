@@ -217,6 +217,16 @@ impl SessionStore {
         list_sessions_conn(&conn, soul_id)
     }
 
+    pub fn last_event_ts(&self, session_id: SessionId) -> Result<Option<String>, SessionError> {
+        let conn = self.reader.lock();
+        let mut stmt = conn.prepare(
+            "SELECT ts FROM session_events WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
+        )?;
+        stmt.query_row([session_id.to_string()], |row| row.get(0))
+            .optional()
+            .map_err(SessionError::from)
+    }
+
     pub fn usage_totals(&self, session_id: SessionId) -> Result<UsageTotals, SessionError> {
         let conn = self.reader.lock();
         let mut stmt = conn.prepare(

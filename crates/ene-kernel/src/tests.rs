@@ -444,3 +444,32 @@ async fn compact_keeps_original_rows() {
             || !m.text().is_empty())
     );
 }
+
+#[tokio::test]
+async fn voice_and_text_share_one_session_log() {
+    let (_dir, store, lane, _model) = open_lane().await;
+    lane.prompt("typed hello").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    lane.prompt_with_modality("spoken hello", "voice")
+        .await
+        .unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let events = store.load_events(lane.session_id(), 0).unwrap();
+    let modalities: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventPayload::UserMessage { input_modality, .. } => Some(input_modality.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(modalities.contains(&"text"));
+    assert!(modalities.contains(&"voice"));
+    let history = lane.project(DisplayDepth::Surface).unwrap();
+    let texts: Vec<String> = history
+        .messages
+        .iter()
+        .map(ene_session::ProjectedMessage::text)
+        .collect();
+    assert!(texts.iter().any(|t| t == "typed hello"));
+    assert!(texts.iter().any(|t| t == "spoken hello"));
+}

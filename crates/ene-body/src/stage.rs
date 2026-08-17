@@ -69,6 +69,11 @@ impl Stage {
     }
 
     #[must_use]
+    pub fn occupants(&self) -> Vec<(SoulId, Option<BodyId>)> {
+        self.occupants.lock().clone()
+    }
+
+    #[must_use]
     pub fn render_enabled(&self) -> bool {
         self.settings.render.enabled
     }

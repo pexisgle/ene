@@ -4,12 +4,13 @@ use std::str::FromStr;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use ene_api::{
-    ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
-    CompactResponse, CreateScheduleRequest, CreateSessionRequest, ExclusiveSnapshot, Health,
-    HistoryResponse, JobView, MemoryPatch, MemoryView, MessageMode, MessageRequest,
-    MessageResponse, Page, PluginView, QueuedCancel, ResourceKind, RestoreRequest, ScheduleView,
-    SendMessageResponse, SessionPatch, SessionView, SettingsPatch, SoulPatch, SoulView, SpanView,
-    ToolTestRequest, ToolView, UsageView,
+    AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
+    CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
+    ExclusiveSnapshot, Health, HistoryResponse, JobView, MemoryPatch, MemoryView, MessageMode,
+    MessageRequest, MessageResponse, OccupantView, Page, PluginView, QueuedCancel, ResourceKind,
+    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView, SettingsPatch,
+    SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView,
+    UsageView,
 };
 use ene_companion::{JournalAction, MemoryId, MemoryScope, install_archive};
 use ene_fiber::ProfileRow;
@@ -17,8 +18,8 @@ use ene_kernel::{CoreSettings, DisplayDepth, HarnessSettings};
 use ene_plane::PopupDecision;
 use ene_registry::Layer;
 use ene_session::{
-    EventKind, EventPayload, NewEvent, NewSession, SessionCreatedBy, SessionId, SessionKind,
-    SoulId, TurnId, v1,
+    EventKind, EventPayload, NewEvent, NewSession, SessionCreatedBy, SessionEndReason, SessionId,
+    SessionKind, SessionMeta, SoulId, TurnId, v1,
 };
 use ene_work::{NewSchedule, ScheduleAction};
 use serde::Deserialize;
@@ -34,6 +35,7 @@ pub struct SoulFilter {
     pub scope: Option<String>,
     pub depth: Option<String>,
     pub session_id: Option<String>,
+    pub q: Option<String>,
 }
 
 pub async fn health(State(state): State<AppState>) -> Json<Health> {
@@ -100,20 +102,63 @@ pub async fn patch_soul_body(
     get_soul(State(state), Path(id)).await
 }
 
+pub async fn get_soul_affect(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AffectView>, ApiReject> {
+    let soul = parse_soul(&id)?;
+    let row = state
+        .core
+        .companions()
+        .get_soul(soul)
+        .map_err(map_companion)?
+        .ok_or_else(|| not_found("soul not found"))?;
+    Ok(Json(AffectView {
+        valence: row.affect.valence,
+        arousal: row.affect.arousal,
+        dominance: row.affect.dominance,
+        trust: row.affect.trust,
+        affinity: row.affect.affinity,
+        mood_label: row.affect.mood_label,
+    }))
+}
+
+pub async fn get_stage(State(state): State<AppState>) -> Json<StageView> {
+    Json(StageView {
+        occupants: state
+            .core
+            .occupants()
+            .into_iter()
+            .map(|(soul, body)| OccupantView {
+                soul_id: soul.to_string(),
+                body_id: body.map(|id| id.to_string()),
+            })
+            .collect(),
+    })
+}
+
 pub async fn list_sessions(
     State(state): State<AppState>,
     Query(filter): Query<SoulFilter>,
 ) -> Result<Json<Page<SessionView>>, ApiReject> {
+    state.core.end_idle_sessions().await.map_err(map_core)?;
     let soul = filter.soul_id.as_deref().map(parse_soul).transpose()?;
-    let items = state
+    let mut items = state
         .core
         .store()
         .list_sessions(soul)
-        .map_err(map_session)?
-        .into_iter()
-        .map(session_view)
-        .collect();
-    Ok(Json(Page::of(items)))
+        .map_err(map_session)?;
+    if let Some(q) = filter
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        items.retain(|meta| session_matches_query(&state.core, meta, q));
+    }
+    Ok(Json(Page::of(
+        items.into_iter().map(session_view).collect(),
+    )))
 }
 
 pub async fn create_session(
@@ -225,6 +270,83 @@ pub async fn fork_session(
     Ok(Json(session_view(view)))
 }
 
+pub async fn split_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SplitSessionResponse>, ApiReject> {
+    let session = parse_session(&id)?;
+    let previous = state
+        .core
+        .store()
+        .get_session(session)
+        .map_err(map_session)?;
+    if previous.ended_at.is_none() {
+        state
+            .core
+            .end_session(session, SessionEndReason::Explicit)
+            .await
+            .map_err(map_core)?;
+    }
+    let previous = state
+        .core
+        .store()
+        .get_session(session)
+        .map_err(map_session)?;
+    let new_id = state
+        .core
+        .store()
+        .create_session(NewSession {
+            soul_id: previous.soul_id,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .map_err(map_session)?;
+    let created = state
+        .core
+        .store()
+        .get_session(new_id)
+        .map_err(map_session)?;
+    Ok(Json(SplitSessionResponse {
+        previous: session_view(previous),
+        session: session_view(created),
+    }))
+}
+
+pub async fn end_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<EndSessionRequest>,
+) -> Result<Json<SessionView>, ApiReject> {
+    let session = parse_session(&id)?;
+    let reason = if req.reason.eq_ignore_ascii_case("idle_timeout") {
+        SessionEndReason::IdleTimeout
+    } else {
+        SessionEndReason::Explicit
+    };
+    state
+        .core
+        .end_session(session, reason)
+        .await
+        .map_err(map_core)?;
+    get_session(State(state), Path(id)).await
+}
+
+pub async fn barge_in(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiReject> {
+    let session = parse_session(&id)?;
+    let lane = state
+        .lanes
+        .get_or_open(&state.core, session)
+        .map_err(map_core)?;
+    lane.abort().await.map_err(|err| map_kernel(&err))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 pub async fn export_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -272,7 +394,7 @@ async fn dispatch_message(
     match req.mode {
         MessageMode::Prompt => {
             let turn = lane
-                .prompt(&req.text)
+                .prompt_with_modality(&req.text, req.input_modality.as_deref().unwrap_or("text"))
                 .await
                 .map_err(|err| map_kernel(&err))?;
             state.lanes.remember_turn(turn, session);
@@ -972,6 +1094,8 @@ fn session_view(meta: ene_session::SessionMeta) -> SessionView {
         created_at: meta.created_at,
         archived: meta.archived,
         next_seq: meta.next_seq,
+        ended_at: meta.ended_at,
+        end_reason: meta.end_reason,
     }
 }
 
@@ -1029,6 +1153,32 @@ fn parse_soul(raw: &str) -> Result<SoulId, ApiReject> {
 
 fn parse_session(raw: &str) -> Result<SessionId, ApiReject> {
     SessionId::from_str(raw).map_err(|_| bad_request("invalid_message", "bad session id"))
+}
+
+fn session_matches_query(core: &crate::CoreDaemon, meta: &SessionMeta, q: &str) -> bool {
+    let needle = q.to_ascii_lowercase();
+    if meta.id.to_string().to_ascii_lowercase().contains(&needle) {
+        return true;
+    }
+    if meta
+        .title
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .contains(&needle)
+    {
+        return true;
+    }
+    let Ok(events) = core.store().load_events(meta.id, 0) else {
+        return false;
+    };
+    events.iter().any(|event| {
+        event
+            .payload
+            .surface_search_text()
+            .to_ascii_lowercase()
+            .contains(&needle)
+    })
 }
 
 fn map_session(err: ene_session::SessionError) -> ApiReject {

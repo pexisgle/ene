@@ -145,6 +145,7 @@ async fn run(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiError> {
                     &MessageRequest {
                         text: text.clone(),
                         mode: MessageMode::Prompt,
+                        input_modality: None,
                     },
                     None,
                 )

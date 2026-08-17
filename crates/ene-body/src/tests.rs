@@ -216,6 +216,18 @@ fn stage_caps_concurrent_rendered_bodies() {
         .unwrap();
     assert!(stage.bus().body_of(s1).is_some());
     assert!(stage.bus().body_of(s2).is_none());
+    let occupants = stage.occupants();
+    assert_eq!(occupants.len(), 2);
+    assert!(
+        occupants
+            .iter()
+            .any(|(soul, body)| *soul == s1 && body.is_some())
+    );
+    assert!(
+        occupants
+            .iter()
+            .any(|(soul, body)| *soul == s2 && body.is_none())
+    );
 }
 
 #[test]

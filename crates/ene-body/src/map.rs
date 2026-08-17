@@ -109,6 +109,13 @@ impl BodyCatalog {
         }
     }
 
+    #[must_use]
+    pub fn vrm_default() -> Self {
+        let mut catalog = Self::text_default();
+        catalog.kind = BodyKind::Vrm;
+        catalog
+    }
+
     /// Map a soul emotion onto this body. Missing labels nearest-fallback (P-402).
     pub fn map_emotion(
         &self,

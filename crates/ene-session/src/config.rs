@@ -17,6 +17,8 @@ pub struct SessionsSettings {
     /// `NORMAL` (default) or `FULL`.
     pub synchronous: String,
     pub export: ExportSettings,
+    /// Idle sessions older than this many seconds may be ended (D-8). `0` disables.
+    pub idle_timeout_secs: u64,
 }
 
 impl Default for SessionsSettings {
@@ -25,6 +27,7 @@ impl Default for SessionsSettings {
             db_path: String::new(),
             synchronous: "NORMAL".to_owned(),
             export: ExportSettings::default(),
+            idle_timeout_secs: 1_800,
         }
     }
 }
