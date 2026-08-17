@@ -1,5 +1,6 @@
 //! Dialogue lane: `prompt` / `steer` / `follow_up` / `abort` / `compact`.
 
+use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,9 +85,11 @@ struct LaneState {
     context: ContextRegistry,
     router: Option<Arc<dyn SurfaceRouter>>,
     running: Option<RunningTurn>,
-    queued_wake: Option<QueuedWake>,
+    queued_wakes: VecDeque<QueuedWake>,
+    pending_next_run: Option<QueuedWake>,
     queued_inject: Option<QueuedInject>,
     consumed_queue: Vec<u64>,
+    last_aborted_turn: Option<TurnId>,
 }
 
 struct RunningTurn {
@@ -151,9 +154,11 @@ impl LaneHandle {
             context,
             router: opts.router,
             running: None,
-            queued_wake: None,
+            queued_wakes: VecDeque::new(),
+            pending_next_run: None,
             queued_inject: None,
             consumed_queue: Vec::new(),
+            last_aborted_turn: None,
         };
         tokio::spawn(lane_actor(state, rx));
         Self {
@@ -330,8 +335,12 @@ async fn dispatch_cmd(
             let result = enqueue_inject(state, text).await;
             drop(reply.send(result));
         }
-        LaneCmd::FollowUp { text, reply } | LaneCmd::NextRun { text, reply } => {
-            let result = enqueue_wake(state, text).await;
+        LaneCmd::FollowUp { text, reply } => {
+            let result = enqueue_follow_up(state, text).await;
+            drop(reply.send(result));
+        }
+        LaneCmd::NextRun { text, reply } => {
+            let result = enqueue_next_run(state, text).await;
             drop(reply.send(result));
         }
         LaneCmd::Abort { reply } => {
@@ -359,7 +368,7 @@ async fn dispatch_cmd(
             drop(reply.send(result));
         }
         LaneCmd::WaitIdle { reply } => {
-            if state.running.is_none() && state.queued_wake.is_none() {
+            if lane_is_idle(state) {
                 drop(reply.send(Ok(())));
             } else {
                 idle_waiters.push(reply);
@@ -381,7 +390,7 @@ async fn on_turn_finished(
     {
         state.running = None;
     }
-    if let Some(wake) = state.queued_wake.take() {
+    if let Some(wake) = state.queued_wakes.pop_front() {
         state.consumed_queue.push(wake.seq);
         let inject = state.queued_inject.take();
         if let Some(ref inject) = inject {
@@ -389,12 +398,36 @@ async fn on_turn_finished(
         }
         if let Err(err) = start_follow_turn(state, wake, inject, done_tx).await {
             warn!(error = %err, "queued wake failed to start");
+            let msg = err.to_string();
+            for waiter in idle_waiters.drain(..) {
+                drop(waiter.send(Err(KernelError::Model(msg.clone()))));
+            }
+            return;
+        }
+        return;
+    }
+    if let Some(wake) = state.pending_next_run.take() {
+        state.consumed_queue.push(wake.seq);
+        if let Err(err) = start_follow_turn(state, wake, None, done_tx).await {
+            warn!(error = %err, "pending next_run failed to start");
+            let msg = err.to_string();
+            for waiter in idle_waiters.drain(..) {
+                drop(waiter.send(Err(KernelError::Model(msg.clone()))));
+            }
+            return;
         }
         return;
     }
     for waiter in idle_waiters.drain(..) {
         drop(waiter.send(Ok(())));
     }
+}
+
+fn lane_is_idle(state: &LaneState) -> bool {
+    state.running.is_none()
+        && state.queued_wakes.is_empty()
+        && state.pending_next_run.is_none()
+        && state.queued_inject.is_none()
 }
 
 fn normalize_input_modality(raw: &str) -> String {
@@ -607,6 +640,7 @@ async fn spawn_turn(
         done: done_tx.clone(),
     };
     tokio::spawn(run_turn(ctx));
+    state.last_aborted_turn = None;
     state.running = Some(RunningTurn {
         turn: spawn.turn,
         cancel,
@@ -616,15 +650,22 @@ async fn spawn_turn(
 }
 
 fn request_abort(state: &mut LaneState) -> Result<(), KernelError> {
-    let Some(running) = &state.running else {
-        return Err(KernelError::no_active(&LaneId::Dialogue));
-    };
-    running.cancelled.store(true, Ordering::SeqCst);
-    running.cancel.notify_waiters();
-    Ok(())
+    if let Some(running) = &state.running {
+        if state.last_aborted_turn == Some(running.turn) {
+            return Ok(());
+        }
+        state.last_aborted_turn = Some(running.turn);
+        running.cancelled.store(true, Ordering::SeqCst);
+        running.cancel.notify_waiters();
+        return Ok(());
+    }
+    if state.last_aborted_turn.is_some() {
+        return Ok(());
+    }
+    Err(KernelError::no_active(&LaneId::Dialogue))
 }
 
-async fn enqueue_wake(state: &mut LaneState, text: String) -> Result<u64, KernelError> {
+async fn enqueue_follow_up(state: &mut LaneState, text: String) -> Result<u64, KernelError> {
     if state.running.is_none() {
         return Err(KernelError::no_active(&LaneId::Dialogue));
     }
@@ -647,7 +688,31 @@ async fn enqueue_wake(state: &mut LaneState, text: String) -> Result<u64, Kernel
         })
         .await?;
     let seq = committed.seqs.first().copied().unwrap_or(0);
-    state.queued_wake = Some(QueuedWake { seq, text });
+    state.queued_wakes.push_back(QueuedWake { seq, text });
+    Ok(seq)
+}
+
+async fn enqueue_next_run(state: &mut LaneState, text: String) -> Result<u64, KernelError> {
+    let text = validate_text(&text)?;
+    let committed = state
+        .store
+        .commit(Transaction {
+            entries: vec![NewEvent::new(
+                state.session,
+                EventKind::InboxEnqueued,
+                EventPayload::InboxEnqueued {
+                    v: v1(),
+                    lane: LaneId::Dialogue.as_str(),
+                    class: InboxClass::Wake,
+                    source: InboxSource::User,
+                    ref_seq: None,
+                },
+            )],
+            usage: Vec::new(),
+        })
+        .await?;
+    let seq = committed.seqs.first().copied().unwrap_or(0);
+    state.pending_next_run = Some(QueuedWake { seq, text });
     Ok(seq)
 }
 
@@ -682,15 +747,16 @@ async fn cancel_queued(state: &mut LaneState, entry_id: u64) -> Result<CancelQue
     if state.consumed_queue.contains(&entry_id) {
         return Ok(CancelQueued::AlreadyConsumed);
     }
-    let wake_hit = state
-        .queued_wake
+    let wake_hit = state.queued_wakes.iter().any(|item| item.seq == entry_id);
+    let next_run_hit = state
+        .pending_next_run
         .as_ref()
         .is_some_and(|item| item.seq == entry_id);
     let inject_hit = state
         .queued_inject
         .as_ref()
         .is_some_and(|item| item.seq == entry_id);
-    if !wake_hit && !inject_hit {
+    if !wake_hit && !next_run_hit && !inject_hit {
         return Ok(CancelQueued::NotFound);
     }
     state
@@ -709,7 +775,10 @@ async fn cancel_queued(state: &mut LaneState, entry_id: u64) -> Result<CancelQue
         })
         .await?;
     if wake_hit {
-        state.queued_wake = None;
+        state.queued_wakes.retain(|item| item.seq != entry_id);
+    }
+    if next_run_hit {
+        state.pending_next_run = None;
     }
     if inject_hit {
         state.queued_inject = None;
@@ -736,7 +805,10 @@ async fn run_compact(state: &LaneState) -> Result<u64, KernelError> {
     };
     let history = derive_messages(
         &events,
-        ProjectOptions::for_depth(DisplayDepth::Detail, state.mind.inner.self_reference_window),
+        ProjectOptions::for_depth(
+            DisplayDepth::Surface,
+            state.mind.inner.self_reference_window,
+        ),
     );
     let summary = history
         .messages
@@ -934,10 +1006,14 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             return Ok(());
         };
 
-        match router
-            .on_tool(&call.name, call.arguments.clone(), step_index)
-            .await?
-        {
+        match tokio::select! {
+            () = ctx.cancel.notified() => {
+                finish_interrupted(&ctx, step_index).await?;
+                span.end();
+                return Ok(());
+            }
+            result = router.on_tool(&call.name, call.arguments.clone(), step_index) => result?,
+        } {
             SurfaceToolOutcome::Delegated { speech, job_id } => {
                 let generation = ModelGeneration {
                     text: speech,
@@ -962,6 +1038,9 @@ async fn finish_speech(
     step_index: u32,
     delegated_job: Option<String>,
 ) -> Result<(), KernelError> {
+    if ctx.cancelled.load(Ordering::SeqCst) {
+        return finish_interrupted(ctx, step_index).await;
+    }
     let (speech, mut inner) = split_surface_and_inner(&generation.text);
     inner.extend(generation.inner.iter().cloned());
     if let Some(derived) = derive_thought_from_thinking(
@@ -1000,11 +1079,7 @@ async fn finish_speech(
             },
         ));
     }
-    let speech_for_live = if speech.is_empty() {
-        generation.text.clone()
-    } else {
-        speech.clone()
-    };
+    let speech_for_live = speech;
     for (aspect, text) in &inner {
         end_entries.push(NewEvent::new(
             ctx.session,
@@ -1052,12 +1127,13 @@ async fn finish_speech(
             error_class: None,
         },
     ));
+    let provider = usage_provider(&generation.model_id);
     let usage = NewUsage {
         session_id: ctx.session,
         soul_id: ctx.soul,
         lane: LaneId::Dialogue.as_str(),
         task: "chat".to_owned(),
-        provider: "echo".to_owned(),
+        provider,
         model: generation.model_id.clone(),
         entry_seq: None,
         input_tokens: generation.input_tokens,
@@ -1067,6 +1143,9 @@ async fn finish_speech(
         cost_micro_usd: None,
         adjustment: false,
     };
+    if ctx.cancelled.load(Ordering::SeqCst) {
+        return finish_interrupted(ctx, step_index).await;
+    }
     ctx.store
         .commit(Transaction {
             entries: end_entries,
@@ -1116,6 +1195,9 @@ async fn commit_tool_step(
     value: serde_json::Value,
     step_index: u32,
 ) -> Result<(), KernelError> {
+    if ctx.cancelled.load(Ordering::SeqCst) {
+        return finish_interrupted(ctx, step_index).await;
+    }
     let call_id = CallId::new();
     let mut entries = vec![
         NewEvent::new(
@@ -1167,6 +1249,9 @@ async fn commit_tool_step(
                 step_index: next,
             },
         ));
+    }
+    if ctx.cancelled.load(Ordering::SeqCst) {
+        return finish_interrupted(ctx, step_index).await;
     }
     ctx.store
         .commit(Transaction {
@@ -1231,4 +1316,12 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         return text.to_owned();
     }
     text.chars().take(max_chars).collect()
+}
+
+fn usage_provider(model_id: &str) -> String {
+    if model_id.is_empty() || model_id == "stub" {
+        "echo".to_owned()
+    } else {
+        model_id.to_owned()
+    }
 }
