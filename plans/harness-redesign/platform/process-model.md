@@ -149,6 +149,27 @@ desktop の数字で隠さない。
 - 数値は最初の実装が動いた時点で計測して置く。先に決めた数字に
   実装を合わせるのではなく、達成できた値を回帰の基準線にする。
 
+### 6.1 v1.0 基準線(D-29)
+
+測定日: 2026-08-17。構成: Linux x86_64、`debug` プロファイル(CI と同じ)、
+`EchoModel`(プロバイダ遅延ゼロ)、描画なし。IPC は同一プロセスの
+`UnixStream` pair + MessagePack。`desktop` の VRM/音声デバイスは含めない。
+
+| 項目 | 測定値 | CI 回帰上限 |
+|---|---|---|
+| 起動(対話可能まで) | `ene-core` プロセス 51 ms / in-process `serve_at` 43 ms | 8 s / 5 s |
+| 待機時メモリ(コア、描画なし) | RSS 20 732 KiB (≈ 20.2 MiB) | 512 MiB |
+| ターン開始(発話→初チャンク) | 平均 1.54 ms (n=10) | 50 ms |
+| HTTP `GET /health` | 平均 218 µs (n=20) | 20 ms |
+| ツール IPC ping | 平均 16 µs (n=50) | 5 ms |
+| ツール IPC `call` (`utility.hash`) | 平均 27 µs (n=50) | 5 ms |
+| データ成長(1 エコーターン後 `sessions.db`) | 4 096 bytes | 監視のみ |
+
+以後の回帰はこれらの上限をテストで固定する(`ene-plugin-ipc` /
+`ene-kernel` / `ene-daemon` の measurable テストと
+`apps/ene-core/tests/w7_acceptance.rs`)。release 最適化や実プロバイダ遅延は
+別枠であり、`minimal` の未達をそれで隠さない。
+
 ## 7. 障害モード
 
 | 障害 | 挙動 |

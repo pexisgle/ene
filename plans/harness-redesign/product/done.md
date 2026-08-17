@@ -246,3 +246,6 @@ v1.0 の完了定義には含めないが、**形式が支える**(既存形式�
 ---
 
 - 前: [features.md](features.md) / 次: [../README.md](../README.md)
+
+W7 の観測記録(総括の成否と D-29 基準線)は
+[w7-verification.md](w7-verification.md)。

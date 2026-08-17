@@ -1,13 +1,16 @@
 use crate::{BootOptions, CoreDaemon};
 use async_trait::async_trait;
 use ene_api::{
-    ApiClient, ClaimResourceRequest, CreateSessionRequest, MessageMode, MessageRequest,
-    ResourceKind,
+    ApiClient, ClaimResourceRequest, CreateSessionRequest, HistoryResponse, MessageMode,
+    MessageRequest, ResourceKind,
 };
-use ene_kernel::{ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest};
+use ene_kernel::{
+    ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
+    spans_leak_content,
+};
 use ene_plane::{ApprovalMode, AuthzRequest, Sensitivity};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 async fn boot_server() -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHandle) {
@@ -29,6 +32,30 @@ async fn boot_server() -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHan
     let base = format!("http://{}", server.addr);
     let client = ApiClient::new(base, token.trim(), "stage");
     (dir, client, core, server)
+}
+
+async fn wait_assistant(client: &ApiClient, session: &str) -> HistoryResponse {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let history = client.history(session, "surface").await.unwrap();
+        if history
+            .messages
+            .iter()
+            .any(|message| message.role == "assistant")
+        {
+            return history;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "assistant message did not land in surface history"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn record_metric(name: &str, body: impl AsRef<[u8]>) {
+    std::fs::create_dir_all("/opt/cursor/artifacts").unwrap();
+    std::fs::write(format!("/opt/cursor/artifacts/{name}"), body).unwrap();
 }
 
 #[tokio::test]
@@ -254,5 +281,195 @@ async fn backup_copies_stores() {
             .exists()
     );
     assert!(core.data_dir().join("backups").join(&backup.id).exists());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn export_default_omits_inner() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: ene_session::SoulId::new().to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "hello inner".into(),
+                mode: MessageMode::Prompt,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    let exported = client.export_session(&session.id).await.unwrap();
+    let blob = exported.to_string();
+    assert!(
+        !blob.contains("inner/message"),
+        "default export must omit inner events: {blob}"
+    );
+    let detail = client.history(&session.id, "detail").await.unwrap();
+    assert!(
+        detail
+            .messages
+            .iter()
+            .any(|message| message.role == "inner"),
+        "detail history must include inner"
+    );
+    let surface = client.history(&session.id, "surface").await.unwrap();
+    assert!(
+        surface
+            .messages
+            .iter()
+            .all(|message| message.role != "inner")
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn fork_leaves_original_session_intact() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: ene_session::SoulId::new().to_string(),
+            title: Some("origin".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "keep me".into(),
+                mode: MessageMode::Prompt,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    let forked = client.fork_session(&session.id).await.unwrap();
+    assert_ne!(forked.id, session.id);
+    let origin = client.get_session(&session.id).await.unwrap();
+    assert_eq!(origin.id, session.id);
+    let origin_history = client.history(&session.id, "surface").await.unwrap();
+    assert!(
+        origin_history
+            .messages
+            .iter()
+            .any(|message| message.text.contains("keep me"))
+    );
+    server.shutdown().await;
+}
+
+#[test]
+fn web_ui_cannot_mutate_memory_or_settings() {
+    let html = include_str!("../web/index.html");
+    assert!(html.contains("/api/v1/souls/"));
+    assert!(html.contains("memories"));
+    assert!(
+        !html.contains("method: \"PATCH\"") && !html.contains("method: \"DELETE\""),
+        "Web UI must not PATCH/DELETE (settings and memory mutation stay off the Web client)"
+    );
+    let stage = include_str!("../../ene-stage/src/main.rs");
+    assert!(stage.contains("eframe"));
+    assert!(stage.contains("show_viewport_immediate"));
+    assert!(!stage.to_ascii_lowercase().contains("webview"));
+}
+
+#[tokio::test]
+async fn http_spans_and_schema_and_anon_health() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: ene_session::SoulId::new().to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "secret prompt text".into(),
+                mode: MessageMode::Prompt,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    let spans = client.diag_spans().await.unwrap();
+    let mapped: Vec<Span> = spans
+        .items
+        .into_iter()
+        .map(|span| Span {
+            name: span.name,
+            duration: span
+                .duration_ms
+                .map(|ms| Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX))),
+            attrs: span.attrs,
+        })
+        .collect();
+    assert!(!spans_leak_content(&mapped));
+    let schema = client.settings_schema().await.unwrap();
+    assert!(schema.is_object(), "settings schema must be JSON");
+    let audit = client.audit().await.unwrap();
+    assert!(audit.get("items").is_some());
+    let anon = ApiClient::new(client.base(), "", "web");
+    assert_eq!(anon.health().await.unwrap().status, "ok");
+    let err = anon.list_souls().await.unwrap_err();
+    assert_eq!(err.error_class(), "unauthorized");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn minimal_http_baselines_are_measurable() {
+    let started = Instant::now();
+    let (_dir, client, core, server) = boot_server().await;
+    let boot_ms = started.elapsed().as_millis();
+    client.health().await.unwrap();
+    let health_started = Instant::now();
+    const N: u32 = 20;
+    for _ in 0..N {
+        client.health().await.unwrap();
+    }
+    let health_mean_us = health_started.elapsed().as_micros() / u128::from(N);
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: ene_session::SoulId::new().to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let prompt_started = Instant::now();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "offline ping".into(),
+                mode: MessageMode::Prompt,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    let prompt_ms = prompt_started.elapsed().as_millis();
+    let db_bytes =
+        std::fs::metadata(core.data_dir().join("sessions.db")).map_or(0, |meta| meta.len());
+    record_metric(
+        "minimal_http_baseline.txt",
+        format!(
+            "boot_to_ready_ms={boot_ms} health_mean_us={health_mean_us} echo_prompt_ms={prompt_ms} sessions_db_bytes={db_bytes}\n"
+        ),
+    );
+    assert!(boot_ms < 5_000, "boot_to_ready_ms={boot_ms}");
+    assert!(health_mean_us < 20_000, "health_mean_us={health_mean_us}");
+    assert!(prompt_ms < 2_000, "echo_prompt_ms={prompt_ms}");
     server.shutdown().await;
 }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::{
     CancelQueued, ConversationModel, DisplayDepth, EchoModel, EventKind, EventPayload,
@@ -372,6 +373,46 @@ async fn cancel_queued_not_found_is_success() {
     assert_eq!(
         lane.cancel_queued(99).await.unwrap(),
         CancelQueued::NotFound
+    );
+}
+
+#[tokio::test]
+async fn echo_turn_to_first_chunk_is_measurable() {
+    let (_dir, _store, lane, _model) = open_lane().await;
+    lane.prompt("warmup").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    const N: u32 = 10;
+    let mut samples_us = Vec::with_capacity(N as usize);
+    for i in 0..N {
+        let mut surface = lane.subscribe(DisplayDepth::Surface);
+        let started = Instant::now();
+        lane.prompt(format!("ping {i}")).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let LiveEvent::TextDelta { .. } = surface
+                    .recv()
+                    .await
+                    .expect("live bus closed before first chunk")
+                {
+                    return started.elapsed().as_micros();
+                }
+            }
+        })
+        .await
+        .expect("first surface chunk");
+        samples_us.push(first);
+        lane.wait_for_idle().await.unwrap();
+    }
+    let mean_us = samples_us.iter().sum::<u128>() / u128::from(N);
+    std::fs::create_dir_all("/opt/cursor/artifacts").unwrap();
+    std::fs::write(
+        "/opt/cursor/artifacts/kernel_turn_baseline.txt",
+        format!("echo_first_chunk_mean_us={mean_us} n={N} samples={samples_us:?}\n"),
+    )
+    .unwrap();
+    assert!(
+        mean_us < 50_000,
+        "echo first-chunk regression mean_us={mean_us}"
     );
 }
 

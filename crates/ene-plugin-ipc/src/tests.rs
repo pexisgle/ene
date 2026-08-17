@@ -132,6 +132,11 @@ async fn core_range_mismatch_rejects() {
     drop(plugin);
 }
 
+fn record_baseline(name: &str, body: impl AsRef<[u8]>) {
+    std::fs::create_dir_all("/opt/cursor/artifacts").unwrap();
+    std::fs::write(format!("/opt/cursor/artifacts/{name}"), body).unwrap();
+}
+
 #[tokio::test]
 async fn ipc_baseline_ping_is_measurable() {
     let (host_side, plugin_side) = UnixStream::pair().unwrap();
@@ -139,20 +144,41 @@ async fn ipc_baseline_ping_is_measurable() {
     let mut host = HostConn::handshake(host_side, hello(), &[ProtoId::Core, ProtoId::Tool])
         .await
         .unwrap();
-    let started = std::time::Instant::now();
+    host.ping().await.unwrap();
     const N: u32 = 50;
+    let ping_started = std::time::Instant::now();
     for _ in 0..N {
         host.ping().await.unwrap();
     }
-    let elapsed = started.elapsed();
-    let mean_us = elapsed.as_micros() / u128::from(N);
-    std::fs::create_dir_all("/opt/cursor/artifacts").ok();
-    std::fs::write(
-        "/opt/cursor/artifacts/ipc_baseline.txt",
-        format!("ping_roundtrip_mean_us={mean_us} n={N}\n"),
-    )
-    .unwrap();
-    assert!(mean_us < 50_000, "unexpectedly slow ping mean_us={mean_us}");
+    let ping_mean_us = ping_started.elapsed().as_micros() / u128::from(N);
+
+    let call = ToolCall {
+        call_id: "bench".to_owned(),
+        tool_name: "utility.hash".to_owned(),
+        args: json!({"text": "hi"}),
+        deadline_ms: None,
+    };
+    host.call_tool(call.clone()).await.unwrap();
+    let tool_started = std::time::Instant::now();
+    for i in 0..N {
+        let mut call = call.clone();
+        call.call_id = format!("bench-{i}");
+        host.call_tool(call).await.unwrap();
+    }
+    let tool_mean_us = tool_started.elapsed().as_micros() / u128::from(N);
+
+    record_baseline(
+        "ipc_baseline.txt",
+        format!("ping_roundtrip_mean_us={ping_mean_us} tool_call_mean_us={tool_mean_us} n={N}\n"),
+    );
+    assert!(
+        ping_mean_us < 5_000,
+        "ipc ping regression ping_mean_us={ping_mean_us}"
+    );
+    assert!(
+        tool_mean_us < 5_000,
+        "ipc tool-call regression tool_mean_us={tool_mean_us}"
+    );
     host.drain().await.unwrap();
     plugin.await.unwrap().unwrap();
 }

@@ -71,3 +71,42 @@ fn io_err(err: &std::io::Error) -> ApiReject {
     super::error::ApiReject::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "fault", "io")
         .with_detail(err.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{backup_now, restore_now};
+    use rusqlite::Connection;
+    use tempfile::TempDir;
+
+    fn seed(path: &std::path::Path, marker: i64) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t(id) VALUES ({marker});"
+        ))
+        .unwrap();
+    }
+
+    fn marker(path: &std::path::Path) -> i64 {
+        let conn = Connection::open(path).unwrap();
+        conn.query_row("SELECT id FROM t", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn backup_and_restore_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        seed(&dir.path().join("sessions.db"), 11);
+        seed(&dir.path().join("companions.db"), 22);
+        seed(&dir.path().join("audit.db"), 33);
+        let (id, dest) = backup_now(dir.path()).unwrap();
+        assert!(dest.join("sessions.db").exists());
+        std::fs::remove_file(dir.path().join("sessions.db")).unwrap();
+        seed(&dir.path().join("sessions.db"), 99);
+        assert_eq!(marker(&dir.path().join("sessions.db")), 99);
+        restore_now(dir.path(), &id).unwrap();
+        assert_eq!(marker(&dir.path().join("sessions.db")), 11);
+        assert_eq!(marker(&dir.path().join("companions.db")), 22);
+        assert_eq!(marker(&dir.path().join("audit.db")), 33);
+        assert!(dir.path().join("backups").join("pre-restore").is_dir());
+    }
+}
