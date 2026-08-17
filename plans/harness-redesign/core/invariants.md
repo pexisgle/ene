@@ -72,7 +72,7 @@
 | `cancelQueued` vs checkpoint 消費 | `cancelled` / `already_consumed` |
 | `set_model` vs 生成ステップの開始 | 旧スナップショットを使用 / 新スナップショットを使用 |
 | `abort` vs 構造変更のコミット | マーカー先 → エントリなしで `aborted` / 構造コミット先 → `completed` |
-| `next_run` vs 受理 | 今回の run が捕獲 / 次回のために残留 |
+| `next_run` vs 受理 | 今回の run が捕獲 / 次回のために残留(承認の遅延応答。ask-user 回答は同一操作の `wake`) |
 | 手動コンパクションの予約 vs アイドルツリーの書き込み | 予約先 → 書き込みは待機 / 書き込み先 → 準備は新 leaf を使用 |
 | 遅延書き込み vs abort | 書き込みはどちらでも abort を生き延びる |
 | `close` vs 保留中の手動操作 | 操作は実行せず拒否。耐久状態はコミット済み接頭辞 |

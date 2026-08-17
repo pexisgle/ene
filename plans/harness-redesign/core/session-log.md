@@ -53,7 +53,8 @@ UI の履歴表示・モデルへの提示・fork・リプレイ・エクスポ�
 | `session/start` | `soul_id`, `body_id?`, `created_by: client\|schedule\|import` | セッション開始。最初のイベント |
 | `session/title` | `title` | タイトル更新(上書き式) |
 | `session/summary` | `scope: session_end\|compaction_ref`, `summary` | 要約の記録。`session_end` はセッション境界の要約 |
-| `session/end` | `reason: explicit\|idle_timeout\|topic_boundary`, `summary_ref?` | セッション終了 |
+| `session/end` | `reason: explicit\|idle_timeout\|topic_boundary`, `summary_ref?` | セッション終了。再開時は tombstone 化する(§7) |
+| `session/reopen` | `previous_end_seq` | 終了済みセッションへの追記開始。対応する `session/end` を tombstone する |
 | `session/archived` | `archived: bool` | アーカイブ状態の切替 |
 | `fork/point` | `source_session_id`, `boundary_seq` | **fork 先**セッションの先頭に置く。接頭辞の来歴 |
 
@@ -62,7 +63,7 @@ UI の履歴表示・モデルへの提示・fork・リプレイ・エクスポ�
 | kind | payload フィールド | 説明 |
 |---|---|---|
 | `turn/start` | `turn_id`, `lane: dialogue\|delegation:<id>`, `origin: user\|proactive\|scheduled\|delegation\|subagent`, `delegation_id?`, `trigger: text\|voice\|timer\|system` | ターン開始。対話レーンでは先行 `turn/end` なしに出現しない(L-4)。`delegation` は job レーンの子ターン、`subagent` は対話レーンの**報告ターン**([delegation.md §6](delegation.md#6-報告ターンp-521)) |
-| `turn/end` | `turn_id`, `outcome: completed\|failed\|cancelled|interrupted\|completed\|failed\|cancelled\|failed`, `error_class?` | ターン終了。`interrupted` はユーザー割り込み、`failed` はエラー分類付き |
+| `turn/end` | `turn_id`, `outcome: completed\|interrupted\|cancelled\|failed`, `error_class?` | ターン終了。`interrupted` はユーザー割り込み、`failed` は必ず `error_class` を伴う |
 | `step/start` | `turn_id`, `step_index: u32` | ステップ開始(モデル要求の前) |
 | `step/end` | `turn_id`, `step_index`, `outcome: next\|stop\|error`, `finish_reason?` | ステップ終了 |
 
@@ -86,10 +87,11 @@ UI の履歴表示・モデルへの提示・fork・リプレイ・エクスポ�
 
 | kind | payload フィールド | 説明 |
 |---|---|---|
-| `tool/call` | `turn_id`, `step_index`, `call_id`, `tool_name`, `source: builtin\|plugin:<id>\|mcp:<server>\|delegated`, `args` | ツール呼び出し。`delegated` は秘匿サブエージェントの親呼び出し(中身は秘匿、この枠だけ記録) |
-| `tool/result` | `call_id`, `status: ok\|error\|completed\|failed\|cancelled\|denied`, `blocks` または `spill_ref`, `error_class?`, `duration_ms` | ツール結果。`denied` は承認 plane の拒否 |
+| `tool/call` | `turn_id`, `step_index`, `call_id`, `tool_name`, `source: plugin:<id>\|mcp:<server>\|delegated`, `args` | ツール呼び出し。ビルトインも `plugin:<id>`(バンドル済みアウトプロセス)。`delegated` は秘匿サブエージェントの親呼び出し(中身は秘匿、この枠だけ記録) |
+| `tool/result` | `call_id`, `status: ok\|error\|cancelled\|denied`, `blocks` または `spill_ref`, `error_class?`, `duration_ms` | ツール結果。`denied` は承認 plane の拒否。`completed`/`failed` は使わない(`ok`/`error`) |
 | `tool/spill` | `call_id`, `spill_ref: sha256`, `size_bytes`, `summary_blocks` | 巨大出力の spill 記録([context-assembly.md §5](context-assembly.md#5-spill)) |
-| `tool/pruned` | `call_id`, `original_size`, `kept_chars` | 直近ツール出力の prune 置換([context-assembly.md §7](context-assembly.md#7-compactionp-506))。投影は置換後を使う。元行は残る |
+| `tool/pruned` | `call_id`, `from_seq`, `original_size`, `kept_chars` | 直近ツール出力の prune 置換([context-assembly.md §7](context-assembly.md#7-compactionp-506))。投影は置換後を使う。元行は残る |
+| `question/asked` | `turn_id`, `call_id?`, `question_id`, `blocks`, `channel: dialogue\|approval` | ask-user の質問。対話レーンは `dialogue`(キャラ発話)。ポップアップは承認 plane(`approval`)に限る([agent-loop.md §9](agent-loop.md#9-人間協調面plan--ask-userp-511-p-512)) |
 | `approval/decision` | `call_id`, `decision: allow\|deny`, `mode: policy\|ai_auto\|popup`, `policy_ref?`, `reason?` | 承認判断。詳細は [../security/approval.md](../security/approval.md) |
 
 ### 3.5 秘匿と tombstone
@@ -233,8 +235,9 @@ CREATE TABLE spill_objects (
   ただし1イベント=数 KB 程度なので実用上問題なし)、先頭に `fork/point` を
   追記する。元は不変(L-5)。
 - **resume**: 終了済みセッションへの追記は `session/end` の打ち消しではなく、
-  新たな `turn/start` を許可することで実現する(`ended_at` を NULL に戻し
-  `session/end` を tombstone 化する)。履歴の正しさは投影が保証する。
+  `session/reopen` を追記し、対応する `session/end` を tombstone する
+  (`ended_at` を NULL に戻す)。その後の `turn/start` が追記を再開する。
+  履歴の正しさは投影が保証する。
 
 ## 8. エクスポート(P-110)
 

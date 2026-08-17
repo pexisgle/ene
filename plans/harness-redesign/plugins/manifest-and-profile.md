@@ -84,14 +84,15 @@ id = "desktop"
 bundles = ["ene-base", "ene-companion", "ene-desktop-stage"]
 
 [policy]
-approval_mode = "policy"        # ask_all | ai_auto | auto(policy ベース)
+approval_mode = "policy"        # 起動時に approval.mode を初期化(実行時の正は approval.mode)
 allow_unsigned = false
 ```
 
 出荷プロファイル:
 
-- `desktop`(既定): 全ツール+コンパニオン系+stage。
-- `minimal`: コア対話+最小ツール(オフライン軽量構成の土台)。
+- `desktop`(既定): 全ツール+コンパニオン系+stage。性能予算は別枠
+  ([../platform/process-model.md §6](../platform/process-model.md#6-性能予算))。
+- `minimal`: コア対話+最小ツール(オフライン軽量構成の土台)。**性能測定の正**。
 - `headless`: CLI/自動化用。stage なし。
 
 ### パッチ
@@ -145,7 +146,7 @@ plugin = "tool.git"
 |---|---|---|
 | `plugins.profile` | `desktop` | 起動プロファイル |
 | `plugins.home_dir` | `<data>/plugins` | インストール先 |
-| `plugins.policy.approval_mode` | `policy` | プロファイルの承認モード既定 |
+| `plugins.policy.approval_mode` | `policy` | プロファイルの承認モード既定。起動時に `approval.mode` を初期化する。実行時の正は `approval.mode`([../security/approval.md](../security/approval.md)) |
 | `plugins.policy.allow_unsigned` | `false` | unsigned の許可 |
 | `ai.tasks.chat.fallback` | `local` | クラウド不能時のローカルフォールバック |
 

@@ -112,7 +112,7 @@ created → running → completed
 
 | 種別 | エンベロープ | 親 inbox での扱い | 用途 |
 |---|---|---|---|
-| `progress` | `message` | **inject**(待機。ターンを起こさない) | 進捗・中間所感。`delegation.status` Source を更新し、親は次ターン境界で自然に知る |
+| `progress` | `message` | **inject**(待機。ターンを起こさない) | 進捗・中間所感。`delegation.active` Source を更新し、親は次ターン境界で自然に知る |
 | `question` | `question` | **wake** | 親の判断が欲しい質問。`delegation.pending_question` に予約され、回答か取下げまで子は待つか自立判断する(§9)。複数同時可 |
 | `artifact_ready` | `message` | inject | 成果物の中間交付(親が先に確認できる) |
 | `complete` | `final` | **wake**(終端) | 完了報告。結果要約+成果物参照 |
@@ -220,7 +220,7 @@ created → running → completed
 
 | 障害 | 挙動 |
 |---|---|
-| 子の質問中に親がユーザーへ ask-user | 親は ask-user の回答を `delegate.answer` に転送できる。2つの待ちが1つのポップアップ経路に直列化する([agent-loop.md §9](agent-loop.md#9-人間協調面plan--ask-userp-511-p-512)) |
+| 子の質問中に親がユーザーへ ask-user | 親は対話レーンでキャラとして質問し、回答を `delegate.answer` に転送できる。2つの待ちは対話で直列化する。ポップアップは承認 plane に限る([agent-loop.md §9](agent-loop.md#9-人間協調面plan--ask-userp-511-p-512)) |
 | 報告 wake の滞留中にユーザーが長会話 | ユーザー wake が優先され続ける。報告は claim 可能になり次第1ターンに結合して届く。`pending.entry` なので失われない |
 | 子が予算超過で死んだ | `failed{budget}` の終端報告が親に届く。中間成果物は保持 |
 | 親のキャンセルと子の完了が同時 | 先にコミットされた側が成立。cancel が先 → `cancelled`、完了が先 → cancel は `already_completed`(競合カタログ、[invariants.md §2](invariants.md#2-競合カタログ)) |

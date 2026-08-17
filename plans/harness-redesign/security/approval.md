@@ -18,6 +18,11 @@
 ### 粗粒度モード
 
 soul ごと(またはグローバル)に1つのモードを持つ。
+**実行時の正は `approval.mode`**。プロファイルの
+`plugins.policy.approval_mode` は起動時にこれを初期化するだけ
+([../plugins/manifest-and-profile.md](../plugins/manifest-and-profile.md))。
+対話や設定 UI で変えた値は `approval.mode` に書き、プロファイル既定は
+上書きしない限り再適用しない。
 
 | モード | 挙動 |
 |---|---|
@@ -156,7 +161,7 @@ rules:
 
 | キー | 既定 | 説明 |
 |---|---|---|
-| `approval.mode` | `policy` | 粗粒度モード |
+| `approval.mode` | `policy` | 実行時の正。粗粒度モード |
 | `approval.popup.timeout` | `300` | ポップアップタイムアウト(秒) |
 | `approval.ai.model` | `auto` | AI 判断のプロバイダ(`ai.tasks.approve`) |
 | `approval.policy_file` | `<data>/policy.yaml` | ポリシー規則 |

@@ -11,7 +11,8 @@
 ## 他フォルダとの接点
 
 - job レーン → [../core/agent-loop.md §2](../core/agent-loop.md#2-レーンp-504)
-- スケジュール発火 → [../companion/proactive.md](../companion/proactive.md)
+- 能動発話(会話/活動/記憶。スケジュールは含めない) → [../companion/proactive.md](../companion/proactive.md)
+- spawn ごとの job workspace → [jobs-and-schedules.md §1](jobs-and-schedules.md#1-内部-workspace-概念)
 - script の承認 → [../security/approval.md](../security/approval.md)
 - soul の skill 参照 → [../character/package-format.md](../character/package-format.md)
 

@@ -103,18 +103,18 @@
 | P-519 | 非同期委譲と層間対話 | 実作業の委譲は非同期。表層 soul は裏層ハーネスを待たずに対話を続ける。両層は Codex multi-agent v2 風の層間メッセージ(`task` / `message` / `question` / `answer` / `final` / `cancel`)で進捗を共有する。 | v1.0 | core/delegation, core/agent-loop |
 | P-520 | 出力秘匿モデル | LLM の生出力(thinking・ツール引数・ツール生出力・子エージェントの内部ログ)はユーザーから秘匿するのが既定。ユーザーが見るのは発話・内面(オプトイン)・要約カード・成果物のみ。 | v1.0 | core/visibility |
 | P-521 | 完了報告の対話化 | 裏層の完了報告は表層の対話レーンにターンとして届き、表層がユーザーへの伝え方(発話・内面・静黙)を判断する。報告が対話を遮ることはない。 | v1.0 | core/delegation |
-| P-522 | 表層/裏層の2層ランタイム | ユーザー入力(音声・テキスト)は表層 soul のみが受ける。表層は副作用のある作業ツールを持たず、作業が必要と判断したときだけ裏層ハーネスへ託す。両層は同一ハーネスカーネル上の別プロファイルであり、ユーザーからは1体のコンパニオンとして見える。 | v1.0 | product/vision, core/agent-loop, core/delegation |
+| P-522 | 表層/裏層の2層ランタイム | ユーザー入力(音声・テキスト)は表層 soul のみが受ける。表層は副作用のある作業ツールを持たず、短い検索も含め作業が必要と判断したときだけ裏層ハーネスへ託す。両層は同一ハーネスカーネル上の専用実装であり、ユーザーからは1体のコンパニオンとして見える。 | v1.0 | product/vision, core/agent-loop, core/delegation |
 
 ## P-6xx ツールと仕事面
 
 | ID | 機能 | 説明 | 優先度 | 対応サブシステム |
 |---|---|---|---|---|
 | P-601 | 統一ツールレジストリ | 全供給元のツールを1つのレジストリに集約。モデルには層ごとにフィルタされたスキーマ面を公開(表層は作業ツールを見ない)。 | v1.0 | tools/registry |
-| P-602 | ビルトインツール群 | fs(読み書き/検索)、exec(シェル)、web(検索/取得)、ブラウザ操作、計算、日時、メモ。 | v1.0 | tools/capabilities |
+| P-602 | ビルトインツール群 | バンドル済みアウトプロセスプラグインとして提供(ホスト内関数ではない)。fs(読み書き/検索)、exec(シェル)、web(検索/取得)、ブラウザ操作、計算、日時、メモ。 | v1.0 | tools/capabilities |
 | P-603 | MCP 接続 | MCP サーバーのツールを同一パイプラインで実行。resources は Context Source に、prompts は skill 素材に変換。 | v1.0 | tools/capabilities |
 | P-604 | コネクタ | メール・カレンダー・ファイル同期などの外部サービス接続。credential はボールト管理。 | v1.0(最小) + 後継(拡張) | tools/capabilities |
 | P-605 | job(バックグラウンド作業) | 対話と並行して進む作業。実体は非同期委譲の public モード。進捗イベント・成果物・キャンセルを持つ。ユーザーには「おつかい」として見える。 | v1.0 | tasks/jobs-and-schedules, core/delegation |
-| P-606 | スケジュール | cron 風の持続スケジュール。発火はターン(proactive/scheduled)を起こす。quiet hours を尊重。 | v1.0 | tasks/jobs-and-schedules |
+| P-606 | スケジュール | cron 風の持続スケジュール。発火は `TurnOrigin::Scheduled` のターンを起こす(能動発話パイプラインには入れない)。quiet hours を尊重。 | v1.0 | tasks/jobs-and-schedules |
 | P-607 | リマインダー | 「X時に思い出させて」が約束(commitments)+スケジュールで実現される。 | v1.0 | tasks/jobs-and-schedules |
 | P-608 | ワークフロー | 複数ステップの自律遂行(例: 調べて→まとめて→文書化)。ユーザーには1つの job として見える。 | v1.0 | tasks/jobs-and-schedules |
 | P-609 | artifact 体系 | テキスト/Markdown/コード/CSV に加え、オフィス文書(docx/xlsx/pptx)・画像・PDF を成果物として生成・保管・交付。形式は段階的に追加。 | v1.0(テキスト系) + 後継(オフィス/画像) | tasks/jobs-and-schedules |

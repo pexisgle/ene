@@ -7,8 +7,10 @@
 **Session History**(会話履歴)に分離する(opencode に倣う)。
 System Context は Context Source のレジストリから組み立てられ、
 Session History は [session-log.md](session-log.md) の投影から得られる。
-表層と裏層は同じ組立機構を使うが、載せる Source と履歴が違う
-([../product/vision.md](../product/vision.md#51-コアデーモン内の2層))。
+組立機構(レジストリ・epoch・途中システムメッセージ・compaction)は
+両層で共有する。載せる Source と履歴は**層の専用実装が登録する**
+([../product/vision.md](../product/vision.md#51-コアデーモン内の2層)、
+[agent-loop.md §2.1](agent-loop.md#21-エージェント実装の登録表p-522))。
 裏層は親の対話履歴を既定で含めず、委譲ブリーフ(goal+excerpt)を使う
 ([delegation.md](delegation.md) §7)。
 
@@ -35,27 +37,44 @@ Session History は [session-log.md](session-log.md) の投影から得られる
 | `max_tokens` | この Source の上限(ソフトキャップ) |
 
 レジストリはスコープごとの挿入順リストであり、組み立ては
-**固定の描画順**(下表)に従う。
+**固定の描画順**に従う。層が登録していない Source はスキップする。
 
 ```text
-描画順(System Context):
- 1. platform_contract        (出力契約・安全規則)
- 2. identity_kernel          (キャラ定義。予算: 窓の 1/8、400..4000 トークンでクランプ)
- 3. character_state          (感情要約)
- 4. memory.semantic          (想起した記憶)
- 5. memory.user_profile
- 6. memory.commitments       (有効な約束)
- 7. workspace.context        (job/成果物の関連チャンク)
- 8. skills.active            (読み込み済みスキル)
- 9. mcp.resources            (MCP resources からの変換分)
-10. scene_state              (転がり要約)
-11. inner_recent             (内面自己参照窓)
-12. style_examples           (発話スタイル例)
-13. interruption_note        (中断後のみ)
-14. delegation.active        (進行中委譲の状態・進捗・未回答質問の要約、
-                             [delegation.md](delegation.md)。親は status を
-                             呼ばなくても境界で現状を知る)
+描画順(System Context、登録されているものだけ描画):
+ 1. platform_contract        (出力契約・安全規則)           両層
+ 2. identity_kernel          (キャラ定義。予算: 窓の 1/8、400..4000 トークンでクランプ)   両層
+ 3. character_state          (感情要約)                     表層
+ 4. memory.semantic          (想起した記憶)                 表層
+ 5. memory.user_profile                                     表層
+ 6. memory.commitments       (有効な約束)                   表層
+ 7. workspace.context        (当該 spawn の job 根)         裏層
+ 8. skills.active            (読み込み済みスキル)           裏層
+ 9. mcp.resources            (MCP resources からの変換分)   裏層
+10. scene_state              (転がり要約)                   両層
+11. inner_recent             (内面自己参照窓)               表層
+12. style_examples           (発話スタイル例)               表層
+13. interruption_note        (中断後のみ)                   表層
+14. delegation.active        (進行中委譲の要約)             表層
+15. delegation.brief         (goal+excerpt)                 裏層
 ```
+
+キー名 `delegation.active` が正。`delegate.status` ツールは同じレジスタを読む。
+
+### 2.1 層ごとの Source 集合
+
+| Source | 表層 | 裏層 |
+|---|---|---|
+| `platform_contract` | 必須 | 必須(作業向け契約。発話チャネル禁止を含む) |
+| `identity_kernel` | 必須 | 必須(同じ soul) |
+| `character_state` | 必須 | なし |
+| `memory.*` | 必須 | なし(親が excerpt で選んだ記憶だけが brief に入る) |
+| `workspace.context` | なし | 必須(当該 spawn の job ディレクトリ) |
+| `skills.active` | なし(カタログ名の参照のみ identity 経由) | 読み込み済み分 |
+| `mcp.resources` | なし | 当該委譲が購読した分 |
+| `inner_recent` | 必須 | なし |
+| `style_examples` | 任意 | なし |
+| `delegation.active` | 必須 | なし |
+| `delegation.brief` | なし | 必須 |
 
 ### Unavailable の扱い
 

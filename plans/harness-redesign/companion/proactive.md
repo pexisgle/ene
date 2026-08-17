@@ -1,7 +1,10 @@
 # 能動発話
 
 > 実現する要件: **P-105**(能動発話)、**P-106**(静寂の同居)、
-> P-306(疲労・quiet hours のゲート入力)、P-606(スケジュール発火の入口)。
+> P-306(疲労・quiet hours のゲート入力)。
+> スケジュール発火は **P-606 の所有者**
+> ([../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md) §3)であり、
+> このパイプラインの入力ではない。
 
 ユーザー発話なしにコンパニオンが起こすターン。
 airi/OLV の proactive speech を、Ene のゲート+決定+発話の3段で設計する。
@@ -11,7 +14,6 @@ airi/OLV の proactive speech を、Ene のゲート+決定+発話の3段で設�
 ```text
 監視(常時・軽量)
   ├─ 会話の途切れ・ユーザーの活動(入力・ウィンドウ・任意の画面要約)
-  ├─ スケジュールの発火(tasks/jobs-and-schedules.md)
   ├─ コネクタの受信イベント(calendar 変更等)
   └─ 記憶/約束の再浮上(commitment の期限接近)
         ↓
@@ -26,6 +28,11 @@ airi/OLV の proactive speech を、Ene のゲート+決定+発話の3段で設�
         ↓
 発話(TurnOrigin::Proactive のターン)
 ```
+
+スケジュール/リマインドの発火は `TurnOrigin::Scheduled` であり、
+このパイプラインを通らない。発火と quiet hours の繰り下げは
+[../tasks/jobs-and-schedules.md §3](../tasks/jobs-and-schedules.md#3-スケジュールp-606)
+が所有する。二重ゲートしない。
 
 - **ゲートは必ず決定論**で、コストのかかる判断はゲート通過後のみ。
 - **決定モデル**は `ai.tasks.proactive`(安価なモデル推奨、ローカル可)。
@@ -47,11 +54,13 @@ airi/OLV の proactive speech を、Ene のゲート+決定+発話の3段で設�
 
 | ソース | 内容 | 優先度 |
 |---|---|---|
-| `scheduled` | スケジュール/リマインドの発火 | 高(quiet hours の `important` を貫通) |
 | `commitment_due` | 約束の期限接近・確認待ちの再浮上 | 高 |
 | `conversation` | 会話の途切れ・未完の話題 | 中 |
 | `activity` | ユーザーの活動変化(長時間の作業・離席からの復帰) | 中 |
 | `memory` | 記憶の想起(「そういえば」) | 低 |
+
+スケジュール発火は上表に無い。`TurnOrigin::Scheduled` として
+jobs-and-schedules が直接ターンを起こす。
 
 - 複数のソースが同時に成立する場合は、優先度の高い1つを採用し、
   残りはキュー(次回以降)。キューの保持は 24 時間。
@@ -88,7 +97,7 @@ airi/OLV の proactive speech を、Ene のゲート+決定+発話の3段で設�
 | 障害 | 挙動 |
 |---|---|
 | 決定モデルの失敗 | ゲート通過分を簡素モードで発話(決定をスキップ)。失敗はライフサイクル警告 |
-| quiet hours 中の scheduled | `important` のみ貫通。`silent` は次可能な時刻へ繰り下げ |
+| quiet hours 中の能動発話 | `silent` は抑制。`important` はリマインド相当のソースだけ通す。スケジュール発火の繰り下げは jobs-and-schedules 側 |
 | クールダウン中のユーザー発話 | 能動発話を抑制(ユーザー発話が優先) |
 | 対話レーン塞がり | 能動発話はキューへ。塞がりが長い(10分)場合は破棄 |
 

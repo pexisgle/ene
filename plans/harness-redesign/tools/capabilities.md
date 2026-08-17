@@ -24,9 +24,10 @@ fs 系ツール・コード実行・成果物保管がすべて一緒に移動�
 | Provider(既定) | ローカル FS。Broker 経由でプラグインに委譲([../plugins/broker.md](../plugins/broker.md)) |
 | Consumer | `fs.read` / `fs.write` / `fs.search`(ripgrep 相当) / `fs.list` ツール、成果物保管、spill |
 
-- ルート概念: ツールは必ず**内部 workspace の根**を基準に動く
-  ([../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md))。
-  絶対パス指定はスコープ検査後に解決。
+- ルート概念: ツールは必ず**当該 spawn の job ディレクトリ**を基準に動く
+  (`<data>/workspaces/<soul_id>/jobs/<job_id>/`、
+  [../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md))。
+  soul 根や他 job への横断はスコープ外。絶対パス指定はスコープ検査後に解決。
 - `fs.search` は大規模リポジトリに耐える実装(rg 呼び出し)を既定とする。
 
 ## 2. exec seam(シェル/プロセス実行)
@@ -38,6 +39,7 @@ fs 系ツール・コード実行・成果物保管がすべて一緒に移動�
 | Consumer | `exec.run` / `exec.pty` ツール、サイドカー起動 |
 
 - コーディング(P-612)と日常スクリプト(P-611)の両方がこの seam を使う。
+- `cwd` の既定は当該 spawn の job ディレクトリ(fs と同じ根)。
 - `exec.run` の既定: `read_only: false`, `side_effects: ["exec"]`。
   承認ポリシーの対象。
 - 持続 PTY は `exec.pty` で扱い、セッション跨ぎのシェルを1つだけ許可

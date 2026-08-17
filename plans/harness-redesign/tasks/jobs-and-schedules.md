@@ -13,13 +13,13 @@ job は**非同期委譲の public モード**である——実体・ライフ�
 ## 1. 内部 workspace 概念
 
 - ユーザーに「プロジェクト」は見せない(UX は AITuber 型、確定済み決定)。
-- 内部では、job・成果物・ファイルツールが根を置く
-  **workspace** を soul ごとに持つ。
+- workspace は **spawn(委譲)ごと**に独立する。常駐の第二人格用ディレクトリではない。
 - 構成: `<data>/workspaces/<soul_id>/` 配下に
-  `jobs/<job_id>/`(作業ディレクトリ・中間成果物)、
+  `jobs/<job_id>/`(当該 spawn の作業ディレクトリ・中間成果物)、
   `artifacts/`(交付済み成果物)、`scratch/`(一時)。
-- fs/exec ツールの既定スコープはこの根
-  ([../tools/capabilities.md §1](../tools/capabilities.md))。
+- **fs/exec の既定スコープは `jobs/<job_id>/`**。soul 根でも
+  `artifacts/` でもない([../tools/capabilities.md §1](../tools/capabilities.md#1-fs-seam))。
+  成果物の交付だけが soul の `artifacts/` へコピーする。
 
 ## 2. job(P-605)
 
@@ -98,13 +98,16 @@ CREATE TABLE schedules (
 CREATE INDEX idx_sched_next ON schedules (enabled, next_fire);
 ```
 
-- 発火は `TurnOrigin::Scheduled` のターンを起こす
-  ([../companion/proactive.md §3](../companion/proactive.md#3-ソースと優先度))。
+- 発火は **`TurnOrigin::Scheduled` のターン**を起こす。能動発話
+  (`TurnOrigin::Proactive`)のパイプラインには入れない
+  ([../companion/proactive.md](../companion/proactive.md))。
+  origin と発火ゲートの所有者はこの文書。
   `remind` は発話によるリマインド、`job` は job の生成、
   `turn` は通常の発話ターン。
 - quiet hours の扱い: `quiet_policy: silent` の時間帯に発火予定の
   スケジュールは**次可能な時刻へ繰り下げ**(リマインドの喪失を防ぐ)。
   `important`(P-606 相当)の指定があるものは貫通。
+  能動発話側で同じ発火を再ゲートしない。
 - タイムゾーンはスケジュールごとに保持し、サマータイムも
   tz DB で正しく扱う。`next_fire` は発火後に再計算。
 

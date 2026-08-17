@@ -17,6 +17,6 @@
 - 裏層への委託 → [../core/delegation.md](../core/delegation.md)
 - 感情→表情の写像先 → [../body/body-and-performance.md](../body/body-and-performance.md)
 - コンテキストへの載せ方 → [../core/context-assembly.md](../core/context-assembly.md)
-- スケジュール発火 → [../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md)
+- スケジュール発火(`TurnOrigin::Scheduled`) → [../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md)(能動発話パイプラインとは別)
 - キャラクター定義(ベースライン等) → [../character/package-format.md](../character/package-format.md)
 

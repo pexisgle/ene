@@ -62,17 +62,21 @@
 - **実装上の義務**: プロバイダ適応はストリームから thinking を検出し、
   **発話チャンクに混ぜない**(混ぜると発話が汚染される)。
   検出した thinking は(1)ログへ記録、(2)内面派生の素材
-  ([§4](#4-thinking--内面の派生任意))にのみ使う。
+  ([§4](#4-thinking--内面の派生欠落時のみ))にのみ使う。
 
-## 4. thinking → 内面の派生(任意)
+## 4. thinking → 内面の派生(欠落時のみ)
 
 thinking は記録されるが、ユーザーには決して見せない(§3)。
 「考えている様子」の表現は内面チャネルへの派生で行う。
 
-- **派生**: ターン終了後(バックグラウンド)、`assistant/thinking`
-  について、感情エンジンが思考の要点を
-  `inner/message{aspect: thought}` として**再生成**する
+- **主経路はストリーム中の `<inner>`**
+  ([../companion/inner-channel.md §2](../companion/inner-channel.md#2-生成経路))。
+- **派生**: ターン終了後(バックグラウンド)、**そのターンに
+  `thought` aspect の `inner/message` が1件も無いときだけ**、
+  `assistant/thinking` について感情エンジンが思考の要点を
+  `inner/message{aspect: thought}` として再生成する
   (原文のコピーではなく、キャラの語り直し)。
+  既に thought があるターンでは走らない(二重生成しない)。
 - 派生はオプトイン(`mind.inner.derive_from_thinking`: 既定 `true`)。
   プロバイダが thinking を出さない構成では何も起きない。
 - 派生内面は通常の `model_visible` 規則に従い、自己参照窓に載り得る
@@ -106,7 +110,7 @@ thinking は記録されるが、ユーザーには決して見せない(§3)。
 
 | キー | 既定 | 説明 |
 |---|---|---|
-| `mind.inner.derive_from_thinking` | `true` | thinking → 内面派生 |
+| `mind.inner.derive_from_thinking` | `true` | thinking → 内面派生(そのターンに thought が無いときだけ) |
 | `mind.inner.ui_visible` | `true` | 内面の UI 表示(オプトインの既定) |
 | `harness.tool_output.ui_summary_chars` | `200` | UI 投影のツール要約上限(文字) |
 

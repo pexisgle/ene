@@ -49,7 +49,7 @@ commit:  出力 + usage + 次の状態                          ← セットル
 |---|---|
 | `assistant{effect_pending}` | **捕獲された**再試行ポリシーが許す場合のみ、番号を増やした試行を開始。許さない場合は、予約済みの応答 id に**合成エラー**を耐久化する。キャンセルが耐久済みなら、その id に合成 `aborted` を書き、再試行しない |
 | `tools{effect_pending}` | 永続化された `op.tool_args` の引数は、**保存時の宣言と現在の宣言の両方**が `replay: safe` と言う場合のみ再実行。それ以外は予約済みの結果 id に合成 `interrupted` エラーを追記 |
-| `deferred{effect_pending}` | `running` の制御なら、アプリの次の `resume()` を待つ(新しい poll/応答/usage id を予約)。`cancel_requested` なら、既存の予約 id に合成 `aborted` をセットルメント。上限なし |
+| `deferred` | 待ち種別は `ask_user` / `approval` / `sidecar_health`([operations.md §2](operations.md#2-opstate--プログラムカウンタ))。`running` なら回答の `wake`(ask-user)または承認応答を待つ。新しい操作は起こさない。`cancel_requested` なら既存の予約 id に合成 `aborted` をセットルメント。上限なし |
 
 ### クラッシュ位置の全表
 
@@ -105,7 +105,7 @@ commit:  出力 + usage + 次の状態                          ← セットル
 アボートはフェーズではなく **control**([operations.md §2](operations.md#2-opstate--プログラムカウンタ))。
 
 - **最初の `abort()`**: 1コミットで `control = cancel_requested` を書き、
-  `requested_at` を記録し、drain した steer/followup の id を
+  `requested_at` を記録し、drain した wake/inject の id を
   `control.drained` に移す。`phase` は触らない。drained 項目の
   `pending.entry` レジスタは**削除しない**(報告と再開が使う)。
   コミット後にシグナルを引き、未解放のゲート付き効果をキャンセル。

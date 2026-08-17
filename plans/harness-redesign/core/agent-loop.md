@@ -34,7 +34,27 @@
 - 対話レーンのターンにはさらに `subagent` origin の**報告ターン**がある
   (委譲の完了・質問が inbox を経て届く、[delegation.md §6](delegation.md#6-報告ターンp-521))。
 - 表層の公開ツール面は層間メッセージとコンパニオン局所能力に限る。
-  副作用のある作業ツールは裏層にだけ公開する([../tools/registry.md](../tools/registry.md) §3.1)。
+  副作用のある作業ツールは裏層にだけ公開する([../tools/registry.md](../tools/registry.md) §2)。
+  短い検索も裏層へ出す。
+
+### 2.1 エージェント実装の登録表(P-522)
+
+カーネル(ログ・耐久性・Tool Calling / MCP / skill 形式・レジストリ)は共有する。
+**違うのは専用実装**であり、公開ツールのフィルタだけではない。
+
+| 項目 | 表層実装 | 裏層実装 |
+|---|---|---|
+| レーン | 対話レーン 1 本 | job レーン(spawn ごと 1 本、上限 `harness.delegation.max_active`) |
+| 公開ツール | `delegate.*`、`memory.recall`、`clock.now`、内面局所 | 作業ツール一式、`delegation.send`、再帰 `delegate.*` |
+| ステップ上限 | `harness.loop.max_steps_per_turn`(既定 **8**) | `harness.delegation.step_budget`(既定 **128**、委譲全体) |
+| 1ターンの性格 | 発話+内面。ツールは委譲と局所のみ | ツールステップが主。発話チャネルなし(I-31) |
+| waterfall | `agent/pre-step`: 感情・quiet hours・能動発話ゲート | `agent/pre-step`: guard。`tools/pre-execute`: 承認・sandbox |
+| Context Source | [context-assembly.md §2.1](context-assembly.md#21-層ごとの-source-集合) の表層集合 | 同節の裏層集合 |
+| モデルタスク | `ai.tasks.chat` | `ai.tasks.job` |
+| workspace | 持たない | spawn ごとに独立([../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md)) |
+
+後継の実装差し替え(P-514)は、この表の列を別アーキテクチャに入れ替える余地である。
+v1.0 はこの2実装で固定する。
 
 ## 3. inbox と claim
 
@@ -53,8 +73,19 @@ claim の規則: 1回の claim で「次のステップ入力1件 + キューさ
 **wake の優先順位は ユーザー由来 > 委譲由来**(会話が委譲報告で
 遅延しない、[delegation.md §5](delegation.md#5-子--親メールボックス))。
 
-inbox とキュー項目の永続化(1項目 = 予約 entry id、steer/followup の
-2キュー、キューモード)は [operations.md §7](operations.md#7-inbox-とキューの耐久化) が定義する。
+レーンコマンドとの対応([lane-api.md](lane-api.md)、[operations.md §7](operations.md#7-inbox-とキューの耐久化)):
+
+| コマンド | inbox | 備考 |
+|---|---|---|
+| `prompt` | `wake`(新操作) | アイドル時のみ |
+| `follow_up` | `wake`(現操作の次ターン) | 実行中の操作にのみ |
+| `steer` | `inject` | 進行中ターンの次 claim に載せる。**生成は割らない**。音声 `interrupt` ではない |
+| `abort()` / 音声バグイン | `interrupt` | 実行中ステップを中断([durability.md §6](durability.md#6-アボート)) |
+| ask-user 回答 | `wake` | **同一操作**の `deferred` を再開。`next_run` は使わない |
+| `next_run` | 操作終端後の予約 | 承認の遅延応答など、**今の操作の後**にだけ使う |
+
+キュー項目の永続化(1項目 = 予約 entry id、`wake`/`inject` の2キュー、
+キューモード)は [operations.md §7](operations.md#7-inbox-とキューの耐久化)。
 
 ## 4. ターン/ステップ状態機械
 
@@ -76,7 +107,9 @@ turn/start
 ```
 
 - ターンは**0ステップで閉じ得る**(pre-step 拒否)。試行自体はログに残る。
-- ステップ上限 `harness.loop.max_steps_per_turn`: 既定 32。到達で打ち切り
+- ステップ上限は層で違う(§2.1)。表層は `harness.loop.max_steps_per_turn`
+  (既定 8)、裏層は `harness.delegation.step_budget`(既定 128、委譲全体)。
+  到達で打ち切り
   (`outcome: failed`, error_class=`step_budget`)。
 - 状態機械の各位置(ステップ間・生成中・ツール実行中・外部待ち)は、
   [operations.md](operations.md) の `op.state` レジスタに total な形で
@@ -160,14 +193,15 @@ quiet hours 進入・疲労限界が使う。
 
 ## 9. 人間協調面(plan / ask-user)(P-511, P-512)
 
-- **ask-user**: ツール実行中に質問が発生。ターンは `awaiting_user` になり、
-  質問を `question/asked` イベントで公開(承認 plane と同じポップアップ経路)。
-  回答は inbox の `wake` として届き、保留中のツール呼び出しを再開。
+- **ask-user**: ツール実行中に質問が発生。操作は `deferred{waiting: ask_user}`
+  になり、ログに `question/asked` を書く。**対話レーンではキャラ発話として
+  質問する**(ポップアップにしない)。回答は inbox の `wake` として届き、
+  **同一操作**の保留中ツール呼び出しを再開。`next_run` は使わない。
   タイムアウト(既定 24 時間、`harness.ask_user.timeout`)で `cancelled`。
-- **plan**: 変更を伴う作業(fs 書き込み・exec・送信系)の前に、
+- **plan / 承認**: 変更を伴う作業(fs 書き込み・exec・送信系)の前に、
   モードが `plan_required` のツールはまず計画を提示して承認を待つ。
-  承認 plane のポップアップと同じ UI 面を使う。承認は
-  [../security/approval.md](../security/approval.md) のポリシーに従う。
+  **ポップアップは承認 plane に限る**
+  ([../security/approval.md](../security/approval.md))。
   拒否はツール結果 `denied` としてモデルに返る(対話は継続)。
 
 ## 10. キャンセルと音声割り込み(P-103)
@@ -185,7 +219,7 @@ quiet hours 進入・疲労限界が使う。
 | キー | 既定 | 説明 |
 |---|---|---|
 | `harness.delegation.max_active` | `4` | job レーン(委譲)並行上限(soul ごと)。[delegation.md](delegation.md) と同一キー |
-| `harness.loop.max_steps_per_turn` | `32` | ステップ上限 |
+| `harness.loop.max_steps_per_turn` | `8` | 表層対話レーンのステップ上限。裏層は `harness.delegation.step_budget` |
 | `harness.loop.repeat_call_threshold` | `3` | 繰り返し検知閾値 |
 | `harness.ask_user.timeout` | `24h` | ask-user タイムアウト |
 | `harness.delegation.report_gates` | `true` | 報告ターンに quiet hours/疲労ゲートを適用([delegation.md §10](delegation.md#10-設定キーと既定値)) |

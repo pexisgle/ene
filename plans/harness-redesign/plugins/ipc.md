@@ -87,7 +87,9 @@ Plugin → Host: hello_ack {
 | `tts.synthesize` | Host→Plugin | `{ request_id, text, voice, style? }`。音声は別チャネル(§4) |
 | `asr.transcribe` / `asr.stream` | Host→Plugin | 音声認識。`asr.stream` は partial を逐次返す |
 | `embed.encode` | Host→Plugin | `{ request_id, texts }` → ベクトル群 |
-| `vad.frame` | Host→Plugin | 音声フレーム→発話区間判定(VAD は低遅延が要なのでフレーム単位 RPC) |
+
+VAD はフレーム単位 RPC(`vad.frame`)にしない。低遅延が要る音声は
+§4 の専用チャネルに載せる。制御面は `stream.open{ kind: vad }` だけ。
 
 ### 3.4 Broker と capability
 
@@ -108,6 +110,9 @@ Plugin → Host: hello_ack {
   プラグインは socketpair を FD 渡しで返す。以降そのソケット対に
   長さプレフィックス付きバイナリフレームを流す。
 - 音声フレーム形式: `{ seq, ts, encoding: pcm16|opus, sample_rate, channels, data }`。
+- **VAD**: 入力 PCM をこのチャネルで送り、発話区間イベント
+  (`speech_start` / `speech_end`)を同じチャネルで返す。
+  `vad.frame` 同期 RPC は持たない(5ms IPC 予算と衝突するため)。
 - 背圧は §1 の flow_control に従う。音声は**破棄優先**
   (溜めると遅延になるため、閾値超えは最新を優先して落とす)。
 

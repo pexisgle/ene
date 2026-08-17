@@ -44,12 +44,13 @@ TX[
 ]
 ```
 
-- 受理前の検証(レーン塞がりの `LaneBusy`、pre-step waterfall の拒否)は
-  このトランザクションより前に行う。
+- 受理前の検証はレーン塞がりの `LaneBusy` のみ。
+  **pre-step は受理後**に走る(dsh と同じ。試行は耐久ターンとして残る)。
 - 受理した瞬間から、操作はクラッシュしても回復可能になる。
-- pre-step が受理前に拒否した場合は、**操作を作らず**試行イベントのみ
-  残す([agent-loop.md §4](agent-loop.md#4-ターンステップ状態機械) の
-  「0ステップで閉じる」ケース)。
+- pre-step が拒否、または書き換え結果が空なら、ステップを回さず
+  終端トランザクションで `turn/end{outcome: completed}` を書く
+  ([agent-loop.md §4](agent-loop.md#4-ターンステップ状態機械) の
+  「0ステップで閉じる」ケース)。操作は作られている。
 
 ## 2. `OpState` — プログラムカウンタ
 
@@ -68,10 +69,10 @@ RunState {
   settings: {                     -- 受理時に原子に捕獲。後からの変更は次操作へ
     compaction: CompactionSettings
     tool_execution: sequential | parallel
-    steering: queue_mode          -- キュー入力の捌き方
+    steering: queue_mode          -- キュー入力の捌き方(`one_at_a_time` | `batch`)
   }
   phase: RunPhase
-  inbox: { steer: [entry_id], followup: [entry_id] }
+  inbox: { wake: [entry_id], inject: [entry_id] }
   latest_assistant_seq: u64?      -- この操作で最新の確定応答
   turn_id: TurnId
 }
@@ -160,7 +161,8 @@ ask-user・承認ポップアップ・サイドカーヘルス待ちなど、
 **外部の回答でしか進めない**状態([agent-loop.md §9](agent-loop.md#9-人間協調面plan--ask-userp-511-p-512))。
 
 - 予約された応答 seq と質問参照を持つ。
-- 回答は inbox の `wake` として届き、新しい poll/応答 id を予約して進行。
+- 回答は inbox の `wake` として届き、**同一操作**を `checkpoint` へ戻す。
+  `next_run`(現操作の終端後予約)は使わない。
 - `cancel_requested` のときに回答が来ても、新しい効果は始めない
   ([durability.md §3](durability.md#3-回復ポリシー))。
 - タイムアウトは通常の期限ポリシー([agent-loop.md §11](agent-loop.md#11-設定キーと既定値) の
@@ -210,7 +212,7 @@ ask-user・承認ポップアップ・サイドカーヘルス待ちなど、
 | 7 | `tools{全 completed}` | なし | checkpoint | `checkpoint` |
 | 8 | `checkpoint{may_finish}` | なし | 終端 | (状態削除) |
 | 9 | 任意 | ask-user/承認要求 | 質問イベント + 予約 | `deferred` |
-| 10 | `deferred` | 回答の取り込み | 回答 entry | `checkpoint{need_assistant}` |
+| 10 | `deferred` | 回答の取り込み(inbox `wake`) | 回答 entry | `checkpoint{need_assistant}` |
 | 11 | 任意(回復不能エラー) | なし | エラー記録 | `failure_drain` |
 | 12 | `failure_drain` | 整合処理 | 確定済み効果のセットルメント | 終端 |
 
@@ -261,8 +263,10 @@ CompactionState {
 - 元メッセージ行は削除しない(投影が置き換える、L-3)。
 - 失敗分類([context-assembly.md §9](context-assembly.md#9-障害モード) を補完):
   `busy`(レーン使用中)/ `cancelled` / `changed`(準備中に履歴が変わった)/
-  `summary`(要約生成失敗)/ `commit`(確定失敗)。手動コンパクションは
-  これらをエラーコードとして返す。
+  `summary`(要約生成失敗)/ `commit`(確定失敗)/ `declined`(畳むものが無い)。
+  手動コンパクションはこれらをエラーコードとして返す。
+  `declined` は失敗ではなく結果バリアント
+  ([lane-api.md §3](lane-api.md#3-結果の形))。
 
 ## 6. 終端トランザクション
 
@@ -293,16 +297,22 @@ TX[
 
 ## 7. inbox とキューの耐久化
 
-- [agent-loop.md §3](agent-loop.md#3-inbox-と-claim) の inbox は、
-  この文書の `RunState.inbox`(予約 entry id の列)として耐久化される。
+inbox の**種別は3つだけ**([agent-loop.md §3](agent-loop.md#3-inbox-と-claim)):
+
+| 種別 | 即時性 | 耐久キュー | レーンコマンド |
+|---|---|---|---|
+| `wake` | 即時(ターンを起こす/続ける) | `inbox.wake` | `prompt`(新操作)、`follow_up`(現操作の次ターン) |
+| `inject` | 待機(次 claim に載せる。ターンを起こさない) | `inbox.inject` | `steer` |
+| `interrupt` | 即時(実行中ステップを中断) | `control: cancel_requested` | `abort()`、音声バグイン |
+
 - キュー項目は **1項目 = 1 entry id**。ペイロードは各 id の
   `pending.entry` レジスタから解決する
   ([storage-model.md §3.4](storage-model.md#34-pendingentry未配置コンテンツ))。
-- `steer`(進行中ターンへの割り込み的注入: 音声割り込みのテキスト化等)と
-  `followup`(次のターンで捌く発話)の2キュー。
+- `steer` は **inject** であり、音声 `interrupt` ではない。
+  進行中ターンの次 claim にテキストを載せる。生成そのものは割らない。
 - キューモード(`settings.steering`): `one_at_a_time`(1つ捌いたら生成)
   / `batch`(境界で全取り込み)。既定 `one_at_a_time`。
-- アボートは `steer`/`followup` の id を `control.drained` に移す。
+- アボートは `wake`/`inject` の id を `control.drained` に移す。
   レジスタは**削除しない**——アボート結果の報告と、クラッシュ後の
   再開が、そこからペイロードを解決するため。削除は終端トランザクションのみ。
 - `cancelQueued` の3分岐(pending → `cancelled` / entry 存在 →
@@ -318,12 +328,12 @@ TX[
 
 | キー | 既定 | 説明 |
 |---|---|---|
-| `harness.queue.steering_mode` | `one_at_a_time` | steer の捌き方 |
+| `harness.queue.steering_mode` | `one_at_a_time` | inject(`steer`)の捌き方 |
 | `harness.operations.validation` | `strict` | ロード時検証。`strict`(拒否)/ `warn`(警告して継続) |
 
 ([agent-loop.md §11](agent-loop.md#11-設定キーと既定値) の既存キー
-`harness.loop.*`・`harness.jobs.*` はそのまま有効。この文書は
-それらの耐久機構を定義する。)
+`harness.loop.*`・`harness.delegation.*` はそのまま有効。この文書は
+それらの耐久機構を定義する。`harness.jobs.*` は使わない。)
 
 ---
 

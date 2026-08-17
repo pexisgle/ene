@@ -21,20 +21,22 @@
 
 ## 2. 生成経路
 
-1. **モデルによる生成(主経路)**: 出力契約で「発話と内面を分けて
-   出力できる」ことを教え、ストリーミング中に内面タグ
+経路は aspect ごとに1つ。同じターンで thought を二重に作らない。
+
+1. **`thought`(主経路)**: 出力契約で「発話と内面を分けて出力できる」
+   ことを教え、ストリーミング中に内面タグ
    (`<inner aspect="thought">…</inner>` 相当の構造化)を受け取る。
    プロバイダ適応がタグを解析し、発話テキストと分離する。
-2. **感情エンジンによる生成**: 出力裁定で大きな感情変化が
-   起きたとき、`emotion` aspect の内面イベントを自動生成
-   (「(嬉しさが込み上げる)」相当)。頻度は裁定器のレート制限に従う。
-3. **行動意図の生成**: ツール実行前(job を受けた、調べ物を始めた等)に
-   `action_intent` を出す。「今から〇〇するね」を内面で先出しし、
-   発話は最小限にできる。
-4. **thinking からの派生**(P-520、[../core/visibility.md §4](../core/visibility.md#4-thinking--内面の派生任意)):
-   プロバイダの thinking ブロックは記録されるがユーザーには見せず、
-   ターン終了後に感情エンジンが思考の要点を `thought` aspect で
-   再生成する(原文コピーではなくキャラの語り直し)。
+2. **`thought`(補助、欠落時のみ)**: そのターンに thought が1件も無いときだけ、
+   プロバイダの thinking から派生する
+   ([../core/visibility.md §4](../core/visibility.md#4-thinking--内面の派生欠落時のみ))。
+   `<inner>` があるターンでは派生しない。
+3. **`emotion`**: 出力裁定で大きな感情変化が起きたとき、感情エンジンが
+   自動生成(「(嬉しさが込み上げる)」相当)。頻度は裁定器のレート制限に従う。
+4. **`action_intent`**: 表層が `delegate.start` を呼んだときに**システムが**
+   生成する。「今から〇〇するね」を内面で先出しし、発話は最小限にできる。
+   汎用ツール実行の直前には出さない(作業ツールは裏層にあり、表層の
+   内面生活ではない)。
 
 ## 3. 自己参照(P-502 両立)
 
@@ -71,6 +73,7 @@
 | `mind.inner.self_reference_window` | `24` | 自己参照窓(件数、session-log と同一キー) |
 | `mind.inner.display_default` | `true` | クライアント表示の既定 |
 | `mind.inner.auto_emotion_events` | `true` | 感情エンジンによる自動生成 |
+| `mind.inner.derive_from_thinking` | `true` | そのターンに thought が無いときだけ thinking から派生([../core/visibility.md §4](../core/visibility.md#4-thinking--内面の派生欠落時のみ)) |
 
 ## 7. 障害モード
 

@@ -29,9 +29,9 @@ job レーン(裏層)は job ごとに1本([agent-loop.md §2](agent-loop.md#2-�
 | コマンド | 対象 | 効果 | 拒否条件 |
 |---|---|---|---|
 | `prompt(message)` | レーン | ターンを1つ起こす(受理トランザクション、[operations.md §1](operations.md#1-操作operationとは)) | `LaneBusy`, `InvalidMessage`, `Closed` |
-| `steer(message)` | 実行中の操作 | 進行中ターンへ割り込み的注入(inbox `interrupt` 相当のテキスト経路) | `NoActiveOperation`, `InvalidMessage` |
+| `steer(message)` | 実行中の操作 | 進行中ターンへの **inject**(次 claim に載せる。生成は割らない) | `NoActiveOperation`, `InvalidMessage` |
 | `follow_up(message)` | 実行中の操作 | 次のターンで捌く発話をキュー(inbox の `wake`) | 同上 |
-| `next_run(message)` | レーン | 現操作の**終端後に**受理される入力を予約(承認応答・ask-user 回答が使う) | `InvalidMessage` |
+| `next_run(message)` | レーン | 現操作の**終端後に**受理される入力を予約。承認の遅延応答など、操作が終わってから拾うものだけ。ask-user 回答は使わない | `InvalidMessage` |
 | `cancel_queued(entry_id)` | キュー項目 | 予約 entry を取消。3分岐 `cancelled / already_consumed / not_found`([storage-model.md §3.2](storage-model.md#32-書き込みの規律)) | —(`not_found` は成功扱い) |
 | `abort()` | 実行中の操作 | control を `cancel_requested` に([durability.md §6](durability.md#6-アボート))。drain した項目のペイロードを返す | `NoActiveOperation` |
 | `resume()` | レーン | 回復不能に保留中の操作(deferred・クラッシュ残り)を前進 | `NothingToResume` |
@@ -48,8 +48,10 @@ job レーン(裏層)は job ごとに1本([agent-loop.md §2](agent-loop.md#2-�
 
 - `steer`/`follow_up` は**実行中の操作にのみ**発行できる。アイドル時は
   `prompt` を使う(曖昧な中間状態を作らない)。
-- `next_run` は「今の操作の後に」を意味する唯一の経路。承認応答と
-  ask-user 回答はこれを通る([agent-loop.md §9](agent-loop.md#9-人間協調面plan--ask-userp-511-p-512))。
+- `steer` は inbox の `inject` であり、音声 `interrupt` ではない
+  ([agent-loop.md §3](agent-loop.md#3-inbox-と-claim))。
+- `next_run` は「今の操作の後に」を意味する経路。承認の遅延応答が使う。
+  ask-user 回答は同一操作への `wake`([agent-loop.md §9](agent-loop.md#9-人間協調面plan--ask-userp-511-p-512))。
 - `abort()` の2回目以降は何も追記せず、同じ drained ペイロードを返す
   ([durability.md §6](durability.md#6-アボート))。[agent-loop.md §10](agent-loop.md#10-キャンセルと音声割り込みp-103)
   の `cancel(turn_id)`・音声割り込みはこの `abort()` の呼び出しである。
