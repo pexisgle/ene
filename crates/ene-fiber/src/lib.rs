@@ -9,12 +9,14 @@
 mod broker;
 mod fiber;
 mod profile;
+mod sidecar;
 mod spawn;
 mod supervisor;
 
 pub use broker::{Broker, BrokerError, Grant};
 pub use fiber::{Effect, Fiber, FiberState, FiberUid};
 pub use profile::ProfileApplyReport;
+pub use sidecar::{SidecarHealth, SidecarId, SidecarRequest};
 pub use spawn::{discover_plugin_bin, discover_plugin_executable, discover_plugin_script};
 pub use supervisor::{
     CircuitBreakerConfig, ProfileRow, Supervisor, SupervisorError, manifest_digest,

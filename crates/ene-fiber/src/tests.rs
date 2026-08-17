@@ -1,6 +1,6 @@
 use crate::{
-    CircuitBreakerConfig, FiberState, ProfileRow, Supervisor, discover_plugin_script,
-    manifest_digest,
+    Broker, BrokerError, CircuitBreakerConfig, FiberState, FiberUid, ProfileRow, SidecarRequest,
+    Supervisor, discover_plugin_script, manifest_digest,
 };
 use ene_registry::{Layer, ToolRegistry};
 use serde_json::json;
@@ -234,4 +234,121 @@ async fn dummy_plugin_handshake_without_provider_subprotocol() {
         .await
         .expect("core+tool handshake must succeed without provider");
     assert!(sup.surface_has_tool("dummy.ping"));
+}
+
+#[test]
+fn sidecar_binary_resolves_config_then_cas_then_bundled_and_rejects_urls() {
+    let dir = TempDir::new().unwrap();
+    let bundled_dir = dir.path().join("bundled");
+    std::fs::create_dir(&bundled_dir).unwrap();
+    let config = dir.path().join("from-config");
+    let cas = dir.path().join("from-cas");
+    let bundled = bundled_dir.join("engine");
+    std::fs::write(&config, b"c").unwrap();
+    std::fs::write(&cas, b"a").unwrap();
+    std::fs::write(&bundled, b"b").unwrap();
+    let broker = Broker::with_bundled_dir(dir.path().to_path_buf(), bundled_dir);
+
+    let all = SidecarRequest {
+        config_path: Some(config.clone()),
+        cas_path: Some(cas.clone()),
+        bundled_name: "engine".into(),
+        args: Vec::new(),
+    };
+    assert_eq!(broker.resolve_sidecar_binary(&all).unwrap(), config);
+
+    let cas_only = SidecarRequest {
+        config_path: None,
+        cas_path: Some(cas.clone()),
+        bundled_name: "engine".into(),
+        args: Vec::new(),
+    };
+    assert_eq!(broker.resolve_sidecar_binary(&cas_only).unwrap(), cas);
+
+    let bundled_only = SidecarRequest {
+        config_path: None,
+        cas_path: None,
+        bundled_name: "engine".into(),
+        args: Vec::new(),
+    };
+    assert_eq!(
+        broker.resolve_sidecar_binary(&bundled_only).unwrap(),
+        bundled
+    );
+
+    let remote = SidecarRequest {
+        config_path: Some(PathBuf::from("https://example.invalid/llama-server")),
+        cas_path: None,
+        bundled_name: String::new(),
+        args: Vec::new(),
+    };
+    assert!(matches!(
+        broker.resolve_sidecar_binary(&remote),
+        Err(BrokerError::RemoteBinaryForbidden)
+    ));
+
+    let missing = SidecarRequest {
+        config_path: None,
+        cas_path: None,
+        bundled_name: String::new(),
+        args: Vec::new(),
+    };
+    assert!(matches!(
+        broker.resolve_sidecar_binary(&missing),
+        Err(BrokerError::SidecarBinaryNotFound)
+    ));
+}
+
+const LOOPBACK_PY: &str = r"
+import socket, sys, time
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(('127.0.0.1', port))
+sock.listen(1)
+time.sleep(3600)
+";
+
+fn python3_bin() -> PathBuf {
+    let output = std::process::Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+        .expect("command -v python3");
+    assert!(
+        output.status.success(),
+        "python3 must exist for sidecar tests"
+    );
+    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+#[test]
+fn sidecar_spawn_health_and_kill_on_loopback() {
+    let dir = TempDir::new().unwrap();
+    let mut broker = Broker::new(dir.path().to_path_buf());
+    let uid = FiberUid::new();
+    let request = SidecarRequest {
+        config_path: Some(python3_bin()),
+        cas_path: None,
+        bundled_name: String::new(),
+        args: vec!["-c".into(), LOOPBACK_PY.into(), "{port}".into()],
+    };
+    assert!(matches!(
+        broker.spawn_sidecar(uid, &request),
+        Err(BrokerError::Denied { .. })
+    ));
+    broker.grant(uid, "proc.spawn_sidecar");
+    let id = broker.spawn_sidecar(uid, &request).unwrap();
+    let health = broker.sidecar_health(uid, id).unwrap();
+    assert!(health.alive);
+    assert_ne!(health.port, 0);
+    let other = FiberUid::new();
+    assert!(matches!(
+        broker.sidecar_health(other, id),
+        Err(BrokerError::SidecarNotOwned { .. })
+    ));
+    broker.kill_sidecar(uid, id).unwrap();
+    assert!(matches!(
+        broker.sidecar_health(uid, id),
+        Err(BrokerError::UnknownSidecar(_))
+    ));
 }
