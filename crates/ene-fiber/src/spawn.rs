@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -83,7 +84,13 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
 }
 
 fn plugin_command(binary: &Path, socket_path: &Path, temp_dir: &Path) -> Command {
-    let mut cmd = Command::new(binary);
+    let mut cmd = if let Some(interpreter) = script_interpreter(binary) {
+        let mut command = Command::new(interpreter);
+        command.arg(binary);
+        command
+    } else {
+        Command::new(binary)
+    };
     cmd.env_clear();
     for key in ["PATH", "HOME", "LANG", "TZ", "LD_LIBRARY_PATH"] {
         if let Ok(val) = std::env::var(key) {
@@ -96,6 +103,25 @@ fn plugin_command(binary: &Path, socket_path: &Path, temp_dir: &Path) -> Command
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::inherit());
     cmd
+}
+
+fn script_interpreter(path: &Path) -> Option<String> {
+    if path.extension().is_some_and(|ext| ext == "py") {
+        return Some("python3".to_owned());
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0_u8; 2];
+    if file.read_exact(&mut header).is_err() || header != *b"#!" {
+        return None;
+    }
+    let mut shebang = String::new();
+    file.take(256)
+        .read_to_string(&mut shebang)
+        .ok()?;
+    let line = shebang.lines().next()?;
+    let interpreter = line.trim_start_matches('#').trim_start_matches('!');
+    let program = interpreter.split_whitespace().next()?;
+    Some(program.to_owned())
 }
 
 fn terminate_child(child: &mut Child) {
@@ -170,6 +196,28 @@ fn apply_sandbox(command: &mut Command, spec: Option<&SandboxSpec>) -> Result<()
 
 #[must_use]
 pub fn discover_plugin_bin(stem: &str) -> Option<PathBuf> {
+    plugin_candidates(stem).into_iter().find(|path| path.is_file())
+}
+
+/// Resolve a profile plugin id to an executable path (native binary or script).
+#[must_use]
+pub fn discover_plugin_executable(plugin: &str) -> Option<PathBuf> {
+    match plugin {
+        "tool.utility" => discover_plugin_bin("ene-harness-utility"),
+        "tool.fs" => discover_plugin_bin("ene-harness-fs"),
+        "tool.exec" => discover_plugin_bin("ene-harness-exec"),
+        "tool.web" => discover_plugin_bin("ene-harness-web"),
+        "tool.dummy" => discover_plugin_script("plugin.py"),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn discover_plugin_script(name: &str) -> Option<PathBuf> {
+    plugin_candidates(name).into_iter().find(|path| path.is_file())
+}
+
+fn plugin_candidates(stem: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
@@ -184,6 +232,7 @@ pub fn discover_plugin_bin(stem: &str) -> Option<PathBuf> {
         while root.parent().is_some() {
             candidates.push(root.join("target/debug").join(stem));
             candidates.push(root.join("target/release").join(stem));
+            candidates.push(root.join("plugins/tool/dummy-py").join(stem));
             if root.join("Cargo.toml").is_file()
                 && std::fs::read_to_string(root.join("Cargo.toml"))
                     .is_ok_and(|text| text.contains("[workspace]"))
@@ -195,5 +244,5 @@ pub fn discover_plugin_bin(stem: &str) -> Option<PathBuf> {
             }
         }
     }
-    candidates.into_iter().find(|path| path.is_file())
+    candidates
 }

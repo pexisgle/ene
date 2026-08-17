@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 ene-plugin-ipc = { workspace = true }
 ene-registry = { workspace = true }
 ene-sandbox = { workspace = true }

@@ -6,6 +6,7 @@ members = [
     "plugins/tool/*",
     "plugins/harness/*",
 ]
+exclude = ["plugins/tool/dummy-py"]
 default-members = [ "apps/ene-cli" ]
 resolver = "2"
 

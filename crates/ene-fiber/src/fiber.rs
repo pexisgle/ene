@@ -29,6 +29,7 @@ impl std::fmt::Display for FiberUid {
 #[serde(rename_all = "snake_case")]
 pub enum FiberState {
     Inactive,
+    Waiting,
     Loading,
     Active,
     Unloading,
@@ -40,6 +41,7 @@ impl FiberState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Inactive => "inactive",
+            Self::Waiting => "waiting",
             Self::Loading => "loading",
             Self::Active => "active",
             Self::Unloading => "unloading",
@@ -67,6 +69,7 @@ pub struct Fiber {
     pub requires: Vec<String>,
     pub dispose: Vec<Effect>,
     pub sandbox_required: bool,
+    pub wait_reason: Option<String>,
 }
 
 impl Fiber {
@@ -81,6 +84,7 @@ impl Fiber {
             requires: Vec::new(),
             dispose: Vec::new(),
             sandbox_required: true,
+            wait_reason: None,
         }
     }
 
