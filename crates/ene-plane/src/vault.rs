@@ -138,10 +138,13 @@ impl Vault {
         let passphrase = self.passphrase.lock().clone();
         let sealed = seal(&passphrase, &plain)?;
         let tmp = self.path.with_extension("tmp");
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(&sealed)?;
-        file.sync_all()?;
-        std::fs::rename(tmp, &self.path)?;
+        write_secret_file(&tmp, &sealed)?;
+        std::fs::rename(&tmp, &self.path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 }
@@ -155,13 +158,31 @@ fn read_or_create_keyfile(path: &Path) -> Result<Vec<u8>, VaultError> {
     }
     let mut bytes = [0_u8; 32];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    std::fs::write(path, bytes)?;
+    write_secret_file(path, &bytes)?;
+    Ok(bytes.to_vec())
+}
+
+fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
     }
-    Ok(bytes.to_vec())
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)?;
+    }
+    Ok(())
 }
 
 fn derive_stream_key(passphrase: &[u8], salt: &[u8; SALT_LEN]) -> [u8; 32] {
