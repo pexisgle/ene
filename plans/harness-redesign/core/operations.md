@@ -310,7 +310,7 @@ TX[
   [storage-model.md §3.1](storage-model.md#31-名前空間全集) の通り。
 - **委譲のメールボックス**は同じ機構の上に載る:
   子→親の wake/inject は親レーンの `pending.entry`、
-  親→子の instruct/answer は子の `delegation.inbox` レジスタ。
+  親→子の instruct/answer/`message` は子の `delegation.inbox` レジスタ。
   子の終端トランザクションが親レーンへの終端 wake を**同トランザクション**
   で書くため、報告が消える窓はない([delegation.md §8](delegation.md#8-耐久性))。
 

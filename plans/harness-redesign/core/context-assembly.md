@@ -7,6 +7,10 @@
 **Session History**(会話履歴)に分離する(opencode に倣う)。
 System Context は Context Source のレジストリから組み立てられ、
 Session History は [session-log.md](session-log.md) の投影から得られる。
+表層と裏層は同じ組立機構を使うが、載せる Source と履歴が違う
+([../product/vision.md](../product/vision.md#51-コアデーモン内の2層))。
+裏層は親の対話履歴を既定で含めず、委譲ブリーフ(goal+excerpt)を使う
+([delegation.md](delegation.md) §7)。
 
 ## 1. 責務と責務外
 

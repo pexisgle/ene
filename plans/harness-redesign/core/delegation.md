@@ -1,31 +1,40 @@
 # 委譲(非同期サブエージェント)
 
-> 実現する要件: **P-519**(非同期委譲と主従対話)、**P-521**(完了報告の対話化)、
-> **P-508**(秘匿サブエージェント)、P-504(job レーンの実体)、P-605(job の実体)。
+> 実現する要件: **P-519**(非同期委譲と層間対話)、**P-521**(完了報告の対話化)、
+> **P-508**(秘匿サブエージェント)、**P-522**(表層/裏層)、P-504(job レーンの実体)、P-605(job の実体)。
 > 参照: 一般的なハーネスの同期 subagent ではなく、**会話を止めない非同期委譲**を
 > Ene の既定とする。同期ツール結果を待つサブエージェントは持たない。
+> 層間の通信骨格は [Codex](https://github.com/openai/codex) multi-agent v2
+> (`NEW_TASK` / `MESSAGE` / `FINAL_ANSWER`)に倣う。
 
 ## 1. 位置づけ
 
-このアプリの対話レーンは**会話のために空けておく**。実作業(調べ物、
-文書作成、コード作業、長い計算)は、対話レーンの外で走る
-**委譲(delegation)** に移す。
+コンパニオンは表層 soul と裏層ハーネスの2層で1体である
+([../product/vision.md](../product/vision.md#51-コアデーモン内の2層))。
+この文書は、その**層間の実行面**を定義する。
 
-- **対話レーンは仲介層である**: 通常のハーネスに存在しない層として、
-  対話レーンのエージェントは「裏で走る LLM 群(委譲・記憶抽出・
+このアプリの対話レーン(表層)は**会話のために空けておく**。実作業(調べ物、
+文書作成、コード作業、長い計算)は、対話レーンの外で走る
+**委譲(delegation)** に移す。委譲の実行体が裏層ハーネスである。
+
+- **表層は仲介層である**: 通常のハーネスに存在しない層として、
+  表層のエージェントは「裏で走る LLM 群(委譲・記憶抽出・
   承認判断など)」と「ユーザーの要望」のあいだを仲介する。
-  子エージェントたちの仕事の束ね方・報告の伝え方・ユーザーへの
+  裏層の仕事の束ね方・報告の伝え方・ユーザーへの
   質問のまとめ方を管理し、ユーザーは常に1体のコンパニオンと
   話している体験を保つ(1つの声、[invariants.md](invariants.md) I-31)。
-- 親(対話レーンのエージェント)は委譲を**待たない**。
+- 表層は委譲を**待たない**。
   `delegate.*` ツールは受理確認+ハンドルを即座に返し、ターンは続く。
   **ブロッキング await は存在しない**。会話が同期点になることを
   許さないためである。「待っていて」は会話で扱う
   (「できたら言うね」が正解)。
-- 委譲の完了・質問・失敗は、親の対話レーンへの**メッセージ**として
-  届き、親がユーザーへの伝え方を決める(P-521)。
+- 委譲の完了・質問・失敗は、表層の対話レーンへの**層間メッセージ**として
+  届き、表層がユーザーへの伝え方を決める(P-521)。
 - job(P-605)と秘匿サブエージェント(P-508)は**同じ機構の2モード**
   である。UX の区別は維持する(§2)。
+- 表層と裏層は互いに進捗を確認できる(§4 の `status`、§5 の `message`)。
+  裏層は表層の対話履歴を既定では見ない(§7)。知るのは inbox に届いた
+  層間メッセージと、表層が選んだ excerpt だけである。
 
 ## 2. モードとユーザー可視性
 
@@ -36,6 +45,7 @@
 
 モードは委譲の開始時に決まり、途中で変えない。
 内部機構の非表示は [visibility.md](visibility.md) の規則に従う。
+以降の「親」は表層 soul、「子」は裏層の1委譲(1 job レーン)を指す。
 
 ## 3. ライフサイクル
 
@@ -53,14 +63,31 @@ created → running → completed
 - 進捗・成果物・キャンセルの UX は public モードのみ
   ([../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md))。
 
-## 4. 親 → 子(親モデルのツール)
+## 4. 層間エンベロープと表層 → 裏層
 
-親モデルには `delegate.*` ツール族が公開される。すべて**非同期**。
+層間メッセージは Codex multi-agent v2 の3種を骨格にする。
+ツール名は既存の `delegate.*` / `delegation.send` に載せる。
+
+| 種別 | Codex v2 | 方向 | inbox | 載せるツール |
+|---|---|---|---|---|
+| `task` | `NEW_TASK`(spawn) | 表層 → 裏層 | wake | `delegate.start` |
+| `task` | `NEW_TASK`(followup) | 表層 → 裏層 | wake | `delegate.instruct` |
+| `message` | `MESSAGE` | 表層 → 裏層 | **inject**(ターンを起こさない) | `delegate.message` |
+| `message` | `MESSAGE` | 裏層 → 表層 | inject | `delegation.send{progress\|artifact_ready}` |
+| `question` | — | 裏層 → 表層 | wake | `delegation.send{question}` |
+| `answer` | — | 表層 → 裏層 | wake | `delegate.answer` |
+| `final` | `FINAL_ANSWER` | 裏層 → 表層 | wake(終端) | `delegation.send{complete\|failed}` |
+| `cancel` | — | 表層 → 裏層 | wake | `delegate.cancel` |
+
+表層モデルには `delegate.*` ツール族が公開される。すべて**非同期**。
+副作用のある作業ツール(fs / exec / web / browser / 送信系)は表層には出さない
+([../tools/registry.md](../tools/registry.md) §3.1)。
 
 | ツール | 効果 | 返値 |
 |---|---|---|
-| `delegate.start(goal, mode, excerpt?, tools?, budget?)` | 委譲を作成し job レーンへ | `delegation_id`+受理確認 |
-| `delegate.instruct(id, message)` | 追加指示。子の inbox に `wake` で届く | 受理確認 |
+| `delegate.start(goal, mode, excerpt?, tools?, budget?)` | 委譲を作成し job レーンへ(`task`) | `delegation_id`+受理確認 |
+| `delegate.instruct(id, message)` | 追加指示。子の inbox に `wake` で届く(`task`) | 受理確認 |
+| `delegate.message(id, message)` | 補足・状況共有。子の inbox に **inject** で届く。子の実行中ターンを起こさず、次の claim で見える | 受理確認 |
 | `delegate.answer(id, question_id, answer)` | 子の質問への回答(§5) | 受理確認 |
 | `delegate.status(id)` | 状態・最新進捗・未回答質問の**読み取り**。子にメッセージは送らない | 状態スナップショット |
 | `delegate.cancel(id)` | 協調的キャンセル。確定済み成果は保持 | 受理確認 |
@@ -68,7 +95,11 @@ created → running → completed
 - `excerpt` は親が**自分で選んだ**関連文脈(会話の抜粋・記憶の要点)。
   子は親の対話履歴を既定では見ない(§7)。
 - `status` はレジスタ読み取りなので何度呼んでも安く、
-  「あれどうなってる?」に親が即答できる。
+  「あれどうなってる?」に表層が即答できる。裏層の progress `message` と
+  あわせて、両層が互いの進捗を確認する手段になる。
+- `instruct`(wake)と `message`(inject)を分ける。Codex v2 の
+  `followup_task` と `send_message` に対応する。急がない共有で
+  裏層の作業ターンを割らない。
 - キャンセルは**再試行安全**: 完了済みの委譲への cancel は
   `already_completed` を返し、取消済みへの再送は `cancelled` を返す
   ([lane-api.md](lane-api.md) の `cancelQueued` と同じ思想)。
@@ -76,16 +107,16 @@ created → running → completed
 
 ## 5. 子 → 親(メールボックス)
 
-子は `delegation.send` 内部ツールで親へメッセージを送る。
+裏層は `delegation.send` 内部ツールで表層へメッセージを送る。
 種別と配送:
 
-| 種別 | 親 inbox での扱い | 用途 |
-|---|---|---|
-| `progress` | **inject**(待機。ターンを起こさない) | 進捗・中間所感。`delegation.status` Source を更新し、親は次ターン境界で自然に知る |
-| `question` | **wake** | 親の判断が欲しい質問。`delegation.pending_question` に予約され、回答か取下げまで子は待つか自立判断する(§9)。複数同時可 |
-| `artifact_ready` | inject | 成果物の中間交付(親が先に確認できる) |
-| `complete` | **wake**(終端) | 完了報告。結果要約+成果物参照 |
-| `failed` | **wake**(終端) | 失敗報告。error_class+どこまで出来たか |
+| 種別 | エンベロープ | 親 inbox での扱い | 用途 |
+|---|---|---|---|
+| `progress` | `message` | **inject**(待機。ターンを起こさない) | 進捗・中間所感。`delegation.status` Source を更新し、親は次ターン境界で自然に知る |
+| `question` | `question` | **wake** | 親の判断が欲しい質問。`delegation.pending_question` に予約され、回答か取下げまで子は待つか自立判断する(§9)。複数同時可 |
+| `artifact_ready` | `message` | inject | 成果物の中間交付(親が先に確認できる) |
+| `complete` | `final` | **wake**(終端) | 完了報告。結果要約+成果物参照 |
+| `failed` | `final` | **wake**(終端) | 失敗報告。error_class+どこまで出来たか |
 
 - 親への配送実体は、親の対話レーンの inbox への
   `pending.entry` 書き込み([operations.md §7](operations.md#7-inbox-とキューの耐久化))。
@@ -150,8 +181,10 @@ created → running → completed
 - **メールボックスの耐久化**:
   - 子→親の wake/inject は、親レーンの `pending.entry`
     (1項目=予約 entry id)。クラッシュしても失われない。
-  - 親→子の instruct/answer は、子レーンの
-    `delegation.inbox` レジスタに届き、子の次 claim で消費される。
+- 親→子の instruct/answer は、子レーンの
+  `delegation.inbox` レジスタに届き、子の次 claim で消費される。
+  `delegate.message` も同じレジスタへ **inject** として書き、
+  wake にはしない。
 - **終端の原子性**: 子の終端トランザクションは
   「子の turn/end + 子セッションの `delegation/end` +
   親レーンへの終端 wake(pending.entry)+ 進捗レジスタの掃除」を

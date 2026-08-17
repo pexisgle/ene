@@ -61,8 +61,8 @@ created → queued → running → completed
 
 ### 開始経路
 
-1. **対話からの依頼**: モデルが `delegate.start(goal, mode: public)` を
-   呼ぶ([../core/delegation.md §4](../core/delegation.md#4-親--子親モデルのツール))。
+1. **対話からの依頼**: 表層モデルが `delegate.start(goal, mode: public)` を
+   呼ぶ([../core/delegation.md §4](../core/delegation.md#4-層間エンベロープと表層--裏層))。
    「引き受けた」発話の後、裏で走る。job 定義(title 等)は
    親が同じ呼び出しで決める。
 2. **スケジュールの発火**(§4): `scheduled` origin のターンが job を生む。
@@ -71,7 +71,7 @@ created → queued → running → completed
 ### キャンセルと中断
 
 - `delegate.cancel`(UI では「おつかいの中止」): 進行中のターン列を
-  停止(協調的キャンセル、[../core/delegation.md §4](../core/delegation.md#4-親--子親モデルのツール))。
+  停止(協調的キャンセル、[../core/delegation.md §4](../core/delegation.md#4-層間エンベロープと表層--裏層))。
   中間成果物は保持し、`cancelled` で確定。
 - アプリ終了時は `queued`/`running` の job を永続化し、
   次回起動で `queued` から再開する(running 中のターンは破棄して再実行)。

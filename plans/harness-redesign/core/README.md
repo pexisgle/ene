@@ -1,6 +1,9 @@
 # core/ — ハーネスカーネル
 
 エージェントハーネスの中核。11文書が3つの層を成す。
+ここは**インフラ**(両層が共有するカーネル)であり、コンパニオンの
+**裏層ハーネス**(作業エージェント)そのものではない。2層の位置づけは
+[../product/vision.md](../product/vision.md#51-コアデーモン内の2層)。
 
 **語彙・振る舞いの層**(何が記録され、どう回るか):
 
@@ -9,7 +12,7 @@
 | [session-log.md](session-log.md) | イベント語彙・SQLite 永続化・投影・fork・不変条件 | P-501, P-502, P-108..P-110 |
 | [context-assembly.md](context-assembly.md) | Context Source・epoch・途中システムメッセージ・compaction(+prune)・spill | P-505..P-507, P-614 |
 | [agent-loop.md](agent-loop.md) | turn/step 状態機械・レーン・割り込み・guard・plan/ask-user | P-503, P-504, P-509..P-512 |
-| [delegation.md](delegation.md) | 非同期委譲(サブエージェント/job の統一機構)・親↔子対話・報告ターン | P-519, P-521, P-508 |
+| [delegation.md](delegation.md) | 表層↔裏層の非同期委譲・層間メッセージ・報告ターン | P-519, P-521, P-508, P-522 |
 | [visibility.md](visibility.md) | 出力秘匿モデル(チャネル分類・thinking・UI 投影規則) | P-520, P-613 |
 
 **耐久性の層**(クラッシュしても壊れず、再開できるか):
@@ -48,8 +51,11 @@
 
 ## このアプリの委譲と秘匿の立場
 
-- 実作業は**非同期委譲**に移す。対話レーンは会話のために空ける
-  (delegation.md)。同期ツール結果を待つサブエージェントは持たない。
+- ユーザー入力は**表層 soul**だけが受ける。実作業は**裏層ハーネス**への
+  非同期委譲に移す。対話レーンは会話のために空ける(delegation.md)。
+  同期ツール結果を待つサブエージェントは持たない。
+- 表層の公開ツール面は、層間メッセージとコンパニオン局所能力に限る。
+  副作用のある作業ツールは裏層にだけ公開する(P-522)。
 - LLM の生出力(thinking・ツール引数・生出し・子セッション)は
   **ユーザーに見せないのが既定**。見えるのは発話・内面・要約・成果物
   (visibility.md)。
@@ -58,6 +64,7 @@
 
 ## 他フォルダとの接点
 
+- 2層ランタイム(表層 soul / 裏層ハーネス) → [../product/vision.md](../product/vision.md#51-コアデーモン内の2層)
 - ツール実行パイプライン → [../tools/registry.md](../tools/registry.md)
 - job のユーザー向け定義 → [../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md)
 - プラグイン輸送 → [../plugins/ipc.md](../plugins/ipc.md)

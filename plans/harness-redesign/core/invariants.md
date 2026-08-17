@@ -54,7 +54,7 @@
 | I-28 | **prune の計画性**: 刈り込まれる `tool/result` は必ず `preparation.prune_plan` に事前記録され、計画にないものは刈り込まれない。本体は spill ストアに存在し続ける | 刈り込み前後の spill 参照一致検証([context-assembly.md §7](context-assembly.md#7-compactionp-506)) |
 | I-29 | **出力秘匿**: ユーザー可視チャネル(UI 投影・ライブバス・エクスポート既定)に thinking・ツール引数原文・ツール生出し・子セッションのコンテンツは1件も出ない([visibility.md §2](visibility.md#2-チャネル分類全体表)) | 投影走査テスト(visibility.md §6)。internal 委譲の存在を示すイベントがユーザー可視チャネルに出ないことを含む |
 | I-30 | **委譲の終端原子性**: 子の終端トランザクションは「子の turn/end + 子セッションの delegation/end + 親レーンへの終端 wake」を1コミットで書く([delegation.md §8](delegation.md#8-耐久性)) | 終端前後の全クラッシュ位置で pending.entry の排他性を検証(階層 A) |
-| I-31 | **1つの声**: ユーザーに向けた発話(assistant/message on 対話レーン)は対話レーンのみが発生させる。子エージェントの出力が発話チャネルに直接出る経路は存在しない | 発話イベントの lane 検証 |
+| I-31 | **1つの声**: ユーザーに向けた発話(assistant/message on 対話レーン)は表層の対話レーンのみが発生させる。裏層・子エージェントの出力が発話チャネルに直接出る経路は存在しない | 発話イベントの lane 検証 |
 | I-32 | **thinking の記録**: プロバイダが返した thinking は必ず `assistant/thinking` として記録される(表示の有無とは独立)。記録なしに破棄する経路はない([visibility.md §3](visibility.md#3-thinking-の扱い)) | プロバイダストリームのキャプチャとログの照合テスト |
 | I-33 | **再帰の秘匿連鎖**: internal 委譲の孫以降も常に internal。internal の子孫を示すイベントがユーザー可視チャネルに出ない([delegation.md §7](delegation.md#7-子のコンテキストと実行)) | internal 秘匿テストを孫委譲込みで検証(visibility.md §6) |
 

@@ -22,7 +22,7 @@
 4. プロファイルの合成(plugins/manifest-and-profile.md §2)
 5. プラグイン監督の起動 → 各行の spawn+ネゴシエーション
 6. プロバイダ seam の確定(ai.tasks.* の解決)
-7. soul のロード(companions.db)→ レーン/ループの準備
+7. soul のロード(companions.db)→ 表層(対話レーン)と裏層(job レーン)の準備
 8. HTTP/WS サーバーの bind(server-api.md)
 9. 準備完了の通知(desktop への ready イベント)
 ```
@@ -38,7 +38,7 @@ Tokio のアクター構成(現行 ene-runtime の方式を発展)。
 |---|---|---|
 | コマンド受付 | クライアント API の受付・検証 | あり |
 | セッションライター | ログの単一書き込み([core/session-log.md §4](../core/session-log.md)) | あり |
-| soul ループ × N | soul ごとにターン/ステップ駆動([core/agent-loop.md](../core/agent-loop.md)) | あり |
+| soul ループ × N | コンパニオンごとに表層/裏層のターン/ステップ駆動([core/agent-loop.md](../core/agent-loop.md)) | あり |
 | ツールディスパッチ | レジストリ照合・パイプライン駆動 | あり |
 | プラグイン監督 | spawn/ヘルス/再起動/サーキットブレーカー | あり |
 | Broker | 資源仲介([plugins/broker.md](../plugins/broker.md)) | あり |
