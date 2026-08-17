@@ -2636,6 +2636,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-body"
+version = "0.1.0"
+dependencies = [
+ "ene-config",
+ "ene-session",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "ene-card"
 version = "0.1.0"
 dependencies = [
@@ -2784,6 +2798,7 @@ name = "ene-daemon"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ene-body",
  "ene-companion",
  "ene-config",
  "ene-fiber",

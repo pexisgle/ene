@@ -162,6 +162,7 @@ ene-registry = { path = "crates/ene-registry" }
 ene-fiber = { path = "crates/ene-fiber" }
 ene-plane = { path = "crates/ene-plane" }
 ene-companion = { path = "crates/ene-companion" }
+ene-body = { path = "crates/ene-body" }
 ene-rag = { path = "crates/ene-rag" }
 ene-runtime = { path = "crates/ene-runtime" }
 ene-sandbox = { path = "crates/ene-sandbox" }

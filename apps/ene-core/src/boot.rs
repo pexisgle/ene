@@ -2,6 +2,10 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ene_body::{
+    BodyCatalog, BodyError, BodySettings, EmotionCue, PerformanceBus, Stage, VoiceRuntime,
+    VoiceSettings,
+};
 use ene_companion::{
     CompanionRuntime, CompanionStore, MindSettings as CompanionMind, register_memory_tools,
 };
@@ -51,6 +55,8 @@ pub enum CoreError {
     Vault(#[from] ene_plane::VaultError),
     #[error(transparent)]
     Companion(#[from] ene_companion::CompanionError),
+    #[error(transparent)]
+    Body(#[from] BodyError),
     #[error("another ene-core instance holds the data-directory lock at {0}")]
     AlreadyRunning(String),
 }
@@ -66,6 +72,7 @@ pub struct CoreDaemon {
     vault: Vault,
     companions: Arc<CompanionStore>,
     companion: CompanionRuntime,
+    stage: Arc<Stage>,
 }
 
 impl CoreDaemon {
@@ -98,6 +105,12 @@ impl CoreDaemon {
         let companions = Arc::new(CompanionStore::open(opts.data_dir.join("companions.db"))?);
         register_memory_tools(&registry, Arc::clone(&companions));
         let companion = CompanionRuntime::new(Arc::clone(&companions), CompanionMind::default());
+        let bus = Arc::new(PerformanceBus::default());
+        let stage = Arc::new(Stage::new(
+            bus,
+            VoiceRuntime::scripted(VoiceSettings::default()),
+            BodySettings::default(),
+        ));
         let supervisor = Arc::new(Supervisor::new(opts.data_dir.clone(), registry));
         Ok(Self {
             data_dir: opts.data_dir,
@@ -109,6 +122,7 @@ impl CoreDaemon {
             vault,
             companions,
             companion,
+            stage,
         })
     }
 
@@ -150,6 +164,31 @@ impl CoreDaemon {
     #[must_use]
     pub fn companion(&self) -> &CompanionRuntime {
         &self.companion
+    }
+
+    #[must_use]
+    pub fn stage(&self) -> Arc<Stage> {
+        Arc::clone(&self.stage)
+    }
+
+    /// Bind a soul to a body (or text-only) and map affect onto the bus (D-19).
+    pub fn present_companion(
+        &self,
+        soul: ene_session::SoulId,
+        body: Option<ene_session::BodyId>,
+        catalog: BodyCatalog,
+    ) -> Result<(), CoreError> {
+        self.stage.present(soul, body, catalog)?;
+        Ok(())
+    }
+
+    pub fn apply_body_emotion(
+        &self,
+        soul: ene_session::SoulId,
+        cue: &EmotionCue,
+    ) -> Result<(), CoreError> {
+        self.stage.apply_emotion(soul, cue)?;
+        Ok(())
     }
 
     /// Note injected into the next surface turn (D-13). `None` when nothing was interrupted.

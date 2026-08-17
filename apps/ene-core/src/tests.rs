@@ -192,6 +192,33 @@ async fn boot_opens_companions_db() {
 }
 
 #[tokio::test]
+async fn boot_stage_maps_emotion_without_a_rendered_body() {
+    let dir = TempDir::new().unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    let soul = core
+        .companions()
+        .create_soul(&ene_companion::NewSoul::text_only("char.boot@1"))
+        .unwrap();
+    core.present_companion(soul.id, None, ene_body::BodyCatalog::text_default())
+        .unwrap();
+    core.apply_body_emotion(
+        soul.id,
+        &ene_body::EmotionCue {
+            label: "happy".into(),
+            intensity: 0.7,
+        },
+    )
+    .unwrap();
+    let cmds = core.stage().bus().drain(soul.id).unwrap();
+    assert!(matches!(
+        cmds[0],
+        ene_body::PerformanceCommand::Expression { ref label, .. } if label == "happy"
+    ));
+}
+
+#[tokio::test]
 async fn boot_installs_approval_plane_and_vault() {
     let dir = TempDir::new().unwrap();
     let core = CoreDaemon::boot(BootOptions::new(dir.path()))
