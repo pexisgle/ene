@@ -159,6 +159,7 @@ impl Supervisor {
             row_id: &row.row_id,
             sandbox_required: row.sandbox_required,
             temp_dir: &self.workspace.join("plugin-tmp").join(&row.row_id),
+            workspace: &self.workspace,
         })
         .await
         {

@@ -24,6 +24,7 @@ pub(crate) struct SpawnOpts<'a> {
     pub row_id: &'a str,
     pub sandbox_required: bool,
     pub temp_dir: &'a Path,
+    pub workspace: &'a Path,
 }
 
 pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, SupervisorError> {
@@ -115,10 +116,11 @@ fn sandbox_for(opts: &SpawnOpts<'_>) -> Result<Option<SandboxSpec>, SupervisorEr
         opts.binary,
         opts.socket_dir,
         opts.temp_dir,
+        opts.workspace,
     )))
 }
 
-fn build_spec(binary: &Path, socket_dir: &Path, temp_dir: &Path) -> SandboxSpec {
+fn build_spec(binary: &Path, socket_dir: &Path, temp_dir: &Path, workspace: &Path) -> SandboxSpec {
     let mut allowed_read = Vec::new();
     let mut allowed_write = Vec::new();
     #[cfg(target_os = "linux")]
@@ -131,6 +133,7 @@ fn build_spec(binary: &Path, socket_dir: &Path, temp_dir: &Path) -> SandboxSpec 
     }
     allowed_read.push(socket_dir.to_path_buf());
     allowed_read.push(temp_dir.to_path_buf());
+    allowed_read.push(workspace.to_path_buf());
     allowed_write.push(socket_dir.to_path_buf());
     allowed_write.push(temp_dir.to_path_buf());
     if let Some(parent) = binary.parent() {
