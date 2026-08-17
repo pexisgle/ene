@@ -1,0 +1,33 @@
+[package]
+name = "ene-daemon"
+version.workspace = true
+edition.workspace = true
+description = "Core daemon (ene-core): session store, dialogue lane, exclusive data-dir lock"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ene_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ene-core"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+ene-config = { workspace = true }
+ene-kernel = { workspace = true }
+ene-session = { workspace = true }
+fs2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

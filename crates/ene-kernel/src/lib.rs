@@ -1,0 +1,35 @@
+//! Dialogue-lane kernel: one session, one running turn, model-visible = logged.
+
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "tests may fail fast"
+    )
+)]
+#![deny(unsafe_code)]
+
+mod config;
+mod context;
+mod error;
+mod lane;
+mod live;
+mod model;
+mod observe;
+
+pub use config::{CoreSettings, HarnessSettings, MindSettings};
+pub use context::{ContextRegistry, format_recovery_note};
+pub use error::{CancelQueued, KernelError, RunOutcome};
+pub use lane::{LaneHandle, LaneOptions};
+pub use live::{LiveBus, LiveEvent, LiveSubscription};
+pub use model::{ConversationModel, EchoModel, ModelGeneration, ModelRequest};
+pub use observe::{ObserveHandle, Span, SpanGuard, SpanRing, spans_leak_content};
+
+pub use ene_session::{
+    DisplayDepth, EventKind, EventPayload, ProjectOptions, ProjectedHistory, RecoveryReport,
+    SessionId, SessionStore, SoulId, TurnId, derive_messages, hash_model_visible, hash_projected,
+};
+
+#[cfg(test)]
+mod tests;
