@@ -58,6 +58,14 @@ struct ManifestFile {
     contents: Option<ContentsMeta>,
     integrity: Option<IntegrityMeta>,
     license: Option<LicenseMeta>,
+    #[serde(default)]
+    locales: BTreeMap<String, LocaleFields>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct LocaleFields {
+    #[serde(default)]
+    display_name: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -296,6 +304,30 @@ pub fn soul_from_install(
         skill_refs: skills,
         affect_baseline: baseline,
     })
+}
+
+/// User-facing package name for `locale` (`en-US` / `ja`), falling back to the manifest default.
+#[must_use]
+pub fn localized_display_name(files: &BTreeMap<String, Vec<u8>>, locale: &str) -> String {
+    let i18n_key = format!("i18n/{locale}.toml");
+    if let Some(bytes) = files.get(&i18n_key)
+        && let Ok(parsed) = toml::from_str::<LocaleFields>(&String::from_utf8_lossy(bytes))
+        && !parsed.display_name.is_empty()
+    {
+        return parsed.display_name;
+    }
+    let Some(bytes) = files.get("manifest.toml") else {
+        return String::new();
+    };
+    let Ok(manifest) = toml::from_str::<ManifestFile>(&String::from_utf8_lossy(bytes)) else {
+        return String::new();
+    };
+    if let Some(localized) = manifest.locales.get(locale)
+        && !localized.display_name.is_empty()
+    {
+        return localized.display_name.clone();
+    }
+    manifest.package.display_name
 }
 
 /// Bind an installed soul package to an installed body package (P-402 / P-8xx).

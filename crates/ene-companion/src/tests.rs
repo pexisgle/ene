@@ -4,8 +4,8 @@ use crate::affect::{
 };
 use crate::classify::ScriptedClassify;
 use crate::config::{AffectSettings, MindSettings, ProactiveSettings};
-use crate::inner::{model_visible_for, split_surface_and_inner};
 use crate::ids::CandidateId;
+use crate::inner::{model_visible_for, split_surface_and_inner};
 use crate::memory::{
     ArbitrateOutcome, MemoryCandidate, MemoryKind, MemoryScope, MemorySource, NewMemory, arbitrate,
     extract_turn,
@@ -739,8 +739,8 @@ fn package_localizes_display_name_en_us_and_ja() {
     let dir = TempDir::new().unwrap();
     let store = CompanionStore::open(dir.path().join("companions.db")).unwrap();
     let zip = pack_archive(&stamp_digest(files)).unwrap();
-    let installed = install_archive(&store, &dir.path().join("characters"), &zip, 10_000_000)
-        .unwrap();
+    let installed =
+        install_archive(&store, &dir.path().join("characters"), &zip, 10_000_000).unwrap();
     assert!(installed.path.join("i18n/ja.toml").is_file());
     assert!(installed.path.join("i18n/en-US.toml").is_file());
 }
