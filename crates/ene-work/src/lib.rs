@@ -32,13 +32,13 @@ pub use skill::{
 };
 pub use speech_gate::SpeechGate;
 pub use spill::{
-    bound_brief, spill_tool_output, DEFAULT_HARD_LIMIT_BYTES, DEFAULT_SOFT_LIMIT_BYTES, SpillResult,
+    DEFAULT_HARD_LIMIT_BYTES, DEFAULT_SOFT_LIMIT_BYTES, SpillResult, bound_brief, spill_tool_output,
 };
 pub use store::{MailboxEntry, WorkStore, next_fire};
 pub use tools::{register_work_tools, surface_shows_delegate};
 pub use types::{
-    Artifact, ArtifactKind, CombinedQuestionTurn, CompanionReport, DelegationMode, Job,
-    JobStatus, NewJob, NewSchedule, OpenQuestion, Schedule, ScheduleAction, UpgradeReason,
+    Artifact, ArtifactKind, CombinedQuestionTurn, CompanionReport, DelegationMode, Job, JobStatus,
+    NewJob, NewSchedule, OpenQuestion, Schedule, ScheduleAction, UpgradeReason,
     WorkDelegationSettings,
 };
 pub use vision::{

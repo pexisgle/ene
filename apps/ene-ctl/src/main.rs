@@ -124,6 +124,10 @@ enum SessionCmd {
     Split {
         id: String,
     },
+    /// End a session (explicit; idle timeout is server-side)
+    End {
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -244,6 +248,16 @@ async fn run_api(client: &ApiClient, args: &Args) -> Result<(), ene_api::ApiErro
                 print_json(&session::search_sessions(client, query).await?)?;
             }
             SessionCmd::Split { id } => print_json(&session::split_session(client, id).await?)?,
+            SessionCmd::End { id } => print_json(
+                &client
+                    .end_session(
+                        id,
+                        &ene_api::EndSessionRequest {
+                            reason: "explicit".to_owned(),
+                        },
+                    )
+                    .await?,
+            )?,
         },
         Cmd::Task { op } => match op {
             TaskCmd::List => print_json(&client.list_jobs(None).await?)?,

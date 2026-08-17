@@ -117,10 +117,7 @@ mod tests {
 
     #[test]
     fn write_glb_round_trip() {
-        let path = std::env::temp_dir().join(format!(
-            "ene_vrm_minimal_{}.vrm",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("ene_vrm_minimal_{}.vrm", std::process::id()));
         write_glb(&path).expect("write");
         let bytes = std::fs::read(&path).expect("read");
         let gltf = gltf::Gltf::from_slice(&bytes).expect("parse");
@@ -138,10 +135,8 @@ mod tests {
             return;
         };
 
-        let path = std::env::temp_dir().join(format!(
-            "ene_vrm_minimal_load_{}.vrm",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ene_vrm_minimal_load_{}.vrm", std::process::id()));
         write_glb(&path).expect("write");
         let model = load_vrm(&path, &device, &queue).expect("load_vrm");
         assert!(!model.meshes.is_empty());

@@ -2,11 +2,7 @@
 
 #![cfg_attr(
     test,
-    expect(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        reason = "tests fail fast"
-    )
+    expect(clippy::unwrap_used, clippy::expect_used, reason = "tests fail fast")
 )]
 #![deny(unsafe_code)]
 

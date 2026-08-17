@@ -13,13 +13,11 @@ pub async fn search_sessions(
     }
 }
 
-pub async fn split_session(client: &ApiClient, id: &str) -> Result<SessionView, ApiError> {
-    send_json(
-        client
-            .request(Method::POST, &format!("/api/v1/sessions/{id}/split"))
-            .json(&serde_json::json!({})),
-    )
-    .await
+pub async fn split_session(
+    client: &ApiClient,
+    id: &str,
+) -> Result<ene_api::SplitSessionResponse, ApiError> {
+    client.split_session(id).await
 }
 
 async fn search_sessions_api(
@@ -127,6 +125,8 @@ mod tests {
             created_at: "now".to_owned(),
             archived: false,
             next_seq: 0,
+            ended_at: None,
+            end_reason: None,
         }
     }
 

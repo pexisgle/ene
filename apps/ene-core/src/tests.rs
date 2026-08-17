@@ -249,6 +249,7 @@ async fn boot_reports_interrupted_job_without_resume() {
                 plan: None,
                 created_from_turn: None,
                 depth: 0,
+                parent_id: None,
             })
             .unwrap();
         store

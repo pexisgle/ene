@@ -14,13 +14,24 @@ use std::path::PathBuf;
 use eframe::egui::ViewportBuilder;
 use stage_app::StageApp;
 
+fn default_minimal_vrm() -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join("ene-stage-vrm");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("minimal.vrm");
+    if !path.is_file() {
+        ene_vrm::minimal::write_glb(&path).ok()?;
+    }
+    Some(path)
+}
+
 fn main() {
     let text_only = std::env::var("ENE_STAGE_TEXT_ONLY")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     let vrm_path = std::env::var("ENE_VRM_PATH")
         .ok()
         .filter(|p| !p.is_empty())
-        .map(PathBuf::from);
+        .map(PathBuf::from)
+        .or_else(default_minimal_vrm);
     let native = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_title("ene stage")
@@ -60,6 +71,14 @@ mod tests {
         assert!(surface_event_allowed(
             &json!({"type": "text.delta", "text": "hi"})
         ));
+    }
+
+    #[test]
+    fn default_minimal_vrm_writes_parseable_glb() {
+        let path = super::default_minimal_vrm().expect("fixture");
+        let bytes = std::fs::read(&path).expect("read");
+        assert!(bytes.starts_with(b"glTF"));
+        assert!(bytes.len() > 12);
     }
 
     #[test]

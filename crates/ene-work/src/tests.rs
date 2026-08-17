@@ -788,13 +788,20 @@ fn combined_child_questions_merge_and_route_answers() {
     assert!(combined.speech.contains("which city?"));
     assert!(combined.speech.contains("how many days?"));
     assert_eq!(combined.questions.len(), 2);
-    host
-        .apply_combined_answers(&combined, &["Tokyo".into(), "3".into()])
+    host.apply_combined_answers(&combined, &["Tokyo".into(), "3".into()])
         .unwrap();
     assert!(host.open_questions(job.id).unwrap().is_empty());
     let mailbox = host.store().mailbox(job.id).unwrap();
-    assert!(mailbox.iter().any(|(_, kind, body)| kind == "answer" && body == "Tokyo"));
-    assert!(mailbox.iter().any(|(_, kind, body)| kind == "answer" && body == "3"));
+    assert!(
+        mailbox
+            .iter()
+            .any(|(_, kind, body)| kind == "answer" && body == "Tokyo")
+    );
+    assert!(
+        mailbox
+            .iter()
+            .any(|(_, kind, body)| kind == "answer" && body == "3")
+    );
 }
 
 #[test]
@@ -906,7 +913,9 @@ fn user_facing_strings_say_task_not_job() {
     assert!(fail.speech.contains("the task failed"));
     assert!(!fail.speech.contains("the job failed"));
     let running = public_start(&host, soul, "another");
-    store.set_status(running.id, JobStatus::Running, None).unwrap();
+    store
+        .set_status(running.id, JobStatus::Running, None)
+        .unwrap();
     let reports = host.recover_interrupted().unwrap();
     assert_eq!(reports.len(), 1);
     assert!(reports[0].speech.contains("the task"));

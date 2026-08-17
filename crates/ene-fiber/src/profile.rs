@@ -101,10 +101,7 @@ fn dfs_cycle(
     found
 }
 
-pub(crate) fn missing_requires(
-    row: &ProfileRow,
-    active_provides: &HashSet<String>,
-) -> Vec<String> {
+pub(crate) fn missing_requires(row: &ProfileRow, active_provides: &HashSet<String>) -> Vec<String> {
     row.requires
         .iter()
         .filter(|req| !active_provides.contains(*req))
@@ -126,6 +123,15 @@ pub(crate) fn waiting_fiber(row: &ProfileRow, reason: impl Into<String>) -> Fibe
     fiber.sandbox_required = row.sandbox_required;
     fiber.state = FiberState::Waiting;
     fiber.wait_reason = Some(reason.into());
+    fiber
+}
+
+pub(crate) fn inactive_cycle_fiber(row: &ProfileRow) -> Fiber {
+    let mut fiber = Fiber::new(&row.row_id, &row.plugin);
+    fiber.requires.clone_from(&row.requires);
+    fiber.sandbox_required = row.sandbox_required;
+    fiber.state = FiberState::Inactive;
+    fiber.wait_reason = Some("circular requires".to_owned());
     fiber
 }
 

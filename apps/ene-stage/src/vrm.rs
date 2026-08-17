@@ -45,7 +45,7 @@ impl VrmPane {
             return;
         }
         let Some(path) = vrm_path else {
-            self.load_error = Some("no VRM path (set ENE_VRM_PATH)".to_owned());
+            self.load_error = Some("no VRM path".to_owned());
             return;
         };
         match load_vrm(&path, device, queue) {

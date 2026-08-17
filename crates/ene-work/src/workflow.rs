@@ -44,10 +44,7 @@ pub fn deliver_bookmark_workflow(
         delivered: false,
     })?;
     host.store().deliver(&artifact.id)?;
-    let delivered = host
-        .store()
-        .get_artifact(&artifact.id)?
-        .unwrap_or(artifact);
+    let delivered = host.store().get_artifact(&artifact.id)?.unwrap_or(artifact);
     let report = host.complete(job_id, &format!("bookmark ready: {title}"))?;
     Ok((delivered, report))
 }

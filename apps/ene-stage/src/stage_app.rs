@@ -4,7 +4,7 @@ use std::sync::mpsc::Receiver;
 use eframe::egui::{self, ViewportBuilder, ViewportId};
 use ene_api::{
     ApiClient, CreateSessionRequest, JobView, MemoryView, MessageMode, MessageRequest, SoulPatch,
-    SoulView,
+    SoulView, StageView,
 };
 use serde_json::Value;
 
@@ -149,11 +149,12 @@ impl StageApp {
         match self.runtime.block_on(async move {
             let health = client.health().await?;
             let souls = client.list_souls().await?;
-            Ok::<_, ene_api::ApiError>((health, souls))
+            let stage = client.stage().await?;
+            Ok::<_, ene_api::ApiError>((health, souls, stage))
         }) {
-            Ok((health, souls)) => {
+            Ok((health, souls, stage)) => {
                 self.bind_label = health.bind;
-                self.bootstrap_companions(&souls.items);
+                self.bootstrap_companions(&souls.items, &stage);
                 self.refresh_detail_for_selected();
                 self.start_ws_if_needed();
             }
@@ -161,8 +162,19 @@ impl StageApp {
         }
     }
 
-    fn bootstrap_companions(&mut self, souls: &[SoulView]) {
-        let mut soul_ids: Vec<String> = souls.iter().map(|s| s.id.clone()).collect();
+    fn bootstrap_companions(&mut self, souls: &[SoulView], stage: &StageView) {
+        let mut soul_ids: Vec<String> = stage
+            .occupants
+            .iter()
+            .map(|occupant| occupant.soul_id.clone())
+            .collect();
+        if soul_ids.len() < 2 {
+            for soul in souls {
+                if !soul_ids.contains(&soul.id) {
+                    soul_ids.push(soul.id.clone());
+                }
+            }
+        }
         while soul_ids.len() < 2 {
             soul_ids.push(uuid::Uuid::new_v4().to_string());
         }
@@ -399,17 +411,22 @@ impl StageApp {
     fn refresh_soul_pad(&mut self, soul_id: &str) {
         let client = self.client.clone();
         let soul = soul_id.to_owned();
-        if let Ok(soul_view) = self
+        let affect = self
             .runtime
-            .block_on(async move { client.get_soul(&soul).await })
-            && let Some(pane_idx) = self.companions.iter().position(|c| c.soul_id == soul_id)
-        {
-            let pane = &mut self.companions[pane_idx];
-            pane.pad.mood_label.clone_from(&soul_view.mood_label);
-            pane.body_ref = soul_view.body_ref;
-            pane.expression.clone_from(&soul_view.mood_label);
-            self.sync_vrm_labels(pane_idx);
-        }
+            .block_on(async move { client.soul_affect(&soul).await });
+        let Ok(affect) = affect else {
+            return;
+        };
+        let Some(pane_idx) = self.companions.iter().position(|c| c.soul_id == soul_id) else {
+            return;
+        };
+        let pane = &mut self.companions[pane_idx];
+        pane.pad.valence = Some(affect.valence);
+        pane.pad.arousal = Some(affect.arousal);
+        pane.pad.dominance = Some(affect.dominance);
+        pane.pad.mood_label.clone_from(&affect.mood_label);
+        pane.expression.clone_from(&affect.mood_label);
+        self.sync_vrm_labels(pane_idx);
     }
 
     fn send(&mut self) {
@@ -430,6 +447,7 @@ impl StageApp {
                     &MessageRequest {
                         text: text.clone(),
                         mode: MessageMode::Prompt,
+                        input_modality: None,
                     },
                     None,
                 )

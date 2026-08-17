@@ -115,9 +115,7 @@ fn script_interpreter(path: &Path) -> Option<String> {
         return None;
     }
     let mut shebang = String::new();
-    file.take(256)
-        .read_to_string(&mut shebang)
-        .ok()?;
+    file.take(256).read_to_string(&mut shebang).ok()?;
     let line = shebang.lines().next()?;
     let interpreter = line.trim_start_matches('#').trim_start_matches('!');
     let program = interpreter.split_whitespace().next()?;
@@ -196,7 +194,9 @@ fn apply_sandbox(command: &mut Command, spec: Option<&SandboxSpec>) -> Result<()
 
 #[must_use]
 pub fn discover_plugin_bin(stem: &str) -> Option<PathBuf> {
-    plugin_candidates(stem).into_iter().find(|path| path.is_file())
+    plugin_candidates(stem)
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 /// Resolve a profile plugin id to an executable path (native binary or script).
@@ -214,7 +214,9 @@ pub fn discover_plugin_executable(plugin: &str) -> Option<PathBuf> {
 
 #[must_use]
 pub fn discover_plugin_script(name: &str) -> Option<PathBuf> {
-    plugin_candidates(name).into_iter().find(|path| path.is_file())
+    plugin_candidates(name)
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 fn plugin_candidates(stem: &str) -> Vec<PathBuf> {

@@ -378,14 +378,17 @@ fn web_ui_cannot_mutate_memory_or_settings() {
     let html = include_str!("../web/index.html");
     assert!(html.contains("/api/v1/souls/"));
     assert!(html.contains("memories"));
+    assert!(html.contains("/affect"));
     assert!(
         !html.contains("method: \"PATCH\"") && !html.contains("method: \"DELETE\""),
         "Web UI must not PATCH/DELETE (settings and memory mutation stay off the Web client)"
     );
-    let stage = include_str!("../../ene-stage/src/main.rs");
-    assert!(stage.contains("eframe"));
-    assert!(stage.contains("show_viewport_immediate"));
-    assert!(!stage.to_ascii_lowercase().contains("webview"));
+    let stage_main = include_str!("../../ene-stage/src/main.rs");
+    let stage_app = include_str!("../../ene-stage/src/stage_app.rs");
+    assert!(stage_main.contains("eframe"));
+    assert!(stage_app.contains("show_viewport_immediate"));
+    assert!(!stage_main.to_ascii_lowercase().contains("webview"));
+    assert!(!stage_app.to_ascii_lowercase().contains("webview"));
 }
 
 #[tokio::test]

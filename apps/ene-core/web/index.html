@@ -98,6 +98,8 @@
       log(detail, "memories " + JSON.stringify(memories.items));
       const jobs = await api("/api/v1/jobs", { headers: headers() });
       log(detail, "tasks " + JSON.stringify(jobs.items));
+      const affect = await api("/api/v1/souls/" + soulId + "/affect", { headers: headers() });
+      log(detail, "pad " + JSON.stringify(affect));
     })().catch((err) => log(surface, "error " + JSON.stringify(err)));
 
     document.getElementById("chat").onsubmit = async (e) => {

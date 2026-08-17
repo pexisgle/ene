@@ -494,7 +494,8 @@ impl WorkStore {
 
     pub fn delegation_depth(&self, id: DelegationId) -> Result<Option<u32>, WorkError> {
         for entry in self.mailbox_entries(id)? {
-            if entry.direction == "meta" && entry.kind == "depth"
+            if entry.direction == "meta"
+                && entry.kind == "depth"
                 && let Ok(depth) = entry.body.parse::<u32>()
             {
                 return Ok(Some(depth));

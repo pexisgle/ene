@@ -1,7 +1,7 @@
 use crate::error::WorkError;
 use crate::questions::{combine_questions, route_combined_answers};
-use crate::spill::{bound_brief, DEFAULT_SOFT_LIMIT_BYTES};
 use crate::speech_gate::SpeechGate;
+use crate::spill::{DEFAULT_SOFT_LIMIT_BYTES, bound_brief};
 use crate::store::WorkStore;
 use crate::types::{
     CombinedQuestionTurn, CompanionReport, DelegationMode, Job, JobStatus, NewJob, OpenQuestion,
@@ -113,8 +113,12 @@ impl DelegationHost {
         let title = title.unwrap_or_else(|| truncate(&goal, 48));
         let workspace_dir = dir.to_string_lossy().into_owned();
         let brief = brief.map(|text| {
-            bound_brief(&text, std::path::Path::new(&workspace_dir), DEFAULT_SOFT_LIMIT_BYTES)
-                .unwrap_or(text)
+            bound_brief(
+                &text,
+                std::path::Path::new(&workspace_dir),
+                DEFAULT_SOFT_LIMIT_BYTES,
+            )
+            .unwrap_or(text)
         });
         let job = if mode == DelegationMode::Public {
             let job = self.store.insert_job(&NewJob {
@@ -396,8 +400,12 @@ impl DelegationHost {
                         "no answer after timeout — proceeding with best guess for: {}",
                         truncate(&question.prompt, 48)
                     );
-                    self.store
-                        .mailbox_push(job.id, "parent_to_child", "assumption", &assumption)?;
+                    self.store.mailbox_push(
+                        job.id,
+                        "parent_to_child",
+                        "assumption",
+                        &assumption,
+                    )?;
                     reports.push(self.progress(job.id, None, &assumption)?);
                 }
             }

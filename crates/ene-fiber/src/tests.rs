@@ -161,7 +161,9 @@ async fn circular_requires_are_reported_and_rows_stay_inactive() {
     assert!(!sup.surface_has_tool("utility.hash"));
     assert!(!sup.surface_has_tool("web.fetch"));
     let util = sup.fiber("r-util").unwrap();
-    assert_eq!(util.state, FiberState::Waiting);
+    assert_eq!(util.state, FiberState::Inactive);
+    let web = sup.fiber("r-web").unwrap();
+    assert_eq!(web.state, FiberState::Inactive);
 }
 
 #[tokio::test]

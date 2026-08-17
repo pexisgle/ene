@@ -18,7 +18,8 @@ use uuid::Uuid;
 use crate::broker::Broker;
 use crate::fiber::{Effect, Fiber, FiberState, FiberUid};
 use crate::profile::{
-    ProfileApplyReport, active_provides, detect_require_cycles, missing_requires, waiting_fiber,
+    ProfileApplyReport, active_provides, detect_require_cycles, inactive_cycle_fiber,
+    missing_requires, waiting_fiber,
 };
 use crate::spawn::{SpawnOpts, SpawnedPlugin, discover_plugin_executable, spawn_plugin};
 
@@ -88,19 +89,13 @@ impl ToolInvoke for PluginInvoker {
         match result {
             Ok(value) if value.status == "ok" => Ok(value.value),
             Ok(value) => {
-            self.inner.record_failure(
-                &self.row_id,
-                &self.plugin,
-                self.inner.circuit_breaker,
-            );
+                self.inner
+                    .record_failure(&self.row_id, &self.plugin, self.inner.circuit_breaker);
                 Err(value.value.to_string())
             }
             Err(err) => {
-            self.inner.record_failure(
-                &self.row_id,
-                &self.plugin,
-                self.inner.circuit_breaker,
-            );
+                self.inner
+                    .record_failure(&self.row_id, &self.plugin, self.inner.circuit_breaker);
                 Err(err.to_string())
             }
         }
@@ -276,7 +271,7 @@ impl Supervisor {
                 self.inner
                     .fibers
                     .lock()
-                    .insert(row_id.clone(), waiting_fiber(row, "circular requires"));
+                    .insert(row_id.clone(), inactive_cycle_fiber(row));
             }
         }
 
@@ -406,11 +401,7 @@ impl Supervisor {
             socket_dir: &self.inner.workspace.join("sockets"),
             row_id: &row.row_id,
             sandbox_required: row.sandbox_required,
-            temp_dir: &self
-                .inner
-                .workspace
-                .join("plugin-tmp")
-                .join(&row.row_id),
+            temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row.row_id),
             workspace: &self.inner.workspace,
         })
         .await
@@ -471,9 +462,7 @@ impl Supervisor {
             fiber.push_effect(Effect::RegisterTool {
                 name: def.name.clone(),
             });
-            self.inner
-                .registry
-                .register_with(def, Arc::clone(&invoke));
+            self.inner.registry.register_with(def, Arc::clone(&invoke));
         }
         {
             let mut broker = self.inner.broker.lock();
