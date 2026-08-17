@@ -20,6 +20,7 @@ clap = { workspace = true }
 ene-config = { workspace = true }
 ene-fiber = { workspace = true }
 ene-kernel = { workspace = true }
+ene-plane = { workspace = true }
 ene-registry = { workspace = true }
 ene-session = { workspace = true }
 fs2 = { workspace = true }

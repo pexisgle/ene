@@ -27,8 +27,9 @@ impl BuiltinExecutor {
             "utility.hash" => hash(args),
             "utility.time" => Ok(json!({ "unix_ms": chrono::Utc::now().timestamp_millis() })),
             "fs.read" => fs_read(args),
+            "fs.write" => fs_write(args),
             "web.fetch" => Err("web.fetch requires broker net in the plugin process".to_owned()),
-            "exec.run" | "fs.write" => Err(format!(
+            "exec.run" => Err(format!(
                 "{name} has side effects and must not reach execute"
             )),
             other => Err(format!("unknown builtin {other}")),
@@ -51,6 +52,19 @@ fn fs_read(args: &Value) -> Result<Value, String> {
         .ok_or_else(|| "missing path".to_owned())?;
     let body = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
     Ok(json!({ "text": body }))
+}
+
+fn fs_write(args: &Value) -> Result<Value, String> {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing path".to_owned())?;
+    let text = args
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing text".to_owned())?;
+    std::fs::write(path, text).map_err(|err| err.to_string())?;
+    Ok(json!({ "ok": true }))
 }
 
 /// Specs advertised by each harness plugin.

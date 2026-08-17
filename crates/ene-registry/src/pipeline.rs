@@ -1,9 +1,11 @@
 use crate::BuiltinExecutor;
 use crate::def::{Layer, ToolDefinition, ToolSource};
 use async_trait::async_trait;
+use ene_plane::{ApprovalPlane, AuthzRequest};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -39,6 +41,8 @@ pub enum PipelineError {
     NotOnSurface(String),
     #[error("denied {name}: {reason}")]
     Denied { name: String, reason: String },
+    #[error(transparent)]
+    Plane(#[from] ene_plane::PlaneError),
     #[error("execute: {0}")]
     Execute(String),
 }
@@ -46,6 +50,8 @@ pub enum PipelineError {
 /// In-memory registry. Fiber unload removes rows by plugin id.
 pub struct ToolRegistry {
     tools: Mutex<HashMap<String, Registered>>,
+    plane: Mutex<Option<Arc<ApprovalPlane>>>,
+    workspace: Mutex<Option<PathBuf>>,
 }
 
 impl ToolRegistry {
@@ -53,7 +59,17 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: Mutex::new(HashMap::new()),
+            plane: Mutex::new(None),
+            workspace: Mutex::new(None),
         }
+    }
+
+    pub fn set_plane(&self, plane: Arc<ApprovalPlane>) {
+        *self.plane.lock() = Some(plane);
+    }
+
+    pub fn set_workspace(&self, path: impl Into<PathBuf>) {
+        *self.workspace.lock() = Some(path.into());
     }
 
     pub fn register(&self, def: ToolDefinition) {
@@ -109,7 +125,19 @@ impl ToolRegistry {
         if layer == Layer::Surface && !def.surface_visible() {
             return Err(PipelineError::NotOnSurface(name.to_owned()));
         }
-        if !def.side_effects.is_empty() {
+        let plane = self.plane.lock().clone();
+        if let Some(plane) = plane {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+            let workspace = self.workspace.lock().clone();
+            let req = AuthzRequest {
+                tool: name.to_owned(),
+                side_effects: def.side_effects.clone(),
+                sensitivity: def.sensitivity,
+                target: path.to_owned(),
+                in_workspace: path_in_workspace(workspace.as_deref(), path),
+            };
+            plane.authorize(&req).await?;
+        } else if !def.side_effects.is_empty() {
             return Err(PipelineError::Denied {
                 name: name.to_owned(),
                 reason: "deny-by-default until approval plane".to_owned(),
@@ -126,4 +154,20 @@ impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn path_in_workspace(workspace: Option<&Path>, path: &str) -> bool {
+    let Some(root) = workspace else {
+        return false;
+    };
+    if path.is_empty() {
+        return false;
+    }
+    let requested = Path::new(path);
+    let resolved = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        root.join(requested)
+    };
+    resolved.starts_with(root)
 }

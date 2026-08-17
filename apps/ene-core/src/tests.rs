@@ -174,3 +174,14 @@ async fn disabling_one_fiber_does_not_restart_the_core() {
     lane.prompt("still here").await.unwrap();
     lane.wait_for_idle().await.unwrap();
 }
+
+#[tokio::test]
+async fn boot_installs_approval_plane_and_vault() {
+    let dir = TempDir::new().unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    core.vault().put("k", b"secret").unwrap();
+    assert_eq!(core.vault().export("k").unwrap(), b"secret");
+    core.plane().audit().verify_chain().unwrap();
+}

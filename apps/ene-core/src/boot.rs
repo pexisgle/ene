@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use ene_fiber::Supervisor;
 use ene_kernel::{ConversationModel, LaneHandle, LaneOptions, format_recovery_note};
+use ene_plane::{ApprovalPlane, ApprovalSettings, AuditLog, ScriptedPopup, Vault};
 use ene_registry::ToolRegistry;
 use ene_session::{RecoveryReport, SessionId, SessionStore, SoulId};
 use fs2::FileExt;
@@ -39,6 +40,12 @@ pub enum CoreError {
     Kernel(#[from] ene_kernel::KernelError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Plane(#[from] ene_plane::PlaneError),
+    #[error(transparent)]
+    Audit(#[from] ene_plane::AuditError),
+    #[error(transparent)]
+    Vault(#[from] ene_plane::VaultError),
     #[error("another ene-core instance holds the data-directory lock at {0}")]
     AlreadyRunning(String),
 }
@@ -50,6 +57,8 @@ pub struct CoreDaemon {
     store: Arc<SessionStore>,
     recovery: Vec<RecoveryReport>,
     supervisor: Arc<Supervisor>,
+    plane: Arc<ApprovalPlane>,
+    vault: Vault,
 }
 
 impl CoreDaemon {
@@ -67,6 +76,18 @@ impl CoreDaemon {
             );
         }
         let registry = Arc::new(ToolRegistry::new());
+        registry.set_workspace(opts.data_dir.clone());
+        let audit = AuditLog::open(opts.data_dir.join("audit.db"))?;
+        let plane = Arc::new(ApprovalPlane::new(
+            ApprovalSettings::default(),
+            audit,
+            ScriptedPopup::deny_all(),
+            None,
+        ));
+        registry.set_plane(Arc::clone(&plane));
+        let passphrase =
+            std::env::var("ENE_VAULT_PASSPHRASE").unwrap_or_else(|_| "local".to_owned());
+        let vault = Vault::open_file(opts.data_dir.join("vault.bin"), &passphrase)?;
         let supervisor = Arc::new(Supervisor::new(opts.data_dir.clone(), registry));
         Ok(Self {
             data_dir: opts.data_dir,
@@ -74,6 +95,8 @@ impl CoreDaemon {
             store: Arc::new(store),
             recovery,
             supervisor,
+            plane,
+            vault,
         })
     }
 
@@ -95,6 +118,16 @@ impl CoreDaemon {
     #[must_use]
     pub fn supervisor(&self) -> Arc<Supervisor> {
         Arc::clone(&self.supervisor)
+    }
+
+    #[must_use]
+    pub fn plane(&self) -> Arc<ApprovalPlane> {
+        Arc::clone(&self.plane)
+    }
+
+    #[must_use]
+    pub fn vault(&self) -> &Vault {
+        &self.vault
     }
 
     /// Note injected into the next surface turn (D-13). `None` when nothing was interrupted.

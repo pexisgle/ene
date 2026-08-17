@@ -1,3 +1,4 @@
+use ene_plane::Sensitivity;
 use ene_plugin_ipc::ToolSpecWire;
 use serde_json::Value;
 
@@ -19,6 +20,7 @@ pub struct ToolDefinition {
     pub side_effects: Vec<String>,
     pub source: ToolSource,
     pub timeout_ms: Option<u32>,
+    pub sensitivity: Sensitivity,
 }
 
 impl ToolDefinition {
@@ -32,6 +34,7 @@ impl ToolDefinition {
             side_effects: spec.side_effects,
             source,
             timeout_ms: None,
+            sensitivity: Sensitivity::None,
         }
     }
 

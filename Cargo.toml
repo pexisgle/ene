@@ -159,6 +159,7 @@ ene-plugin-macros = { path = "crates/ene-plugin-macros" }
 ene-plugin-proto = { path = "crates/ene-plugin-proto" }
 ene-registry = { path = "crates/ene-registry" }
 ene-fiber = { path = "crates/ene-fiber" }
+ene-plane = { path = "crates/ene-plane" }
 ene-rag = { path = "crates/ene-rag" }
 ene-runtime = { path = "crates/ene-runtime" }
 ene-sandbox = { path = "crates/ene-sandbox" }

@@ -1,6 +1,7 @@
 use crate::{Layer, PipelineError, ToolDefinition, ToolRegistry, ToolSource, builtin_specs};
 use ene_plugin_ipc::BuiltinKind;
 use serde_json::json;
+use std::sync::Arc;
 
 #[test]
 fn surface_schemas_omit_fs_write() {
@@ -119,7 +120,52 @@ fn harness_tool_uses_the_same_pipeline() {
             name: "memory.recall".to_owned(),
         },
         timeout_ms: None,
+        sensitivity: ene_plane::Sensitivity::None,
     });
     let surface = registry.schemas(Layer::Surface);
     assert_eq!(surface[0]["name"], "memory.recall");
+}
+
+#[tokio::test]
+async fn plane_denies_side_effects_and_sensitive_reads() {
+    use ene_plane::{ApprovalPlane, ApprovalSettings, AuditLog, ScriptedPopup};
+    let dir = tempfile::TempDir::new().unwrap();
+    let registry = ToolRegistry::new();
+    registry.set_workspace(dir.path());
+    let audit = AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ApprovalPlane::new(
+        ApprovalSettings::default(),
+        audit,
+        ScriptedPopup::deny_all(),
+        None,
+    ));
+    registry.set_plane(plane);
+    for def in crate::builtins::definitions_for(BuiltinKind::Fs) {
+        registry.register(def);
+    }
+    registry.register(ToolDefinition {
+        name: "app.screenshot".to_owned(),
+        description: "capture".to_owned(),
+        parameters: json!({"type":"object","additionalProperties":false}),
+        output: json!({"type":"object"}),
+        side_effects: Vec::new(),
+        source: ToolSource::Harness {
+            name: "app.screenshot".to_owned(),
+        },
+        timeout_ms: None,
+        sensitivity: ene_plane::Sensitivity::High,
+    });
+    let denied = registry
+        .execute("fs.write", json!({"path":"/tmp/x","text":"no"}), Layer::Job)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        denied,
+        PipelineError::Plane(_) | PipelineError::Denied { .. }
+    ));
+    let shot = registry
+        .execute("app.screenshot", json!({}), Layer::Surface)
+        .await
+        .unwrap_err();
+    assert!(matches!(shot, PipelineError::Plane(_)));
 }
