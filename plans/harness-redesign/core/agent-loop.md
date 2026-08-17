@@ -195,6 +195,10 @@ turn/start
 `agent/turn-stopping`(serial、`next()` なし): ターンを止める最終機会。
 quiet hours 進入・疲労限界が使う。
 
+waterfall のリスナーはカーネルとホスト内実装だけが登録できる。
+サードパーティファイバーからは登録できない
+([../plugins/composition.md §3](../plugins/composition.md#3-巻き戻し可能な-effect時間))。
+
 ## 7. 秘匿サブエージェント(P-508)
 
 サブエージェントは **裏層ハーネス内部の機構**であり、ユーザーのイベント・UI から

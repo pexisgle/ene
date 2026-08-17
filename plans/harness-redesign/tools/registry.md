@@ -81,6 +81,12 @@ IPC の往復になり、コストにも整合性にも見合わない。委譲�
 `delegated` のいずれか
 ([../core/session-log.md §3.4](../core/session-log.md#34-ツール))。
 
+登録そのものは供給元ファイバーの巻き戻し可能な effect である(D-32)。
+ファイバーが `unloading` に入ると、その供給元のツールはスキーマ面から
+降り、進行中の呼び出しは `cancel` される。降りたあとに表層/裏層が
+その名前を見てはならない
+([../plugins/composition.md §3](../plugins/composition.md#3-巻き戻し可能な-effect時間))。
+
 ## 1. 責務と責務外
 
 - **責務**: ツール定義の登録・照合、層ごとのモデル向けスキーマの公開、
@@ -214,7 +220,8 @@ tool.call(モデル要求)
 | 障害 | 挙動 |
 |---|---|
 | 引数のスキーマ違反 | 実行せず `error{error_class: invalid_args}` をモデルへ。連続違反は guard が検知 |
-| 供給元の死亡(IPC/MCP) | `plugin_dead` / `mcp_unavailable`。再起動待ち後に1回再試行([../core/agent-loop.md §8](../core/agent-loop.md#8-ガードとエラー回復)) |
+| 供給元の死亡(IPC/MCP) | `plugin_dead` / `mcp_unavailable`。ファイバー unload でスキーマ面から降り、再起動待ち後に1回再試行([../core/agent-loop.md §8](../core/agent-loop.md#8-ガードとエラー回復)) |
+| ファイバー unload 中の呼び出し | 新規は受け付けず `plugin_unloading`。進行中は `cancel` |
 | 正規出力の検証失敗 | 供給元のバグ。`error{error_class: bad_output}` をモデルへ、ライフサイクルで警告 |
 | 承認のタイムアウト | `denied{reason: timeout}` をモデルへ。対話は継続 |
 | finalize_content の例外 | total の義務違反。既定のコンテンツを維持し、警告ログ |

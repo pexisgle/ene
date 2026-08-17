@@ -96,6 +96,7 @@ effect sandwich は後付けが難しいので、設計としては捨てずに�
 - ツール実行パイプライン → [../tools/registry.md](../tools/registry.md)
 - job のユーザー向け定義 → [../tasks/jobs-and-schedules.md](../tasks/jobs-and-schedules.md)
 - プラグイン輸送 → [../plugins/ipc.md](../plugins/ipc.md)
+- ホスト文脈の寿命 → [../plugins/composition.md](../plugins/composition.md)
 - 割り込みの音声側 → [../body/voice.md](../body/voice.md)
 - 承認(plane・internal 委譲の匿名化) → [../security/approval.md](../security/approval.md)
 - 内面イベントの形式詳細 → [../companion/inner-channel.md](../companion/inner-channel.md)

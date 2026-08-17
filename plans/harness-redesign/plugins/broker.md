@@ -9,6 +9,12 @@
 Broker は「何ができるか」(capability)と「何を承認したか」(plane の判断)を
 照合し、FD/ハンドルを委譲する唯一の窓口である。
 
+委譲は呼び出したファイバーの巻き戻し可能な effect である(D-32)。
+ファイバーが `unloading` に入ると、残っている grant は逆として回収される
+([composition.md §1](composition.md#1-システム境界))。
+取得(FD・inject_ref・サイドカー handle)は内側、そこへ書いたバイトや
+既に送った HTTP は外側。
+
 ## 1. 責務と責務外
 
 - **責務**: 資源操作の仲介、FD/ハンドルの委譲と回収、資格情報の
@@ -23,7 +29,9 @@ Broker は「何ができるか」(capability)と「何を承認したか」(pla
 呼び出しは [ipc.md](ipc.md) の capability 副プロトコル
 (`request{ method, params, capability_ref }`)で届く。
 `capability_ref` は hello で付与された能力の参照であり、
-宣言外の操作は即 `denied`。
+宣言外の操作は即 `denied`。参照はファイバーごとに隔離され、
+A の grant を B は使えない
+([composition.md §5](composition.md#5-隔離と-interception))。
 
 ### ファイル
 
@@ -85,13 +93,17 @@ Broker は「何ができるか」(capability)と「何を承認したか」(pla
 
 ```text
 broker.request → plane 判断 → broker.grant{ grant_id, fds }
-  → プラグイン使用 → broker.release / 期限切れ / プラグイン死亡
+  → プラグイン使用 → broker.release / 期限切れ / ファイバー unload
 ```
 
-- 全委譲は `grant_id` で追跡し、プラグイン死亡時にホストが全回収する。
+- 全委譲は `grant_id` で追跡し、ファイバー unload(死亡を含む)時に
+  ホストが全回収する。回収は spawn の逆とは独立で、プロセスが
+  先に死んでいても走らせる。
 - 委譲には**有効期限**(ファイル・資格情報は時間、ストリームは接続寿命)が
   あり、延長は再要求。
 - 各委譲は監査ログに記録(method・対象・grant_id・プラグイン id・承認経路)。
+- `scope` とパス接頭辞は interception メタデータであり、満足条件を
+  変えない。ポリシー側の縮小はファイバー reload を起こさない。
 
 ## 4. 障害モード
 
@@ -101,6 +113,7 @@ broker.request → plane 判断 → broker.grant{ grant_id, fds }
 | plane が保留中(ポップアップ待ち) | 要求は保留キューに入り、決定までブロック。プラグイン側は `tool.progress` で待機を報告すべき |
 | fd 回収漏れ | 期限切れで強制 close。連続漏れはプラグインの欠陥としてライフサイクル警告 |
 | 委譲中の承認取り消し | 進行中操作は完了させるが、次の委譲から `denied`。取り消しは監査ログに記録 |
+| ファイバー unload 中の未 release | ホストが残 grant を逆として回収。プラグインの `release` 待ちで unload を止めない |
 
 ## 5. 設定キー
 

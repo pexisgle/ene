@@ -15,10 +15,14 @@
   → Broker(資源の仲介・委譲)              [plugins/broker.md]
   → サンドボックス(プロセスの隔離・強制)   [sandbox.md]
   → 監査ログ(全操作の記録)                 [approval.md §6]
+
+ファイバー停止(無効化・死亡・差し替え)
+  → ホスト文脈の逆(登録・grant の回収)     [plugins/composition.md]
 ```
 
 承認が「していいか」、Broker が「どう渡すか」、サンドボックスが
-「閉じ込める」、監査が「残す」。4層が揃って初めて安全になる。
+「閉じ込める」、監査が「残す」。止めたあとにホスト文脈が空に戻るのは
+合成(D-32)の仕事で、実行経路とは別軸である。
 
 ## この層に効く主な決定
 
@@ -34,6 +38,7 @@
 
 - ツールの副作用宣言 → [../tools/registry.md §2](../tools/registry.md)
 - 資源委譲の窓口 → [../plugins/broker.md](../plugins/broker.md)
+- ホスト文脈の回収 → [../plugins/composition.md](../plugins/composition.md)
 - 記憶の承認キューと共有プール → [../companion/memory.md](../companion/memory.md)
 - ポップアップの配信・応答 → [../platform/clients.md §3](../platform/clients.md)
 - 表層UIでの匿名化と詳細画面 → [../core/visibility.md](../core/visibility.md)

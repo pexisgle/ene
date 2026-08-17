@@ -38,6 +38,10 @@ Session History は [session-log.md](session-log.md) の投影から得られる
 
 レジストリはスコープごとの挿入順リストであり、組み立ては
 **固定の描画順**に従う。層が登録していない Source はスキップする。
+MCP 由来などプラグインが載せる Source は、供給元ファイバーの
+巻き戻し可能な effect である(D-32)。ファイバー unload は
+`render_removal` を走らせてから行を外す。Unavailable(観測不能)とは別で、
+供給元が居なくなった行を残さない。
 
 ```text
 描画順(System Context、登録されているものだけ描画):

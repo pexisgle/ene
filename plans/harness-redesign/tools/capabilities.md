@@ -35,6 +35,12 @@ spill は同一パイプラインを通る(§5)。
 例: fs の provider をリモートサンドボックスに向けると、
 fs 系ツール・コード実行・成果物保管がすべて一緒に移動する。
 
+seam は論文の service broker に当たる(D-32)。複数の provider ファイバーが
+同時に ACTIVE でよく、消費者は `seam.<name>` を `requires` するので
+個別プロバイダの死亡で reload しない。登録と束縛はファイバーの
+巻き戻し可能な effect
+([../plugins/composition.md §4.2](../plugins/composition.md#42-プラグイン同士は話さない))。
+
 ## 1. fs seam
 
 | 役割 | 内容 |
@@ -148,7 +154,7 @@ MCP サーバーは**供給元**として接続する([registry.md](registry.md)
 - **prompts → skill 素材**: MCP prompt を skill 素材として取り込める
   ([../tasks/skills.md](../tasks/skills.md))。
 - 障害: MCP サーバー死亡は `mcp_unavailable` として、その供給元の
-  ツールだけを一時的に無効化。他は影響しない。
+  ファイバーを unload する。他は影響しない。再接続は同じ行の reload。
 
 ## 6. 資格情報の扱い
 
@@ -204,6 +210,8 @@ LLM/埋め込み/STT/TTS/VAD はすべてプロバイダ seam。
 
 - クラウド/ローカルを問わない同一経路(P-909)。プロバイダはプラグイン
   として実装され、[ipc.md](../plugins/ipc.md) のプロバイダ副プロトコルを使う。
+  束縛は `seam.llm` 等のブローカー経由で、`ai.tasks.<task>` が選ぶ。
+  ローカルプラグインが落ちても、他 seam の消費者ファイバーは動かない(D-32)。
 - タスク別モデル選択(`ai.tasks.<task>`)は
   [manifest-and-profile.md §3](../plugins/manifest-and-profile.md#3-プロバイダの選択p-909)。
 

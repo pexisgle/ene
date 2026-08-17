@@ -2,7 +2,7 @@
 
 > 実現する要件: **P-1001**(アウトプロセスプラグイン)、**P-1004**(多言語プラグイン)、
 > **P-1009**(副プロトコル分割)、P-509 の実行期限伝播、P-902 の Broker 接点。
-> 参照: D-22。
+> 参照: D-22。ホスト文脈の寿命は [composition.md](composition.md)(D-32)。
 
 ツール・プロバイダ・MCP ブリッジが子プロセスで動く。ハーネス機能ツールは
 ホスト内なのでこの IPC を通らない([../tools/registry.md §0](../tools/registry.md#0-2軸の分類d-10))。
@@ -118,7 +118,8 @@ Plugin → Host: hello_ack {
 |---|---|---|
 | `ping` / `pong` | 双方向 | ヘルス。不達が続けば死亡判定 |
 | `shutdown` | Host→Plugin | 猶予付き終了 |
-| `drain` | Host→Plugin | 実行中を片付けてから終了(再起動前) |
+| `drain` | Host→Plugin | 実行中を片付けてから終了(ファイバー unload / 再起動の前段) |
+| `reconfigure` | Host→Plugin | `{ config }`。行の設定だけが変わったときの差分。プラグインが物質的変更と判断したら `need_rebuild` を返し、ホストはファイバーを rebuild する([composition.md §6](composition.md#6-ライフサイクル慣性)) |
 | `log` | Plugin→Host | 構造化ログ(tracing 形式のフィールド群) |
 
 ### 4.2 tool
@@ -126,7 +127,7 @@ Plugin → Host: hello_ack {
 | kind | 方向 | 説明 |
 |---|---|---|
 | `list` | Host→Plugin | ツール一覧要求 |
-| `spec` | Plugin→Host | ツール定義(name, description, parameters schema, output schema, hints) |
+| `spec` | Plugin→Host | ツール定義(name, description, parameters schema, output schema, hints)。ホストはこれを巻き戻し可能な effect としてレジストリへ載せる([composition.md §3](composition.md#3-巻き戻し可能な-effect時間)) |
 | `call` | Host→Plugin | `{ call_id, tool_name, args, deadline?, fds, signal_token }` |
 | `progress` | Plugin→Host | `{ call_id, fraction?, note? }` |
 | `result` | Plugin→Host | `{ call_id, status, value, fds? }` |
@@ -184,8 +185,9 @@ MessagePack の構造化値として運ぶ。二重シリアライズを避け�
 - ホストは副プロトコルごとに `[min, max]` を広告し、N-1 を維持する。
 - **プラグイン側の実装コストを増やさないこと**が分割の前提。
   プラグイン作者は使う面だけを実装し、ハンドシェイクで名乗る。
-  authoring facade([../plugins/README.md](README.md))が、
-  実装したトレイトから `hello_ack` の中身を自動で組み立てる。
+  authoring facade が、実装したトレイトから `hello_ack` の中身を自動で
+  組み立て、ホスト文脈への登録の逆も対で積む(D-32)。
+  作者は `deactivate` を書かない。
 
 ## 6. バルク転送(音声・大きな結果)
 
@@ -218,12 +220,16 @@ MessagePack の構造化値として運ぶ。二重シリアライズを避け�
   確定し([../core/agent-loop.md §8](../core/agent-loop.md#8-ガードとエラー回復))、
   プラグイン自体は殺さない(次回の呼び出しは正常に送る)。
   期限無視が続けばサーキットブレーカーが開く。
+- ファイバーの unload では、進行中の `call` を `cancel` し、`drain` のあと
+  プロセスの逆(kill)とホスト文脈の逆(登録・grant の回収)を走らせる。
+  プロセスが先に死んでもホスト文脈の逆は省略しない
+  ([composition.md §3](composition.md#3-巻き戻し可能な-effect時間))。
 
 ## 8. 障害モード
 
 | 障害 | 挙動 |
 |---|---|
-| プラグインの突然死 | ping 不達・EOF で検知。進行中の呼び出しは全部 `plugin_dead` で確定。監督が再起動([../platform/process-model.md](../platform/process-model.md)) |
+| プラグインの突然死 | ping 不達・EOF で検知。進行中の呼び出しは全部 `plugin_dead` で確定。ホスト文脈の登録と grant はファイバー unload で回収し、監督が再起動または `failed`([composition.md §6](composition.md#6-ライフサイクル慣性)) |
 | フレーム上限超過 | フレームを拒否し `result{status: error, error_class: frame_too_large}`。§6 を使うべき場面なので、ライフサイクル警告も出す |
 | FD 渡しの失敗 | `capability.grant` をエラーで返し、プラグインは代替(再要求/諦め)を選ぶ |
 | hello のタイムアウト | 期限内に `hello_ack` がなければ切断+起動失敗扱い |
@@ -247,4 +253,4 @@ MessagePack の構造化値として運ぶ。二重シリアライズを避け�
 
 ---
 
-- 次: [manifest-and-profile.md](manifest-and-profile.md)
+- 次: [composition.md](composition.md)

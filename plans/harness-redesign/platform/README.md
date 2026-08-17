@@ -27,7 +27,10 @@
 
 ## 他フォルダとの接点
 
-- プラグインの輸送・監督対象 → [../plugins/ipc.md](../plugins/ipc.md)
+- ツールとして登録される面 → [../tools/registry.md](../tools/registry.md)
+  (登録はファイバーの巻き戻し可能な effect)
+- プラグイン輸送 → [../plugins/ipc.md](../plugins/ipc.md)
+- ホスト文脈の寿命 → [../plugins/composition.md](../plugins/composition.md)
 - 表示の深さ → [../core/visibility.md](../core/visibility.md)
 - 音声パイプラインの本体 → [../body/voice.md](../body/voice.md)
 - 承認の配信先 → [../security/approval.md](../security/approval.md)

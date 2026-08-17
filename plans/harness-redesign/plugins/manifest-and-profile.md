@@ -2,7 +2,7 @@
 
 > 実現する要件: **P-1002**(プロファイル/バンドル/パッチ)、
 > **P-902**(Broker 仲介の宣言面)、**P-909**(オフライン可のプロバイダ構成)、
-> P-1008(コミュニティプラグインの形式面)。
+> P-1008(コミュニティプラグインの形式面)、**P-1010**(時空間合成の宣言と差分)。
 
 ## 1. manifest
 
@@ -31,6 +31,14 @@ broker = [
 network = []                    # 直接ネットワーク(原則空。プロバイダのみ)
 assets_bypass = true            # 同梱アセットは Broker 素通り(P-902)
 
+[provides]                      # ホスト文脈へ入れる鍵(D-32)
+seams = ["fs"]                  # seam.fs ブローカーへの backing 登録(排他ではない)
+# ツール名は hello 後の spec で確定する。manifest と二重管理しない
+
+[requires]                      # ACTIVE になるために必要なホスト seam
+seams = []                      # 例: ツール内部 LLM を使うなら ["llm"]
+# [capabilities].broker は broker.* に対する requires。ここへ書かない
+
 [sandbox]
 required = true                 # サンドボックス非対応環境では起動しない
 fs_write = []                   # sandbox 内の書き込み可能領域(追加)
@@ -55,6 +63,14 @@ digest = "sha256:..."           # パッケージ内容のハッシュ
   **必要最小限**を付与する。
 - `assets_bypass` は、manifest に列挙された同梱アセットパスへの読み取りを
   Broker 承認なしで許可する(P-902 の素通り)。書き込みは対象外。
+- **`[provides]` / `[requires]` はホスト文脈の空間合成**(D-32)。
+  ファイバーは `requires.seams` と `[capabilities].broker` が揃うまで
+  `inactive` のまま待つ。ツール名は `spec` 到着後に `provides` へ足す。
+  プラグイン同士は直接呼び出さない
+  ([composition.md §4](composition.md#4-反応的な依存空間))。
+- `kind` を持たないのと同じ理由で、`provides.seams` に書いていない
+  ブローカーへ backing 登録することはできない。したら無視し、
+  ライフサイクル警告を出す。ツール名の衝突(後着)は `failed`。
 
 ### 完全性の検証(D-26)
 
@@ -131,6 +147,32 @@ plugin = "tool.git"
 
 - パッチは**上のレイヤーほど強い**(後から適用される)。
 - `--dump-profile` で実際に起動するツリーを表示できる(検証手段)。
+- 合成結果の各行がファイバーになる
+  ([composition.md §2](composition.md#2-ファイバー))。
+
+### 差分 reconcile(P-1010)
+
+積層の結果(望ましい行集合)が変わったとき、ローダはツリー全体を
+落とさず、行ごとに最も破壊の小さい操作を選ぶ。静止状態は最終的な
+積層だけに依存し、途中の足し引きの順には依存しない。
+
+| 行の変化 | 操作 |
+|---|---|
+| 新しい `id` | ファイバーを挿入(`inactive` から requires 待ち) |
+| 行の削除 / `disabled = true` | ファイバーを卸す(unload → 行を捨てる) |
+| `disabled` の解除 | 既存 uid のまま reload |
+| `plugin` / `version` / digest の変化 | rebuild(卸して入れ直す。uid は新しい) |
+| `config` のみ | `core.reconfigure` を送る。プラグインが `need_rebuild` を返したら rebuild |
+| `[capabilities]` / 隔離の変化 | rebuild(付与する能力が変わるため) |
+| パッチ `target` 不存在 | そのパッチ行を無視し警告(従前どおり) |
+
+無関係な行の `state` は動かさない。プロバイダ行だけを差し替えても
+`fs` は `active` のまま(`fs` は `seam.llm` を require しない)。
+LLM を require する行も、ACTIVE な backing が1つ以上残れば reload しない。
+
+コアデーモンの再起動が要るのはデータディレクトリ変更など、
+ファイバーでは届かない項目だけ
+([../platform/process-model.md §4](../platform/process-model.md#4-設定システムp-708))。
 
 ## 3. プロバイダの選択(P-909)
 
@@ -177,11 +219,15 @@ git・ブラウザ操作・カレンダー等は内製せず MCP に委ねる
 | 障害 | 挙動 |
 |---|---|
 | manifest の能力要求がポリシー超え | 起動せず、ライフサイクルイベントで「能力不足の拒否」を報告。ツリー全体は起動継続(行の無効化) |
+| `requires` 未充足 | その行は `inactive` で待つ。不足鍵を報告。充足すれば activating |
+| `requires` の循環 | 関係行をすべて `inactive`。起動時に報告 |
+| `provides` の鍵衝突 | 後着の行を `failed`。先着が保持 |
 | digest 不一致 | 起動拒否+監査ログ。改竄としてユーザー通知 |
 | manifest 外の副プロトコルを名乗る | 切断([ipc.md §8](ipc.md#8-障害モード)) |
 | パッチの target 不存在 | そのパッチ行を無視し警告(起動は継続) |
-| MCP サーバーへの接続失敗 | その供給元のツールのみ無効化。他は影響しない |
+| MCP サーバーへの接続失敗 | その供給元のツールのみ無効化(ファイバー unload)。他は影響しない |
 | サンドボックス必須プラグインが非対応環境 | 起動しない(行の無効化)。対話機能は継続 |
+| プロファイル切替 | 差分 reconcile。無関係なファイバーとコアデーモンは再起動しない |
 
 ## 7. 設定キー
 
@@ -195,5 +241,5 @@ git・ブラウザ操作・カレンダー等は内製せず MCP に委ねる
 
 ---
 
-- 前: [ipc.md](ipc.md) / 次: [broker.md](broker.md)
+- 前: [composition.md](composition.md) / 次: [broker.md](broker.md)
 

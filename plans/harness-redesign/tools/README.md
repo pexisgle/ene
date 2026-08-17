@@ -26,5 +26,6 @@
 - 委譲への自動昇格 → [../core/agent-loop.md](../core/agent-loop.md)
 - 実行パイプラインの承認 → [../security/approval.md](../security/approval.md)
 - 資源の仲介 → [../plugins/broker.md](../plugins/broker.md)
+- 登録の寿命 → [../plugins/composition.md](../plugins/composition.md)
 - spill/出力上限 → [../core/context-assembly.md](../core/context-assembly.md)
 - skill の注入 → [../tasks/skills.md](../tasks/skills.md)

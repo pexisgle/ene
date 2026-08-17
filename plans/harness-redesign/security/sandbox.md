@@ -15,8 +15,11 @@
 - 現行の成果(`plans/sandbox-and-downloads.md`、`plans/windows-appcontainer.md`、
   `crates/ene-sandbox`)を継承し、新 IPC([../plugins/ipc.md](../plugins/ipc.md))に
   合わせて整理する。
-- サンドボックスは「プロセスの隔離」、Broker は「資源の仲介」。両方が
-  揃って初めて安全になる(多層防御)。
+- サンドボックスは「プロセスの隔離」、Broker は「資源の仲介」、
+  ファイバー合成は「ホスト文脈の回収」。3つが揃って初めて安全になる
+  (多層防御)。`requires` の静的審査は起動前に要求を見せるだけで、
+  ネイティブコードの代わりにはならない
+  ([../plugins/composition.md §5](../plugins/composition.md#5-隔離と-interception))。
 - **v1.0 は署名を持たない**(D-26)ため、サンドボックスと Broker が
   実質的な唯一の防御線になる。「署名で信頼できるから緩めてよい」という
   逃げ道が無いことを前提に設計する。
