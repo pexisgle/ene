@@ -78,7 +78,8 @@ v1.0 はその手間を手書き設定として受け入れる。導線 UI は�
   3ストア/レジスタは後継設計なので作らない。
 - agent-loop の最小(対話レーンのみ)+ **中断の検出と報告**(D-5)。
   effect sandwich と操作状態機械は作らない。
-- lane-api のコマンド面(受理/拒否・結果・`lane.last_result` 照合)。
+- lane-api の v1.0 コマンド面(prompt/steer/follow_up/abort/compact の
+  受理/拒否・結果)。`resume` と `lane.last_result` 照合は後継なので作らない。
 - **表示の深さ**(D-11): `depth: surface|detail` の購読分離と、
   サーバ側で深さを判定する経路。投影走査テストの骨格。
 - observability の最小(スパン語彙・ローカルリング・コンテンツ禁止)。

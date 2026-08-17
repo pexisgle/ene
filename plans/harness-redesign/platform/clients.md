@@ -112,7 +112,7 @@ desktop は**2つの表示面**を持つ。
 - コマンド群(現行の `/command` 系を発展):
   - `ene chat <soul>` — テキスト対話(REPL)
   - `ene session list/show/fork/export` — セッション操作
-  - `ene session resume/compact` — 回復の前進・手動 compaction([../core/lane-api.md](../core/lane-api.md))
+  - `ene session compact` — 手動 compaction([../core/lane-api.md](../core/lane-api.md))。`ene session resume` は後継(P-525)
   - `ene usage` — LLM 使用量の集計([../core/storage-model.md](../core/storage-model.md) §4)
   - `ene tool list/call` — ツール一覧・実行
   - `ene plugin list/restart` — プラグイン

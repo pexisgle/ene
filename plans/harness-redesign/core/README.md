@@ -37,7 +37,7 @@ effect sandwich は後付けが難しいので、設計としては捨てずに�
 
 | 文書 | 責務 | 主な P 対応 |
 |---|---|---|
-| [lane-api.md](lane-api.md) | レーンコマンド面(prompt/steer/abort/resume…)・結果とエラー・クラッシュ後の照合 | P-101, P-503, P-515 |
+| [lane-api.md](lane-api.md) | レーンコマンド面(prompt/steer/abort…)。v1.0 は中断の検出と報告、`resume` / 結果照合は後継 | P-101, P-503, P-515 / P-525 |
 | [observability.md](observability.md) | ローカルスパン計測・プライバシー規則・診断ファイル | P-517 |
 
 ## 読み順

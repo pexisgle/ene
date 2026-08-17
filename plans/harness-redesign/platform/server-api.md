@@ -34,7 +34,7 @@
 | soul | `GET /souls`, `GET /souls/{id}`, `PATCH /souls/{id}/body` | soul 一覧・詳細・body 結合(hot swap) |
 | session | `GET /sessions`, `POST /sessions`, `GET /sessions/{id}`, `POST /sessions/{id}/fork`, `POST /sessions/{id}/export`, `PATCH /sessions/{id}` | セッション操作 |
 | message | `POST /sessions/{id}/messages`, `GET /sessions/{id}/history`, `DELETE /sessions/{id}/queued/{entry_id}` | 発話と履歴・キュー取消。messages はモード指定(`prompt\|steer\|follow_up`、既定 `prompt`)で [../core/lane-api.md](../core/lane-api.md) の3コマンドに対応 |
-| session-op | `POST /sessions/{id}/resume`, `POST /sessions/{id}/compact` | 回復の前進・手動 compaction([../core/lane-api.md §5](../core/lane-api.md#5-httpws-との対応)) |
+| session-op | `POST /sessions/{id}/compact` | 手動 compaction([../core/lane-api.md §5](../core/lane-api.md#5-httpws-との対応))。`POST /sessions/{id}/resume` は後継(P-525) |
 | turn | `POST /turns/{id}/cancel` | キャンセル |
 | memory | `GET /souls/{id}/memories`(`scope` で絞り込み), `PATCH /memories/{id}`, `DELETE /memories/{id}` | 記憶の閲覧/編集/削除。`scope` は `private\|shared`([../companion/memory.md §4](../companion/memory.md)) |
 | job | `GET /jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel` | タスクの一覧/詳細/キャンセル(API 上の名は job) |
