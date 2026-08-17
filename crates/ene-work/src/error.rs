@@ -30,6 +30,8 @@ pub enum WorkError {
     SlotsFull,
     #[error("delegation depth exceeded")]
     DepthExceeded,
+    #[error("internal delegation cannot spawn a public child")]
+    SecrecyViolation,
     #[error("unsupported artifact kind {0}")]
     UnsupportedArtifact(String),
 }

@@ -1,7 +1,7 @@
 use crate::error::WorkError;
 use crate::types::{
-    Artifact, ArtifactKind, DelegationMode, Job, JobStatus, NewJob, NewSchedule, Schedule,
-    ScheduleAction,
+    Artifact, ArtifactKind, DelegationMode, Job, JobStatus, NewJob, NewSchedule, OpenQuestion,
+    Schedule, ScheduleAction,
 };
 use chrono::{DateTime, Utc};
 use cron::Schedule as Cron;
@@ -426,22 +426,106 @@ impl WorkStore {
         kind: &str,
         body: &str,
     ) -> Result<(), WorkError> {
+        self.mailbox_push_at(id, direction, kind, body, &Utc::now().to_rfc3339())
+    }
+
+    pub fn mailbox_push_at(
+        &self,
+        id: DelegationId,
+        direction: &str,
+        kind: &str,
+        body: &str,
+        ts: &str,
+    ) -> Result<(), WorkError> {
         self.conn.lock().execute(
             "INSERT INTO mailbox (delegation_id, direction, kind, body, ts) VALUES (?1,?2,?3,?4,?5)",
-            params![id.to_string(), direction, kind, body, Utc::now().to_rfc3339()],
+            params![id.to_string(), direction, kind, body, ts],
         )?;
         Ok(())
     }
 
     pub fn mailbox(&self, id: DelegationId) -> Result<Vec<(String, String, String)>, WorkError> {
+        Ok(self
+            .mailbox_entries(id)?
+            .into_iter()
+            .map(|entry| (entry.direction, entry.kind, entry.body))
+            .collect())
+    }
+
+    pub fn mailbox_entries(&self, id: DelegationId) -> Result<Vec<MailboxEntry>, WorkError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT direction, kind, body FROM mailbox WHERE delegation_id = ?1 ORDER BY seq",
+            "SELECT seq, direction, kind, body, ts FROM mailbox WHERE delegation_id = ?1 ORDER BY seq",
         )?;
         let rows = stmt.query_map(params![id.to_string()], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            Ok(MailboxEntry {
+                seq: row.get(0)?,
+                direction: row.get(1)?,
+                kind: row.get(2)?,
+                body: row.get(3)?,
+                ts: row.get(4)?,
+            })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(WorkError::from)
+    }
+
+    pub fn record_meta(
+        &self,
+        id: DelegationId,
+        mode: DelegationMode,
+        depth: u32,
+    ) -> Result<(), WorkError> {
+        self.mailbox_push(id, "meta", "mode", mode.as_str())?;
+        self.mailbox_push(id, "meta", "depth", &depth.to_string())?;
+        Ok(())
+    }
+
+    pub fn delegation_mode(&self, id: DelegationId) -> Result<Option<DelegationMode>, WorkError> {
+        if let Some(job) = self.get_job(id)? {
+            return Ok(Some(job.mode));
+        }
+        for entry in self.mailbox_entries(id)? {
+            if entry.direction == "meta" && entry.kind == "mode" {
+                return Ok(Some(DelegationMode::parse(&entry.body)));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn delegation_depth(&self, id: DelegationId) -> Result<Option<u32>, WorkError> {
+        for entry in self.mailbox_entries(id)? {
+            if entry.direction == "meta" && entry.kind == "depth"
+                && let Ok(depth) = entry.body.parse::<u32>()
+            {
+                return Ok(Some(depth));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn open_questions(&self, id: DelegationId) -> Result<Vec<OpenQuestion>, WorkError> {
+        let entries = self.mailbox_entries(id)?;
+        let mut pending: Vec<MailboxEntry> = Vec::new();
+        for entry in entries {
+            if entry.direction == "child_to_parent" && entry.kind == "question" {
+                pending.push(entry);
+            } else if entry.direction == "parent_to_child" && entry.kind == "answer" {
+                if !pending.is_empty() {
+                    pending.remove(0);
+                }
+            } else if entry.direction == "parent_to_child" && entry.kind == "assumption" {
+                pending.clear();
+            }
+        }
+        Ok(pending
+            .into_iter()
+            .map(|entry| OpenQuestion {
+                delegation_id: id,
+                mailbox_seq: entry.seq,
+                prompt: entry.body,
+                asked_at: entry.ts,
+            })
+            .collect())
     }
 
     pub fn upsert_mcp(
@@ -459,6 +543,15 @@ impl WorkStore {
         )?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxEntry {
+    pub seq: i64,
+    pub direction: String,
+    pub kind: String,
+    pub body: String,
+    pub ts: String,
 }
 
 pub fn next_fire(spec: &str, tz_name: &str, from: DateTime<Utc>) -> Result<String, WorkError> {

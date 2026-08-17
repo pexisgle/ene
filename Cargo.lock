@@ -3902,7 +3902,12 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "ene-api",
+ "ene-body",
+ "ene-vrm",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3998,6 +4003,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

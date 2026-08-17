@@ -114,6 +114,7 @@ fn public_start(host: &DelegationHost, soul: SoulId, goal: &str) -> crate::types
         plan: None,
         created_from_turn: None,
         depth: 0,
+        parent_id: None,
     })
     .unwrap()
 }
@@ -347,8 +348,10 @@ fn progress_and_complete_are_companion_speech() {
     let job = public_start(&host, soul, "draft");
     let progress = host.progress(job.id, Some(0.4), "outlining").unwrap();
     assert!(progress.speech.contains("outlining"));
+    assert!(!progress.starts_conversation);
     let done = host.complete(job.id, "the outline is ready").unwrap();
     assert!(done.speech.contains("the outline is ready"));
+    assert!(done.starts_conversation);
     assert!(matches!(
         host.cancel(job.id),
         Err(crate::WorkError::AlreadyCompleted)
@@ -379,6 +382,7 @@ fn internal_delegation_has_no_job_row() {
             plan: None,
             created_from_turn: None,
             depth: 0,
+            parent_id: None,
         })
         .unwrap();
     assert!(store.get_job(job.id).unwrap().is_none());
@@ -679,4 +683,232 @@ fn work_tools_cover_delegate_surface() {
     assert!(names.iter().any(|n| n == "skill.load"));
     assert!(!names.iter().any(|n| n == "delegation.send"));
     assert!(!names.iter().any(|n| n == "artifact.register"));
+}
+
+#[test]
+fn grandchild_delegation_respects_depth_guard() {
+    let (_dir, _store, host, soul) = open_work();
+    let parent = public_start(&host, soul, "parent task");
+    let child = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "child work".into(),
+            mode: DelegationMode::Public,
+            title: Some("child".into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 1,
+            parent_id: Some(parent.id),
+        })
+        .unwrap();
+    let grandchild = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "grandchild work".into(),
+            mode: DelegationMode::Public,
+            title: Some("grandchild".into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 2,
+            parent_id: Some(child.id),
+        })
+        .unwrap();
+    assert_eq!(grandchild.goal, "grandchild work");
+    assert!(matches!(
+        host.start(StartDelegation {
+            soul_id: soul,
+            goal: "too deep".into(),
+            mode: DelegationMode::Public,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 3,
+            parent_id: Some(grandchild.id),
+        }),
+        Err(crate::WorkError::DepthExceeded)
+    ));
+}
+
+#[test]
+fn internal_child_cannot_spawn_public_grandchild() {
+    let (_dir, _store, host, soul) = open_work();
+    let internal = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "secret parent".into(),
+            mode: DelegationMode::Internal,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+        })
+        .unwrap();
+    assert!(matches!(
+        host.start(StartDelegation {
+            soul_id: soul,
+            goal: "leak".into(),
+            mode: DelegationMode::Public,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 1,
+            parent_id: Some(internal.id),
+        }),
+        Err(crate::WorkError::SecrecyViolation)
+    ));
+    let grandchild = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "still secret".into(),
+            mode: DelegationMode::Internal,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 1,
+            parent_id: Some(internal.id),
+        })
+        .unwrap();
+    assert_eq!(grandchild.mode, DelegationMode::Internal);
+}
+
+#[test]
+fn combined_child_questions_merge_and_route_answers() {
+    let (_dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "research");
+    host.question(job.id, "which city?").unwrap();
+    host.question(job.id, "how many days?").unwrap();
+    let combined = host.combine_pending_questions(job.id).unwrap();
+    assert!(combined.speech.contains("which city?"));
+    assert!(combined.speech.contains("how many days?"));
+    assert_eq!(combined.questions.len(), 2);
+    host
+        .apply_combined_answers(&combined, &["Tokyo".into(), "3".into()])
+        .unwrap();
+    assert!(host.open_questions(job.id).unwrap().is_empty());
+    let mailbox = host.store().mailbox(job.id).unwrap();
+    assert!(mailbox.iter().any(|(_, kind, body)| kind == "answer" && body == "Tokyo"));
+    assert!(mailbox.iter().any(|(_, kind, body)| kind == "answer" && body == "3"));
+}
+
+#[test]
+fn question_timeout_proceeds_with_assumption() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "planning");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    let asked = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+    store
+        .mailbox_push_at(
+            job.id,
+            "child_to_parent",
+            "question",
+            "which airline?",
+            &asked.to_rfc3339(),
+        )
+        .unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 1).unwrap();
+    let reports = host
+        .resolve_question_timeouts(now, Some(StdDuration::from_hours(24)))
+        .unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].speech.contains("timeout"));
+    assert!(!reports[0].starts_conversation);
+    let mailbox = store.mailbox(job.id).unwrap();
+    assert!(mailbox.iter().any(|(_, kind, _)| kind == "assumption"));
+}
+
+#[test]
+fn spill_huge_tool_output_keeps_brief_bounded() {
+    let dir = TempDir::new().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let huge = "x".repeat(10_000);
+    let spilled = crate::spill_tool_output(
+        &huge,
+        &workspace,
+        crate::DEFAULT_SOFT_LIMIT_BYTES,
+        crate::DEFAULT_HARD_LIMIT_BYTES,
+    )
+    .unwrap();
+    assert!(spilled.spilled);
+    assert!(spilled.inline.len() < huge.len());
+    assert!(spilled.spill_path.is_some());
+    let bounded = crate::bound_brief(&huge, &workspace, 500).unwrap();
+    assert!(bounded.len() < huge.len());
+}
+
+#[test]
+fn bookmark_workflow_delivers_markdown_artifact() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "travel notes");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    let (artifact, report) = crate::deliver_bookmark_workflow(
+        &host,
+        soul,
+        job.id,
+        "Tokyo trip",
+        &[crate::BookmarkSection {
+            heading: "Highlights".into(),
+            body: "Shibuya crossing".into(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(artifact.kind, ArtifactKind::Markdown);
+    assert!(artifact.delivered);
+    assert!(report.speech.contains("bookmark ready"));
+    let arts = store.artifacts_for(job.id).unwrap();
+    assert_eq!(arts.len(), 1);
+    let content = std::fs::read_to_string(&artifact.path).unwrap();
+    assert!(content.contains("# Tokyo trip"));
+    assert!(content.contains("Shibuya crossing"));
+}
+
+#[test]
+fn surface_message_and_cancel_while_running() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "long task");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    host.message(job.id, "user added context").unwrap();
+    host.instruct(job.id, "please prioritize speed").unwrap();
+    assert_eq!(host.cancel(job.id).unwrap(), JobStatus::Cancelled);
+    let mailbox = store.mailbox(job.id).unwrap();
+    assert!(mailbox.iter().any(|(_, kind, _)| kind == "message"));
+    assert!(mailbox.iter().any(|(_, kind, _)| kind == "task"));
+}
+
+#[test]
+fn completion_waits_for_user_speech_gap() {
+    let (_dir, _store, host, soul) = open_work();
+    let gate = host.speech_gate();
+    gate.set_user_speaking(true);
+    let job = public_start(&host, soul, "report");
+    let queued = host.complete(job.id, "all findings collected").unwrap();
+    assert!(!queued.starts_conversation);
+    assert_eq!(queued.inner_intent.as_deref(), Some("complete_queued"));
+    assert!(gate.drain_when_gap().is_empty());
+    gate.set_user_speaking(false);
+    let drained = gate.drain_when_gap();
+    assert_eq!(drained.len(), 1);
+    assert!(drained[0].speech.contains("all findings collected"));
+}
+
+#[test]
+fn user_facing_strings_say_task_not_job() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "cleanup");
+    let fail = host.fail(job.id, "disk full").unwrap();
+    assert!(fail.speech.contains("the task failed"));
+    assert!(!fail.speech.contains("the job failed"));
+    let running = public_start(&host, soul, "another");
+    store.set_status(running.id, JobStatus::Running, None).unwrap();
+    let reports = host.recover_interrupted().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].speech.contains("the task"));
+    assert!(!reports[0].speech.contains("the job"));
 }

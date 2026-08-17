@@ -1,6 +1,12 @@
 use crate::error::WorkError;
+use crate::questions::{combine_questions, route_combined_answers};
+use crate::spill::{bound_brief, DEFAULT_SOFT_LIMIT_BYTES};
+use crate::speech_gate::SpeechGate;
 use crate::store::WorkStore;
-use crate::types::{CompanionReport, DelegationMode, Job, JobStatus, NewJob, UpgradeReason};
+use crate::types::{
+    CombinedQuestionTurn, CompanionReport, DelegationMode, Job, JobStatus, NewJob, OpenQuestion,
+    UpgradeReason, WorkDelegationSettings,
+};
 use chrono::{DateTime, Utc};
 use ene_registry::{Layer, ToolDefinition, ToolRegistry};
 use ene_session::{DelegationId, SoulId};
@@ -12,14 +18,14 @@ use std::time::Duration;
 pub struct DelegationHost {
     store: Arc<WorkStore>,
     data_dir: PathBuf,
-    max_active: u32,
-    max_depth: u32,
+    settings: WorkDelegationSettings,
+    speech_gate: Arc<SpeechGate>,
 }
 
 impl DelegationHost {
     #[must_use]
     pub fn new(store: Arc<WorkStore>, data_dir: PathBuf) -> Self {
-        Self::with_limits(store, data_dir, 8, 3)
+        Self::with_settings(store, data_dir, WorkDelegationSettings::default())
     }
 
     #[must_use]
@@ -29,12 +35,39 @@ impl DelegationHost {
         max_active: u32,
         max_depth: u32,
     ) -> Self {
+        Self::with_settings(
+            store,
+            data_dir,
+            WorkDelegationSettings {
+                max_active,
+                max_depth,
+                question_timeout_hours: 24,
+            },
+        )
+    }
+
+    #[must_use]
+    pub fn with_settings(
+        store: Arc<WorkStore>,
+        data_dir: PathBuf,
+        settings: WorkDelegationSettings,
+    ) -> Self {
         Self {
             store,
             data_dir,
-            max_active,
-            max_depth,
+            settings,
+            speech_gate: Arc::new(SpeechGate::new()),
         }
+    }
+
+    #[must_use]
+    pub fn settings(&self) -> WorkDelegationSettings {
+        self.settings
+    }
+
+    #[must_use]
+    pub fn speech_gate(&self) -> Arc<SpeechGate> {
+        Arc::clone(&self.speech_gate)
     }
 
     #[must_use]
@@ -57,11 +90,15 @@ impl DelegationHost {
             plan,
             created_from_turn,
             depth,
+            parent_id,
         } = request;
-        if depth >= self.max_depth {
+        let mode = self.enforce_secrecy(parent_id, mode)?;
+        if depth >= self.settings.max_depth {
             return Err(WorkError::DepthExceeded);
         }
-        if mode == DelegationMode::Public && self.store.count_active(soul_id)? >= self.max_active {
+        if mode == DelegationMode::Public
+            && self.store.count_active(soul_id)? >= self.settings.max_active
+        {
             return Err(WorkError::SlotsFull);
         }
         let workspace = self
@@ -75,6 +112,10 @@ impl DelegationHost {
         std::fs::create_dir_all(&dir)?;
         let title = title.unwrap_or_else(|| truncate(&goal, 48));
         let workspace_dir = dir.to_string_lossy().into_owned();
+        let brief = brief.map(|text| {
+            bound_brief(&text, std::path::Path::new(&workspace_dir), DEFAULT_SOFT_LIMIT_BYTES)
+                .unwrap_or(text)
+        });
         let job = if mode == DelegationMode::Public {
             let job = self.store.insert_job(&NewJob {
                 id: Some(job_id),
@@ -110,9 +151,30 @@ impl DelegationHost {
                 ended_at: None,
             }
         };
+        self.store.record_meta(job.id, mode, depth)?;
         self.store
             .mailbox_push(job.id, "parent_to_child", "task", &job.goal)?;
         Ok(job)
+    }
+
+    fn enforce_secrecy(
+        &self,
+        parent_id: Option<DelegationId>,
+        mode: DelegationMode,
+    ) -> Result<DelegationMode, WorkError> {
+        if let Some(parent_id) = parent_id {
+            let parent_mode = self
+                .store
+                .delegation_mode(parent_id)?
+                .ok_or_else(|| WorkError::UnknownJob(parent_id.to_string()))?;
+            if parent_mode == DelegationMode::Internal && mode == DelegationMode::Public {
+                return Err(WorkError::SecrecyViolation);
+            }
+            if parent_mode == DelegationMode::Internal {
+                return Ok(DelegationMode::Internal);
+            }
+        }
+        Ok(mode)
     }
 
     /// Surface requested a side-effect tool or blew the step budget. Do not run the tool.
@@ -133,6 +195,7 @@ impl DelegationHost {
             plan: None,
             created_from_turn: request.created_from_turn,
             depth: 0,
+            parent_id: None,
         })
     }
 
@@ -151,6 +214,7 @@ impl DelegationHost {
         Ok(CompanionReport {
             speech: format!("still working: {note}"),
             inner_intent: Some("progress".into()),
+            starts_conversation: false,
         })
     }
 
@@ -167,10 +231,20 @@ impl DelegationHost {
         }
         self.store
             .mailbox_push(id, "child_to_parent", "complete", summary)?;
-        Ok(CompanionReport {
+        let report = CompanionReport {
             speech: format!("done — {summary}"),
             inner_intent: Some("complete".into()),
-        })
+            starts_conversation: true,
+        };
+        if let Some(delivered) = self.speech_gate.offer(report) {
+            Ok(delivered)
+        } else {
+            Ok(CompanionReport {
+                speech: String::new(),
+                inner_intent: Some("complete_queued".into()),
+                starts_conversation: false,
+            })
+        }
     }
 
     pub fn fail(&self, id: DelegationId, summary: &str) -> Result<CompanionReport, WorkError> {
@@ -181,10 +255,20 @@ impl DelegationHost {
         }
         self.store
             .mailbox_push(id, "child_to_parent", "failed", summary)?;
-        Ok(CompanionReport {
+        let report = CompanionReport {
             speech: format!("the task failed: {summary}"),
             inner_intent: Some("failed".into()),
-        })
+            starts_conversation: true,
+        };
+        if let Some(delivered) = self.speech_gate.offer(report) {
+            Ok(delivered)
+        } else {
+            Ok(CompanionReport {
+                speech: String::new(),
+                inner_intent: Some("failed_queued".into()),
+                starts_conversation: false,
+            })
+        }
     }
 
     pub fn cancel(&self, id: DelegationId) -> Result<JobStatus, WorkError> {
@@ -222,6 +306,7 @@ impl DelegationHost {
                 CompanionReport {
                     speech,
                     inner_intent: Some("interrupted".into()),
+                    starts_conversation: true,
                 }
             })
             .collect())
@@ -234,7 +319,32 @@ impl DelegationHost {
         Ok(CompanionReport {
             speech: prompt.to_owned(),
             inner_intent: Some("ask_user".into()),
+            starts_conversation: true,
         })
+    }
+
+    pub fn open_questions(&self, id: DelegationId) -> Result<Vec<OpenQuestion>, WorkError> {
+        self.require_known(id)?;
+        self.store.open_questions(id)
+    }
+
+    pub fn combine_pending_questions(
+        &self,
+        id: DelegationId,
+    ) -> Result<CombinedQuestionTurn, WorkError> {
+        let questions = self.open_questions(id)?;
+        Ok(combine_questions(&questions))
+    }
+
+    pub fn apply_combined_answers(
+        &self,
+        turn: &CombinedQuestionTurn,
+        answers: &[String],
+    ) -> Result<(), WorkError> {
+        for (delegation_id, answer) in route_combined_answers(turn, answers) {
+            self.answer(delegation_id, &answer)?;
+        }
+        Ok(())
     }
 
     pub fn answer(&self, id: DelegationId, answer: &str) -> Result<(), WorkError> {
@@ -261,6 +371,40 @@ impl DelegationHost {
             .ok_or_else(|| WorkError::UnknownJob(id.to_string()))
     }
 
+    pub fn resolve_question_timeouts(
+        &self,
+        now: DateTime<Utc>,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<CompanionReport>, WorkError> {
+        let timeout = timeout.unwrap_or_else(|| {
+            Duration::from_secs(u64::from(self.settings.question_timeout_hours) * 3_600)
+        });
+        let jobs = self.store.list_jobs_all()?;
+        let mut reports = Vec::new();
+        for job in jobs {
+            if !matches!(
+                job.status,
+                JobStatus::Created | JobStatus::Queued | JobStatus::Running
+            ) {
+                continue;
+            }
+            for question in self.store.open_questions(job.id)? {
+                let asked_at = DateTime::parse_from_rfc3339(&question.asked_at)
+                    .map_or(now, |ts| ts.with_timezone(&Utc));
+                if question_timed_out(asked_at, now, timeout) {
+                    let assumption = format!(
+                        "no answer after timeout — proceeding with best guess for: {}",
+                        truncate(&question.prompt, 48)
+                    );
+                    self.store
+                        .mailbox_push(job.id, "parent_to_child", "assumption", &assumption)?;
+                    reports.push(self.progress(job.id, None, &assumption)?);
+                }
+            }
+        }
+        Ok(reports)
+    }
+
     fn require_known(&self, id: DelegationId) -> Result<(), WorkError> {
         if self.store.get_job(id)?.is_some() {
             return Ok(());
@@ -281,6 +425,7 @@ pub struct StartDelegation {
     pub plan: Option<String>,
     pub created_from_turn: Option<String>,
     pub depth: u32,
+    pub parent_id: Option<DelegationId>,
 }
 
 pub struct UpgradeRequest {

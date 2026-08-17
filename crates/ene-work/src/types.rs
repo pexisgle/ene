@@ -221,4 +221,40 @@ impl UpgradeReason {
 pub struct CompanionReport {
     pub speech: String,
     pub inner_intent: Option<String>,
+    /// Progress companion speech does not open a surface conversation turn.
+    pub starts_conversation: bool,
+}
+
+/// Child question still waiting for a parent answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenQuestion {
+    pub delegation_id: ene_session::DelegationId,
+    pub mailbox_seq: i64,
+    pub prompt: String,
+    pub asked_at: String,
+}
+
+/// Parent-facing combined ask-user turn for one or more child questions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CombinedQuestionTurn {
+    pub speech: String,
+    pub questions: Vec<OpenQuestion>,
+}
+
+/// Delegation resource guards mirrored from kernel `DelegationSettings`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkDelegationSettings {
+    pub max_active: u32,
+    pub max_depth: u32,
+    pub question_timeout_hours: u32,
+}
+
+impl Default for WorkDelegationSettings {
+    fn default() -> Self {
+        Self {
+            max_active: 8,
+            max_depth: 3,
+            question_timeout_hours: 24,
+        }
+    }
 }

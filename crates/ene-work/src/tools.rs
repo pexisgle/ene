@@ -38,7 +38,8 @@ fn delegate_defs() -> Vec<ToolDefinition> {
                     "mode": { "type": "string" },
                     "title": { "type": "string" },
                     "soul_id": { "type": "string" },
-                    "excerpt": { "type": "string" }
+                    "excerpt": { "type": "string" },
+                    "parent_id": { "type": "string" }
                 },
                 "required": ["goal", "soul_id"]
             }),
@@ -256,6 +257,25 @@ fn start(invoker: &WorkInvoker, args: &Value) -> Result<Value, String> {
     } else {
         DelegationMode::Public
     };
+    let parent_id = args
+        .get("parent_id")
+        .and_then(Value::as_str)
+        .map(DelegationId::from_str)
+        .transpose()
+        .map_err(|err| err.to_string())?;
+    let depth = if let Some(parent_id) = parent_id {
+        let parent_depth = invoker
+            .host
+            .store()
+            .delegation_depth(parent_id)
+            .map_err(|err| err.to_string())?
+            .unwrap_or(0);
+        parent_depth + 1
+    } else {
+        args.get("depth")
+            .and_then(Value::as_u64)
+            .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX))
+    };
     let job = invoker
         .host
         .start(StartDelegation {
@@ -269,10 +289,8 @@ fn start(invoker: &WorkInvoker, args: &Value) -> Result<Value, String> {
                 .map(str::to_owned),
             plan: None,
             created_from_turn: None,
-            depth: args
-                .get("depth")
-                .and_then(Value::as_u64)
-                .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX)),
+            depth,
+            parent_id,
         })
         .map_err(|err| err.to_string())?;
     Ok(json!({
