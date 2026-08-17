@@ -181,6 +181,57 @@ impl DelegationHost {
         Ok(mode)
     }
 
+    pub fn present_plan(&self, id: DelegationId, plan: &str) -> Result<CompanionReport, WorkError> {
+        self.require_known(id)?;
+        self.store.set_plan(id, plan)?;
+        self.store
+            .mailbox_push(id, "child_to_parent", "question", &format!("plan:\n{plan}"))?;
+        Ok(CompanionReport {
+            speech: format!("here's the plan: {plan}"),
+            inner_intent: Some("ask_plan".into()),
+            starts_conversation: true,
+        })
+    }
+
+    pub fn approve_plan(&self, id: DelegationId) -> Result<(), WorkError> {
+        self.require_known(id)?;
+        let job = self
+            .store
+            .get_job(id)?
+            .ok_or_else(|| WorkError::UnknownJob(id.to_string()))?;
+        if job.plan.as_ref().is_none_or(|plan| plan.trim().is_empty()) {
+            return Err(WorkError::PlanNotApproved);
+        }
+        self.store
+            .mailbox_push(id, "parent_to_child", "answer", "plan_approved")?;
+        Ok(())
+    }
+
+    pub fn mutating_work_allowed(&self, id: DelegationId) -> Result<bool, WorkError> {
+        let job = self
+            .store
+            .get_job(id)?
+            .ok_or_else(|| WorkError::UnknownJob(id.to_string()))?;
+        if job.plan.as_ref().is_none_or(|plan| plan.trim().is_empty()) {
+            return Ok(false);
+        }
+        Ok(self
+            .store
+            .mailbox(id)?
+            .iter()
+            .any(|(direction, kind, body)| {
+                direction == "parent_to_child" && kind == "answer" && body.contains("plan_approved")
+            }))
+    }
+
+    pub fn require_mutating_allowed(&self, id: DelegationId) -> Result<(), WorkError> {
+        if self.mutating_work_allowed(id)? {
+            Ok(())
+        } else {
+            Err(WorkError::PlanNotApproved)
+        }
+    }
+
     /// Surface requested a side-effect tool or blew the step budget. Do not run the tool.
     pub fn auto_upgrade(&self, request: UpgradeRequest) -> Result<Job, WorkError> {
         let brief = request.brief.unwrap_or_else(|| {

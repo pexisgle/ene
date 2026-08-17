@@ -680,6 +680,7 @@ fn work_tools_cover_delegate_surface() {
         })
         .collect();
     assert!(names.iter().any(|n| n == "delegate.start"));
+    assert!(names.iter().any(|n| n == "delegate.approve_plan"));
     assert!(names.iter().any(|n| n == "skill.load"));
     assert!(!names.iter().any(|n| n == "delegation.send"));
     assert!(!names.iter().any(|n| n == "artifact.register"));
@@ -938,4 +939,36 @@ fn user_facing_strings_say_task_not_job() {
     assert_eq!(reports.len(), 1);
     assert!(reports[0].speech.contains("the task"));
     assert!(!reports[0].speech.contains("the job"));
+}
+
+#[tokio::test]
+async fn mutating_work_waits_for_plan_approval() {
+    let (_dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "rewrite docs");
+    assert!(!host.mutating_work_allowed(job.id).unwrap());
+    assert!(matches!(
+        host.require_mutating_allowed(job.id),
+        Err(crate::WorkError::PlanNotApproved)
+    ));
+    let presented = host
+        .present_plan(job.id, "1. edit README\n2. run tests")
+        .unwrap();
+    assert!(presented.speech.contains("here's the plan"));
+    assert!(!host.mutating_work_allowed(job.id).unwrap());
+    host.approve_plan(job.id).unwrap();
+    host.require_mutating_allowed(job.id).unwrap();
+
+    let registry = ToolRegistry::new();
+    register_work_tools(&registry, Arc::clone(&host), PathBuf::from("/tmp/skills"));
+    let names: Vec<String> = registry
+        .schemas(ene_registry::Layer::Surface)
+        .iter()
+        .filter_map(|schema| {
+            schema
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert!(names.iter().any(|n| n == "delegate.approve_plan"));
 }

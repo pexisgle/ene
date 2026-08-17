@@ -32,6 +32,8 @@ pub enum WorkError {
     DepthExceeded,
     #[error("internal delegation cannot spawn a public child")]
     SecrecyViolation,
+    #[error("mutating work needs an approved plan")]
+    PlanNotApproved,
     #[error("unsupported artifact kind {0}")]
     UnsupportedArtifact(String),
 }

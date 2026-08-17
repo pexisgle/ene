@@ -105,6 +105,16 @@ fn delegate_defs() -> Vec<ToolDefinition> {
             Vec::new(),
         ),
         harness(
+            "delegate.approve_plan",
+            "Approve a task plan so mutating work may start.",
+            json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+            Vec::new(),
+        ),
+        harness(
             "skill.load",
             "Load a skill body into context.",
             json!({
@@ -227,6 +237,12 @@ impl ToolInvoke for WorkInvoker {
                 Err(WorkError::Cancelled) => Ok(json!({ "status": "cancelled" })),
                 Err(other) => Err(other.to_string()),
             },
+            "delegate.approve_plan" => {
+                self.host
+                    .approve_plan(id_arg(&args)?)
+                    .map_err(|err| err.to_string())?;
+                Ok(json!({ "ok": true }))
+            }
             "skill.load" => {
                 let skill_name = str_arg(&args, "name")?;
                 let meta =
@@ -239,11 +255,11 @@ impl ToolInvoke for WorkInvoker {
             }
             "artifact.register" => register_artifact(self.host.store().as_ref(), &args),
             "job.plan_write" => {
-                self.host
-                    .store()
-                    .set_plan(id_arg(&args)?, str_arg(&args, "plan")?)
+                let report = self
+                    .host
+                    .present_plan(id_arg(&args)?, str_arg(&args, "plan")?)
                     .map_err(|err| err.to_string())?;
-                Ok(json!({ "ok": true }))
+                Ok(json!({ "ok": true, "speech": report.speech }))
             }
             "delegation.send" => send_from_child(&self.host, &args),
             other => Err(format!("unknown work tool {other}")),
