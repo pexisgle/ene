@@ -14,7 +14,7 @@
 | # | 条件 | 新ハーネスでの観測 |
 |---|---|---|
 | 1 | stage + CLI + Web が同一コアに接続 | 成立。`ene-daemon::http_tests::three_clients_share_one_core` |
-| 2 | 1 体が done.md の全 P-xxx を満たす | **未達(メタ)**。下表の個別 P-id はクレート単体/HTTP で固定するが、旧 desktop の全二重 GUI・実 VRM 同室演出の E2E は別系統 |
+| 2 | 1 体が done.md の全 P-xxx を満たす | 成立(自動テスト観測)。下表の P-id をクレート単体/HTTP で固定。stage の VRM は minimal fixture + wgpu load。実機 GPU 同室 E2E は lavapipe 依存 |
 | 3 | ネットワークなしで会話 | 成立。`ene-daemon::w7_acceptance::spawned_core_offline_conversation_and_rss` |
 | 4 | ビルドと性能(D-29) | 成立。`minimal_http_baselines_are_measurable` / `kernel::echo_turn_to_first_chunk_is_measurable` / `w7_acceptance` RSS。Cloud VM は `cargo` 直接(AGENTS.md) |
 | 5 | 監査・バックアップ・エクスポート | 成立。`ene-plane::audit_hash_chain_verifies` / `http::backup::backup_and_restore_roundtrip` / `export_default_omits_inner` |
@@ -73,12 +73,12 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-508 | `ene-work::internal_delegation_has_no_job_row` |
 | P-509 | `ene-work::grandchild_delegation_respects_depth_guard` |
 | P-510 | `ene-work::interrupt_recovery_and_tool_failure_use_different_wording` |
-| P-511 | **未実装** — plan モードの受入テストなし |
+| P-511 | `ene-work::mutating_work_waits_for_plan_approval` |
 | P-512 | `ene-work::combined_child_questions_merge_and_route_answers` |
 | P-515 | `ene-kernel::crash_recovery_is_reported_and_not_resumed`; `ene-daemon::boot_recovers_interrupted_turn_without_resume`; `ene-work::job_persists_and_recover_does_not_resume`; `ene-daemon::boot_reports_interrupted_job_without_resume` |
 | P-516 | `ene-session::usage_ledger_rows_are_append_only`; `ene-daemon::http_tests::usage_ledger_records_completed_turn` |
 | P-517 | `ene-kernel::observe_spans_do_not_leak_content`; `ene-daemon::http_tests::http_spans_and_schema_and_anon_health`; `ene-ctl::core_smoke::ctl_client_lists_tools_and_debug_spans` |
-| P-518 | `ene-session::storage_too_new_is_rejected`; `ene-session::recover_closes_open_turn_and_abandons_inbox` — **前方マイグレーション連鎖は storage v1 のため未固定** |
+| P-518 | `ene-session::storage_too_new_is_rejected`; `ene-session::older_storage_migrates_and_interrupts_open_work`; `ene-session::recover_closes_open_turn_and_abandons_inbox` |
 | P-519 | `ene-work::progress_and_complete_are_companion_speech`; `ene-work::surface_message_and_cancel_while_running` |
 | P-520 | `ene-session::surface_projection_hides_inner_and_thinking`; `ene-daemon::surface_ws_never_sees_inner`; `ene-stage::surface_blocks_inner_and_thinking` |
 | P-521 | `ene-work::progress_and_complete_are_companion_speech`; `ene-work::completion_waits_for_user_speech_gap` |
@@ -104,17 +104,17 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-702 | `ene-daemon::http_tests::three_clients_share_one_core` |
 | P-703 | `ene-daemon::http_tests::three_clients_share_one_core` (OpenAPI) |
 | P-704 | `ene-daemon::http_tests::web_ui_cannot_mutate_memory_or_settings` (eframe/wgpu, WebView なし) |
-| P-705 | `ene-ctl::core_smoke::ctl_client_lists_tools_and_debug_spans`; `ene-ctl::core::parse_api_json_reads_url_and_token` |
+| P-705 | `ene-ctl::core_smoke::ctl_client_lists_tools_and_debug_spans`; `ene-ctl::core_smoke::cli_binary_starts_core_and_runs_session_ops` |
 | P-706 | `ene-daemon::http_tests::web_ui_cannot_mutate_memory_or_settings`; `three_clients_share_one_core` |
 | P-707 | `ene-daemon::exclusive_mic_is_first_writer`; `approval_first_writer_wins` |
 | P-708 | `ene-daemon::http_tests::http_spans_and_schema_and_anon_health` |
-| P-709 | `ene-daemon::http::backup::backup_and_restore_roundtrip`; `http_tests::backup_copies_stores` |
+| P-709 | `ene-daemon::http::backup::backup_and_restore_roundtrip`; `http_tests::backup_copies_stores`; `http_tests::backup_restore_roundtrip_and_unknown_id` |
 | P-712 | `ene-daemon::surface_ws_never_sees_inner`; `http_tests::export_default_omits_inner` (detail 履歴) |
 | P-801 | `ene-companion::package_install_and_soul_creation` |
 | P-802 | `ene-companion::soul_and_body_packages_compose` |
 | P-803 | `ene-companion::v3_json_imports_as_enechar` |
 | P-804 | `ene-companion::package_install_and_soul_creation` (export roundtrip) |
-| P-805 | *(パッケージ manifest の en/ja フィールドは install 検証で間接固定)* `ene-companion::package_install_and_soul_creation` |
+| P-805 | `ene-companion::package_localizes_display_name_en_us_and_ja` |
 | P-806 | `ene-companion::package_rejects_unknown_format_and_bad_digest`; `ene-fiber::manifest_digest_matches_python_plugin_contract` |
 | P-808 | `ene-companion::package_rejects_unknown_format_and_bad_digest` |
 | P-901 | `plugins/harness/utility::process_survives_os_sandbox_when_supported` (Landlock 対応時) |
@@ -132,8 +132,8 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-1003 | `ene-kernel::EchoModel` 経路 (`text_turn_is_logged_and_projected`) |
 | P-1004 | `ene-fiber::python_dummy_registers_in_registry_and_executes` |
 | P-1005 | `ene-fiber::circuit_breaker_opens_after_spawn_failures`; `ene-fiber::unload_removes_tools_and_grants` |
-| P-1006 | **未固定** — サイドカー spawn/health の専用受入テストなし(旧 provider プラグイン側) |
-| P-1007 | **未固定** — waterfall/emit の二モード明示テストなし |
+| P-1006 | `ene-fiber::sidecar_binary_resolves_config_then_cas_then_bundled_and_rejects_urls`; `ene-fiber::sidecar_spawn_health_and_kill_on_loopback` |
+| P-1007 | `ene-kernel::waterfall_rewrites_by_calling_next_and_emit_cannot`; `ene-kernel::waterfall_pre_step_can_stop_the_model` |
 | P-1008 | `ene-fiber::manifest_digest_matches_python_plugin_contract` |
 | P-1009 | `ene-fiber::dummy_plugin_handshake_without_provider_subprotocol` |
 | P-1010 | `ene-fiber::requires_unsatisfied_row_waits_without_error`; `ene-fiber::circular_requires_are_reported_and_rows_stay_inactive`; `ene-daemon::disabling_one_fiber_does_not_restart_the_core` |
