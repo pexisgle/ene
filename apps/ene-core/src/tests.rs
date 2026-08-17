@@ -153,7 +153,8 @@ async fn disabling_one_fiber_does_not_restart_the_core() {
     sup.disable_row("r-util").await;
     assert!(sup.fiber("r-web").is_some());
     assert_eq!(sup.fiber("r-web").unwrap().uid, web);
-    assert!(sup.surface_has_tool("web.fetch"));
+    assert!(sup.registry().get("web.fetch").is_some());
+    assert!(!sup.surface_has_tool("web.fetch"));
     assert!(!sup.surface_has_tool("utility.hash"));
     assert_eq!(core.recovery().len(), 0);
     let soul = SoulId::new();
@@ -252,6 +253,9 @@ async fn dummy_plugin_and_harness_tools_share_registry() {
     )
     .await
     .unwrap();
+    core.plane()
+        .set_mode(ene_plane::ApprovalMode::Auto)
+        .unwrap();
     let registry = sup.registry();
     assert!(registry.get("dummy.ping").is_some());
     let pong = registry

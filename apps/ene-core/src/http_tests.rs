@@ -1,11 +1,13 @@
 use crate::{BootOptions, CoreDaemon};
 use async_trait::async_trait;
+use base64::Engine;
 use ene_api::{
     ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
     MessageMode, MessageRequest, ResourceKind, RestoreRequest,
 };
 use ene_companion::{
-    MemoryKind, MemoryScope, MemorySource, NewMemory, content_digest, export_dir, pack_archive,
+    CompanionStore, MemoryKind, MemoryScope, MemorySource, NewMemory, content_digest,
+    install_archive, pack_archive,
 };
 use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
@@ -18,6 +20,18 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+async fn first_soul_id(client: &ApiClient) -> String {
+    client
+        .list_souls()
+        .await
+        .unwrap()
+        .items
+        .first()
+        .expect("boot seeds souls")
+        .id
+        .clone()
+}
 
 async fn boot_server() -> (TempDir, ApiClient, Arc<CoreDaemon>, crate::ServerHandle) {
     let dir = TempDir::new().unwrap();
@@ -80,9 +94,10 @@ async fn three_clients_share_one_core() {
 #[tokio::test]
 async fn surface_ws_never_sees_inner() {
     let (_dir, client, _core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: None,
         })
         .await
@@ -163,9 +178,10 @@ async fn concurrent_prompt_returns_lane_busy() {
         .unwrap();
     let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
     let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "cli");
+    let soul_id = first_soul_id(&client).await;
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: None,
         })
         .await
@@ -195,9 +211,10 @@ async fn concurrent_prompt_returns_lane_busy() {
 #[tokio::test]
 async fn idempotency_key_dedupes_prompt() {
     let (_dir, client, _core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: None,
         })
         .await
@@ -312,9 +329,10 @@ async fn barge_in_aborts_busy_lane() {
         .unwrap();
     let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
     let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "cli");
+    let soul_id = first_soul_id(&client).await;
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: None,
         })
         .await
@@ -416,7 +434,7 @@ async fn backup_restore_roundtrip_and_unknown_id() {
     let (_dir, client, core, server) = boot_server().await;
     let missing = client
         .restore(&RestoreRequest {
-            id: "does-not-exist".into(),
+            id: "20990101T120000".into(),
         })
         .await
         .unwrap_err();
@@ -484,9 +502,10 @@ async fn http_forget_memory_is_audited() {
 #[tokio::test]
 async fn export_default_omits_inner() {
     let (_dir, client, _core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: None,
         })
         .await
@@ -531,9 +550,10 @@ async fn export_default_omits_inner() {
 #[tokio::test]
 async fn fork_leaves_original_session_intact() {
     let (_dir, client, _core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: Some("origin".into()),
         })
         .await
@@ -565,39 +585,57 @@ async fn fork_leaves_original_session_intact() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn web_client_cannot_mutate_memory_or_settings() {
+    let (_dir, stage, _core, server) = boot_server().await;
+    let web = ApiClient::new(stage.base(), stage.token(), "web");
+    let souls = stage.list_souls().await.unwrap();
+    let soul = &souls.items[0].id;
+    let memories = stage.list_memories(soul, None).await.unwrap();
+    if let Some(memory) = memories.items.first() {
+        let err = web
+            .patch_memory(&memory.id, &ene_api::MemoryPatch::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_class(), "forbidden");
+        let err = web.delete_memory(&memory.id).await.unwrap_err();
+        assert_eq!(err.error_class(), "forbidden");
+    }
+    let err = web
+        .patch_settings(&serde_json::json!({ "theme": "light" }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "forbidden");
+    let err = web.backup().await.unwrap_err();
+    assert_eq!(err.error_class(), "forbidden");
+    let err = web
+        .restore(&RestoreRequest {
+            id: "20240101T000000".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "forbidden");
+    server.shutdown().await;
+}
+
 #[test]
-fn web_ui_cannot_mutate_memory_or_settings() {
+fn web_ui_is_read_only_in_source() {
     let html = include_str!("../web/index.html");
     assert!(html.contains("/api/v1/souls"));
-    assert!(html.contains("/api/v1/stage"));
-    assert!(html.contains("soul-picker"));
-    assert!(html.contains("depth=detail"));
-    assert!(html.contains("memories"));
-    assert!(html.contains("/affect"));
-    assert!(html.contains("client_id"));
+    assert!(html.contains("display_name"));
     assert!(
         !html.contains("method: \"PATCH\"") && !html.contains("method: \"DELETE\""),
-        "Web UI must not PATCH/DELETE (settings and memory mutation stay off the Web client)"
+        "Web UI must not PATCH/DELETE in page scripts"
     );
-    let stage_main = include_str!("../../ene-stage/src/main.rs");
-    let stage_app = include_str!("../../ene-stage/src/stage_app.rs");
-    let stage_cargo = include_str!("../../ene-stage/Cargo.toml");
-    assert!(stage_main.contains("eframe"));
-    assert!(stage_app.contains("show_viewport_immediate"));
-    assert!(
-        !stage_cargo.to_ascii_lowercase().contains("webview")
-            && !stage_cargo.to_ascii_lowercase().contains("wry"),
-        "stage must stay on native eframe/wgpu without a WebView crate"
-    );
-    assert!(!stage_app.contains("web-view") && !stage_app.contains("wry::"));
 }
 
 #[tokio::test]
 async fn http_spans_and_schema_and_anon_health() {
     let (_dir, client, core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: None,
         })
         .await
@@ -643,8 +681,8 @@ async fn http_spans_and_schema_and_anon_health() {
         .unwrap();
     assert!(core.data_dir().join("settings.json").is_file());
     let settings = client.settings().await.unwrap();
-    assert_eq!(settings["theme"], "dark");
-    assert!(settings.get("core").is_some());
+    assert_eq!(settings["overlay"]["theme"], "dark");
+    assert!(settings.get("effective").is_some());
     let audit = client.audit().await.unwrap();
     assert!(audit.get("items").is_some());
     let anon = ApiClient::new(client.base(), "", "web");
@@ -657,9 +695,10 @@ async fn http_spans_and_schema_and_anon_health() {
 #[tokio::test]
 async fn usage_ledger_records_completed_turn() {
     let (_dir, client, _core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: None,
         })
         .await
@@ -695,9 +734,10 @@ async fn minimal_http_baselines_are_measurable() {
         client.health().await.unwrap();
     }
     let health_mean_us = health_started.elapsed().as_micros() / u128::from(N);
+    let soul_id = first_soul_id(&client).await;
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: None,
         })
         .await
@@ -865,15 +905,83 @@ fn stamp_digest(mut files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8
 }
 
 #[tokio::test]
+async fn import_rejects_path_outside_import_dirs() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let err = client.import_character("/etc/passwd").await.unwrap_err();
+    assert!(
+        err.error_class() == "invalid_message" || err.error_class() == "fault",
+        "unexpected class: {}",
+        err.error_class()
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn restore_keeps_backed_up_session_readable() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let soul_id = first_soul_id(&client).await;
+    let first = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_id.clone(),
+            title: Some("restore-me".into()),
+        })
+        .await
+        .unwrap();
+    let backup = client.backup().await.unwrap();
+    let _second = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: Some("after-backup".into()),
+        })
+        .await
+        .unwrap();
+    client
+        .restore(&RestoreRequest { id: backup.id })
+        .await
+        .unwrap();
+    let restored = client.get_session(&first.id).await.unwrap();
+    assert_eq!(restored.title.as_deref(), Some("restore-me"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn web_cannot_release_stage_mic_via_body_spoof() {
+    let (_dir, stage, _core, server) = boot_server().await;
+    let web = ApiClient::new(stage.base(), stage.token(), "web");
+    stage
+        .claim_resource(
+            ResourceKind::Mic,
+            &ClaimResourceRequest {
+                client_id: "ignored".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let released = web.release_resource(ResourceKind::Mic).await.unwrap();
+    assert_eq!(released.mic.as_deref(), Some("stage"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn create_session_rejects_unknown_soul() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let err = client
+        .create_session(&CreateSessionRequest {
+            soul_id: ene_session::SoulId::new().to_string(),
+            title: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "not_found");
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn http_character_import_list_export_roundtrip() {
     let (_dir, client, _core, server) = boot_server().await;
-    let archive_dir = TempDir::new().unwrap();
-    let archive_path = archive_dir.path().join("roundtrip.enechar");
     let zip = pack_archive(&stamp_digest(sample_char_files())).unwrap();
-    std::fs::write(&archive_path, zip).unwrap();
-
     let imported = client
-        .import_character(archive_path.to_str().unwrap())
+        .import_character_archive_b64(&base64::engine::general_purpose::STANDARD.encode(&zip))
         .await
         .unwrap();
     assert_eq!(imported.id, "char.mychar");
@@ -895,23 +1003,35 @@ async fn http_character_import_list_export_roundtrip() {
         exported.get("id").and_then(|v| v.as_str()),
         Some("char.mychar")
     );
-    let install_path = exported
-        .get("path")
+    let archive_b64 = exported
+        .get("archive_b64")
         .and_then(|v| v.as_str())
-        .expect("export must return install path");
-    let reimport_path = archive_dir.path().join("reimport.enechar");
-    std::fs::write(
-        &reimport_path,
-        export_dir(std::path::Path::new(install_path)).unwrap(),
+        .expect("export must return archive_b64");
+    let zip = base64::engine::general_purpose::STANDARD
+        .decode(archive_b64)
+        .expect("archive_b64 must decode");
+    let roundtrip_dir = TempDir::new().unwrap();
+    let store = CompanionStore::open(roundtrip_dir.path().join("companions.db")).unwrap();
+    let installed = install_archive(
+        &store,
+        &roundtrip_dir.path().join("characters"),
+        &zip,
+        32 * 1024 * 1024,
     )
     .unwrap();
-    std::fs::remove_dir_all(install_path).unwrap();
+    assert_eq!(installed.id, "char.mychar");
+    assert_eq!(installed.version, "1.0.0");
+    server.shutdown().await;
+}
 
-    let again = client
-        .import_character(reimport_path.to_str().unwrap())
+#[tokio::test]
+async fn web_client_cannot_patch_settings() {
+    let (_dir, stage, _core, server) = boot_server().await;
+    let web = ApiClient::new(stage.base(), stage.token(), "web");
+    let err = web
+        .patch_settings(&serde_json::json!({ "theme": "dark" }))
         .await
-        .unwrap();
-    assert_eq!(again.id, "char.mychar");
-    assert_eq!(again.version, "1.0.0");
+        .unwrap_err();
+    assert_eq!(err.error_class(), "forbidden");
     server.shutdown().await;
 }

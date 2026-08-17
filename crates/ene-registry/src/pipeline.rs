@@ -200,7 +200,7 @@ fn path_in_workspace(workspace: Option<&Path>, path: &str) -> bool {
     confine_tool_path(root, Path::new(path), false).is_ok()
 }
 
-fn confine_tool_path(
+pub(crate) fn confine_tool_path(
     workspace: &Path,
     path: &Path,
     create_parent: bool,

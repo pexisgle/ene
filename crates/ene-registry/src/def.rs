@@ -39,15 +39,20 @@ impl ToolDefinition {
                 sensitivity: Sensitivity::None,
             };
         }
+        let side_effects = spec.side_effects;
         Self {
             name: spec.name,
             description: spec.description,
             parameters: spec.parameters,
             output: spec.output,
-            side_effects: spec.side_effects,
+            side_effects: side_effects.clone(),
             source,
             timeout_ms: None,
-            sensitivity: Sensitivity::None,
+            sensitivity: if side_effects.is_empty() {
+                Sensitivity::Medium
+            } else {
+                Sensitivity::None
+            },
         }
     }
 

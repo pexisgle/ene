@@ -58,18 +58,7 @@ fn fs_read(args: &Value) -> Result<Value, String> {
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing path".to_owned())?;
-    if let Ok(workspace) = std::env::var("ENE_WORKSPACE") {
-        let root = Path::new(&workspace);
-        if path.starts_with('/') {
-            let canonical = Path::new(path)
-                .canonicalize()
-                .map_err(|err| err.to_string())?;
-            let base = root.canonicalize().map_err(|err| err.to_string())?;
-            if !canonical.starts_with(&base) {
-                return Err("path outside workspace".to_owned());
-            }
-        }
-    }
+    let path = confined_fs_path(path, false)?;
     let body = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
     Ok(json!({ "text": body }))
 }
@@ -79,24 +68,21 @@ fn fs_write(args: &Value) -> Result<Value, String> {
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing path".to_owned())?;
-    if let Ok(workspace) = std::env::var("ENE_WORKSPACE") {
-        let root = Path::new(&workspace);
-        if path.starts_with('/') {
-            let canonical = Path::new(path)
-                .canonicalize()
-                .map_err(|err| err.to_string())?;
-            let base = root.canonicalize().map_err(|err| err.to_string())?;
-            if !canonical.starts_with(&base) {
-                return Err("path outside workspace".to_owned());
-            }
-        }
-    }
+    let path = confined_fs_path(path, true)?;
     let text = args
         .get("text")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing text".to_owned())?;
     std::fs::write(path, text).map_err(|err| err.to_string())?;
     Ok(json!({ "ok": true }))
+}
+
+fn confined_fs_path(path: &str, create_parent: bool) -> Result<std::path::PathBuf, String> {
+    let Ok(workspace) = std::env::var("ENE_WORKSPACE") else {
+        return Ok(std::path::PathBuf::from(path));
+    };
+    crate::pipeline::confine_tool_path(Path::new(&workspace), Path::new(path), create_parent)
+        .map_err(|err| err.to_string())
 }
 
 #[must_use]

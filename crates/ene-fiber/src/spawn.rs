@@ -26,6 +26,7 @@ pub(crate) struct SpawnOpts<'a> {
     pub row_id: &'a str,
     pub sandbox_required: bool,
     pub temp_dir: &'a Path,
+    pub workspace: &'a Path,
 }
 
 /// BLAKE3 digest of a plugin binary or script file (`blake3:<hex>`).
@@ -53,7 +54,13 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
     let listener = UnixListener::bind(&socket_path)?;
     let spawn_token = Uuid::now_v7().to_string();
     let sandbox = sandbox_for(&opts)?;
-    let mut command = plugin_command(opts.binary, &socket_path, opts.temp_dir, &spawn_token);
+    let mut command = plugin_command(
+        opts.binary,
+        &socket_path,
+        opts.temp_dir,
+        &spawn_token,
+        opts.workspace,
+    );
     apply_sandbox(&mut command, sandbox.as_ref())?;
     let mut child = command
         .spawn()
@@ -114,6 +121,7 @@ fn plugin_command(
     socket_path: &Path,
     temp_dir: &Path,
     spawn_token: &str,
+    workspace: &Path,
 ) -> Command {
     let mut cmd = if let Some(interpreter) = script_interpreter(binary) {
         let mut command = Command::new(interpreter);
@@ -130,6 +138,7 @@ fn plugin_command(
     }
     cmd.env("ENE_PLUGIN_SOCKET", socket_path);
     cmd.env("ENE_PLUGIN_SPAWN_TOKEN", spawn_token);
+    cmd.env("ENE_WORKSPACE", workspace);
     cmd.env("TMPDIR", temp_dir);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());

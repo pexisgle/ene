@@ -82,7 +82,16 @@ async fn spawned_core_offline_conversation_and_rss() {
     let child = KillOnDrop(Some(child));
     let ready = wait_ready(&dir.path().join("api.json")).await;
     let url = ready["url"].as_str().unwrap().to_owned();
-    let token = ready["token"].as_str().unwrap().to_owned();
+    let token_path = dir.path().join(
+        ready
+            .get("token_file")
+            .and_then(Value::as_str)
+            .unwrap_or("api.token"),
+    );
+    let token = std::fs::read_to_string(&token_path)
+        .expect("api.token")
+        .trim()
+        .to_owned();
     let client = ApiClient::new(url, token, "cli");
     let mut health_ok = false;
     let health_deadline = Instant::now() + Duration::from_secs(5);
@@ -96,9 +105,17 @@ async fn spawned_core_offline_conversation_and_rss() {
     assert!(health_ok, "health never succeeded");
     let boot_ms = started.elapsed().as_millis();
     let rss = rss_kb(pid);
+    let soul_id = client
+        .list_souls()
+        .await
+        .unwrap()
+        .items
+        .first()
+        .map(|soul| soul.id.clone())
+        .expect("boot seeds souls");
     let session = client
         .create_session(&CreateSessionRequest {
-            soul_id: ene_session::SoulId::new().to_string(),
+            soul_id,
             title: None,
         })
         .await

@@ -193,3 +193,30 @@ async fn plane_denies_side_effects_and_sensitive_reads() {
         .unwrap_err();
     assert!(matches!(shot, PipelineError::Plane(_)));
 }
+
+#[test]
+fn confine_tool_path_rejects_parent_escape_for_new_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let err =
+        crate::pipeline::confine_tool_path(dir.path(), std::path::Path::new("../escape.txt"), true)
+            .unwrap_err();
+    assert!(matches!(err, PipelineError::PathEscape(_)));
+}
+
+#[test]
+fn unknown_plugin_empty_side_effects_are_medium_sensitivity() {
+    let spec = ene_plugin_ipc::ToolSpecWire {
+        name: "evil.read".to_owned(),
+        description: "d".to_owned(),
+        parameters: json!({"type":"object"}),
+        output: json!({"type":"object"}),
+        side_effects: Vec::new(),
+    };
+    let def = ToolDefinition::from_wire(
+        spec,
+        ToolSource::Plugin {
+            plugin_id: "evil".to_owned(),
+        },
+    );
+    assert_eq!(def.sensitivity, ene_plane::Sensitivity::Medium);
+}
