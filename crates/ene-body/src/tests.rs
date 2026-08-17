@@ -1,6 +1,7 @@
 use crate::{
-    BodyCatalog, BodySettings, DuplexState, EmotionCue, FallbackSettings, InputEffect,
-    PerformanceBus, PerformanceCommand, Stage, Viseme, Vitality, VoiceRuntime, VoiceSettings,
+    BargeInSettings, BodyCatalog, BodySettings, DuplexState, EmotionCue, FallbackSettings,
+    InputEffect, PerformanceBus, PerformanceCommand, Stage, Viseme, Vitality, VoiceRuntime,
+    VoiceSettings,
 };
 use ene_session::{BodyId, SoulId};
 
@@ -155,6 +156,39 @@ fn barge_in_stops_playback_after_min_speech() {
     assert!(matches!(barged, InputEffect::BargeIn { body: b } if b == body));
     assert_eq!(voice.state(), DuplexState::Interrupting);
     assert!(voice.speaking_body().is_none());
+}
+
+#[test]
+fn interruption_accepts_further_speech_as_listening() {
+    let mut voice = VoiceRuntime::scripted(VoiceSettings::default());
+    let body = BodyId::new();
+    voice.speak(body, "long reply text here", 0).unwrap();
+    let other = speech_tone(0.31, 1600);
+    voice.push_input(&other, 10);
+    voice.push_input(&other, 500);
+    assert_eq!(voice.state(), DuplexState::Interrupting);
+    let effect = voice.push_input(&other, 600);
+    assert_eq!(effect, InputEffect::Listening);
+    assert_eq!(voice.state(), DuplexState::Listening);
+}
+
+#[test]
+fn barge_in_disabled_holds_speaking() {
+    let settings = VoiceSettings {
+        barge_in: BargeInSettings {
+            enabled: false,
+            ..BargeInSettings::default()
+        },
+        ..VoiceSettings::default()
+    };
+    let mut voice = VoiceRuntime::scripted(settings);
+    let body = BodyId::new();
+    voice.speak(body, "hello there friends", 0).unwrap();
+    let other = speech_tone(0.31, 1600);
+    let effect = voice.push_input(&other, 500);
+    assert_eq!(effect, InputEffect::IgnoredSelfVoice);
+    assert_eq!(voice.state(), DuplexState::Speaking);
+    assert_eq!(voice.speaking_body(), Some(body));
 }
 
 #[test]

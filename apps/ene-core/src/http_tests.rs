@@ -10,6 +10,7 @@ use ene_kernel::{
     spans_leak_content,
 };
 use ene_plane::{ApprovalMode, AuthzRequest, Sensitivity};
+use ene_session::{EventPayload, SessionId, TurnOutcome};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -244,6 +245,123 @@ async fn exclusive_mic_is_first_writer() {
 }
 
 #[tokio::test]
+async fn exclusive_mic_second_claims_after_release() {
+    let (_dir, stage, _core, server) = boot_server().await;
+    let web = ApiClient::new(stage.base(), stage.token(), "web");
+    stage
+        .claim_resource(
+            ResourceKind::Mic,
+            &ClaimResourceRequest {
+                client_id: "stage".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let busy = web
+        .claim_resource(
+            ResourceKind::Mic,
+            &ClaimResourceRequest {
+                client_id: "web".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(busy.error_class(), "resource_busy");
+    let released = stage.release_resource(ResourceKind::Mic).await.unwrap();
+    assert!(released.mic.is_none());
+    let claimed = web
+        .claim_resource(
+            ResourceKind::Mic,
+            &ClaimResourceRequest {
+                client_id: "web".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed.mic.as_deref(), Some("web"));
+    let still_busy = stage
+        .claim_resource(
+            ResourceKind::Mic,
+            &ClaimResourceRequest {
+                client_id: "stage".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(still_busy.error_class(), "resource_busy");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn barge_in_aborts_busy_lane() {
+    let dir = TempDir::new().unwrap();
+    let core = Arc::new(
+        CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap(),
+    );
+    let server = core
+        .clone()
+        .serve_at(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(SlowModel) as Arc<dyn ConversationModel>,
+        )
+        .await
+        .unwrap();
+    let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
+    let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "cli");
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: ene_session::SoulId::new().to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let started = client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "slow turn".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let turn = started.turn_id.expect("prompt must return turn_id");
+    client.barge_in(&session.id).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let sid = SessionId::from_str(&session.id).unwrap();
+    loop {
+        let events = core.store().load_events(sid, 0).unwrap();
+        if events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::TurnEnd {
+                    outcome: TurnOutcome::Interrupted,
+                    turn_id,
+                    ..
+                } if turn_id.to_string() == turn
+            )
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "turn was not interrupted");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let history = client.history(&session.id, "surface").await.unwrap();
+    assert!(
+        !history
+            .messages
+            .iter()
+            .any(|message| message.role == "assistant" && message.text.contains("ack: slow turn")),
+        "aborted turn must not write assistant closure"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn approval_first_writer_wins() {
     let (_dir, stage, core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");
@@ -437,6 +555,35 @@ async fn http_spans_and_schema_and_anon_health() {
     assert_eq!(anon.health().await.unwrap().status, "ok");
     let err = anon.list_souls().await.unwrap_err();
     assert_eq!(err.error_class(), "unauthorized");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn usage_ledger_records_completed_turn() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: ene_session::SoulId::new().to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "ledger ping".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    wait_assistant(&client, &session.id).await;
+    let usage = client.usage(Some(&session.id)).await.unwrap();
+    assert!(usage.input_tokens > 0 || usage.output_tokens > 0);
+    assert!(usage.rows >= 1);
     server.shutdown().await;
 }
 
@@ -657,7 +804,11 @@ async fn http_character_import_list_export_roundtrip() {
         .and_then(|v| v.as_str())
         .expect("export must return install path");
     let reimport_path = archive_dir.path().join("reimport.enechar");
-    std::fs::write(&reimport_path, export_dir(std::path::Path::new(install_path)).unwrap()).unwrap();
+    std::fs::write(
+        &reimport_path,
+        export_dir(std::path::Path::new(install_path)).unwrap(),
+    )
+    .unwrap();
     std::fs::remove_dir_all(install_path).unwrap();
 
     let again = client
