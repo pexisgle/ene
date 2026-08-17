@@ -1,13 +1,18 @@
-use crate::affect::{AffectBaseline, AffectState, apply_self_report, project_decay};
+use crate::affect::{
+    AffectBaseline, AffectPresentation, AffectState, ExpressionArbiter, apply_self_report,
+    project_decay,
+};
 use crate::classify::ScriptedClassify;
 use crate::config::{AffectSettings, MindSettings, ProactiveSettings};
 use crate::inner::{model_visible_for, split_surface_and_inner};
+use crate::ids::CandidateId;
 use crate::memory::{
-    ArbitrateOutcome, MemoryKind, MemoryScope, MemorySource, NewMemory, arbitrate, extract_turn,
+    ArbitrateOutcome, MemoryCandidate, MemoryKind, MemoryScope, MemorySource, NewMemory, arbitrate,
+    extract_turn,
 };
 use crate::package::{
-    compose_soul_and_body, content_digest, export_dir, import_v3, install_archive, pack_archive,
-    soul_from_install,
+    compose_soul_and_body, content_digest, export_dir, import_v3, install_archive,
+    localized_display_name, pack_archive, soul_from_install,
 };
 use crate::proactive::{
     ActivitySnapshot, GateRejectReason, ProactiveConfirmation, ProactiveObservation,
@@ -194,7 +199,7 @@ async fn extract_names_as_shared_and_arbitrates() {
 }
 
 #[test]
-fn forget_request_removes_matching_memory() {
+fn forget_request_removes_matching_memory_and_records_journal() {
     let (_dir, store) = open_store();
     let soul = store
         .create_soul(&NewSoul::text_only("char.ene@1"))
@@ -213,8 +218,10 @@ fn forget_request_removes_matching_memory() {
             expires_at: None,
         })
         .unwrap();
+    let journal_before = store.journal_len().unwrap();
     let n = crate::memory::apply_forget_request(&store, soul.id, "forget trip").unwrap();
     assert_eq!(n, 1);
+    assert!(store.journal_len().unwrap() > journal_before);
     let hits = store
         .recall(
             soul.id,
@@ -225,6 +232,85 @@ fn forget_request_removes_matching_memory() {
         )
         .unwrap();
     assert!(hits.is_empty());
+}
+
+#[test]
+fn sensitive_candidate_queues_for_approval() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    let cand = MemoryCandidate {
+        id: CandidateId::new(),
+        soul_id: soul.id,
+        kind: MemoryKind::Episodic,
+        title: "credentials".into(),
+        content: "password is hunter2".into(),
+        scope: MemoryScope::Private,
+        confidence: 0.95,
+        salience: 0.9,
+        sensitive: true,
+    };
+    let approval = MindSettings::default().memory_approval;
+    let outcome = arbitrate(&store, &cand, &approval).unwrap();
+    assert!(matches!(outcome, ArbitrateOutcome::Queued(_)));
+    let pending = store.list_pending_candidates(soul.id).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].sensitive);
+}
+
+#[test]
+fn decay_surfaces_low_salience_forgetting_candidates() {
+    let (_dir, store) = open_store();
+    let soul = store
+        .create_soul(&NewSoul::text_only("char.ene@1"))
+        .unwrap();
+    store
+        .insert_memory(NewMemory {
+            soul_id: soul.id,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "old note".into(),
+            content: "fading".into(),
+            confidence: 0.8,
+            salience: 0.2,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    assert!(store.forgetting_candidates(0.15).unwrap().is_empty());
+    store.decay_salience(MemoryKind::Episodic, 0.4).unwrap();
+    let candidates = store.forgetting_candidates(0.15).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].title, "old note");
+}
+
+#[test]
+fn expression_arbiter_suppresses_rapid_label_changes() {
+    let mut arbiter = ExpressionArbiter::default();
+    let settings = AffectSettings::default();
+    let now = Utc::now();
+    let first = arbiter.decide(
+        AffectPresentation {
+            label: "happy".into(),
+            intensity: 0.8,
+        },
+        &settings,
+        now,
+        true,
+    );
+    assert!(first.is_some());
+    let second = arbiter.decide(
+        AffectPresentation {
+            label: "sad".into(),
+            intensity: 0.7,
+        },
+        &settings,
+        now + Duration::milliseconds(200),
+        true,
+    );
+    assert!(second.is_none());
 }
 
 #[tokio::test]
@@ -633,6 +719,30 @@ fn soul_and_body_packages_compose() {
     let composed = compose_soul_and_body(&store, &soul_pkg, &body_pkg).unwrap();
     assert!(composed.character_ref.contains("soul.ene"));
     assert!(composed.body_ref.is_some());
+}
+
+#[test]
+fn package_localizes_display_name_en_us_and_ja() {
+    let mut files = sample_char_files();
+    files.insert(
+        "i18n/en-US.toml".into(),
+        b"display_name = \"My Character\"\n".to_vec(),
+    );
+    files.insert(
+        "i18n/ja.toml".into(),
+        "display_name = \"マイキャラ\"\n".as_bytes().to_vec(),
+    );
+    assert_eq!(localized_display_name(&files, "en-US"), "My Character");
+    assert_eq!(localized_display_name(&files, "ja"), "マイキャラ");
+    assert_eq!(localized_display_name(&files, "fr"), "My Character");
+
+    let dir = TempDir::new().unwrap();
+    let store = CompanionStore::open(dir.path().join("companions.db")).unwrap();
+    let zip = pack_archive(&stamp_digest(files)).unwrap();
+    let installed = install_archive(&store, &dir.path().join("characters"), &zip, 10_000_000)
+        .unwrap();
+    assert!(installed.path.join("i18n/ja.toml").is_file());
+    assert!(installed.path.join("i18n/en-US.toml").is_file());
 }
 
 #[test]

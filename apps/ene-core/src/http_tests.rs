@@ -2,9 +2,11 @@ use crate::{BootOptions, CoreDaemon};
 use async_trait::async_trait;
 use ene_api::{
     ApiClient, ClaimResourceRequest, CreateSessionRequest, EndSessionRequest, HistoryResponse,
-    MessageMode, MessageRequest, ResourceKind,
+    MessageMode, MessageRequest, ResourceKind, RestoreRequest,
 };
-use ene_companion::{content_digest, export_dir, pack_archive};
+use ene_companion::{
+    MemoryKind, MemoryScope, MemorySource, NewMemory, content_digest, export_dir, pack_archive,
+};
 use ene_kernel::{
     ConversationModel, EchoModel, KernelError, ModelGeneration, ModelRequest, Span,
     spans_leak_content,
@@ -410,6 +412,66 @@ async fn backup_copies_stores() {
 }
 
 #[tokio::test]
+async fn backup_restore_roundtrip_and_unknown_id() {
+    let (_dir, client, core, server) = boot_server().await;
+    let missing = client
+        .restore(&RestoreRequest {
+            id: "does-not-exist".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(missing.error_class(), "not_found");
+    let backup = client.backup().await.unwrap();
+    client
+        .restore(&RestoreRequest { id: backup.id })
+        .await
+        .unwrap();
+    assert!(core.data_dir().join("backups").join("pre-restore").is_dir());
+    assert_eq!(client.health().await.unwrap().status, "ok");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn http_forget_memory_is_audited() {
+    let (_dir, client, core, server) = boot_server().await;
+    let souls = client.list_souls().await.unwrap();
+    let soul = ene_session::SoulId::from_str(&souls.items[0].id).unwrap();
+    let memory = core
+        .companions()
+        .insert_memory(NewMemory {
+            soul_id: soul,
+            scope: MemoryScope::Private,
+            kind: MemoryKind::Episodic,
+            title: "picnic".into(),
+            content: "we planned a picnic".into(),
+            confidence: 0.9,
+            salience: 0.8,
+            source: MemorySource::Extraction,
+            source_seq: None,
+            expires_at: None,
+        })
+        .unwrap();
+    let listed = client
+        .list_memories(&souls.items[0].id, None)
+        .await
+        .unwrap();
+    assert!(listed.items.iter().any(|item| item.id == memory.id.to_string()));
+    client.delete_memory(&memory.id.to_string()).await.unwrap();
+    let after = client
+        .list_memories(&souls.items[0].id, None)
+        .await
+        .unwrap();
+    assert!(after.items.iter().all(|item| item.id != memory.id.to_string()));
+    let audit = client.audit().await.unwrap();
+    let blob = audit.to_string();
+    assert!(
+        blob.contains("forget") || blob.contains(&memory.id.to_string()),
+        "forget must be audited: {blob}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn export_default_omits_inner() {
     let (_dir, client, _core, server) = boot_server().await;
     let session = client
@@ -517,7 +579,7 @@ fn web_ui_cannot_mutate_memory_or_settings() {
 
 #[tokio::test]
 async fn http_spans_and_schema_and_anon_health() {
-    let (_dir, client, _core, server) = boot_server().await;
+    let (_dir, client, core, server) = boot_server().await;
     let session = client
         .create_session(&CreateSessionRequest {
             soul_id: ene_session::SoulId::new().to_string(),
@@ -553,6 +615,21 @@ async fn http_spans_and_schema_and_anon_health() {
     assert!(!spans_leak_content(&mapped));
     let schema = client.settings_schema().await.unwrap();
     assert!(schema.is_object(), "settings schema must be JSON");
+    assert!(
+        schema.get("properties").is_some()
+            || schema.get("$defs").is_some()
+            || schema.get("$schema").is_some()
+            || schema.get("title").is_some(),
+        "generated schema must describe settings: {schema}"
+    );
+    client
+        .patch_settings(&serde_json::json!({ "theme": "dark" }))
+        .await
+        .unwrap();
+    assert!(core.data_dir().join("settings.json").is_file());
+    let settings = client.settings().await.unwrap();
+    assert_eq!(settings["theme"], "dark");
+    assert!(settings.get("core").is_some());
     let audit = client.audit().await.unwrap();
     assert!(audit.get("items").is_some());
     let anon = ApiClient::new(client.base(), "", "web");
