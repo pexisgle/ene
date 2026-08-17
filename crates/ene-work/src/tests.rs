@@ -610,6 +610,9 @@ async fn artifact_register_and_deliver() {
     ));
     let soul = SoulId::new();
     let job = public_start(&host, soul, "notes");
+    host.present_plan(job.id, "1. write notes\n2. register artifact")
+        .unwrap();
+    host.approve_plan(job.id).unwrap();
     let registry = ToolRegistry::new();
     register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
     let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
@@ -856,6 +859,9 @@ fn bookmark_workflow_delivers_markdown_artifact() {
     let (_dir, store, host, soul) = open_work();
     let job = public_start(&host, soul, "travel notes");
     store.set_status(job.id, JobStatus::Running, None).unwrap();
+    host.present_plan(job.id, "1. write markdown\n2. deliver")
+        .unwrap();
+    host.approve_plan(job.id).unwrap();
     let (artifact, report) = crate::deliver_bookmark_workflow(
         &host,
         soul,
@@ -875,6 +881,52 @@ fn bookmark_workflow_delivers_markdown_artifact() {
     let content = std::fs::read_to_string(&artifact.path).unwrap();
     assert!(content.contains("# Tokyo trip"));
     assert!(content.contains("Shibuya crossing"));
+}
+
+#[test]
+fn deliver_bookmark_workflow_requires_plan_approval() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "report");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    assert!(matches!(
+        crate::deliver_bookmark_workflow(
+            &host,
+            soul,
+            job.id,
+            "Draft",
+            &[crate::BookmarkSection {
+                heading: "Body".into(),
+                body: "content".into(),
+            }],
+        ),
+        Err(crate::WorkError::PlanNotApproved)
+    ));
+    host.present_plan(job.id, "1. write\n2. ship").unwrap();
+    assert!(matches!(
+        crate::deliver_bookmark_workflow(
+            &host,
+            soul,
+            job.id,
+            "Draft",
+            &[crate::BookmarkSection {
+                heading: "Body".into(),
+                body: "content".into(),
+            }],
+        ),
+        Err(crate::WorkError::PlanNotApproved)
+    ));
+    host.approve_plan(job.id).unwrap();
+    crate::deliver_bookmark_workflow(
+        &host,
+        soul,
+        job.id,
+        "Draft",
+        &[crate::BookmarkSection {
+            heading: "Body".into(),
+            body: "content".into(),
+        }],
+    )
+    .unwrap();
 }
 
 #[test]
@@ -954,6 +1006,8 @@ async fn mutating_work_waits_for_plan_approval() {
         .present_plan(job.id, "1. edit README\n2. run tests")
         .unwrap();
     assert!(presented.speech.contains("here's the plan"));
+    assert!(!host.mutating_work_allowed(job.id).unwrap());
+    host.answer(job.id, "please plan_approved thanks").unwrap();
     assert!(!host.mutating_work_allowed(job.id).unwrap());
     host.approve_plan(job.id).unwrap();
     host.require_mutating_allowed(job.id).unwrap();

@@ -21,6 +21,7 @@ pub fn deliver_bookmark_workflow(
     title: &str,
     sections: &[BookmarkSection],
 ) -> Result<(Artifact, CompanionReport), WorkError> {
+    host.require_mutating_allowed(job_id)?;
     let job = host.status_snapshot(job_id)?;
     let safe_title = sanitize_filename(title);
     let path = std::path::Path::new(&job.workspace_dir).join(format!("{safe_title}.md"));

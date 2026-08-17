@@ -253,7 +253,20 @@ impl ToolInvoke for WorkInvoker {
                     "body": meta.body,
                 }))
             }
-            "artifact.register" => register_artifact(self.host.store().as_ref(), &args),
+            "artifact.register" => {
+                let job_id = args
+                    .get("job_id")
+                    .and_then(Value::as_str)
+                    .map(DelegationId::from_str)
+                    .transpose()
+                    .map_err(|err| err.to_string())?;
+                if let Some(job_id) = job_id {
+                    self.host
+                        .require_mutating_allowed(job_id)
+                        .map_err(|err| err.to_string())?;
+                }
+                register_artifact(self.host.store().as_ref(), &args)
+            }
             "job.plan_write" => {
                 let report = self
                     .host
@@ -365,10 +378,14 @@ fn send_from_child(host: &DelegationHost, args: &Value) -> Result<Value, String>
             Ok(json!({ "speech": report.speech }))
         }
         "complete" => {
+            host.require_mutating_allowed(id)
+                .map_err(|err| err.to_string())?;
             let report = host.complete(id, body).map_err(|err| err.to_string())?;
             Ok(json!({ "speech": report.speech }))
         }
         "failed" => {
+            host.require_mutating_allowed(id)
+                .map_err(|err| err.to_string())?;
             let report = host.fail(id, body).map_err(|err| err.to_string())?;
             Ok(json!({ "speech": report.speech }))
         }

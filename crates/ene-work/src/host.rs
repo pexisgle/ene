@@ -151,6 +151,7 @@ impl DelegationHost {
                 created_from_turn,
                 plan,
                 brief,
+                plan_approved: false,
                 created_at: Utc::now().to_rfc3339(),
                 ended_at: None,
             }
@@ -202,8 +203,7 @@ impl DelegationHost {
         if job.plan.as_ref().is_none_or(|plan| plan.trim().is_empty()) {
             return Err(WorkError::PlanNotApproved);
         }
-        self.store
-            .mailbox_push(id, "parent_to_child", "answer", "plan_approved")?;
+        self.store.set_plan_approved(id)?;
         Ok(())
     }
 
@@ -215,13 +215,7 @@ impl DelegationHost {
         if job.plan.as_ref().is_none_or(|plan| plan.trim().is_empty()) {
             return Ok(false);
         }
-        Ok(self
-            .store
-            .mailbox(id)?
-            .iter()
-            .any(|(direction, kind, body)| {
-                direction == "parent_to_child" && kind == "answer" && body.contains("plan_approved")
-            }))
+        Ok(job.plan_approved)
     }
 
     pub fn require_mutating_allowed(&self, id: DelegationId) -> Result<(), WorkError> {

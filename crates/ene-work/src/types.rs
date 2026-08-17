@@ -82,6 +82,7 @@ pub struct Job {
     pub created_from_turn: Option<String>,
     pub plan: Option<String>,
     pub brief: Option<String>,
+    pub plan_approved: bool,
     pub created_at: String,
     pub ended_at: Option<String>,
 }
