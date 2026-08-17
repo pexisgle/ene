@@ -392,6 +392,19 @@ impl ApiClient {
             .await
     }
 
+    pub async fn import_character(&self, path: &str) -> Result<CharacterView, ApiError> {
+        self.send_json(
+            self.request(Method::POST, "/api/v1/characters/import")
+                .json(&serde_json::json!({ "path": path })),
+        )
+        .await
+    }
+
+    pub async fn export_character(&self, id: &str) -> Result<Value, ApiError> {
+        self.send_json(self.request(Method::GET, &format!("/api/v1/characters/{id}/export")))
+            .await
+    }
+
     pub async fn settings(&self) -> Result<Value, ApiError> {
         self.send_json(self.request(Method::GET, "/api/v1/settings"))
             .await
