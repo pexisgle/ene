@@ -402,3 +402,28 @@ Cordis そのもの(TypeScript の in-process ローダ)は採用しない(visio
 **波及**: [plugins/composition.md](plugins/composition.md) が本体。
 manifest の `provides`/`requires`、監督のファイバー状態機械、
 レジストリ登録の逆、seam のブローカー役、プロファイル差分の reconcile。
+
+実施規則(実装が一意に定まるまで、ここが勝つ):
+
+1. **`target` は充足の真偽であって提供者 uid ではない。** `requires.seams`
+   の各鍵は「そのブローカーに ACTIVE な backing が1つ以上あるか」だけを
+   見る。backing の差し替え・追加は neutral。最後の1つが落ちたときだけ
+   deactivating。
+2. **プロファイル行は安定 `id` を持つ。** 省略時は `plugin` と同一。
+   同じ `plugin` を2行置くときは `id` 必須。パッチの `target` /
+   `insert_after` は行 `id`。ファイバー `uid` は行 `id` ではなく、
+   起動のたびに払い再利用しない。disable→enable も新しい `uid`。
+3. **失敗の行き先。** 宣言/ポリシーで起動できない行は `inactive` のまま
+   自動再試行しない。spawn/hello/apply の実行時失敗は死亡と同じ
+   (backoff → 規定回数で `failed`)。
+4. **`reconfigure` は応答を持つ。** プラグインは
+   `applied` / `need_rebuild` / `error` を返す。無応答は `need_rebuild`。
+5. **逆を積むのはホスト。** 子プロセスの SDK は apply 側だけ書く。
+   非 Rust プラグインでもホストが `spec`/grant/spawn を見て対を積む。
+6. **進行中呼び出しは cancel。** ステップ開始時にモデルへ渡したスキーマは
+   そのステップの間固定。unload は提供を直ちに止め、進行中の
+   `tool.call` / `generate` を `cancel` し、新規は `plugin_unloading`。
+   次ステップのスキーマから消える。
+
+コード上の名前はホストの `dispose` 蓄積とする。耐久性の effect sandwich
+(D-4、v1.0 では実装しない)と混ぜない。

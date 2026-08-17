@@ -168,6 +168,12 @@ turn/start
 
 - ツール呼び出しは [../tools/registry.md](../tools/registry.md) の
   パイプライン(pre-execute → execute → post-execute)に委譲する。
+- **このステップのスキーマ面は `agent/request` の直前にスナップショットする。**
+  モデルへ渡したツール一覧は、ステップ途中のファイバー unload で
+  書き換えない。unload された供給元への新規 call は実行せず
+  `plugin_unloading`。進行中は `cancel`
+  ([../plugins/composition.md §6](../plugins/composition.md#6-ライフサイクル慣性))。
+  次ステップは新しい `schemas()` を撮る。
 - **並行ツール呼び出し**: モデルが1ステップで複数ツールを呼んだ場合、
   `is_concurrency_safe(args) == true` の呼び出し同士は並行実行する
   (dsh に倣う)。safe でない呼び出しは順次実行。

@@ -119,7 +119,8 @@ Plugin → Host: hello_ack {
 | `ping` / `pong` | 双方向 | ヘルス。不達が続けば死亡判定 |
 | `shutdown` | Host→Plugin | 猶予付き終了 |
 | `drain` | Host→Plugin | 実行中を片付けてから終了(ファイバー unload / 再起動の前段) |
-| `reconfigure` | Host→Plugin | `{ config }`。行の設定だけが変わったときの差分。プラグインが物質的変更と判断したら `need_rebuild` を返し、ホストはファイバーを rebuild する([composition.md §6](composition.md#6-ライフサイクル慣性)) |
+| `reconfigure` | Host→Plugin | `{ config }`。行の設定だけが変わったときの差分。応答必須 |
+| `reconfigure_ack` | Plugin→Host | `{ status: applied \| need_rebuild \| error }`。`need_rebuild` / `error` / 無応答はホストがそのファイバーだけ rebuild する。`applied` ならプロセスも `uid` も維持 |
 | `log` | Plugin→Host | 構造化ログ(tracing 形式のフィールド群) |
 
 ### 4.2 tool
@@ -186,7 +187,7 @@ MessagePack の構造化値として運ぶ。二重シリアライズを避け�
 - **プラグイン側の実装コストを増やさないこと**が分割の前提。
   プラグイン作者は使う面だけを実装し、ハンドシェイクで名乗る。
   authoring facade が、実装したトレイトから `hello_ack` の中身を自動で
-  組み立て、ホスト文脈への登録の逆も対で積む(D-32)。
+  組み立てる。ホスト文脈への登録の逆は**ホスト**が積む(D-32)。
   作者は `deactivate` を書かない。
 
 ## 6. バルク転送(音声・大きな結果)
@@ -232,7 +233,8 @@ MessagePack の構造化値として運ぶ。二重シリアライズを避け�
 | プラグインの突然死 | ping 不達・EOF で検知。進行中の呼び出しは全部 `plugin_dead` で確定。ホスト文脈の登録と grant はファイバー unload で回収し、監督が再起動または `failed`([composition.md §6](composition.md#6-ライフサイクル慣性)) |
 | フレーム上限超過 | フレームを拒否し `result{status: error, error_class: frame_too_large}`。§6 を使うべき場面なので、ライフサイクル警告も出す |
 | FD 渡しの失敗 | `capability.grant` をエラーで返し、プラグインは代替(再要求/諦め)を選ぶ |
-| hello のタイムアウト | 期限内に `hello_ack` がなければ切断+起動失敗扱い |
+| hello のタイムアウト | 期限内に `hello_ack` がなければ切断+実行時失敗(backoff → `failed`) |
+| `reconfigure` の無応答 | `need_rebuild`。そのファイバーだけ rebuild |
 | manifest 外の副プロトコルを名乗る | 切断。権限審査との不一致は設定ミスではなく攻撃の可能性がある |
 | 一部の副プロトコルだけ非互換 | その面のみ無効化して接続継続(§3) |
 | MessagePack のデコード不能 | そのフレームを破棄し `log` で警告。連続で切断(実装欠陥とみなす) |
@@ -246,6 +248,7 @@ MessagePack の構造化値として運ぶ。二重シリアライズを避け�
 |---|---|
 | `plugins.ipc.max_frame_bytes` | 1フレーム上限(暴走の歯止め) |
 | `plugins.ipc.hello_timeout` | ハンドシェイク期限 |
+| `plugins.ipc.reconfigure_timeout` | `reconfigure_ack` 待ち。超過は `need_rebuild` |
 | `plugins.ipc.ping_interval` | ヘルス間隔 |
 | `plugins.ipc.send_buffer_bytes` | 背圧閾値 |
 | `plugins.ipc.bulk_threshold_bytes` | これを超える結果は §6 の経路へ |

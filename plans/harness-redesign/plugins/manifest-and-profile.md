@@ -105,12 +105,17 @@ dsh の Cordis 構成に倣い、起動するプラグイン集合を**積層**�
 id = "ene-base"
 
 [[rows]]
+id = "tool.fs"                  # 省略時は plugin と同じ。同じ plugin を2行置くなら必須
 plugin = "tool.fs"
 config = { workspace_scope = "home" }
 
 [[rows]]
-plugin = "provider.openai"
+plugin = "provider.openai"      # id 省略 → "provider.openai"
 ```
+
+行の `id` は reconcile とパッチのキーである。ファイバー `uid` ではない。
+同一プロファイル内で `id` が衝突したら合成失敗(起動しない。そのプロファイル
+だけ)。`plugin` が同じで `id` が無い2行も同じ扱い。
 
 ### プロファイル
 
@@ -137,11 +142,12 @@ allow_unverified = false        # digest 照合に通らないものを起動す
 
 ```toml
 [[patch]]
-target = "tool.fs"              # 行の置換
+target = "tool.fs"              # 行 id の置換(省略時 id = plugin なのでこれで足りる)
 config = { workspace_scope = "project-x" }
 
 [[patch]]
-insert_after = "tool.fs"        # 新行の挿入
+insert_after = "tool.fs"        # この行 id の直後に挿入
+id = "tool.git"
 plugin = "tool.git"
 ```
 
@@ -158,13 +164,13 @@ plugin = "tool.git"
 
 | 行の変化 | 操作 |
 |---|---|
-| 新しい `id` | ファイバーを挿入(`inactive` から requires 待ち) |
-| 行の削除 / `disabled = true` | ファイバーを卸す(unload → 行を捨てる) |
-| `disabled` の解除 | 既存 uid のまま reload |
-| `plugin` / `version` / digest の変化 | rebuild(卸して入れ直す。uid は新しい) |
-| `config` のみ | `core.reconfigure` を送る。プラグインが `need_rebuild` を返したら rebuild |
+| 新しい `id` | ファイバーを挿入(`inactive` から requires 待ち)。新しい `uid` |
+| 行の削除 / `disabled = true` | ファイバーを卸す(unload → 行を捨てる、または disabled のまま残す) |
+| `disabled` の解除 | **新しい `uid`** で reload。前の起動と取り違えない |
+| `plugin` / `version` / digest の変化 | rebuild(卸して入れ直す。`uid` は新しい。`row_id` は維持) |
+| `config` のみ | `core.reconfigure` を送る。`applied` なら `uid` 維持。`need_rebuild` / `error` / 無応答なら rebuild |
 | `[capabilities]` / 隔離の変化 | rebuild(付与する能力が変わるため) |
-| パッチ `target` 不存在 | そのパッチ行を無視し警告(従前どおり) |
+| パッチの `target` 不存在 | そのパッチ行を無視し警告(従前どおり) |
 
 無関係な行の `state` は動かさない。プロバイダ行だけを差し替えても
 `fs` は `active` のまま(`fs` は `seam.llm` を require しない)。
@@ -222,7 +228,8 @@ git・ブラウザ操作・カレンダー等は内製せず MCP に委ねる
 | `requires` 未充足 | その行は `inactive` で待つ。不足鍵を報告。充足すれば activating |
 | `requires` の循環 | 関係行をすべて `inactive`。起動時に報告 |
 | `provides` の鍵衝突 | 後着の行を `failed`。先着が保持 |
-| digest 不一致 | 起動拒否+監査ログ。改竄としてユーザー通知 |
+| 行 `id` の衝突 / 同一 `plugin` で `id` 無しが2行 | そのプロファイルの合成失敗。起動しない |
+| digest 不一致 | `inactive`。自動再試行しない。監査ログ。改竄としてユーザー通知 |
 | manifest 外の副プロトコルを名乗る | 切断([ipc.md §8](ipc.md#8-障害モード)) |
 | パッチの target 不存在 | そのパッチ行を無視し警告(起動は継続) |
 | MCP サーバーへの接続失敗 | その供給元のツールのみ無効化(ファイバー unload)。他は影響しない |
