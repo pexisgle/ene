@@ -159,7 +159,14 @@ async fn surface_live_subscription_does_not_receive_inner() {
         !surface_hist
             .messages
             .iter()
-            .any(|m| m.text().contains("turn complete"))
+            .any(|m| m.role == ene_session::Role::Inner)
+    );
+    let detail_hist = lane.project(DisplayDepth::Detail).unwrap();
+    assert!(
+        detail_hist
+            .messages
+            .iter()
+            .any(|m| m.role == ene_session::Role::Inner)
     );
 }
 

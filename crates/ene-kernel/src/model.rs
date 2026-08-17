@@ -65,7 +65,7 @@ impl ConversationModel for EchoModel {
         Ok(ModelGeneration {
             text,
             thinking: None,
-            inner: Vec::new(),
+            inner: vec![(InnerAspect::Thought, format!("noted: {last}"))],
             finish_reason: "stop".to_owned(),
             model_id: "echo".to_owned(),
             input_tokens: u32::try_from(request.messages.len()).unwrap_or(0),

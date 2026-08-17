@@ -74,14 +74,15 @@ impl Default for DiagSettings {
     }
 }
 
-ene_config::define_config!(
-    settings,
-    "mind",
-    /// Inner-channel projection window.
-    pub struct MindSettings {
-        pub inner: InnerSettings,
-    }
-);
+/// Inner-channel window passed into the lane. Full `mind.*` lives in `ene-companion`.
+#[derive(
+    Debug, Clone, Default, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct MindSettings {
+    pub inner: InnerSettings,
+}
 
 /// `mind.inner.*`
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
@@ -89,12 +90,16 @@ ene_config::define_config!(
 #[schemars(crate = "::ene_config::schemars")]
 pub struct InnerSettings {
     pub self_reference_window: u32,
+    pub auto_emotion_events: bool,
+    pub derive_from_thinking: bool,
 }
 
 impl Default for InnerSettings {
     fn default() -> Self {
         Self {
-            self_reference_window: 8,
+            self_reference_window: 24,
+            auto_emotion_events: true,
+            derive_from_thinking: true,
         }
     }
 }

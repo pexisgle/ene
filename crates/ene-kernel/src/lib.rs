@@ -13,6 +13,7 @@
 mod config;
 mod context;
 mod error;
+mod inner;
 mod lane;
 mod live;
 mod model;
@@ -21,6 +22,7 @@ mod observe;
 pub use config::{CoreSettings, HarnessSettings, MindSettings};
 pub use context::{ContextRegistry, format_recovery_note};
 pub use error::{CancelQueued, KernelError, RunOutcome};
+pub use inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
 pub use lane::{LaneHandle, LaneOptions};
 pub use live::{LiveBus, LiveEvent, LiveSubscription};
 pub use model::{ConversationModel, EchoModel, ModelGeneration, ModelRequest};

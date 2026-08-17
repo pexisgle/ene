@@ -2,6 +2,9 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ene_companion::{
+    CompanionRuntime, CompanionStore, MindSettings as CompanionMind, register_memory_tools,
+};
 use ene_fiber::Supervisor;
 use ene_kernel::{ConversationModel, LaneHandle, LaneOptions, format_recovery_note};
 use ene_plane::{ApprovalPlane, ApprovalSettings, AuditLog, ScriptedPopup, Vault};
@@ -46,6 +49,8 @@ pub enum CoreError {
     Audit(#[from] ene_plane::AuditError),
     #[error(transparent)]
     Vault(#[from] ene_plane::VaultError),
+    #[error(transparent)]
+    Companion(#[from] ene_companion::CompanionError),
     #[error("another ene-core instance holds the data-directory lock at {0}")]
     AlreadyRunning(String),
 }
@@ -59,6 +64,8 @@ pub struct CoreDaemon {
     supervisor: Arc<Supervisor>,
     plane: Arc<ApprovalPlane>,
     vault: Vault,
+    companions: Arc<CompanionStore>,
+    companion: CompanionRuntime,
 }
 
 impl CoreDaemon {
@@ -88,6 +95,9 @@ impl CoreDaemon {
         let passphrase =
             std::env::var("ENE_VAULT_PASSPHRASE").unwrap_or_else(|_| "local".to_owned());
         let vault = Vault::open_file(opts.data_dir.join("vault.bin"), &passphrase)?;
+        let companions = Arc::new(CompanionStore::open(opts.data_dir.join("companions.db"))?);
+        register_memory_tools(&registry, Arc::clone(&companions));
+        let companion = CompanionRuntime::new(Arc::clone(&companions), CompanionMind::default());
         let supervisor = Arc::new(Supervisor::new(opts.data_dir.clone(), registry));
         Ok(Self {
             data_dir: opts.data_dir,
@@ -97,6 +107,8 @@ impl CoreDaemon {
             supervisor,
             plane,
             vault,
+            companions,
+            companion,
         })
     }
 
@@ -128,6 +140,16 @@ impl CoreDaemon {
     #[must_use]
     pub fn vault(&self) -> &Vault {
         &self.vault
+    }
+
+    #[must_use]
+    pub fn companions(&self) -> Arc<CompanionStore> {
+        Arc::clone(&self.companions)
+    }
+
+    #[must_use]
+    pub fn companion(&self) -> &CompanionRuntime {
+        &self.companion
     }
 
     /// Note injected into the next surface turn (D-13). `None` when nothing was interrupted.

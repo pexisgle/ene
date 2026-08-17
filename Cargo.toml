@@ -137,6 +137,7 @@ insta = "1"
 proptest = "1"
 thiserror = "2.0"
 zip = { version = "8", default-features = false }
+toml = "0.8"
 
 ene-connector = { path = "crates/ene-connector" }
 ene-ai = { path = "crates/ene-ai" }
@@ -160,6 +161,7 @@ ene-plugin-proto = { path = "crates/ene-plugin-proto" }
 ene-registry = { path = "crates/ene-registry" }
 ene-fiber = { path = "crates/ene-fiber" }
 ene-plane = { path = "crates/ene-plane" }
+ene-companion = { path = "crates/ene-companion" }
 ene-rag = { path = "crates/ene-rag" }
 ene-runtime = { path = "crates/ene-runtime" }
 ene-sandbox = { path = "crates/ene-sandbox" }

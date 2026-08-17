@@ -176,6 +176,22 @@ async fn disabling_one_fiber_does_not_restart_the_core() {
 }
 
 #[tokio::test]
+async fn boot_opens_companions_db() {
+    let dir = TempDir::new().unwrap();
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    let soul = core
+        .companions()
+        .create_soul(&ene_companion::NewSoul::text_only("char.boot@1"))
+        .unwrap();
+    core.companion()
+        .on_user_turn(soul.id, "hello", &[])
+        .unwrap();
+    assert!(dir.path().join("companions.db").exists());
+}
+
+#[tokio::test]
 async fn boot_installs_approval_plane_and_vault() {
     let dir = TempDir::new().unwrap();
     let core = CoreDaemon::boot(BootOptions::new(dir.path()))

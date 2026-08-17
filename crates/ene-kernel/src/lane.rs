@@ -10,12 +10,13 @@ use tracing::warn;
 use crate::config::{HarnessSettings, MindSettings};
 use crate::context::{ContextRegistry, format_recovery_note};
 use crate::error::{CancelQueued, KernelError};
+use crate::inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
 use crate::live::{LiveBus, LiveEvent, LiveSubscription};
 use crate::model::{ConversationModel, ModelRequest};
 use crate::observe::ObserveHandle;
 use ene_session::{
-    Block, ClientId, DisplayDepth, EventKind, EventPayload, InboxClass, InboxSource, InnerAspect,
-    LaneId, NewEvent, NewUsage, ProjectOptions, RecoveryReport, SessionId, SessionStore, SoulId,
+    Block, ClientId, DisplayDepth, EventKind, EventPayload, InboxClass, InboxSource, LaneId,
+    NewEvent, NewUsage, ProjectOptions, RecoveryReport, SessionId, SessionStore, SoulId,
     StepOutcome, Transaction, TurnId, TurnOrigin, TurnOutcome, TurnTrigger, derive_messages,
     hash_model_visible, hash_projected, v1,
 };
@@ -555,6 +556,7 @@ async fn spawn_turn(
         observe: state.observe.clone(),
         live: state.live.clone(),
         window: state.mind.inner.self_reference_window,
+        derive_from_thinking: state.mind.inner.derive_from_thinking,
         max_steps: state.max_steps,
         cancel: Arc::clone(&cancel),
         cancelled: Arc::clone(&cancelled),
@@ -749,6 +751,7 @@ struct TurnCtx {
     observe: ObserveHandle,
     live: LiveBus,
     window: u32,
+    derive_from_thinking: bool,
     max_steps: u32,
     cancel: Arc<Notify>,
     cancelled: Arc<AtomicBool>,
@@ -813,6 +816,15 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
         return Ok(());
     }
 
+    let (speech, mut inner) = split_surface_and_inner(&generation.text);
+    inner.extend(generation.inner.iter().cloned());
+    if let Some(derived) = derive_thought_from_thinking(
+        &inner,
+        generation.thinking.as_deref(),
+        ctx.derive_from_thinking,
+    ) {
+        inner.push(derived);
+    }
     let mut end_entries = Vec::new();
     if let Some(thinking) = generation.thinking.clone() {
         end_entries.push(NewEvent::new(
@@ -827,7 +839,12 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             },
         ));
     }
-    for (aspect, text) in &generation.inner {
+    let speech_for_live = if speech.is_empty() {
+        generation.text.clone()
+    } else {
+        speech.clone()
+    };
+    for (aspect, text) in &inner {
         end_entries.push(NewEvent::new(
             ctx.session,
             EventKind::InnerMessage,
@@ -837,21 +854,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
                 step_index: Some(0),
                 aspects: vec![*aspect],
                 blocks: vec![Block::text(text)],
-                model_visible: false,
-            },
-        ));
-    }
-    if generation.inner.is_empty() {
-        end_entries.push(NewEvent::new(
-            ctx.session,
-            EventKind::InnerMessage,
-            EventPayload::InnerMessage {
-                v: v1(),
-                turn_id: Some(ctx.turn),
-                step_index: Some(0),
-                aspects: vec![InnerAspect::Thought],
-                blocks: vec![Block::text("turn complete")],
-                model_visible: false,
+                model_visible: model_visible_for(*aspect),
             },
         ));
     }
@@ -862,7 +865,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             v: v1(),
             turn_id: ctx.turn,
             step_index: 0,
-            blocks: vec![Block::text(&generation.text)],
+            blocks: vec![Block::text(&speech_for_live)],
             finish_reason: generation.finish_reason.clone(),
             token_count: Some(generation.output_tokens),
         },
@@ -914,16 +917,18 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
         DisplayDepth::Surface,
         LiveEvent::TextDelta {
             turn_id: ctx.turn,
-            text: generation.text.clone(),
+            text: speech_for_live,
         },
     );
-    ctx.live.emit(
-        DisplayDepth::Detail,
-        LiveEvent::InnerMessage {
-            turn_id: Some(ctx.turn),
-            text: "turn complete".to_owned(),
-        },
-    );
+    if let Some((_, text)) = inner.first() {
+        ctx.live.emit(
+            DisplayDepth::Detail,
+            LiveEvent::InnerMessage {
+                turn_id: Some(ctx.turn),
+                text: text.clone(),
+            },
+        );
+    }
     if let Some(thinking) = generation.thinking {
         ctx.live.emit(
             DisplayDepth::Detail,
