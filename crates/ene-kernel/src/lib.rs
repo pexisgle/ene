@@ -18,15 +18,17 @@ mod lane;
 mod live;
 mod model;
 mod observe;
+mod router;
 
-pub use config::{CoreSettings, HarnessSettings, MindSettings};
+pub use config::{CoreSettings, DelegationSettings, HarnessSettings, MindSettings};
 pub use context::{ContextRegistry, format_recovery_note};
 pub use error::{CancelQueued, KernelError, RunOutcome};
 pub use inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
 pub use lane::{LaneHandle, LaneOptions};
 pub use live::{LiveBus, LiveEvent, LiveSubscription};
-pub use model::{ConversationModel, EchoModel, ModelGeneration, ModelRequest};
+pub use model::{ConversationModel, EchoModel, ModelGeneration, ModelRequest, ToolCall};
 pub use observe::{ObserveHandle, Span, SpanGuard, SpanRing, spans_leak_content};
+pub use router::{SurfaceRouter, SurfaceToolOutcome};
 
 pub use ene_session::{
     DisplayDepth, EventKind, EventPayload, ProjectOptions, ProjectedHistory, RecoveryReport,

@@ -1,5 +1,6 @@
 //! Dialogue lane: `prompt` / `steer` / `follow_up` / `abort` / `compact`.
 
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -12,13 +13,14 @@ use crate::context::{ContextRegistry, format_recovery_note};
 use crate::error::{CancelQueued, KernelError};
 use crate::inner::{derive_thought_from_thinking, model_visible_for, split_surface_and_inner};
 use crate::live::{LiveBus, LiveEvent, LiveSubscription};
-use crate::model::{ConversationModel, ModelRequest};
+use crate::model::{ConversationModel, ModelGeneration, ModelRequest};
 use crate::observe::ObserveHandle;
+use crate::router::{SurfaceRouter, SurfaceToolOutcome};
 use ene_session::{
-    Block, ClientId, DisplayDepth, EventKind, EventPayload, InboxClass, InboxSource, LaneId,
-    NewEvent, NewUsage, ProjectOptions, RecoveryReport, SessionId, SessionStore, SoulId,
-    StepOutcome, Transaction, TurnId, TurnOrigin, TurnOutcome, TurnTrigger, derive_messages,
-    hash_model_visible, hash_projected, v1,
+    Block, CallId, ClientId, DelegationId, DisplayDepth, EventKind, EventPayload, InboxClass,
+    InboxSource, LaneId, NewEvent, NewUsage, ProjectOptions, RecoveryReport, SessionId,
+    SessionStore, SoulId, StepOutcome, ToolStatus, Transaction, TurnId, TurnOrigin, TurnOutcome,
+    TurnTrigger, derive_messages, hash_model_visible, hash_projected, v1,
 };
 
 enum LaneCmd {
@@ -77,6 +79,7 @@ struct LaneState {
     mind: MindSettings,
     max_steps: u32,
     context: ContextRegistry,
+    router: Option<Arc<dyn SurfaceRouter>>,
     running: Option<RunningTurn>,
     queued_wake: Option<QueuedWake>,
     queued_inject: Option<QueuedInject>,
@@ -105,6 +108,8 @@ pub struct LaneOptions {
     pub mind: MindSettings,
     /// Reports from `recover_interrupted` to inject into the next turn.
     pub recovery: Vec<RecoveryReport>,
+    /// Surface tool router. `None` keeps the lane speech-only.
+    pub router: Option<Arc<dyn SurfaceRouter>>,
 }
 
 /// Handle to the single dialogue lane.
@@ -138,6 +143,7 @@ impl LaneHandle {
             mind: opts.mind,
             max_steps: opts.harness.loop_cfg.max_steps_per_turn,
             context,
+            router: opts.router,
             running: None,
             queued_wake: None,
             queued_inject: None,
@@ -558,6 +564,7 @@ async fn spawn_turn(
         window: state.mind.inner.self_reference_window,
         derive_from_thinking: state.mind.inner.derive_from_thinking,
         max_steps: state.max_steps,
+        router: state.router.clone(),
         cancel: Arc::clone(&cancel),
         cancelled: Arc::clone(&cancelled),
         done: done_tx.clone(),
@@ -753,6 +760,7 @@ struct TurnCtx {
     window: u32,
     derive_from_thinking: bool,
     max_steps: u32,
+    router: Option<Arc<dyn SurfaceRouter>>,
     cancel: Arc<Notify>,
     cancelled: Arc<AtomicBool>,
     done: mpsc::UnboundedSender<TurnFinish>,
@@ -783,39 +791,95 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
         .start("turn")
         .attr("turn_id", ctx.turn.to_string());
     debug_assert!(ctx.max_steps >= 1);
-    let events = ctx.store.load_events(ctx.session, 0)?;
-    let history = derive_messages(&events, ProjectOptions::model_visible(ctx.window));
-    let request = ModelRequest {
-        messages: history.messages.clone(),
-    };
-    let logged_hash = hash_projected(&history)?;
-    let request_hash = hash_model_visible(&request.messages)?;
-    debug_assert_eq!(
-        logged_hash, request_hash,
-        "model-visible must equal logged projection (L-1)"
-    );
-
-    if ctx.cancelled.load(Ordering::SeqCst) {
-        finish_interrupted(&ctx).await?;
-        span.end();
-        return Ok(());
-    }
-
-    let generation = tokio::select! {
-        () = ctx.cancel.notified() => {
-            finish_interrupted(&ctx).await?;
+    let mut step_index = 0_u32;
+    loop {
+        if ctx.cancelled.load(Ordering::SeqCst) {
+            finish_interrupted(&ctx, step_index).await?;
             span.end();
             return Ok(());
         }
-        result = ctx.model.generate(request) => result?,
-    };
+        if step_index >= ctx.max_steps.max(1) {
+            finish_speech(
+                &ctx,
+                &ModelGeneration {
+                    text: "I'll look into that.".to_owned(),
+                    finish_reason: "delegated".to_owned(),
+                    ..ModelGeneration::default()
+                },
+                step_index.saturating_sub(1),
+                None,
+            )
+            .await?;
+            span.end();
+            return Ok(());
+        }
 
-    if ctx.cancelled.load(Ordering::SeqCst) {
-        finish_interrupted(&ctx).await?;
-        span.end();
-        return Ok(());
+        let events = ctx.store.load_events(ctx.session, 0)?;
+        let history = derive_messages(&events, ProjectOptions::model_visible(ctx.window));
+        let request = ModelRequest {
+            messages: history.messages.clone(),
+        };
+        let logged_hash = hash_projected(&history)?;
+        let request_hash = hash_model_visible(&request.messages)?;
+        debug_assert_eq!(
+            logged_hash, request_hash,
+            "model-visible must equal logged projection (L-1)"
+        );
+
+        let generation = tokio::select! {
+            () = ctx.cancel.notified() => {
+                finish_interrupted(&ctx, step_index).await?;
+                span.end();
+                return Ok(());
+            }
+            result = ctx.model.generate(request) => result?,
+        };
+
+        if ctx.cancelled.load(Ordering::SeqCst) {
+            finish_interrupted(&ctx, step_index).await?;
+            span.end();
+            return Ok(());
+        }
+
+        let Some(call) = generation.tool_calls.first() else {
+            finish_speech(&ctx, &generation, step_index, None).await?;
+            span.end();
+            return Ok(());
+        };
+        let Some(router) = ctx.router.as_ref() else {
+            finish_speech(&ctx, &generation, step_index, None).await?;
+            span.end();
+            return Ok(());
+        };
+
+        match router
+            .on_tool(&call.name, call.arguments.clone(), step_index)
+            .await?
+        {
+            SurfaceToolOutcome::Delegated { speech, job_id } => {
+                let generation = ModelGeneration {
+                    text: speech,
+                    finish_reason: "delegated".to_owned(),
+                    ..generation
+                };
+                finish_speech(&ctx, &generation, step_index, Some(job_id)).await?;
+                span.end();
+                return Ok(());
+            }
+            SurfaceToolOutcome::Result(value) => {
+                commit_tool_step(&ctx, &call.name, &call.arguments, value, step_index).await?;
+                step_index = step_index.saturating_add(1);
+            }
+        }
     }
+}
 
+async fn finish_speech(
+    ctx: &TurnCtx,
+    generation: &ModelGeneration,
+    step_index: u32,
+    delegated_job: Option<String>,
+) -> Result<(), KernelError> {
     let (speech, mut inner) = split_surface_and_inner(&generation.text);
     inner.extend(generation.inner.iter().cloned());
     if let Some(derived) = derive_thought_from_thinking(
@@ -826,6 +890,21 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
         inner.push(derived);
     }
     let mut end_entries = Vec::new();
+    if let Some(job_id) = delegated_job.as_deref()
+        && let Ok(delegation_id) = DelegationId::from_str(job_id)
+    {
+        end_entries.push(NewEvent::new(
+            ctx.session,
+            EventKind::DelegationStart,
+            EventPayload::DelegationStart {
+                v: v1(),
+                delegation_id,
+                mode: "public".to_owned(),
+                goal_excerpt: truncate_chars(&generation.text, 120),
+                budget: serde_json::json!({}),
+            },
+        ));
+    }
     if let Some(thinking) = generation.thinking.clone() {
         end_entries.push(NewEvent::new(
             ctx.session,
@@ -833,7 +912,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             EventPayload::AssistantThinking {
                 v: v1(),
                 turn_id: ctx.turn,
-                step_index: 0,
+                step_index,
                 blocks: vec![Block::text(thinking)],
                 model_id: generation.model_id.clone(),
             },
@@ -851,7 +930,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             EventPayload::InnerMessage {
                 v: v1(),
                 turn_id: Some(ctx.turn),
-                step_index: Some(0),
+                step_index: Some(step_index),
                 aspects: vec![*aspect],
                 blocks: vec![Block::text(text)],
                 model_visible: model_visible_for(*aspect),
@@ -864,7 +943,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
         EventPayload::AssistantMessage {
             v: v1(),
             turn_id: ctx.turn,
-            step_index: 0,
+            step_index,
             blocks: vec![Block::text(&speech_for_live)],
             finish_reason: generation.finish_reason.clone(),
             token_count: Some(generation.output_tokens),
@@ -876,7 +955,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
         EventPayload::StepEnd {
             v: v1(),
             turn_id: ctx.turn,
-            step_index: 0,
+            step_index,
             outcome: StepOutcome::Stop,
             finish_reason: Some(generation.finish_reason.clone()),
         },
@@ -929,7 +1008,7 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             },
         );
     }
-    if let Some(thinking) = generation.thinking {
+    if let Some(thinking) = generation.thinking.clone() {
         ctx.live.emit(
             DisplayDepth::Detail,
             LiveEvent::ThinkingDelta {
@@ -945,11 +1024,78 @@ async fn run_turn_inner(ctx: TurnCtx) -> Result<(), KernelError> {
             outcome: "completed".to_owned(),
         },
     );
-    span.end();
     Ok(())
 }
 
-async fn finish_interrupted(ctx: &TurnCtx) -> Result<(), KernelError> {
+async fn commit_tool_step(
+    ctx: &TurnCtx,
+    name: &str,
+    args: &serde_json::Value,
+    value: serde_json::Value,
+    step_index: u32,
+) -> Result<(), KernelError> {
+    let call_id = CallId::new();
+    let mut entries = vec![
+        NewEvent::new(
+            ctx.session,
+            EventKind::ToolCall,
+            EventPayload::ToolCall {
+                v: v1(),
+                turn_id: ctx.turn,
+                step_index,
+                call_id,
+                tool_name: name.to_owned(),
+                source: "surface".to_owned(),
+                args: args.clone(),
+            },
+        ),
+        NewEvent::new(
+            ctx.session,
+            EventKind::ToolResult,
+            EventPayload::ToolResult {
+                v: v1(),
+                call_id,
+                status: ToolStatus::Ok,
+                blocks: vec![Block::text(value.to_string())],
+                spill_ref: None,
+                error_class: None,
+                duration_ms: 0,
+            },
+        ),
+        NewEvent::new(
+            ctx.session,
+            EventKind::StepEnd,
+            EventPayload::StepEnd {
+                v: v1(),
+                turn_id: ctx.turn,
+                step_index,
+                outcome: StepOutcome::Next,
+                finish_reason: Some("tool".to_owned()),
+            },
+        ),
+    ];
+    let next = step_index.saturating_add(1);
+    if next < ctx.max_steps.max(1) {
+        entries.push(NewEvent::new(
+            ctx.session,
+            EventKind::StepStart,
+            EventPayload::StepStart {
+                v: v1(),
+                turn_id: ctx.turn,
+                step_index: next,
+            },
+        ));
+    }
+    ctx.store
+        .commit(Transaction {
+            entries,
+            usage: Vec::new(),
+        })
+        .await?;
+    Ok(())
+}
+
+async fn finish_interrupted(ctx: &TurnCtx, step_index: u32) -> Result<(), KernelError> {
     ctx.store
         .commit(Transaction {
             entries: vec![
@@ -959,7 +1105,7 @@ async fn finish_interrupted(ctx: &TurnCtx) -> Result<(), KernelError> {
                     EventPayload::StepEnd {
                         v: v1(),
                         turn_id: ctx.turn,
-                        step_index: 0,
+                        step_index,
                         outcome: StepOutcome::Error,
                         finish_reason: Some("interrupted".to_owned()),
                     },

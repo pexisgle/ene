@@ -23,6 +23,8 @@ pub enum KernelError {
     Model(String),
     #[error("queued entry not found")]
     QueuedNotFound,
+    #[error("tool: {0}")]
+    Tool(String),
 }
 
 impl KernelError {

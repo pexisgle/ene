@@ -6,6 +6,7 @@ ene_config::define_config!(
         #[serde(rename = "loop")]
         pub loop_cfg: LoopSettings,
         pub context: ContextSettings,
+        pub delegation: DelegationSettings,
     }
 );
 
@@ -40,6 +41,30 @@ impl Default for ContextSettings {
         Self {
             response_reserve_tokens: 4096,
             safety_margin_ratio: 0.1,
+        }
+    }
+}
+
+/// Resource guards for public/internal delegations.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct DelegationSettings {
+    pub max_active: u32,
+    pub step_budget: u32,
+    pub wall_timeout_secs: u32,
+    pub max_depth: u32,
+    pub question_timeout_hours: u32,
+}
+
+impl Default for DelegationSettings {
+    fn default() -> Self {
+        Self {
+            max_active: 8,
+            step_budget: 64,
+            wall_timeout_secs: 3_600,
+            max_depth: 3,
+            question_timeout_hours: 24,
         }
     }
 }

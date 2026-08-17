@@ -1,0 +1,33 @@
+[package]
+name = "ene-work"
+version.workspace = true
+edition.workspace = true
+description = "Delegation, jobs, schedules, skills, MCP bindings, and vision dual-path"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+cron = { workspace = true }
+ene-companion = { workspace = true }
+ene-kernel = { workspace = true }
+ene-plane = { workspace = true }
+ene-registry = { workspace = true }
+ene-session = { workspace = true }
+parking_lot = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

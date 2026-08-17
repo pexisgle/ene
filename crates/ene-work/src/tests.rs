@@ -1,0 +1,682 @@
+use crate::host::{
+    DelegationHost, StartDelegation, SurfaceCallKind, UpgradeRequest, question_timed_out,
+    should_upgrade_steps, surface_call_kind,
+};
+use crate::mcp::{McpProfile, McpTool, ScriptedMcp, register_mcp_tools};
+use crate::router::WorkSurfaceRouter;
+use crate::schedule::{QuietWindow, catch_up_missed, fire_due, reminder_report};
+use crate::skill::{catalog, install_skill_dir, load_skill, parse_skill_md};
+use crate::store::WorkStore;
+use crate::tools::{register_work_tools, surface_shows_delegate};
+use crate::types::{
+    ArtifactKind, DelegationMode, JobStatus, NewSchedule, ScheduleAction, UpgradeReason,
+};
+use crate::vision::{observe_screen, register_screenshot_tool, screenshot_is_job_or_surface};
+use async_trait::async_trait;
+use chrono::{Duration, TimeZone, Utc};
+use ene_companion::{WorldStateMemory, WorldStateSettings};
+use ene_kernel::{
+    ConversationModel, DisplayDepth, EventKind, HarnessSettings, KernelError, LaneHandle,
+    LaneOptions, MindSettings, ModelGeneration, ModelRequest, SurfaceRouter, SurfaceToolOutcome,
+    ToolCall,
+};
+use ene_plane::Sensitivity;
+use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
+use ene_session::{
+    NewSession, SessionCreatedBy, SessionKind, SessionStore, SoulId, derive_messages,
+};
+use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration as StdDuration;
+use tempfile::TempDir;
+
+struct SpyInvoke {
+    hit: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl ToolInvoke for SpyInvoke {
+    async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {
+        self.hit.store(true, Ordering::SeqCst);
+        Ok(json!({ "ok": true }))
+    }
+}
+
+struct SequenceModel {
+    remaining: parking_lot::Mutex<Vec<ModelGeneration>>,
+}
+
+#[async_trait]
+impl ConversationModel for SequenceModel {
+    async fn generate(&self, _request: ModelRequest) -> Result<ModelGeneration, KernelError> {
+        let mut remaining = self.remaining.lock();
+        remaining.pop().map_or_else(
+            || {
+                Ok(ModelGeneration {
+                    text: "all done".to_owned(),
+                    ..ModelGeneration::default()
+                })
+            },
+            Ok,
+        )
+    }
+}
+
+fn fs_write_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "fs.write".to_owned(),
+        description: "Write a file".to_owned(),
+        parameters: json!({"type":"object"}),
+        output: json!({"type":"object"}),
+        side_effects: vec!["fs.write".to_owned()],
+        source: ToolSource::Harness {
+            name: "fs".to_owned(),
+        },
+        timeout_ms: Some(1_000),
+        sensitivity: Sensitivity::None,
+    }
+}
+
+fn utility_time_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "utility.time".to_owned(),
+        description: "Current UTC time".to_owned(),
+        parameters: json!({"type":"object"}),
+        output: json!({"type":"object"}),
+        side_effects: Vec::new(),
+        source: ToolSource::Harness {
+            name: "utility".to_owned(),
+        },
+        timeout_ms: Some(1_000),
+        sensitivity: Sensitivity::None,
+    }
+}
+
+fn open_work() -> (TempDir, Arc<WorkStore>, Arc<DelegationHost>, SoulId) {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+    ));
+    (dir, store, host, SoulId::new())
+}
+
+fn public_start(host: &DelegationHost, soul: SoulId, goal: &str) -> crate::types::Job {
+    host.start(StartDelegation {
+        soul_id: soul,
+        goal: goal.to_owned(),
+        mode: DelegationMode::Public,
+        title: Some(goal.to_owned()),
+        brief: None,
+        plan: None,
+        created_from_turn: None,
+        depth: 0,
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn surface_fs_write_upgrades_without_invoking() {
+    let (_dir, store, host, soul) = open_work();
+    let registry = ToolRegistry::new();
+    let hit = Arc::new(AtomicBool::new(false));
+    registry.register_with(
+        fs_write_def(),
+        Arc::new(SpyInvoke {
+            hit: Arc::clone(&hit),
+        }),
+    );
+    registry.register(utility_time_def());
+    assert_eq!(
+        surface_call_kind(&registry, "fs.write"),
+        SurfaceCallKind::Upgrade
+    );
+    assert_eq!(
+        surface_call_kind(&registry, "utility.time"),
+        SurfaceCallKind::Run
+    );
+    let err = registry
+        .execute(
+            "fs.write",
+            json!({"path":"/tmp/x","text":"no"}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ene_registry::PipelineError::NotOnSurface(_)));
+    let job = host
+        .auto_upgrade(UpgradeRequest {
+            soul_id: soul,
+            goal: "write the file".into(),
+            reason: UpgradeReason::SideEffectTool,
+            steps_so_far: String::new(),
+            brief: Some("so far: (nothing yet). next tool requested: fs.write".into()),
+            created_from_turn: None,
+        })
+        .unwrap();
+    assert!(!hit.load(Ordering::SeqCst));
+    assert_eq!(job.mode, DelegationMode::Public);
+    assert_eq!(store.list_jobs(soul).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn empty_side_effect_tool_runs_on_surface_router() {
+    let (_dir, _store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register(utility_time_def());
+    let router = WorkSurfaceRouter::new(host, Arc::clone(&registry), soul, 4);
+    let outcome = router.on_tool("utility.time", json!({}), 0).await.unwrap();
+    assert!(matches!(outcome, SurfaceToolOutcome::Result(_)));
+}
+
+#[tokio::test]
+async fn surface_router_upgrades_fs_write_without_spy() {
+    let (_dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    let hit = Arc::new(AtomicBool::new(false));
+    registry.register_with(
+        fs_write_def(),
+        Arc::new(SpyInvoke {
+            hit: Arc::clone(&hit),
+        }),
+    );
+    let router = WorkSurfaceRouter::new(host, registry, soul, 4);
+    let outcome = router
+        .on_tool("fs.write", json!({"path":"a","text":"b"}), 0)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SurfaceToolOutcome::Delegated { .. }));
+    assert!(!hit.load(Ordering::SeqCst));
+    assert_eq!(store.list_jobs(soul).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn step_budget_upgrades_even_for_empty_side_effects() {
+    let (_dir, store, host, soul) = open_work();
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register(utility_time_def());
+    let router = WorkSurfaceRouter::new(host, registry, soul, 2);
+    assert!(should_upgrade_steps(1, 2));
+    let outcome = router.on_tool("utility.time", json!({}), 1).await.unwrap();
+    assert!(matches!(outcome, SurfaceToolOutcome::Delegated { .. }));
+    assert_eq!(store.list_jobs(soul).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn lane_prompt_still_works_while_job_running() {
+    let dir = TempDir::new().unwrap();
+    let work = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&work),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let job = public_start(&host, soul, "research");
+    work.set_status(job.id, JobStatus::Running, None).unwrap();
+    let sessions = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let session = sessions
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&sessions),
+        session,
+        soul,
+        model: Arc::new(ene_kernel::EchoModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        router: None,
+    });
+    lane.prompt("hello while working").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let still = work.get_job(job.id).unwrap().unwrap();
+    assert_eq!(still.status, JobStatus::Running);
+    let history = lane.project(DisplayDepth::Surface).unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|m| m.text().contains("hello while working"))
+    );
+}
+
+#[tokio::test]
+async fn lane_auto_upgrade_does_not_execute_fs_write() {
+    let dir = TempDir::new().unwrap();
+    let work = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&work),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let registry = Arc::new(ToolRegistry::new());
+    let hit = Arc::new(AtomicBool::new(false));
+    registry.register_with(
+        fs_write_def(),
+        Arc::new(SpyInvoke {
+            hit: Arc::clone(&hit),
+        }),
+    );
+    let router = Arc::new(WorkSurfaceRouter::new(
+        Arc::clone(&host),
+        Arc::clone(&registry),
+        soul,
+        4,
+    ));
+    let sessions = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let session = sessions
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let model = Arc::new(SequenceModel {
+        remaining: parking_lot::Mutex::new(vec![ModelGeneration {
+            tool_calls: vec![ToolCall {
+                name: "fs.write".into(),
+                arguments: json!({"path":"x","text":"y"}),
+            }],
+            ..ModelGeneration::default()
+        }]),
+    });
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: sessions,
+        session,
+        soul,
+        model,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        router: Some(router as Arc<dyn SurfaceRouter>),
+    });
+    lane.prompt("please write a file").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    assert!(!hit.load(Ordering::SeqCst));
+    assert_eq!(work.list_jobs(soul).unwrap().len(), 1);
+}
+
+#[test]
+fn job_persists_and_recover_does_not_resume() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("companions.db");
+    let soul = SoulId::new();
+    let id;
+    {
+        let store = Arc::new(WorkStore::open(&path).unwrap());
+        let host = DelegationHost::new(Arc::clone(&store), dir.path().to_path_buf());
+        let job = public_start(&host, soul, "long task");
+        store.set_status(job.id, JobStatus::Running, None).unwrap();
+        id = job.id;
+    }
+    let store = Arc::new(WorkStore::open(&path).unwrap());
+    let host = DelegationHost::new(Arc::clone(&store), dir.path().to_path_buf());
+    let reports = host.recover_interrupted().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].speech.contains("long task"));
+    assert!(reports[0].speech.contains("stopped"));
+    let job = store.get_job(id).unwrap().unwrap();
+    assert_eq!(job.status, JobStatus::Interrupted);
+    assert!(host.recover_interrupted().unwrap().is_empty());
+}
+
+#[test]
+fn progress_and_complete_are_companion_speech() {
+    let (_dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "draft");
+    let progress = host.progress(job.id, Some(0.4), "outlining").unwrap();
+    assert!(progress.speech.contains("outlining"));
+    let done = host.complete(job.id, "the outline is ready").unwrap();
+    assert!(done.speech.contains("the outline is ready"));
+    assert!(matches!(
+        host.cancel(job.id),
+        Err(crate::WorkError::AlreadyCompleted)
+    ));
+}
+
+#[test]
+fn cancel_of_cancelled_is_idempotent_error() {
+    let (_dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "x");
+    assert_eq!(host.cancel(job.id).unwrap(), JobStatus::Cancelled);
+    assert!(matches!(
+        host.cancel(job.id),
+        Err(crate::WorkError::Cancelled)
+    ));
+}
+
+#[test]
+fn internal_delegation_has_no_job_row() {
+    let (_dir, store, host, soul) = open_work();
+    let job = host
+        .start(StartDelegation {
+            soul_id: soul,
+            goal: "secret lookup".into(),
+            mode: DelegationMode::Internal,
+            title: None,
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+        })
+        .unwrap();
+    assert!(store.get_job(job.id).unwrap().is_none());
+    assert!(store.list_jobs(soul).unwrap().is_empty());
+    assert!(!store.mailbox(job.id).unwrap().is_empty());
+}
+
+#[test]
+fn schedule_remind_fires_and_quiet_hours_defer() {
+    let (_dir, store, _host, soul) = open_work();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 3, 0, 0).unwrap();
+    let remind = store
+        .insert_schedule(&NewSchedule {
+            soul_id: soul,
+            name: "tea".into(),
+            spec: "* * * * * *".into(),
+            timezone: "UTC".into(),
+            action: ScheduleAction::Remind,
+            action_ref: Some("drink tea".into()),
+            important: false,
+        })
+        .unwrap();
+    store
+        .defer_next_fire(&remind.id, now - Duration::minutes(1))
+        .unwrap();
+    let quiet = QuietWindow {
+        enabled: true,
+        start_hour: 0,
+        end_hour: 24,
+        timezone: "UTC".into(),
+    };
+    assert!(fire_due(&store, now, &quiet).unwrap().is_empty());
+    let important = store
+        .insert_schedule(&NewSchedule {
+            soul_id: soul,
+            name: "meds".into(),
+            spec: "* * * * * *".into(),
+            timezone: "UTC".into(),
+            action: ScheduleAction::Remind,
+            action_ref: Some("take meds".into()),
+            important: true,
+        })
+        .unwrap();
+    store
+        .defer_next_fire(&important.id, now - Duration::minutes(1))
+        .unwrap();
+    let fired = fire_due(&store, now, &quiet).unwrap();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].schedule.name, "meds");
+    assert!(
+        reminder_report(&fired[0].schedule)
+            .speech
+            .contains("take meds")
+    );
+}
+
+#[test]
+fn missed_job_schedule_does_not_run() {
+    let (_dir, store, _host, soul) = open_work();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 0).unwrap();
+    let job_sched = store
+        .insert_schedule(&NewSchedule {
+            soul_id: soul,
+            name: "nightly".into(),
+            spec: "0 0 * * * *".into(),
+            timezone: "UTC".into(),
+            action: ScheduleAction::Job,
+            action_ref: None,
+            important: false,
+        })
+        .unwrap();
+    let past = now - Duration::hours(2);
+    store.defer_next_fire(&job_sched.id, past).unwrap();
+    assert!(catch_up_missed(&store, now).unwrap().is_empty());
+    let updated = store.get_schedule(&job_sched.id).unwrap().unwrap();
+    assert_ne!(
+        updated.next_fire.as_deref(),
+        Some(past.to_rfc3339().as_str())
+    );
+}
+
+#[test]
+fn missed_remind_fires_once() {
+    let (_dir, store, _host, soul) = open_work();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 0).unwrap();
+    let remind = store
+        .insert_schedule(&NewSchedule {
+            soul_id: soul,
+            name: "call".into(),
+            spec: "* * * * * *".into(),
+            timezone: "UTC".into(),
+            action: ScheduleAction::Remind,
+            action_ref: Some("call mom".into()),
+            important: false,
+        })
+        .unwrap();
+    store
+        .defer_next_fire(&remind.id, now - Duration::minutes(5))
+        .unwrap();
+    let fired = catch_up_missed(&store, now).unwrap();
+    assert_eq!(fired.len(), 1);
+    assert!(fired[0].missed);
+}
+
+#[test]
+fn skill_install_and_load() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: travel\ndescription: plan a trip\n---\n\n# Travel\npack light\n",
+    )
+    .unwrap();
+    let home = dir.path().join("skills");
+    let installed = install_skill_dir(&home, &src).unwrap();
+    assert_eq!(installed.meta.name, "travel");
+    let loaded = load_skill(&home, "travel").unwrap();
+    assert!(loaded.body.contains("pack light"));
+    assert_eq!(catalog(&home, &["travel".into()]).unwrap().len(), 1);
+    assert!(matches!(
+        load_skill(&home, "missing"),
+        Err(crate::WorkError::UnknownSkill(_))
+    ));
+    assert!(parse_skill_md("not a skill").is_err());
+}
+
+#[tokio::test]
+async fn mcp_handwritten_tools_execute_through_registry() {
+    let registry = ToolRegistry::new();
+    let invoke: Arc<dyn ToolInvoke> = Arc::new(ScriptedMcp::new([(
+        "mcp:git.status".into(),
+        json!({"clean": true}),
+    )]));
+    register_mcp_tools(
+        &registry,
+        &McpProfile {
+            server: "git".into(),
+            transport: "stdio".into(),
+            command: Some("git-mcp".into()),
+            url: None,
+        },
+        vec![McpTool {
+            name: "status".into(),
+            description: "git status".into(),
+            parameters: json!({"type":"object"}),
+            side_effects: Vec::new(),
+        }],
+        &invoke,
+    );
+    let value = registry
+        .execute("mcp:git.status", json!({}), Layer::Job)
+        .await
+        .unwrap();
+    assert_eq!(value["clean"], json!(true));
+}
+
+#[test]
+fn screenshot_is_surface_and_high_sensitivity() {
+    let registry = ToolRegistry::new();
+    register_screenshot_tool(
+        &registry,
+        Arc::new(ScriptedMcp::new([(
+            "app.screenshot".into(),
+            json!({"ok": true}),
+        )])),
+    );
+    assert!(screenshot_is_job_or_surface(&registry));
+    let def = registry.get("app.screenshot").unwrap();
+    assert!(def.side_effects.is_empty());
+    assert_eq!(def.sensitivity, Sensitivity::High);
+}
+
+#[tokio::test]
+async fn observe_screen_does_not_enter_session_history() {
+    let dir = TempDir::new().unwrap();
+    let sessions = SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+        .await
+        .unwrap();
+    let soul = SoulId::new();
+    let session = sessions
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let mut memory = WorldStateMemory::default();
+    let snap = observe_screen(
+        &mut memory,
+        &WorldStateSettings {
+            enabled: true,
+            ..WorldStateSettings::default()
+        },
+        "secret pixels",
+        12,
+    );
+    assert!(!format!("{snap:?}").contains("secret pixels"));
+    let events = sessions.load_events(session, 0).unwrap();
+    let history = derive_messages(&events, ene_session::ProjectOptions::model_visible(8));
+    let text = history
+        .messages
+        .iter()
+        .map(ene_session::ProjectedMessage::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("secret pixels"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::UserMessage))
+    );
+}
+
+#[tokio::test]
+async fn artifact_register_and_deliver() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let job = public_start(&host, soul, "notes");
+    let registry = ToolRegistry::new();
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_plane::ApprovalPlane::new(
+        ene_plane::ApprovalSettings::default(),
+        audit,
+        ene_plane::ScriptedPopup::deny_all(),
+        None,
+    ));
+    plane.set_policy(ene_plane::PolicyFile {
+        rules: vec![ene_plane::PolicyRule {
+            tool: "artifact.register".to_owned(),
+            scope: None,
+            decision: ene_plane::PolicyDecision::Allow,
+        }],
+    });
+    registry.set_plane(plane);
+    assert!(surface_shows_delegate(&registry));
+    let file = dir.path().join("out.md");
+    std::fs::write(&file, "# hi").unwrap();
+    let registered = registry
+        .execute(
+            "artifact.register",
+            json!({
+                "soul_id": soul.to_string(),
+                "job_id": job.id.to_string(),
+                "kind": "markdown",
+                "title": "notes",
+                "path": file.to_string_lossy(),
+            }),
+            Layer::Job,
+        )
+        .await
+        .unwrap();
+    let art_id = registered["id"].as_str().unwrap();
+    store.deliver(art_id).unwrap();
+    let arts = store.artifacts_for(job.id).unwrap();
+    assert_eq!(arts.len(), 1);
+    assert!(arts[0].delivered);
+    assert!(ArtifactKind::try_parse("docx").is_err());
+}
+
+#[test]
+fn question_timeout_is_24h() {
+    let asked = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 1).unwrap();
+    assert!(question_timed_out(asked, now, StdDuration::from_hours(24)));
+    assert!(!question_timed_out(
+        asked,
+        Utc.with_ymd_and_hms(2026, 8, 17, 11, 0, 0).unwrap(),
+        StdDuration::from_hours(24)
+    ));
+}
+
+#[test]
+fn work_tools_cover_delegate_surface() {
+    let (_dir, _store, host, _soul) = open_work();
+    let registry = ToolRegistry::new();
+    register_work_tools(&registry, host, PathBuf::from("/tmp/skills"));
+    let names: Vec<String> = registry
+        .schemas(Layer::Surface)
+        .iter()
+        .filter_map(|schema| {
+            schema
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert!(names.iter().any(|n| n == "delegate.start"));
+    assert!(names.iter().any(|n| n == "skill.load"));
+    assert!(!names.iter().any(|n| n == "delegation.send"));
+    assert!(!names.iter().any(|n| n == "artifact.register"));
+}

@@ -32,6 +32,7 @@ pub use affect::{
 pub use classify::{ClassifyModel, ClassifyTask, ScriptedClassify};
 pub use config::{
     CharacterSettings, ForgettingMode, MindSettings, ProactiveSettings, RecallSettings,
+    WorldStateSettings,
 };
 pub use error::CompanionError;
 pub use ids::{CandidateId, MemoryId};

@@ -71,6 +71,7 @@ async fn open_lane() -> (TempDir, Arc<SessionStore>, LaneHandle, Arc<RecordingMo
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        router: None,
     });
     (dir, store, lane, model)
 }
@@ -201,6 +202,7 @@ async fn prompt_while_busy_returns_lane_busy() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        router: None,
     });
     let first = lane.prompt("one").await.unwrap();
     let busy = lane.prompt("two").await.unwrap_err();
@@ -240,6 +242,7 @@ async fn abort_does_not_write_assistant_closure() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        router: None,
     });
     let turn = lane.prompt("hold").await.unwrap();
     lane.abort().await.unwrap();
@@ -344,6 +347,7 @@ async fn crash_recovery_is_reported_and_not_resumed() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: reports,
+        router: None,
     });
     lane.prompt("what happened").await.unwrap();
     lane.wait_for_idle().await.unwrap();

@@ -1,0 +1,383 @@
+use crate::error::WorkError;
+use crate::host::{DelegationHost, StartDelegation};
+use crate::skill::load_skill;
+use crate::store::WorkStore;
+use crate::types::{Artifact, ArtifactKind, DelegationMode};
+use async_trait::async_trait;
+use chrono::Utc;
+use ene_plane::Sensitivity;
+use ene_registry::{ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
+use ene_session::{DelegationId, SoulId};
+use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+use uuid::Uuid;
+
+/// Register surface `delegate.*` plus job-layer harness tools.
+pub fn register_work_tools(
+    registry: &ToolRegistry,
+    host: Arc<DelegationHost>,
+    skills_home: PathBuf,
+) {
+    let invoke = Arc::new(WorkInvoker { host, skills_home });
+    for def in delegate_defs() {
+        registry.register_with(def, Arc::clone(&invoke) as Arc<dyn ToolInvoke>);
+    }
+}
+
+fn delegate_defs() -> Vec<ToolDefinition> {
+    vec![
+        harness(
+            "delegate.start",
+            "Start an asynchronous task. Returns immediately.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "goal": { "type": "string" },
+                    "mode": { "type": "string" },
+                    "title": { "type": "string" },
+                    "soul_id": { "type": "string" },
+                    "excerpt": { "type": "string" }
+                },
+                "required": ["goal", "soul_id"]
+            }),
+            Vec::new(),
+        ),
+        harness(
+            "delegate.instruct",
+            "Send a follow-up instruction that wakes the task.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "message": { "type": "string" }
+                },
+                "required": ["id", "message"]
+            }),
+            Vec::new(),
+        ),
+        harness(
+            "delegate.message",
+            "Share context without waking the task.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "message": { "type": "string" }
+                },
+                "required": ["id", "message"]
+            }),
+            Vec::new(),
+        ),
+        harness(
+            "delegate.answer",
+            "Answer a task question.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "answer": { "type": "string" }
+                },
+                "required": ["id", "answer"]
+            }),
+            Vec::new(),
+        ),
+        harness(
+            "delegate.status",
+            "Read task status without sending a message.",
+            json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+            Vec::new(),
+        ),
+        harness(
+            "delegate.cancel",
+            "Cancel a running task.",
+            json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+            Vec::new(),
+        ),
+        harness(
+            "skill.load",
+            "Load a skill body into context.",
+            json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+            }),
+            Vec::new(),
+        ),
+        harness(
+            "artifact.register",
+            "Register a workspace file as an artifact.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "soul_id": { "type": "string" },
+                    "job_id": { "type": "string" },
+                    "kind": { "type": "string" },
+                    "title": { "type": "string" },
+                    "path": { "type": "string" }
+                },
+                "required": ["soul_id", "kind", "title", "path"]
+            }),
+            vec!["artifact.register".to_owned()],
+        ),
+        harness(
+            "job.plan_write",
+            "Update the workflow plan on a job.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "plan": { "type": "string" }
+                },
+                "required": ["id", "plan"]
+            }),
+            vec!["job.plan_write".to_owned()],
+        ),
+        harness(
+            "delegation.send",
+            "Child-to-parent mailbox send.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "kind": { "type": "string" },
+                    "body": { "type": "string" },
+                    "fraction": { "type": "number" }
+                },
+                "required": ["id", "kind", "body"]
+            }),
+            vec!["delegation.send".to_owned()],
+        ),
+    ]
+}
+
+fn harness(
+    name: &str,
+    description: &str,
+    parameters: Value,
+    side_effects: Vec<String>,
+) -> ToolDefinition {
+    ToolDefinition {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        parameters,
+        output: json!({ "type": "object" }),
+        side_effects,
+        source: ToolSource::Harness {
+            name: "work".to_owned(),
+        },
+        timeout_ms: Some(5_000),
+        sensitivity: Sensitivity::None,
+    }
+}
+
+struct WorkInvoker {
+    host: Arc<DelegationHost>,
+    skills_home: PathBuf,
+}
+
+#[async_trait]
+impl ToolInvoke for WorkInvoker {
+    async fn invoke(&self, name: &str, args: Value) -> Result<Value, String> {
+        match name {
+            "delegate.start" => start(self, &args),
+            "delegate.instruct" => {
+                self.host
+                    .instruct(id_arg(&args)?, str_arg(&args, "message")?)
+                    .map_err(|err| err.to_string())?;
+                Ok(json!({ "ok": true }))
+            }
+            "delegate.message" => {
+                self.host
+                    .message(id_arg(&args)?, str_arg(&args, "message")?)
+                    .map_err(|err| err.to_string())?;
+                Ok(json!({ "ok": true }))
+            }
+            "delegate.answer" => {
+                self.host
+                    .answer(id_arg(&args)?, str_arg(&args, "answer")?)
+                    .map_err(|err| err.to_string())?;
+                Ok(json!({ "ok": true }))
+            }
+            "delegate.status" => {
+                let job = self
+                    .host
+                    .status_snapshot(id_arg(&args)?)
+                    .map_err(|err| err.to_string())?;
+                Ok(json!({
+                    "id": job.id.to_string(),
+                    "status": job.status.as_str(),
+                    "title": job.title,
+                    "progress_note": job.progress_note,
+                }))
+            }
+            "delegate.cancel" => match self.host.cancel(id_arg(&args)?) {
+                Ok(status) => Ok(json!({ "status": status.as_str() })),
+                Err(WorkError::AlreadyCompleted) => Ok(json!({ "status": "already_completed" })),
+                Err(WorkError::Cancelled) => Ok(json!({ "status": "cancelled" })),
+                Err(other) => Err(other.to_string()),
+            },
+            "skill.load" => {
+                let skill_name = str_arg(&args, "name")?;
+                let meta =
+                    load_skill(&self.skills_home, skill_name).map_err(|err| err.to_string())?;
+                Ok(json!({
+                    "name": meta.name,
+                    "description": meta.description,
+                    "body": meta.body,
+                }))
+            }
+            "artifact.register" => register_artifact(self.host.store().as_ref(), &args),
+            "job.plan_write" => {
+                self.host
+                    .store()
+                    .set_plan(id_arg(&args)?, str_arg(&args, "plan")?)
+                    .map_err(|err| err.to_string())?;
+                Ok(json!({ "ok": true }))
+            }
+            "delegation.send" => send_from_child(&self.host, &args),
+            other => Err(format!("unknown work tool {other}")),
+        }
+    }
+}
+
+fn start(invoker: &WorkInvoker, args: &Value) -> Result<Value, String> {
+    let mode = if args.get("mode").and_then(Value::as_str) == Some("internal") {
+        DelegationMode::Internal
+    } else {
+        DelegationMode::Public
+    };
+    let job = invoker
+        .host
+        .start(StartDelegation {
+            soul_id: soul_arg(args)?,
+            goal: str_arg(args, "goal")?.to_owned(),
+            mode,
+            title: args.get("title").and_then(Value::as_str).map(str::to_owned),
+            brief: args
+                .get("excerpt")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            plan: None,
+            created_from_turn: None,
+            depth: args
+                .get("depth")
+                .and_then(Value::as_u64)
+                .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX)),
+        })
+        .map_err(|err| err.to_string())?;
+    Ok(json!({
+        "delegation_id": job.id.to_string(),
+        "status": job.status.as_str(),
+        "accepted": true,
+    }))
+}
+
+fn register_artifact(store: &WorkStore, args: &Value) -> Result<Value, String> {
+    let kind = ArtifactKind::try_parse(str_arg(args, "kind")?).map_err(|err| err.to_string())?;
+    let job_id = args
+        .get("job_id")
+        .and_then(Value::as_str)
+        .map(DelegationId::from_str)
+        .transpose()
+        .map_err(|err| err.to_string())?;
+    let path = str_arg(args, "path")?.to_owned();
+    let size = std::fs::metadata(&path)
+        .ok()
+        .and_then(|meta| i64::try_from(meta.len()).ok());
+    let art = store
+        .register_artifact(Artifact {
+            id: Uuid::now_v7().to_string(),
+            soul_id: soul_arg(args)?,
+            job_id,
+            kind,
+            title: str_arg(args, "title")?.to_owned(),
+            path,
+            mime: None,
+            size_bytes: size,
+            created_at: Utc::now().to_rfc3339(),
+            delivered: false,
+        })
+        .map_err(|err| err.to_string())?;
+    Ok(json!({ "id": art.id }))
+}
+
+fn send_from_child(host: &DelegationHost, args: &Value) -> Result<Value, String> {
+    let id = id_arg(args)?;
+    let kind = str_arg(args, "kind")?;
+    let body = str_arg(args, "body")?;
+    match kind {
+        "progress" => {
+            let fraction = args
+                .get("fraction")
+                .and_then(Value::as_f64)
+                .map(|n| n as f32);
+            let report = host
+                .progress(id, fraction, body)
+                .map_err(|err| err.to_string())?;
+            Ok(json!({ "speech": report.speech }))
+        }
+        "question" => {
+            let report = host.question(id, body).map_err(|err| err.to_string())?;
+            Ok(json!({ "speech": report.speech }))
+        }
+        "complete" => {
+            let report = host.complete(id, body).map_err(|err| err.to_string())?;
+            Ok(json!({ "speech": report.speech }))
+        }
+        "failed" => {
+            let report = host.fail(id, body).map_err(|err| err.to_string())?;
+            Ok(json!({ "speech": report.speech }))
+        }
+        other => {
+            host.store()
+                .mailbox_push(id, "child_to_parent", other, body)
+                .map_err(|err| err.to_string())?;
+            Ok(json!({ "ok": true }))
+        }
+    }
+}
+
+fn soul_arg(args: &Value) -> Result<SoulId, String> {
+    let raw = args
+        .get("soul_id")
+        .and_then(Value::as_str)
+        .ok_or("missing soul_id")?;
+    SoulId::from_str(raw).map_err(|err| err.to_string())
+}
+
+fn id_arg(args: &Value) -> Result<DelegationId, String> {
+    let raw = args.get("id").and_then(Value::as_str).ok_or("missing id")?;
+    DelegationId::from_str(raw).map_err(|err| err.to_string())
+}
+
+fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing {key}"))
+}
+
+/// `delegate.*` must appear on the surface schema; `delegation.send` must not.
+#[must_use]
+pub fn surface_shows_delegate(registry: &ToolRegistry) -> bool {
+    let names: Vec<_> = registry
+        .schemas(ene_registry::Layer::Surface)
+        .iter()
+        .filter_map(|schema| {
+            schema
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    names.iter().any(|n| n == "delegate.start") && !names.iter().any(|n| n == "delegation.send")
+}

@@ -25,6 +25,7 @@ ene-kernel = { workspace = true }
 ene-plane = { workspace = true }
 ene-registry = { workspace = true }
 ene-session = { workspace = true }
+ene-work = { workspace = true }
 fs2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }

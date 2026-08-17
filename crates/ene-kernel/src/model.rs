@@ -1,6 +1,7 @@
 use crate::error::KernelError;
 use async_trait::async_trait;
 use ene_session::{InnerAspect, ProjectedMessage};
+use serde_json::Value;
 
 /// Conversation LLM used by the dialogue lane.
 #[async_trait]
@@ -20,10 +21,18 @@ pub struct ModelGeneration {
     pub text: String,
     pub thinking: Option<String>,
     pub inner: Vec<(InnerAspect, String)>,
+    pub tool_calls: Vec<ToolCall>,
     pub finish_reason: String,
     pub model_id: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
+}
+
+/// Model-requested tool invocation. Empty on echo / speech-only generations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCall {
+    pub name: String,
+    pub arguments: Value,
 }
 
 impl Default for ModelGeneration {
@@ -32,6 +41,7 @@ impl Default for ModelGeneration {
             text: String::new(),
             thinking: None,
             inner: Vec::new(),
+            tool_calls: Vec::new(),
             finish_reason: "stop".to_owned(),
             model_id: "stub".to_owned(),
             input_tokens: 0,
@@ -66,6 +76,7 @@ impl ConversationModel for EchoModel {
             text,
             thinking: None,
             inner: vec![(InnerAspect::Thought, format!("noted: {last}"))],
+            tool_calls: Vec::new(),
             finish_reason: "stop".to_owned(),
             model_id: "echo".to_owned(),
             input_tokens: u32::try_from(request.messages.len()).unwrap_or(0),

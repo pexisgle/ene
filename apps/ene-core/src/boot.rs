@@ -10,10 +10,14 @@ use ene_companion::{
     CompanionRuntime, CompanionStore, MindSettings as CompanionMind, register_memory_tools,
 };
 use ene_fiber::Supervisor;
-use ene_kernel::{ConversationModel, LaneHandle, LaneOptions, format_recovery_note};
+use ene_kernel::{ConversationModel, LaneHandle, LaneOptions, SurfaceRouter, format_recovery_note};
 use ene_plane::{ApprovalPlane, ApprovalSettings, AuditLog, ScriptedPopup, Vault};
 use ene_registry::ToolRegistry;
 use ene_session::{RecoveryReport, SessionId, SessionStore, SoulId};
+use ene_work::{
+    CompanionReport, DelegationHost, PlaceholderScreenshot, WorkError, WorkStore,
+    WorkSurfaceRouter, register_screenshot_tool, register_work_tools,
+};
 use fs2::FileExt;
 use thiserror::Error;
 use tracing::info;
@@ -57,6 +61,8 @@ pub enum CoreError {
     Companion(#[from] ene_companion::CompanionError),
     #[error(transparent)]
     Body(#[from] BodyError),
+    #[error(transparent)]
+    Work(#[from] WorkError),
     #[error("another ene-core instance holds the data-directory lock at {0}")]
     AlreadyRunning(String),
 }
@@ -73,6 +79,9 @@ pub struct CoreDaemon {
     companions: Arc<CompanionStore>,
     companion: CompanionRuntime,
     stage: Arc<Stage>,
+    work: Arc<WorkStore>,
+    host: Arc<DelegationHost>,
+    job_reports: Vec<CompanionReport>,
 }
 
 impl CoreDaemon {
@@ -104,6 +113,20 @@ impl CoreDaemon {
         let vault = Vault::open_file(opts.data_dir.join("vault.bin"), &passphrase)?;
         let companions = Arc::new(CompanionStore::open(opts.data_dir.join("companions.db"))?);
         register_memory_tools(&registry, Arc::clone(&companions));
+        let work = Arc::new(WorkStore::open(opts.data_dir.join("companions.db"))?);
+        let host = Arc::new(DelegationHost::new(
+            Arc::clone(&work),
+            opts.data_dir.clone(),
+        ));
+        register_work_tools(&registry, Arc::clone(&host), opts.data_dir.join("skills"));
+        register_screenshot_tool(&registry, Arc::new(PlaceholderScreenshot));
+        let job_reports = host.recover_interrupted()?;
+        if !job_reports.is_empty() {
+            info!(
+                jobs = job_reports.len(),
+                "detected interrupted tasks; closed without resume"
+            );
+        }
         let companion = CompanionRuntime::new(Arc::clone(&companions), CompanionMind::default());
         let bus = Arc::new(PerformanceBus::default());
         let stage = Arc::new(Stage::new(
@@ -123,6 +146,9 @@ impl CoreDaemon {
             companions,
             companion,
             stage,
+            work,
+            host,
+            job_reports,
         })
     }
 
@@ -171,6 +197,21 @@ impl CoreDaemon {
         Arc::clone(&self.stage)
     }
 
+    #[must_use]
+    pub fn work(&self) -> Arc<WorkStore> {
+        Arc::clone(&self.work)
+    }
+
+    #[must_use]
+    pub fn host(&self) -> Arc<DelegationHost> {
+        Arc::clone(&self.host)
+    }
+
+    #[must_use]
+    pub fn job_reports(&self) -> &[CompanionReport] {
+        &self.job_reports
+    }
+
     /// Bind a soul to a body (or text-only) and map affect onto the bus (D-19).
     pub fn present_companion(
         &self,
@@ -194,7 +235,20 @@ impl CoreDaemon {
     /// Note injected into the next surface turn (D-13). `None` when nothing was interrupted.
     #[must_use]
     pub fn interruption_note(&self) -> Option<String> {
-        format_recovery_note(&self.recovery)
+        let session = format_recovery_note(&self.recovery);
+        if self.job_reports.is_empty() {
+            return session;
+        }
+        let jobs = self
+            .job_reports
+            .iter()
+            .map(|report| report.speech.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(match session {
+            Some(session) => format!("{session} {jobs}"),
+            None => jobs,
+        })
     }
 
     /// Open a dialogue lane on an existing session, carrying recovery into context.
@@ -205,14 +259,22 @@ impl CoreDaemon {
         session: SessionId,
         model: Arc<dyn ConversationModel>,
     ) -> LaneHandle {
+        let harness = ene_kernel::HarnessSettings::default();
+        let router = Arc::new(WorkSurfaceRouter::new(
+            Arc::clone(&self.host),
+            self.supervisor.registry(),
+            soul,
+            harness.loop_cfg.max_steps_per_turn,
+        ));
         LaneHandle::spawn(LaneOptions {
             store: Arc::clone(&self.store),
             session,
             soul,
             model,
-            harness: ene_kernel::HarnessSettings::default(),
+            harness,
             mind: ene_kernel::MindSettings::default(),
             recovery: self.recovery.clone(),
+            router: Some(router as Arc<dyn SurfaceRouter>),
         })
     }
 }

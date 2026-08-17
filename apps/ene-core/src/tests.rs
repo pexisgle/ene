@@ -228,3 +228,38 @@ async fn boot_installs_approval_plane_and_vault() {
     assert_eq!(core.vault().export("k").unwrap(), b"secret");
     core.plane().audit().verify_chain().unwrap();
 }
+
+#[tokio::test]
+async fn boot_reports_interrupted_job_without_resume() {
+    let dir = TempDir::new().unwrap();
+    let soul = SoulId::new();
+    {
+        let store = std::sync::Arc::new(
+            ene_work::WorkStore::open(dir.path().join("companions.db")).unwrap(),
+        );
+        let host =
+            ene_work::DelegationHost::new(std::sync::Arc::clone(&store), dir.path().to_path_buf());
+        let job = host
+            .start(ene_work::StartDelegation {
+                soul_id: soul,
+                goal: "research".into(),
+                mode: ene_work::DelegationMode::Public,
+                title: Some("research".into()),
+                brief: None,
+                plan: None,
+                created_from_turn: None,
+                depth: 0,
+            })
+            .unwrap();
+        store
+            .set_status(job.id, ene_work::JobStatus::Running, None)
+            .unwrap();
+    }
+    let core = CoreDaemon::boot(BootOptions::new(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(core.job_reports().len(), 1);
+    assert!(core.interruption_note().unwrap().contains("research"));
+    let jobs = core.work().list_jobs(soul).unwrap();
+    assert_eq!(jobs[0].status, ene_work::JobStatus::Interrupted);
+}
