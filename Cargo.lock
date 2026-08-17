@@ -3042,6 +3042,7 @@ name = "ene-fiber"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "ene-plugin-ipc",
  "ene-registry",
  "ene-sandbox",
