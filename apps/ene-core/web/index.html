@@ -37,8 +37,7 @@
     <div id="detail-log"></div>
   </section>
   <script>
-    const params = new URLSearchParams(location.search);
-    const token = params.get("token") || prompt("API token") || "";
+    const token = prompt("API token") || "";
     const clientId = "web";
     const sessions = new Map();
     let companions = [];
@@ -75,7 +74,7 @@
     function companionLabel(soulId, soulsPage) {
       const soul = soulsPage.items.find((item) => item.id === soulId);
       if (!soul) return soulId.slice(0, 8);
-      return soul.character_ref || soul.mood_label || soulId.slice(0, 8);
+      return soul.display_name || soul.character_ref || soul.mood_label || soulId.slice(0, 8);
     }
 
     async function ensureSession(soulId) {
@@ -133,9 +132,11 @@
 
     function openSocket(depth, sessionId, onMessage) {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const q = new URLSearchParams({ depth, client_id: clientId, access_token: token });
+      const protocols = token ? ["bearer." + token] : [];
+      const q = new URLSearchParams({ depth, client_id: clientId });
       if (sessionId) q.set("session_id", sessionId);
-      const sock = new WebSocket(`${proto}://${location.host}/api/v1/events?` + q);
+      if (token) q.set("access_token", token);
+      const sock = new WebSocket(`${proto}://${location.host}/api/v1/events?` + q, protocols);
       sock.onmessage = (ev) => onMessage(JSON.parse(ev.data));
       return sock;
     }
@@ -182,13 +183,8 @@
       ]);
       const soulIds = orderedSoulIds(stage, soulsPage);
       if (!soulIds.length) {
-        const created = await api("/api/v1/sessions", {
-          method: "POST",
-          headers: headers(),
-          body: JSON.stringify({ soul_id: crypto.randomUUID() }),
-        });
-        soulIds.push(created.soul_id);
-        sessions.set(created.soul_id, created.id);
+        log(surface, "error: no companions available — import a character first");
+        return;
       }
       companions = soulIds.map((id) => ({ id, label: companionLabel(id, soulsPage) }));
       for (const companion of companions) {

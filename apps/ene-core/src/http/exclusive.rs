@@ -47,8 +47,7 @@ impl ExclusiveHub {
             return Err(conflict(
                 "resource_busy",
                 "exclusive resource is held by another client",
-            )
-            .with_detail(owner.clone()));
+            ));
         }
         *slot = Some(client_id.to_owned());
         drop(slot);

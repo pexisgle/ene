@@ -50,4 +50,21 @@ impl LaneHub {
     pub fn session_for_turn(&self, turn: TurnId) -> Option<SessionId> {
         self.turns.lock().get(&turn).copied()
     }
+
+    pub fn reset(&self) {
+        self.lanes.lock().clear();
+        self.turns.lock().clear();
+    }
+
+    pub fn any_busy(&self, core: &CoreDaemon) -> bool {
+        for lane in self.all() {
+            let Ok(events) = core.store().load_events(lane.session_id(), 0) else {
+                continue;
+            };
+            if !ene_session::open_turns(&events).is_empty() {
+                return true;
+            }
+        }
+        false
+    }
 }

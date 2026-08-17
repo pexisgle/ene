@@ -94,3 +94,7 @@ pub fn conflict(class: &str, title: &str) -> ApiReject {
 pub fn unauthorized() -> ApiReject {
     ApiReject::new(StatusCode::UNAUTHORIZED, "unauthorized", "invalid token")
 }
+
+pub fn forbidden(title: &str) -> ApiReject {
+    ApiReject::new(StatusCode::FORBIDDEN, "forbidden", title)
+}

@@ -1,4 +1,5 @@
-mod backup;
+pub(crate) mod backup;
+mod client_id;
 mod error;
 mod exclusive;
 mod lanes;
@@ -9,6 +10,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -98,7 +102,11 @@ impl CoreDaemon {
             .map_err(|err| CoreError::Http(err.to_string()))?;
         let token =
             load_or_create_token(self.data_dir(), &CoreSettings::default().server.token_file)?;
-        write_ready_file(self.data_dir(), addr, &token)?;
+        write_ready_file(
+            self.data_dir(),
+            addr,
+            &CoreSettings::default().server.token_file,
+        )?;
         let last_used = CoreSettings::default().clients.audio_active_policy == "last_used";
         let state = AppState {
             popup: Arc::clone(self.popup()),
@@ -180,6 +188,14 @@ fn router(state: AppState) -> Router {
             "/api/v1/memories/{id}",
             patch(routes::patch_memory).delete(routes::delete_memory),
         )
+        .route(
+            "/api/v1/memories/pending",
+            get(routes::list_pending_memories),
+        )
+        .route(
+            "/api/v1/memories/candidates/{id}/resolve",
+            post(routes::resolve_memory_candidate),
+        )
         .route("/api/v1/tools", get(routes::list_tools))
         .route("/api/v1/tools/{name}/test", post(routes::test_tool))
         .route("/api/v1/plugins", get(routes::list_plugins))
@@ -225,7 +241,7 @@ async fn auth(
         return Ok(next.run(request).await);
     }
     let provided = token_from(&request);
-    if provided.as_deref() != Some(state.token.as_str()) {
+    if !token_matches(provided.as_deref(), state.token.as_str()) {
         drop(
             state
                 .core
@@ -239,11 +255,23 @@ async fn auth(
 }
 
 fn token_from(request: &Request) -> Option<String> {
+    if let Some(header) = request.headers().get("sec-websocket-protocol")
+        && let Ok(value) = header.to_str()
+    {
+        for proto in value.split(',').map(str::trim) {
+            if let Some(token) = proto.strip_prefix("bearer.") {
+                return Some(token.to_owned());
+            }
+        }
+    }
     if let Some(header) = request.headers().get(axum::http::header::AUTHORIZATION)
         && let Ok(value) = header.to_str()
         && let Some(token) = value.strip_prefix("Bearer ")
     {
         return Some(token.to_owned());
+    }
+    if request.uri().path() != "/api/v1/events" {
+        return None;
     }
     let query = request.uri().query()?;
     for pair in query.split('&') {
@@ -255,6 +283,22 @@ fn token_from(request: &Request) -> Option<String> {
         }
     }
     None
+}
+
+fn token_matches(provided: Option<&str>, expected: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+    let Some(provided) = provided else {
+        return false;
+    };
+    let a = provided.as_bytes();
+    let b = expected.as_bytes();
+    let mut diff = u8::from(a.len() != b.len());
+    for (left, right) in a.iter().chain(b.iter()).zip(b.iter().chain(a.iter())) {
+        diff |= left ^ right;
+    }
+    diff == 0
 }
 
 fn url_decode(raw: &str) -> String {
@@ -295,21 +339,48 @@ fn load_or_create_token(data_dir: &Path, token_file: &str) -> Result<String, Cor
     } else {
         data_dir.join(token_file)
     };
-    if path.exists() {
-        return Ok(std::fs::read_to_string(&path)?.trim().to_owned());
+    if path.is_file() {
+        let raw = std::fs::read_to_string(&path)?;
+        let token = raw.trim();
+        if !token.is_empty() {
+            return Ok(token.to_owned());
+        }
     }
     let token =
         uuid::Uuid::new_v4().simple().to_string() + &uuid::Uuid::new_v4().simple().to_string();
-    std::fs::write(&path, &token)?;
+    write_token_file(&path, &token)?;
     Ok(token)
 }
 
-fn write_ready_file(data_dir: &Path, addr: SocketAddr, token: &str) -> Result<(), CoreError> {
+fn write_token_file(path: &Path, token: &str) -> Result<(), CoreError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(token.as_bytes())?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, token)?;
+        Ok(())
+    }
+}
+
+fn write_ready_file(data_dir: &Path, addr: SocketAddr, token_file: &str) -> Result<(), CoreError> {
     let body = json!({
         "bind": addr.to_string(),
         "url": format!("http://{addr}"),
-        "token_file": "api.token",
-        "token": token,
+        "token_file": token_file,
     });
     std::fs::write(data_dir.join("api.json"), body.to_string())?;
     Ok(())

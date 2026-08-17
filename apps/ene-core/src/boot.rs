@@ -11,7 +11,9 @@ use ene_companion::{
 };
 use ene_fiber::Supervisor;
 use ene_kernel::{ConversationModel, LaneHandle, LaneOptions, SurfaceRouter, format_recovery_note};
-use ene_plane::{ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PopupSink, Vault};
+use ene_plane::{
+    ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink, Vault,
+};
 use ene_registry::ToolRegistry;
 use ene_session::{
     BodyId, EventKind, EventPayload, NewEvent, RecoveryReport, SessionEndReason, SessionId,
@@ -108,16 +110,21 @@ impl CoreDaemon {
         registry.set_workspace(opts.data_dir.clone());
         let audit = AuditLog::open(opts.data_dir.join("audit.db"))?;
         let popup = Arc::new(PendingPopup::new());
+        let approval_settings = ApprovalSettings::default();
         let plane = Arc::new(ApprovalPlane::new(
-            ApprovalSettings::default(),
+            approval_settings.clone(),
             audit,
             Arc::clone(&popup) as Arc<dyn PopupSink>,
             None,
         ));
+        let policy_path = opts.data_dir.join("policy.json");
+        let policy = PolicyFile::load_json(&policy_path)?;
+        plane.set_policy(policy);
         registry.set_plane(Arc::clone(&plane));
-        let passphrase =
-            std::env::var("ENE_VAULT_PASSPHRASE").unwrap_or_else(|_| "local".to_owned());
-        let vault = Vault::open_file(opts.data_dir.join("vault.bin"), &passphrase)?;
+        let vault = Vault::open_or_create_keyfile(
+            opts.data_dir.join("vault.bin"),
+            opts.data_dir.join("vault.key"),
+        )?;
         let companions = Arc::new(CompanionStore::open(opts.data_dir.join("companions.db"))?);
         register_memory_tools(&registry, Arc::clone(&companions));
         let work = Arc::new(WorkStore::open(opts.data_dir.join("companions.db"))?);
@@ -229,6 +236,32 @@ impl CoreDaemon {
     #[must_use]
     pub fn popup(&self) -> &Arc<PendingPopup> {
         &self.popup
+    }
+
+    /// Checkpoint databases, close the session writer, and copy a backup generation on disk.
+    pub async fn prepare_restore(&self, backup_id: &str) -> Result<(), CoreError> {
+        use crate::http::backup::{checkpoint_db, restore_copy, validate_restore_id};
+        validate_restore_id(backup_id).map_err(|err| CoreError::Http(err.0.title.clone()))?;
+        checkpoint_db(&self.data_dir.join("sessions.db"))
+            .map_err(|err| CoreError::Http(err.0.title.clone()))?;
+        checkpoint_db(&self.data_dir.join("companions.db"))
+            .map_err(|err| CoreError::Http(err.0.title.clone()))?;
+        checkpoint_db(&self.data_dir.join("audit.db"))
+            .map_err(|err| CoreError::Http(err.0.title.clone()))?;
+        self.store.close_writer().await?;
+        restore_copy(&self.data_dir, backup_id)
+            .map_err(|err| CoreError::Http(err.0.title.clone()))?;
+        Ok(())
+    }
+
+    /// Reopen stores after [`Self::prepare_restore`].
+    pub async fn finish_restore(&self) -> Result<(), CoreError> {
+        let sync = SessionsSettings::default().synchronous;
+        self.store.reopen_writer().await?;
+        self.store.reload_reader(&sync)?;
+        self.companions.reconnect()?;
+        self.work.reconnect()?;
+        Ok(())
     }
 
     /// Bind a soul to a body (or text-only) and map affect onto the bus (D-19).

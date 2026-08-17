@@ -1,5 +1,6 @@
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use ene_kernel::{DisplayDepth, LiveEvent};
 use ene_session::{EventKind, SessionId};
@@ -54,6 +55,7 @@ pub struct EventsQuery {
 
 pub async fn events(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(query): Query<EventsQuery>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ApiReject> {
@@ -69,7 +71,23 @@ pub async fn events(
             &json!({ "client_id": client_id, "session_id": query.session_id }),
         ));
     }
-    Ok(ws.on_upgrade(move |socket| {
+    let bearer_proto = headers
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .find(|proto| proto.starts_with("bearer."))
+                .map(str::to_owned)
+        });
+    let upgrade = if let Some(proto) = bearer_proto {
+        let static_proto: &'static str = Box::leak(proto.into_boxed_str());
+        ws.protocols([static_proto])
+    } else {
+        ws
+    };
+    Ok(upgrade.on_upgrade(move |socket| {
         socket_loop(
             socket,
             state,

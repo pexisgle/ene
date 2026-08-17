@@ -1,8 +1,11 @@
 use std::fs;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
+use base64::Engine;
 use ene_api::{
     AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
     CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
@@ -12,8 +15,8 @@ use ene_api::{
     SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView,
     UsageView,
 };
-use ene_companion::{JournalAction, MemoryId, MemoryScope, install_archive};
-use ene_fiber::ProfileRow;
+use ene_companion::{JournalAction, MemoryId, MemoryScope, export_dir, install_archive};
+use ene_fiber::discover_plugin_executable;
 use ene_kernel::{CoreSettings, DisplayDepth, HarnessSettings};
 use ene_plane::PopupDecision;
 use ene_registry::Layer;
@@ -26,7 +29,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::AppState;
-use super::error::{ApiReject, bad_request, conflict, map_kernel, not_found};
+use super::client_id::{client_id_from_headers, web_mutate_forbidden};
+use super::error::{ApiReject, bad_request, conflict, forbidden, map_kernel, not_found};
 use crate::CoreError;
 
 #[derive(Debug, Deserialize)]
@@ -50,13 +54,12 @@ pub async fn openapi() -> Json<Value> {
 }
 
 pub async fn list_souls(State(state): State<AppState>) -> Result<Json<Page<SoulView>>, ApiReject> {
-    let items = state
-        .core
-        .companions()
+    let store = state.core.companions();
+    let items = store
         .list_souls()
         .map_err(map_companion)?
         .into_iter()
-        .map(soul_view)
+        .map(|soul| soul_view(&store, soul))
         .collect();
     Ok(Json(Page::of(items)))
 }
@@ -72,14 +75,16 @@ pub async fn get_soul(
         .get_soul(soul)
         .map_err(map_companion)?
         .ok_or_else(|| not_found("soul not found"))?;
-    Ok(Json(soul_view(row)))
+    Ok(Json(soul_view(&state.core.companions(), row)))
 }
 
 pub async fn patch_soul_body(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(patch): Json<SoulPatch>,
 ) -> Result<Json<SoulView>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
     let soul = parse_soul(&id)?;
     let body = patch
         .body_ref
@@ -166,6 +171,12 @@ pub async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionView>, ApiReject> {
     let soul = parse_soul(&req.soul_id)?;
+    state
+        .core
+        .companions()
+        .get_soul(soul)
+        .map_err(map_companion)?
+        .ok_or_else(|| not_found("soul not found"))?;
     let id = state
         .core
         .store()
@@ -376,7 +387,11 @@ pub async fn send_message(
             return Ok(Json(cached));
         }
         let response = dispatch_message(&state, session, &req).await?;
-        state.idem.lock().insert(cache_key, response.clone());
+        let mut cache = state.idem.lock();
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(cache_key, response.clone());
         return Ok(Json(response));
     }
     Ok(Json(dispatch_message(&state, session, &req).await?))
@@ -669,8 +684,10 @@ pub async fn list_memories(
 pub async fn patch_memory(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(patch): Json<MemoryPatch>,
 ) -> Result<Json<MemoryView>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
     let memory =
         MemoryId::from_str(&id).map_err(|_| bad_request("invalid_message", "bad memory id"))?;
     let row = state
@@ -705,7 +722,9 @@ pub async fn patch_memory(
 pub async fn delete_memory(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
     let memory =
         MemoryId::from_str(&id).map_err(|_| bad_request("invalid_message", "bad memory id"))?;
     let row = state
@@ -752,13 +771,25 @@ pub async fn list_tools(State(state): State<AppState>) -> Json<Page<ToolView>> {
 pub async fn test_tool(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<ToolTestRequest>,
 ) -> Result<Json<Value>, ApiReject> {
-    let value = state
-        .core
-        .supervisor()
-        .registry()
-        .execute(&name, req.arguments, Layer::Job)
+    let client_id = client_id_from_headers(&headers);
+    let registry = state.core.supervisor().registry();
+    let def = registry
+        .list()
+        .into_iter()
+        .find(|tool| tool.name == name)
+        .ok_or_else(|| not_found("tool not found"))?;
+    let layer = if def.surface_visible() {
+        Layer::Surface
+    } else if client_id == "cli" || client_id == "stage" {
+        Layer::Job
+    } else {
+        return Err(forbidden("job-only tools require cli or stage client"));
+    };
+    let value = registry
+        .execute(&name, req.arguments, layer)
         .await
         .map_err(|err| bad_request("failed", &err.to_string()))?;
     Ok(Json(value))
@@ -783,20 +814,20 @@ pub async fn restart_plugin(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<PluginView>, ApiReject> {
-    let fiber = state
+    let row = state
         .core
         .supervisor()
-        .fiber(&id)
+        .profile_row(&id)
         .ok_or_else(|| not_found("plugin row not found"))?;
-    let row = ProfileRow {
-        row_id: fiber.row_id.clone(),
-        plugin: fiber.plugin.clone(),
-        requires: fiber.requires.clone(),
-        capabilities: fiber.provides.clone(),
-        sandbox_required: fiber.sandbox_required,
-    };
+    let binary = discover_plugin_executable(&row.plugin)
+        .ok_or_else(|| conflict("unknown_binary", "plugin binary not found"))?;
     state.core.supervisor().disable_row(&id).await;
-    drop(state.core.supervisor().activate(&row));
+    state
+        .core
+        .supervisor()
+        .activate_process(&row, &binary)
+        .await
+        .map_err(|err| conflict("restart_failed", &err.to_string()))?;
     let updated = state
         .core
         .supervisor()
@@ -874,13 +905,11 @@ pub async fn list_characters(
 
 pub async fn import_character(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<CharacterView>, ApiReject> {
-    let path = body
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| bad_request("invalid_message", "path required"))?;
-    let bytes = fs::read(path).map_err(|err| bad_request("fault", &err.to_string()))?;
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    let bytes = read_import_bytes(&body, state.core.data_dir())?;
     let home = state.core.data_dir().join("characters");
     let installed = install_archive(
         state.core.companions().as_ref(),
@@ -910,36 +939,47 @@ pub async fn export_character(
         .into_iter()
         .find(|(pkg, _, _, _)| pkg == &id)
         .ok_or_else(|| not_found("character not found"))?;
+    let zip = export_dir(std::path::Path::new(&found.3)).map_err(map_companion)?;
+    let archive_b64 = base64::engine::general_purpose::STANDARD.encode(zip);
     Ok(Json(
-        json!({ "id": found.0, "version": found.1, "path": found.3 }),
+        json!({ "id": found.0, "version": found.1, "archive_b64": archive_b64 }),
     ))
 }
 
 pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
     let mut core = CoreSettings::default();
     core.data_dir = state.core.data_dir().display().to_string();
-    let mut out = json!({
+    let mut effective = json!({
         "core": core,
         "harness": HarnessSettings::default(),
         "approval": { "mode": format!("{:?}", state.core.plane().mode()).to_ascii_lowercase() },
     });
+    let mut overlay = json!({});
     let settings_path = state.core.data_dir().join("settings.json");
     if settings_path.exists()
         && let Ok(raw) = fs::read_to_string(&settings_path)
         && let Ok(file) = serde_json::from_str::<Value>(&raw)
-        && let (Some(dst), Some(src)) = (out.as_object_mut(), file.as_object())
     {
-        for (key, value) in src {
-            dst.insert(key.clone(), value.clone());
-        }
+        overlay = file;
+        deep_merge_objects(effective.as_object_mut(), overlay.as_object());
     }
-    Json(out)
+    Json(json!({ "overlay": overlay, "effective": effective }))
 }
 
 pub async fn patch_settings(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(patch): Json<SettingsPatch>,
 ) -> Result<Json<Value>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    let allowed = ["core", "harness", "approval", "theme"];
+    if let Some(incoming) = patch.fields.as_object() {
+        for key in incoming.keys() {
+            if !allowed.contains(&key.as_str()) {
+                return Err(bad_request("invalid_message", "unknown settings key"));
+            }
+        }
+    }
     let settings_path = state.core.data_dir().join("settings.json");
     let mut current = if settings_path.exists() {
         let raw = fs::read_to_string(&settings_path)
@@ -950,7 +990,15 @@ pub async fn patch_settings(
     };
     if let (Some(cur), Some(incoming)) = (current.as_object_mut(), patch.fields.as_object()) {
         for (key, value) in incoming {
-            cur.insert(key.clone(), value.clone());
+            if let Some(dst) = cur.get_mut(key) {
+                if let (Some(dst_map), Some(src_map)) = (dst.as_object_mut(), value.as_object()) {
+                    deep_merge_objects(Some(dst_map), Some(src_map));
+                } else {
+                    *dst = value.clone();
+                }
+            } else {
+                cur.insert(key.clone(), value.clone());
+            }
         }
     }
     fs::write(&settings_path, current.to_string())
@@ -1029,7 +1077,11 @@ pub async fn diag_spans(State(state): State<AppState>) -> Json<Page<SpanView>> {
     Json(Page::of(items))
 }
 
-pub async fn backup(State(state): State<AppState>) -> Result<Json<BackupResponse>, ApiReject> {
+pub async fn backup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<BackupResponse>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
     let (id, path) = super::backup::backup_now(state.core.data_dir())?;
     Ok(Json(BackupResponse {
         id,
@@ -1039,10 +1091,33 @@ pub async fn backup(State(state): State<AppState>) -> Result<Json<BackupResponse
 
 pub async fn restore(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<RestoreRequest>,
 ) -> Result<Json<Value>, ApiReject> {
-    super::backup::restore_now(state.core.data_dir(), &req.id)?;
-    Ok(Json(json!({ "ok": true })))
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    super::backup::validate_restore_id(&req.id)?;
+    let backup_dir = state.core.data_dir().join("backups").join(&req.id);
+    if !backup_dir.is_dir() {
+        return Err(not_found("backup not found"));
+    }
+    if state.lanes.any_busy(&state.core) {
+        return Err(conflict(
+            "lane_busy",
+            "cannot restore while a lane is active",
+        ));
+    }
+    state
+        .core
+        .prepare_restore(&req.id)
+        .await
+        .map_err(|err| bad_request("fault", &err.to_string()))?;
+    state
+        .core
+        .finish_restore()
+        .await
+        .map_err(|err| bad_request("fault", &err.to_string()))?;
+    state.lanes.reset();
+    Ok(Json(json!({ "ok": true, "restart_required": true })))
 }
 
 pub async fn exclusive_get(State(state): State<AppState>) -> Json<ExclusiveSnapshot> {
@@ -1052,18 +1127,20 @@ pub async fn exclusive_get(State(state): State<AppState>) -> Json<ExclusiveSnaps
 pub async fn exclusive_claim(
     State(state): State<AppState>,
     Path(resource): Path<String>,
-    Json(req): Json<ClaimResourceRequest>,
+    headers: HeaderMap,
+    Json(_req): Json<ClaimResourceRequest>,
 ) -> Result<Json<ExclusiveSnapshot>, ApiReject> {
+    let client_id = client_id_from_headers(&headers);
     let kind = ResourceKind::parse(&resource).ok_or_else(|| {
         bad_request(
             "invalid_message",
             "resource must be mic, speaker, or notify",
         )
     })?;
-    let snap = state.exclusive.claim(kind, &req.client_id)?;
+    let snap = state.exclusive.claim(kind, &client_id)?;
     state.events.emit(
         DisplayDepth::Surface,
-        json!({ "type": "notify.hint", "resource": resource, "client_id": req.client_id }),
+        json!({ "type": "notify.hint", "resource": resource, "client_id": client_id }),
     );
     Ok(Json(snap))
 }
@@ -1071,28 +1148,161 @@ pub async fn exclusive_claim(
 pub async fn exclusive_release(
     State(state): State<AppState>,
     Path(resource): Path<String>,
-    Query(filter): Query<ClaimResourceRequest>,
+    headers: HeaderMap,
 ) -> Result<Json<ExclusiveSnapshot>, ApiReject> {
+    let client_id = client_id_from_headers(&headers);
     let kind = ResourceKind::parse(&resource).ok_or_else(|| {
         bad_request(
             "invalid_message",
             "resource must be mic, speaker, or notify",
         )
     })?;
-    Ok(Json(state.exclusive.release(kind, &filter.client_id)))
+    Ok(Json(state.exclusive.release(kind, &client_id)))
+}
+
+pub async fn list_pending_memories(
+    State(state): State<AppState>,
+    Query(filter): Query<SoulFilter>,
+) -> Result<Json<Page<MemoryView>>, ApiReject> {
+    let soul = filter
+        .soul_id
+        .as_deref()
+        .map(parse_soul)
+        .transpose()?
+        .ok_or_else(|| bad_request("invalid_message", "soul_id required"))?;
+    let items = state
+        .core
+        .companions()
+        .list_pending_candidates(soul)
+        .map_err(map_companion)?
+        .into_iter()
+        .map(|cand| MemoryView {
+            id: cand.id.to_string(),
+            soul_id: cand.soul_id.to_string(),
+            scope: cand.scope.as_str().to_owned(),
+            kind: cand.kind.as_str().to_owned(),
+            title: cand.title,
+            content: cand.content,
+        })
+        .collect();
+    Ok(Json(Page::of(items)))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResolveCandidateBody {
+    accept: bool,
+}
+
+pub async fn resolve_memory_candidate(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ResolveCandidateBody>,
+) -> Result<Json<Value>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    let candidate_id = ene_companion::CandidateId::from_str(&id)
+        .map_err(|_| bad_request("invalid_message", "bad candidate id"))?;
+    let status = if body.accept { "accepted" } else { "rejected" };
+    state
+        .core
+        .companions()
+        .resolve_candidate(candidate_id, status)
+        .map_err(map_companion)?;
+    Ok(Json(json!({ "ok": true, "status": status })))
 }
 
 pub async fn web_index() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../web/index.html"))
 }
 
-fn soul_view(soul: ene_companion::Soul) -> SoulView {
+fn soul_view(store: &ene_companion::CompanionStore, soul: ene_companion::Soul) -> SoulView {
+    let display_name = resolve_display_name(store, &soul.character_ref)
+        .unwrap_or_else(|| soul.character_ref.clone());
     SoulView {
         id: soul.id.to_string(),
         character_ref: soul.character_ref,
+        display_name,
         body_ref: soul.body_ref.map(|id| id.to_string()),
         voice_ref: soul.voice_ref,
         mood_label: soul.affect.mood_label,
+    }
+}
+
+fn resolve_display_name(
+    store: &ene_companion::CompanionStore,
+    character_ref: &str,
+) -> Option<String> {
+    let (id, version) = character_ref.split_once('@')?;
+    let path = store.package_path(id, version).ok()??;
+    ene_companion::display_name_for_install(std::path::Path::new(&path), "en-US").ok()
+}
+
+const MAX_IMPORT_BYTES: u64 = 32 * 1024 * 1024;
+
+fn read_import_bytes(body: &Value, data_dir: &std::path::Path) -> Result<Vec<u8>, ApiReject> {
+    if let Some(raw) = body
+        .get("archive_b64")
+        .or_else(|| body.get("bytes"))
+        .and_then(Value::as_str)
+    {
+        return base64::engine::general_purpose::STANDARD
+            .decode(raw)
+            .map_err(|err| bad_request("invalid_message", &err.to_string()));
+    }
+    if let Some(path) = body.get("path").and_then(Value::as_str) {
+        let resolved = resolve_import_path(data_dir, path)?;
+        let meta = fs::metadata(&resolved).map_err(|err| bad_request("fault", &err.to_string()))?;
+        if meta.len() > MAX_IMPORT_BYTES {
+            return Err(bad_request("invalid_message", "file too large"));
+        }
+        return fs::read(&resolved).map_err(|err| bad_request("fault", &err.to_string()));
+    }
+    Err(bad_request(
+        "invalid_message",
+        "path or archive_b64 required",
+    ))
+}
+
+fn resolve_import_path(data_dir: &std::path::Path, raw: &str) -> Result<PathBuf, ApiReject> {
+    if raw.contains("..") {
+        return Err(bad_request("invalid_message", "invalid path"));
+    }
+    let imports = data_dir.join("imports");
+    fs::create_dir_all(&imports).map_err(|err| bad_request("fault", &err.to_string()))?;
+    let allowed = [imports.clone(), data_dir.join("characters")];
+    let path = if std::path::Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        data_dir.join(raw)
+    };
+    let canonical =
+        fs::canonicalize(&path).map_err(|err| bad_request("fault", &err.to_string()))?;
+    for root in allowed {
+        let Ok(root_canon) = fs::canonicalize(&root) else {
+            continue;
+        };
+        if canonical.starts_with(&root_canon) {
+            return Ok(canonical);
+        }
+    }
+    Err(bad_request("invalid_message", "path outside import dirs"))
+}
+
+fn deep_merge_objects(
+    dst: Option<&mut serde_json::Map<String, Value>>,
+    src: Option<&serde_json::Map<String, Value>>,
+) {
+    let (Some(dst), Some(src)) = (dst, src) else {
+        return;
+    };
+    for (key, value) in src {
+        if let (Some(Value::Object(child_dst)), Value::Object(child_src)) =
+            (dst.get_mut(key), value)
+        {
+            deep_merge_objects(Some(child_dst), Some(child_src));
+        } else {
+            dst.insert(key.clone(), value.clone());
+        }
     }
 }
 
