@@ -246,13 +246,14 @@ CompactionState {
 }
 ```
 
-- **ロック括弧**: コンパクションは開始イベントでロックを取得し、
-  **最後に**解除する。途中でクラッシュすると
-  「開始あり・解除なし」の孤立ロックとして検出できる
+- **ロック括弧**: 後継。v1.0 は成功時の `compaction/applied` のみ
+  ([context-assembly.md §7](context-assembly.md#7-compactionp-506))。
+  コンパクションは開始イベントでロックを取得し、**最後に**解除する。
+  途中でクラッシュすると「開始あり・解除なし」の孤立ロックとして検出できる
   (「解除あり」が偽の完了を主張するのを防ぐ)。
   イベントは [session-log.md §3.3](session-log.md#33-メッセージ) の
   `compaction/applied` に加え、`compaction/start` と `compaction/end`
-  を**語彙に追加**する(payload: `compaction_id`、`start` は `turn` 参照)。
+  を語彙に追加する(payload: `compaction_id`、`start` は `turn` 参照)。
 - `preparation` は判断フックの前に `op.preparation` へ書き込み一度。
   クラッシュしても再計算不要。
 - 要約生成は `summarizing`(effect sandwich の不確実区間)。
@@ -300,6 +301,9 @@ TX[
   `turn/end.outcome` と同一語彙(`completed | interrupted | cancelled | failed`)。
 
 ## 7. inbox とキューの耐久化
+
+v1.0 の inbox 永続は [session-log.md §3.7](session-log.md#37-inboxv10-のキュー永続d-5)
+のログイベント。この節は後継の `pending.entry` 表現である。
 
 inbox の**種別は3つだけ**([agent-loop.md §3](agent-loop.md#3-inbox-と-claim)):
 

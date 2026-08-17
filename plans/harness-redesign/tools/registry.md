@@ -1,7 +1,7 @@
 # 統一ツールレジストリ
 
 > 実現する要件: **P-601**(統一レジストリ)、P-503 のツール面、
-> P-613(ユーザー可視化)、P-614(巨大出力)。
+> P-613(ユーザー可視化)、P-614(巨大出力)、**P-615**(ハーネス機能ツールの目次)。
 
 ## Tool Calling と MCP の分離(この文書の前提)
 
@@ -34,8 +34,34 @@
 ### 0.1 ハーネス機能ツール(ホスト内)
 
 ハーネス状態と密結合するため、プロセス境界の向こうに置けないもの。
+引数と振る舞いの本体は各領域の文書。この節は**名前の目次**だけを置く(P-615)。
 
-記憶想起、委譲(`delegate.*`)、内面、ユーザーへの質問。
+| 名前 | 公開 | 本体 |
+|---|---|---|
+| `memory.recall` | 表層+裏層 | [../companion/memory.md §5](../companion/memory.md#5-想起p-203--d-18) |
+| `memory.write_shared` | 裏層 | [../companion/memory.md §4.3](../companion/memory.md#43-明示的な書き込みp-212) |
+| `delegate.start` | 表層+裏層 | [../core/delegation.md §4](../core/delegation.md#4-層間エンベロープと表層--裏層) |
+| `delegate.instruct` | 表層+裏層 | 同上 |
+| `delegate.message` | 表層+裏層 | 同上 |
+| `delegate.answer` | 表層+裏層 | 同上 |
+| `delegate.status` | 表層+裏層 | 同上 |
+| `delegate.cancel` | 表層+裏層 | 同上 |
+| `delegation.send` | 裏層 | [../core/delegation.md §5](../core/delegation.md#5-子--親メールボックス) |
+| `question.ask` | 表層+裏層 | [../core/agent-loop.md §9](../core/agent-loop.md#9-人間協調面plan--ask-userp-511-p-512) |
+| `approval.policy_add` | 裏層 | [../security/approval.md §5](../security/approval.md#5-対話からのポリシー追加p-906) |
+| `skill.load` | 表層+裏層 | [../tasks/skills.md](../tasks/skills.md) |
+| `skill.read` | 表層+裏層 | 同上 |
+| `job.plan_write` | 裏層 | [../tasks/jobs-and-schedules.md §4](../tasks/jobs-and-schedules.md#4-ワークフローp-608) |
+| `artifact.register` | 裏層 | [../tasks/jobs-and-schedules.md §5](../tasks/jobs-and-schedules.md#5-artifact-体系p-609) |
+| `spill.read` | 表層+裏層 | [../core/context-assembly.md §5](../core/context-assembly.md#5-spill) |
+
+内面はツールではない。出力契約とシステム生成
+([../companion/inner-channel.md](../companion/inner-channel.md))。
+compaction・記憶抽出・感情更新・能動発話の観測もツールではない(§0 の下段)。
+
+公開列は §2.1 のフィルタ結果。`delegate.*` は副作用があっても表層に出す例外。
+`memory.write_shared` / `approval.policy_add` / `job.plan_write` /
+`artifact.register` / `delegation.send` は副作用があるので表層には出ない。
 
 これらをアウトプロセスにすると、記憶ストアやレーン状態への操作が
 IPC の往復になり、コストにも整合性にも見合わない。委譲に至っては、

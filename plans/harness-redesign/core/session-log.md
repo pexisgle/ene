@@ -2,7 +2,7 @@
 
 > 実現する要件: **P-501**(イベントソーシング・ログ)、**P-502**(model-visible = logged)、
 > **P-108**(セッション分割・一覧・再開)、**P-109**(fork)、**P-110**(エクスポート)、
-> P-114 の拡張余地(room)。
+> **P-515**(中断時 inbox の復元)、P-114 の拡張余地(room)。
 
 セッションで起きた**すべての事実**は追記専用のイベントログに記録される。
 UI の履歴表示・モデルへの提示・fork・リプレイ・エクスポートは、すべて
@@ -11,7 +11,7 @@ UI の履歴表示・モデルへの提示・fork・リプレイ・エクスポ�
 ## 1. 責務と責務外
 
 - **責務**: イベントの語彙定義、永続化、順序保証、投影(`derive_messages`)、
-  fork/resume、エクスポート、不変条件の検証。
+  fork/resume、エクスポート、不変条件の検証。v1.0 inbox の語彙(§3.7)。
 - **責務外**: コンテキスト組立(何を入れるかの政策)は
   [context-assembly.md](context-assembly.md)、ループの駆動は
   [agent-loop.md](agent-loop.md)、可変状態(レジスタ)・使用量台帳・
@@ -79,9 +79,9 @@ UI の履歴表示・モデルへの提示・fork・リプレイ・エクスポ�
 | `inner/message` | `turn_id?`, `step_index?`, `aspects: [thought\|emotion\|action_intent]`, `blocks`, `model_visible: bool` | 内面イベント。詳細は [../companion/inner-channel.md](../companion/inner-channel.md) |
 | `context/system_message` | `blocks`, `source_key` | 途中システムメッセージ(Context Source の変更通知)。詳細は [context-assembly.md](context-assembly.md) |
 | `context/epoch` | `epoch_id`, `reason: init\|compaction\|session_move\|incompatible` | Context Epoch の境界マーカー |
-| `compaction/applied` | `from_seq`, `to_seq`, `summary_event_seq` | seq 範囲が要約で置き換えられたことを示すマーカー |
-| `compaction/start` | `compaction_id`, `turn_id?` | compaction 操作の**ロック取得**(ロック括弧の開始、[operations.md §5](operations.md#5-compactionstate構造変更))。孤立ロック検出の鍵 |
-| `compaction/end` | `compaction_id` | ロック解除。`start` があって `end` がない = 孤立ロック(fault、[durability.md §8](durability.md#8-故障の分類faults)) |
+| `compaction/applied` | `from_seq`, `to_seq`, `summary_event_seq` | seq 範囲が要約で置き換えられたことを示すマーカー。**v1.0 の成功記録はこれだけ**(D-4)。途中で死んだらこのイベントが無いので投影は原文のまま |
+| `compaction/start` | `compaction_id`, `turn_id?` | **後継**。ロック括弧の開始([operations.md §5](operations.md#5-compactionstate構造変更))。v1.0 では書かない |
+| `compaction/end` | `compaction_id` | **後継**。ロック解除。v1.0 では書かない |
 
 ### 3.4 ツール
 
@@ -124,6 +124,26 @@ UI の履歴表示・モデルへの提示・fork・リプレイ・エクスポ�
 | `delegation/question` | `delegation_id`, `question_id`, `question`(要約形) | 子の質問。親の回答は `delegation/answer` |
 | `delegation/answer` | `delegation_id`, `question_id` | 質問の回答・取下げ(回答文は親の発話として対話ログに既出) |
 | `delegation/end` | `delegation_id`, `outcome: completed\|failed\|cancelled`, `error_class?`, `artifact_ids`, `summary` | 終端。`summary` は子→親の終端メッセージ(要約形)であり、生の作業ログを含まない |
+
+### 3.7 inbox(v1.0 のキュー永続、D-5)
+
+v1.0 の inbox はレジスタ(`pending.entry`)を持たない(D-4)。未 claim の入力は
+追記ログに残し、起動時に復元して見せる。claim してモデルを回すのは
+同一プロセス内の通常動作に限る。クラッシュ後に未消化項目を実行しない(D-5)。
+
+本文(発話・委譲報告・質問)は既存のドメインイベントに書く。inbox イベントは
+キューの索引である。`entry_id` は `inbox/enqueued` の seq(クライアントが
+取消に使う。[lane-api.md](lane-api.md) の `cancel_queued`)。
+
+| kind | payload フィールド | 説明 |
+|---|---|---|
+| `inbox/enqueued` | `lane`, `class: wake\|inject\|interrupt`, `source: user\|delegation\|ask_user\|approval\|steer`, `ref_seq?` | キュー投入。`ref_seq` は対応する `user/message` / `delegation/*` / `question/asked` |
+| `inbox/claimed` | `entry_seq`, `turn_id` | claim。この後にループがターンを起こす。`entry_seq` は対象の `inbox/enqueued` の seq |
+| `inbox/cancelled` | `entry_seq`, `reason: user\|abandoned_interrupt` | ユーザー取消、または起動時 D-5 による放棄 |
+
+起動時の走査: `inbox/enqueued` があり、対応する `claimed` / `cancelled` がない
+項目は `inbox/cancelled{reason: abandoned_interrupt}` で閉じ、中断報告の材料にする。
+放棄した項目を次のターンの入力として claim してはならない。
 
 ## 4. SQLite スキーマ
 
@@ -199,6 +219,10 @@ CREATE TABLE spill_objects (
   存在しないことは、呼び出し側の型で保証する。
 - 出力: `ProjectedHistory { messages: [ProjectedMessage], truncated_prefix: bool }`。
 
+v1.0 は投影結果をキャッシュしない(D-9)。毎回この規則でログから組み立てる。
+有界化は compaction に任せる。`compaction/applied` がある範囲は走査せず
+要約1件に置き換える(規則3)。スナップショット行やプロセス内キャッシュは後継。
+
 規則:
 
 1. seq 昇順に走査し、`user/message`・`assistant/message`・
@@ -225,6 +249,9 @@ CREATE TABLE spill_objects (
    (UI 表示と fork 点の特定のため)。
 
 ## 6. ライブストリームとの分担
+
+waterfall / emit の2モードは [agent-loop.md §6](agent-loop.md#6-pre-step-と-waterfall-イベントp-1007)
+が正(P-1007)。この節は永続とライブの置き場だけを決める。
 
 - **永続ログ**: メッセージ単位の確定イベントのみ。
 - **ライブバス**(WS でクライアントへ): テキストチャンク・音声チャンク・
@@ -278,6 +305,8 @@ CREATE TABLE spill_objects (
 | ディスク満杯 | 書き込みエラーとして上記と同じ経路。spill 書き込みは先に容量チェック |
 | 未知の `v` のイベント | 保存したまま読み飛ばし、起動ログに警告 |
 | 前回の異常終了で `turn/end` を欠くターン | 起動時に `interrupted` として確定(D-5)。投影では中断として表示される |
+| compaction 成功前にプロセスが死ぬ | `compaction/applied` が無いので投影は原文のまま。次回の閾値でやり直す。start/end は書かない(D-4) |
+| 未 claim の inbox 項目が残っている | 起動時に `inbox/cancelled{abandoned_interrupt}` で閉じ、中断報告の材料にする。claim して実行しない(D-5、§3.7) |
 
 ---
 

@@ -25,7 +25,8 @@
 7. soul のロード(companions.db)→ 表層(対話レーン)と裏層(job レーン)の準備
 8. **中断の検出と片付け**(D-5): 前回の異常終了で `running` のまま
    残ったセッション/job を洗い出し、一時ファイルを片付けて
-   `interrupted` を確定する。**自動再開はしない**
+   `interrupted` を確定する。未 claim の inbox はログから復元して見せ、
+   `abandoned_interrupt` で閉じる。**自動再開はしない**
    ([../core/agent-loop.md §12](../core/agent-loop.md#12-中断の検出と報告p-515--d-5))
 9. HTTP/WS サーバーの bind(server-api.md)
 10. 準備完了の通知(desktop への ready イベント)

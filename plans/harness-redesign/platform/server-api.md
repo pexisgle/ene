@@ -37,7 +37,7 @@
 | session-op | `POST /sessions/{id}/compact` | 手動 compaction([../core/lane-api.md §5](../core/lane-api.md#5-httpws-との対応))。`POST /sessions/{id}/resume` は後継(P-525) |
 | turn | `POST /turns/{id}/cancel` | キャンセル |
 | memory | `GET /souls/{id}/memories`(`scope` で絞り込み), `PATCH /memories/{id}`, `DELETE /memories/{id}` | 記憶の閲覧/編集/削除。`scope` は `private\|shared`([../companion/memory.md §4](../companion/memory.md)) |
-| job | `GET /jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel` | タスクの一覧/詳細/キャンセル(API 上の名は job) |
+| job | `GET /jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel` | タスクの一覧/詳細/キャンセル(API 上の名は job)。一覧は `companions.db` の `jobs` を読む([../tasks/jobs-and-schedules.md §2](../tasks/jobs-and-schedules.md#2-jobp-605)) |
 | schedule | `GET /schedules`, `POST /schedules`, `PATCH /schedules/{id}`, `DELETE /schedules/{id}` | スケジュール CRUD |
 | artifact | `GET /artifacts`, `GET /artifacts/{id}/content` | 成果物の一覧/取得/ダウンロード |
 | tool | `GET /tools`, `POST /tools/{name}/test`(開発用) | ツール面 |
@@ -97,7 +97,7 @@
 | `affect.state` | detail | 感情の内部状態(PAD)。表層へは body 経由でのみ出る(D-19) |
 | `job.progress` / `job.completed` | detail | タスクの進捗。**表層への伝達はコンパニオンの発話**であってこのイベントではない(D-13) |
 | `delegation.*` | detail | 層間メッセージ |
-| `proactive.speech` | surface | 能動発話の開始 |
+| `notify.hint` | surface | OS 通知の材料。出し手はクライアント([clients.md §3.1](clients.md#31-os-通知d-25))。コアは出さない(D-25) |
 | `lifecycle.*` | detail | プラグイン/プロバイダの状態変化・警告 |
 | `session.event` | 種別による | 永続イベントの通知(カーソル付き) |
 

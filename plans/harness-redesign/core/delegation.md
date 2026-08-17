@@ -143,7 +143,8 @@ created → running → completed
 | `failed` | `final` | **wake**(終端) | 失敗報告。error_class+どこまで出来たか |
 
 - 親への配送実体は、親の対話レーンの inbox への
-  `pending.entry` 書き込み([operations.md §7](operations.md#7-inbox-とキューの耐久化))。
+  `inbox/enqueued` 書き込み([session-log.md §3.7](session-log.md#37-inboxv10-のキュー永続d-5))。
+  後継の `pending.entry` は [operations.md §7](operations.md#7-inbox-とキューの耐久化)。
 - **孫委譲の質問/報告は親へ直送される**(仲介層に集約)。
   中継ツリーは作らない——ユーザーとの窓口は常に1つ。
 - **ユーザー発話が常に優先**: claim の順序は
@@ -164,7 +165,7 @@ created → running → completed
 - 報告ターンを受け取った親は、出力契約に基づき**伝え方を自分で選ぶ**:
   - ユーザーに発話で報告する(通常)
   - 内面だけに留める(ユーザーが忙しい・重要度が低い)
-  - 静黙する(quiet hours・疲労ゲート。[../companion/proactive.md §2](../companion/proactive.md#2-ゲートの詳細))
+  - 静黙する(quiet hours・疲労ゲート。[../companion/proactive.md §3](../companion/proactive.md#3-決定的ゲート))
 - 報告の内容(子の生ログ・ツール生出し)は親にも**渡らない**。
   渡るのは終端メッセージの要約と成果物参照のみ
   ([visibility.md §2](visibility.md#2-チャネル分類全体表))。
@@ -204,11 +205,13 @@ created → running → completed
 中断を報告する([agent-loop.md §12](agent-loop.md#12-中断の検出と報告p-515--d-5))。
 中断された委譲は**自動再開しない**。
 
-メールボックスは、子→親の wake/inject が親レーンに予約された形で永続する。
-子の終端(turn/end + `delegation/end` + 親レーンへの終端 wake + 進捗の掃除)は
-**1トランザクション**でコミットする。報告が途中で消える窓を作らないため。
-これは v1.0 でも守る——効果の重複を防ぐ話ではなく、報告の欠落を防ぐ話であり、
-単一トランザクションで足りる。
+メールボックスは、子→親の wake/inject を親レーンの `inbox/enqueued` として
+永続する。子の終端(`turn/end` + `delegation/end` + 親レーンへの終端 wake +
+進捗の掃除)は **1トランザクション**でコミットする。報告が途中で消える窓を
+作らないため。これは v1.0 でも守る——効果の重複を防ぐ話ではなく、報告の
+欠落を防ぐ話であり、単一トランザクションで足りる。
+プロセスが死んだあとの未 claim 報告はログから見えるが、報告ターンとしては
+起こさない([agent-loop.md §12](agent-loop.md#12-中断の検出と報告p-515--d-5))。
 
 **後継設計**(P-525、D-4): 子の実行本体を
 [operations.md](operations.md)/[durability.md](durability.md) の操作状態機械に
@@ -246,7 +249,7 @@ v1.0 ではここまで踏み込まない。
 | 障害 | 挙動 |
 |---|---|
 | 子の質問中に親がユーザーへ ask-user | 親は対話レーンでキャラとして質問し、回答を `delegate.answer` に転送できる。2つの待ちは対話で直列化する。ポップアップは承認 plane に限る([agent-loop.md §9](agent-loop.md#9-人間協調面plan--ask-userp-511-p-512)) |
-| 報告 wake の滞留中にユーザーが長会話 | ユーザー wake が優先され続ける。報告は claim 可能になり次第1ターンに結合して届く。`pending.entry` なので失われない |
+| 報告 wake の滞留中にユーザーが長会話 | ユーザー wake が優先され続ける。同一プロセス内では報告は claim 可能になり次第1ターンに結合して届く。ログの `inbox/enqueued` なのでプロセス生存中は失われない。プロセスが死んだあとは [agent-loop.md §12](agent-loop.md#12-中断の検出と報告p-515--d-5) |
 | 子が予算超過で死んだ | `failed{budget}` の終端報告が親に届く。中間成果物は保持 |
 | 親のキャンセルと子の完了が同時 | 先にコミットされた側が成立。cancel が先 → `cancelled`、完了が先 → cancel は `already_completed`(競合カタログ、[invariants.md §2](invariants.md#2-競合カタログ)) |
 | タイムアウトで仮定を置いた後に親の回答が遅着 | 仮定を維持し、回答は棄棄してログに残す(子が方針を二転させない)。遅着の事実は progress で補足できる |

@@ -102,7 +102,8 @@ CREATE VIRTUAL TABLE mem_fts USING fts5(title, content, content='memories');
 
 ### 4.3 明示的な書き込み(P-212)
 
-抽出器の判定を待たず、soul が明示的に共有プールへ書き込むツールを持つ。
+抽出器の判定を待たず、soul が明示的に共有プールへ書き込むツールを持つ
+(`memory.write_shared`。[../tools/registry.md §0.1](../tools/registry.md#01-ハーネス機能ツールホスト内))。
 ユーザーが「これはみんなに覚えておいて」と言った場合の経路。
 
 ## 5. 想起(P-203 / D-18)
@@ -118,7 +119,8 @@ CREATE VIRTUAL TABLE mem_fts USING fts5(title, content, content='memories');
 外したときに取り返せない。ツールだけだと、モデルは「自分が何を知らないか」を
 知らないので呼ぶきっかけがない。両方あって初めて成立する。
 
-想起ツールは**ハーネス機能ツール**であり、ホスト内で実行される(D-10)。
+想起ツールは**ハーネス機能ツール** `memory.recall` であり、ホスト内で実行される
+(D-10、[../tools/registry.md §0.1](../tools/registry.md#01-ハーネス機能ツールホスト内))。
 記憶ストアと密結合するため、プロセス境界の向こうに置かない。
 
 ### 5.1 検索の手順

@@ -31,7 +31,8 @@ job 固有の UX 状態を足す:
 ```text
 created → queued → running → completed
                       ├─→ failed(error_class 付き)
-                      └─→ cancelled
+                      ├─→ cancelled
+                      └─→ interrupted(D-5。起動時に running から確定)
 ```
 
 - job は **job レーン**で走る([../core/agent-loop.md §2](../core/agent-loop.md#2-レーンp-504))。
@@ -61,6 +62,35 @@ created → queued → running → completed
 | `error_class` | string? | 失敗分類 |
 | `created_at`/`ended_at` | RFC3339 | 時刻 |
 
+### 永続スキーマ
+
+`<data>/companions.db`(記憶・スケジュールと同じ DB)。
+`job_id` は public 委譲の `delegation_id` と同じ。internal 委譲は行を持たない。
+`GET /jobs` はこの表を読む([../platform/server-api.md](../platform/server-api.md))。
+会話ログの `delegation/*` は要約であり、一覧の正ではない(D-9)。
+
+```sql
+CREATE TABLE jobs (
+  id                 TEXT PRIMARY KEY,  -- JobId = public の delegation_id
+  soul_id            TEXT NOT NULL,
+  title              TEXT NOT NULL,
+  goal               TEXT NOT NULL,
+  status             TEXT NOT NULL,     -- created|queued|running|completed|failed|cancelled|interrupted
+  progress_fraction  REAL,
+  progress_note      TEXT,
+  workspace_dir      TEXT NOT NULL,
+  error_class        TEXT,
+  created_from_turn  TEXT,              -- 依頼元 turn_id
+  plan               TEXT,              -- ワークフローのステップ配列(JSON、§4)。線形 job は NULL
+  created_at         TEXT NOT NULL,
+  ended_at           TEXT
+);
+CREATE INDEX idx_jobs_soul ON jobs (soul_id, status, created_at DESC);
+```
+
+成果物は `artifacts.job_id` で辿る(§5)。状態の更新は委譲の受理・進捗・終端と
+同一トランザクションで行う。
+
 ### 開始経路
 
 1. **対話からの依頼**: 表層モデルが `delegate.start(goal, mode: public)` を
@@ -87,7 +117,8 @@ created → queued → running → completed
      (「さっきの調べもの、途中で止まっちゃった。やり直す?」)。
   4. 再開するかはユーザーが決める。再開は**新しい job として**始まる。
 
-  `queued` のまま未着手だった job は副作用が無いので、そのまま再投入する。
+  `queued` のまま未着手だった job も自動では走らせない(D-5)。
+  一覧に `queued` のまま残り、中断報告の材料になる。始めるかはユーザーが決める。
 
   副作用の記録による安全な再開(effect sandwich)は後継設計
   ([../core/durability.md](../core/durability.md))。
@@ -108,6 +139,7 @@ CREATE TABLE schedules (
   action_kind TEXT NOT NULL,      -- remind | job | turn
   action_ref  TEXT,               -- job テンプレート/発話内容への参照
   enabled     INTEGER NOT NULL DEFAULT 1,
+  important   INTEGER NOT NULL DEFAULT 0,  -- 1 なら quiet hours を貫通
   last_fired  TEXT,
   next_fire   TEXT                -- 計算済み次発火時刻(インデックス)
 );
@@ -122,10 +154,15 @@ CREATE INDEX idx_sched_next ON schedules (enabled, next_fire);
   `turn` は通常の発話ターン。
 - quiet hours の扱い: `quiet_policy: silent` の時間帯に発火予定の
   スケジュールは**次可能な時刻へ繰り下げ**(リマインドの喪失を防ぐ)。
-  `important`(P-606 相当)の指定があるものは貫通。
+  `important = 1` の行は貫通する。作成時に付ける列であり、能動発話の
+  `mind.proactive.quiet_policy` とは別物。
   能動発話側で同じ発火を再ゲートしない。
 - タイムゾーンはスケジュールごとに保持し、サマータイムも
   tz DB で正しく扱う。`next_fire` は発火後に再計算。
+- **停止中の発火漏れ**(起動時に `next_fire` が過去):
+  `remind` は**1回だけ**即時発火する(時刻の約束を落とさない。繰り越しはしない)。
+  `job` / `turn` は走らせない(D-5)。過ぎた枠は捨てて次の `next_fire` を計算し、
+  中断報告の材料にする。
 
 ### リマインダー(P-607)
 
@@ -143,8 +180,8 @@ CREATE INDEX idx_sched_next ON schedules (enabled, next_fire);
 - 実体: job の `goal` に加え、`plan` フィールド
   (ステップの配列: `{ id, description, status }`)を持つ。
 - ステップの進行はモデル自身が plan を更新しながら進める
-  (`todo_write` 相当の**ハーネス機能ツール**で管理。plan はハーネス側の
-  job 状態なので、ホスト内で動く。[../tools/registry.md §0.1](../tools/registry.md#01-ハーネス機能ツールホスト内))。
+  (`job.plan_write`。plan はハーネス側の job 状態なので、ホスト内で動く。
+  [../tools/registry.md §0.1](../tools/registry.md#01-ハーネス機能ツールホスト内))。
   コアはステップ列を詳細画面に表示するだけ(進行の強制はしない)。
 - ステップ間の成果物は workspace_dir に蓄積し、最終成果物を
   artifact として交付する。
@@ -215,7 +252,8 @@ CREATE INDEX idx_art_soul ON artifacts (soul_id, created_at DESC);
 | job のターン列が失敗 | ステップ予算内で再試行。不能なら `failed` で確定し、**報告ターン**が親の対話レーンに届く([../core/delegation.md §6](../core/delegation.md#6-報告ターンp-521)) |
 | 子が親に質問を送った | 親への wake は報告ターンで届き、**親がユーザーに口頭で尋ねる**(ask-user 経路の転送)。詳細画面のタスク一覧では「確認待ち」表示 |
 | 異常終了時の running job | `interrupted` として検出し、片付けて報告。自動再開はしない(§2 キャンセルと中断) |
-| スケジュールの発火漏れ(停止中) | 起動時に `next_fire` が過去になっているものは**1回だけ**即時発火(繰り越しはしない) |
+| 異常終了時の queued job | `queued` のまま残し、中断報告の材料にする。自動では走らせない(D-5) |
+| スケジュールの発火漏れ(停止中) | `remind` は1回だけ即時発火。`job` / `turn` は走らせず、過ぎた枠を捨てて次を計算し、中断報告の材料にする(D-5) |
 | artifact 登録の容量超過 | 登録拒否+job に報告。モデルは分割/圧縮を判断 |
 | quiet hours 中の remind | 繰り下げ(`silent`)。`important` は貫通 |
 

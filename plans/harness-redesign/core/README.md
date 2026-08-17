@@ -14,7 +14,7 @@
 |---|---|---|
 | [session-log.md](session-log.md) | イベント語彙・SQLite 永続化・投影・fork・不変条件 | P-501, P-502, P-108..P-110 |
 | [context-assembly.md](context-assembly.md) | Context Source・epoch・途中システムメッセージ・compaction(+prune)・spill | P-505..P-507, P-614 |
-| [agent-loop.md](agent-loop.md) | turn/step 状態機械・レーン・割り込み・guard・plan/ask-user | P-503, P-504, P-509..P-512 |
+| [agent-loop.md](agent-loop.md) | turn/step 状態機械・レーン・割り込み・guard・plan/ask-user・中断検出・waterfall/emit | P-503, P-504, P-509..P-512, P-515, P-1007 |
 | [delegation.md](delegation.md) | 表層↔裏層の非同期委譲・層間メッセージ・報告ターン | P-519, P-521, P-508, P-522 |
 | [visibility.md](visibility.md) | 表示の深さ(表示面ごとのチャネル分類・thinking・UI 投影規則) | P-520, P-613, P-712 |
 
@@ -22,7 +22,8 @@
 
 このうち3文書は**後継設計**であり、v1.0 では実装しない(D-4)。
 v1.0 が満たすのは「中断されたターン/ジョブを検出し、後始末をして、
-ユーザーに報告する」までで、重複効果なしの再開は保証しない(D-5、P-515)。
+ユーザーに報告する」まで。未消化の inbox はログから見せ、実行は再開しない
+(D-5、P-515)。重複効果なしの再開は保証しない。
 v1.0 のスコープを維持したままここまで作り込むと初版が出ないためだが、
 effect sandwich は後付けが難しいので、設計としては捨てずに残す。
 

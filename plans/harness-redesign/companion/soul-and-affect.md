@@ -43,6 +43,36 @@ Ene は感情モデルとして両者を(対外層と内部層の)2層で統合�
 | `voice_ref` | 音声設定 | [../body/voice.md](../body/voice.md) |
 | `skill_refs` | [skill 参照] | [../tasks/skills.md](../tasks/skills.md) |
 
+`<data>/companions.db` に soul ごと 1 行。記憶・スケジュールと同じ DB
+([memory.md §3](memory.md#3-スキーマ))。`AffectState`(§3)は同じ行の列。
+ベースラインは減衰の帰着点なので JSON で持つ。ボールトは `memories.soul_id`
+で識別し、souls に別列は持たない。
+
+```sql
+CREATE TABLE souls (
+  id               TEXT PRIMARY KEY,   -- SoulId (UUIDv7)
+  character_ref    TEXT NOT NULL,      -- パッケージ参照
+  body_ref         TEXT,               -- BodyId。NULL = テキスト専用
+  voice_ref        TEXT,               -- 音声設定(JSON)
+  skill_refs       TEXT NOT NULL DEFAULT '[]',  -- JSON 配列
+  affect_baseline  TEXT NOT NULL,      -- JSON。§3 と同キーの帰着点
+  valence          REAL NOT NULL,
+  arousal          REAL NOT NULL,
+  dominance        REAL NOT NULL,
+  trust            REAL NOT NULL,
+  affinity         REAL NOT NULL,
+  irritation       REAL NOT NULL DEFAULT 0,
+  curiosity        REAL NOT NULL DEFAULT 0,
+  fatigue          REAL NOT NULL DEFAULT 0,
+  mood_label       TEXT NOT NULL,
+  last_report_ts   TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+);
+```
+
+更新頻度はターン境界と定期減衰のみ(毎フレームではない)。
+
 ## 3. `AffectState`(内部層の全フィールド)
 
 | フィールド | 範囲 | 説明 |
@@ -58,9 +88,7 @@ Ene は感情モデルとして両者を(対外層と内部層の)2層で統合�
 | `mood_label` | 離散ボキャブラリ | 支配的な感情ラベル(裁定器の出力キャッシュ) |
 | `last_report_ts` | RFC3339 | 最後の自己報告/更新時刻 |
 
-保存は soul ごとに 1 行(`<data>/companions.db` の `souls` テーブル、
-[memory.md §3](memory.md) と同 DB)。更新頻度はターン境界と
-定期減衰のみ(毎フレームではない)。
+列は §2 の `souls` 行と 1:1。読み出し時の減衰投影は §4。
 
 ## 4. 更新規則
 
