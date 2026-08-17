@@ -496,9 +496,13 @@ async fn fork_leaves_original_session_intact() {
 #[test]
 fn web_ui_cannot_mutate_memory_or_settings() {
     let html = include_str!("../web/index.html");
-    assert!(html.contains("/api/v1/souls/"));
+    assert!(html.contains("/api/v1/souls"));
+    assert!(html.contains("/api/v1/stage"));
+    assert!(html.contains("soul-picker"));
+    assert!(html.contains("depth=detail"));
     assert!(html.contains("memories"));
     assert!(html.contains("/affect"));
+    assert!(html.contains("client_id"));
     assert!(
         !html.contains("method: \"PATCH\"") && !html.contains("method: \"DELETE\""),
         "Web UI must not PATCH/DELETE (settings and memory mutation stay off the Web client)"
