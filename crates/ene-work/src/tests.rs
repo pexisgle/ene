@@ -906,6 +906,24 @@ fn completion_waits_for_user_speech_gap() {
 }
 
 #[test]
+fn interrupt_recovery_and_tool_failure_use_different_wording() {
+    let (_dir, store, host, soul) = open_work();
+    let job = public_start(&host, soul, "cleanup");
+    store.set_status(job.id, JobStatus::Running, None).unwrap();
+    let fail = host.fail(job.id, "disk full").unwrap();
+    assert!(fail.speech.contains("the task failed"));
+    assert!(!fail.speech.contains("stopped"));
+    let running = public_start(&host, soul, "another");
+    store
+        .set_status(running.id, JobStatus::Running, None)
+        .unwrap();
+    let reports = host.recover_interrupted().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].speech.contains("stopped"));
+    assert!(!reports[0].speech.contains("the task failed"));
+}
+
+#[test]
 fn user_facing_strings_say_task_not_job() {
     let (_dir, store, host, soul) = open_work();
     let job = public_start(&host, soul, "cleanup");

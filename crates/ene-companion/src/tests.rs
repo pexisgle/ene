@@ -283,6 +283,22 @@ async fn proactive_gate_fail_closed_without_llm() {
 }
 
 #[tokio::test]
+async fn proactive_disabled_never_invokes_llm() {
+    let config = ProactiveSettings {
+        enabled: false,
+        min_idle_seconds: 0,
+        ..ProactiveSettings::default()
+    };
+    let ctx = speak_context(&config);
+    let classify = ScriptedClassify::new([
+        r#"{"should_speak":true,"confidence":1.0,"reason":"x","topic_hint":"hi","urgency":"low","screen_digest":""}"#,
+    ]);
+    let outcome = decide_proactive_speech(&config, &ctx, Some(&classify)).await;
+    assert!(!outcome.llm_invoked);
+    assert!(matches!(outcome.skip, Some(ProactiveSkipReason::Disabled)));
+}
+
+#[tokio::test]
 async fn proactive_speaks_when_gates_pass() {
     let config = ProactiveSettings {
         enabled: true,

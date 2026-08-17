@@ -170,6 +170,14 @@ fn vault_inject_ref_does_not_embed_plaintext() {
 }
 
 #[test]
+fn exec_is_higher_risk_than_workspace_fs_write() {
+    let fs = req("fs.write", &["fs.write"], Sensitivity::None, true);
+    let exec = req("exec.run", &["exec"], Sensitivity::None, true);
+    assert_eq!(Risk::classify(&fs), Risk::Low);
+    assert_eq!(Risk::classify(&exec), Risk::High);
+}
+
+#[test]
 fn risk_screenshot_is_medium_with_empty_side_effects() {
     let classified = req("app.screenshot", &[], Sensitivity::High, true);
     assert_eq!(Risk::classify(&classified), Risk::Medium);

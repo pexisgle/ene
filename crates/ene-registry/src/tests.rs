@@ -100,6 +100,30 @@ fn side_effects_field_is_required_on_the_wire() {
 }
 
 #[test]
+fn exec_tools_stay_off_surface_schema() {
+    let registry = ToolRegistry::new();
+    for def in crate::builtins::definitions_for(BuiltinKind::Fs) {
+        registry.register(def);
+    }
+    for def in crate::builtins::definitions_for(BuiltinKind::Exec) {
+        registry.register(def);
+    }
+    let surface_schemas = registry.schemas(Layer::Surface);
+    let surface: Vec<&str> = surface_schemas
+        .iter()
+        .filter_map(|schema| schema.get("name").and_then(|v| v.as_str()))
+        .collect();
+    assert!(!surface.iter().any(|name| name.starts_with("exec.")));
+    let job_schemas = registry.schemas(Layer::Job);
+    let job: Vec<&str> = job_schemas
+        .iter()
+        .filter_map(|schema| schema.get("name").and_then(|v| v.as_str()))
+        .collect();
+    assert!(job.contains(&"exec.run"));
+    assert!(job.contains(&"fs.write"));
+}
+
+#[test]
 fn builtin_specs_cover_four_plugins() {
     assert!(!builtin_specs(BuiltinKind::Fs).is_empty());
     assert!(!builtin_specs(BuiltinKind::Exec).is_empty());
