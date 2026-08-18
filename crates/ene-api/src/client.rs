@@ -125,14 +125,7 @@ impl ApiClient {
         soul_id: Option<&str>,
         q: Option<&str>,
     ) -> Result<Page<SessionView>, ApiError> {
-        let mut encoded = url::form_urlencoded::Serializer::new(String::new());
-        if let Some(soul) = soul_id {
-            encoded.append_pair("soul_id", soul);
-        }
-        if let Some(q) = q {
-            encoded.append_pair("q", q);
-        }
-        let query = encoded.finish();
+        let query = session_search_query(soul_id, q);
         let path = if query.is_empty() {
             "/api/v1/sessions".to_owned()
         } else {
@@ -570,4 +563,22 @@ impl EventSocket {
             }
         }
     }
+}
+
+fn session_search_query(soul_id: Option<&str>, q: Option<&str>) -> String {
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    if let Some(soul) = soul_id {
+        pairs.push(("soul_id", soul));
+    }
+    if let Some(q) = q {
+        pairs.push(("q", q));
+    }
+    pairs
+        .into_iter()
+        .map(|(key, value)| {
+            let encoded: String = url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
+            format!("{key}={encoded}")
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }

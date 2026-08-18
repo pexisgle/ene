@@ -27,6 +27,14 @@ image = { version = "0.25", default-features = false }
 wgpu = "29"
 rustfft = "6"
 
+global-hotkey = "0.8"
+rfd = "0.15"
+cpal = "0.18"
+rodio = { version = "0.22", default-features = false }
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+crossbeam-channel = "0.5"
+
 base64 = { version = "0.23", default-features = false }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.6"
@@ -161,6 +169,9 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.naga]
+opt-level = 2
+
+[profile.dev.package.rapier3d]
 opt-level = 2
 
 [profile.dev.package.sha2]
