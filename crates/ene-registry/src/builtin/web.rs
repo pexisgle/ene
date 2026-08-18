@@ -33,7 +33,7 @@ pub(super) fn execute(name: &str, args: &Value) -> Result<Value, String> {
 
 fn fetch(raw: &str) -> Result<Value, String> {
     let url = deny_ssrf(raw)?;
-    let response = http().get(url).send().map_err(|err| err.to_string())?;
+    let response = off_runtime(move || http().get(url).send().map_err(|err| err.to_string()))?;
     let status = response.status().as_u16();
     let content_type = response
         .headers()
@@ -60,7 +60,7 @@ fn search(query: &str) -> Result<Value, String> {
         .append_pair("format", "json")
         .append_pair("no_html", "1")
         .append_pair("skip_disambig", "1");
-    let response = http().get(url).send().map_err(|err| err.to_string())?;
+    let response = off_runtime(move || http().get(url).send().map_err(|err| err.to_string()))?;
     let payload: Value = response.json().map_err(|err| err.to_string())?;
     let heading = payload
         .get("Heading")
@@ -103,6 +103,15 @@ fn search(query: &str) -> Result<Value, String> {
         }
     }
     Ok(json!({ "results": results }))
+}
+
+fn off_runtime<T: Send>(work: impl FnOnce() -> Result<T, String> + Send) -> Result<T, String> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(work)
+            .join()
+            .unwrap_or_else(|_| Err("web worker panicked".to_owned()))
+    })
 }
 
 fn http() -> &'static reqwest::blocking::Client {

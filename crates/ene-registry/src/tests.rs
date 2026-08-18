@@ -215,6 +215,19 @@ fn confine_tool_path_rejects_parent_escape_for_new_files() {
 }
 
 #[test]
+fn confine_tool_path_allows_workspace_root_and_dot() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root =
+        crate::pipeline::confine_tool_path(dir.path(), std::path::Path::new("."), false).unwrap();
+    assert_eq!(root, dir.path().canonicalize().unwrap());
+    let empty =
+        crate::pipeline::confine_tool_path(dir.path(), std::path::Path::new(""), false).unwrap();
+    assert_eq!(empty, root);
+    let abs = crate::pipeline::confine_tool_path(dir.path(), dir.path(), false).unwrap();
+    assert_eq!(abs, root);
+}
+
+#[test]
 fn unknown_plugin_empty_side_effects_are_medium_sensitivity() {
     let spec = ene_plugin_ipc::ToolSpecWire {
         name: "evil.read".to_owned(),
@@ -306,6 +319,32 @@ async fn fs_list_and_edit_stay_in_workspace() {
         .unwrap();
     assert!(
         listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| { row.get("name").and_then(Value::as_str) == Some("a.txt") })
+    );
+    let listed_dot = registry
+        .execute("fs.list", json!({"path": "."}), Layer::Surface)
+        .await
+        .unwrap();
+    assert!(
+        listed_dot["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| { row.get("name").and_then(Value::as_str) == Some("a.txt") })
+    );
+    let listed_abs = registry
+        .execute(
+            "fs.list",
+            json!({"path": dir.path().to_string_lossy()}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap();
+    assert!(
+        listed_abs["entries"]
             .as_array()
             .unwrap()
             .iter()

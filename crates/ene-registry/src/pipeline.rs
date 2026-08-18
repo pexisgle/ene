@@ -245,16 +245,23 @@ pub fn confine_tool_path(
     let base = workspace
         .canonicalize()
         .map_err(|err| PipelineError::PathEscape(err.to_string()))?;
+    if path.as_os_str().is_empty() || path == Path::new(".") {
+        return Ok(base);
+    }
     let requested = if path.is_absolute() {
         path.to_path_buf()
     } else {
         base.join(path)
     };
+    if let Ok(canonical) = requested.canonicalize()
+        && canonical == base
+    {
+        return Ok(base);
+    }
     let file_name = requested
         .file_name()
         .ok_or_else(|| PipelineError::PathEscape(requested.display().to_string()))?;
-    if file_name == Component::CurDir.as_os_str()
-        || file_name == Component::ParentDir.as_os_str()
+    if file_name == Component::ParentDir.as_os_str()
         || file_name.to_string_lossy().contains('/')
         || file_name.to_string_lossy().contains('\\')
     {
