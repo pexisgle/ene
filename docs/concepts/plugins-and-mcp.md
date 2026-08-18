@@ -36,3 +36,18 @@ binary on loopback and talks `/v1`. Sidecar helpers also live in
 MCP `resources/list` snapshots land in `<workspace>/mcp-context/` and are
 injected as a context source. MCP `prompts/list` become `SKILL.md` files under
 the data-dir skills home.
+
+## Launch profiles
+
+`plugins.profile` chooses the harness tree. `apply_profile` reconciles fibers;
+unrelated rows stay up.
+
+| Profile | Harness plugins | MCP |
+|---|---|---|
+| `desktop` (default) | `tool.utility`, `tool.fs`, `tool.exec`, `tool.web`, `tool.app` | handwritten `mcp.json` rows |
+| `minimal` | `tool.utility` | none |
+| `headless` | `tool.utility`, `tool.fs`, `tool.exec`, `tool.web` | handwritten `mcp.json` rows |
+
+Providers still come from `ai.tasks.*`, not from the profile name. Change the
+profile from the Plugins page or `PATCH /api/v1/settings` with
+`{"plugins":{"profile":"minimal"}}`.

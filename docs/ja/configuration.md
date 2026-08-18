@@ -21,6 +21,20 @@
 書きません）。プラグイン id は `echo` または [プラグイン一覧](concepts/plugins-and-mcp.md)
 の `provider.*` です。
 
+プラグイン起動は `plugins.profile`（`desktop` / `minimal` / `headless`）です。
+プラグインごとの有効マップはありません。
+
+| キー | 役割 |
+|---|---|
+| `plugins.profile` | 起動ツリー。既定 `desktop`。環境変数: `ENE_PLUGINS__PROFILE`。 |
+| `plugins.home_dir` | インストール検索パス。空なら `<data>/plugins`。環境変数: `ENE_PLUGINS__HOME_DIR`。 |
+| `plugins.policy.approval_mode` | 起動時に `approval.mode` を初期化（`ask_all` / `policy` / `ai_auto` / `auto`）。実行時の正は `approval.mode`。 |
+| `plugins.policy.allow_unverified` | digest 不一致でも起動するか。既定 `false`。 |
+| `plugins.ipc.max_frame_bytes` | IPC フレーム上限。既定 `1048576`。環境変数: `ENE_PLUGINS__IPC__MAX_FRAME_BYTES`。 |
+
+MCP サーバーは手書きの `mcp.json` であり、設定キーではありません。
+[プラグインと MCP](concepts/plugins-and-mcp.md) を見てください。
+
 デバッグビルドの同梱アセットはリポジトリの `assets/` から解決します。
 実行時データ（`sessions.db`、`api.token`、`vault.bin`、workspace）は
 設定ファイルの隣ではなく、データディレクトリに置きます。

@@ -37,3 +37,18 @@ API キーは vault に置き、`settings.json` には書きません。ネイ�
 MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショットされ、
 コンテキスト源として注入されます。`prompts/list` は data-dir の skills 配下の
 `SKILL.md` になります。
+
+## 起動プロファイル
+
+`plugins.profile` がハーネスの起動ツリーを選びます。`apply_profile` がファイバーを
+差分 reconcile し、無関係な行は動かしません。
+
+| プロファイル | ハーネスプラグイン | MCP |
+|---|---|---|
+| `desktop`（既定） | `tool.utility`、`tool.fs`、`tool.exec`、`tool.web`、`tool.app` | 手書き `mcp.json` |
+| `minimal` | `tool.utility` | なし |
+| `headless` | `tool.utility`、`tool.fs`、`tool.exec`、`tool.web` | 手書き `mcp.json` |
+
+プロバイダはプロファイル名ではなく `ai.tasks.*` から載ります。プロファイルの変更は
+プラグインページ、または `PATCH /api/v1/settings` の
+`{"plugins":{"profile":"minimal"}}` です。

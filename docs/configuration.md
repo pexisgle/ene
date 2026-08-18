@@ -22,6 +22,20 @@ secrets (`ENE_AI__TASKS__<TASK>__API_KEY` at boot; PATCH `/api/v1/settings`
 never writes them into JSON). Plugin ids are `echo` or `provider.*` names
 from the [plugin catalog](concepts/plugins-and-mcp.md).
 
+Plugin launch is `plugins.profile` (`desktop`, `minimal`, or `headless`), not a
+per-plugin enable map. Related keys:
+
+| Key | Role |
+|---|---|
+| `plugins.profile` | Launch tree. Default `desktop`. Env: `ENE_PLUGINS__PROFILE`. |
+| `plugins.home_dir` | Install search path. Empty means `<data>/plugins`. Env: `ENE_PLUGINS__HOME_DIR`. |
+| `plugins.policy.approval_mode` | Seeds `approval.mode` at boot (`ask_all`, `policy`, `ai_auto`, `auto`). Runtime truth stays `approval.mode`. |
+| `plugins.policy.allow_unverified` | Allow a fiber whose digest does not match. Default `false`. |
+| `plugins.ipc.max_frame_bytes` | IPC frame cap. Default `1048576`. Env: `ENE_PLUGINS__IPC__MAX_FRAME_BYTES`. |
+
+MCP servers are handwritten `mcp.json` rows, not settings keys. See
+[Plugins & MCP](concepts/plugins-and-mcp.md).
+
 Debug builds still resolve some bundled assets from the repository `assets/`
 folder. Runtime data (`sessions.db`, `api.token`, `vault.bin`, workspace)
 lives under the data directory, not next to the settings file.

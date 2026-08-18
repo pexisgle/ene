@@ -24,7 +24,6 @@ defining crate. Character card containers live in
 | Macro | Purpose |
 |---|---|
 | `define_config!` | Declares a settings section struct, its JSON schema, and its registration (settings / character / nested variants) |
-| `define_tool_config!` | Declares a tool's config schema under `tools.list.<tool>` |
 | `define_label_enum!` | Declares a labeled enum with a consistent `label()` API |
 
 ## Dependencies

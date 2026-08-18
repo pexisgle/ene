@@ -23,7 +23,6 @@
 | マクロ | 目的 |
 |---|---|
 | `define_config!` | 設定セクション構造体と JSON スキーマ・登録を宣言（settings / character / ネストの各バリアント） |
-| `define_tool_config!` | `tools.list.<tool>` 配下のツール設定スキーマを宣言 |
 | `define_label_enum!` | 一貫した `label()` API を持つラベル付き enum を宣言 |
 
 ## 依存関係
