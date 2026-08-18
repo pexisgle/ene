@@ -57,6 +57,10 @@ pub struct HotkeyState {
     manager: Option<GlobalHotKeyManager>,
     hotkey: HotKey,
     registered: bool,
+    /// Skip further `register` calls after the OS rejected the grab
+    /// until Spotlight is toggled off. Otherwise a taken Alt+Space
+    /// would warn on every frame.
+    register_blocked: bool,
     /// `true` while the OS reports the key held (see [`track_press`]).
     held: bool,
 }
@@ -81,6 +85,7 @@ impl HotkeyState {
             manager: Some(manager),
             hotkey,
             registered: false,
+            register_blocked: false,
             held: false,
         };
         if let Err(error) = state.register() {
@@ -98,6 +103,7 @@ impl HotkeyState {
             manager: None,
             hotkey: HotKey::new(Some(Modifiers::ALT), Code::Space),
             registered: false,
+            register_blocked: false,
             held: false,
         }
     }
@@ -110,12 +116,23 @@ impl HotkeyState {
         let Some(manager) = self.manager.as_ref() else {
             return Ok(());
         };
-        manager.register(self.hotkey).map_err(|e| e.to_string())?;
-        self.registered = true;
-        Ok(())
+        if self.register_blocked {
+            return Ok(());
+        }
+        match manager.register(self.hotkey) {
+            Ok(()) => {
+                self.registered = true;
+                Ok(())
+            }
+            Err(error) => {
+                self.register_blocked = true;
+                Err(error.to_string())
+            }
+        }
     }
 
     fn unregister(&mut self) -> Result<(), String> {
+        self.register_blocked = false;
         if let Some(manager) = self.manager.as_ref() {
             manager.unregister(self.hotkey).map_err(|e| e.to_string())?;
         }
