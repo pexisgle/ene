@@ -393,6 +393,16 @@ impl WorkStore {
         u32::try_from(n).map_err(|err| WorkError::Codec(err.to_string()))
     }
 
+    pub fn has_active_jobs(&self) -> Result<bool, WorkError> {
+        let n: i64 = self.conn.lock().query_row(
+            "SELECT COUNT(*) FROM jobs
+             WHERE status IN ('created', 'queued', 'running')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn set_plan(&self, id: DelegationId, plan: &str) -> Result<(), WorkError> {
         let n = self.conn.lock().execute(
             "UPDATE jobs SET plan = ?1 WHERE id = ?2",

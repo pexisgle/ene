@@ -19,6 +19,7 @@ pub fn backup_now(data_dir: &Path) -> Result<(String, PathBuf), ApiReject> {
     copy_sqlite(&data_dir.join("companions.db"), &dest.join("companions.db"))?;
     copy_sqlite(&data_dir.join("audit.db"), &dest.join("audit.db"))?;
     copy_if_exists(&data_dir.join("vault.bin"), &dest.join("vault.bin"))?;
+    copy_if_exists(&data_dir.join("vault.key"), &dest.join("vault.key"))?;
     copy_if_exists(&data_dir.join("settings.json"), &dest.join("settings.json"))?;
     Ok((id, dest))
 }
@@ -60,6 +61,7 @@ pub fn restore_copy(data_dir: &Path, id: &str) -> Result<(), ApiReject> {
     copy_sqlite(&src.join("companions.db"), &data_dir.join("companions.db"))?;
     copy_sqlite(&src.join("audit.db"), &data_dir.join("audit.db"))?;
     copy_if_exists(&src.join("vault.bin"), &data_dir.join("vault.bin"))?;
+    copy_if_exists(&src.join("vault.key"), &data_dir.join("vault.key"))?;
     copy_if_exists(&src.join("settings.json"), &data_dir.join("settings.json"))?;
     Ok(())
 }
@@ -132,8 +134,10 @@ mod tests {
         seed(&dir.path().join("sessions.db"), 11);
         seed(&dir.path().join("companions.db"), 22);
         seed(&dir.path().join("audit.db"), 33);
+        std::fs::write(dir.path().join("vault.key"), "key-bytes").unwrap();
         let (id, dest) = backup_now(dir.path()).unwrap();
         assert!(dest.join("sessions.db").exists());
+        assert!(dest.join("vault.key").exists());
         std::fs::remove_file(dir.path().join("sessions.db")).unwrap();
         seed(&dir.path().join("sessions.db"), 99);
         assert_eq!(marker(&dir.path().join("sessions.db")), 99);

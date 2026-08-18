@@ -74,6 +74,11 @@ impl ToolRegistry {
         *self.workspace.lock() = Some(path.into());
     }
 
+    #[must_use]
+    pub fn workspace(&self) -> Option<PathBuf> {
+        self.workspace.lock().clone()
+    }
+
     pub fn register(&self, def: ToolDefinition) {
         self.register_with(def, Arc::new(BuiltinInvoker));
     }
@@ -200,7 +205,8 @@ fn path_in_workspace(workspace: Option<&Path>, path: &str) -> bool {
     confine_tool_path(root, Path::new(path), false).is_ok()
 }
 
-pub(crate) fn confine_tool_path(
+/// Resolve `path` under `workspace`, rejecting parent-directory escapes.
+pub fn confine_tool_path(
     workspace: &Path,
     path: &Path,
     create_parent: bool,

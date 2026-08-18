@@ -20,7 +20,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
 use ene_api::SendMessageResponse;
-use ene_kernel::{ConversationModel, CoreSettings, EchoModel};
+use ene_kernel::{ConversationModel, EchoModel};
 use ene_plane::PendingPopup;
 use parking_lot::Mutex;
 use serde_json::json;
@@ -79,8 +79,8 @@ impl CoreDaemon {
         self: Arc<Self>,
         model: Arc<dyn ConversationModel>,
     ) -> Result<ServerHandle, CoreError> {
-        let settings = CoreSettings::default();
-        let bind: SocketAddr = settings
+        let bind: SocketAddr = self
+            .settings()
             .server
             .bind
             .parse()
@@ -100,14 +100,9 @@ impl CoreDaemon {
         let addr = listener
             .local_addr()
             .map_err(|err| CoreError::Http(err.to_string()))?;
-        let token =
-            load_or_create_token(self.data_dir(), &CoreSettings::default().server.token_file)?;
-        write_ready_file(
-            self.data_dir(),
-            addr,
-            &CoreSettings::default().server.token_file,
-        )?;
-        let last_used = CoreSettings::default().clients.audio_active_policy == "last_used";
+        let token = load_or_create_token(self.data_dir(), &self.settings().server.token_file)?;
+        write_ready_file(self.data_dir(), addr, &self.settings().server.token_file)?;
+        let last_used = self.settings().clients.audio_active_policy == "last_used";
         let state = AppState {
             popup: Arc::clone(self.popup()),
             core: Arc::clone(&self),
@@ -115,7 +110,7 @@ impl CoreDaemon {
             exclusive: Arc::new(ExclusiveHub::new(last_used)),
             idem: Arc::new(Mutex::new(HashMap::new())),
             token: token.clone(),
-            events: CoreBus::new(CoreSettings::default().server.ws_send_buffer),
+            events: CoreBus::new(self.settings().server.ws_send_buffer),
             bind: addr,
         };
         let app = router(state.clone());

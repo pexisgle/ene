@@ -10,7 +10,9 @@ use ene_companion::{
     CompanionRuntime, CompanionStore, MindSettings as CompanionMind, NewSoul, register_memory_tools,
 };
 use ene_fiber::Supervisor;
-use ene_kernel::{ConversationModel, LaneHandle, LaneOptions, SurfaceRouter, format_recovery_note};
+use ene_kernel::{
+    ConversationModel, CoreSettings, LaneHandle, LaneOptions, SurfaceRouter, format_recovery_note,
+};
 use ene_plane::{
     ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink, Vault,
 };
@@ -21,7 +23,7 @@ use ene_session::{
 };
 use ene_work::{
     CompanionReport, DelegationHost, PlaceholderScreenshot, WorkError, WorkStore,
-    WorkSurfaceRouter, register_screenshot_tool, register_work_tools,
+    WorkSurfaceRouter, register_screenshot_tool, register_work_tools, workspace_root,
 };
 use fs2::FileExt;
 use thiserror::Error;
@@ -90,12 +92,14 @@ pub struct CoreDaemon {
     host: Arc<DelegationHost>,
     job_reports: Vec<CompanionReport>,
     popup: Arc<PendingPopup>,
+    settings: CoreSettings,
 }
 
 impl CoreDaemon {
     /// Ensure the data dir, take the exclusive lock, open the store, recover interrupts.
     pub async fn boot(opts: BootOptions) -> Result<Self, CoreError> {
         std::fs::create_dir_all(&opts.data_dir)?;
+        let settings = load_core_settings(&opts.data_dir);
         let lock = lock_data_dir(&opts.data_dir)?;
         let db_path = opts.data_dir.join("sessions.db");
         let store = SessionStore::open(&db_path, &opts.synchronous).await?;
@@ -106,8 +110,10 @@ impl CoreDaemon {
                 "detected interrupted work; closed without resume"
             );
         }
+        let workspace = workspace_root(&opts.data_dir);
+        std::fs::create_dir_all(&workspace)?;
         let registry = Arc::new(ToolRegistry::new());
-        registry.set_workspace(opts.data_dir.clone());
+        registry.set_workspace(workspace.clone());
         let audit = AuditLog::open(opts.data_dir.join("audit.db"))?;
         let popup = Arc::new(PendingPopup::new());
         let approval_settings = ApprovalSettings::default();
@@ -149,7 +155,7 @@ impl CoreDaemon {
             VoiceRuntime::scripted(VoiceSettings::default()),
             BodySettings::default(),
         ));
-        let supervisor = Arc::new(Supervisor::new(opts.data_dir.clone(), registry));
+        let supervisor = Arc::new(Supervisor::new(workspace, registry));
         seed_default_occupants(&companions, &stage)?;
         Ok(Self {
             data_dir: opts.data_dir,
@@ -166,12 +172,23 @@ impl CoreDaemon {
             host,
             job_reports,
             popup,
+            settings,
         })
     }
 
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    #[must_use]
+    pub fn workspace_dir(&self) -> PathBuf {
+        workspace_root(&self.data_dir)
+    }
+
+    #[must_use]
+    pub fn settings(&self) -> &CoreSettings {
+        &self.settings
     }
 
     #[must_use]
@@ -420,4 +437,47 @@ fn lock_data_dir(data_dir: &Path) -> Result<File, CoreError> {
         }
     })?;
     Ok(file)
+}
+
+fn load_core_settings(data_dir: &Path) -> CoreSettings {
+    let mut settings = CoreSettings {
+        data_dir: data_dir.display().to_string(),
+        ..CoreSettings::default()
+    };
+    let path = data_dir.join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(&path)
+        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(core) = file.get("core")
+        && let Ok(overlay) = serde_json::from_value::<CoreSettings>(core.clone())
+    {
+        settings = overlay;
+        if settings.data_dir.is_empty() {
+            settings.data_dir = data_dir.display().to_string();
+        }
+    }
+    apply_core_env(&mut settings);
+    settings
+}
+
+fn apply_core_env(settings: &mut CoreSettings) {
+    if let Ok(bind) = std::env::var("ENE_CORE__SERVER__BIND")
+        && !bind.is_empty()
+    {
+        settings.server.bind = bind;
+    }
+    if let Ok(token_file) = std::env::var("ENE_CORE__SERVER__TOKEN_FILE")
+        && !token_file.is_empty()
+    {
+        settings.server.token_file = token_file;
+    }
+    if let Ok(raw) = std::env::var("ENE_CORE__SERVER__WS_SEND_BUFFER")
+        && let Ok(n) = raw.parse()
+    {
+        settings.server.ws_send_buffer = n;
+    }
+    if let Ok(policy) = std::env::var("ENE_CORE__CLIENTS__AUDIO_ACTIVE_POLICY")
+        && !policy.is_empty()
+    {
+        settings.clients.audio_active_policy = policy;
+    }
 }

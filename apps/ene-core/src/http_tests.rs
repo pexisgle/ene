@@ -425,6 +425,11 @@ async fn backup_copies_stores() {
             .join("sessions.db")
             .exists()
     );
+    assert!(
+        std::path::Path::new(&backup.path)
+            .join("vault.key")
+            .exists()
+    );
     assert!(core.data_dir().join("backups").join(&backup.id).exists());
     server.shutdown().await;
 }
@@ -446,6 +451,65 @@ async fn backup_restore_roundtrip_and_unknown_id() {
         .unwrap();
     assert!(core.data_dir().join("backups").join("pre-restore").is_dir());
     assert_eq!(client.health().await.unwrap().status, "ok");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn restore_rejects_active_jobs() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let job = core
+        .host()
+        .start(ene_work::StartDelegation {
+            soul_id: soul,
+            goal: "running".into(),
+            mode: ene_work::DelegationMode::Public,
+            title: Some("running".into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+        })
+        .unwrap();
+    core.work()
+        .set_status(job.id, ene_work::JobStatus::Running, None)
+        .unwrap();
+    let backup = client.backup().await.unwrap();
+    let err = client
+        .restore(&RestoreRequest { id: backup.id })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "job_busy");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn boot_loads_settings_json_token_file() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"core":{"server":{"token_file":"custom.token","bind":"127.0.0.1:0"}}}"#,
+    )
+    .unwrap();
+    let core = Arc::new(
+        CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(core.settings().server.token_file, "custom.token");
+    assert_eq!(core.workspace_dir(), dir.path().join("workspace"));
+    assert!(core.workspace_dir().is_dir());
+    let server = core
+        .clone()
+        .serve_with(Arc::new(EchoModel) as Arc<dyn ConversationModel>)
+        .await
+        .unwrap();
+    assert!(dir.path().join("custom.token").is_file());
+    let ready: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("api.json")).unwrap())
+            .unwrap();
+    assert_eq!(ready["token_file"], "custom.token");
     server.shutdown().await;
 }
 

@@ -128,15 +128,22 @@ impl Drop for Vault {
 impl Vault {
     fn load(&self) -> Result<HashMap<String, Vec<u8>>, VaultError> {
         let sealed = std::fs::read(&self.path)?;
-        let passphrase = self.passphrase.lock().clone();
-        let plain = open(&passphrase, &sealed)?;
-        serde_json::from_slice(&plain).map_err(|err| VaultError::Codec(err.to_string()))
+        let mut passphrase = self.passphrase.lock().clone();
+        let mut plain = open(&passphrase, &sealed)?;
+        passphrase.zeroize();
+        let parsed =
+            serde_json::from_slice(&plain).map_err(|err| VaultError::Codec(err.to_string()));
+        plain.zeroize();
+        parsed
     }
 
     fn save(&self, map: &HashMap<String, Vec<u8>>) -> Result<(), VaultError> {
-        let plain = serde_json::to_vec(map).map_err(|err| VaultError::Codec(err.to_string()))?;
-        let passphrase = self.passphrase.lock().clone();
+        let mut plain =
+            serde_json::to_vec(map).map_err(|err| VaultError::Codec(err.to_string()))?;
+        let mut passphrase = self.passphrase.lock().clone();
         let sealed = seal(&passphrase, &plain)?;
+        passphrase.zeroize();
+        plain.zeroize();
         let tmp = self.path.with_extension("tmp");
         write_secret_file(&tmp, &sealed)?;
         std::fs::rename(&tmp, &self.path)?;
@@ -205,7 +212,7 @@ fn seal(passphrase: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, VaultError> {
     let nonce: [u8; NONCE_LEN] = random_bytes(NONCE_LEN)?
         .try_into()
         .map_err(|_| VaultError::Codec("invalid nonce length".to_owned()))?;
-    let stream_key = derive_stream_key(passphrase, &salt);
+    let mut stream_key = derive_stream_key(passphrase, &salt);
     let mut hasher = blake3::Hasher::new_derive_key("ene-vault/stream");
     hasher.update(&stream_key);
     hasher.update(&nonce);
@@ -215,11 +222,13 @@ fn seal(passphrase: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, VaultError> {
     for (dst, src) in ct.iter_mut().zip(keystream.iter()) {
         *dst ^= src;
     }
+    keystream.zeroize();
     let mut mac = blake3::Hasher::new_derive_key("ene-vault/mac");
     mac.update(&stream_key);
     mac.update(&nonce);
     mac.update(&ct);
     let tag: Hash = mac.finalize();
+    stream_key.zeroize();
     let mut out = Vec::with_capacity(MAGIC.len() + SALT_LEN + NONCE_LEN + ct.len() + TAG_LEN);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&salt);
@@ -241,12 +250,13 @@ fn open(passphrase: &[u8], sealed: &[u8]) -> Result<Vec<u8>, VaultError> {
     let tag = &sealed[sealed.len() - TAG_LEN..];
     let ct = &sealed[MAGIC.len() + SALT_LEN + NONCE_LEN..sealed.len() - TAG_LEN];
     let salt_arr: [u8; SALT_LEN] = salt.try_into().map_err(|_| VaultError::Integrity)?;
-    let stream_key = derive_stream_key(passphrase, &salt_arr);
+    let mut stream_key = derive_stream_key(passphrase, &salt_arr);
     let mut mac = blake3::Hasher::new_derive_key("ene-vault/mac");
     mac.update(&stream_key);
     mac.update(nonce);
     mac.update(ct);
     if !constant_time_eq(mac.finalize().as_bytes(), tag) {
+        stream_key.zeroize();
         return Err(VaultError::Integrity);
     }
     let mut hasher = blake3::Hasher::new_derive_key("ene-vault/stream");
@@ -258,6 +268,8 @@ fn open(passphrase: &[u8], sealed: &[u8]) -> Result<Vec<u8>, VaultError> {
     for (dst, src) in plain.iter_mut().zip(keystream.iter()) {
         *dst ^= src;
     }
+    keystream.zeroize();
+    stream_key.zeroize();
     Ok(plain)
 }
 

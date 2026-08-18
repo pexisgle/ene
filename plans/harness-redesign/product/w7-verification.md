@@ -15,7 +15,7 @@
 |---|---|---|
 | 1 | stage + CLI + Web が同一コアに接続 | 成立。`ene-daemon::http_tests::three_clients_share_one_core` |
 | 2 | 1 体が done.md の全 P-xxx を満たす | 成立(自動テスト観測)。下表の P-id をクレート単体/HTTP で固定。stage の VRM は minimal fixture + wgpu load。実機 GPU 同室 E2E は lavapipe 依存 |
-| 3 | ネットワークなしで会話 | 成立。`ene-daemon::w7_acceptance::spawned_core_offline_conversation_and_rss` |
+| 3 | ネットワークなしで会話 | 未達。`spawned_core_offline_conversation_and_rss` は EchoModel 往復のみ。provider 配線なし |
 | 4 | ビルドと性能(D-29) | 成立。`minimal_http_baselines_are_measurable` / `kernel::echo_turn_to_first_chunk_is_measurable` / `w7_acceptance` RSS。Cloud VM は `cargo` 直接(AGENTS.md) |
 | 5 | 監査・バックアップ・エクスポート | 成立。`ene-plane::audit_hash_chain_verifies` / `http::backup::backup_and_restore_roundtrip` / `export_default_omits_inner` |
 
@@ -81,7 +81,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-518 | `ene-session::storage_too_new_is_rejected`; `ene-session::older_storage_migrates_and_interrupts_open_work`; `ene-session::recover_closes_open_turn_and_abandons_inbox` |
 | P-519 | `ene-work::progress_and_complete_are_companion_speech`; `ene-work::surface_message_and_cancel_while_running` |
 | P-520 | `ene-session::surface_projection_hides_inner_and_thinking`; `ene-daemon::surface_ws_never_sees_inner`; `ene-stage::surface_blocks_inner_and_thinking` |
-| P-521 | `ene-work::progress_and_complete_are_companion_speech`; `ene-work::completion_waits_for_user_speech_gap` |
+| P-521 | `ene-work::progress_and_complete_are_companion_speech`; `ene-work::completion_waits_for_user_speech_gap`; barge-in / mic release / prompt drain in `ene-daemon` |
 | P-522 | `ene-work::surface_fs_write_upgrades_without_invoking`; `ene-work::lane_auto_upgrade_does_not_execute_fs_write` |
 | P-523 | `ene-work::step_budget_upgrades_even_for_empty_side_effects`; `ene-work::surface_router_upgrades_fs_write_without_spy` |
 | P-524 | `ene-companion::proactive_speaks_when_gates_pass` (補助 LLM 分類); `ene-companion::classifier_scope_defaults_private_when_missing` |
@@ -106,7 +106,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-704 | `ene-daemon::http_tests::web_ui_cannot_mutate_memory_or_settings` (eframe/wgpu, WebView なし) |
 | P-705 | `ene-ctl::core_smoke::ctl_client_lists_tools_and_debug_spans`; `ene-ctl::core_smoke::cli_binary_starts_core_and_runs_session_ops` |
 | P-706 | `ene-daemon::http_tests::web_ui_cannot_mutate_memory_or_settings`; `three_clients_share_one_core` |
-| P-707 | `ene-daemon::exclusive_mic_is_first_writer`; `approval_first_writer_wins` |
+| P-707 | `ene-daemon::http_tests::boot_loads_settings_json_token_file`; `exclusive_mic_is_first_writer`; `approval_first_writer_wins` |
 | P-708 | `ene-daemon::http_tests::http_spans_and_schema_and_anon_health` |
 | P-709 | `ene-daemon::http::backup::backup_and_restore_roundtrip`; `http_tests::backup_copies_stores`; `http_tests::backup_restore_roundtrip_and_unknown_id` |
 | P-712 | `ene-daemon::surface_ws_never_sees_inner`; `http_tests::export_default_omits_inner` (detail 履歴) |
@@ -125,7 +125,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 | P-906 | `ene-plane::policy_add_requires_confirmation` |
 | P-907 | `ene-plane::vault_inject_ref_does_not_embed_plaintext`; `ene-daemon::boot_installs_approval_plane_and_vault` |
 | P-908 | `ene-plane::audit_hash_chain_verifies` |
-| P-909 | `ene-daemon::w7_acceptance::spawned_core_offline_conversation_and_rss` |
+| P-909 | Echo 経路のみ（総括 3 未達）。`ene-daemon::w7_acceptance::spawned_core_offline_conversation_and_rss` |
 | P-910 | `ene-kernel::observe_spans_do_not_leak_content` |
 | P-1001 | `plugins/harness/utility::out_of_process_utility_registers_and_runs` |
 | P-1002 | `ene-fiber::apply_profile_unloads_removed_rows_and_keeps_uid` |
@@ -146,6 +146,7 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 - Web UI は memory/settings の PATCH/DELETE を持たない。stage は eframe+wgpu で WebView なし
 - スパン属性にプロンプト内容が乗らない
 - 空トークンは `/api/v1/health` 以外 `unauthorized`
+- 会話 LLM は EchoModel。P-xxx の自動テストは機構検出。実モデルの分類・応答品質は総括 3 完了まで対象外
 
 ## 性能基準線
 

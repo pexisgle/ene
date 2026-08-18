@@ -55,9 +55,14 @@ jobs:
               -p ene-infer -p ene-mind -p ene-plugin -p ene-plugin-db
               -p ene-plugin-host -p ene-plugin-macros -p ene-plugin-proto
               -p ene-rag -p ene-runtime -p ene-store -p ene-util
-              -p ene-voice -p ene-vrm
+              -p ene-voice -p ene-vrm -p ene-session -p ene-kernel
+              -p ene-plane -p ene-work -p ene-companion -p ene-body
+              -p ene-fiber -p ene-registry -p ene-api -p ene-plugin-ipc
+              -p ene-sandbox -p ene-approval -p ene-artifact
+              -p ene-plugin-broker
           - name: apps
-            packages: -p ene-cli -p ene-desktop
+            packages: >-
+              -p ene-cli -p ene-desktop -p ene-daemon -p ene-ctl -p ene-stage
           - name: plugins
             packages: >-
               -p ene-plugin-anthropic -p ene-plugin-edge-tts
@@ -71,6 +76,8 @@ jobs:
               -p ene-plugin-fs -p ene-plugin-geo -p ene-plugin-git
               -p ene-plugin-homeassistant -p ene-plugin-random
               -p ene-plugin-utility -p ene-plugin-web
+              -p ene-harness-fs -p ene-harness-exec -p ene-harness-web
+              -p ene-harness-utility
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

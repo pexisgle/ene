@@ -82,8 +82,7 @@ pub async fn events(
                 .map(str::to_owned)
         });
     let upgrade = if let Some(proto) = bearer_proto {
-        let static_proto: &'static str = Box::leak(proto.into_boxed_str());
-        ws.protocols([static_proto])
+        ws.protocols([proto])
     } else {
         ws
     };

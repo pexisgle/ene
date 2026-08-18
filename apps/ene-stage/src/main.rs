@@ -73,6 +73,15 @@ mod tests {
         assert!(surface_event_allowed(
             &json!({"type": "text.delta", "text": "hi"})
         ));
+        assert!(!surface_event_allowed(
+            &json!({"type": "session.event", "kind": "inner/message"})
+        ));
+        assert!(!surface_event_allowed(
+            &json!({"type": "session.event", "kind": "assistant/thinking"})
+        ));
+        assert!(surface_event_allowed(
+            &json!({"type": "session.event", "kind": "turn/end"})
+        ));
     }
 
     #[test]
@@ -118,9 +127,10 @@ mod tests {
         let path = dir.path().join("api.json");
         std::fs::write(
             &path,
-            r#"{"url":"http://127.0.0.1:9","token":"abc","bind":"127.0.0.1:9"}"#,
+            r#"{"url":"http://127.0.0.1:9","token_file":"api.token","bind":"127.0.0.1:9"}"#,
         )
         .expect("write");
+        std::fs::write(dir.path().join("api.token"), "abc").expect("token");
         let value = wait_for_api_json(&path).expect("ready");
         let (url, token) = connection_from_ready(&value).expect("parse");
         assert_eq!(url, "http://127.0.0.1:9");

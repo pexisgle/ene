@@ -3,10 +3,17 @@ use serde_json::Value;
 /// Defense-in-depth: drop inner/thinking from surface streams even if the server mis-filters.
 pub fn surface_event_allowed(value: &Value) -> bool {
     let event_type = value.get("type").and_then(Value::as_str);
-    !matches!(
+    if matches!(
         event_type,
         Some("inner.message" | "thinking.delta" | "inner.delta")
-    )
+    ) {
+        return false;
+    }
+    if event_type == Some("session.event") {
+        let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
+        return !matches!(kind, "inner/message" | "assistant/thinking");
+    }
+    true
 }
 
 pub fn format_event_line(value: &Value) -> String {

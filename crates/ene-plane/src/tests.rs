@@ -189,6 +189,8 @@ fn risk_fs_read_outside_workspace_is_medium() {
     assert_eq!(Risk::classify(&outside), Risk::Medium);
     let inside = req("fs.read", &[], Sensitivity::None, true);
     assert_eq!(Risk::classify(&inside), Risk::None);
+    let alias = req("fs.readfoo", &[], Sensitivity::None, false);
+    assert_eq!(Risk::classify(&alias), Risk::None);
 }
 
 #[tokio::test]
@@ -202,6 +204,19 @@ async fn allow_and_remember_appends_policy_rule() {
     assert_eq!(plane.policy().rules.len(), 1);
     assert_eq!(plane.policy().rules[0].tool, "fs.write");
     assert_eq!(plane.policy().rules[0].scope.as_deref(), Some("workspace"));
+    let records = plane.audit().records().unwrap();
+    assert!(records.iter().any(|row| row.kind == "policy"));
+}
+
+#[tokio::test]
+async fn allow_and_remember_outside_workspace_does_not_persist() {
+    let popup = Arc::new(ScriptedPopup::new([PopupDecision::AllowAndRemember]));
+    let (_dir, plane) = make_plane(popup, None);
+    plane
+        .authorize(&req("fs.write", &["fs.write"], Sensitivity::None, false))
+        .await
+        .unwrap();
+    assert!(plane.policy().rules.is_empty());
 }
 
 #[tokio::test]

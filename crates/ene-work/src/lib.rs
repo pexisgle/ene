@@ -22,6 +22,7 @@ pub use error::WorkError;
 pub use host::{
     DelegationHost, StartDelegation, SurfaceCallKind, UpgradeRequest, def_is_side_effect,
     fold_brief, layer_for_call, question_timed_out, should_upgrade_steps, surface_call_kind,
+    workspace_root,
 };
 pub use mcp::{McpProfile, McpTool, ScriptedMcp, register_mcp_tools};
 pub use questions::{combine_questions, route_combined_answers};

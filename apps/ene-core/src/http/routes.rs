@@ -17,14 +17,14 @@ use ene_api::{
 };
 use ene_companion::{JournalAction, MemoryId, MemoryScope, export_dir, install_archive};
 use ene_fiber::discover_plugin_executable;
-use ene_kernel::{CoreSettings, DisplayDepth, HarnessSettings};
+use ene_kernel::{DisplayDepth, HarnessSettings};
 use ene_plane::PopupDecision;
 use ene_registry::Layer;
 use ene_session::{
-    EventKind, EventPayload, NewEvent, NewSession, SessionCreatedBy, SessionEndReason, SessionId,
-    SessionKind, SessionMeta, SoulId, TurnId, v1,
+    Block, EventKind, EventPayload, NewEvent, NewSession, SessionCreatedBy, SessionEndReason,
+    SessionId, SessionKind, SessionMeta, SoulId, Transaction, TurnId, v1,
 };
-use ene_work::{NewSchedule, ScheduleAction};
+use ene_work::{CompanionReport, NewSchedule, ScheduleAction};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -354,6 +354,7 @@ pub async fn barge_in(
         .lanes
         .get_or_open(&state.core, session)
         .map_err(map_core)?;
+    drop(state.core.host().mark_user_speaking(true));
     lane.abort().await.map_err(|err| map_kernel(&err))?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -408,6 +409,7 @@ async fn dispatch_message(
         .map_err(map_core)?;
     match req.mode {
         MessageMode::Prompt => {
+            deliver_speech_gap(state).await;
             let turn = lane
                 .prompt_with_modality(&req.text, req.input_modality.as_deref().unwrap_or("text"))
                 .await
@@ -657,9 +659,15 @@ pub async fn artifact_content(
         .get_artifact(&id)
         .map_err(map_work)?
         .ok_or_else(|| not_found("artifact not found"))?;
-    let text = fs::read_to_string(&art.path).unwrap_or_default();
+    let confined = ene_registry::confine_tool_path(
+        &state.core.workspace_dir(),
+        std::path::Path::new(&art.path),
+        false,
+    )
+    .map_err(|_| not_found("artifact not found"))?;
+    let text = fs::read_to_string(&confined).unwrap_or_default();
     Ok(Json(
-        json!({ "id": art.id, "content": text, "path": art.path }),
+        json!({ "id": art.id, "content": text, "path": confined.display().to_string() }),
     ))
 }
 
@@ -947,7 +955,7 @@ pub async fn export_character(
 }
 
 pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
-    let mut core = CoreSettings::default();
+    let mut core = state.core.settings().clone();
     core.data_dir = state.core.data_dir().display().to_string();
     let mut effective = json!({
         "core": core,
@@ -1106,6 +1114,13 @@ pub async fn restore(
             "cannot restore while a lane is active",
         ));
     }
+    let jobs_busy = state.core.work().has_active_jobs().map_err(map_work)?;
+    if jobs_busy {
+        return Err(conflict(
+            "job_busy",
+            "cannot restore while a task is running",
+        ));
+    }
     state
         .core
         .prepare_restore(&req.id)
@@ -1137,6 +1152,9 @@ pub async fn exclusive_claim(
             "resource must be mic, speaker, or notify",
         )
     })?;
+    if kind == ResourceKind::Mic {
+        drop(state.core.host().mark_user_speaking(true));
+    }
     let snap = state.exclusive.claim(kind, &client_id)?;
     state.events.emit(
         DisplayDepth::Surface,
@@ -1157,6 +1175,9 @@ pub async fn exclusive_release(
             "resource must be mic, speaker, or notify",
         )
     })?;
+    if kind == ResourceKind::Mic {
+        deliver_speech_gap(&state).await;
+    }
     Ok(Json(state.exclusive.release(kind, &client_id)))
 }
 
@@ -1435,5 +1456,53 @@ fn map_core(err: CoreError) -> ApiReject {
     match err {
         CoreError::Session(err) => map_session(err),
         other => bad_request("fault", &other.to_string()),
+    }
+}
+
+async fn deliver_speech_gap(state: &AppState) {
+    let reports = state.core.host().mark_user_speaking(false);
+    emit_job_reports(state, &reports);
+    for report in reports.iter().filter(|report| !report.speech.is_empty()) {
+        persist_job_report(state, report).await;
+    }
+}
+
+fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
+    for report in reports {
+        if report.speech.is_empty() {
+            continue;
+        }
+        state.events.emit(
+            DisplayDepth::Surface,
+            json!({
+                "type": "job.report",
+                "speech": report.speech,
+                "inner_intent": report.inner_intent,
+                "starts_conversation": report.starts_conversation,
+            }),
+        );
+    }
+}
+
+async fn persist_job_report(state: &AppState, report: &CompanionReport) {
+    for lane in state.lanes.all() {
+        drop(
+            state
+                .core
+                .store()
+                .commit(Transaction {
+                    entries: vec![NewEvent::new(
+                        lane.session_id(),
+                        EventKind::ContextSystemMessage,
+                        EventPayload::ContextSystemMessage {
+                            v: v1(),
+                            blocks: vec![Block::text(report.speech.clone())],
+                            source_key: "job.report".to_owned(),
+                        },
+                    )],
+                    usage: Vec::new(),
+                })
+                .await,
+        );
     }
 }

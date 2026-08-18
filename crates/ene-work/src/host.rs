@@ -10,9 +10,15 @@ use crate::types::{
 use chrono::{DateTime, Utc};
 use ene_registry::{Layer, ToolDefinition, ToolRegistry};
 use ene_session::{DelegationId, SoulId};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Tool-confine and job-artifact root (`<data>/workspace`), kept off secrets.
+#[must_use]
+pub fn workspace_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("workspace")
+}
 
 /// Host for public/internal delegations. Auto-upgrade uses the same entity.
 pub struct DelegationHost {
@@ -76,8 +82,18 @@ impl DelegationHost {
     }
 
     #[must_use]
-    pub fn data_dir(&self) -> &std::path::Path {
+    pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// Queue or release job-completion speech according to the voice gap.
+    pub fn mark_user_speaking(&self, speaking: bool) -> Vec<CompanionReport> {
+        self.speech_gate.set_user_speaking(speaking);
+        if speaking {
+            Vec::new()
+        } else {
+            self.speech_gate.drain_when_gap()
+        }
     }
 
     pub fn start(&self, request: StartDelegation) -> Result<Job, WorkError> {
@@ -101,11 +117,9 @@ impl DelegationHost {
         {
             return Err(WorkError::SlotsFull);
         }
-        let workspace = self
-            .data_dir
-            .join("workspaces")
-            .join(soul_id.to_string())
-            .join("jobs");
+        let workspace = workspace_root(&self.data_dir)
+            .join("jobs")
+            .join(soul_id.to_string());
         std::fs::create_dir_all(&workspace)?;
         let job_id = DelegationId::new();
         let dir = workspace.join(job_id.to_string());

@@ -119,6 +119,16 @@ fn public_start(host: &DelegationHost, soul: SoulId, goal: &str) -> crate::types
     .unwrap()
 }
 
+#[test]
+fn job_workspace_is_not_the_data_dir() {
+    let (dir, _store, host, soul) = open_work();
+    let job = public_start(&host, soul, "notes");
+    let root = crate::workspace_root(dir.path());
+    assert_eq!(root, dir.path().join("workspace"));
+    assert_ne!(root, dir.path());
+    assert!(std::path::Path::new(&job.workspace_dir).starts_with(&root));
+}
+
 #[tokio::test]
 async fn surface_fs_write_upgrades_without_invoking() {
     let (_dir, store, host, soul) = open_work();
@@ -630,8 +640,11 @@ async fn artifact_register_and_deliver() {
         }],
     });
     registry.set_plane(plane);
+    let workspace = crate::workspace_root(dir.path());
+    std::fs::create_dir_all(&workspace).unwrap();
+    registry.set_workspace(&workspace);
     assert!(surface_shows_delegate(&registry));
-    let file = dir.path().join("out.md");
+    let file = workspace.join("out.md");
     std::fs::write(&file, "# hi").unwrap();
     let registered = registry
         .execute(
@@ -653,6 +666,100 @@ async fn artifact_register_and_deliver() {
     assert_eq!(arts.len(), 1);
     assert!(arts[0].delivered);
     assert!(ArtifactKind::try_parse("docx").is_err());
+}
+
+#[tokio::test]
+async fn artifact_register_rejects_path_outside_workspace() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let job = public_start(&host, soul, "notes");
+    host.present_plan(job.id, "1. write notes").unwrap();
+    host.approve_plan(job.id).unwrap();
+    let registry = ToolRegistry::new();
+    register_work_tools(&registry, Arc::clone(&host), dir.path().join("skills"));
+    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_plane::ApprovalPlane::new(
+        ene_plane::ApprovalSettings::default(),
+        audit,
+        ene_plane::ScriptedPopup::deny_all(),
+        None,
+    ));
+    plane.set_policy(ene_plane::PolicyFile {
+        rules: vec![ene_plane::PolicyRule {
+            tool: "artifact.register".to_owned(),
+            scope: None,
+            decision: ene_plane::PolicyDecision::Allow,
+        }],
+    });
+    registry.set_plane(plane);
+    let outside = dir.path().join("secret.txt");
+    std::fs::write(&outside, "token").unwrap();
+    let err = registry
+        .execute(
+            "artifact.register",
+            json!({
+                "soul_id": soul.to_string(),
+                "job_id": job.id.to_string(),
+                "kind": "markdown",
+                "title": "leak",
+                "path": outside.to_string_lossy(),
+            }),
+            Layer::Job,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("escapes workspace"));
+}
+
+#[tokio::test]
+async fn artifact_register_requires_job_id() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(WorkStore::open(dir.path().join("companions.db")).unwrap());
+    let host = Arc::new(DelegationHost::new(
+        Arc::clone(&store),
+        dir.path().to_path_buf(),
+    ));
+    let soul = SoulId::new();
+    let registry = ToolRegistry::new();
+    register_work_tools(&registry, host, dir.path().join("skills"));
+    let audit = ene_plane::AuditLog::open(dir.path().join("audit.db")).unwrap();
+    let plane = Arc::new(ene_plane::ApprovalPlane::new(
+        ene_plane::ApprovalSettings::default(),
+        audit,
+        ene_plane::ScriptedPopup::deny_all(),
+        None,
+    ));
+    plane.set_policy(ene_plane::PolicyFile {
+        rules: vec![ene_plane::PolicyRule {
+            tool: "artifact.register".to_owned(),
+            scope: None,
+            decision: ene_plane::PolicyDecision::Allow,
+        }],
+    });
+    registry.set_plane(plane);
+    let workspace = crate::workspace_root(dir.path());
+    std::fs::create_dir_all(&workspace).unwrap();
+    let file = workspace.join("out.md");
+    std::fs::write(&file, "# hi").unwrap();
+    let err = registry
+        .execute(
+            "artifact.register",
+            json!({
+                "soul_id": soul.to_string(),
+                "kind": "markdown",
+                "title": "notes",
+                "path": file.to_string_lossy(),
+            }),
+            Layer::Job,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("missing job_id"));
 }
 
 #[test]
@@ -945,15 +1052,12 @@ fn surface_message_and_cancel_while_running() {
 #[test]
 fn completion_waits_for_user_speech_gap() {
     let (_dir, _store, host, soul) = open_work();
-    let gate = host.speech_gate();
-    gate.set_user_speaking(true);
+    drop(host.mark_user_speaking(true));
     let job = public_start(&host, soul, "report");
     let queued = host.complete(job.id, "all findings collected").unwrap();
     assert!(!queued.starts_conversation);
     assert_eq!(queued.inner_intent.as_deref(), Some("complete_queued"));
-    assert!(gate.drain_when_gap().is_empty());
-    gate.set_user_speaking(false);
-    let drained = gate.drain_when_gap();
+    let drained = host.mark_user_speaking(false);
     assert_eq!(drained.len(), 1);
     assert!(drained[0].speech.contains("all findings collected"));
 }

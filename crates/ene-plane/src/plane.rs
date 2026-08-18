@@ -216,13 +216,23 @@ impl ApprovalPlane {
         match decision {
             PopupDecision::Allow => Ok(Decision::Allow),
             PopupDecision::AllowAndRemember => {
-                let scope = req.in_workspace.then_some("workspace".to_owned());
-                self.policy.lock().rules.push(PolicyRule {
-                    tool: req.tool.clone(),
-                    scope,
-                    decision: PolicyDecision::Allow,
-                });
-                self.persist_policy()?;
+                if req.in_workspace {
+                    self.policy.lock().rules.push(PolicyRule {
+                        tool: req.tool.clone(),
+                        scope: Some("workspace".to_owned()),
+                        decision: PolicyDecision::Allow,
+                    });
+                    self.persist_policy()?;
+                    self.audit.append(
+                        "policy",
+                        &json!({
+                            "origin": "remember",
+                            "tool": req.tool,
+                            "scope": "workspace",
+                            "decision": "allow",
+                        }),
+                    )?;
+                }
                 Ok(Decision::Allow)
             }
             PopupDecision::Deny => Ok(Decision::Deny),

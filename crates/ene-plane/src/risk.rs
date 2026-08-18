@@ -21,7 +21,7 @@ impl Risk {
         if req.sensitivity == Sensitivity::Medium {
             return Self::Medium;
         }
-        if (req.tool.starts_with("fs.read") || req.tool == "fs.read") && !req.in_workspace {
+        if (req.tool == "fs.read" || req.tool.starts_with("fs.read.")) && !req.in_workspace {
             return Self::Medium;
         }
         if !req.side_effects.is_empty() && !req.in_workspace {

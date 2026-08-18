@@ -27,6 +27,7 @@ use crate::models;
 /// for minutes. Dropping the HTTP call on timeout aborts the sidecar-side
 /// generation.
 const DECISION_COMPLETION_TIMEOUT_SECS: u64 = 20;
+const GENERATE_COMPLETION_TIMEOUT_SECS: u64 = 120;
 
 /// Local GGUF inference provider plugin (llama-server sidecar).
 ///
@@ -166,18 +167,40 @@ impl LlmPlugin for LlamaServerPlugin {
         messages: Vec<Value>,
         json_schema: Option<Value>,
     ) -> Result<PluginCompletion, PluginError> {
+        self.complete(
+            kind,
+            model,
+            max_tokens,
+            messages,
+            json_schema,
+            DECISION_COMPLETION_TIMEOUT_SECS,
+        )
+        .await
+    }
+}
+
+impl LlamaServerPlugin {
+    async fn complete(
+        &self,
+        kind: &str,
+        model: String,
+        max_tokens: Option<u32>,
+        messages: Vec<Value>,
+        json_schema: Option<Value>,
+        budget_secs: u64,
+    ) -> Result<PluginCompletion, PluginError> {
         ensure_kind(kind)?;
         let messages = convert::to_llm_messages(&messages)?;
         let oai_messages = convert::messages_to_oai(&messages)?;
         let client = models::chat_provider(&model).await?;
         tokio::time::timeout(
-            Duration::from_secs(DECISION_COMPLETION_TIMEOUT_SECS),
+            Duration::from_secs(budget_secs),
             client.chat_completion(&model, oai_messages, max_tokens, json_schema),
         )
         .await
         .map_err(|_| {
             PluginError::provider(format!(
-                "local completion exceeded the {DECISION_COMPLETION_TIMEOUT_SECS}s decision budget"
+                "local completion exceeded the {budget_secs}s completion budget"
             ))
         })?
     }
@@ -276,16 +299,16 @@ impl CapabilityProvider for LlamaServerPlugin {
                     "role": "user",
                     "parts": [{ "Text": { "text": request.prompt } }]
                 })];
-                let completion = LlmPlugin::chat_completion(
-                    self,
-                    Self::LLM_PROVIDER_KIND,
-                    serde_json::json!({}),
-                    request.model,
-                    None,
-                    messages,
-                    request.json_schema,
-                )
-                .await?;
+                let completion = self
+                    .complete(
+                        Self::LLM_PROVIDER_KIND,
+                        request.model,
+                        None,
+                        messages,
+                        request.json_schema,
+                        GENERATE_COMPLETION_TIMEOUT_SECS,
+                    )
+                    .await?;
                 Ok(serde_json::json!({ "text": completion.text }))
             }
             "embed" => {

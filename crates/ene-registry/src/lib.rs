@@ -13,7 +13,7 @@ pub use builtins::{
     host_spec_for, run_plugin,
 };
 pub use def::{Layer, ToolDefinition, ToolSource};
-pub use pipeline::{BuiltinInvoker, PipelineError, ToolInvoke, ToolRegistry};
+pub use pipeline::{BuiltinInvoker, PipelineError, ToolInvoke, ToolRegistry, confine_tool_path};
 
 #[cfg(test)]
 mod tests;

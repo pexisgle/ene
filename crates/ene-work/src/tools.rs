@@ -1,7 +1,6 @@
 use crate::error::WorkError;
 use crate::host::{DelegationHost, StartDelegation};
 use crate::skill::load_skill;
-use crate::store::WorkStore;
 use crate::types::{Artifact, ArtifactKind, DelegationMode};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -9,7 +8,7 @@ use ene_plane::Sensitivity;
 use ene_registry::{ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
 use ene_session::{DelegationId, SoulId};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -136,7 +135,7 @@ fn delegate_defs() -> Vec<ToolDefinition> {
                     "title": { "type": "string" },
                     "path": { "type": "string" }
                 },
-                "required": ["soul_id", "kind", "title", "path"]
+                "required": ["soul_id", "job_id", "kind", "title", "path"]
             }),
             vec!["artifact.register".to_owned()],
         ),
@@ -254,18 +253,11 @@ impl ToolInvoke for WorkInvoker {
                 }))
             }
             "artifact.register" => {
-                let job_id = args
-                    .get("job_id")
-                    .and_then(Value::as_str)
-                    .map(DelegationId::from_str)
-                    .transpose()
+                let job_id = job_id_arg(&args)?;
+                self.host
+                    .require_mutating_allowed(job_id)
                     .map_err(|err| err.to_string())?;
-                if let Some(job_id) = job_id {
-                    self.host
-                        .require_mutating_allowed(job_id)
-                        .map_err(|err| err.to_string())?;
-                }
-                register_artifact(self.host.store().as_ref(), &args)
+                register_artifact(self.host.as_ref(), &args)
             }
             "job.plan_write" => {
                 let report = self
@@ -329,23 +321,24 @@ fn start(invoker: &WorkInvoker, args: &Value) -> Result<Value, String> {
     }))
 }
 
-fn register_artifact(store: &WorkStore, args: &Value) -> Result<Value, String> {
+fn register_artifact(host: &DelegationHost, args: &Value) -> Result<Value, String> {
     let kind = ArtifactKind::try_parse(str_arg(args, "kind")?).map_err(|err| err.to_string())?;
-    let job_id = args
-        .get("job_id")
-        .and_then(Value::as_str)
-        .map(DelegationId::from_str)
-        .transpose()
-        .map_err(|err| err.to_string())?;
-    let path = str_arg(args, "path")?.to_owned();
+    let job_id = job_id_arg(args)?;
+    let workspace = crate::workspace_root(host.data_dir());
+    std::fs::create_dir_all(&workspace).map_err(|err| err.to_string())?;
+    let confined =
+        ene_registry::confine_tool_path(&workspace, Path::new(str_arg(args, "path")?), false)
+            .map_err(|err| err.to_string())?;
+    let path = confined.display().to_string();
     let size = std::fs::metadata(&path)
         .ok()
         .and_then(|meta| i64::try_from(meta.len()).ok());
-    let art = store
+    let art = host
+        .store()
         .register_artifact(Artifact {
             id: Uuid::now_v7().to_string(),
             soul_id: soul_arg(args)?,
-            job_id,
+            job_id: Some(job_id),
             kind,
             title: str_arg(args, "title")?.to_owned(),
             path,
@@ -408,6 +401,14 @@ fn soul_arg(args: &Value) -> Result<SoulId, String> {
 
 fn id_arg(args: &Value) -> Result<DelegationId, String> {
     let raw = args.get("id").and_then(Value::as_str).ok_or("missing id")?;
+    DelegationId::from_str(raw).map_err(|err| err.to_string())
+}
+
+fn job_id_arg(args: &Value) -> Result<DelegationId, String> {
+    let raw = args
+        .get("job_id")
+        .and_then(Value::as_str)
+        .ok_or("missing job_id")?;
     DelegationId::from_str(raw).map_err(|err| err.to_string())
 }
 

@@ -79,11 +79,16 @@ pub fn wait_for_api_json(path: &Path) -> Result<Value, String> {
     let deadline = Instant::now() + READY_TIMEOUT;
     loop {
         if let Ok(text) = std::fs::read_to_string(path)
-            && let Ok(value) = serde_json::from_str::<Value>(&text)
+            && let Ok(mut value) = serde_json::from_str::<Value>(&text)
+            && url_ready(&value)
         {
-            let url = value.get("url").and_then(Value::as_str);
-            let token = value.get("token").and_then(Value::as_str);
-            if url.is_some() && token.is_some() {
+            if token_missing(&value)
+                && let Some(token) = read_sibling_token(path, &value)
+                && let Some(object) = value.as_object_mut()
+            {
+                object.insert("token".to_owned(), Value::String(token));
+            }
+            if !token_missing(&value) {
                 return Ok(value);
             }
         }
@@ -95,6 +100,31 @@ pub fn wait_for_api_json(path: &Path) -> Result<Value, String> {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn url_ready(value: &Value) -> bool {
+    value
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|url| !url.is_empty())
+}
+
+fn token_missing(value: &Value) -> bool {
+    value
+        .get("token")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+}
+
+fn read_sibling_token(api_json: &Path, value: &Value) -> Option<String> {
+    let name = value
+        .get("token_file")
+        .and_then(Value::as_str)
+        .unwrap_or("api.token");
+    let token_path = api_json.parent()?.join(name);
+    let token = std::fs::read_to_string(token_path).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_owned())
 }
 
 pub fn spawn_core(data_dir: &Path) -> Result<CoreChild, String> {
