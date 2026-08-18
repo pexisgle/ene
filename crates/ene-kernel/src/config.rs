@@ -227,6 +227,21 @@ pub struct TaskBinding {
     pub base_url: String,
     #[serde(default)]
     pub voice: String,
+    /// Absolute engine binary for a managed loopback sidecar (P-1006).
+    #[serde(default)]
+    pub server_path: String,
+    /// Catalog-injected CAS path for the same binary; used when `server_path` is empty.
+    #[serde(default)]
+    pub cas_path: String,
+    /// GGUF / weights path passed to the sidecar as `-m` when `server_args` is empty.
+    #[serde(default)]
+    pub model_path: String,
+    /// Sidecar argv. `{port}` is replaced with the host-assigned loopback port.
+    #[serde(default)]
+    pub server_args: Vec<String>,
+    /// Sidecar health timeout. `None` uses the plugin default.
+    #[serde(default)]
+    pub startup_timeout_secs: Option<u32>,
 }
 
 impl Default for TaskBinding {
@@ -244,6 +259,11 @@ impl TaskBinding {
             max_tokens: None,
             base_url: String::new(),
             voice: String::new(),
+            server_path: String::new(),
+            cas_path: String::new(),
+            model_path: String::new(),
+            server_args: Vec::new(),
+            startup_timeout_secs: None,
         }
     }
 

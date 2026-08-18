@@ -20,13 +20,19 @@ subprotocol. Bind them with `ai.tasks.<task>.plugin`:
 | Plugin | Modalities |
 |---|---|
 | `echo` | Host offline model (no network) |
-| `provider.openai_compat` | LLM, embeddings, TTS, STT (`/v1` chat+audio, including llama-server) |
+| `provider.openai_compat` | LLM, embeddings, TTS, STT (`/v1` chat+audio). Set `server_path` to spawn llama-server on loopback (P-1006). |
 | `provider.anthropic` | LLM (Messages API) |
 | `provider.elevenlabs` | TTS |
-| `provider.voicevox` | TTS (HTTP to a user-run engine) |
+| `provider.voicevox` | TTS. User-run engine, or `server_path` sidecar |
 | `provider.edge_tts` | TTS (Edge Neural Voice) |
 
 API keys are stored in the vault, not in `settings.json`. Native in-process
 engines (llama.cpp, whisper.cpp, Kokoro ONNX) are not in this tree; local
-GGUF chat uses `provider.openai_compat` pointed at a user-run llama-server.
-Sidecar helpers live in `templates/sidecar`.
+GGUF chat uses `provider.openai_compat` with `ai.tasks.*.server_path` pointing
+at `llama-server` (and `model_path` at the GGUF). The plugin spawns that
+binary on loopback and talks `/v1`. Sidecar helpers also live in
+`templates/sidecar`.
+
+MCP `resources/list` snapshots land in `<workspace>/mcp-context/` and are
+injected as a context source. MCP `prompts/list` become `SKILL.md` files under
+the data-dir skills home.

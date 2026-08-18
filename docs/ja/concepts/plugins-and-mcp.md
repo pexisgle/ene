@@ -21,13 +21,19 @@ MCP サーバーはベンダーしません。手書きの `mcp.json` の各行�
 | プラグイン | モダリティ |
 |---|---|
 | `echo` | ホスト内蔵オフラインモデル（ネットワークなし） |
-| `provider.openai_compat` | LLM、埋め込み、TTS、STT（`/v1` chat+audio。llama-server 含む） |
+| `provider.openai_compat` | LLM、埋め込み、TTS、STT（`/v1` chat+audio）。`server_path` を入れると llama-server をループバックで起動します（P-1006）。 |
 | `provider.anthropic` | LLM（Messages API） |
 | `provider.elevenlabs` | TTS |
-| `provider.voicevox` | TTS（ユーザー起動エンジンへの HTTP） |
+| `provider.voicevox` | TTS。ユーザー起動エンジン、または `server_path` サイドカー |
 | `provider.edge_tts` | TTS（Edge Neural Voice） |
 
 API キーは vault に置き、`settings.json` には書きません。ネイティブの
 プロセス内エンジン（llama.cpp、whisper.cpp、Kokoro ONNX）はこのツリーには
-ありません。ローカル GGUF 会話は、ユーザー起動の llama-server を
-`provider.openai_compat` で指します。Sidecar 補助は `templates/sidecar` にあります。
+ありません。ローカル GGUF 会話は `provider.openai_compat` の
+`ai.tasks.*.server_path` に `llama-server` を、`model_path` に GGUF を指定します。
+プラグインがそのバイナリをループバックで起動し `/v1` で話します。Sidecar 補助は
+`templates/sidecar` にもあります。
+
+MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショットされ、
+コンテキスト源として注入されます。`prompts/list` は data-dir の skills 配下の
+`SKILL.md` になります。

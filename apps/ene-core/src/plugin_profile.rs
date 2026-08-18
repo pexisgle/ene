@@ -14,7 +14,7 @@ struct McpFile {
 pub fn collect_rows(data_dir: &Path, work: &WorkStore, ai: &AiSettings) -> Vec<ProfileRow> {
     let mut rows = harness_rows();
     rows.extend(provider_rows(ai));
-    rows.extend(mcp_rows(&load_servers(data_dir, work)));
+    rows.extend(mcp_rows(data_dir, &load_servers(data_dir, work)));
     rows
 }
 
@@ -119,13 +119,18 @@ fn provider_rows(ai: &AiSettings) -> Vec<ProfileRow> {
             config: serde_json::json!({
                 "base_url": binding.base_url,
                 "model": binding.model,
+                "server_path": binding.server_path,
+                "cas_path": binding.cas_path,
+                "model_path": binding.model_path,
+                "server_args": binding.server_args,
+                "startup_timeout_secs": binding.startup_timeout_secs,
             }),
         });
     }
     rows
 }
 
-fn mcp_rows(servers: &[McpServer]) -> Vec<ProfileRow> {
+fn mcp_rows(data_dir: &Path, servers: &[McpServer]) -> Vec<ProfileRow> {
     if discover_plugin_executable("mcp.bridge").is_none() {
         if servers.iter().any(|server| server.enabled) {
             tracing::warn!("ene-harness-mcp missing; handwritten MCP rows skipped");
@@ -135,11 +140,11 @@ fn mcp_rows(servers: &[McpServer]) -> Vec<ProfileRow> {
     servers
         .iter()
         .filter(|server| server.enabled)
-        .filter_map(mcp_row)
+        .filter_map(|server| mcp_row(data_dir, server))
         .collect()
 }
 
-fn mcp_row(server: &McpServer) -> Option<ProfileRow> {
+fn mcp_row(data_dir: &Path, server: &McpServer) -> Option<ProfileRow> {
     if !valid_mcp_id(&server.id) {
         tracing::warn!(id = %server.id, "skipping MCP row with invalid id");
         return None;
@@ -166,6 +171,7 @@ fn mcp_row(server: &McpServer) -> Option<ProfileRow> {
             "command": server.command,
             "args": server.args,
             "url": server.url,
+            "skills_home": data_dir.join("skills"),
         }),
     })
 }

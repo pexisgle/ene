@@ -28,6 +28,10 @@
 ```
 
 `transport` は `stdio`（`command` + `args` を spawn）か `http`（`url` への
-Streamable HTTP JSON-RPC POST）です。代表的なサーバーを選ぶマーケット UI は
-まだありません（後継、P-616）。旧ホストの `tools.mcp_servers` ブロックを
-コピーしないでください。そのスキーマは無くなっています。
+Streamable HTTP JSON-RPC POST）です。`tools/list` のあと、ブリッジは
+`resources/list`（`<workspace>/mcp-context/` にスナップショットし、コンテキスト源へ注入）
+と `prompts/list`（data-dir の skills 配下へ `SKILL.md`）も呼びます。
+それらのメソッドが無いサーバーはそのままで構いません。
+代表的なサーバーを選ぶマーケット UI はまだありません（後継、P-616）。
+旧ホストの `tools.mcp_servers` ブロックをコピーしないでください。そのスキーマは
+無くなっています。

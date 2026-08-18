@@ -70,6 +70,9 @@ impl TtsHandler for Voicevox {
 }
 
 fn effective_base(request: &str) -> String {
+    if let Some(base) = crate::sidecar::managed_base() {
+        return base.to_owned();
+    }
     if !request.is_empty() {
         return request.trim_end_matches('/').to_owned();
     }

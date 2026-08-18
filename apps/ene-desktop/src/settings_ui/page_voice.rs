@@ -8,6 +8,7 @@ use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
 use super::provider_form::{
     AUDIO_PLUGINS, STT_PLUGINS, plugin_combo, plugin_needs_key, provider_description,
+    sidecar_fields,
 };
 use serde_json::{Value, json};
 
@@ -183,6 +184,7 @@ fn render_audio_binding(
     let url_changed = ui
         .add(egui::TextEdit::singleline(&mut base_url).desired_width(f32::INFINITY))
         .changed();
+    let sidecar_changed = sidecar_fields(ui, &mut binding);
     let mut key_changed = false;
     if plugin_needs_key(&plugin) {
         ui.label(i18n_embed_fl::fl!(
@@ -209,6 +211,7 @@ fn render_audio_binding(
         || model_changed
         || voice_changed
         || url_changed
+        || sidecar_changed
         || key_changed
     {
         binding["plugin"] = json!(plugin);

@@ -36,8 +36,9 @@ impl TurnPrefetch for RecallPrefetch {
         _session: SessionId,
         user_text: &str,
     ) -> Vec<(String, String)> {
+        let mut out = mcp_context_lines(&self.core.workspace_dir());
         if user_text.trim().is_empty() {
-            return Vec::new();
+            return out;
         }
         let query_vec = embed_query(self, user_text).await;
         let hits = match self
@@ -48,22 +49,47 @@ impl TurnPrefetch for RecallPrefetch {
             Ok(hits) => hits,
             Err(err) => {
                 tracing::debug!(error = %err, "recall skipped");
-                return Vec::new();
+                return out;
             }
         };
         if hits.is_empty() {
-            return Vec::new();
+            return out;
         }
         let body = hits
             .iter()
             .map(|hit| format!("- {}: {}", hit.title, hit.content))
             .collect::<Vec<_>>()
             .join("\n");
-        vec![(
+        out.push((
             "companion.recall".to_owned(),
             format!("Recalled memories:\n{body}"),
-        )]
+        ));
+        out
     }
+}
+
+fn mcp_context_lines(workspace: &std::path::Path) -> Vec<(String, String)> {
+    let dir = workspace.join("mcp-context");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut chunks = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "md")
+            && let Ok(text) = std::fs::read_to_string(&path)
+            && !text.trim().is_empty()
+        {
+            chunks.push(text);
+        }
+    }
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+    vec![(
+        "mcp.resources".to_owned(),
+        format!("MCP resources:\n{}", chunks.join("\n\n")),
+    )]
 }
 
 async fn embed_query(prefetch: &RecallPrefetch, text: &str) -> Option<Vec<f32>> {

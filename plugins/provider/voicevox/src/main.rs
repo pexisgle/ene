@@ -1,9 +1,12 @@
 //! `VOICEVOX`-compatible engine TTS (`provider.voicevox`).
 //!
-//! Talks HTTP to a user-run engine (`VOICEVOX` :50021, Aivis Speech :10101).
-//! The host does not vendor the engine binary.
+//! Talks HTTP to a user-run engine (`VOICEVOX` :50021, Aivis Speech :10101)
+//! or to a sidecar spawned from `server_path`.
+
+#![cfg_attr(test, expect(clippy::expect_used, reason = "tests fail fast"))]
 
 mod client;
+mod sidecar;
 
 use std::sync::Arc;
 
@@ -18,6 +21,13 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    let sidecar = match sidecar::maybe_start() {
+        Ok(guard) => guard,
+        Err(err) => {
+            tracing::error!(error = %err, plugin = "provider.voicevox", "sidecar");
+            std::process::exit(1);
+        }
+    };
     let provider = Arc::new(Voicevox::new());
     let handlers = ProviderHandlers {
         tts: Some(provider),
@@ -25,8 +35,10 @@ async fn main() {
     };
     if let Err(err) = serve_provider_from_env(identity(), handlers).await {
         tracing::error!(error = %err, plugin = "provider.voicevox", "fatal");
+        drop(sidecar);
         std::process::exit(1);
     }
+    drop(sidecar);
 }
 
 fn identity() -> PluginIdentity {

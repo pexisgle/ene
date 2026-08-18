@@ -3,7 +3,10 @@
 //! Speaks the provider subprotocol and maps host-canonical messages onto
 //! `/chat/completions`, `/embeddings`, `/audio/speech`, and `/audio/transcriptions`.
 
+#![cfg_attr(test, expect(clippy::expect_used, reason = "tests fail fast"))]
+
 mod client;
+mod sidecar;
 
 use std::sync::Arc;
 
@@ -18,6 +21,13 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    let sidecar = match sidecar::maybe_start() {
+        Ok(guard) => guard,
+        Err(err) => {
+            tracing::error!(error = %err, plugin = "provider.openai_compat", "sidecar");
+            std::process::exit(1);
+        }
+    };
     let provider = Arc::new(OpenAiCompat::new());
     let handlers = ProviderHandlers {
         llm: Some(provider.clone()),
@@ -27,8 +37,10 @@ async fn main() {
     };
     if let Err(err) = serve_provider_from_env(identity(), handlers).await {
         tracing::error!(error = %err, plugin = "provider.openai_compat", "fatal");
+        drop(sidecar);
         std::process::exit(1);
     }
+    drop(sidecar);
 }
 
 fn identity() -> PluginIdentity {

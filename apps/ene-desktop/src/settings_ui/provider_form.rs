@@ -1,5 +1,7 @@
 //! Provider selector labels for AI / Voice pages.
 
+use serde_json::{Value, json};
+
 pub(crate) const BUILTIN_PROVIDER_I18N_IDS: &[(&str, &str)] = &[
     ("echo", "echo"),
     ("openai_compat", "openai-compat"),
@@ -67,6 +69,71 @@ pub fn plugin_needs_key(kind: &str) -> bool {
         kind.strip_prefix("provider.").unwrap_or(kind),
         "openai_compat" | "anthropic" | "elevenlabs"
     )
+}
+
+#[must_use]
+pub fn plugin_needs_sidecar(kind: &str) -> bool {
+    matches!(
+        kind.strip_prefix("provider.").unwrap_or(kind),
+        "openai_compat" | "voicevox"
+    )
+}
+
+/// Loopback engine fields (`server_path` / `model_path` / `server_args`).
+pub fn sidecar_fields(ui: &mut egui::Ui, binding: &mut Value) -> bool {
+    let plugin = binding.get("plugin").and_then(Value::as_str).unwrap_or("");
+    if !plugin_needs_sidecar(plugin) {
+        return false;
+    }
+    let mut changed = false;
+    ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-sidecar-hint"));
+    changed |= text_field(ui, "ai-server-path-label", binding, "server_path");
+    changed |= text_field(ui, "ai-cas-path-label", binding, "cas_path");
+    changed |= text_field(ui, "ai-model-path-label", binding, "model_path");
+    let mut args = binding
+        .get("server_args")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    ui.label(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "ai-server-args-label"
+    ));
+    if ui
+        .add(egui::TextEdit::singleline(&mut args).desired_width(f32::INFINITY))
+        .changed()
+    {
+        binding["server_args"] = json!(
+            args.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        changed = true;
+    }
+    changed
+}
+
+fn text_field(ui: &mut egui::Ui, label: &str, binding: &mut Value, key: &str) -> bool {
+    let mut value = binding
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    ui.label(fl(label));
+    if ui
+        .add(egui::TextEdit::singleline(&mut value).desired_width(f32::INFINITY))
+        .changed()
+    {
+        binding[key] = json!(value);
+        true
+    } else {
+        false
+    }
 }
 
 /// Combo box of bundled provider ids, grouped Host / Local / Cloud.

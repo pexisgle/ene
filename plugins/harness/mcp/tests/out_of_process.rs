@@ -56,6 +56,26 @@ while True:
             "description":"ping",
             "inputSchema":{"type":"object","additionalProperties":False}
         }]}})
+    elif method == "resources/list":
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{"resources":[{
+            "uri":"memo://note",
+            "name":"note"
+        }]}})
+    elif method == "resources/read":
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{"contents":[{
+            "uri":"memo://note",
+            "text":"hello resource"
+        }]}})
+    elif method == "prompts/list":
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{"prompts":[{
+            "name":"brief",
+            "description":"a brief"
+        }]}})
+    elif method == "prompts/get":
+        write_msg({"jsonrpc":"2.0","id":ident,"result":{"messages":[{
+            "role":"user",
+            "content":{"type":"text","text":"do the brief"}
+        }]}})
     elif method == "tools/call":
         write_msg({"jsonrpc":"2.0","id":ident,"result":{
             "content":[{"type":"text","text":"pong"}]
@@ -81,6 +101,7 @@ async fn handwritten_stdio_mcp_registers_and_runs() {
             "server": "fixture",
             "command": "python3",
             "args": [script.to_string_lossy()],
+            "skills_home": dir.path().join("skills"),
         }),
     };
     sup.activate_process(&row, &bin()).await.unwrap();
@@ -91,5 +112,9 @@ async fn handwritten_stdio_mcp_registers_and_runs() {
         .await
         .unwrap();
     assert!(value.to_string().contains("pong"));
+    let context = std::fs::read_to_string(dir.path().join("mcp-context/fixture.md")).unwrap();
+    assert!(context.contains("hello resource"));
+    let skill = std::fs::read_to_string(dir.path().join("skills/brief/SKILL.md")).unwrap();
+    assert!(skill.contains("do the brief"));
     sup.unload("mcp.fixture").await;
 }

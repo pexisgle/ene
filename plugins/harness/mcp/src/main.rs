@@ -1,5 +1,6 @@
 //! MCP stdio / HTTP bridge. One process per handwritten `mcp.<server>` profile row.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 
 use async_trait::async_trait;
@@ -37,6 +38,7 @@ struct McpConfig {
     command: String,
     args: Vec<String>,
     url: Option<String>,
+    skills_home: PathBuf,
 }
 
 fn load_config() -> McpConfig {
@@ -72,12 +74,18 @@ fn load_config() -> McpConfig {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    let skills_home = value
+        .get("skills_home")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_default();
     McpConfig {
         server,
         transport,
         command,
         args,
         url,
+        skills_home,
     }
 }
 
@@ -114,7 +122,12 @@ impl McpBridge {
             || config.transport == "streamable-http"
             || (config.url.is_some() && config.command.is_empty());
         let mut session = if http {
-            let url = config.url.ok_or_else(|| "mcp http needs url".to_owned())?;
+            let url = config
+                .url
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "mcp http needs url".to_owned())?
+                .to_owned();
             McpTransport::Http(McpHttp {
                 url,
                 client: reqwest::Client::builder()
@@ -186,6 +199,7 @@ impl McpBridge {
                 })
             })
             .collect();
+        ingest_context(&mut session, &config).await;
         Ok(Self {
             plugin_id,
             digest: exe_digest(),
@@ -193,6 +207,151 @@ impl McpBridge {
             session: Mutex::new(session),
         })
     }
+}
+
+async fn ingest_context(session: &mut McpTransport, config: &McpConfig) {
+    if let Ok(listed) = session.rpc("resources/list", json!({})).await {
+        let text = resource_markdown(&listed, session).await;
+        if !text.is_empty() {
+            write_resource_snapshot(&config.server, &text);
+        }
+    }
+    if config.skills_home.as_os_str().is_empty() {
+        return;
+    }
+    let Ok(listed) = session.rpc("prompts/list", json!({})).await else {
+        return;
+    };
+    let Some(prompts) = listed.get("prompts").and_then(Value::as_array) else {
+        return;
+    };
+    for prompt in prompts {
+        let Some(name) = prompt.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let description = prompt
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(name);
+        let body = match session
+            .rpc("prompts/get", json!({ "name": name, "arguments": {} }))
+            .await
+        {
+            Ok(got) => prompt_body(&got),
+            Err(_) => String::new(),
+        };
+        write_prompt_skill(&config.skills_home, name, description, &body);
+    }
+}
+
+async fn resource_markdown(listed: &Value, session: &mut McpTransport) -> String {
+    let Some(resources) = listed.get("resources").and_then(Value::as_array) else {
+        return String::new();
+    };
+    let mut chunks = Vec::new();
+    for resource in resources.iter().take(32) {
+        let uri = resource
+            .get("uri")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if uri.is_empty() {
+            continue;
+        }
+        let title = resource.get("name").and_then(Value::as_str).unwrap_or(uri);
+        let body = match session.rpc("resources/read", json!({ "uri": uri })).await {
+            Ok(got) => resource_text(&got),
+            Err(_) => String::new(),
+        };
+        if body.is_empty() {
+            chunks.push(format!("### {title}\n{uri}"));
+        } else {
+            chunks.push(format!("### {title}\n{body}"));
+        }
+    }
+    chunks.join("\n\n")
+}
+
+fn resource_text(got: &Value) -> String {
+    got.get("contents")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn prompt_body(got: &Value) -> String {
+    got.get("messages")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let content = row.get("content")?;
+                    if let Some(text) = content.as_str() {
+                        return Some(text.to_owned());
+                    }
+                    content
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn write_resource_snapshot(server: &str, text: &str) {
+    let Ok(workspace) = std::env::var("ENE_WORKSPACE") else {
+        return;
+    };
+    let dir = PathBuf::from(workspace).join("mcp-context");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let mut end = 16_384.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let body = if text.len() > end {
+        format!("{}\n", text.get(..end).unwrap_or(text))
+    } else {
+        text.to_owned()
+    };
+    drop(std::fs::write(dir.join(format!("{server}.md")), body));
+}
+
+fn write_prompt_skill(home: &std::path::Path, name: &str, description: &str, body: &str) {
+    let slug: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if slug.is_empty() {
+        return;
+    }
+    let skill_dir = home.join(&slug);
+    if std::fs::create_dir_all(&skill_dir).is_err() {
+        return;
+    }
+    let summary = if description.is_empty() {
+        slug.clone()
+    } else {
+        description
+            .chars()
+            .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+            .collect()
+    };
+    let md = format!("---\nname: {slug}\ndescription: {summary}\n---\n\n{body}\n");
+    drop(std::fs::write(skill_dir.join("SKILL.md"), md));
 }
 
 impl McpTransport {

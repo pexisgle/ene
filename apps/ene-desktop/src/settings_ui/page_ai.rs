@@ -8,6 +8,7 @@ use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
 use super::provider_form::{
     CHAT_PLUGINS, EMBED_PLUGINS, plugin_combo, plugin_needs_key, provider_description,
+    sidecar_fields,
 };
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
@@ -166,6 +167,10 @@ fn render_binding(
         } else if let Ok(n) = max_tokens.trim().parse::<u32>() {
             binding["max_tokens"] = json!(n);
         }
+        write_binding(draft, task, binding.clone());
+    }
+
+    if sidecar_fields(ui, &mut binding) {
         write_binding(draft, task, binding.clone());
     }
 
