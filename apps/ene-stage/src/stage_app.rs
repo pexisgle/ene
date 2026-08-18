@@ -187,7 +187,7 @@ impl StageApp {
             let soul_meta = souls.iter().find(|s| s.id == *soul_id);
             let label = soul_meta.map_or_else(
                 || short_label(soul_id, "new"),
-                |s| short_label(&s.id, &s.mood_label),
+                |s| companion_label(&s.id, &s.display_name, &s.character_ref, &s.mood_label),
             );
             let mood = soul_meta.map_or_else(|| "—".to_owned(), |s| s.mood_label.clone());
             let body_ref = soul_meta.and_then(|s| s.body_ref.clone());
@@ -702,6 +702,22 @@ fn empty_pane(side: &str) -> CompanionPane {
 fn short_label(id: &str, mood: &str) -> String {
     let short = id.chars().take(8).collect::<String>();
     format!("{short} ({mood})")
+}
+
+/// Prefer package names: ULID prefixes collide when two souls are minted together.
+pub(crate) fn companion_label(
+    id: &str,
+    display_name: &str,
+    character_ref: &str,
+    mood: &str,
+) -> String {
+    let name = [display_name, character_ref]
+        .into_iter()
+        .find(|value| !value.is_empty());
+    match name {
+        Some(name) => format!("{name} ({mood})"),
+        None => short_label(id, mood),
+    }
 }
 
 fn fmt_pad(value: Option<f32>) -> String {

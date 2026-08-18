@@ -89,6 +89,7 @@ mod tests {
         job_report_matches_soul, live_surface_line, merge_soul_ids, surface_event_allowed,
         surface_history_line,
     };
+    use super::stage_app::companion_label;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -153,6 +154,19 @@ mod tests {
         assert_eq!(
             surface_history_line("user", "hello").as_deref(),
             Some("user: hello")
+        );
+    }
+
+    #[test]
+    fn companion_label_prefers_display_name_over_ulid_prefix() {
+        let alpha = companion_label("01a01440-3113-aaaa", "char.alpha@1", "char.alpha@1", "calm");
+        let beta = companion_label("01a01440-3113-bbbb", "char.beta@1", "char.beta@1", "calm");
+        assert_eq!(alpha, "char.alpha@1 (calm)");
+        assert_eq!(beta, "char.beta@1 (calm)");
+        assert_ne!(alpha, beta);
+        assert_eq!(
+            companion_label("01dead00-ffff", "", "char.gamma@1", "calm"),
+            "char.gamma@1 (calm)"
         );
     }
 
