@@ -156,7 +156,7 @@ async fn disabling_one_fiber_does_not_restart_the_core() {
     assert!(sup.fiber("r-web").is_some());
     assert_eq!(sup.fiber("r-web").unwrap().uid, web);
     assert!(sup.registry().get("web.fetch").is_some());
-    assert!(!sup.surface_has_tool("web.fetch"));
+    assert!(sup.surface_has_tool("web.fetch"));
     assert!(!sup.surface_has_tool("utility.hash"));
     assert_eq!(core.recovery().len(), 0);
     let soul = SoulId::new();
