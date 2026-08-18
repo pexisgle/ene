@@ -51,6 +51,19 @@ pub fn stage_spawn_data_dir() -> PathBuf {
     std::env::temp_dir().join(format!("ene-stage-core-{}", uuid::Uuid::new_v4().simple()))
 }
 
+fn core_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "ene-core.exe"
+    } else {
+        "ene-core"
+    }
+}
+
+pub(crate) fn binary_in_dir(dir: &Path) -> Option<PathBuf> {
+    let candidate = dir.join(core_bin_name());
+    candidate.is_file().then_some(candidate)
+}
+
 pub fn ene_core_binary() -> Option<PathBuf> {
     if let Some(path) = option_env!("CARGO_BIN_EXE_ene_core") {
         return Some(PathBuf::from(path));
@@ -61,18 +74,17 @@ pub fn ene_core_binary() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let Ok(mut path) = std::env::current_exe() else {
-        return None;
-    };
-    path.pop();
-    if path.ends_with("deps") {
+    if let Ok(mut path) = std::env::current_exe() {
         path.pop();
+        if path.ends_with("deps") {
+            path.pop();
+        }
+        if let Some(found) = binary_in_dir(&path) {
+            return Some(found);
+        }
     }
-    path.push("ene-core");
-    if path.is_file() {
-        return Some(path);
-    }
-    None
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .find_map(|dir| binary_in_dir(&dir))
 }
 
 pub fn wait_for_api_json(path: &Path) -> Result<Value, String> {
@@ -132,6 +144,10 @@ pub fn spawn_core(data_dir: &Path) -> Result<CoreChild, String> {
         "ene-core binary not found (build ene-core or set ENE_CORE_BIN)".to_owned()
     })?;
     std::fs::create_dir_all(data_dir).map_err(|err| err.to_string())?;
+    let stale = data_dir.join("api.json");
+    if stale.is_file() {
+        std::fs::remove_file(&stale).map_err(|err| err.to_string())?;
+    }
     let child = Command::new(&bin)
         .arg("--data-dir")
         .arg(data_dir)

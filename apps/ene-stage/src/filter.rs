@@ -34,10 +34,10 @@ pub fn format_event_line(value: &Value) -> String {
 }
 
 pub fn surface_history_line(role: &str, text: &str) -> Option<String> {
-    if role == "inner" {
-        return None;
+    match role {
+        "user" | "assistant" => Some(format!("{role}: {text}")),
+        _ => None,
     }
-    Some(format!("{role}: {text}"))
 }
 
 #[must_use]
@@ -53,8 +53,6 @@ pub fn live_surface_line(value: &Value) -> Option<String> {
             .and_then(Value::as_str)
             .filter(|speech| !speech.is_empty())
             .map(|speech| format!("assistant: {speech}")),
-        "session.event" => Some(format_event_line(value)),
-        _ if event_type.starts_with("body.") => None,
         _ => None,
     }
 }

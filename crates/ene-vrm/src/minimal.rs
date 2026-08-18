@@ -141,6 +141,13 @@ mod tests {
         let model = load_vrm(&path, &device, &queue).expect("load_vrm");
         assert!(!model.meshes.is_empty());
         assert_eq!(model.meshes[0].primitives.len(), 1);
+        let _renderer = crate::renderer::VrmRenderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            None,
+            &model,
+        );
         std::fs::remove_file(path).ok();
     }
 

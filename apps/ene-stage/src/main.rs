@@ -10,6 +10,7 @@ mod stage_app;
 mod vrm;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use eframe::egui::ViewportBuilder;
 use stage_app::StageApp;
@@ -24,6 +25,30 @@ fn default_minimal_vrm() -> Option<PathBuf> {
     Some(path)
 }
 
+fn wgpu_options_for_vrm() -> egui_wgpu::WgpuConfiguration {
+    let mut options = egui_wgpu::WgpuConfiguration::default();
+    if let egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_setup {
+        create.device_descriptor = Arc::new(|adapter| {
+            let adapter_limits = adapter.limits();
+            let mut limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                wgpu::Limits::downlevel_webgl2_defaults()
+            } else {
+                wgpu::Limits::default()
+            };
+            limits.max_texture_dimension_2d = 8192;
+            // Unlit VRM uses 5 bind groups and MToon uses 7; eframe's WebGPU
+            // default device keeps max_bind_groups at 4 and panics on create.
+            limits.max_bind_groups = adapter_limits.max_bind_groups;
+            wgpu::DeviceDescriptor {
+                label: Some("ene-stage wgpu device"),
+                required_limits: limits,
+                ..wgpu::DeviceDescriptor::default()
+            }
+        });
+    }
+    options
+}
+
 fn main() {
     let text_only = std::env::var("ENE_STAGE_TEXT_ONLY")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
@@ -35,7 +60,8 @@ fn main() {
     let native = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_title("ene stage")
-            .with_inner_size([960.0, 640.0]),
+            .with_inner_size([1280.0, 720.0]),
+        wgpu_options: wgpu_options_for_vrm(),
         ..Default::default()
     };
     if let Err(err) = eframe::run_native(
@@ -56,7 +82,8 @@ fn main() {
 )]
 mod tests {
     use super::core_spawn::{
-        connection_from_ready, env_api_config, health_reachable, spawn_core, wait_for_api_json,
+        binary_in_dir, connection_from_ready, env_api_config, health_reachable, spawn_core,
+        wait_for_api_json,
     };
     use super::filter::{
         job_report_matches_soul, live_surface_line, merge_soul_ids, surface_event_allowed,
@@ -86,8 +113,16 @@ mod tests {
             &json!({"type": "session.event", "kind": "turn/end"})
         ));
         assert_eq!(
+            live_surface_line(&json!({"type": "text.delta", "text": "hi"})).as_deref(),
+            Some("assistant: hi")
+        );
+        assert_eq!(
             live_surface_line(&json!({"type": "job.report", "speech": "done — notes"})).as_deref(),
             Some("assistant: done — notes")
+        );
+        assert!(
+            live_surface_line(&json!({"type": "session.event", "kind": "turn/end"})).is_none(),
+            "session.event JSON must not land on the stage surface"
         );
         assert!(job_report_matches_soul(
             &json!({"type": "job.report", "soul_id": "a", "speech": "x"}),
@@ -110,9 +145,14 @@ mod tests {
     #[test]
     fn surface_history_skips_inner_role() {
         assert!(surface_history_line("inner", "secret").is_none());
+        assert!(surface_history_line("system", "prompt").is_none());
         assert_eq!(
             surface_history_line("assistant", "hi").as_deref(),
             Some("assistant: hi")
+        );
+        assert_eq!(
+            surface_history_line("user", "hello").as_deref(),
+            Some("user: hello")
         );
     }
 
@@ -150,6 +190,14 @@ mod tests {
         let (url, token) = connection_from_ready(&value).expect("parse");
         assert_eq!(url, "http://127.0.0.1:9");
         assert_eq!(token, "abc");
+    }
+
+    #[test]
+    fn binary_in_dir_finds_sibling_named_ene_core() {
+        let dir = TempDir::new().expect("tempdir");
+        let bin = dir.path().join("ene-core");
+        std::fs::write(&bin, b"#!/bin/sh\n").expect("write");
+        assert_eq!(binary_in_dir(dir.path()), Some(bin));
     }
 
     #[test]

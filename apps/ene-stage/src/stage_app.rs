@@ -32,6 +32,7 @@ struct CompanionPane {
     soul_label: String,
     body_ref: Option<String>,
     surface_lines: Vec<String>,
+    draft: String,
     pad: PadState,
     expression: String,
     viseme: String,
@@ -61,7 +62,6 @@ pub struct StageApp {
     core_child: CoreChild,
     companions: [CompanionPane; 2],
     selected: usize,
-    draft: String,
     detail: DetailState,
     error: Option<String>,
     bind_label: String,
@@ -104,7 +104,6 @@ impl StageApp {
             core_child,
             companions: [empty_pane("left"), empty_pane("right")],
             selected: 0,
-            draft: String::new(),
             detail: DetailState {
                 lines: Vec::new(),
                 memories: Vec::new(),
@@ -204,6 +203,7 @@ impl StageApp {
                 soul_label: label,
                 body_ref,
                 surface_lines,
+                draft: String::new(),
                 pad: PadState {
                     mood_label: mood.clone(),
                     ..PadState::default()
@@ -437,16 +437,16 @@ impl StageApp {
         self.sync_vrm_labels(pane_idx);
     }
 
-    fn send(&mut self) {
-        let pane = &mut self.companions[self.selected];
-        let Some(session) = pane.session_id.clone() else {
+    fn send_pane(&mut self, idx: usize) {
+        self.selected = idx;
+        let Some(session) = self.companions[idx].session_id.clone() else {
             return;
         };
-        let text = self.draft.trim().to_owned();
+        let text = self.companions[idx].draft.trim().to_owned();
         if text.is_empty() {
             return;
         }
-        self.draft.clear();
+        self.companions[idx].draft.clear();
         let client = self.client.clone();
         match self.runtime.block_on(async move {
             client
@@ -465,8 +465,8 @@ impl StageApp {
             Ok::<_, ene_api::ApiError>((surface, detail))
         }) {
             Ok((surface, detail)) => {
-                let soul_id = pane.soul_id.clone();
-                pane.surface_lines = surface
+                let soul_id = self.companions[idx].soul_id.clone();
+                self.companions[idx].surface_lines = surface
                     .messages
                     .into_iter()
                     .filter_map(|m| surface_history_line(&m.role, &m.text))
@@ -517,41 +517,57 @@ impl StageApp {
     }
 
     fn companion_ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, idx: usize) {
-        let selected = self.selected == idx;
-        if ui
-            .selectable_label(selected, format!("Companion {}", idx + 1))
-            .clicked()
-        {
-            self.selected = idx;
-            self.refresh_detail_for_selected();
-        }
-        let soul_label = self.companions[idx].soul_label.clone();
-        ui.label(format!("soul {soul_label}"));
-        if !self.text_only && self.gpu_ready {
-            self.draw_vrm_slot(ui, frame, idx);
-        } else if !self.text_only {
-            ui.label("3D unavailable (text-only or missing GPU)");
-        }
-        let overlay = format!(
-            "body slot: expr={} viseme={} look={}",
-            self.companions[idx].expression,
-            self.companions[idx].viseme,
-            self.companions[idx].look_at,
-        );
-        ui.small(overlay);
-        let lines = self.companions[idx].surface_lines.clone();
-        egui::ScrollArea::vertical()
-            .id_salt(format!("surface-{idx}"))
-            .max_height(180.0)
-            .show(ui, |ui| {
-                for line in &lines {
-                    ui.label(line);
-                }
+        ui.push_id(idx, |ui| {
+            let selected = self.selected == idx;
+            if ui
+                .selectable_label(selected, format!("Companion {}", idx + 1))
+                .clicked()
+            {
+                self.selected = idx;
+                self.refresh_detail_for_selected();
+            }
+            let soul_label = self.companions[idx].soul_label.clone();
+            ui.label(format!("soul {soul_label}"));
+            if !self.text_only && self.gpu_ready {
+                self.draw_vrm_slot(ui, frame, idx);
+            } else if !self.text_only {
+                ui.label("3D unavailable (text-only or missing GPU)");
+            }
+            let overlay = format!(
+                "body slot: expr={} viseme={} look={}",
+                self.companions[idx].expression,
+                self.companions[idx].viseme,
+                self.companions[idx].look_at,
+            );
+            ui.small(overlay);
+            let lines = self.companions[idx].surface_lines.clone();
+            egui::ScrollArea::vertical()
+                .id_salt(format!("surface-{idx}"))
+                .min_scrolled_height(96.0)
+                .max_height(180.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if lines.is_empty() {
+                        ui.weak("no speech yet");
+                    }
+                    for line in &lines {
+                        ui.label(line);
+                    }
+                });
+            let mut send = false;
+            ui.horizontal(|ui| {
+                let reply = ui.text_edit_singleline(&mut self.companions[idx].draft);
+                send = ui.button("Send").clicked()
+                    || (reply.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
             });
+            if send {
+                self.send_pane(idx);
+            }
+        });
     }
 
     fn draw_vrm_slot(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, idx: usize) {
-        let desired = egui::vec2(ui.available_width(), 220.0);
+        let desired = egui::vec2(ui.available_width().clamp(140.0, 360.0), 180.0);
         let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
         let Some(wgpu) = frame.wgpu_render_state() else {
             ui.put(rect, egui::Label::new("wgpu unavailable"));
@@ -589,16 +605,9 @@ impl StageApp {
         if let Some(err) = &self.error {
             ui.colored_label(egui::Color32::RED, err);
         }
-        ui.horizontal(|ui| {
-            self.companion_ui(ui, frame, 0);
-            self.companion_ui(ui, frame, 1);
-        });
-        ui.horizontal(|ui| {
-            let enter = ui.text_edit_singleline(&mut self.draft).lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Send").clicked() || enter {
-                self.send();
-            }
+        ui.columns(2, |columns| {
+            self.companion_ui(&mut columns[0], frame, 0);
+            self.companion_ui(&mut columns[1], frame, 1);
         });
     }
 
@@ -682,6 +691,7 @@ fn empty_pane(side: &str) -> CompanionPane {
         soul_label: side.to_owned(),
         body_ref: None,
         surface_lines: Vec::new(),
+        draft: String::new(),
         pad: PadState::default(),
         expression: "neutral".to_owned(),
         viseme: "—".to_owned(),
