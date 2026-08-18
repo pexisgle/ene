@@ -21,8 +21,8 @@ dev shell. macOS is not a supported target.
 
 ## Commands
 
-`default-members = ["apps/ene-cli"]`, so **a bare `cargo test` / `cargo clippy` only covers
-the CLI, not the workspace.** Always pass `--workspace` or `-p <package>` explicitly.
+`default-members = ["apps/ene-ctl"]`, so **a bare `cargo test` / `cargo clippy` only covers
+the CLI client, not the workspace.** Always pass `--workspace` or `-p <package>` explicitly.
 
 | Purpose | Command |
 |---|---|
@@ -30,7 +30,7 @@ the CLI, not the workspace.** Always pass `--workspace` or `-p <package>` explic
 | Focused iteration | `cargo check -p <pkg>` / `cargo test -p <pkg>` |
 | Full lint (CI gate) | `cargo clippy --workspace --all-targets -- -D warnings` |
 | Full tests (CI gate) | `cargo test --workspace` |
-| Run | `cargo run -p ene-cli -- --help` / `cargo run -p ene-desktop` |
+| Run | `cargo run -p ene-ctl -- --help` / `cargo run -p ene-stage` / `cargo run -p ene-daemon` |
 
 CI additionally runs `cargo doc --workspace --no-deps`. It is deliberately *not* run with
 `RUSTDOCFLAGS=-D warnings` — pre-existing broken intra-doc links would fail unrelated work.
@@ -44,7 +44,7 @@ whole groups, plus these individually: `unwrap_used`, `expect_used`, `panic`, `t
 build failures.
 
 - No `unwrap`/`expect`/panic paths in production code. Tests opt out per-crate via
-  `#![cfg_attr(test, expect(clippy::unwrap_used, ...))]` — see `crates/ene-runtime/src/lib.rs`.
+  `#![cfg_attr(test, expect(clippy::unwrap_used, ...))]` — see `crates/ene-session/src/lib.rs`.
 - `allow_attributes` and `allow_attributes_without_reason` are denied: every exception must be
   `#[expect(lint, reason = "...")]`, scoped as narrowly as possible — `#[allow]` is rejected
   outright, so a stale exception surfaces as `unfulfilled_lint_expectations` instead of
@@ -57,7 +57,7 @@ build failures.
 - Async is Tokio. Library errors are `thiserror` — never expose `anyhow`, bare `String`, or
   `Box<dyn Error>` at a library boundary.
 - Diagnostics use structured `tracing`. `print_stdout`/`print_stderr` are re-allowed at the
-  crate level only for `apps/ene-cli`, plugin binaries' fatal-error paths, and examples.
+  crate level only for `apps/ene-ctl`, plugin binaries' fatal-error paths, and examples.
 - Prefer `parking_lot` locks, `OnceLock` for one-time init, and the narrowest visibility
   (`pub(crate)` by default).
 - Keep deps in root `[workspace.dependencies]` and reference them as `{ workspace = true }`.
@@ -93,7 +93,7 @@ on public items is the exception — it states the contract, not the mechanism.
 - `TODO:` states *what* and *under which condition*, never a ticket:
   `// TODO: drop the fallback once every plugin negotiates IPC v4`.
 - `// SAFETY:` is mandatory on every `unsafe` block and must name the invariant that makes it
-  sound (see `plugins/provider/local-llm/src/local_llm/model.rs`).
+  sound (see `crates/ene-sandbox/src/linux.rs`).
 - Commented-out code is deleted, not parked.
 - Comments and rustdoc are **English only**, regardless of the working language — the
   bilingual rule applies to `docs/` and i18n strings, not to source.
@@ -102,26 +102,26 @@ on public items is the exception — it states the contract, not the mechanism.
 
 Violating these is the most common way to break this repo:
 
-- `ene-runtime` — host/actor facade and bootstrap. `ene-mind` owns session, recall, prompt
-  composition, affect, performance, and memory writing, and **must not depend on runtime or
-  the tool host**.
-- `ene-store` alone owns SQLite/SeaORM connections, schema, migrations, and raw DB access. It
-  must not depend on ai/mind. Plugin binaries reach state through `ene-plugin-db` over IPC.
-- `ene-card` owns character card containers (V3, PNG/CHARX import) and per-character config.
-  It depends only on `ene-config` (error/paths/language aliases); `ene-config` must never
-  depend on it, or the `zip` dependency leaks back into the settings core.
-- `ene-plugin-proto` is wire ABI only. `ene-plugin` is the authoring facade,
-  `ene-plugin-host` owns process/registry orchestration, `ene-vrm` is rendering-only.
-  Never move business or DB logic into ABI crates.
-- `ene-util` — dependency-isolated pure utility functions (truncate, html). No I/O, no
-  business logic, no state. New helpers go here only if they are pure functions with
-  dependencies that can be feature-gated; anything else belongs in a domain crate.
-- API v1 invariants: every turn has a `TurnId`; `run` is single-flight and returns
-  `RunError::Busy`; `Terminal` follows history commit and synchronous finalization (deferred
-  memory work may continue after it); `Performance` is the presentation event, kept separate
-  from detailed pipeline diagnostics.
-- `release` deliberately omits `panic = "abort"` — `ene-runtime`'s actor relies on
-  `catch_unwind` isolation (`crates/ene-runtime/src/handle/actor.rs`). Do not add it.
+- `ene-session` owns the append-only conversation log and usage ledger. Other crates
+  read history through its projection APIs; they do not open `sessions.db` themselves.
+- `ene-kernel` owns the dialogue lane (`prompt` / `steer` / `follow_up` / `abort` /
+  `compact`). It must not depend on HTTP, plugins, or companion persistence.
+- `ene-companion` owns soul, affect, memory, inner channel, proactive speech, and
+  character packages. It must not depend on the daemon or the tool host.
+- `ene-work` owns delegation, jobs, schedules, skills, and MCP bindings. Mutating work
+  is gated on plan approval in `ene-plane`, not on mailbox text.
+- `ene-plane` owns approval, the audit hash chain, and the credential vault.
+- `ene-fiber` owns plugin process supervision and reversible host-context composition.
+  Child kill is not unload; host registrations must be disposed LIFO.
+- `ene-plugin-ipc` is wire ABI only (split `core` / `tool` subprotocols). `ene-registry`
+  is the unified tool pipeline. Never move business or DB logic into the ABI crate.
+- `ene-card` owns Character Card V3 / PNG / CHARX import. It depends only on
+  `ene-config`; `ene-config` must never depend on it, or the `zip` dependency leaks
+  back into the settings core.
+- `ene-vrm` is rendering-only. It must not depend on kernel, companion, or work.
+- `ene-daemon` (`apps/ene-core`, binary `ene-core`) is the process that wires the
+  libraries and serves HTTP/WS. Clients (`ene-ctl`, `ene-stage`, Web) talk only through
+  `ene-api`.
 
 ## Docs and where truth lives
 
@@ -133,55 +133,39 @@ into Markdown.
 Orientation: `docs/index.md`, `docs/quickstart.md`, `docs/configuration.md`,
 `docs/concepts/`, `docs/apps/`, `docs/guides/`, `docs/reference/`.
 User-facing docs are bilingual: every change under `docs/` needs the matching file under
-`docs/ja/`. UI strings live in `apps/ene-desktop/i18n/{en-US,ja}/` and
-`apps/ene-cli/i18n/{en-US,ja}/` — keep both locales in sync. Backend event and status names
-stay stable English contracts.
+`docs/ja/`. Backend event and status names stay stable English contracts.
 
 ## Configuration
 
 Precedence is defaults → JSON → `ENE_` env vars, with `__` separating nested keys
-(e.g. `ENE_AI__TASKS__CHAT__MODEL`). Public sections: `ai.*`, `store.*`, `mind.*`,
-`plugins.*`, `desktop.*`; plugin entries are `plugins.list.<name>` with flattened fields.
-
-Add settings at the owning `define_config!` invocation, which often lives outside
-`ene-config` (`ene-ai`, `ene-mind`, `ene-store`, `ene-plugin-host`, `apps/ene-desktop`).
-Schemas regenerate automatically at config init — `assets/schema/*` is gitignored; never
-hand-edit or commit it.
+(e.g. `ENE_CORE__SERVER__BIND`). Add settings at the owning `define_config!` invocation,
+which often lives outside `ene-config` (`ene-session`, `ene-kernel`, `ene-companion`,
+`ene-body`, `ene-plane`). Schemas regenerate automatically at config init —
+`assets/schema/*` is gitignored; never hand-edit or commit it.
 
 ## Plugins and IPC
 
-New tools are separate lightweight binaries: `cargo new --bin plugins/tool/<name>`. Derive
-`ToolAction`, build on `ene_plugin::{prelude, ActionSetProvider}`, then serve via
-`run_plugin_server(PluginDispatch::new(Some(Arc::new(ToolProviderPlugin::new(provider))), None, None, None, None))`
-(see `plugins/tool/utility/src/main.rs`). Use namespaced `<namespace>.<action>` names and
-declare side effects / sandbox needs. Verify with `/tool list` and update both
-`docs/concepts/plugins-and-mcp.md` and its `docs/ja/` counterpart.
+New tools are separate lightweight binaries: `cargo new --bin plugins/harness/<name>`.
+Serve via `ene_registry::run_plugin(BuiltinKind::…)` (see `plugins/harness/fs/src/main.rs`).
+Use namespaced `<namespace>.<action>` names and declare side effects. Verify through
+`ene-ctl` and update both `docs/concepts/plugins-and-mcp.md` and its `docs/ja/` counterpart.
 
-Plugin crates are **binary-only** — no `[lib]` target (see `plugins/tool/fs`,
-`plugins/provider/anthropic`). Size is not a reason to add one: `#[cfg(test)]` modules run
-normally in a bin crate. Add `[lib]` only when an integration test under `tests/` or another
-workspace crate must link the logic directly.
+Plugin crates are **binary-only** — no `[lib]` target (see `plugins/harness/fs`). Size is
+not a reason to add one: `#[cfg(test)]` modules run normally in a bin crate. Add `[lib]`
+only when an integration test under `tests/` or another workspace crate must link the
+logic directly.
 
 One plugin per native runtime. `llama.cpp`, `whisper.cpp`, and ONNX Runtime each get their
-own plugin binary — never bundle two native runtimes into one. Their build characteristics
-differ sharply (ONNX Runtime is `load-dynamic` and needs no compilation; llama.cpp and
-whisper.cpp are cmake C++ builds that also cross-compile to mingw), so bundling forces every
-user of one onto the build cost of the other.
+own plugin binary — never bundle two native runtimes into one.
 
-Sidecar pattern: provider plugins that run a local engine as a child process
-(`llama-server`, `voicevox` managed mode, `whisper` sidecar mode) follow
-`templates/sidecar` — spawn on a loopback port, health-poll with a timeout,
-kill on `Drop`/config change, and resolve the binary as config path →
-host-injected CAS artifact path → bundled plugins dir → `PATH`. Catalog-managed
-binaries and model weights are injected by the host into the delivered config
-(`server_path` / `model_path`); plugins must never download binaries from
-arbitrary URLs. The Engines settings page is the management surface for these.
+Sidecar pattern: provider plugins that run a local engine as a child process follow
+`templates/sidecar` — spawn on a loopback port, health-poll with a timeout, kill on
+`Drop`/config change, and resolve the binary as config path → bundled plugins dir →
+`PATH`. Plugins must never download binaries from arbitrary URLs.
 
-IPC starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v7, length-prefixed frames). The
-host advertises a range via `VersionRange::host_supported()` and keeps N-1 compatibility, so
-`PLUGIN_IPC_MIN_SUPPORTED_VERSION = PLUGIN_IPC_PROTOCOL_VERSION - 1`. Prefer adding
-`#[serde(default)]` fields over bumping the version; gate behavior on newer messages via
-`IpcPluginConnection::negotiated_version()` (see `supports_cancel_stream()` for the pattern).
+IPC lives in `crates/ene-plugin-ipc` (split `core` / `tool` subprotocols, length-prefixed
+MessagePack frames). `id` is required on every request/response. Prefer adding
+`#[serde(default)]` fields over bumping a subprotocol version.
 
 ## Repo etiquette
 
@@ -211,9 +195,7 @@ image (apt) instead of the flake and are baked into the VM; the startup script o
   run `sudo update-alternatives --set cc /usr/bin/gcc && sudo update-alternatives --set c++ /usr/bin/g++`.
 - **Don't set `RUSTFLAGS`/`CC`/`CXX` for normal builds** — changing them invalidates the cache
   and forces a full (~10+ min) workspace rebuild.
-- **Desktop (`ene-desktop`)** runs headless via **software Vulkan (lavapipe)**: launch with
+- **Stage (`ene-stage`)** runs headless via **software Vulkan (lavapipe)**: launch with
   `DISPLAY=:1 WGPU_BACKEND=vulkan`; it also needs `libxkbcommon-x11`.
-- **Live chat needs credentials.** The bundled `assets/settings.json` ships without a usable
-  chat key, so out-of-the-box chat fails; provide credentials via the `ai.*` config
-  (`ENE_AI__…` env overrides, see the Configuration section). Embeddings/local models are
-  fetched to `assets/models/` (gitignored) on first use.
+- **Live chat without a provider plugin is Echo-only.** Out-of-the-box conversation uses
+  the in-process Echo model until a conversation provider is wired.

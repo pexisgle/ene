@@ -23,7 +23,7 @@
 ## 依存関係
 
 - 依存: `ene-config`（エラー・パス・言語エイリアスのみ）。
-- 利用: `ene-mind`・`ene-runtime`・`ene-cli`・`ene-desktop`。
+- 利用: `ene-companion`（V3 インポート）。
 
 ## リファクタリングの注目点
 

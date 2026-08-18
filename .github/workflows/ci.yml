@@ -51,31 +51,15 @@ jobs:
           # isolates a flaky/slow package so a rerun targets one group.
           - name: core
             packages: >-
-              -p ene-ai -p ene-card -p ene-config -p ene-connector -p ene-core
-              -p ene-infer -p ene-mind -p ene-plugin -p ene-plugin-db
-              -p ene-plugin-host -p ene-plugin-macros -p ene-plugin-proto
-              -p ene-rag -p ene-runtime -p ene-store -p ene-util
-              -p ene-voice -p ene-vrm -p ene-session -p ene-kernel
+              -p ene-card -p ene-config -p ene-session -p ene-kernel
               -p ene-plane -p ene-work -p ene-companion -p ene-body
               -p ene-fiber -p ene-registry -p ene-api -p ene-plugin-ipc
-              -p ene-sandbox -p ene-approval -p ene-artifact
-              -p ene-plugin-broker
+              -p ene-sandbox -p ene-vrm
           - name: apps
             packages: >-
-              -p ene-cli -p ene-desktop -p ene-daemon -p ene-ctl -p ene-stage
+              -p ene-daemon -p ene-ctl -p ene-stage
           - name: plugins
             packages: >-
-              -p ene-plugin-anthropic -p ene-plugin-edge-tts
-              -p ene-plugin-elevenlabs -p ene-plugin-kokoro
-              -p ene-plugin-llama-cpp -p ene-plugin-llama-server
-              -p ene-plugin-onnx -p ene-plugin-openai
-              -p ene-plugin-openai-tts -p ene-plugin-voicevox
-              -p ene-plugin-whisper -p ene-plugin-app
-              -p ene-plugin-browser -p ene-plugin-calc
-              -p ene-plugin-calendar -p ene-plugin-counter
-              -p ene-plugin-fs -p ene-plugin-geo -p ene-plugin-git
-              -p ene-plugin-homeassistant -p ene-plugin-random
-              -p ene-plugin-utility -p ene-plugin-web
               -p ene-harness-fs -p ene-harness-exec -p ene-harness-web
               -p ene-harness-utility
     steps:
@@ -85,22 +69,6 @@ jobs:
       - name: Run tests
         run: cargo test ${{ matrix.group.packages }}
 
-  # GPU backends are compile-only in CI (no GPU hardware): the workspace no
-  # longer enables llama.cpp's vulkan feature through ene-cli/ene-desktop, so
-  # this job keeps the GPU code paths compiling. The cuda feature has no
-  # compile coverage here — a CUDA toolkit is not installed on the runner —
-  # matching the pre-relocation setup where cuda was never built by CI either.
-  local-llm-gpu-compile:
-    name: Local LLM GPU compile (vulkan)
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: ./.github/actions/rust-build-env
-      - name: Compile the local-llm plugin with the vulkan backend
-        run: cargo check -p ene-plugin-llama-cpp --features vulkan
-
   docs:
     name: Doc build
     runs-on: ubuntu-latest
@@ -109,11 +77,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/rust-build-env
-      # Not run with RUSTDOCFLAGS=-D warnings: many crates already carry
-      # pre-existing broken-intra-doc-link warnings unrelated to #273 (e.g.
-      # ene-ai, ene-voice, apps/ene-desktop). Turning warnings into hard
-      # errors here would fail CI on unrelated debt instead of catching new
-      # breakage. See the #273 PR description for the follow-up.
+      # Not run with RUSTDOCFLAGS=-D warnings: pre-existing broken
+      # intra-doc links would fail unrelated work.
       - name: Build docs
         run: cargo doc --workspace --no-deps
 

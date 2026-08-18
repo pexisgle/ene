@@ -44,6 +44,7 @@ uuid = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
+cargo-husky = { workspace = true }
 ene-api = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

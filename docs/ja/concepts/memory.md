@@ -1,104 +1,52 @@
 # メモリ
 
-Ene のメモリは明示的で、型があり、検査可能です。重要な情報はモデルの
-コンテキスト窓の中だけには置かれません。会話はログに残り、事実は型付き
-メモリとして抽出され、すべてをユーザーが確認・編集・削除できます。
+メモリは明示的で、型があり、検査可能です。会話は追記専用のセッションログ
+（`ene-session`）に残ります。事実は `ene-companion`（`companions.db`）に
+あり、履歴を書き換えずに一覧・編集・忘却できます。
 
 ## 型付きメモリ
 
-各メモリ項目は次の属性を持ちます:
+各行は次を持ちます:
 
-- **種別（Kind）** — `episodic`（出来事）、`semantic`（事実）、
-  `user_profile`、`relationship`（関係）、`affective`（感情）、
-  `commitment`（約束）、`preference`（好み）、`procedure`（手順）、
-  `reflection`（自己内省）、`world_state`（予約済み）。
-- **スコープ** — `character`・`user`・`shared`。
-- **ステータス** — `active`・`faded`・`archived`・`disputed`・
-  `superseded`・`user_deleted`。
-- **ソース** — 生成方法: `conversation`・`user_stated`・`llm_extracted`・
-  `inferred`・`imported`・`ccv3`。
-- **確信度と重要度（confidence / salience）** — システムの確信度と重要度。
-  どちらも想起に影響します。
-- **感情アノテーション** — メモリとともに記録された valence/arousal。
-- **関係インパクト** — メモリがキャラクターのユーザーへの感情をどれだけ
-  動かすか（-1..1）。
+- **種別（Kind）** — `episodic`・`semantic`・`user_profile`・`preference`・
+  `commitment`。
+- **スコープ** — `private`（書いた soul）または `shared`。
+- **ソース** — `extraction`・`user_stated`・`tool`・`import`・`shared`。
+- **確信度と重要度（confidence / salience）** — どちらも想起に影響します。
+- **ジャーナル** — 作成 / 更新 / 忘却 / 上書き / 復元は追記専用です。
+
+忘却した行もジャーナルに残ります。矛盾する書き込みは古い行を supersede
+できます。
 
 ## メモリの生成
 
-各ターンの後、メモリライターがバックグラウンドで動作します:
+ターンの後、コンパニオンのメモリライターが:
 
-1. **決定的抽出** — 構造化シグナル（約束・ユーザー明示の事実・ツール結果）
-   を捕捉します。
-2. **LLM 抽出**（分類モデル設定時）— 会話から候補メモリを提案します。
-3. **メモリ仲裁者（arbiter）** — 候補をスコアリングし、既存メモリとの
-   意味的重複・矛盾を検出して、書き込み・却下・保留を決定します。
+1. 構造化シグナル（約束・ユーザー明示の事実・ツール結果）を抽出します。
+2. 分類モデルが接続されていれば、追加の候補を分類します。
+3. 仲裁者が重複と矛盾をスコアし、書き込み・却下・保留を決めます。
 
-`mind.memory_approval.require_approval` が有効な場合、保留された候補は
-書き込まれず**承認キュー**で待機します。ホストはライフサイクルイベント
-（`pending_candidates_available`・`candidate_changed`）を発行するため、
-UI でレビューを提供できます。デスクトップのメモリ台帳か CLI の `/memory`
-コマンドで、候補を承認・却下・編集できます。
+`mind.memory_approval.require_approval` が true（既定）のとき、保留候補は
+キューで待ちます。`/api/v1/memories/pending` か対応する `ene-ctl memory`
+コマンドで解決します。
 
 ## メモリの想起
 
-毎ターン、**想起プランナー**が会話を検索計画（何を・どのスコープで・
-どの予算で探すか）に変換し、**ハイブリッド検索**が実行されます:
+各ターン、`ene-companion` の想起は title/content（FTS）に salience・新しさ・
+アクセス回数を足して検索します。結果はカーネルのプロンプトへ入ります。
+読んだメモリは `access_count` が上がります。
 
-- ベクトル類似度（埋め込み。埋め込みがない場合は代替手段へフォールバック）、
-- 語彙オーバーラップとタイトル一致、
-- 新しさ（指数半減期による減衰）、
-- 感情一致と関係スコアリング、
-- 矛盾ペナルティと陳腐化ペナルティ、
-- アクセスブースト: メモリを読むと将来の関連性が上がります。
+## 忘却
 
-結果は多様化され（MMR）、1 つの話題が他を圧迫しません。そして想起理由付きで
-プロンプトのメモリセクションに整形されます。想起されたメモリの
-`access_count` は増加し、忘却ポリシーに反映されます。
-
-## 忘却とライフサイクル
-
-メモリは半減期（グローバルデフォルトは `mind.memory.*`）で減衰します:
-
-```text
-active ──(減衰)──▶ faded ──(減衰)──▶ archived
-```
-
-- `faded` メモリは検索に現れますが順位が下がります。
-- `archived` メモリは保持されますが通常の想起から除外されます。
-- ピン留めされたメモリは減衰しません。
-- 矛盾する新しいメモリは古いものを**置き換え**（`supersedes_id` でリンク）、
-  古い行は `superseded` になります。
-- ユーザーはメモリを `disputed` にしたり、完全に削除したりできます。
-
-## 約束台帳
-
-キャラクターが立てた約束やフォローアップ（「明日思い出させるね」）は、
-自由形式のメモリではなく専用の台帳で追跡されます。各約束にはステータス
-ライフサイクルがあり、アクティブな間はプロンプトに注入され、CLI
-（`/commitments`）かデスクトップのメモリ台帳で完了できます。
-
-## キャラクター由来のメモリ
-
-lorebook エントリとカードデータは、カード読み込み時にセマンティックメモリ
-としてストアへ同期されます（[キャラクターカード → Lorebook](character-cards.md#lorebook)参照）。
-他のメモリと同様に想起されます。
-
-## メモリの置き場所
-
-すべて `memory.db`（SQLite + 埋め込み用 `sqlite-vec`）に永続化されます。
-ストアは権限判断と破壊的操作の完全な**監査ログ**も保持します。バックアップ:
-
-```sh
-ene store backup
-ene store list-backups
-ene store restore <path>
-```
+`mind.forgetting.*` が salience を減衰します。忘却した行は通常の想起から
+外れます。ピン留めはユーザー編集（salience を上げる / 行を残す）です。
 
 ## メモリの確認
 
-- デスクトップ: メモリページ（ブラウズ / 想起 / 保留 / 約束のタブ）と
-  メモリ台帳。
-- CLI: `/memory <list|inspect|search|why|pin|archive|forget|dispute|restore|status|pending|retry|approval>`・`/commitments`・
-  `/affect show`。
+```sh
+ene-ctl memory list <soul>
+ene-ctl memory edit <id> "<content>"
+ene-ctl memory delete <id>
+```
 
-[メモリ台帳ガイド](../guides/memory-ledger.md) を参照してください。
+[メモリ台帳ガイド](../guides/memory-ledger.md)を参照してください。

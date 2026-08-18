@@ -181,6 +181,7 @@ fn sandbox_for(opts: &SpawnOpts<'_>) -> Result<Option<SandboxSpec>, SupervisorEr
         opts.binary,
         opts.socket_dir,
         opts.temp_dir,
+        opts.workspace,
         opts.sandbox_required,
     )))
 }
@@ -189,6 +190,7 @@ fn build_spec(
     binary: &Path,
     socket_dir: &Path,
     temp_dir: &Path,
+    workspace: &Path,
     sandbox_required: bool,
 ) -> SandboxSpec {
     let mut allowed_read = Vec::new();
@@ -205,6 +207,11 @@ fn build_spec(
     allowed_read.push(temp_dir.to_path_buf());
     allowed_write.push(socket_dir.to_path_buf());
     allowed_write.push(temp_dir.to_path_buf());
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    allowed_read.push(workspace.clone());
+    allowed_write.push(workspace);
     if let Some(parent) = binary.parent() {
         allowed_read.push(parent.to_path_buf());
     }

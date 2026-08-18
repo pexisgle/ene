@@ -67,7 +67,13 @@ async fn fs_write_is_denied_and_absent_from_surface() {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, PipelineError::Execute(_)));
+        assert!(
+            matches!(
+                err,
+                PipelineError::PathEscape(_) | PipelineError::Execute(_)
+            ),
+            "out-of-workspace read must fail, got {err:?}"
+        );
     }
     sup.unload("r-fs").await;
 }

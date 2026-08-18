@@ -452,12 +452,13 @@ async fn echo_turn_to_first_chunk_is_measurable() {
         lane.wait_for_idle().await.unwrap();
     }
     let mean_us = samples_us.iter().sum::<u128>() / u128::from(N);
-    std::fs::create_dir_all("/opt/cursor/artifacts").unwrap();
-    std::fs::write(
-        "/opt/cursor/artifacts/kernel_turn_baseline.txt",
-        format!("echo_first_chunk_mean_us={mean_us} n={N} samples={samples_us:?}\n"),
-    )
-    .unwrap();
+    if std::fs::create_dir_all("/opt/cursor/artifacts").is_ok() {
+        std::fs::write(
+            "/opt/cursor/artifacts/kernel_turn_baseline.txt",
+            format!("echo_first_chunk_mean_us={mean_us} n={N} samples={samples_us:?}\n"),
+        )
+        .ok();
+    }
     assert!(
         mean_us < 50_000,
         "echo first-chunk regression mean_us={mean_us}"

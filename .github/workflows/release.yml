@@ -33,23 +33,13 @@ jobs:
       - name: Build release binaries
         run: |
           nix develop --command cargo build --release \
-            -p ene-cli \
-            -p ene-desktop \
-            -p ene-tool-fs \
-            -p ene-tool-web \
-            -p ene-tool-utility \
-            -p ene-tool-app \
-            -p ene-tool-browser
-          # The local GGUF provider plugin ships with the vulkan backend
-          # compiled in (matching the pre-plugin host builds, which enabled
-          # ene-ai-local/vulkan on Linux); a CPU-only binary rejects
-          # acceleration: "vulkan" at load.
-          nix develop --command cargo build --release \
-            -p ene-plugin-llama-cpp --features vulkan
-          # The experimental llama-server sidecar provider plugin (disabled
-          # by default; ships so the switch-over is packaged).
-          nix develop --command cargo build --release \
-            -p ene-plugin-llama-server
+            -p ene-daemon \
+            -p ene-ctl \
+            -p ene-stage \
+            -p ene-harness-fs \
+            -p ene-harness-exec \
+            -p ene-harness-web \
+            -p ene-harness-utility
 
       - name: Package Linux artifacts
         run: |
@@ -70,5 +60,5 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
-            dist/ene-cli-${{ env.VERSION }}-linux-x86_64.tar.gz
-            dist/ene-desktop_${{ env.VERSION }}_amd64.deb
+            dist/ene-ctl-${{ env.VERSION }}-linux-x86_64.tar.gz
+            dist/ene-stage_${{ env.VERSION }}_amd64.deb

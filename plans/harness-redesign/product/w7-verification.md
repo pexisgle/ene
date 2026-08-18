@@ -7,7 +7,7 @@
 
 測定日: 2026-08-17。対象は現行アプリと並べて追加した新クレート
 (`ene-session` / `ene-kernel` / `ene-daemon` / `ene-api` / `ene-ctl` /
-`ene-stage` ほか)。旧 `ene-desktop` の置き換えはしていない。
+`ene-stage` ほか)。W7 時点では旧 `ene-desktop` も残していた。
 
 ## 総括条件
 
@@ -157,5 +157,3 @@ P-513–P-514, P-525, P-616, P-710–P-711, P-807, marketplace, 署名)。
 
 - `resume` / `lane.last_result` / OperationState / effect sandwich
 - キャラ署名・marketplace・MCP 接続導線 UI
-- `docs/` と `AGENTS.md` の新レイアウトへの書き換え
-- 旧 `ene-desktop` / `ene-cli` の削除

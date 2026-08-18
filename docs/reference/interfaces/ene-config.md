@@ -31,8 +31,7 @@ defining crate. Character card containers live in
 
 - Depends on: nothing internal.
 - Used by: every crate and app (config sections live in the owning crate,
-  e.g. `ene-ai::AiConfig`, `ene-mind::MindConfig`, `ene-store::StoreConfig`,
-  `ene-plugin-host::PluginConfig`, `apps/ene-desktop`).
+  e.g. `ene-session`, `ene-kernel`, `ene-companion`, `ene-plane`).
 
 ## Refactoring notes
 

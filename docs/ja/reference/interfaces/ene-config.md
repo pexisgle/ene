@@ -30,8 +30,7 @@
 
 - 依存: 内部なし。
 - 利用: 全クレート・アプリ（設定セクションは所有クレート側に定義。例:
-  `ene-ai::AiConfig`・`ene-mind::MindConfig`・`ene-store::StoreConfig`・
-  `ene-plugin-host::PluginConfig`・`apps/ene-desktop`）。
+  `ene-session`、`ene-kernel`、`ene-companion`、`ene-plane`）。
 
 ## リファクタリングの注目点
 

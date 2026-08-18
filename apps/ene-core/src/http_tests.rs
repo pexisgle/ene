@@ -74,8 +74,11 @@ async fn wait_assistant(client: &ApiClient, session: &str) -> HistoryResponse {
 }
 
 fn record_metric(name: &str, body: impl AsRef<[u8]>) {
-    std::fs::create_dir_all("/opt/cursor/artifacts").unwrap();
-    std::fs::write(format!("/opt/cursor/artifacts/{name}"), body).unwrap();
+    let dir = std::path::Path::new("/opt/cursor/artifacts");
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    std::fs::write(dir.join(name), body).ok();
 }
 
 #[tokio::test]

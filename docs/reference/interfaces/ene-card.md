@@ -22,7 +22,7 @@ on `ene-config` only for shared error, path, and language-alias primitives.
 ## Dependencies
 
 - Depends on: `ene-config` (error, paths, language aliases only).
-- Used by: `ene-mind`, `ene-runtime`, `ene-cli`, `ene-desktop`.
+- Used by: `ene-companion` (V3 import).
 
 ## Refactoring notes
 

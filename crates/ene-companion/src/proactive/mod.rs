@@ -1,4 +1,4 @@
-//! Proactive speech: current `ene-mind/src/proactive` behaviour is the spec (D-28).
+//! Proactive speech: event-driven gates and quiet hours (D-28).
 
 mod gate;
 mod parse;

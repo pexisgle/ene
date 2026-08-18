@@ -234,6 +234,14 @@ async fn boot_installs_approval_plane_and_vault() {
 
 #[tokio::test]
 async fn dummy_plugin_and_harness_tools_share_registry() {
+    if !std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import sys")
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let core = CoreDaemon::boot(BootOptions::new(dir.path()))
         .await

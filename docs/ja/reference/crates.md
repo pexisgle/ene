@@ -1,95 +1,57 @@
 # クレートリファレンス
 
-このページはワークスペース内の全クレート・アプリ・プラグインバイナリと、
-アーキテクチャを維持する依存ルールの正規マップです。全体の仕組みは
-[アーキテクチャ](../concepts/architecture.md) を参照してください。
-各クレートの**公開インターフェース**（モジュール・型・トレイト・
-リファクタリングの継ぎ目）は[クレートインターフェース](interfaces/overview.md)を
-参照してください。
+このページはワークスペース内のクレート・アプリ・プラグインバイナリの地図です。
+依存規則もここにあります。動きの説明は [アーキテクチャ](../concepts/architecture.md)。
+シグネチャは rustdoc (`cargo doc -p <crate> --open`) が正です。
 
 ## アプリケーション
 
 | パッケージ | パス | 役割 |
 |---|---|---|
-| `ene-desktop` | `apps/ene-desktop` | GUI アプリ: winit + wgpu + egui + bevy_ecs。アバター・チャット・音声・トレイ・設定。`voice` フィーチャー（デフォルト）が cpal/rodio の音声をゲート。 |
-| `ene-cli` | `apps/ene-cli` | 対話型 REPL + スクリプト用非対話サブコマンド。 |
+| `ene-daemon` | `apps/ene-core`（バイナリ `ene-core`） | コアデーモン: データディレクトリのロック、HTTP/WS API、session + kernel + companion + work + plane + fiber |
+| `ene-ctl` | `apps/ene-ctl` | 同一 HTTP/WS API の CLI クライアント |
+| `ene-stage` | `apps/ene-stage` | ネイティブ stage クライアント（egui + wgpu）。表層ウィンドウと別窓の詳細画面 |
 
 ## ライブラリクレート
 
 | クレート | 役割 | 主な内部依存 |
 |---|---|---|
-| `ene-runtime` | アクターベースのホストファサード: `EneHandle`・ターン制御・3 チャネルイベントバス・ツール/スケジュール/undo/ワークスペースハンドル・API v1 ミラー | mind, store, ai, plugin-host, rag, config, card, connector, core |
-| `ene-mind` | 認知エンジン: プロンプトパケット・想起・メモリ書き込み/仲裁・感情・プロアクティブ・セッション・約束・要約 | core, config, card, ai, rag, util |
-| `ene-store` | SQLite/SeaORM の唯一の所有者: スキーマ・マイグレーション・sqlite-vec 検索・バックアップ・監査・DB IPC サーバー（`db` ホストサービス） | config, core, rag, plugin-db, plugin-proto |
-| `ene-core` | 永続化非依存のドメイン語彙 + `MemoryPort`/`EmbeddingStorePort`/`WorkspaceDocumentPort` トレイト | （内部なし） |
-| `ene-card` | キャラクターカードコンテナ（V3）・PNG/CHARX インポート/エクスポート・キャラクター別設定・ローカライズ済みカード差分 | config |
-| `ene-config` | 設定の読み書き・スキーマ・パス・プロンプト/パターン・`define_config!` マクロ | （内部なし） |
-| `ene-ai` | LLM/埋め込み/STT/TTS/VAD トレイト・タスクルーティング・リトライ・コンテキスト窓計算・モデル取得 | config, infer, plugin-proto |
-| `ene-infer` | シングルスレッドローカルモデルフレームワーク（`LocalModel`・`EngineHandle`）: ワーカースレッド・有界キュー・協調キャンセル・パニック回復 | （内部なし） |
-| `ene-rag` | RAG ポリシー: ハイブリッドスコアリング・減衰・ワークスペースチャンク化。`tool` フィーチャーでツール選択パイプライン（ene-ai が必要） | core, config |
-| `ene-connector` | 外部サービス接続フレームワーク: 資格情報・権限ゲート・ポリシー・webhook | （内部なし） |
-| `ene-approval` | 許可モデル: カテゴリ・モード・全体/プラグイン別ポリシー解決・監査ログ・署名付き manifest 型 | （内部なし） |
-| `ene-artifact` | 署名付き Artifact Catalog・CAS(SHA-256)・再開ダウンロード・1 世代ロールバック付きインストーラ | （内部なし） |
-| `ene-sandbox` | OS サンドボックス基盤: Landlock + seccomp + rlimits + cgroup v2(Linux)、Job Object(Windows) | （内部なし） |
-| `ene-plugin-proto` | ワイヤ ABI: IPC プロトコル v8・ツール型・capability・サンドボックス設定・Broker チャネル型 | （内部なし） |
-| `ene-plugin` | プラグイン作成ファサード: `run_plugin_server`・`PluginDispatch`・トレイト・`prelude` | proto, infer, macros |
-| `ene-plugin-macros` | プロシージャルマクロ: `ToolAction`・`ToolSpec`・`tool_action`・プロバイダー derive | proto |
-| `ene-plugin-host` | プラグイン監視: 起動/ハンドシェイク/capability/ヘルス/サーキットブレーカー・IPC プロバイダーブリッジ・MCP クライアント・資格情報レジストリ・Broker hub(file/network/process/credential/artifact/platform)・manifest 検証・承認エンジン | proto, ai, config, connector, approval, artifact, sandbox |
-| `ene-plugin-db` | ホスト `db` サービス上のプラグイン向け型付き CRUD クライアント | proto |
-| `ene-plugin-broker` | プラグイン側 Broker クライアント(プロトコル v8)。ホスト仲介の file/network/process/credential/artifact/platform サービス向け | proto |
-| `ene-voice` | ローカル音声エンジン: whisper STT・Kokoro TTS・Silero VAD（フィーチャー: `local-stt`・`local-tts`・`silero-vad`） | ai, config, infer |
-| `ene-vrm` | VRM 1.0 ローダー + wgpu レンダラー。独立（ene-desktop が使用） | （内部なし） |
-| `ene-util` | 純粋ヘルパー: truncate・HTML→Markdown（フィーチャー `html`） | （内部なし） |
+| `ene-session` | 追記専用の会話ログ、usage 台帳、履歴投影 | config |
+| `ene-kernel` | 対話レーン: prompt / steer / follow_up / abort / compact、可視性、可観測性 | config, session |
+| `ene-companion` | soul・感情・記憶・内面・能動発話・キャラパッケージ | card, config, plane, registry, session |
+| `ene-body` | パフォーマンスキュー、感情→表情、全二重音声 | config, session |
+| `ene-work` | 委譲、ジョブ、スケジュール、skill、MCP | companion, kernel, plane, registry, session |
+| `ene-plane` | 承認 plane、hash chain 監査、資格情報ボールト | config |
+| `ene-fiber` | プラグインファイバー合成: 巻き戻し可能な effect、プロファイル reconcile、サンドボックス spawn | plugin-ipc, registry, sandbox |
+| `ene-registry` | 統一ツールレジストリ: side_effects フィルタ、deny-by-default パイプライン | plugin-ipc, plane |
+| `ene-plugin-ipc` | 分割 IPC: core / tool 副プロトコルの length-prefixed MessagePack | （内部依存なし） |
+| `ene-api` | HTTP/WS 型、OpenAPI、Rust クライアント | （内部依存なし） |
+| `ene-card` | Character Card V3 / PNG / CHARX インポート | config |
+| `ene-config` | 設定の load/save/schema、パス、`define_config!` | （内部依存なし） |
+| `ene-sandbox` | OS サンドボックス（Linux では Landlock + seccomp + rlimits） | （内部依存なし） |
+| `ene-vrm` | VRM 1.0 ローダ + wgpu レンダラ | （内部依存なし） |
 
-## 依存ルール（レビューで強制・CI で検証）
+## 依存規則（レビューで強制）
 
 ```text
-ene-core    ← ene-store, ene-mind, ene-rag     （語彙とポート）
-ene-store   ↛ ene-ai, ene-mind, ene-runtime    （永続化は純粋のまま）
-ene-mind    ↛ ene-runtime, ene-plugin-host     （本番コード）;
-              永続化は ene_core::MemoryPort 経由のみ
-ene-rag     ↛ ene-store, ene-mind              （ポリシー層。循環は構造的に不可能）
-ene-card    → ene-config                       （エラー/パス/言語エイリアスのみ。
-                                                逆方向の辺は作らない）
-ene-plugin-proto ↛ ビジネスロジック             （ワイヤ ABI のみ）
-ene-vrm     ↛ ene-mind, ene-runtime, ene-store （レンダラーは独立）
+ene-session     ↛ kernel, companion, work, daemon
+ene-kernel      ↛ companion, work, fiber, daemon
+ene-companion   ↛ daemon, fiber
+ene-plugin-ipc  ↛ business logic
+ene-card        → ene-config のみ（逆辺は禁止）
+ene-vrm         ↛ kernel, companion, work, session
+ene-api         ↛ daemon types
 ```
 
-このエッジの違反は、このリポジトリで最もよく起きる破壊の原因です。
+クライアントは `ene-api` 経由でのみデーモンと話します。`ene-stage` の本番コードから
+`ene-daemon` をリンクしないでください（`ene-ctl` のテストはデーモンを spawn してよい）。
 
 ## プラグインバイナリ
 
-### ツールプラグイン（`plugins/tool/*`）
+### ハーネスツール (`plugins/harness/*`)
 
-`app`・`browser`・`calc`・`calendar`・`counter`・`fs`・`geo`・`git`・
-`homeassistant`・`random`・`utility`・`web` — [同梱ツール](../guides/tools/builtin-tools.md)参照。
+`fs`、`exec`、`web`、`utility` — [同梱ツール](../guides/tools/builtin-tools.md)。
+`exec` は `fs` とは別プラグインです（D-24）。
 
-### プロバイダープラグイン（`plugins/provider/*`）
-
-`openai`・`anthropic`・`local-llm`（llama.cpp。バイナリ名
-`ene-plugin-llama-cpp`）・`llama-server`・`onnx`（Silero VAD）・`whisper`
-（whisper.cpp）・`kokoro`（ONNX TTS）・`edge-tts`・`elevenlabs`・`openai-tts`・
-`voicevox` — [プラグインと MCP](../concepts/plugins-and-mcp.md)参照。
-
-## 重要なフィーチャーフラグ
-
-| フィーチャー | 所有者 | 効果 |
-|---|---|---|
-| `tool` | `ene-rag` | ツール選択 RAG パイプライン（ene-ai/plugin-proto を導入）。`ene-runtime` が有効化。 |
-| `local-stt` / `local-tts` / `silero-vad` | `ene-voice` | ネイティブ whisper/ONNX エンジン。プロバイダープラグインが消費。 |
-| `voice` | `ene-desktop` | マイクキャプチャ+再生（cpal/rodio）。オフ ⇒ 無機能スタブ。 |
-| `test-util` | `ene-infer` | `LocalModel` 実装の適合性テスト一式。 |
-| `html` / `truncate` | `ene-util` | HTML→Markdown / truncate ヘルパー。 |
-
-## ビルドと CI
-
-- `default-members = ["apps/ene-cli"]` — 素の `cargo test`/`cargo clippy` は
-  CLI だけを対象にします。常に `--workspace` か `-p <pkg>` を指定してください。
-- CI ゲート: `cargo clippy --workspace --all-targets -- -D warnings`・
-  `cargo test --workspace`・`cargo doc --workspace --no-deps`。
-- リントが仕様です: `all`/`pedantic`/`cargo` を deny し、さらに
-  `unwrap_used`・`expect_used`・`panic`・`todo`・`dbg_macro` などを deny。
-  例外は `#[expect(lint, reason = "...")]` に限られます（`#[allow]` は
-  拒否されます）。
-- ネイティブ依存はチェックイン済み Nix flake から。Windows は Linux から
-  クロスコンパイル（mingw）。macOS は非対応。
+Python のダミー (`plugins/tool/dummy-py`) は IPC 用フィクスチャのみで、Cargo
+ワークスペースからは除外されています。

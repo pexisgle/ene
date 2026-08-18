@@ -178,6 +178,7 @@ impl Supervisor {
         registry: Arc<ToolRegistry>,
         circuit_breaker: CircuitBreakerConfig,
     ) -> Self {
+        registry.set_workspace(workspace.clone());
         Self {
             inner: Arc::new(SupervisorInner {
                 fibers: Mutex::new(HashMap::new()),

@@ -3,7 +3,7 @@
 
 ## Role
 
-Standalone VRM 1.0 loader and wgpu renderer for the desktop avatar.
+Standalone VRM 1.0 loader and wgpu renderer for the stage avatar.
 Deliberately imports no cognitive, memory, or runtime types.
 
 ## Public modules
@@ -32,7 +32,7 @@ Deliberately imports no cognitive, memory, or runtime types.
 ## Dependencies
 
 - Depends on: nothing internal (wgpu, gltf, glam, image, …).
-- Used by: `ene-desktop` only.
+- Used by: `ene-stage` only.
 
 ## Refactoring notes
 

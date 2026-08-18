@@ -1793,11 +1793,7 @@ mod tests {
     /// pulling in another workspace crate (whose `define_config!` impl would
     /// be for a different copy of the `HasConfigKey` trait).
     ///
-    /// Modelled on the real `ToolRuntimeConfig` (`tools`, owned by
-    /// `ene-runtime`), which sits at the same path as the nested
-    /// `ToolRagConfig` (`tools.rag`, owned by `ene-tool-rag`). Writing
-    /// `tools` must not wipe the sibling `tools.rag` subtree — the exact
-    /// regression the merge change fixes.
+    /// Writing `tools` must not wipe a sibling `tools.rag` subtree.
     #[derive(serde::Serialize, serde::Deserialize, Default)]
     struct TestSection {
         enabled: bool,

@@ -16,9 +16,10 @@ Ene は 3 種類のコンテナからカードを読み込み、`assets/characte
 | PNG カード | PNG のテキストチャンク（V3 は `ccv3`、V2 は `chara`）にカード JSON を埋め込んだもの | フォルダとしてインポート。PNG は `avatar.png` として保持 |
 | CHARX | カード JSON + アセット（VRM・VRMA・画像）を含む ZIP | エントリ単位で検証しながらフォルダに展開 |
 
-インポートは既存のキャラクターフォルダを上書きしません。CLI の
-`/import <path>` と非対話インポート（[CLI ガイド](../apps/cli.md)参照）は
-PNG と CHARX の両方を受け付けます。素の JSON ファイルはインポートされません
+インポートは既存のキャラクターフォルダを上書きしません。`ene-card` は PNG
+と CHARX を受け付けます。`ene-ctl import` はまだありません —
+`assets/characters/<name>/` にフォルダを置くか、ホストから `ene_card` を
+呼んでください。素の JSON ファイルはインポートされません
 （キャラクターフォルダに直接置くのが正しい形式です）。
 
 インポート時のサイズは検証されます（エントリ単位・アーカイブ合計の上限）。
@@ -33,7 +34,7 @@ PNG と CHARX の両方を受け付けます。素の JSON ファイルはイン
 | `name`, `nickname` | キャラクター名。`nickname` があれば優先 |
 | `description`, `personality`, `scenario` | 誰・どんな性格・どこで — アイデンティティカーネルにコンパイル |
 | `system_prompt`, `post_history_instructions` | システム指示。PHI は履歴の後に追加 |
-| `first_mes`, `alternate_greetings` | 開始メッセージ（`/greeting` で切替） |
+| `first_mes`, `alternate_greetings` | 開始メッセージ |
 | `mes_example` | 初回ターンに示す例示会話 |
 | `character_book` | lorebook（下記参照） |
 | `authors_note`, `authors_note_depth` | 履歴の指定深度に注入する持続指示 |
@@ -117,13 +118,12 @@ lorebook（`character_book`）はキーワードと内容を持つエントリ�
   （ローカライズ対象フィールドだけを含む）。
 - PNG カード: カードに埋め込まれた `extensions.ene.locales` バッグ。
 
-アクティブなロケールはアプリ言語 / `character_settings.json` の `language`
-オーバーライドから選ばれ、差分がベースカードの上に重ねられます。
+アクティブなロケールは stage の言語 / `character_settings.json` の
+`language` オーバーライドから選ばれ、差分がベースカードの上に重ねられます。
 
 ## キャラクターごとの表示設定
 
-カードの隣の `character_settings.json` がデスクトップシーンを制御します:
+カードの隣の `character_settings.json` に stage の表示を置けます:
 モデルの位置/スケール・視線追従の強さ・デフォルトモーション・デフォルト
 表情・カード言語。詳細は
-[設定 → キャラクターごとの設定](../configuration.md#キャラクターごとの設定-character_settingsjson)を
-参照してください。
+[キャラクターエディタ](../guides/character-editor.md) です。

@@ -1,5 +1,5 @@
 //! Companion layer: soul, hybrid affect, memory (with `scope`), inner channel,
-//! proactive speech, and character packages. Does not link `ene-mind`.
+//! proactive speech, and character packages.
 
 #![cfg_attr(
     test,

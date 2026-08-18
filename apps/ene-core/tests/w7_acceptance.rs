@@ -160,15 +160,16 @@ async fn spawned_core_offline_conversation_and_rss() {
             .iter()
             .any(|message| message.role == "inner")
     );
-    std::fs::create_dir_all("/opt/cursor/artifacts").unwrap();
-    std::fs::write(
-        "/opt/cursor/artifacts/minimal_process_baseline.txt",
-        format!(
-            "boot_to_health_ms={boot_ms} rss_kb={}\n",
-            rss.map_or_else(|| "unknown".to_owned(), |kb| kb.to_string())
-        ),
-    )
-    .unwrap();
+    if std::fs::create_dir_all("/opt/cursor/artifacts").is_ok() {
+        std::fs::write(
+            "/opt/cursor/artifacts/minimal_process_baseline.txt",
+            format!(
+                "boot_to_health_ms={boot_ms} rss_kb={}\n",
+                rss.map_or_else(|| "unknown".to_owned(), |kb| kb.to_string())
+            ),
+        )
+        .ok();
+    }
     assert!(boot_ms < 8_000, "boot_to_health_ms={boot_ms}");
     if let Some(kb) = rss {
         assert!(kb < 512_000, "idle rss_kb={kb}");
