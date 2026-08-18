@@ -49,7 +49,9 @@ and chat on the surface depth, and opens a separate detail window (F4 / tray)
 for logs and internals. `ene-stage` is an optional debug client for the same
 API.
 
-Without a conversation provider plugin, replies are Echo-only.
+Default chat is Echo (`ai.tasks.chat.plugin = echo`). Bind
+`provider.openai_compat` or `provider.anthropic` on the AI page (or via
+`ENE_AI__TASKS__CHAT__PLUGIN`) for live models. Keys go to the vault.
 
 ## 5. Tests
 

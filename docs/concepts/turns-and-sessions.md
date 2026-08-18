@@ -26,7 +26,7 @@ running turn; `compact` compresses history.
 
 1. Recall and affect tick in `ene-companion`.
 2. The kernel composes the model-visible prompt from the session log.
-3. The conversation model streams text (Echo until a provider plugin exists).
+3. The conversation model streams text (`echo` or a bound `provider.*` plugin).
 4. Surface-eligible tools run through `ene-registry` / `ene-plane`.
 5. Events are committed to `ene-session` (model-visible equals logged).
 6. Live events go out at `surface` or `detail` depth.

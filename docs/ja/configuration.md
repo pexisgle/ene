@@ -15,6 +15,12 @@
 テーマ、言語、マイク、オーバーレイ、コア寿命）はデスクトップ自身の
 `settings.json` に保存します。
 
+会話・分類・埋め込み・TTS・STT は `ai.tasks.<task>`（`plugin`、`model`、
+`base_url`、`voice`、`max_tokens`）でバインドします。API キーは vault 秘密です
+（起動時は `ENE_AI__TASKS__<TASK>__API_KEY`。PATCH `/api/v1/settings` は JSON に
+書きません）。プラグイン id は `echo` または [プラグイン一覧](concepts/plugins-and-mcp.md)
+の `provider.*` です。
+
 デバッグビルドの同梱アセットはリポジトリの `assets/` から解決します。
 実行時データ（`sessions.db`、`api.token`、`vault.bin`、workspace）は
 設定ファイルの隣ではなく、データディレクトリに置きます。

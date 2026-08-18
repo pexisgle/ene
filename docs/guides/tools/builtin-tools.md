@@ -1,18 +1,21 @@
 # Built-in tools
 
 Bundled tools live under `plugins/harness/` and use the same IPC as a
-third-party tool.
+third-party tool. `ene-core` always applies these profile rows:
 
 | Plugin | Binary | Role |
 |---|---|---|
-| `fs` | `ene-harness-fs` | Read / write / edit inside the workspace. No shell. |
-| `exec` | `ene-harness-exec` | Process execution (separate from `fs`, D-24) |
-| `web` | `ene-harness-web` | Fetch via the host HTTP broker |
-| `utility` | `ene-harness-utility` | Deterministic helpers (time, hash, encode) |
+| `utility` | `ene-harness-utility` | Hash, time, calc, random, text |
+| `fs` | `ene-harness-fs` | Read / write / edit / list / search / patch / undo in the workspace. No shell. |
+| `exec` | `ene-harness-exec` | Process execution by program name (separate from `fs`) |
+| `web` | `ene-harness-web` | HTTPS fetch and public search (SSRF blocked) |
+| `app` | `ene-harness-app` | Screenshot, windows, clipboard, pointer/keyboard |
 
-`fs.write` and `exec` are not on the surface schema. The registry filters by
-empty `side_effects`, not by a name allow-list. Approval is deny-by-default
-until `ene-plane` has a matching policy.
+`fs.write`, `fs.edit`, `exec`, and input-mutating `app.*` tools are not on the
+surface schema. The registry filters by empty `side_effects`, not by a name
+allow-list. Approval is deny-by-default until `ene-plane` has a matching
+policy. Host observation (`app.active_window`, `app.screenshot`) skips the
+approval popup when the user enabled the proactive source.
 
 Mature MCP servers (git, browser, calendar, homeassistant, geo) are not
-in-tree; connect them as handwritten profile rows.
+in-tree; connect them as handwritten `mcp.<id>` rows.

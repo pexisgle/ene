@@ -4,13 +4,11 @@
 
 `ene-body` owns duplex voice state (idle / listening / thinking /
 responding / speaking / interrupting), energy VAD, and lip-sync visemes.
-TTS and ASR are traits (`TtsEngine` / `AsrEngine`). Provider plugins for
-those engines are not in this tree yet, so conversation is Echo-only until
-they are rewritten onto `ene-plugin-ipc`.
-
-Desktop owns the microphone and playback devices. The daemon still owns
-policy and the live bus; exclusive resources (mic) are claimed through the
-API.
+TTS and STT bind through `ai.tasks.tts` / `ai.tasks.stt` to provider plugins
+(`provider.openai_compat`, `provider.elevenlabs`, `provider.voicevox`,
+`provider.edge_tts`). PCM is `f32` on the provider subprotocol. Desktop owns
+the microphone and playback devices. The daemon still owns policy and the live
+bus; exclusive resources (mic) are claimed through the API.
 
 Lip-sync maps PCM energy to the same viseme targets `ene-vrm` expects.
 Affect in `ene-companion` picks expression cues that `ene-body` queues as

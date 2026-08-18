@@ -25,6 +25,6 @@ data-dir `settings.json`. Attach to an already-running core with `ENE_API_URL`
 
 `ene-stage` remains an optional debug client for the same API.
 
-Without a conversation provider plugin, replies are Echo-only. Audio device
-relay and approval popups are the desktop's client-side jobs; the daemon still
-owns policy and the live bus.
+Default chat is Echo (`ai.tasks.chat.plugin = echo`). Bind a provider plugin
+on the AI page for live models. Audio device relay and approval popups are
+the desktop's client-side jobs; the daemon still owns policy and the live bus.

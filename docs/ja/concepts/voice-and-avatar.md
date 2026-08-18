@@ -4,12 +4,11 @@
 
 `ene-body` がデュプレックス音声状態（idle / listening / thinking /
 responding / speaking / interrupting）、エネルギー VAD、リップシンクの
-viseme を持ちます。TTS と ASR はトレイトです（`TtsEngine` / `AsrEngine`）。
-それらのエンジン用プロバイダープラグインはまだこのツリーに無いので、
-`ene-plugin-ipc` へ書き直されるまで会話は Echo のみです。
-
-マイクと再生デバイスは desktop が持ちます。ポリシーとライブバスはデーモンの
-ままです。排他資源（マイク）は API で請求します。
+viseme を持ちます。TTS / STT は `ai.tasks.tts` / `ai.tasks.stt` で
+プロバイダプラグイン（`provider.openai_compat`、`provider.elevenlabs`、
+`provider.voicevox`、`provider.edge_tts`）に結びます。音声はプロバイダ
+副プロトコル上の `f32` PCM です。マイクと再生デバイスは desktop が持ちます。
+ポリシーとライブバスはデーモンのままです。排他資源（マイク）は API で請求します。
 
 リップシンクは PCM エネルギーを `ene-vrm` と同じ viseme ターゲットへ
 写します。`ene-companion` の感情が表情キューを選び、`ene-body` が

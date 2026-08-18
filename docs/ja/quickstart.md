@@ -45,7 +45,9 @@ desktop は必要なら `ene-core` を子プロセスとして起動し、表層
 チャットを出し、詳細は別窓（F4 / トレイ）です。`ene-stage` は同一 API の
 任意のデバッグクライアントです。
 
-会話プロバイダプラグインが無い間、応答は Echo のみです。
+既定のチャットは Echo（`ai.tasks.chat.plugin = echo`）です。ライブモデルは
+AI ページ（または `ENE_AI__TASKS__CHAT__PLUGIN`）で
+`provider.openai_compat` か `provider.anthropic` を結びます。キーはボールトへ入ります。
 
 ## 5. テスト
 
