@@ -86,8 +86,8 @@ mod tests {
         wait_for_api_json,
     };
     use super::filter::{
-        job_report_matches_soul, live_surface_line, merge_soul_ids, surface_event_allowed,
-        surface_history_line,
+        append_surface_line, job_report_matches_soul, live_surface_line, merge_soul_ids,
+        surface_event_allowed, surface_history_line,
     };
     use super::stage_app::companion_label;
     use serde_json::json;
@@ -124,6 +124,17 @@ mod tests {
         assert!(
             live_surface_line(&json!({"type": "session.event", "kind": "turn/end"})).is_none(),
             "session.event JSON must not land on the stage surface"
+        );
+        let mut lines = vec!["assistant: ack: hello from stage".to_owned()];
+        append_surface_line(&mut lines, "assistant: ack: hello from stage".to_owned());
+        assert_eq!(lines.len(), 1);
+        append_surface_line(&mut lines, "assistant: ack: hello beta".to_owned());
+        assert_eq!(
+            lines,
+            [
+                "assistant: ack: hello from stage",
+                "assistant: ack: hello beta"
+            ]
         );
         assert!(job_report_matches_soul(
             &json!({"type": "job.report", "soul_id": "a", "speech": "x"}),

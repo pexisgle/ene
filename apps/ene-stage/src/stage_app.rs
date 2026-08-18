@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use crate::core_spawn::{CoreChild, resolve_connection};
 use crate::filter::{
-    format_event_line, job_report_matches_soul, live_surface_line, merge_soul_ids,
-    surface_event_allowed, surface_history_line,
+    append_surface_line, format_event_line, job_report_matches_soul, live_surface_line,
+    merge_soul_ids, surface_event_allowed, surface_history_line,
 };
 use crate::vrm;
 
@@ -301,7 +301,7 @@ impl StageApp {
                     }
                     self.apply_live_value(pane, &value, false);
                     if let Some(line) = live_surface_line(&value) {
-                        self.companions[pane].surface_lines.push(line);
+                        append_surface_line(&mut self.companions[pane].surface_lines, line);
                     }
                 }
                 LiveEventMsg::Detail { pane, value } => {

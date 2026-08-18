@@ -57,6 +57,13 @@ pub fn live_surface_line(value: &Value) -> Option<String> {
     }
 }
 
+/// Skip a live line that history already committed (same text as last row).
+pub fn append_surface_line(lines: &mut Vec<String>, line: String) {
+    if lines.last() != Some(&line) {
+        lines.push(line);
+    }
+}
+
 /// Occupants first, then remaining souls, de-duplicated (P-107 / P-405).
 #[must_use]
 pub fn merge_soul_ids(occupants: &[String], extras: &[String]) -> Vec<String> {
