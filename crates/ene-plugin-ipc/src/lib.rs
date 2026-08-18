@@ -19,7 +19,7 @@ pub use dispatch::{
     serve_provider, serve_provider_from_env,
 };
 pub use error::IpcError;
-pub use frame::{MAX_FRAME_BYTES, read_frame, write_frame};
+pub use frame::{MAX_FRAME_BYTES, frame_limit, read_frame, write_frame};
 pub use host::{HostConn, negotiate};
 pub use plugin::{BuiltinKind, ToolHandler, serve_from_env, serve_plugin};
 pub use protocol::{

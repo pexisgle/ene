@@ -76,7 +76,14 @@ async fn empty_side_effects_tools_run() {
         .execute("utility.hash", json!({"text":"hi"}), Layer::Surface)
         .await
         .unwrap();
-    assert!(value.get("blake3").is_some());
+    assert!(
+        value.get("hex").is_some(),
+        "utility.hash returns {{algorithm, hex}}, got {value}"
+    );
+    assert_eq!(
+        value.get("algorithm").and_then(serde_json::Value::as_str),
+        Some("blake3")
+    );
 }
 
 #[test]

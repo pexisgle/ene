@@ -4,6 +4,16 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// Default frame cap. Hitting it is a design failure; bulk goes out-of-band.
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 
+/// Resolve `plugins.ipc.max_frame_bytes`. `0` keeps the compile-time default.
+#[must_use]
+pub fn frame_limit(configured: u32) -> usize {
+    if configured == 0 {
+        MAX_FRAME_BYTES
+    } else {
+        usize::try_from(configured).unwrap_or(MAX_FRAME_BYTES)
+    }
+}
+
 /// Write one length-prefixed (32-bit BE) frame.
 pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,

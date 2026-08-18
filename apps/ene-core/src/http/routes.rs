@@ -16,7 +16,6 @@ use ene_api::{
     ToolTestRequest, ToolView, UsageView,
 };
 use ene_companion::{JournalAction, MemoryId, MemoryScope, export_dir, install_archive};
-use ene_fiber::discover_plugin_executable;
 use ene_kernel::{DisplayDepth, HarnessSettings};
 use ene_plane::PopupDecision;
 use ene_registry::Layer;
@@ -878,7 +877,10 @@ pub async fn restart_plugin(
         .supervisor()
         .profile_row(&id)
         .ok_or_else(|| not_found("plugin row not found"))?;
-    let binary = discover_plugin_executable(&row.plugin)
+    let binary = state
+        .core
+        .supervisor()
+        .discover(&row.plugin)
         .ok_or_else(|| conflict("unknown_binary", "plugin binary not found"))?;
     state.core.supervisor().disable_row(&id).await;
     state
@@ -1086,11 +1088,13 @@ pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
     let mut core = state.core.settings().clone();
     core.data_dir = state.core.data_dir().display().to_string();
     let ai = state.core.ai().lock().clone();
+    let plugins = state.core.plugins().lock().clone();
     let mut effective = json!({
         "core": core,
         "harness": HarnessSettings::default(),
         "approval": { "mode": format!("{:?}", state.core.plane().mode()).to_ascii_lowercase() },
         "ai": ai,
+        "plugins": plugins,
         "mind": state.core.mind(),
         "ai_chat_key_set": state.core.task_key_set("chat"),
         "ai_classifier_key_set": state.core.task_key_set("classifier"),
@@ -1117,7 +1121,9 @@ pub async fn patch_settings(
     Json(patch): Json<SettingsPatch>,
 ) -> Result<Json<Value>, ApiReject> {
     web_mutate_forbidden(&client_id_from_headers(&headers))?;
-    let allowed = ["core", "harness", "approval", "theme", "ai", "mind"];
+    let allowed = [
+        "core", "harness", "approval", "theme", "ai", "mind", "plugins",
+    ];
     if let Some(incoming) = patch.fields.as_object() {
         for key in incoming.keys() {
             if !allowed.contains(&key.as_str()) {
@@ -1206,15 +1212,25 @@ pub async fn patch_settings(
     }
     fs::write(&settings_path, current.to_string())
         .map_err(|err| bad_request("fault", &err.to_string()))?;
+    let mut profile_dirty = false;
     if let Some(ai_value) = current.get("ai") {
         let mut ai = state.core.ai().lock().clone();
         crate::overlay_ai(&mut ai, ai_value);
         state.core.replace_ai(ai, secrets);
-        state.core.apply_plugin_profile().await;
+        profile_dirty = true;
     } else {
         // `replace_ai` locks this mutex; clone first so the guard is not held.
         let ai = state.core.ai().lock().clone();
         state.core.replace_ai(ai, secrets);
+    }
+    if let Some(plugins_value) = current.get("plugins") {
+        let mut plugins = state.core.plugins().lock().clone();
+        crate::overlay_plugins(&mut plugins, plugins_value);
+        state.core.replace_plugins(plugins);
+        profile_dirty = true;
+    }
+    if profile_dirty {
+        state.core.apply_plugin_profile().await;
     }
     if let Some(mind_value) = current.get("mind")
         && let Ok(mind) = serde_json::from_value::<ene_companion::MindSettings>(mind_value.clone())

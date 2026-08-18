@@ -19,7 +19,10 @@ pub use fiber::{Effect, Fiber, FiberState, FiberUid};
 pub use profile::ProfileApplyReport;
 pub use providers::{PROVIDER_PLUGINS, ProviderPlugin, provider_plugin};
 pub use sidecar::{SidecarHealth, SidecarId, SidecarRequest};
-pub use spawn::{discover_plugin_bin, discover_plugin_executable, discover_plugin_script};
+pub use spawn::{
+    discover_plugin_bin, discover_plugin_executable, discover_plugin_executable_in,
+    discover_plugin_script,
+};
 pub use supervisor::{
     CircuitBreakerConfig, ProfileRow, Supervisor, SupervisorError, manifest_digest,
 };

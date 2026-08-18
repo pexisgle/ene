@@ -1,5 +1,5 @@
 use crate::error::IpcError;
-use crate::frame::{MAX_FRAME_BYTES, read_frame, write_frame};
+use crate::frame::{read_frame, write_frame};
 use crate::protocol::{
     HelloAck, HostHello, Message, Negotiated, ProtoId, ProtocolRanges, ToolCall, ToolResult,
     ToolSpecWire, VersionRange,
@@ -36,16 +36,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
         plugin_declared: &[ProtoId],
         expected_spawn_token: &str,
     ) -> Result<Self, IpcError> {
+        let max_frame = hello.frame_limit();
         write_frame(
             &mut stream,
             &Message::Hello {
                 body: hello.clone(),
             }
             .encode()?,
-            MAX_FRAME_BYTES,
+            max_frame,
         )
         .await?;
-        let bytes = read_frame(&mut stream, MAX_FRAME_BYTES).await?;
+        let bytes = read_frame(&mut stream, max_frame).await?;
         match Message::decode(&bytes)? {
             Message::HelloAck { body } => {
                 validate_ack(&hello, &body, plugin_declared, expected_spawn_token)?;
@@ -53,7 +54,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
                     stream,
                     next_id: 1,
                     negotiated: body.protocols,
-                    max_frame: MAX_FRAME_BYTES,
+                    max_frame,
                 })
             }
             Message::HelloReject { body } => Err(IpcError::Rejected(body.reason)),
@@ -212,7 +213,7 @@ pub(crate) fn validate_ack(
     declared: &[ProtoId],
     expected_spawn_token: &str,
 ) -> Result<(), IpcError> {
-    if ack.manifest_digest != hello.expected_digest {
+    if ack.manifest_digest != hello.expected_digest && !hello.allow_unverified {
         return Err(IpcError::DigestMismatch);
     }
     if ack.spawn_token != expected_spawn_token {

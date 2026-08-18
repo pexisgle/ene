@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use ene_fiber::{ProfileRow, discover_plugin_executable};
-use ene_kernel::AiSettings;
+use ene_fiber::{ProfileRow, discover_plugin_executable_in};
+use ene_kernel::{AiSettings, PluginProfileKind, PluginSettings};
 use ene_work::{McpServer, WorkError, WorkStore};
 use serde::{Deserialize, Serialize};
 
@@ -11,10 +11,25 @@ struct McpFile {
     servers: Vec<McpServer>,
 }
 
-pub fn collect_rows(data_dir: &Path, work: &WorkStore, ai: &AiSettings) -> Vec<ProfileRow> {
-    let mut rows = harness_rows();
-    rows.extend(provider_rows(ai));
-    rows.extend(mcp_rows(data_dir, &load_servers(data_dir, work)));
+pub fn collect_rows(
+    data_dir: &Path,
+    work: &WorkStore,
+    ai: &AiSettings,
+    plugins: &PluginSettings,
+) -> Vec<ProfileRow> {
+    let kind = plugins.kind();
+    if !plugins.profile.is_empty() && plugins.profile != kind.as_str() {
+        tracing::warn!(
+            profile = %plugins.profile,
+            "unknown plugins.profile; using desktop"
+        );
+    }
+    let home = plugins.resolved_home(data_dir);
+    let mut rows = harness_rows(kind, &home);
+    rows.extend(provider_rows(ai, &home));
+    if kind.includes_mcp() {
+        rows.extend(mcp_rows(data_dir, &load_servers(data_dir, work), &home));
+    }
     rows
 }
 
@@ -63,21 +78,16 @@ fn load_mcp_json(path: &Path) -> Result<Vec<McpServer>, WorkError> {
     Ok(file.servers)
 }
 
-fn harness_rows() -> Vec<ProfileRow> {
-    [
-        "tool.utility",
-        "tool.fs",
-        "tool.exec",
-        "tool.web",
-        "tool.app",
-    ]
-    .into_iter()
-    .map(harness_row)
-    .collect()
+fn harness_rows(kind: PluginProfileKind, home: &Path) -> Vec<ProfileRow> {
+    kind.harness_plugins()
+        .iter()
+        .copied()
+        .map(|plugin| harness_row(plugin, home))
+        .collect()
 }
 
-fn harness_row(plugin: &str) -> ProfileRow {
-    let binary = discover_plugin_executable(plugin);
+fn harness_row(plugin: &str, home: &Path) -> ProfileRow {
+    let binary = discover_plugin_executable_in(plugin, Some(home));
     let needs_sandbox = matches!(plugin, "tool.fs" | "tool.exec" | "tool.web");
     ProfileRow {
         row_id: plugin.to_owned(),
@@ -89,7 +99,7 @@ fn harness_row(plugin: &str) -> ProfileRow {
     }
 }
 
-fn provider_rows(ai: &AiSettings) -> Vec<ProfileRow> {
+fn provider_rows(ai: &AiSettings, home: &Path) -> Vec<ProfileRow> {
     let mut seen = std::collections::BTreeSet::new();
     let mut rows = Vec::new();
     for binding in [
@@ -106,7 +116,7 @@ fn provider_rows(ai: &AiSettings) -> Vec<ProfileRow> {
         if !seen.insert(binding.plugin.clone()) {
             continue;
         }
-        if discover_plugin_executable(&binding.plugin).is_none() {
+        if discover_plugin_executable_in(&binding.plugin, Some(home)).is_none() {
             tracing::warn!(plugin = %binding.plugin, "provider binary missing; skipping");
             continue;
         }
@@ -130,8 +140,8 @@ fn provider_rows(ai: &AiSettings) -> Vec<ProfileRow> {
     rows
 }
 
-fn mcp_rows(data_dir: &Path, servers: &[McpServer]) -> Vec<ProfileRow> {
-    if discover_plugin_executable("mcp.bridge").is_none() {
+fn mcp_rows(data_dir: &Path, servers: &[McpServer], home: &Path) -> Vec<ProfileRow> {
+    if discover_plugin_executable_in("mcp.bridge", Some(home)).is_none() {
         if servers.iter().any(|server| server.enabled) {
             tracing::warn!("ene-harness-mcp missing; handwritten MCP rows skipped");
         }
@@ -184,4 +194,57 @@ pub fn valid_mcp_id(id: &str) -> bool {
         && id
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ene_kernel::PluginSettings;
+    use std::path::Path;
+
+    #[test]
+    fn desktop_includes_app_and_mcp_eligible() {
+        let kind = PluginProfileKind::Desktop;
+        assert!(kind.harness_plugins().contains(&"tool.app"));
+        assert!(kind.includes_mcp());
+    }
+
+    #[test]
+    fn minimal_is_utility_only() {
+        assert_eq!(
+            PluginProfileKind::Minimal.harness_plugins(),
+            &["tool.utility"]
+        );
+        assert!(!PluginProfileKind::Minimal.includes_mcp());
+        let rows = harness_rows(PluginSettings::default().kind(), Path::new(""));
+        assert!(rows.iter().any(|row| row.plugin == "tool.app"));
+        let mut minimal = PluginSettings::default();
+        minimal.profile = "minimal".to_owned();
+        let rows = harness_rows(minimal.kind(), Path::new(""));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].plugin, "tool.utility");
+    }
+
+    #[test]
+    fn headless_omits_app() {
+        let plugins = PluginProfileKind::Headless.harness_plugins();
+        assert!(plugins.contains(&"tool.fs"));
+        assert!(!plugins.contains(&"tool.app"));
+        assert!(PluginProfileKind::Headless.includes_mcp());
+    }
+
+    #[test]
+    fn resolved_home_defaults_to_data_plugins() {
+        let settings = PluginSettings::default();
+        assert_eq!(
+            settings.resolved_home(Path::new("/tmp/ene-data")),
+            Path::new("/tmp/ene-data/plugins")
+        );
+        let mut custom = PluginSettings::default();
+        custom.home_dir = "/opt/ene-plugins".to_owned();
+        assert_eq!(
+            custom.resolved_home(Path::new("/tmp/ene-data")),
+            Path::new("/opt/ene-plugins")
+        );
+    }
 }

@@ -56,6 +56,7 @@ where
     H: ToolHandler,
 {
     let hello = expect_hello(&mut stream).await?;
+    let max_frame = hello.frame_limit();
     let ack = match build_ack(&hello, &handler) {
         Ok(ack) => ack,
         Err(reason) => {
@@ -66,16 +67,19 @@ where
                         reason: reason.clone(),
                     },
                 },
+                max_frame,
             )
             .await?;
             return Err(IpcError::Rejected(reason));
         }
     };
-    write_msg(&mut stream, &Message::HelloAck { body: ack }).await?;
+    write_msg(&mut stream, &Message::HelloAck { body: ack }, max_frame).await?;
     loop {
-        let bytes = read_frame(&mut stream, MAX_FRAME_BYTES).await?;
+        let bytes = read_frame(&mut stream, max_frame).await?;
         match Message::decode(&bytes)? {
-            Message::Ping { id } => write_msg(&mut stream, &Message::Pong { id }).await?,
+            Message::Ping { id } => {
+                write_msg(&mut stream, &Message::Pong { id }, max_frame).await?;
+            }
             Message::ToolList { id } => {
                 write_msg(
                     &mut stream,
@@ -83,6 +87,7 @@ where
                         id,
                         tools: handler.specs(),
                     },
+                    max_frame,
                 )
                 .await?;
             }
@@ -99,7 +104,12 @@ where
                         value: serde_json::json!({ "error": err.to_string() }),
                     },
                 };
-                write_msg(&mut stream, &Message::ToolResult { id, body: result }).await?;
+                write_msg(
+                    &mut stream,
+                    &Message::ToolResult { id, body: result },
+                    max_frame,
+                )
+                .await?;
             }
             Message::ToolCancel { id, .. } => {
                 write_msg(
@@ -112,11 +122,12 @@ where
                             value: serde_json::Value::Null,
                         },
                     },
+                    max_frame,
                 )
                 .await?;
             }
             Message::Drain { id } | Message::Shutdown { id } => {
-                write_msg(&mut stream, &Message::DrainAck { id }).await?;
+                write_msg(&mut stream, &Message::DrainAck { id }, max_frame).await?;
                 return Ok(());
             }
             other => return Err(IpcError::Unexpected(other.kind_name().to_owned())),
@@ -147,7 +158,7 @@ fn build_ack<H: ToolHandler>(hello: &HostHello, handler: &H) -> Result<HelloAck,
         None,
     )
     .map_err(|err| err.to_string())?;
-    if handler.digest() != hello.expected_digest {
+    if handler.digest() != hello.expected_digest && !hello.allow_unverified {
         return Err("manifest digest mismatch".to_owned());
     }
     let spawn_token = handler.spawn_token()?;
@@ -155,7 +166,7 @@ fn build_ack<H: ToolHandler>(hello: &HostHello, handler: &H) -> Result<HelloAck,
         plugin_id: handler.plugin_id().to_owned(),
         plugin_name: handler.plugin_name().to_owned(),
         plugin_version: "0.1.0".to_owned(),
-        manifest_digest: hello.expected_digest.clone(),
+        manifest_digest: handler.digest().to_owned(),
         protocols: negotiated,
         spawn_token,
     })
@@ -164,8 +175,9 @@ fn build_ack<H: ToolHandler>(hello: &HostHello, handler: &H) -> Result<HelloAck,
 async fn write_msg<S: AsyncWrite + Unpin>(
     stream: &mut S,
     message: &Message,
+    max_frame: usize,
 ) -> Result<(), IpcError> {
-    write_frame(stream, &message.encode()?, MAX_FRAME_BYTES).await
+    write_frame(stream, &message.encode()?, max_frame).await
 }
 
 /// Connect to `ENE_PLUGIN_SOCKET` and serve until drain/shutdown.

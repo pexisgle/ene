@@ -480,3 +480,12 @@ fn exe_plugin_candidates_include_plugins_dir() {
         ]
     );
 }
+
+#[test]
+fn discover_plugin_executable_in_searches_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("ene-harness-utility");
+    std::fs::write(&binary, b"#!/bin/true\n").unwrap();
+    let found = crate::spawn::discover_plugin_executable_in("tool.utility", Some(dir.path()));
+    assert_eq!(found.as_deref(), Some(binary.as_path()));
+}

@@ -69,6 +69,8 @@ fn hello() -> HostHello {
         protocols: ProtocolRanges::host_supported(),
         expected_digest: "sha256:test".to_owned(),
         declared_protocols: vec![ProtoId::Core, ProtoId::Tool],
+        max_frame_bytes: 0,
+        allow_unverified: false,
     }
 }
 
@@ -134,6 +136,8 @@ async fn core_range_mismatch_rejects() {
         protocols: ranges,
         expected_digest: "sha256:test".to_owned(),
         declared_protocols: vec![ProtoId::Core, ProtoId::Tool],
+        max_frame_bytes: 0,
+        allow_unverified: false,
     };
     let (host_side, plugin_side) = UnixStream::pair().unwrap();
     let plugin = spawn_echo_plugin(plugin_side);
@@ -166,6 +170,44 @@ async fn spawn_token_mismatch_rejects() {
     .unwrap_err();
     assert!(matches!(err, IpcError::DigestMismatch));
     drop(plugin);
+}
+
+#[tokio::test]
+async fn digest_mismatch_rejects_unless_allow_unverified() {
+    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let plugin = spawn_echo_plugin(plugin_side);
+    let mut denied = hello();
+    denied.expected_digest = "sha256:other".to_owned();
+    let err = HostConn::handshake(
+        host_side,
+        denied,
+        &[ProtoId::Core, ProtoId::Tool],
+        SPAWN_TOKEN,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        IpcError::Rejected(_) | IpcError::DigestMismatch
+    ));
+    drop(plugin);
+
+    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let plugin = spawn_echo_plugin(plugin_side);
+    let mut allowed = hello();
+    allowed.expected_digest = "sha256:other".to_owned();
+    allowed.allow_unverified = true;
+    let mut host = HostConn::handshake(
+        host_side,
+        allowed,
+        &[ProtoId::Core, ProtoId::Tool],
+        SPAWN_TOKEN,
+    )
+    .await
+    .unwrap();
+    host.ping().await.unwrap();
+    host.drain().await.unwrap();
+    plugin.await.unwrap().unwrap();
 }
 
 fn record_baseline(name: &str, body: impl AsRef<[u8]>) {
@@ -267,6 +309,8 @@ async fn llm_generate_roundtrip_without_tool_face() {
         protocols: ProtocolRanges::host_supported(),
         expected_digest: "sha256:test".to_owned(),
         declared_protocols: vec![ProtoId::Core, ProtoId::Provider],
+        max_frame_bytes: 0,
+        allow_unverified: false,
     };
     let mut host = HostConn::handshake(
         host_side,

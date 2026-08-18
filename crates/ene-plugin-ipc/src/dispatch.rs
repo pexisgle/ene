@@ -88,6 +88,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let hello = expect_hello(&mut stream).await?;
+    let max_frame = hello.frame_limit();
     let ack = match build_ack(&hello, &identity, &handlers) {
         Ok(ack) => ack,
         Err(reason) => {
@@ -98,34 +99,57 @@ where
                         reason: reason.clone(),
                     },
                 },
+                max_frame,
             )
             .await?;
             return Err(IpcError::Rejected(reason));
         }
     };
-    write_msg(&mut stream, &Message::HelloAck { body: ack }).await?;
+    write_msg(&mut stream, &Message::HelloAck { body: ack }, max_frame).await?;
     loop {
-        let bytes = read_frame(&mut stream, MAX_FRAME_BYTES).await?;
+        let bytes = read_frame(&mut stream, max_frame).await?;
         match Message::decode(&bytes)? {
-            Message::Ping { id } => write_msg(&mut stream, &Message::Pong { id }).await?,
+            Message::Ping { id } => {
+                write_msg(&mut stream, &Message::Pong { id }, max_frame).await?;
+            }
             Message::LlmGenerate { id, body } => {
                 let reply = dispatch_llm(handlers.llm.as_ref(), body).await;
-                write_msg(&mut stream, &Message::LlmDone { id, body: reply }).await?;
+                write_msg(
+                    &mut stream,
+                    &Message::LlmDone { id, body: reply },
+                    max_frame,
+                )
+                .await?;
             }
             Message::EmbedEncode { id, body } => {
                 let reply = dispatch_embed(handlers.embed.as_ref(), body).await;
-                write_msg(&mut stream, &Message::EmbedResult { id, body: reply }).await?;
+                write_msg(
+                    &mut stream,
+                    &Message::EmbedResult { id, body: reply },
+                    max_frame,
+                )
+                .await?;
             }
             Message::TtsSynthesize { id, body } => {
                 let reply = dispatch_tts(handlers.tts.as_ref(), body).await;
-                write_msg(&mut stream, &Message::TtsResult { id, body: reply }).await?;
+                write_msg(
+                    &mut stream,
+                    &Message::TtsResult { id, body: reply },
+                    max_frame,
+                )
+                .await?;
             }
             Message::SttTranscribe { id, body } => {
                 let reply = dispatch_stt(handlers.stt.as_ref(), body).await;
-                write_msg(&mut stream, &Message::SttResult { id, body: reply }).await?;
+                write_msg(
+                    &mut stream,
+                    &Message::SttResult { id, body: reply },
+                    max_frame,
+                )
+                .await?;
             }
             Message::Drain { id } | Message::Shutdown { id } => {
-                write_msg(&mut stream, &Message::DrainAck { id }).await?;
+                write_msg(&mut stream, &Message::DrainAck { id }, max_frame).await?;
                 return Ok(());
             }
             other => return Err(IpcError::Unexpected(other.kind_name().to_owned())),
@@ -212,7 +236,7 @@ fn build_ack(
     if !hello.declared_protocols.contains(&ProtoId::Core) {
         return Err("manifest must declare core".to_owned());
     }
-    if identity.digest != hello.expected_digest {
+    if identity.digest != hello.expected_digest && !hello.allow_unverified {
         return Err("manifest digest mismatch".to_owned());
     }
     let plugin_tool = hello
@@ -231,7 +255,7 @@ fn build_ack(
         plugin_id: identity.plugin_id.clone(),
         plugin_name: identity.plugin_name.clone(),
         plugin_version: "0.1.0".to_owned(),
-        manifest_digest: hello.expected_digest.clone(),
+        manifest_digest: identity.digest.clone(),
         protocols: negotiated,
         spawn_token,
     })
@@ -240,8 +264,9 @@ fn build_ack(
 async fn write_msg<S: AsyncWrite + Unpin>(
     stream: &mut S,
     message: &Message,
+    max_frame: usize,
 ) -> Result<(), IpcError> {
-    write_frame(stream, &message.encode()?, MAX_FRAME_BYTES).await
+    write_frame(stream, &message.encode()?, max_frame).await
 }
 
 /// Connect to `ENE_PLUGIN_SOCKET` and serve provider faces until drain.

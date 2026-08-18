@@ -1378,6 +1378,40 @@ async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
 }
 
 #[tokio::test]
+async fn plugins_profile_minimal_unloads_non_utility_harness() {
+    let (_dir, client, core, server) = boot_server().await;
+    let settings = client.settings().await.unwrap();
+    assert_eq!(
+        settings.pointer("/effective/plugins/profile"),
+        Some(&serde_json::json!("desktop"))
+    );
+    let before = client.list_tools().await.unwrap();
+    let names: Vec<&str> = before.items.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(names.contains(&"app.screenshot"), "{names:?}");
+    assert!(names.contains(&"utility.hash"), "{names:?}");
+
+    client
+        .patch_settings(&serde_json::json!({
+            "plugins": { "profile": "minimal" }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(core.plugins().lock().profile, "minimal");
+    let after = client.list_tools().await.unwrap();
+    let names: Vec<&str> = after.items.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(names.contains(&"utility.hash"), "{names:?}");
+    assert!(
+        !names.contains(&"app.screenshot"),
+        "minimal profile must drop app: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name.starts_with("fs.")),
+        "minimal profile must drop fs: {names:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn mcp_document_round_trips_through_http() {
     let (_dir, client, core, server) = boot_server().await;
     let empty = client.mcp().await.unwrap();

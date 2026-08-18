@@ -52,6 +52,8 @@ pub(crate) struct SpawnOpts<'a> {
     pub temp_dir: &'a Path,
     pub workspace: &'a Path,
     pub config: &'a serde_json::Value,
+    pub max_frame_bytes: u32,
+    pub allow_unverified: bool,
 }
 
 /// BLAKE3 digest of a plugin binary or script file (`blake3:<hex>`).
@@ -117,6 +119,8 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
         protocols: ProtocolRanges::host_supported(),
         expected_digest: opts.digest.to_owned(),
         declared_protocols: declared.clone(),
+        max_frame_bytes: opts.max_frame_bytes,
+        allow_unverified: opts.allow_unverified,
     };
     let handshake = timeout(
         HELLO_TIMEOUT,
@@ -310,39 +314,51 @@ fn apply_sandbox(command: &mut Command, spec: Option<&SandboxSpec>) -> Result<()
     Ok(())
 }
 
-#[must_use]
-pub fn discover_plugin_bin(stem: &str) -> Option<PathBuf> {
-    plugin_candidates(stem)
-        .into_iter()
-        .find(|path| path.is_file())
-}
-
 /// Resolve a profile plugin id to an executable path (native binary or script).
 #[must_use]
 pub fn discover_plugin_executable(plugin: &str) -> Option<PathBuf> {
+    discover_plugin_executable_in(plugin, None)
+}
+
+/// Same as [`discover_plugin_executable`], also searching `plugins.home_dir`.
+#[must_use]
+pub fn discover_plugin_executable_in(plugin: &str, home: Option<&Path>) -> Option<PathBuf> {
     match plugin {
-        "tool.utility" => discover_plugin_bin("ene-harness-utility"),
-        "tool.fs" => discover_plugin_bin("ene-harness-fs"),
-        "tool.exec" => discover_plugin_bin("ene-harness-exec"),
-        "tool.web" => discover_plugin_bin("ene-harness-web"),
-        "tool.app" => discover_plugin_bin("ene-harness-app"),
+        "tool.utility" => discover_plugin_bin_in("ene-harness-utility", home),
+        "tool.fs" => discover_plugin_bin_in("ene-harness-fs", home),
+        "tool.exec" => discover_plugin_bin_in("ene-harness-exec", home),
+        "tool.web" => discover_plugin_bin_in("ene-harness-web", home),
+        "tool.app" => discover_plugin_bin_in("ene-harness-app", home),
         "tool.dummy" => discover_plugin_script("plugin.py"),
-        other if other.starts_with("mcp.") => discover_plugin_bin("ene-harness-mcp"),
-        other => {
-            crate::providers::provider_plugin(other).and_then(|meta| discover_plugin_bin(meta.bin))
-        }
+        other if other.starts_with("mcp.") => discover_plugin_bin_in("ene-harness-mcp", home),
+        other => crate::providers::provider_plugin(other)
+            .and_then(|meta| discover_plugin_bin_in(meta.bin, home)),
     }
 }
 
 #[must_use]
-pub fn discover_plugin_script(name: &str) -> Option<PathBuf> {
-    plugin_candidates(name)
+pub fn discover_plugin_bin(stem: &str) -> Option<PathBuf> {
+    discover_plugin_bin_in(stem, None)
+}
+
+fn discover_plugin_bin_in(stem: &str, home: Option<&Path>) -> Option<PathBuf> {
+    plugin_candidates(stem, home)
         .into_iter()
         .find(|path| path.is_file())
 }
 
-fn plugin_candidates(stem: &str) -> Vec<PathBuf> {
+#[must_use]
+pub fn discover_plugin_script(name: &str) -> Option<PathBuf> {
+    plugin_candidates(name, None)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+fn plugin_candidates(stem: &str, home: Option<&Path>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+    if let Some(home) = home.filter(|path| !path.as_os_str().is_empty()) {
+        candidates.extend(exe_plugin_candidates(home, stem));
+    }
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {

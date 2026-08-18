@@ -13,11 +13,12 @@ use ene_companion::{
 };
 use ene_fiber::Supervisor;
 use ene_kernel::{
-    AiSettings, ConversationModel, CoreSettings, LaneHandle, LaneOptions, SpeechPresenter,
-    SurfaceRouter, TaskBinding, TurnFinalizer, TurnPrefetch, format_recovery_note,
+    AiSettings, ConversationModel, CoreSettings, LaneHandle, LaneOptions, PluginSettings,
+    SpeechPresenter, SurfaceRouter, TaskBinding, TurnFinalizer, TurnPrefetch, format_recovery_note,
 };
 use ene_plane::{
-    ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink, Vault,
+    ApprovalMode, ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink,
+    Vault,
 };
 use ene_registry::ToolRegistry;
 use ene_session::{
@@ -97,6 +98,7 @@ pub struct CoreDaemon {
     popup: Arc<PendingPopup>,
     settings: CoreSettings,
     ai: Arc<parking_lot::Mutex<ene_kernel::AiSettings>>,
+    plugins: Arc<parking_lot::Mutex<PluginSettings>>,
     chat_secret: Arc<parking_lot::Mutex<String>>,
     classifier_secret: Arc<parking_lot::Mutex<String>>,
     embedding_secret: Arc<parking_lot::Mutex<String>>,
@@ -116,6 +118,7 @@ impl CoreDaemon {
         std::fs::create_dir_all(&opts.data_dir)?;
         let settings = load_core_settings(&opts.data_dir);
         let ai = load_ai_settings(&opts.data_dir);
+        let plugins = load_plugin_settings(&opts.data_dir);
         let mind = load_mind_settings(&opts.data_dir);
         let lock = lock_data_dir(&opts.data_dir)?;
         let db_path = opts.data_dir.join("sessions.db");
@@ -133,7 +136,15 @@ impl CoreDaemon {
         registry.set_workspace(workspace.clone());
         let audit = AuditLog::open(opts.data_dir.join("audit.db"))?;
         let popup = Arc::new(PendingPopup::new());
-        let approval_settings = ApprovalSettings::default();
+        let mut approval_settings = ApprovalSettings::default();
+        if let Some(mode) = ApprovalMode::parse(&plugins.policy.approval_mode) {
+            approval_settings.mode = mode;
+        } else if !plugins.policy.approval_mode.is_empty() {
+            tracing::warn!(
+                mode = %plugins.policy.approval_mode,
+                "unknown plugins.policy.approval_mode; using policy"
+            );
+        }
         let plane = Arc::new(ApprovalPlane::new(
             approval_settings.clone(),
             audit,
@@ -204,6 +215,7 @@ impl CoreDaemon {
             popup,
             settings,
             ai: Arc::new(parking_lot::Mutex::new(ai)),
+            plugins: Arc::new(parking_lot::Mutex::new(plugins)),
             chat_secret: Arc::new(parking_lot::Mutex::new(chat_secret)),
             classifier_secret: Arc::new(parking_lot::Mutex::new(classifier_secret)),
             embedding_secret: Arc::new(parking_lot::Mutex::new(embedding_secret)),
@@ -236,6 +248,11 @@ impl CoreDaemon {
     #[must_use]
     pub fn ai(&self) -> Arc<parking_lot::Mutex<AiSettings>> {
         Arc::clone(&self.ai)
+    }
+
+    #[must_use]
+    pub fn plugins(&self) -> Arc<parking_lot::Mutex<PluginSettings>> {
+        Arc::clone(&self.plugins)
     }
 
     /// Vault value for `ai.tasks.<task>`, falling back to the chat key.
@@ -310,7 +327,17 @@ impl CoreDaemon {
     /// Spawn harness tools, provider plugins, and handwritten MCP rows.
     pub async fn apply_plugin_profile(&self) {
         let ai = self.ai.lock().clone();
-        let rows = crate::plugin_profile::collect_rows(&self.data_dir, &self.work, &ai);
+        let plugins = self.plugins.lock().clone();
+        let home = plugins.resolved_home(&self.data_dir);
+        if let Err(err) = std::fs::create_dir_all(&home) {
+            tracing::warn!(error = %err, path = %home.display(), "plugin home_dir not created");
+        }
+        self.supervisor.set_plugin_runtime(
+            home,
+            plugins.ipc.max_frame_bytes,
+            plugins.policy.allow_unverified,
+        );
+        let rows = crate::plugin_profile::collect_rows(&self.data_dir, &self.work, &ai, &plugins);
         let report = self.supervisor.apply_profile(&rows).await;
         if !report.waiting.is_empty() {
             tracing::warn!(waiting = ?report.waiting, "plugin profile rows waiting");
@@ -334,6 +361,10 @@ impl CoreDaemon {
         store_secret(&self.proactive_secret, secrets.proactive);
         store_secret(&self.tts_secret, secrets.tts);
         store_secret(&self.stt_secret, secrets.stt);
+    }
+
+    pub fn replace_plugins(&self, plugins: PluginSettings) {
+        *self.plugins.lock() = plugins;
     }
 
     #[must_use]
@@ -621,6 +652,20 @@ fn load_ai_settings(data_dir: &Path) -> AiSettings {
     settings
 }
 
+fn load_plugin_settings(data_dir: &Path) -> PluginSettings {
+    let mut settings = PluginSettings::default();
+    let path = data_dir.join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(&path)
+        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(plugins) = file.get("plugins")
+        && let Ok(overlay) = serde_json::from_value::<PluginSettings>(plugins.clone())
+    {
+        settings = overlay;
+    }
+    apply_plugin_env(&mut settings);
+    settings
+}
+
 fn load_mind_settings(data_dir: &Path) -> CompanionMind {
     let path = data_dir.join("settings.json");
     if let Ok(raw) = std::fs::read_to_string(&path)
@@ -640,6 +685,32 @@ fn apply_ai_env(settings: &mut AiSettings) {
     apply_task_env("ENE_AI__TASKS__PROACTIVE", &mut settings.tasks.proactive);
     apply_task_env("ENE_AI__TASKS__TTS", &mut settings.tasks.tts);
     apply_task_env("ENE_AI__TASKS__STT", &mut settings.tasks.stt);
+}
+
+fn apply_plugin_env(settings: &mut PluginSettings) {
+    if let Ok(profile) = std::env::var("ENE_PLUGINS__PROFILE")
+        && !profile.is_empty()
+    {
+        settings.profile = profile;
+    }
+    if let Ok(home) = std::env::var("ENE_PLUGINS__HOME_DIR")
+        && !home.is_empty()
+    {
+        settings.home_dir = home;
+    }
+    if let Ok(mode) = std::env::var("ENE_PLUGINS__POLICY__APPROVAL_MODE")
+        && !mode.is_empty()
+    {
+        settings.policy.approval_mode = mode;
+    }
+    if let Ok(raw) = std::env::var("ENE_PLUGINS__POLICY__ALLOW_UNVERIFIED") {
+        settings.policy.allow_unverified = matches!(raw.as_str(), "1" | "true" | "TRUE");
+    }
+    if let Ok(raw) = std::env::var("ENE_PLUGINS__IPC__MAX_FRAME_BYTES")
+        && let Ok(n) = raw.parse()
+    {
+        settings.ipc.max_frame_bytes = n;
+    }
 }
 
 fn apply_task_env(prefix: &str, binding: &mut TaskBinding) {
@@ -717,6 +788,36 @@ pub(crate) fn overlay_ai(live: &mut AiSettings, incoming: &serde_json::Value) {
     );
     overlay_task(&mut live.tasks.tts, incoming.pointer("/tasks/tts"));
     overlay_task(&mut live.tasks.stt, incoming.pointer("/tasks/stt"));
+}
+
+pub(crate) fn overlay_plugins(live: &mut PluginSettings, incoming: &serde_json::Value) {
+    if let Some(profile) = incoming.get("profile").and_then(serde_json::Value::as_str) {
+        live.profile = profile.to_owned();
+    }
+    if let Some(home) = incoming.get("home_dir").and_then(serde_json::Value::as_str) {
+        live.home_dir = home.to_owned();
+    }
+    if let Some(policy) = incoming.get("policy") {
+        if let Some(mode) = policy
+            .get("approval_mode")
+            .and_then(serde_json::Value::as_str)
+        {
+            live.policy.approval_mode = mode.to_owned();
+        }
+        if let Some(flag) = policy
+            .get("allow_unverified")
+            .and_then(serde_json::Value::as_bool)
+        {
+            live.policy.allow_unverified = flag;
+        }
+    }
+    if let Some(n) = incoming
+        .pointer("/ipc/max_frame_bytes")
+        .and_then(serde_json::Value::as_u64)
+        && let Ok(n) = u32::try_from(n)
+    {
+        live.ipc.max_frame_bytes = n;
+    }
 }
 
 fn overlay_task(dst: &mut TaskBinding, value: Option<&serde_json::Value>) {

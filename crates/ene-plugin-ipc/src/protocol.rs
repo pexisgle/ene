@@ -98,6 +98,19 @@ pub struct HostHello {
     pub protocols: ProtocolRanges,
     pub expected_digest: String,
     pub declared_protocols: Vec<ProtoId>,
+    /// `0` means the compile-time default (`MAX_FRAME_BYTES`).
+    #[serde(default)]
+    pub max_frame_bytes: u32,
+    /// Skip digest mismatch. Runtime source of truth is `plugins.policy.allow_unverified`.
+    #[serde(default)]
+    pub allow_unverified: bool,
+}
+
+impl HostHello {
+    #[must_use]
+    pub fn frame_limit(&self) -> usize {
+        crate::frame::frame_limit(self.max_frame_bytes)
+    }
 }
 
 /// Plugin `hello_ack`.

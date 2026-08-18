@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -23,7 +23,7 @@ use crate::profile::{
     ProfileApplyReport, active_provides, detect_require_cycles, inactive_cycle_fiber,
     missing_requires, waiting_fiber,
 };
-use crate::spawn::{SpawnOpts, SpawnedPlugin, discover_plugin_executable, spawn_plugin};
+use crate::spawn::{SpawnOpts, SpawnedPlugin, discover_plugin_executable_in, spawn_plugin};
 
 /// Profile row (manifest subset used at W1).
 #[derive(Debug, Clone)]
@@ -61,6 +61,9 @@ struct SupervisorInner {
     cycle_report: Mutex<Option<String>>,
     missing_requires: Mutex<HashMap<String, Vec<String>>>,
     prefer_in_process: AtomicBool,
+    plugin_home: Mutex<PathBuf>,
+    max_frame_bytes: AtomicU32,
+    allow_unverified: AtomicBool,
 }
 
 /// Fiber supervisor. Reconcile is per-row; the core process is not restarted.
@@ -201,6 +204,9 @@ impl Supervisor {
                 cycle_report: Mutex::new(None),
                 missing_requires: Mutex::new(HashMap::new()),
                 prefer_in_process: AtomicBool::new(false),
+                plugin_home: Mutex::new(PathBuf::new()),
+                max_frame_bytes: AtomicU32::new(1_048_576),
+                allow_unverified: AtomicBool::new(false),
             }),
         }
     }
@@ -208,6 +214,24 @@ impl Supervisor {
     /// Use in-process builtin handlers instead of spawning harness binaries.
     pub fn set_prefer_in_process_builtins(&self, yes: bool) {
         self.inner.prefer_in_process.store(yes, Ordering::Relaxed);
+    }
+
+    /// Install home, IPC frame cap, and digest policy from `plugins.*`.
+    pub fn set_plugin_runtime(&self, home: PathBuf, max_frame_bytes: u32, allow_unverified: bool) {
+        *self.inner.plugin_home.lock() = home;
+        self.inner
+            .max_frame_bytes
+            .store(max_frame_bytes, Ordering::Relaxed);
+        self.inner
+            .allow_unverified
+            .store(allow_unverified, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn discover(&self, plugin: &str) -> Option<PathBuf> {
+        let home = self.inner.plugin_home.lock().clone();
+        let home = (!home.as_os_str().is_empty()).then_some(home);
+        discover_plugin_executable_in(plugin, home.as_deref())
     }
 
     #[must_use]
@@ -357,7 +381,7 @@ impl Supervisor {
             }
             return result;
         }
-        let result = if let Some(path) = discover_plugin_executable(&row.plugin) {
+        let result = if let Some(path) = self.discover(&row.plugin) {
             self.activate_process(row, &path).await.map(|_| ())
         } else if row.sandbox_required {
             Err(SupervisorError::UnknownPlugin(row.plugin.clone()))
@@ -442,6 +466,8 @@ impl Supervisor {
             temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row.row_id),
             workspace: &self.inner.workspace,
             config: &row.config,
+            max_frame_bytes: self.inner.max_frame_bytes.load(Ordering::Relaxed),
+            allow_unverified: self.inner.allow_unverified.load(Ordering::Relaxed),
         })
         .await
         {
