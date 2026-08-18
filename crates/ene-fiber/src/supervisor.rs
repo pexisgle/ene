@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ene_plugin_ipc::{BuiltinKind, HostConn, ToolCall};
+use ene_plugin_ipc::{
+    BuiltinKind, EmbedRequest, EmbedResult, HostConn, LlmGenerateRequest, LlmGeneration,
+    SttRequest, SttResult, ToolCall, TtsAudio, TtsRequest,
+};
 use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for};
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -29,6 +32,7 @@ pub struct ProfileRow {
     pub requires: Vec<String>,
     pub capabilities: Vec<String>,
     pub sandbox_required: bool,
+    pub config: Value,
 }
 
 /// Circuit breaker threshold for consecutive spawn/call failures.
@@ -108,6 +112,8 @@ pub enum SupervisorError {
     SandboxRequired,
     #[error("unknown plugin {0}")]
     UnknownPlugin(String),
+    #[error("provider unavailable: {0}")]
+    ProviderUnavailable(String),
     #[error("spawn: {0}")]
     Spawn(String),
     #[error("circuit open for row {0}")]
@@ -415,6 +421,7 @@ impl Supervisor {
             sandbox_required: row.sandbox_required,
             temp_dir: &self.inner.workspace.join("plugin-tmp").join(&row.row_id),
             workspace: &self.inner.workspace,
+            config: &row.config,
         })
         .await
         {
@@ -452,7 +459,12 @@ impl Supervisor {
         let pid = child.id();
         fiber.push_effect(Effect::SpawnProcess { pid });
         self.inner.children.lock().insert(row.row_id.clone(), child);
-        let tools = conn.list_tools().await?;
+        let faces = conn.negotiated().provider.clone();
+        let tools = if conn.negotiated().tool.is_some() {
+            conn.list_tools().await?
+        } else {
+            Vec::new()
+        };
         let session = Arc::new(PluginSession {
             conn: tokio::sync::Mutex::new(conn),
         });
@@ -487,6 +499,36 @@ impl Supervisor {
                     name: def.name.clone(),
                 });
                 self.inner.registry.register_with(def, Arc::clone(&invoke));
+            }
+        } else if row.plugin.starts_with("mcp.") {
+            for spec in tools {
+                let def = ToolDefinition::from_wire(spec, source.clone());
+                fiber.push_effect(Effect::RegisterTool {
+                    name: def.name.clone(),
+                });
+                self.inner.registry.register_with(def, Arc::clone(&invoke));
+            }
+        }
+        if let Some(faces) = faces {
+            if faces.llm.is_some() {
+                fiber.push_effect(Effect::BindSeam {
+                    name: "llm".to_owned(),
+                });
+            }
+            if faces.embed.is_some() {
+                fiber.push_effect(Effect::BindSeam {
+                    name: "embed".to_owned(),
+                });
+            }
+            if faces.tts.is_some() {
+                fiber.push_effect(Effect::BindSeam {
+                    name: "tts".to_owned(),
+                });
+            }
+            if faces.stt.is_some() {
+                fiber.push_effect(Effect::BindSeam {
+                    name: "stt".to_owned(),
+                });
             }
         }
         {
@@ -573,6 +615,72 @@ impl Supervisor {
             .iter()
             .any(|schema| schema.get("name").and_then(|v| v.as_str()) == Some(name))
     }
+
+    /// First active plugin bound to `seam.llm` matching `plugin`, or any llm seam.
+    pub async fn generate_llm(
+        &self,
+        plugin: &str,
+        request: LlmGenerateRequest,
+    ) -> Result<LlmGeneration, SupervisorError> {
+        let session = self.provider_session(plugin, "seam.llm")?;
+        let mut conn = session.conn.lock().await;
+        conn.generate_llm(request).await.map_err(Into::into)
+    }
+
+    pub async fn embed(
+        &self,
+        plugin: &str,
+        request: EmbedRequest,
+    ) -> Result<EmbedResult, SupervisorError> {
+        let session = self.provider_session(plugin, "seam.embed")?;
+        let mut conn = session.conn.lock().await;
+        conn.embed(request).await.map_err(Into::into)
+    }
+
+    pub async fn synthesize_tts(
+        &self,
+        plugin: &str,
+        request: TtsRequest,
+    ) -> Result<TtsAudio, SupervisorError> {
+        let session = self.provider_session(plugin, "seam.tts")?;
+        let mut conn = session.conn.lock().await;
+        conn.synthesize_tts(request).await.map_err(Into::into)
+    }
+
+    pub async fn transcribe(
+        &self,
+        plugin: &str,
+        request: SttRequest,
+    ) -> Result<SttResult, SupervisorError> {
+        let session = self.provider_session(plugin, "seam.stt")?;
+        let mut conn = session.conn.lock().await;
+        conn.transcribe(request).await.map_err(Into::into)
+    }
+
+    fn provider_session(
+        &self,
+        plugin: &str,
+        seam: &str,
+    ) -> Result<Arc<PluginSession>, SupervisorError> {
+        let row_id = self
+            .inner
+            .fibers
+            .lock()
+            .values()
+            .find(|fiber| {
+                fiber.state == FiberState::Active
+                    && fiber.plugin == plugin
+                    && fiber.provides.iter().any(|key| key == seam)
+            })
+            .map(|fiber| fiber.row_id.clone())
+            .ok_or_else(|| SupervisorError::ProviderUnavailable(plugin.to_owned()))?;
+        self.inner
+            .sessions
+            .lock()
+            .get(&row_id)
+            .cloned()
+            .ok_or_else(|| SupervisorError::ProviderUnavailable(plugin.to_owned()))
+    }
 }
 
 impl Drop for Supervisor {
@@ -588,6 +696,9 @@ fn resolve_plugin_id(plugin: &str) -> Option<String> {
         return Some(kind.plugin_id().to_owned());
     }
     if plugin == "tool.dummy" {
+        return Some(plugin.to_owned());
+    }
+    if plugin.starts_with("provider.") || plugin.starts_with("mcp.") {
         return Some(plugin.to_owned());
     }
     None
@@ -609,6 +720,7 @@ fn finish_active(fiber: &mut Fiber) {
         .filter_map(|effect| match effect {
             Effect::RegisterTool { name } => Some(format!("tool.{name}")),
             Effect::BrokerGrant { op } => Some(format!("broker.{op}")),
+            Effect::BindSeam { name } => Some(format!("seam.{name}")),
             Effect::SpawnProcess { .. } => None,
         })
         .collect();
@@ -629,6 +741,7 @@ fn plugin_kind(plugin: &str) -> Option<BuiltinKind> {
         "tool.exec" => Some(BuiltinKind::Exec),
         "tool.web" => Some(BuiltinKind::Web),
         "tool.utility" => Some(BuiltinKind::Utility),
+        "tool.app" => Some(BuiltinKind::App),
         _ => None,
     }
 }

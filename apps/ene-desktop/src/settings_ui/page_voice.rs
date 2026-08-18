@@ -6,15 +6,54 @@ use crate::settings::CharacterSettings;
 use super::components::{section_card, toggle_row};
 use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
+use super::provider_form::{
+    AUDIO_PLUGINS, STT_PLUGINS, plugin_combo, plugin_needs_key, provider_description,
+};
+use serde_json::{Value, json};
 
 pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
-    _draft: &mut SettingsDraft,
+    draft: &mut SettingsDraft,
     ai: &Arc<CoreSession>,
     input: &mut SettingsInputState,
     world: &mut bevy_ecs::world::World,
 ) {
+    input.core_settings.poll();
+    if !input.core_settings.started() {
+        input.core_settings.start(ai.fetch_core_settings());
+    }
+    if let Some(Ok(core)) = &input.core_settings.data
+        && draft.editing().section_value("ai").is_none()
+        && let Some(ai_value) = core.pointer("/effective/ai")
+    {
+        draft.seed_core_section("ai", ai_value.clone());
+        input.ai_tts_key_set = core
+            .pointer("/effective/ai_tts_key_set")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        input.ai_stt_key_set = core
+            .pointer("/effective/ai_stt_key_set")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    }
+
+    section_card(
+        ui,
+        "voice-tts",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-section"),
+        |ui| {
+            render_audio_binding(ui, draft, input, "tts", AUDIO_PLUGINS);
+        },
+    );
+    section_card(
+        ui,
+        "voice-stt",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "audio-stt-section"),
+        |ui| {
+            render_audio_binding(ui, draft, input, "stt", STT_PLUGINS);
+        },
+    );
     section_card(
         ui,
         "voice-mic",
@@ -88,4 +127,106 @@ pub fn render(
             }
         },
     );
+}
+
+fn render_audio_binding(
+    ui: &mut egui::Ui,
+    draft: &mut SettingsDraft,
+    input: &mut SettingsInputState,
+    task: &str,
+    plugins: &[&str],
+) {
+    let mut binding = draft
+        .editing()
+        .section_value("ai")
+        .and_then(|ai| ai.pointer(&format!("/tasks/{task}")).cloned())
+        .unwrap_or_else(|| json!({ "plugin": "echo", "model": "echo" }));
+    let mut plugin = binding
+        .get("plugin")
+        .and_then(Value::as_str)
+        .unwrap_or("echo")
+        .to_owned();
+    plugin_combo(ui, &format!("voice-{task}-plugin"), &mut plugin, plugins);
+    if let Some(desc) = provider_description(&plugin) {
+        ui.weak(desc);
+    }
+    let mut model = binding
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let mut voice = binding
+        .get("voice")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let mut base_url = binding
+        .get("base_url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-model-label"));
+    let model_changed = ui
+        .add(egui::TextEdit::singleline(&mut model).desired_width(f32::INFINITY))
+        .changed();
+    if task == "tts" {
+        ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-voice-label"));
+    }
+    let voice_changed = task == "tts"
+        && ui
+            .add(egui::TextEdit::singleline(&mut voice).desired_width(f32::INFINITY))
+            .changed();
+    ui.label(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "ai-base-url-label"
+    ));
+    let url_changed = ui
+        .add(egui::TextEdit::singleline(&mut base_url).desired_width(f32::INFINITY))
+        .changed();
+    let mut key_changed = false;
+    if plugin_needs_key(&plugin) {
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "ai-api-key-label"
+        ));
+        let (buffer, set) = if task == "tts" {
+            (&mut input.ai_tts_key, input.ai_tts_key_set)
+        } else {
+            (&mut input.ai_stt_key, input.ai_stt_key_set)
+        };
+        if set && buffer.is_empty() {
+            ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-key-set"));
+        }
+        key_changed = ui
+            .add(
+                egui::TextEdit::singleline(buffer)
+                    .password(true)
+                    .desired_width(f32::INFINITY),
+            )
+            .changed();
+    }
+    if plugin != binding.get("plugin").and_then(Value::as_str).unwrap_or("")
+        || model_changed
+        || voice_changed
+        || url_changed
+        || key_changed
+    {
+        binding["plugin"] = json!(plugin);
+        binding["model"] = json!(model);
+        binding["base_url"] = json!(base_url);
+        if task == "tts" {
+            binding["voice"] = json!(voice);
+            if !input.ai_tts_key.is_empty() {
+                binding["api_key"] = json!(input.ai_tts_key.clone());
+            }
+        } else if !input.ai_stt_key.is_empty() {
+            binding["api_key"] = json!(input.ai_stt_key.clone());
+        }
+        let mut ai = draft
+            .editing()
+            .section_value("ai")
+            .unwrap_or_else(|| json!({ "tasks": {} }));
+        ai["tasks"][task] = binding;
+        draft.set_section_value("ai", ai);
+    }
 }

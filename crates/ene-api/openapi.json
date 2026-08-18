@@ -32,6 +32,7 @@
     "/sessions/{id}/split": { "post": { "summary": "Explicit split: end current, open a new session for the same soul", "responses": { "200": { "description": "split" } } } },
     "/sessions/{id}/end": { "post": { "summary": "End session (explicit or idle_timeout)", "responses": { "200": { "description": "session" } } } },
     "/sessions/{id}/barge-in": { "post": { "summary": "Abort the running turn (voice barge-in)", "responses": { "200": { "description": "ok" } } } },
+    "/sessions/{id}/listen": { "post": { "summary": "Transcribe PCM through ai.tasks.stt and prompt if non-empty", "responses": { "200": { "description": "accepted or empty" } } } },
     "/sessions/{id}/export": { "post": { "summary": "JSON export", "responses": { "200": { "description": "export" } } } },
     "/sessions/{id}/messages": { "post": { "summary": "prompt | steer | follow_up", "responses": { "200": { "description": "accepted" }, "409": { "description": "lane_busy" } } } },
     "/sessions/{id}/history": { "get": { "summary": "Projected history", "parameters": [{ "name": "depth", "in": "query", "schema": { "enum": ["surface", "detail"] } }], "responses": { "200": { "description": "history" } } } },
@@ -59,6 +60,10 @@
     "/tools/{name}/test": { "post": { "summary": "Dev invoke", "responses": { "200": { "description": "result" } } } },
     "/plugins": { "get": { "summary": "Plugin fibers", "responses": { "200": { "description": "page" } } } },
     "/plugins/{id}/restart": { "post": { "summary": "Disable then activate row", "responses": { "200": { "description": "plugin" } } } },
+    "/mcp": {
+      "get": { "summary": "Handwritten MCP servers (mcp.json)", "responses": { "200": { "description": "document" } } },
+      "put": { "summary": "Replace handwritten MCP servers and apply profile rows", "responses": { "200": { "description": "document" } } }
+    },
     "/approvals": { "get": { "summary": "Pending popups", "responses": { "200": { "description": "page" } } } },
     "/approvals/{id}/respond": { "post": { "summary": "First writer wins", "responses": { "200": { "description": "ok" }, "409": { "description": "already_resolved" } } } },
     "/characters": { "get": { "summary": "Installed packages", "responses": { "200": { "description": "page" } } } },

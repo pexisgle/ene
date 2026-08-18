@@ -67,7 +67,7 @@ fn focus_accent(ui: &Ui) -> Color32 {
     }
 }
 
-pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 56] = [
+pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 53] = [
     ("character-model", "section-character-model"),
     ("character-transform", "section-character-transform"),
     ("character-expressions", "section-character-expressions"),
@@ -85,8 +85,9 @@ pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 56] = [
     ("graphics-language", "section-graphics-language"),
     ("graphics-theme", "section-graphics-theme"),
     ("ai-chat", "section-ai-chat"),
+    ("ai-classifier", "section-ai-classifier"),
+    ("ai-proactive", "section-ai-proactive"),
     ("ai-embedding", "section-ai-embedding"),
-    ("ai-health", "section-ai-health"),
     ("voice-tts", "audio-tts-section"),
     ("voice-stt", "audio-stt-section"),
     ("voice-mic", "audio-mic-section"),
@@ -101,7 +102,7 @@ pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 56] = [
     ("permissions-pending", "permissions-pending"),
     ("permissions-grants", "permissions-granted"),
     ("approvals-policy", "approvals-title"),
-    ("engines-catalog", "engines-catalog"),
+    ("engines-plugins", "engines"),
     ("engines-list", "engines-list"),
     ("connectors-list", "connectors-list"),
     ("connectors-detail", "connectors-status-title"),
@@ -121,11 +122,7 @@ pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 56] = [
     ("memory-config", "memory-config-storage"),
     ("memory-approval", "memory-config-approval"),
     ("memory-limits", "memory-config-limits"),
-    ("plugins-general", "plugins-general-title"),
-    ("plugins-tools", "plugins-tab-tools"),
-    ("plugins-providers", "plugins-tab-providers"),
-    ("plugins-mcp", "plugins-mcp-title"),
-    ("plugins-discovered", "plugins-discovered-title"),
+    ("plugins-list", "tools-and-plugins"),
     ("advanced-sections", "advanced-sections"),
 ];
 

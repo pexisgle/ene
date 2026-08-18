@@ -29,14 +29,14 @@ impl ToolDefinition {
     pub fn from_wire(spec: ToolSpecWire, source: ToolSource) -> Self {
         if let Some(host) = host_spec_for(&spec.name) {
             return Self {
-                name: spec.name,
+                name: spec.name.clone(),
                 description: host.description,
                 parameters: host.parameters,
                 output: host.output,
                 side_effects: host.side_effects,
                 source,
                 timeout_ms: None,
-                sensitivity: Sensitivity::None,
+                sensitivity: crate::builtins::host_sensitivity(&spec.name),
             };
         }
         let side_effects = spec.side_effects;

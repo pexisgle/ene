@@ -27,6 +27,7 @@ pub(crate) struct SpawnOpts<'a> {
     pub sandbox_required: bool,
     pub temp_dir: &'a Path,
     pub workspace: &'a Path,
+    pub config: &'a serde_json::Value,
 }
 
 /// BLAKE3 digest of a plugin binary or script file (`blake3:<hex>`).
@@ -60,6 +61,7 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
         opts.temp_dir,
         &spawn_token,
         opts.workspace,
+        opts.config,
     );
     apply_sandbox(&mut command, sandbox.as_ref())?;
     let mut child = command
@@ -84,16 +86,17 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
             "plugin exited before hello completed".to_owned(),
         ));
     }
+    let declared = declared_protocols(opts.plugin_id);
     let hello = HostHello {
         host_name: "ene-core".to_owned(),
         host_version: "0.1.0".to_owned(),
         protocols: ProtocolRanges::host_supported(),
         expected_digest: opts.digest.to_owned(),
-        declared_protocols: vec![ProtoId::Core, ProtoId::Tool],
+        declared_protocols: declared.clone(),
     };
     let handshake = timeout(
         HELLO_TIMEOUT,
-        HostConn::handshake(stream, hello, &[ProtoId::Core, ProtoId::Tool], &spawn_token),
+        HostConn::handshake(stream, hello, &declared, &spawn_token),
     )
     .await;
     let conn = match handshake {
@@ -122,6 +125,7 @@ fn plugin_command(
     temp_dir: &Path,
     spawn_token: &str,
     workspace: &Path,
+    config: &serde_json::Value,
 ) -> Command {
     let mut cmd = if let Some(interpreter) = script_interpreter(binary) {
         let mut command = Command::new(interpreter);
@@ -131,7 +135,29 @@ fn plugin_command(
         Command::new(binary)
     };
     cmd.env_clear();
-    for key in ["PATH", "HOME", "LANG", "TZ", "LD_LIBRARY_PATH"] {
+    for key in [
+        "PATH",
+        "HOME",
+        "LANG",
+        "TZ",
+        "LD_LIBRARY_PATH",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "RUST_LOG",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_TYPE",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ] {
         if let Ok(val) = std::env::var(key) {
             cmd.env(key, val);
         }
@@ -140,10 +166,23 @@ fn plugin_command(
     cmd.env("ENE_PLUGIN_SPAWN_TOKEN", spawn_token);
     cmd.env("ENE_WORKSPACE", workspace);
     cmd.env("TMPDIR", temp_dir);
+    if !config.is_null()
+        && let Ok(encoded) = serde_json::to_string(config)
+    {
+        cmd.env("ENE_PROVIDER_CONFIG", encoded);
+    }
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::inherit());
     cmd
+}
+
+fn declared_protocols(plugin_id: &str) -> Vec<ProtoId> {
+    if plugin_id.starts_with("provider.") {
+        vec![ProtoId::Core, ProtoId::Provider]
+    } else {
+        vec![ProtoId::Core, ProtoId::Tool]
+    }
 }
 
 fn script_interpreter(path: &Path) -> Option<String> {
@@ -259,8 +298,12 @@ pub fn discover_plugin_executable(plugin: &str) -> Option<PathBuf> {
         "tool.fs" => discover_plugin_bin("ene-harness-fs"),
         "tool.exec" => discover_plugin_bin("ene-harness-exec"),
         "tool.web" => discover_plugin_bin("ene-harness-web"),
+        "tool.app" => discover_plugin_bin("ene-harness-app"),
         "tool.dummy" => discover_plugin_script("plugin.py"),
-        _ => None,
+        other if other.starts_with("mcp.") => discover_plugin_bin("ene-harness-mcp"),
+        other => {
+            crate::providers::provider_plugin(other).and_then(|meta| discover_plugin_bin(meta.bin))
+        }
     }
 }
 

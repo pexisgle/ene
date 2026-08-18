@@ -1173,7 +1173,7 @@ mod tests {
                     ui,
                     &schema,
                     &mut value,
-                    "plugins.list.openai-tts.config",
+                    "ai.tasks.tts",
                     SchemaFormOptions {
                         show_advanced: true,
                         show_impact: true,

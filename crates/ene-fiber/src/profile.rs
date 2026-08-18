@@ -22,6 +22,8 @@ pub(crate) fn row_provides(plugin: &str, capabilities: &[String]) -> HashSet<Str
         }
     } else if plugin == "tool.dummy" {
         keys.insert("tool.dummy.ping".to_owned());
+    } else if let Some(meta) = crate::providers::provider_plugin(plugin) {
+        keys.extend(meta.seams.iter().map(|seam| (*seam).to_owned()));
     }
     for cap in capabilities {
         keys.insert(format!("broker.{cap}"));
@@ -141,6 +143,7 @@ fn plugin_kind(plugin: &str) -> Option<BuiltinKind> {
         "tool.exec" => Some(BuiltinKind::Exec),
         "tool.web" => Some(BuiltinKind::Web),
         "tool.utility" => Some(BuiltinKind::Utility),
+        "tool.app" => Some(BuiltinKind::App),
         _ => None,
     }
 }
@@ -156,6 +159,7 @@ mod tests {
             requires: requires.iter().map(|s| (*s).to_owned()).collect(),
             capabilities: Vec::new(),
             sandbox_required: false,
+            config: serde_json::Value::Null,
         }
     }
 

@@ -2108,6 +2108,7 @@ dependencies = [
  "ene-fiber",
  "ene-kernel",
  "ene-plane",
+ "ene-plugin-ipc",
  "ene-registry",
  "ene-session",
  "ene-work",
@@ -2205,6 +2206,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-harness-app"
+version = "0.1.0"
+dependencies = [
+ "ene-fiber",
+ "ene-plane",
+ "ene-plugin-ipc",
+ "ene-registry",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ene-harness-exec"
 version = "0.1.0"
 dependencies = [
@@ -2223,6 +2239,24 @@ dependencies = [
  "ene-plugin-ipc",
  "ene-registry",
  "ene-sandbox",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-harness-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "ene-fiber",
+ "ene-plugin-ipc",
+ "ene-registry",
+ "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2309,21 +2343,104 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-registry"
+name = "ene-provider-anthropic"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "ene-plugin-ipc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-provider-edge-tts"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "ene-plugin-ipc",
+ "futures",
+ "hex",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "ene-provider-elevenlabs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "ene-plugin-ipc",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-provider-openai-compat"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "ene-plugin-ipc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-provider-voicevox"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "ene-plugin-ipc",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ene-registry"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "blake3",
+ "chrono",
  "ene-plane",
  "ene-plugin-ipc",
  "parking_lot",
+ "regex",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -6219,7 +6336,9 @@ checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -6228,6 +6347,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -6462,6 +6582,7 @@ checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",

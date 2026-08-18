@@ -13,8 +13,10 @@
 
 mod boot;
 mod http;
+mod plugin_profile;
 
-pub use boot::{BootOptions, CoreDaemon, CoreError};
+pub(crate) use boot::overlay_ai;
+pub use boot::{BootOptions, CoreDaemon, CoreError, TaskSecrets};
 pub use http::ServerHandle;
 
 #[cfg(test)]

@@ -2,10 +2,10 @@ use crate::error::ApiError;
 use crate::types::{
     AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
     CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
-    ExclusiveSnapshot, Health, HistoryResponse, JobView, MemoryPatch, MemoryView, MessageRequest,
-    Page, PluginView, Problem, QueuedCancel, ResourceKind, RestoreRequest, ScheduleView,
-    SendMessageResponse, SessionPatch, SessionView, SoulPatch, SoulView, SpanView,
-    SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
+    ExclusiveSnapshot, Health, HistoryResponse, JobView, ListenRequest, McpDocument, MemoryPatch,
+    MemoryView, MessageRequest, Page, PluginView, Problem, QueuedCancel, ResourceKind,
+    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView, SoulPatch,
+    SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
@@ -184,6 +184,18 @@ impl ApiClient {
     pub async fn barge_in(&self, id: &str) -> Result<Value, ApiError> {
         self.send_json(self.request(Method::POST, &format!("/api/v1/sessions/{id}/barge-in")))
             .await
+    }
+
+    pub async fn listen(
+        &self,
+        id: &str,
+        req: &ListenRequest,
+    ) -> Result<SendMessageResponse, ApiError> {
+        self.send_json(
+            self.request(Method::POST, &format!("/api/v1/sessions/{id}/listen"))
+                .json(req),
+        )
+        .await
     }
 
     pub async fn stage(&self) -> Result<StageView, ApiError> {
@@ -365,6 +377,16 @@ impl ApiClient {
 
     pub async fn restart_plugin(&self, id: &str) -> Result<PluginView, ApiError> {
         self.send_json(self.request(Method::POST, &format!("/api/v1/plugins/{id}/restart")))
+            .await
+    }
+
+    pub async fn mcp(&self) -> Result<McpDocument, ApiError> {
+        self.send_json(self.request(Method::GET, "/api/v1/mcp"))
+            .await
+    }
+
+    pub async fn put_mcp(&self, body: &McpDocument) -> Result<McpDocument, ApiError> {
+        self.send_json(self.request(Method::PUT, "/api/v1/mcp").json(body))
             .await
     }
 

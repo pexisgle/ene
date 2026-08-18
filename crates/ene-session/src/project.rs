@@ -94,6 +94,8 @@ pub struct ProjectedMessage {
     pub step_index: Option<u32>,
     pub tool_name: Option<String>,
     pub tool_args: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl ProjectedMessage {
@@ -183,6 +185,7 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
                 step_index: None,
                 tool_name: None,
                 tool_args: None,
+                tool_call_id: None,
             }),
             EventKind::AssistantMessage => {
                 let (turn_id, step_index) = assistant_meta(&event.payload);
@@ -194,6 +197,7 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
                     step_index,
                     tool_name: None,
                     tool_args: None,
+                    tool_call_id: None,
                 });
             }
             EventKind::AssistantThinking
@@ -208,6 +212,7 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
                     step_index,
                     tool_name: None,
                     tool_args: None,
+                    tool_call_id: None,
                 });
             }
             EventKind::InnerMessage => {
@@ -224,6 +229,7 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
                     step_index: None,
                     tool_name: None,
                     tool_args: None,
+                    tool_call_id: None,
                 });
             }
             EventKind::SessionSummary => {
@@ -241,6 +247,7 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
                     step_index: None,
                     tool_name: None,
                     tool_args: None,
+                    tool_call_id: None,
                 });
             }
             EventKind::ToolCall => {
@@ -249,6 +256,7 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
                     args,
                     turn_id,
                     step_index,
+                    call_id,
                     ..
                 } = &event.payload
                 {
@@ -265,10 +273,16 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
                         step_index: Some(*step_index),
                         tool_name: Some(tool_name.clone()),
                         tool_args: options.include_tool_args.then(|| args.clone()),
+                        tool_call_id: Some(call_id.to_string()),
                     });
                 }
             }
             EventKind::ToolResult | EventKind::ToolSpill if options.include_tool_args => {
+                let tool_call_id = match &event.payload {
+                    EventPayload::ToolResult { call_id, .. }
+                    | EventPayload::ToolSpill { call_id, .. } => Some(call_id.to_string()),
+                    _ => None,
+                };
                 messages.push(ProjectedMessage {
                     seq: event.seq,
                     role: Role::Tool,
@@ -277,6 +291,7 @@ pub fn derive_messages(events: &[LoggedEvent], options: ProjectOptions) -> Proje
                     step_index: None,
                     tool_name: None,
                     tool_args: None,
+                    tool_call_id,
                 });
             }
             _ => {}
@@ -381,6 +396,7 @@ fn project_inner(
         step_index: *step_index,
         tool_name: None,
         tool_args: None,
+        tool_call_id: None,
     })
 }
 

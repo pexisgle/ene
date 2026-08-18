@@ -810,26 +810,6 @@ impl CharacterSettings {
         self.store.read().with_config_mut(f);
     }
 
-    /// Reads the onnx plugin's VAD speech threshold
-    /// (`plugins.list.onnx.config.threshold`); defaults to 0.5.
-    pub fn vad_threshold(&self) -> f32 {
-        self.config()
-            .get_path("plugins.list.onnx.config.threshold")
-            .and_then(|v| v.as_f64())
-            .map_or(0.5, |v| v.clamp(0.0, 1.0) as f32)
-    }
-
-    /// Writes the onnx plugin's VAD speech threshold
-    /// (`plugins.list.onnx.config.threshold`).
-    pub fn set_vad_threshold(&self, threshold: f32) {
-        self.with_config_mut(|c| {
-            drop(c.set_path(
-                "plugins.list.onnx.config.threshold",
-                &format!("{}", threshold.clamp(0.0, 1.0)),
-            ));
-        });
-    }
-
     pub fn graphics(&self) -> GraphicsSettings {
         self.config_section::<DesktopSection>().graphics
     }

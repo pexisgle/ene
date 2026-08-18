@@ -112,6 +112,12 @@ pub enum MessageMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListenRequest {
+    pub pcm: Vec<f32>,
+    pub sample_rate: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRequest {
     pub text: String,
     #[serde(default)]
@@ -252,6 +258,30 @@ pub struct PluginView {
     pub row_id: String,
     pub plugin: String,
     pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpServerView {
+    pub id: String,
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct McpDocument {
+    #[serde(default)]
+    pub servers: Vec<McpServerView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

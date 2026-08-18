@@ -384,7 +384,7 @@ mod tests {
     fn config_with_sections() -> ene_config::EneConfig {
         let mut config = ene_config::EneConfig::default();
         drop(config.set_section_value("desktop", json!({"language": "en", "theme": "dark"})));
-        drop(config.set_section_value("ai", json!({"tasks": {"chat": {"provider": "echo"}}})));
+        drop(config.set_section_value("ai", json!({"tasks": {"chat": {"plugin": "echo"}}})));
         config
     }
 
@@ -414,14 +414,17 @@ mod tests {
     fn build_proposed_overlays_dirty_extra() {
         let original = config_with_sections();
         let mut editing = original.clone();
-        drop(editing.set_section_value("ai", json!({"tasks": {"chat": {"provider": "openai"}}})));
+        drop(editing.set_section_value(
+            "ai",
+            json!({"tasks": {"chat": {"plugin": "provider.openai_compat"}}}),
+        ));
         let dirty = BTreeSet::from(["ai".to_owned()]);
         let proposed = build_proposed(&original, &editing, &dirty);
         assert_eq!(
             proposed
                 .section_value("ai")
-                .and_then(|value| value.pointer("/tasks/chat/provider").cloned()),
-            Some(json!("openai"))
+                .and_then(|value| value.pointer("/tasks/chat/plugin").cloned()),
+            Some(json!("provider.openai_compat"))
         );
     }
 
@@ -436,19 +439,16 @@ mod tests {
     #[test]
     fn merge_secrets_restores_placeholder() {
         let mut original = ene_config::EneConfig::default();
-        drop(original.set_section_value(
-            "ai",
-            json!({"providers": {"openai": {"api_key": {"inline": "sk-real"}}}}),
-        ));
+        drop(original.set_section_value("ai", json!({"tasks": {"chat": {"api_key": "sk-real"}}})));
         let mut editing = original.clone();
         drop(editing.set_section_value(
             "ai",
-            json!({"providers": {"openai": {"api_key": {"inline": super::super::draft::SECRET_PLACEHOLDER}}}}),
+            json!({"tasks": {"chat": {"api_key": super::super::draft::SECRET_PLACEHOLDER}}}),
         ));
         let merged = merge_secrets(&original, &editing);
         assert_eq!(
             merged
-                .get_path("ai.providers.openai.api_key.inline")
+                .get_path("ai.tasks.chat.api_key")
                 .and_then(|value| value.as_str().map(str::to_owned)),
             Some("sk-real".to_owned())
         );

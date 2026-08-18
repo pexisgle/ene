@@ -4,6 +4,10 @@ use crate::protocol::{
     HelloAck, HostHello, Message, Negotiated, ProtoId, ProtocolRanges, ToolCall, ToolResult,
     ToolSpecWire, VersionRange,
 };
+use crate::provider::{
+    EmbedRequest, EmbedResult, LlmGenerateRequest, LlmGeneration, ProviderFaces, SttRequest,
+    SttResult, TtsAudio, TtsRequest,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Host side of a negotiated plugin connection.
@@ -95,6 +99,88 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HostConn<S> {
         }
     }
 
+    pub async fn generate_llm(
+        &mut self,
+        request: LlmGenerateRequest,
+    ) -> Result<LlmGeneration, IpcError> {
+        if self
+            .negotiated
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.llm)
+            .is_none()
+        {
+            return Err(IpcError::Unexpected("llm disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::LlmGenerate { id, body: request })
+            .await?;
+        loop {
+            match self.recv().await? {
+                Message::LlmChunk { id: got, .. } if got == id => {}
+                Message::LlmDone { id: got, body } if got == id => return Ok(body),
+                other => return Err(IpcError::Unexpected(other.kind_name().to_owned())),
+            }
+        }
+    }
+
+    pub async fn embed(&mut self, request: EmbedRequest) -> Result<EmbedResult, IpcError> {
+        if self
+            .negotiated
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.embed)
+            .is_none()
+        {
+            return Err(IpcError::Unexpected("embed disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::EmbedEncode { id, body: request })
+            .await?;
+        match self.recv().await? {
+            Message::EmbedResult { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    pub async fn synthesize_tts(&mut self, request: TtsRequest) -> Result<TtsAudio, IpcError> {
+        if self
+            .negotiated
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.tts)
+            .is_none()
+        {
+            return Err(IpcError::Unexpected("tts disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::TtsSynthesize { id, body: request })
+            .await?;
+        match self.recv().await? {
+            Message::TtsResult { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
+    pub async fn transcribe(&mut self, request: SttRequest) -> Result<SttResult, IpcError> {
+        if self
+            .negotiated
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.stt)
+            .is_none()
+        {
+            return Err(IpcError::Unexpected("stt disabled".to_owned()));
+        }
+        let id = self.alloc();
+        self.send(&Message::SttTranscribe { id, body: request })
+            .await?;
+        match self.recv().await? {
+            Message::SttResult { id: got, body } if got == id => Ok(body),
+            other => Err(IpcError::Unexpected(other.kind_name().to_owned())),
+        }
+    }
+
     pub async fn drain(&mut self) -> Result<(), IpcError> {
         let id = self.alloc();
         self.send(&Message::Drain { id }).await?;
@@ -135,14 +221,18 @@ pub(crate) fn validate_ack(
     if ack.protocols.tool.is_some() && !declared.contains(&ProtoId::Tool) {
         return Err(IpcError::UndeclaredProtocol("tool".to_owned()));
     }
+    if ack.protocols.provider.is_some() && !declared.contains(&ProtoId::Provider) {
+        return Err(IpcError::UndeclaredProtocol("provider".to_owned()));
+    }
     Ok(())
 }
 
-/// Negotiate versions. Core mismatch is an error; tool mismatch disables the face.
+/// Negotiate versions. Core mismatch is an error; other faces disable independently.
 pub fn negotiate(
     host: &ProtocolRanges,
     plugin_core: VersionRange,
     plugin_tool: Option<VersionRange>,
+    plugin_provider: Option<ProviderFaces>,
 ) -> Result<Negotiated, IpcError> {
     let core = host
         .core
@@ -152,5 +242,28 @@ pub fn negotiate(
         (Some(host_tool), Some(plugin_tool)) => host_tool.negotiate(plugin_tool),
         _ => None,
     };
-    Ok(Negotiated { core, tool })
+    Ok(Negotiated {
+        core,
+        tool,
+        provider: negotiate_faces(host.provider, plugin_provider),
+    })
+}
+
+fn negotiate_faces(
+    host: Option<VersionRange>,
+    offered: Option<ProviderFaces>,
+) -> Option<ProviderFaces> {
+    let host = host?;
+    let offered = offered?;
+    let pick = |version: Option<u32>| {
+        version.and_then(|version| host.negotiate(VersionRange::exact(version)))
+    };
+    let faces = ProviderFaces {
+        llm: pick(offered.llm),
+        embed: pick(offered.embed),
+        tts: pick(offered.tts),
+        stt: pick(offered.stt),
+        vad: pick(offered.vad),
+    };
+    (!faces.is_empty()).then_some(faces)
 }

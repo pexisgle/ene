@@ -39,7 +39,14 @@ jobs:
             -p ene-harness-fs \
             -p ene-harness-exec \
             -p ene-harness-web \
-            -p ene-harness-utility
+            -p ene-harness-utility \
+            -p ene-harness-app \
+            -p ene-harness-mcp \
+            -p ene-provider-openai-compat \
+            -p ene-provider-anthropic \
+            -p ene-provider-elevenlabs \
+            -p ene-provider-voicevox \
+            -p ene-provider-edge-tts
 
       - name: Package Linux artifacts
         run: |

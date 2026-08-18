@@ -19,6 +19,7 @@ fn row(id: &str) -> ProfileRow {
         requires: Vec::new(),
         capabilities: Vec::new(),
         sandbox_required: false,
+        config: serde_json::Value::Null,
     }
 }
 

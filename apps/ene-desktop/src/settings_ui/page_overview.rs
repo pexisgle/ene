@@ -19,6 +19,10 @@ pub fn render(
     if !input.health.started() {
         input.health.start(ai.fetch_health());
     }
+    input.core_settings.poll();
+    if !input.core_settings.started() {
+        input.core_settings.start(ai.fetch_core_settings());
+    }
     input.plugins.poll();
     if !input.plugins.started() {
         input.plugins.start(ai.fetch_plugins());
@@ -31,10 +35,28 @@ pub fn render(
         "overview-needs-config",
         &i18n_embed_fl::fl!(crate::i18n::loader(), "overview-needs-config"),
         |ui| {
-            ui.weak(i18n_embed_fl::fl!(
-                crate::i18n::loader(),
-                "overview-echo-hint"
-            ));
+            match &input.core_settings.data {
+                Some(Ok(settings)) => {
+                    let plugin = settings
+                        .pointer("/effective/ai/tasks/chat/plugin")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("echo");
+                    if plugin == "echo" || plugin.is_empty() {
+                        ui.weak(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "overview-echo-hint"
+                        ));
+                    } else {
+                        ui.label(plugin);
+                    }
+                }
+                _ => {
+                    ui.weak(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "overview-echo-hint"
+                    ));
+                }
+            }
             if ui
                 .button(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-models"))
                 .clicked()

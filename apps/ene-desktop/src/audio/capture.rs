@@ -123,6 +123,8 @@ struct CaptureState {
     tts_playing: Arc<AtomicBool>,
     barged: bool,
     channels: usize,
+    utterance: Vec<f32>,
+    silence_frames: u32,
 }
 
 impl CaptureState {
@@ -156,24 +158,44 @@ impl CaptureState {
         self.resampler.process(&mono, &mut resampled);
         let rms = rms_energy(&resampled);
         let tts_active = self.tts_playing.load(Ordering::Relaxed);
-        if !tts_active {
-            self.barged = false;
+        if tts_active {
+            self.utterance.clear();
+            self.silence_frames = 0;
+            if rms < SILENCE_RMS * BARGE_IN_ENERGY_FACTOR {
+                return;
+            }
+            if self.barged {
+                return;
+            }
+            self.barged = true;
+            tracing::info!(
+                component = "MicCapture",
+                rms,
+                "barge-in: energy during TTS playback; cancelling turn"
+            );
+            self.ai.barge_in();
+            self.ai.cancel();
             return;
         }
-        if rms < SILENCE_RMS * BARGE_IN_ENERGY_FACTOR {
+        self.barged = false;
+        if rms >= SILENCE_RMS {
+            self.utterance.extend_from_slice(&resampled);
+            self.silence_frames = 0;
             return;
         }
-        if self.barged {
+        if self.utterance.is_empty() {
             return;
         }
-        self.barged = true;
-        tracing::info!(
-            component = "MicCapture",
-            rms,
-            "barge-in: energy during TTS playback; cancelling turn"
-        );
-        self.ai.barge_in();
-        self.ai.cancel();
+        self.silence_frames = self.silence_frames.saturating_add(1);
+        if self.silence_frames < 8 {
+            self.utterance.extend_from_slice(&resampled);
+            return;
+        }
+        let pcm = std::mem::take(&mut self.utterance);
+        self.silence_frames = 0;
+        if pcm.len() >= 3_200 {
+            self.ai.listen(pcm, CAPTURE_SAMPLE_RATE);
+        }
     }
 }
 
@@ -213,6 +235,8 @@ pub fn start_mic_capture(
         tts_playing: Arc::clone(&audio_state.tts_playing),
         barged: false,
         channels,
+        utterance: Vec::new(),
+        silence_frames: 0,
     };
     let mut state = Some(state);
 

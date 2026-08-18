@@ -16,6 +16,7 @@ name = "ene-core"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 chrono = { workspace = true }
@@ -27,6 +28,7 @@ ene-config = { workspace = true }
 ene-fiber = { workspace = true }
 ene-kernel = { workspace = true }
 ene-plane = { workspace = true }
+ene-plugin-ipc = { workspace = true }
 ene-registry = { workspace = true }
 ene-session = { workspace = true }
 ene-work = { workspace = true }

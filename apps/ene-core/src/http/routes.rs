@@ -9,11 +9,11 @@ use base64::Engine;
 use ene_api::{
     AffectView, ApprovalView, ArtifactView, BackupResponse, CharacterView, ClaimResourceRequest,
     CompactResponse, CreateScheduleRequest, CreateSessionRequest, EndSessionRequest,
-    ExclusiveSnapshot, Health, HistoryResponse, JobView, MemoryPatch, MemoryView, MessageMode,
-    MessageRequest, MessageResponse, OccupantView, Page, PluginView, QueuedCancel, ResourceKind,
-    RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch, SessionView, SettingsPatch,
-    SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView,
-    UsageView,
+    ExclusiveSnapshot, Health, HistoryResponse, JobView, McpDocument, McpServerView, MemoryPatch,
+    MemoryView, MessageMode, MessageRequest, MessageResponse, OccupantView, Page, PluginView,
+    QueuedCancel, ResourceKind, RestoreRequest, ScheduleView, SendMessageResponse, SessionPatch,
+    SessionView, SettingsPatch, SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView,
+    ToolTestRequest, ToolView, UsageView,
 };
 use ene_companion::{JournalAction, MemoryId, MemoryScope, export_dir, install_archive};
 use ene_fiber::discover_plugin_executable;
@@ -357,6 +357,57 @@ pub async fn barge_in(
     drop(state.core.host().mark_user_speaking(true));
     lane.abort().await.map_err(|err| map_kernel(&err))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn listen(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ene_api::ListenRequest>,
+) -> Result<Json<SendMessageResponse>, ApiReject> {
+    let session = parse_session(&id)?;
+    let binding = state.core.ai().lock().tasks.stt.clone();
+    if binding.uses_echo() {
+        return Ok(Json(SendMessageResponse {
+            turn_id: None,
+            entry_id: None,
+        }));
+    }
+    let result = state
+        .core
+        .supervisor()
+        .transcribe(
+            &binding.plugin,
+            ene_plugin_ipc::SttRequest {
+                pcm: req.pcm,
+                sample_rate: req.sample_rate.max(1),
+                language: None,
+                model: binding.model,
+                base_url: binding.base_url,
+                auth: ene_plugin_ipc::ProviderAuth {
+                    api_key: state.core.secret_for("stt"),
+                },
+            },
+        )
+        .await
+        .map_err(|err| bad_request("fault", &err.to_string()))?;
+    let text = result.text.trim();
+    if text.is_empty() {
+        return Ok(Json(SendMessageResponse {
+            turn_id: None,
+            entry_id: None,
+        }));
+    }
+    dispatch_message(
+        &state,
+        session,
+        &MessageRequest {
+            text: text.to_owned(),
+            mode: MessageMode::Prompt,
+            input_modality: Some("voice".into()),
+        },
+    )
+    .await
+    .map(Json)
 }
 
 pub async fn export_session(
@@ -848,6 +899,81 @@ pub async fn restart_plugin(
     }))
 }
 
+pub async fn get_mcp(State(state): State<AppState>) -> Json<McpDocument> {
+    Json(mcp_document(&state.core.mcp_servers()))
+}
+
+pub async fn put_mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<McpDocument>,
+) -> Result<Json<McpDocument>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    let mut servers = Vec::with_capacity(body.servers.len());
+    for row in &body.servers {
+        servers.push(parse_mcp_server(row)?);
+    }
+    state
+        .core
+        .replace_mcp_servers(&servers)
+        .map_err(|err| bad_request("fault", &err.to_string()))?;
+    state.core.apply_plugin_profile().await;
+    Ok(Json(mcp_document(&state.core.mcp_servers())))
+}
+
+fn mcp_document(servers: &[ene_work::McpServer]) -> McpDocument {
+    McpDocument {
+        servers: servers.iter().map(mcp_view).collect(),
+    }
+}
+
+fn mcp_view(server: &ene_work::McpServer) -> McpServerView {
+    McpServerView {
+        id: server.id.clone(),
+        transport: server.transport.clone(),
+        command: server.command.clone(),
+        args: server.args.clone(),
+        url: server.url.clone(),
+        enabled: server.enabled,
+    }
+}
+
+fn parse_mcp_server(row: &McpServerView) -> Result<ene_work::McpServer, ApiReject> {
+    if !crate::plugin_profile::valid_mcp_id(&row.id) {
+        return Err(bad_request(
+            "invalid_message",
+            "mcp id must be a short token",
+        ));
+    }
+    let transport = match row.transport.as_str() {
+        "" | "stdio" => "stdio",
+        "http" | "sse" | "streamable_http" | "streamable-http" => "http",
+        _ => {
+            return Err(bad_request(
+                "invalid_message",
+                "mcp transport must be stdio or http",
+            ));
+        }
+    };
+    if transport == "http" && row.url.as_deref().unwrap_or("").is_empty() {
+        return Err(bad_request("invalid_message", "http MCP rows need url"));
+    }
+    if transport == "stdio" && row.command.as_deref().unwrap_or("").is_empty() {
+        return Err(bad_request(
+            "invalid_message",
+            "stdio MCP rows need command",
+        ));
+    }
+    Ok(ene_work::McpServer {
+        id: row.id.clone(),
+        transport: transport.to_owned(),
+        command: row.command.clone(),
+        args: row.args.clone(),
+        url: row.url.clone(),
+        enabled: row.enabled,
+    })
+}
+
 pub async fn list_approvals(State(state): State<AppState>) -> Json<Page<ApprovalView>> {
     let items = state
         .popup
@@ -959,10 +1085,19 @@ pub async fn export_character(
 pub async fn get_settings(State(state): State<AppState>) -> Json<Value> {
     let mut core = state.core.settings().clone();
     core.data_dir = state.core.data_dir().display().to_string();
+    let ai = state.core.ai().lock().clone();
     let mut effective = json!({
         "core": core,
         "harness": HarnessSettings::default(),
         "approval": { "mode": format!("{:?}", state.core.plane().mode()).to_ascii_lowercase() },
+        "ai": ai,
+        "mind": state.core.mind(),
+        "ai_chat_key_set": state.core.task_key_set("chat"),
+        "ai_classifier_key_set": state.core.task_key_set("classifier"),
+        "ai_embedding_key_set": state.core.task_key_set("embedding"),
+        "ai_proactive_key_set": state.core.task_key_set("proactive"),
+        "ai_tts_key_set": state.core.task_key_set("tts"),
+        "ai_stt_key_set": state.core.task_key_set("stt"),
     });
     let mut overlay = json!({});
     let settings_path = state.core.data_dir().join("settings.json");
@@ -982,7 +1117,7 @@ pub async fn patch_settings(
     Json(patch): Json<SettingsPatch>,
 ) -> Result<Json<Value>, ApiReject> {
     web_mutate_forbidden(&client_id_from_headers(&headers))?;
-    let allowed = ["core", "harness", "approval", "theme"];
+    let allowed = ["core", "harness", "approval", "theme", "ai", "mind"];
     if let Some(incoming) = patch.fields.as_object() {
         for key in incoming.keys() {
             if !allowed.contains(&key.as_str()) {
@@ -990,6 +1125,56 @@ pub async fn patch_settings(
             }
         }
     }
+    let mut secrets = crate::TaskSecrets::default();
+    take_task_secret(
+        &state,
+        &patch.fields,
+        "/ai/tasks/chat/api_key",
+        "ai.chat",
+        &mut secrets.chat,
+    )?;
+    take_task_secret(
+        &state,
+        &patch.fields,
+        "/ai/api_key",
+        "ai.chat",
+        &mut secrets.chat,
+    )?;
+    take_task_secret(
+        &state,
+        &patch.fields,
+        "/ai/tasks/classifier/api_key",
+        "ai.classifier",
+        &mut secrets.classifier,
+    )?;
+    take_task_secret(
+        &state,
+        &patch.fields,
+        "/ai/tasks/embedding/api_key",
+        "ai.embedding",
+        &mut secrets.embedding,
+    )?;
+    take_task_secret(
+        &state,
+        &patch.fields,
+        "/ai/tasks/proactive/api_key",
+        "ai.proactive",
+        &mut secrets.proactive,
+    )?;
+    take_task_secret(
+        &state,
+        &patch.fields,
+        "/ai/tasks/tts/api_key",
+        "ai.tts",
+        &mut secrets.tts,
+    )?;
+    take_task_secret(
+        &state,
+        &patch.fields,
+        "/ai/tasks/stt/api_key",
+        "ai.stt",
+        &mut secrets.stt,
+    )?;
     let settings_path = state.core.data_dir().join("settings.json");
     let mut current = if settings_path.exists() {
         let raw = fs::read_to_string(&settings_path)
@@ -1011,8 +1196,31 @@ pub async fn patch_settings(
             }
         }
     }
+    for task in ["chat", "classifier", "embedding", "proactive", "tts", "stt"] {
+        if let Some(binding) = current
+            .pointer_mut(&format!("/ai/tasks/{task}"))
+            .and_then(Value::as_object_mut)
+        {
+            binding.remove("api_key");
+        }
+    }
     fs::write(&settings_path, current.to_string())
         .map_err(|err| bad_request("fault", &err.to_string()))?;
+    if let Some(ai_value) = current.get("ai") {
+        let mut ai = state.core.ai().lock().clone();
+        crate::overlay_ai(&mut ai, ai_value);
+        state.core.replace_ai(ai, secrets);
+        state.core.apply_plugin_profile().await;
+    } else {
+        state
+            .core
+            .replace_ai(state.core.ai().lock().clone(), secrets);
+    }
+    if let Some(mind_value) = current.get("mind")
+        && let Ok(mind) = serde_json::from_value::<ene_companion::MindSettings>(mind_value.clone())
+    {
+        state.core.replace_mind(mind);
+    }
     drop(state.core.plane().audit().append("settings", &current));
     Ok(Json(current))
 }
@@ -1311,6 +1519,31 @@ fn resolve_import_path(data_dir: &std::path::Path, raw: &str) -> Result<PathBuf,
         }
     }
     Err(bad_request("invalid_message", "path outside import dirs"))
+}
+
+fn take_task_secret(
+    state: &AppState,
+    fields: &Value,
+    pointer: &str,
+    vault_key: &str,
+    slot: &mut Option<String>,
+) -> Result<(), ApiReject> {
+    let Some(value) = fields.pointer(pointer) else {
+        return Ok(());
+    };
+    let Some(secret) = value.as_str() else {
+        return Ok(());
+    };
+    if secret.is_empty() {
+        return Ok(());
+    }
+    state
+        .core
+        .vault()
+        .put(vault_key, secret.as_bytes())
+        .map_err(|err| bad_request("fault", &err.to_string()))?;
+    *slot = Some(secret.to_owned());
+    Ok(())
 }
 
 fn deep_merge_objects(

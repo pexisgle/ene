@@ -9,6 +9,7 @@
 mod broker;
 mod fiber;
 mod profile;
+mod providers;
 mod sidecar;
 mod spawn;
 mod supervisor;
@@ -16,6 +17,7 @@ mod supervisor;
 pub use broker::{Broker, BrokerError, Grant, confine_path};
 pub use fiber::{Effect, Fiber, FiberState, FiberUid};
 pub use profile::ProfileApplyReport;
+pub use providers::{PROVIDER_PLUGINS, ProviderPlugin, provider_plugin};
 pub use sidecar::{SidecarHealth, SidecarId, SidecarRequest};
 pub use spawn::{discover_plugin_bin, discover_plugin_executable, discover_plugin_script};
 pub use supervisor::{

@@ -526,9 +526,10 @@ fn forget_target_matches(title: &str, target: &str) -> bool {
 #[must_use]
 pub fn recall_weights(settings: &RecallSettings) -> RecallWeights {
     RecallWeights {
-        lexical: settings.weight_lexical + 0.0,
+        lexical: settings.weight_lexical,
         recency: settings.weight_recency,
         salience: settings.weight_salience,
+        embedding: settings.weight_embedding,
         mmr_lambda: settings.mmr_lambda,
     }
 }

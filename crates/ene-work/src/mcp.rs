@@ -1,11 +1,46 @@
 use async_trait::async_trait;
 use ene_plane::Sensitivity;
 use ene_registry::{ToolDefinition, ToolInvoke, ToolRegistry, ToolSource};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Handwritten MCP profile row (D-23). No connection UI (P-616).
+/// Handwritten MCP server row (`mcp.json` / `mcp.<id>` fiber).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServer {
+    pub id: String,
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+impl McpServer {
+    #[must_use]
+    pub fn plugin_id(&self) -> String {
+        format!("mcp.{}", self.id)
+    }
+
+    #[must_use]
+    pub fn is_http(&self) -> bool {
+        matches!(
+            self.transport.as_str(),
+            "http" | "sse" | "streamable_http" | "streamable-http"
+        )
+    }
+}
+
+/// Handwritten MCP profile row (D-23). No marketplace picker (P-616).
 #[derive(Debug, Clone)]
 pub struct McpProfile {
     pub server: String,

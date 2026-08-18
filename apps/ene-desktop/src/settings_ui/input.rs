@@ -108,9 +108,18 @@ pub struct SettingsInputState {
     pub ai_chat_provider: String,
     pub ai_chat_model: String,
     pub ai_base_url: String,
-    pub ai_api_key_source: String,
     pub ai_api_key: String,
-    pub ai_api_key_env: String,
+    pub ai_chat_key_set: bool,
+    pub ai_classifier_key: String,
+    pub ai_embedding_key: String,
+    pub ai_proactive_key: String,
+    pub ai_classifier_key_set: bool,
+    pub ai_embedding_key_set: bool,
+    pub ai_proactive_key_set: bool,
+    pub ai_tts_key: String,
+    pub ai_stt_key: String,
+    pub ai_tts_key_set: bool,
+    pub ai_stt_key_set: bool,
     pub ai_embedding_provider: String,
     pub ai_embedding_model: String,
     pub ai_embedding_dimensions: String,
@@ -119,9 +128,6 @@ pub struct SettingsInputState {
     pub stt_provider: String,
     /// Enumerated input device names for the microphone picker.
     pub mic_devices: Vec<String>,
-    pub model_catalog: BTreeMap<String, Vec<String>>,
-    pub model_fetch_error: Option<String>,
-    pub plugin_options: BTreeMap<String, AsyncData<PluginOptionsMap>>,
     pub health: AsyncData<Result<String, String>>,
     pub plugins: AsyncData<Vec<PluginView>>,
     pub memories: AsyncData<Vec<MemoryView>>,
@@ -132,16 +138,17 @@ pub struct SettingsInputState {
     pub schedule_spec: String,
     pub approvals: AsyncData<Vec<ApprovalView>>,
     pub core_settings: AsyncData<Result<Value, String>>,
+    pub mcp: AsyncData<Result<ene_api::McpDocument, String>>,
+    pub mcp_json: String,
+    pub mcp_status: Option<String>,
 }
 
 impl SettingsInputState {
     pub fn new() -> Self {
         Self {
-            ai_embedding_provider: "llama-cpp".to_string(),
-            ai_embedding_model: "text-embedding-3-small".to_string(),
+            ai_embedding_provider: "echo".to_string(),
+            ai_embedding_model: String::new(),
             ai_embedding_dimensions: "1536".to_string(),
-            ai_api_key_source: "env".to_string(),
-            ai_api_key_env: "OPENAI_API_KEY".to_string(),
             ..Self::default()
         }
     }
@@ -172,7 +179,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).expect("test temp dir");
         let settings = CharacterSettings::discover(&tmp, "Alicia");
         settings.with_config_mut(|config| {
-            drop(config.set_path("ai.providers.openai.api_key.inline", "\"sk-super-secret\""));
+            drop(config.set_path("ai.tasks.chat.api_key", "\"sk-super-secret\""));
         });
         let mut input = SettingsInputState::new();
         input.sync_from_settings(&settings, &crate::settings::UiState::default());

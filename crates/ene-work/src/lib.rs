@@ -24,7 +24,7 @@ pub use host::{
     fold_brief, layer_for_call, question_timed_out, should_upgrade_steps, surface_call_kind,
     workspace_root,
 };
-pub use mcp::{McpProfile, McpTool, ScriptedMcp, register_mcp_tools};
+pub use mcp::{McpProfile, McpServer, McpTool, ScriptedMcp, register_mcp_tools};
 pub use questions::{combine_questions, route_combined_answers};
 pub use router::WorkSurfaceRouter;
 pub use schedule::{FiredSchedule, QuietWindow, catch_up_missed, fire_due, reminder_report};

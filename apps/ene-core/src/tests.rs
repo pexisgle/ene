@@ -139,6 +139,7 @@ async fn disabling_one_fiber_does_not_restart_the_core() {
         requires: Vec::new(),
         capabilities: Vec::new(),
         sandbox_required: false,
+        config: serde_json::Value::Null,
     })
     .unwrap();
     let web = sup
@@ -148,6 +149,7 @@ async fn disabling_one_fiber_does_not_restart_the_core() {
             requires: Vec::new(),
             capabilities: Vec::new(),
             sandbox_required: false,
+            config: serde_json::Value::Null,
         })
         .unwrap();
     sup.disable_row("r-util").await;
@@ -256,6 +258,7 @@ async fn dummy_plugin_and_harness_tools_share_registry() {
             requires: Vec::new(),
             capabilities: Vec::new(),
             sandbox_required: false,
+            config: serde_json::Value::Null,
         },
         &path,
     )

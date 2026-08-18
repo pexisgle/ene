@@ -18,6 +18,13 @@ PLUGINS=(
   ene-harness-exec
   ene-harness-web
   ene-harness-utility
+  ene-harness-app
+  ene-harness-mcp
+  ene-provider-openai-compat
+  ene-provider-anthropic
+  ene-provider-elevenlabs
+  ene-provider-voicevox
+  ene-provider-edge-tts
 )
 
 mkdir -p "$DIST_DIR"

@@ -17,10 +17,11 @@ use crate::live::{LiveBus, LiveEvent, LiveSubscription};
 use crate::model::{ConversationModel, ModelGeneration, ModelRequest};
 use crate::observe::ObserveHandle;
 use crate::router::{SurfaceRouter, SurfaceToolOutcome};
+use crate::speech::{SpeechPresenter, TurnFinalizer, TurnPrefetch};
 use crate::waterfall::{HookEvent, LoopHooks};
 use ene_session::{
     Block, CallId, ClientId, DelegationId, DisplayDepth, EventKind, EventPayload, InboxClass,
-    InboxSource, LaneId, NewEvent, NewUsage, ProjectOptions, RecoveryReport, SessionId,
+    InboxSource, LaneId, NewEvent, NewUsage, ProjectOptions, RecoveryReport, Role, SessionId,
     SessionStore, SoulId, StepOutcome, ToolStatus, Transaction, TurnId, TurnOrigin, TurnOutcome,
     TurnTrigger, derive_messages, hash_model_visible, hash_projected, v1,
 };
@@ -42,6 +43,10 @@ enum LaneCmd {
     NextRun {
         text: String,
         reply: oneshot::Sender<Result<u64, KernelError>>,
+    },
+    Proactive {
+        hint: String,
+        reply: oneshot::Sender<Result<TurnId, KernelError>>,
     },
     Abort {
         reply: oneshot::Sender<Result<(), KernelError>>,
@@ -84,6 +89,9 @@ struct LaneState {
     max_steps: u32,
     context: ContextRegistry,
     router: Option<Arc<dyn SurfaceRouter>>,
+    speech: Option<Arc<dyn SpeechPresenter>>,
+    finalizer: Option<Arc<dyn TurnFinalizer>>,
+    prefetch: Option<Arc<dyn TurnPrefetch>>,
     running: Option<RunningTurn>,
     queued_wakes: VecDeque<QueuedWake>,
     pending_next_run: Option<QueuedWake>,
@@ -116,6 +124,12 @@ pub struct LaneOptions {
     pub recovery: Vec<RecoveryReport>,
     /// Surface tool router. `None` keeps the lane speech-only.
     pub router: Option<Arc<dyn SurfaceRouter>>,
+    /// Optional TTS presenter (daemon-owned provider seam).
+    pub speech: Option<Arc<dyn SpeechPresenter>>,
+    /// Optional post-turn work (memory extract via classifier).
+    pub finalizer: Option<Arc<dyn TurnFinalizer>>,
+    /// Optional recall / companion context logged as `context/system_message`.
+    pub prefetch: Option<Arc<dyn TurnPrefetch>>,
 }
 
 /// Handle to the single dialogue lane.
@@ -153,6 +167,9 @@ impl LaneHandle {
             max_steps: opts.harness.loop_cfg.max_steps_per_turn,
             context,
             router: opts.router,
+            speech: opts.speech,
+            finalizer: opts.finalizer,
+            prefetch: opts.prefetch,
             running: None,
             queued_wakes: VecDeque::new(),
             pending_next_run: None,
@@ -253,6 +270,15 @@ impl LaneHandle {
         .await
     }
 
+    /// Start a companion-origin turn (no user message). Busy when a turn is running.
+    pub async fn proactive(&self, hint: impl Into<String>) -> Result<TurnId, KernelError> {
+        self.ask(|reply| LaneCmd::Proactive {
+            hint: hint.into(),
+            reply,
+        })
+        .await
+    }
+
     /// Abort the running turn. No assistant closure is written (I-21).
     pub async fn abort(&self) -> Result<(), KernelError> {
         self.ask(|reply| LaneCmd::Abort { reply }).await
@@ -341,6 +367,10 @@ async fn dispatch_cmd(
         }
         LaneCmd::NextRun { text, reply } => {
             let result = enqueue_next_run(state, text).await;
+            drop(reply.send(result));
+        }
+        LaneCmd::Proactive { hint, reply } => {
+            let result = start_proactive_turn(state, hint, done_tx).await;
             drop(reply.send(result));
         }
         LaneCmd::Abort { reply } => {
@@ -489,6 +519,7 @@ async fn start_prompt(
             origin: TurnOrigin::User,
             claim_seq: Some(enqueue_seq),
             inject,
+            proactive_hint: None,
         },
         done_tx,
     )
@@ -527,6 +558,32 @@ async fn start_follow_turn(
             origin: TurnOrigin::User,
             claim_seq: Some(wake.seq),
             inject,
+            proactive_hint: None,
+        },
+        done_tx,
+    )
+    .await?;
+    Ok(turn)
+}
+
+async fn start_proactive_turn(
+    state: &mut LaneState,
+    hint: String,
+    done_tx: &mpsc::UnboundedSender<TurnFinish>,
+) -> Result<TurnId, KernelError> {
+    if let Some(running) = &state.running {
+        return Err(KernelError::lane_busy(running.turn));
+    }
+    let hint = validate_text(&hint)?;
+    let turn = TurnId::new();
+    spawn_turn(
+        state,
+        TurnSpawn {
+            turn,
+            origin: TurnOrigin::Proactive,
+            claim_seq: None,
+            inject: None,
+            proactive_hint: Some(hint),
         },
         done_tx,
     )
@@ -539,6 +596,7 @@ struct TurnSpawn {
     origin: TurnOrigin,
     claim_seq: Option<u64>,
     inject: Option<QueuedInject>,
+    proactive_hint: Option<String>,
 }
 
 async fn spawn_turn(
@@ -558,7 +616,11 @@ async fn spawn_turn(
             lane: LaneId::Dialogue.as_str(),
             origin: spawn.origin,
             delegation_id: None,
-            trigger: TurnTrigger::Text,
+            trigger: if spawn.origin == TurnOrigin::Proactive {
+                TurnTrigger::Timer
+            } else {
+                TurnTrigger::Text
+            },
         },
     )];
     if let Some(seq) = spawn.claim_seq {
@@ -594,6 +656,17 @@ async fn spawn_turn(
             },
         ));
     }
+    if let Some(hint) = spawn.proactive_hint {
+        begin.push(NewEvent::new(
+            state.session,
+            EventKind::ContextSystemMessage,
+            EventPayload::ContextSystemMessage {
+                v: v1(),
+                blocks: vec![Block::text(hint)],
+                source_key: "proactive.hint".to_owned(),
+            },
+        ));
+    }
     for (key, text) in state.context.assemble() {
         begin.push(NewEvent::new(
             state.session,
@@ -604,6 +677,23 @@ async fn spawn_turn(
                 source_key: key,
             },
         ));
+    }
+    if let Some(prefetch) = &state.prefetch {
+        let user = last_user_text(&state.store, state.session).unwrap_or_default();
+        for (key, text) in prefetch.lines(state.soul, state.session, &user).await {
+            if text.is_empty() {
+                continue;
+            }
+            begin.push(NewEvent::new(
+                state.session,
+                EventKind::ContextSystemMessage,
+                EventPayload::ContextSystemMessage {
+                    v: v1(),
+                    blocks: vec![Block::text(text)],
+                    source_key: key,
+                },
+            ));
+        }
     }
     begin.push(NewEvent::new(
         state.session,
@@ -635,6 +725,8 @@ async fn spawn_turn(
         derive_from_thinking: state.mind.inner.derive_from_thinking,
         max_steps: state.max_steps,
         router: state.router.clone(),
+        speech: state.speech.clone(),
+        finalizer: state.finalizer.clone(),
         cancel: Arc::clone(&cancel),
         cancelled: Arc::clone(&cancelled),
         done: done_tx.clone(),
@@ -871,6 +963,8 @@ struct TurnCtx {
     derive_from_thinking: bool,
     max_steps: u32,
     router: Option<Arc<dyn SurfaceRouter>>,
+    speech: Option<Arc<dyn SpeechPresenter>>,
+    finalizer: Option<Arc<dyn TurnFinalizer>>,
     cancel: Arc<Notify>,
     cancelled: Arc<AtomicBool>,
     done: mpsc::UnboundedSender<TurnFinish>,
@@ -1157,7 +1251,7 @@ async fn finish_speech(
         DisplayDepth::Surface,
         LiveEvent::TextDelta {
             turn_id: ctx.turn,
-            text: speech_for_live,
+            text: speech_for_live.clone(),
         },
     );
     if let Some((_, text)) = inner.first() {
@@ -1178,6 +1272,11 @@ async fn finish_speech(
             },
         );
     }
+    if let Some(presenter) = &ctx.speech
+        && !speech_for_live.is_empty()
+    {
+        presenter.present_speech(&speech_for_live).await;
+    }
     ctx.live.emit(
         DisplayDepth::Surface,
         LiveEvent::TurnEnded {
@@ -1185,7 +1284,31 @@ async fn finish_speech(
             outcome: "completed".to_owned(),
         },
     );
+    spawn_finalize(ctx, &speech_for_live);
     Ok(())
+}
+
+fn last_user_text(store: &SessionStore, session: SessionId) -> Option<String> {
+    let events = store.load_events(session, 0).ok()?;
+    let history = derive_messages(&events, ProjectOptions::model_visible(8));
+    history
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)
+        .map(ene_session::ProjectedMessage::text)
+}
+
+fn spawn_finalize(ctx: &TurnCtx, assistant: &str) {
+    let Some(finalizer) = ctx.finalizer.clone() else {
+        return;
+    };
+    let soul = ctx.soul;
+    let assistant = assistant.to_owned();
+    let user = last_user_text(&ctx.store, ctx.session).unwrap_or_default();
+    tokio::spawn(async move {
+        finalizer.finalize_turn(soul, &user, &assistant).await;
+    });
 }
 
 async fn commit_tool_step(

@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   transport TEXT NOT NULL,
   command TEXT,
   url TEXT,
-  enabled INTEGER NOT NULL DEFAULT 1
+  enabled INTEGER NOT NULL DEFAULT 1,
+  args TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS mailbox (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,6 +97,13 @@ impl WorkStore {
         if !plan_approved_exists {
             conn.execute(
                 "ALTER TABLE jobs ADD COLUMN plan_approved INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        let mcp_args_exists = conn.prepare("SELECT args FROM mcp_servers LIMIT 0").is_ok();
+        if !mcp_args_exists {
+            conn.execute(
+                "ALTER TABLE mcp_servers ADD COLUMN args TEXT NOT NULL DEFAULT '[]'",
                 [],
             )?;
         }
@@ -581,11 +589,46 @@ impl WorkStore {
         url: Option<&str>,
     ) -> Result<(), WorkError> {
         self.conn.lock().execute(
-            "INSERT INTO mcp_servers (id, transport, command, url, enabled)
-             VALUES (?1,?2,?3,?4,1)
+            "INSERT INTO mcp_servers (id, transport, command, url, enabled, args)
+             VALUES (?1,?2,?3,?4,1,'[]')
              ON CONFLICT(id) DO UPDATE SET transport=?2, command=?3, url=?4",
             params![id, transport, command, url],
         )?;
+        Ok(())
+    }
+
+    pub fn list_mcp(&self) -> Result<Vec<crate::McpServer>, WorkError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, transport, command, url, enabled, args FROM mcp_servers ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], row_mcp)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn replace_mcp(&self, servers: &[crate::McpServer]) -> Result<(), WorkError> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM mcp_servers", [])?;
+        for server in servers {
+            let args = serde_json::to_string(&server.args)
+                .map_err(|err| WorkError::Codec(err.to_string()))?;
+            conn.execute(
+                "INSERT INTO mcp_servers (id, transport, command, url, enabled, args)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    server.id,
+                    server.transport,
+                    server.command,
+                    server.url,
+                    i32::from(server.enabled),
+                    args
+                ],
+            )?;
+        }
         Ok(())
     }
 }
@@ -638,6 +681,19 @@ fn row_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         plan_approved: row.get::<_, i32>(13)? != 0,
         created_at: row.get(14)?,
         ended_at: row.get(15)?,
+    })
+}
+
+fn row_mcp(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::McpServer> {
+    let args_raw: String = row.get(5)?;
+    let args = serde_json::from_str(&args_raw).unwrap_or_default();
+    Ok(crate::McpServer {
+        id: row.get(0)?,
+        transport: row.get(1)?,
+        command: row.get(2)?,
+        url: row.get(3)?,
+        enabled: row.get::<_, i32>(4)? != 0,
+        args,
     })
 }
 

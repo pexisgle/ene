@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// Per-process companion facade over `companions.db`.
 pub struct CompanionRuntime {
     store: Arc<CompanionStore>,
-    settings: MindSettings,
+    settings: Mutex<MindSettings>,
     arbiters: Mutex<HashMap<SoulId, ExpressionArbiter>>,
 }
 
@@ -28,7 +28,7 @@ impl CompanionRuntime {
     pub fn new(store: Arc<CompanionStore>, settings: MindSettings) -> Self {
         Self {
             store,
-            settings,
+            settings: Mutex::new(settings),
             arbiters: Mutex::new(HashMap::new()),
         }
     }
@@ -36,6 +36,15 @@ impl CompanionRuntime {
     #[must_use]
     pub fn store(&self) -> Arc<CompanionStore> {
         Arc::clone(&self.store)
+    }
+
+    pub fn replace_settings(&self, settings: MindSettings) {
+        *self.settings.lock() = settings;
+    }
+
+    #[must_use]
+    pub fn settings(&self) -> MindSettings {
+        self.settings.lock().clone()
     }
 
     /// Decay + user signals + optional self-report. Returns surface presentation.
@@ -50,13 +59,9 @@ impl CompanionRuntime {
             .get_soul(soul_id)?
             .ok_or_else(|| CompanionError::UnknownSoul(soul_id.to_string()))?;
         let now = Utc::now();
-        project_decay(
-            &mut soul.affect,
-            &soul.affect_baseline,
-            &self.settings.affect,
-            now,
-        );
-        apply_turn_signals(&mut soul.affect, user_text, None, &self.settings.affect);
+        let affect = self.settings.lock().affect.clone();
+        project_decay(&mut soul.affect, &soul.affect_baseline, &affect, now);
+        apply_turn_signals(&mut soul.affect, user_text, None, &affect);
         let mut presentation = None;
         for (aspect, body) in inner {
             if *aspect == InnerAspect::Emotion
@@ -69,7 +74,7 @@ impl CompanionRuntime {
         if let Some(pres) = presentation {
             let mut arbiters = self.arbiters.lock();
             let arbiter = arbiters.entry(soul_id).or_default();
-            return Ok(arbiter.decide(pres, &self.settings.affect, now, true));
+            return Ok(arbiter.decide(pres, &affect, now, true));
         }
         Ok(None)
     }
@@ -82,23 +87,14 @@ impl CompanionRuntime {
         assistant_text: &str,
         classifier: Option<&dyn ClassifyModel>,
     ) -> Result<Vec<ArbitrateOutcome>, CompanionError> {
-        if apply_forget_request(
-            &self.store,
-            soul_id,
-            user_text,
-            self.settings.forgetting.mode,
-        )? > 0
-        {
+        let settings = self.settings.lock().clone();
+        if apply_forget_request(&self.store, soul_id, user_text, settings.forgetting.mode)? > 0 {
             return Ok(Vec::new());
         }
         let cands = extract_turn(soul_id, user_text, assistant_text, classifier).await;
         let mut out = Vec::new();
         for cand in cands {
-            out.push(arbitrate(
-                &self.store,
-                &cand,
-                &self.settings.memory_approval,
-            )?);
+            out.push(arbitrate(&self.store, &cand, &settings.memory_approval)?);
         }
         Ok(out)
     }
@@ -114,22 +110,37 @@ impl CompanionRuntime {
         soul_id: SoulId,
         query: &str,
     ) -> Result<Vec<crate::memory::RecalledMemory>, CompanionError> {
-        self.store.recall(
+        self.recall_ranked(soul_id, query, None)
+    }
+
+    pub fn recall_ranked(
+        &self,
+        soul_id: SoulId,
+        query: &str,
+        query_vec: Option<&[f32]>,
+    ) -> Result<Vec<crate::memory::RecalledMemory>, CompanionError> {
+        let settings = self.settings.lock().clone();
+        let mut weights = recall_weights(&settings.recall);
+        if query_vec.is_some() && weights.embedding <= 0.0 {
+            weights.embedding = 0.35;
+        }
+        self.store.recall_ranked(
             soul_id,
             query,
-            self.settings.recall.budget,
+            settings.recall.budget,
             &Utc::now().to_rfc3339(),
-            recall_weights(&self.settings.recall),
+            weights,
+            query_vec,
         )
     }
 
     #[must_use]
-    pub fn affect_settings(&self) -> &AffectSettings {
-        &self.settings.affect
+    pub fn affect_settings(&self) -> AffectSettings {
+        self.settings.lock().affect.clone()
     }
 
     #[must_use]
-    pub fn approval_settings(&self) -> &MemoryApprovalSettings {
-        &self.settings.memory_approval
+    pub fn approval_settings(&self) -> MemoryApprovalSettings {
+        self.settings.lock().memory_approval.clone()
     }
 }

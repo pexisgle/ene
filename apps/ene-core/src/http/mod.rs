@@ -1,9 +1,14 @@
 pub(crate) mod backup;
+mod classify;
 mod client_id;
 mod error;
 mod exclusive;
 mod lanes;
+mod model;
+mod proactive;
+mod recall;
 mod routes;
+mod speech;
 mod ws;
 
 use std::collections::HashMap;
@@ -20,7 +25,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
 use ene_api::SendMessageResponse;
-use ene_kernel::{ConversationModel, EchoModel};
+use ene_kernel::ConversationModel;
 use ene_plane::PendingPopup;
 use parking_lot::Mutex;
 use serde_json::json;
@@ -68,10 +73,10 @@ impl ServerHandle {
 }
 
 impl CoreDaemon {
-    /// Bind HTTP/WS with the echo model (offline / tests).
+    /// Bind HTTP/WS using `ai.tasks.chat` (Echo when unset).
     pub async fn serve(self: Arc<Self>) -> Result<ServerHandle, CoreError> {
-        self.serve_with(Arc::new(EchoModel) as Arc<dyn ConversationModel>)
-            .await
+        let model = Arc::new(model::SeamedModel::new(Arc::clone(&self)));
+        self.serve_with(model as Arc<dyn ConversationModel>).await
     }
 
     /// Bind HTTP/WS using `core.server.bind` (port 0 is ephemeral).
@@ -94,6 +99,7 @@ impl CoreDaemon {
         bind: SocketAddr,
         model: Arc<dyn ConversationModel>,
     ) -> Result<ServerHandle, CoreError> {
+        self.apply_plugin_profile().await;
         let listener = tokio::net::TcpListener::bind(bind)
             .await
             .map_err(|err| CoreError::Http(err.to_string()))?;
@@ -105,6 +111,17 @@ impl CoreDaemon {
         let last_used = self.settings().clients.audio_active_policy == "last_used";
         let (report_tx, mut report_rx) = mpsc::unbounded_channel();
         self.host().set_report_sink(report_tx);
+        let events = CoreBus::new(self.settings().server.ws_send_buffer);
+        self.set_speech(Arc::new(speech::PluginSpeech::new(
+            Arc::clone(&self),
+            events.clone(),
+        )));
+        let classify = Arc::new(classify::SeamedClassify::new(Arc::clone(&self)));
+        self.set_prefetch(Arc::new(recall::RecallPrefetch::new(Arc::clone(&self))));
+        self.set_finalizer(Arc::new(classify::MemoryFinalizer::new(
+            Arc::clone(&self),
+            Arc::clone(&classify),
+        )));
         let state = AppState {
             popup: Arc::clone(self.popup()),
             core: Arc::clone(&self),
@@ -112,7 +129,7 @@ impl CoreDaemon {
             exclusive: Arc::new(ExclusiveHub::new(last_used)),
             idem: Arc::new(Mutex::new(HashMap::new())),
             token: token.clone(),
-            events: CoreBus::new(self.settings().server.ws_send_buffer),
+            events,
             bind: addr,
         };
         let report_state = state.clone();
@@ -121,6 +138,10 @@ impl CoreDaemon {
                 routes::emit_job_reports(&report_state, std::slice::from_ref(&report));
                 routes::persist_job_report(&report_state, &report).await;
             }
+        }));
+        let proactive_state = state.clone();
+        drop(tokio::spawn(async move {
+            proactive::run_loop(proactive_state, classify).await;
         }));
         let app = router(state.clone());
         let (tx, rx) = oneshot::channel::<()>();
@@ -163,6 +184,7 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/sessions/{id}/split", post(routes::split_session))
         .route("/api/v1/sessions/{id}/end", post(routes::end_session))
         .route("/api/v1/sessions/{id}/barge-in", post(routes::barge_in))
+        .route("/api/v1/sessions/{id}/listen", post(routes::listen))
         .route("/api/v1/sessions/{id}/export", post(routes::export_session))
         .route("/api/v1/sessions/{id}/messages", post(routes::send_message))
         .route("/api/v1/sessions/{id}/history", get(routes::history))
@@ -204,6 +226,7 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/tools/{name}/test", post(routes::test_tool))
         .route("/api/v1/plugins", get(routes::list_plugins))
         .route("/api/v1/plugins/{id}/restart", post(routes::restart_plugin))
+        .route("/api/v1/mcp", get(routes::get_mcp).put(routes::put_mcp))
         .route("/api/v1/approvals", get(routes::list_approvals))
         .route(
             "/api/v1/approvals/{id}/respond",

@@ -78,6 +78,7 @@ pub struct RecallSettings {
     pub weight_lexical: f32,
     pub weight_recency: f32,
     pub weight_salience: f32,
+    pub weight_embedding: f32,
 }
 
 impl Default for RecallSettings {
@@ -88,6 +89,7 @@ impl Default for RecallSettings {
             weight_lexical: 0.5,
             weight_recency: 0.25,
             weight_salience: 0.25,
+            weight_embedding: 0.35,
         }
     }
 }

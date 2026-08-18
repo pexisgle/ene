@@ -33,6 +33,7 @@ pub enum BuiltinKind {
     Exec,
     Web,
     Utility,
+    App,
 }
 
 impl BuiltinKind {
@@ -43,6 +44,7 @@ impl BuiltinKind {
             Self::Exec => "tool.exec",
             Self::Web => "tool.web",
             Self::Utility => "tool.utility",
+            Self::App => "tool.app",
         }
     }
 }
@@ -142,6 +144,7 @@ fn build_ack<H: ToolHandler>(hello: &HostHello, handler: &H) -> Result<HelloAck,
         &hello.protocols,
         VersionRange::exact(CORE_VERSION),
         plugin_tool,
+        None,
     )
     .map_err(|err| err.to_string())?;
     if handler.digest() != hello.expected_digest {

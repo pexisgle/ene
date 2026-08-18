@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+use crate::provider::{
+    EmbedRequest, EmbedResult, LlmChunk, LlmGenerateRequest, LlmGeneration, ProviderFaces,
+    SttRequest, SttResult, TtsAudio, TtsRequest,
+};
+
 /// Current `core` subprotocol version.
 pub const CORE_VERSION: u32 = 1;
 /// Current `tool` subprotocol version.
@@ -69,7 +74,7 @@ impl ProtocolRanges {
         Self {
             core: VersionRange::exact(CORE_VERSION),
             tool: Some(VersionRange::exact(TOOL_VERSION)),
-            provider: None,
+            provider: Some(VersionRange::exact(crate::provider::PROVIDER_VERSION)),
             capability: None,
         }
     }
@@ -81,6 +86,8 @@ pub struct Negotiated {
     pub core: u32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tool: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider: Option<ProviderFaces>,
 }
 
 /// Host hello (first frame).
@@ -157,6 +164,15 @@ pub enum Message {
     Drain { id: u64 },
     DrainAck { id: u64 },
     Log { fields: serde_json::Value },
+    LlmGenerate { id: u64, body: LlmGenerateRequest },
+    LlmChunk { id: u64, body: LlmChunk },
+    LlmDone { id: u64, body: LlmGeneration },
+    EmbedEncode { id: u64, body: EmbedRequest },
+    EmbedResult { id: u64, body: EmbedResult },
+    TtsSynthesize { id: u64, body: TtsRequest },
+    TtsResult { id: u64, body: TtsAudio },
+    SttTranscribe { id: u64, body: SttRequest },
+    SttResult { id: u64, body: SttResult },
 }
 
 impl Message {
@@ -185,6 +201,15 @@ impl Message {
             Self::Drain { .. } => "drain",
             Self::DrainAck { .. } => "drain_ack",
             Self::Log { .. } => "log",
+            Self::LlmGenerate { .. } => "llm_generate",
+            Self::LlmChunk { .. } => "llm_chunk",
+            Self::LlmDone { .. } => "llm_done",
+            Self::EmbedEncode { .. } => "embed_encode",
+            Self::EmbedResult { .. } => "embed_result",
+            Self::TtsSynthesize { .. } => "tts_synthesize",
+            Self::TtsResult { .. } => "tts_result",
+            Self::SttTranscribe { .. } => "stt_transcribe",
+            Self::SttResult { .. } => "stt_result",
         }
     }
 }

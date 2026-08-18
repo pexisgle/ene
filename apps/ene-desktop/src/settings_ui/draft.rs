@@ -507,30 +507,12 @@ pub(crate) fn config_with_real_secrets() -> EneConfig {
     drop(config.set_section_value(
         "ai",
         serde_json::json!({
-            "providers": {
-                "openai": {
-                    "api_key": {
-                        "source": "inline",
-                        "inline": "sk-stored-inline"
-                    }
+            "tasks": {
+                "chat": {
+                    "plugin": "echo",
+                    "api_key": "sk-stored-inline"
                 }
             }
-        }),
-    ));
-    drop(config.set_section_value(
-        "plugins",
-        serde_json::json!({
-            "list": {
-                "demo": {
-                    "credentials": { "cred-key": "cred-stored-value" },
-                    "config": { "token": "config-stored-token", "voice": "af_heart" }
-                }
-            },
-            "mcp_servers": [{
-                "name": "m",
-                "enabled": true,
-                "transport": { "url": "http://example.test", "auth_header": "Bearer stored-auth" }
-            }]
         }),
     ));
     config
@@ -759,14 +741,11 @@ mod tests {
     #[test]
     fn secret_states_round_trip() {
         let mut d = draft();
-        assert_eq!(d.secret("ai.providers.openai.api_key"), SecretState::None);
-        d.set_secret("ai.providers.openai.api_key", SecretState::Unchanged);
-        assert_eq!(
-            d.secret("ai.providers.openai.api_key"),
-            SecretState::Unchanged
-        );
-        d.set_secret("ai.providers.openai.api_key", SecretState::None);
-        assert_eq!(d.secret("ai.providers.openai.api_key"), SecretState::None);
+        assert_eq!(d.secret("ai.tasks.chat.api_key"), SecretState::None);
+        d.set_secret("ai.tasks.chat.api_key", SecretState::Unchanged);
+        assert_eq!(d.secret("ai.tasks.chat.api_key"), SecretState::Unchanged);
+        d.set_secret("ai.tasks.chat.api_key", SecretState::None);
+        assert_eq!(d.secret("ai.tasks.chat.api_key"), SecretState::None);
     }
 
     #[test]
@@ -875,17 +854,10 @@ mod tests {
     fn draft_never_holds_stored_secret_values() {
         let draft = SettingsDraft::new(config_with_real_secrets());
         let text = serde_json::to_string(draft.editing()).expect("editing serializes");
-        for secret in [
-            "sk-stored-inline",
-            "cred-stored-value",
-            "config-stored-token",
-            "stored-auth",
-        ] {
-            assert!(
-                !text.contains(secret),
-                "stored secret `{secret}` must never reach the draft"
-            );
-        }
+        assert!(
+            !text.contains("sk-stored-inline"),
+            "stored secret `sk-stored-inline` must never reach the draft"
+        );
         assert!(
             text.contains("ene-secret-placeholder"),
             "the placeholder (JSON-escaped) must appear in the serialized draft"
@@ -893,14 +865,14 @@ mod tests {
         assert_eq!(
             draft
                 .editing()
-                .get_path("ai.providers.openai.api_key.source")
+                .get_path("ai.tasks.chat.plugin")
                 .and_then(|value| value.as_str().map(str::to_owned)),
-            Some("inline".to_owned())
+            Some("echo".to_owned())
         );
         assert_eq!(
             draft
                 .editing()
-                .get_path("ai.providers.openai.api_key.inline")
+                .get_path("ai.tasks.chat.api_key")
                 .and_then(|value| value.as_str().map(str::to_owned))
                 .as_deref(),
             Some(SECRET_PLACEHOLDER)
@@ -910,12 +882,12 @@ mod tests {
     #[test]
     fn seed_core_section_does_not_dirty() {
         let mut d = draft();
-        d.seed_core_section("ai", json!({"tasks": {"chat": {"provider": "echo"}}}));
+        d.seed_core_section("ai", json!({"tasks": {"chat": {"plugin": "echo"}}}));
         assert!(!d.is_dirty());
         assert_eq!(
             d.editing()
                 .section_value("ai")
-                .and_then(|value| value.pointer("/tasks/chat/provider").cloned()),
+                .and_then(|value| value.pointer("/tasks/chat/plugin").cloned()),
             Some(json!("echo"))
         );
     }

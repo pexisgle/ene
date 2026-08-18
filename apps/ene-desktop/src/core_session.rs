@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use ene_api::{
     ApiClient, ApprovalView, CreateScheduleRequest, CreateSessionRequest, HistoryResponse, JobView,
-    MemoryPatch, MemoryView, MessageMode, MessageRequest, PluginView, ScheduleView, SessionPatch,
-    SessionView, SoulView,
+    McpDocument, MemoryPatch, MemoryView, MessageMode, MessageRequest, PluginView, ScheduleView,
+    SessionPatch, SessionView, SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -165,6 +165,24 @@ impl CoreSession {
         self.runtime.spawn(async move {
             if let Err(err) = client.barge_in(&session_id).await {
                 tracing::debug!(error = %err, "barge_in failed");
+            }
+        });
+    }
+
+    pub fn listen(&self, pcm: Vec<f32>, sample_rate: u32) {
+        let Some(session_id) = self.session_id.lock().clone() else {
+            return;
+        };
+        if pcm.is_empty() {
+            return;
+        }
+        let client = self.client.clone();
+        self.runtime.spawn(async move {
+            if let Err(err) = client
+                .listen(&session_id, &ene_api::ListenRequest { pcm, sample_rate })
+                .await
+            {
+                tracing::debug!(error = %err, "listen failed");
             }
         });
     }
@@ -373,6 +391,16 @@ impl CoreSession {
                 .map(|_| ())
                 .map_err(|err| err.to_string())
         })
+    }
+
+    pub fn fetch_mcp(&self) -> oneshot::Receiver<Result<McpDocument, String>> {
+        let client = self.client.clone();
+        self.spawn_fetch(async move { client.mcp().await.map_err(|err| err.to_string()) })
+    }
+
+    pub fn put_mcp(&self, doc: McpDocument) -> oneshot::Receiver<Result<McpDocument, String>> {
+        let client = self.client.clone();
+        self.spawn_fetch(async move { client.put_mcp(&doc).await.map_err(|err| err.to_string()) })
     }
 
     pub fn patch_memory(

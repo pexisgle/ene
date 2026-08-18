@@ -120,6 +120,9 @@ async fn open_lane() -> (TempDir, Arc<SessionStore>, LaneHandle, Arc<RecordingMo
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
         router: None,
     });
     (dir, store, lane, model)
@@ -251,6 +254,9 @@ async fn prompt_while_busy_returns_lane_busy() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
         router: None,
     });
     let first = lane.prompt("one").await.unwrap();
@@ -291,6 +297,9 @@ async fn abort_does_not_write_assistant_closure() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
         router: None,
     });
     let turn = lane.prompt("hold").await.unwrap();
@@ -396,6 +405,9 @@ async fn crash_recovery_is_reported_and_not_resumed() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: reports,
+        speech: None,
+        finalizer: None,
+        prefetch: None,
         router: None,
     });
     lane.prompt("what happened").await.unwrap();
@@ -602,6 +614,9 @@ async fn inner_only_model_does_not_leak_on_surface() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
         router: None,
     });
     let mut surface = lane.subscribe(DisplayDepth::Surface);
@@ -708,6 +723,9 @@ async fn abort_after_generate_does_not_write_assistant_closure() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
         router: None,
     });
     let wait_enter = done.notified();
@@ -764,6 +782,9 @@ async fn duplicate_abort_is_idempotent() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
         router: None,
     });
     lane.prompt("hold").await.unwrap();
@@ -805,6 +826,9 @@ async fn follow_up_queues_fifo_and_next_run_works_when_idle() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
         router: None,
     });
     lane.prompt("first").await.unwrap();

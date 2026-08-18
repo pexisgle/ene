@@ -1,6 +1,6 @@
 use crate::{Layer, PipelineError, ToolDefinition, ToolRegistry, ToolSource, builtin_specs};
 use ene_plugin_ipc::BuiltinKind;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[test]
@@ -18,8 +18,11 @@ fn surface_schemas_omit_fs_write() {
         .filter_map(|schema| schema.get("name").and_then(|v| v.as_str()))
         .collect();
     assert!(names.contains(&"utility.hash"));
+    assert!(names.contains(&"utility.calc"));
     assert!(names.contains(&"fs.read"));
+    assert!(names.contains(&"fs.list"));
     assert!(!names.contains(&"fs.write"));
+    assert!(!names.contains(&"fs.edit"));
     assert!(
         surface
             .iter()
@@ -124,11 +127,12 @@ fn exec_tools_stay_off_surface_schema() {
 }
 
 #[test]
-fn builtin_specs_cover_four_plugins() {
+fn builtin_specs_cover_five_plugins() {
     assert!(!builtin_specs(BuiltinKind::Fs).is_empty());
     assert!(!builtin_specs(BuiltinKind::Exec).is_empty());
     assert!(!builtin_specs(BuiltinKind::Web).is_empty());
     assert!(!builtin_specs(BuiltinKind::Utility).is_empty());
+    assert!(!builtin_specs(BuiltinKind::App).is_empty());
 }
 
 #[test]
@@ -219,4 +223,85 @@ fn unknown_plugin_empty_side_effects_are_medium_sensitivity() {
         },
     );
     assert_eq!(def.sensitivity, ene_plane::Sensitivity::Medium);
+}
+
+#[tokio::test]
+async fn calc_and_text_tools_run_on_surface() {
+    let registry = ToolRegistry::new();
+    for def in crate::builtins::definitions_for(BuiltinKind::Utility) {
+        registry.register(def);
+    }
+    let sum = registry
+        .execute("utility.calc", json!({"expr": "1+2*3"}), Layer::Surface)
+        .await
+        .unwrap();
+    assert_eq!(sum["value"], json!(7.0));
+    let hashed = registry
+        .execute(
+            "utility.text",
+            json!({"op":"hash","text":"hi","algorithm":"blake3"}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap();
+    assert!(hashed.get("hex").is_some());
+}
+
+#[tokio::test]
+async fn web_fetch_is_on_surface_and_blocks_loopback() {
+    let registry = ToolRegistry::new();
+    for def in crate::builtins::definitions_for(BuiltinKind::Web) {
+        registry.register(def);
+    }
+    let surface = registry.schemas(Layer::Surface);
+    let names: Vec<&str> = surface
+        .iter()
+        .filter_map(|schema| schema.get("name").and_then(|v| v.as_str()))
+        .collect();
+    assert!(names.contains(&"web.fetch"));
+    assert!(names.contains(&"web.search"));
+    let err = registry
+        .execute(
+            "web.fetch",
+            json!({"url":"http://127.0.0.1/secret"}),
+            Layer::Surface,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PipelineError::Execute(_)));
+}
+
+#[test]
+fn app_screenshot_is_high_sensitivity_from_host_spec() {
+    let defs = crate::builtins::definitions_for(BuiltinKind::App);
+    let shot = defs
+        .iter()
+        .find(|def| def.name == "app.screenshot")
+        .unwrap();
+    assert!(shot.side_effects.is_empty());
+    assert_eq!(shot.sensitivity, ene_plane::Sensitivity::High);
+    let click = defs.iter().find(|def| def.name == "app.click").unwrap();
+    assert_eq!(click.side_effects, vec!["input".to_owned()]);
+}
+
+#[tokio::test]
+async fn fs_list_and_edit_stay_in_workspace() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello world").unwrap();
+    let registry = ToolRegistry::new();
+    registry.set_workspace(dir.path());
+    for def in crate::builtins::definitions_for(BuiltinKind::Fs) {
+        registry.register(def);
+    }
+    let listed = registry
+        .execute("fs.list", json!({}), Layer::Surface)
+        .await
+        .unwrap();
+    assert!(
+        listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| { row.get("name").and_then(Value::as_str) == Some("a.txt") })
+    );
 }

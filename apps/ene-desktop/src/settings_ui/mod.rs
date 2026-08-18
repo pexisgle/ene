@@ -228,26 +228,18 @@ impl PageKind {
                     "model",
                     "models",
                     "anthropic",
-                    "local",
-                    "gguf",
+                    "echo",
+                    "classifier",
+                    "proactive",
                 ],
-                sections: &["ai-chat", "ai-embedding", "ai-health"],
+                sections: &["ai-chat", "ai-classifier", "ai-proactive", "ai-embedding"],
                 section_aliases: &[],
             },
             PageKind::Voice => &PageMeta {
                 category: PageCategory::Settings,
                 title_key: "voice-audio",
                 description_key: "page-voice-description",
-                aliases: &[
-                    "tts",
-                    "stt",
-                    "vad",
-                    "speech",
-                    "mic",
-                    "microphone",
-                    "kokoro",
-                    "whisper",
-                ],
+                aliases: &["tts", "stt", "vad", "speech", "mic", "microphone"],
                 sections: &["voice-tts", "voice-stt", "voice-mic"],
                 section_aliases: &[
                     SectionAlias {
@@ -255,15 +247,7 @@ impl PageKind {
                         section: "voice-tts",
                     },
                     SectionAlias {
-                        alias: "kokoro",
-                        section: "voice-tts",
-                    },
-                    SectionAlias {
                         alias: "stt",
-                        section: "voice-stt",
-                    },
-                    SectionAlias {
-                        alias: "whisper",
                         section: "voice-stt",
                     },
                     SectionAlias {
@@ -395,44 +379,17 @@ impl PageKind {
                 title_key: "tools-and-plugins",
                 description_key: "page-tools-and-plugins-description",
                 aliases: &[
-                    "mcp",
-                    "tool",
-                    "provider",
-                    "tools",
-                    "sandbox",
-                    "credential",
-                    "schema",
-                    "plugin",
-                    "actions",
-                    "llama",
-                    "whisper",
-                    "kokoro",
+                    "mcp", "tool", "provider", "tools", "sandbox", "plugin", "actions",
                 ],
-                sections: &[
-                    "plugins-general",
-                    "plugins-tools",
-                    "plugins-providers",
-                    "plugins-mcp",
-                    "plugins-discovered",
-                ],
+                sections: &["plugins-list"],
                 section_aliases: &[],
             },
             PageKind::Engines => &PageMeta {
                 category: PageCategory::Management,
                 title_key: "engines",
                 description_key: "page-engines-description",
-                aliases: &[
-                    "sidecar",
-                    "engine",
-                    "inference",
-                    "llama-server",
-                    "voicevox",
-                    "whisper",
-                    "catalog",
-                    "artifact-install",
-                    "model-files",
-                ],
-                sections: &["engines-catalog", "engines-list"],
+                aliases: &["sidecar", "engine", "inference", "llama-server", "catalog"],
+                sections: &["engines-plugins", "engines-list"],
                 section_aliases: &[],
             },
             PageKind::Advanced => &PageMeta {
@@ -669,9 +626,7 @@ fn memory_mode_for_section(section: &str) -> Option<crate::settings::MemoryPageM
 
 fn plugin_mode_for_section(section: &str) -> Option<crate::settings::PluginPageMode> {
     match section {
-        "plugins-tools" => Some(crate::settings::PluginPageMode::Tools),
-        "plugins-providers" => Some(crate::settings::PluginPageMode::Providers),
-        "plugins-mcp" => Some(crate::settings::PluginPageMode::Mcp),
+        "plugins-list" => Some(crate::settings::PluginPageMode::Tools),
         _ => None,
     }
 }
@@ -866,7 +821,6 @@ impl SettingsUi {
         // A committed secret never stays in a UI text buffer, even when it
         // was typed this session.
         self.input.ai_api_key.clear();
-        self.input.plugin_options.clear();
         if outcome.conflicted {
             // Keep the user's edits; only the baseline moves to the actor's
             // newer state so the next apply is not stale.
@@ -1522,8 +1476,16 @@ impl SettingsUi {
                             world,
                         );
                     }
-                    PageKind::Features => page_features::render(ui, &mut self.draft),
-                    PageKind::Memory => page_memory::render_config(ui, settings, &mut self.draft),
+                    PageKind::Features => {
+                        page_features::render(ui, &mut self.draft, ai, &mut self.input);
+                    }
+                    PageKind::Memory => page_memory::render_config(
+                        ui,
+                        settings,
+                        &mut self.draft,
+                        ai,
+                        &mut self.input,
+                    ),
                     PageKind::Memories => {
                         page_memory::render_journal(ui, ai, &mut self.input, world, ui_entity);
                         page_memory_ledger::render(ui, ai, &mut self.input, world, ui_entity);

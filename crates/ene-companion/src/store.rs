@@ -466,28 +466,51 @@ impl CompanionStore {
         now: &str,
         weights: RecallWeights,
     ) -> Result<Vec<RecalledMemory>, CompanionError> {
+        self.recall_ranked(soul_id, query, budget, now, weights, None)
+    }
+
+    /// Recall with an optional query embedding (cosine on `memories.embedding`).
+    pub fn recall_ranked(
+        &self,
+        soul_id: SoulId,
+        query: &str,
+        budget: usize,
+        now: &str,
+        weights: RecallWeights,
+        query_vec: Option<&[f32]>,
+    ) -> Result<Vec<RecalledMemory>, CompanionError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, soul_id, scope, kind, title, content, confidence, salience,
                     source, source_seq, created_at, last_access, access_count,
-                    superseded_by, expires_at, forgotten
+                    superseded_by, expires_at, forgotten, embedding
              FROM memories
              WHERE forgotten = 0 AND superseded_by IS NULL
                AND (scope = 'shared' OR soul_id = ?1)
                AND (expires_at IS NULL OR expires_at > ?2)",
         )?;
-        let rows = stmt.query_map(params![soul_id.to_string(), now], row_to_memory)?;
+        let rows = stmt.query_map(params![soul_id.to_string(), now], |row| {
+            let mem = row_to_memory(row)?;
+            let blob: Option<Vec<u8>> = row.get(16)?;
+            Ok((mem, blob))
+        })?;
         let mut scored = Vec::new();
         let q = query.to_ascii_lowercase();
         for row in rows {
-            let mem = row?;
+            let (mem, blob) = row?;
             let lex = lexical_score(&q, &mem.title, &mem.content);
-            if !q.is_empty() && lex <= 0.0 {
+            if query_vec.is_none() && !q.is_empty() && lex <= 0.0 {
                 continue;
             }
             let recency = recency_score(&mem.last_access, now);
-            let score =
-                weights.lexical * lex + weights.recency * recency + weights.salience * mem.salience;
+            let embed = match (query_vec, blob.as_deref()) {
+                (Some(query), Some(bytes)) => cosine(query, &decode_f32_slice(bytes)),
+                _ => 0.0,
+            };
+            let score = weights.lexical * lex
+                + weights.recency * recency
+                + weights.salience * mem.salience
+                + weights.embedding * embed;
             scored.push((score, mem));
         }
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -519,6 +542,14 @@ impl CompanionStore {
             self.touch(id)?;
         }
         Ok(picked)
+    }
+
+    pub fn set_embedding(&self, id: MemoryId, vector: &[f32]) -> Result<(), CompanionError> {
+        self.conn.lock().execute(
+            "UPDATE memories SET embedding = ?1 WHERE id = ?2",
+            params![encode_f32_slice(vector), id.to_string()],
+        )?;
+        Ok(())
     }
 
     fn touch(&self, id: MemoryId) -> Result<(), CompanionError> {
@@ -739,6 +770,7 @@ pub struct RecallWeights {
     pub lexical: f32,
     pub recency: f32,
     pub salience: f32,
+    pub embedding: f32,
     pub mmr_lambda: f32,
 }
 
@@ -748,6 +780,7 @@ impl Default for RecallWeights {
             lexical: 0.5,
             recency: 0.25,
             salience: 0.25,
+            embedding: 0.0,
             mmr_lambda: 0.7,
         }
     }
@@ -856,6 +889,41 @@ fn recency_score(last_access: &str, now: &str) -> f32 {
     };
     let days = (now - then).num_minutes() as f32 / (60.0 * 24.0);
     (-days / 14.0).exp().clamp(0.0, 1.0)
+}
+
+fn encode_f32_slice(values: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len().saturating_mul(4));
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+fn decode_f32_slice(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
+fn cosine(left: &[f32], right: &[f32]) -> f32 {
+    if left.is_empty() || left.len() != right.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (a, b) in left.iter().zip(right) {
+        dot += a * b;
+        left_norm += a * a;
+        right_norm += b * b;
+    }
+    let denom = left_norm.sqrt() * right_norm.sqrt();
+    if denom <= f32::EPSILON {
+        0.0
+    } else {
+        (dot / denom).clamp(0.0, 1.0)
+    }
 }
 
 fn titles_too_close(a: &str, b: &str) -> bool {

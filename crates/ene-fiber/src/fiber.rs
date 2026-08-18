@@ -56,6 +56,7 @@ pub enum Effect {
     RegisterTool { name: String },
     BrokerGrant { op: String },
     SpawnProcess { pid: u32 },
+    BindSeam { name: String },
 }
 
 /// One profile-row activation.

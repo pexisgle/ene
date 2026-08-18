@@ -262,6 +262,9 @@ async fn lane_prompt_still_works_while_job_running() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
         router: None,
     });
     lane.prompt("hello while working").await.unwrap();
@@ -332,6 +335,9 @@ async fn lane_auto_upgrade_does_not_execute_fs_write() {
         harness: HarnessSettings::default(),
         mind: MindSettings::default(),
         recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
         router: Some(router as Arc<dyn SurfaceRouter>),
     });
     lane.prompt("please write a file").await.unwrap();
@@ -1194,4 +1200,26 @@ async fn mutating_work_waits_for_plan_approval() {
         })
         .collect();
     assert!(names.iter().any(|n| n == "delegate.approve_plan"));
+}
+
+#[test]
+fn mcp_store_round_trips_args() {
+    let dir = TempDir::new().unwrap();
+    let store = WorkStore::open(dir.path().join("companions.db")).unwrap();
+    store
+        .replace_mcp(&[crate::McpServer {
+            id: "git".into(),
+            transport: "stdio".into(),
+            command: Some("npx".into()),
+            args: vec!["-y".into(), "git-mcp".into()],
+            url: None,
+            enabled: true,
+        }])
+        .unwrap();
+    let listed = store.list_mcp().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "git");
+    assert_eq!(listed[0].args, vec!["-y".to_owned(), "git-mcp".to_owned()]);
+    store.replace_mcp(&[]).unwrap();
+    assert!(store.list_mcp().unwrap().is_empty());
 }

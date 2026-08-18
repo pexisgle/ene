@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use ene_body::{
     BodyCatalog, BodyError, BodySettings, EmotionCue, PerformanceBus, Stage, VoiceRuntime,
@@ -11,7 +13,8 @@ use ene_companion::{
 };
 use ene_fiber::Supervisor;
 use ene_kernel::{
-    ConversationModel, CoreSettings, LaneHandle, LaneOptions, SurfaceRouter, format_recovery_note,
+    AiSettings, ConversationModel, CoreSettings, LaneHandle, LaneOptions, SpeechPresenter,
+    SurfaceRouter, TaskBinding, TurnFinalizer, TurnPrefetch, format_recovery_note,
 };
 use ene_plane::{
     ApprovalPlane, ApprovalSettings, AuditLog, PendingPopup, PolicyFile, PopupSink, Vault,
@@ -22,8 +25,8 @@ use ene_session::{
     SessionStore, SessionsSettings, SoulId, Transaction, v1,
 };
 use ene_work::{
-    CompanionReport, DelegationHost, PlaceholderScreenshot, WorkError, WorkStore,
-    WorkSurfaceRouter, register_screenshot_tool, register_work_tools, workspace_root,
+    CompanionReport, DelegationHost, WorkError, WorkStore, WorkSurfaceRouter, register_work_tools,
+    workspace_root,
 };
 use fs2::FileExt;
 use thiserror::Error;
@@ -86,13 +89,25 @@ pub struct CoreDaemon {
     plane: Arc<ApprovalPlane>,
     vault: Vault,
     companions: Arc<CompanionStore>,
-    companion: CompanionRuntime,
+    companion: Arc<CompanionRuntime>,
     stage: Arc<Stage>,
     work: Arc<WorkStore>,
     host: Arc<DelegationHost>,
     job_reports: Vec<CompanionReport>,
     popup: Arc<PendingPopup>,
     settings: CoreSettings,
+    ai: Arc<parking_lot::Mutex<ene_kernel::AiSettings>>,
+    chat_secret: Arc<parking_lot::Mutex<String>>,
+    classifier_secret: Arc<parking_lot::Mutex<String>>,
+    embedding_secret: Arc<parking_lot::Mutex<String>>,
+    proactive_secret: Arc<parking_lot::Mutex<String>>,
+    tts_secret: Arc<parking_lot::Mutex<String>>,
+    stt_secret: Arc<parking_lot::Mutex<String>>,
+    speech: parking_lot::Mutex<Option<Arc<dyn SpeechPresenter>>>,
+    finalizer: parking_lot::Mutex<Option<Arc<dyn ene_kernel::TurnFinalizer>>>,
+    prefetch: parking_lot::Mutex<Option<Arc<dyn TurnPrefetch>>>,
+    mind: parking_lot::Mutex<CompanionMind>,
+    last_proactive: parking_lot::Mutex<HashMap<SessionId, Instant>>,
 }
 
 impl CoreDaemon {
@@ -100,6 +115,8 @@ impl CoreDaemon {
     pub async fn boot(opts: BootOptions) -> Result<Self, CoreError> {
         std::fs::create_dir_all(&opts.data_dir)?;
         let settings = load_core_settings(&opts.data_dir);
+        let ai = load_ai_settings(&opts.data_dir);
+        let mind = load_mind_settings(&opts.data_dir);
         let lock = lock_data_dir(&opts.data_dir)?;
         let db_path = opts.data_dir.join("sessions.db");
         let store = SessionStore::open(&db_path, &opts.synchronous).await?;
@@ -140,7 +157,6 @@ impl CoreDaemon {
             opts.data_dir.clone(),
         ));
         register_work_tools(&registry, Arc::clone(&host), opts.data_dir.join("skills"));
-        register_screenshot_tool(&registry, Arc::new(PlaceholderScreenshot));
         let job_reports = host.recover_interrupted()?;
         if !job_reports.is_empty() {
             info!(
@@ -148,7 +164,7 @@ impl CoreDaemon {
                 "detected interrupted tasks; closed without resume"
             );
         }
-        let companion = CompanionRuntime::new(Arc::clone(&companions), CompanionMind::default());
+        let companion = Arc::new(CompanionRuntime::new(Arc::clone(&companions), mind.clone()));
         let bus = Arc::new(PerformanceBus::default());
         let stage = Arc::new(Stage::new(
             bus,
@@ -157,6 +173,18 @@ impl CoreDaemon {
         ));
         let supervisor = Arc::new(Supervisor::new(workspace, registry));
         seed_default_occupants(&companions, &stage)?;
+        let chat_secret = load_named_secret(&vault, "ENE_AI__TASKS__CHAT__API_KEY", "ai.chat");
+        let classifier_secret = load_named_secret(
+            &vault,
+            "ENE_AI__TASKS__CLASSIFIER__API_KEY",
+            "ai.classifier",
+        );
+        let embedding_secret =
+            load_named_secret(&vault, "ENE_AI__TASKS__EMBEDDING__API_KEY", "ai.embedding");
+        let proactive_secret =
+            load_named_secret(&vault, "ENE_AI__TASKS__PROACTIVE__API_KEY", "ai.proactive");
+        let tts_secret = load_named_secret(&vault, "ENE_AI__TASKS__TTS__API_KEY", "ai.tts");
+        let stt_secret = load_named_secret(&vault, "ENE_AI__TASKS__STT__API_KEY", "ai.stt");
         Ok(Self {
             data_dir: opts.data_dir,
             _lock: lock,
@@ -173,6 +201,18 @@ impl CoreDaemon {
             job_reports,
             popup,
             settings,
+            ai: Arc::new(parking_lot::Mutex::new(ai)),
+            chat_secret: Arc::new(parking_lot::Mutex::new(chat_secret)),
+            classifier_secret: Arc::new(parking_lot::Mutex::new(classifier_secret)),
+            embedding_secret: Arc::new(parking_lot::Mutex::new(embedding_secret)),
+            proactive_secret: Arc::new(parking_lot::Mutex::new(proactive_secret)),
+            tts_secret: Arc::new(parking_lot::Mutex::new(tts_secret)),
+            stt_secret: Arc::new(parking_lot::Mutex::new(stt_secret)),
+            speech: parking_lot::Mutex::new(None),
+            finalizer: parking_lot::Mutex::new(None),
+            prefetch: parking_lot::Mutex::new(None),
+            mind: parking_lot::Mutex::new(mind),
+            last_proactive: parking_lot::Mutex::new(HashMap::new()),
         })
     }
 
@@ -189,6 +229,103 @@ impl CoreDaemon {
     #[must_use]
     pub fn settings(&self) -> &CoreSettings {
         &self.settings
+    }
+
+    #[must_use]
+    pub fn ai(&self) -> Arc<parking_lot::Mutex<AiSettings>> {
+        Arc::clone(&self.ai)
+    }
+
+    /// Vault value for `ai.tasks.<task>`, falling back to the chat key.
+    #[must_use]
+    pub fn secret_for(&self, task: &str) -> String {
+        let named = match task {
+            "classifier" => self.classifier_secret.lock().clone(),
+            "embedding" => self.embedding_secret.lock().clone(),
+            "proactive" => self.proactive_secret.lock().clone(),
+            "tts" => self.tts_secret.lock().clone(),
+            "stt" => self.stt_secret.lock().clone(),
+            "chat" => self.chat_secret.lock().clone(),
+            _ => String::new(),
+        };
+        if named.is_empty() && task != "chat" {
+            self.chat_secret.lock().clone()
+        } else {
+            named
+        }
+    }
+
+    #[must_use]
+    pub fn task_key_set(&self, task: &str) -> bool {
+        let named = match task {
+            "classifier" => self.classifier_secret.lock().clone(),
+            "embedding" => self.embedding_secret.lock().clone(),
+            "proactive" => self.proactive_secret.lock().clone(),
+            "tts" => self.tts_secret.lock().clone(),
+            "stt" => self.stt_secret.lock().clone(),
+            _ => self.chat_secret.lock().clone(),
+        };
+        !named.is_empty()
+    }
+
+    pub fn set_speech(&self, speech: Arc<dyn SpeechPresenter>) {
+        *self.speech.lock() = Some(speech);
+    }
+
+    pub fn set_finalizer(&self, finalizer: Arc<dyn TurnFinalizer>) {
+        *self.finalizer.lock() = Some(finalizer);
+    }
+
+    pub fn set_prefetch(&self, prefetch: Arc<dyn TurnPrefetch>) {
+        *self.prefetch.lock() = Some(prefetch);
+    }
+
+    #[must_use]
+    pub fn mind(&self) -> CompanionMind {
+        self.mind.lock().clone()
+    }
+
+    pub fn replace_mind(&self, mind: CompanionMind) {
+        *self.mind.lock() = mind.clone();
+        self.companion.replace_settings(mind);
+    }
+
+    pub fn mark_proactive(&self, session: SessionId) {
+        self.last_proactive.lock().insert(session, Instant::now());
+    }
+
+    #[must_use]
+    pub fn last_proactive(&self, session: SessionId) -> Option<Instant> {
+        self.last_proactive.lock().get(&session).copied()
+    }
+
+    /// Spawn harness tools, provider plugins, and handwritten MCP rows.
+    pub async fn apply_plugin_profile(&self) {
+        let ai = self.ai.lock().clone();
+        let rows = crate::plugin_profile::collect_rows(&self.data_dir, &self.work, &ai);
+        let report = self.supervisor.apply_profile(&rows).await;
+        if !report.waiting.is_empty() {
+            tracing::warn!(waiting = ?report.waiting, "plugin profile rows waiting");
+        }
+    }
+
+    pub fn mcp_servers(&self) -> Vec<ene_work::McpServer> {
+        crate::plugin_profile::load_servers(&self.data_dir, &self.work)
+    }
+
+    pub fn replace_mcp_servers(&self, servers: &[ene_work::McpServer]) -> Result<(), CoreError> {
+        crate::plugin_profile::save_servers(&self.data_dir, &self.work, servers)?;
+        Ok(())
+    }
+
+    pub fn replace_ai(&self, ai: AiSettings, secrets: TaskSecrets) {
+        *self.ai.lock() = ai;
+        store_secret(&self.chat_secret, secrets.chat);
+        store_secret(&self.classifier_secret, secrets.classifier);
+        store_secret(&self.embedding_secret, secrets.embedding);
+        store_secret(&self.proactive_secret, secrets.proactive);
+        store_secret(&self.tts_secret, secrets.tts);
+        store_secret(&self.stt_secret, secrets.stt);
     }
 
     #[must_use]
@@ -222,8 +359,8 @@ impl CoreDaemon {
     }
 
     #[must_use]
-    pub fn companion(&self) -> &CompanionRuntime {
-        &self.companion
+    pub fn companion(&self) -> Arc<CompanionRuntime> {
+        Arc::clone(&self.companion)
     }
 
     #[must_use]
@@ -401,6 +538,9 @@ impl CoreDaemon {
             mind: ene_kernel::MindSettings::default(),
             recovery: self.recovery.clone(),
             router: Some(router as Arc<dyn SurfaceRouter>),
+            speech: self.speech.lock().clone(),
+            finalizer: self.finalizer.lock().clone(),
+            prefetch: self.prefetch.lock().clone(),
         })
     }
 }
@@ -457,6 +597,127 @@ fn load_core_settings(data_dir: &Path) -> CoreSettings {
     }
     apply_core_env(&mut settings);
     settings
+}
+
+fn load_ai_settings(data_dir: &Path) -> AiSettings {
+    let mut settings = AiSettings::default();
+    let path = data_dir.join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(&path)
+        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(ai) = file.get("ai")
+        && let Ok(overlay) = serde_json::from_value::<AiSettings>(ai.clone())
+    {
+        settings = overlay;
+    }
+    apply_ai_env(&mut settings);
+    settings
+}
+
+fn load_mind_settings(data_dir: &Path) -> CompanionMind {
+    let path = data_dir.join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(&path)
+        && let Ok(file) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(mind) = file.get("mind")
+        && let Ok(overlay) = serde_json::from_value::<CompanionMind>(mind.clone())
+    {
+        return overlay;
+    }
+    CompanionMind::default()
+}
+
+fn apply_ai_env(settings: &mut AiSettings) {
+    apply_task_env("ENE_AI__TASKS__CHAT", &mut settings.tasks.chat);
+    apply_task_env("ENE_AI__TASKS__CLASSIFIER", &mut settings.tasks.classifier);
+    apply_task_env("ENE_AI__TASKS__EMBEDDING", &mut settings.tasks.embedding);
+    apply_task_env("ENE_AI__TASKS__PROACTIVE", &mut settings.tasks.proactive);
+    apply_task_env("ENE_AI__TASKS__TTS", &mut settings.tasks.tts);
+    apply_task_env("ENE_AI__TASKS__STT", &mut settings.tasks.stt);
+}
+
+fn apply_task_env(prefix: &str, binding: &mut TaskBinding) {
+    if let Ok(plugin) = std::env::var(format!("{prefix}__PLUGIN"))
+        && !plugin.is_empty()
+    {
+        binding.plugin = plugin;
+    }
+    if let Ok(model) = std::env::var(format!("{prefix}__MODEL"))
+        && !model.is_empty()
+    {
+        binding.model = model;
+    }
+    if let Ok(base_url) = std::env::var(format!("{prefix}__BASE_URL"))
+        && !base_url.is_empty()
+    {
+        binding.base_url = base_url;
+    }
+    if let Ok(raw) = std::env::var(format!("{prefix}__MAX_TOKENS"))
+        && let Ok(n) = raw.parse()
+    {
+        binding.max_tokens = Some(n);
+    }
+    if let Ok(voice) = std::env::var(format!("{prefix}__VOICE"))
+        && !voice.is_empty()
+    {
+        binding.voice = voice;
+    }
+}
+
+fn load_named_secret(vault: &Vault, env_key: &str, vault_key: &str) -> String {
+    if let Ok(key) = std::env::var(env_key)
+        && !key.is_empty()
+    {
+        drop(vault.put(vault_key, key.as_bytes()));
+        return key;
+    }
+    vault
+        .export(vault_key)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Secrets stripped from a settings PATCH.
+#[derive(Debug, Clone, Default)]
+pub struct TaskSecrets {
+    pub chat: Option<String>,
+    pub classifier: Option<String>,
+    pub embedding: Option<String>,
+    pub proactive: Option<String>,
+    pub tts: Option<String>,
+    pub stt: Option<String>,
+}
+
+fn store_secret(slot: &parking_lot::Mutex<String>, value: Option<String>) {
+    if let Some(secret) = value {
+        *slot.lock() = secret;
+    }
+}
+
+pub(crate) fn overlay_ai(live: &mut AiSettings, incoming: &serde_json::Value) {
+    overlay_task(&mut live.tasks.chat, incoming.pointer("/tasks/chat"));
+    overlay_task(
+        &mut live.tasks.classifier,
+        incoming.pointer("/tasks/classifier"),
+    );
+    overlay_task(
+        &mut live.tasks.embedding,
+        incoming.pointer("/tasks/embedding"),
+    );
+    overlay_task(
+        &mut live.tasks.proactive,
+        incoming.pointer("/tasks/proactive"),
+    );
+    overlay_task(&mut live.tasks.tts, incoming.pointer("/tasks/tts"));
+    overlay_task(&mut live.tasks.stt, incoming.pointer("/tasks/stt"));
+}
+
+fn overlay_task(dst: &mut TaskBinding, value: Option<&serde_json::Value>) {
+    let Some(value) = value else {
+        return;
+    };
+    if let Ok(parsed) = serde_json::from_value::<TaskBinding>(value.clone()) {
+        *dst = parsed;
+    }
 }
 
 fn apply_core_env(settings: &mut CoreSettings) {

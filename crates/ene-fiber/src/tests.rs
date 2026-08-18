@@ -22,6 +22,7 @@ fn row(id: &str, plugin: &str, caps: &[&str]) -> ProfileRow {
         requires: Vec::new(),
         capabilities: caps.iter().map(|s| (*s).to_owned()).collect(),
         sandbox_required: false,
+        config: serde_json::Value::Null,
     }
 }
 
@@ -32,6 +33,7 @@ fn row_with_requires(id: &str, plugin: &str, requires: &[&str]) -> ProfileRow {
         requires: requires.iter().map(|s| (*s).to_owned()).collect(),
         capabilities: Vec::new(),
         sandbox_required: false,
+        config: serde_json::Value::Null,
     }
 }
 
@@ -72,7 +74,7 @@ async fn disabling_one_row_leaves_the_other_active() {
     assert_eq!(remaining.uid, uid_web);
     assert_eq!(remaining.state, FiberState::Active);
     assert!(sup.registry().get("web.fetch").is_some());
-    assert!(!sup.surface_has_tool("web.fetch"));
+    assert!(sup.surface_has_tool("web.fetch"));
     assert!(!sup.surface_has_tool("utility.hash"));
 }
 
@@ -110,7 +112,7 @@ async fn apply_profile_unloads_removed_rows_and_keeps_uid() {
     sup.activate(&row("r-web", "tool.web", &[])).unwrap();
     assert!(sup.surface_has_tool("utility.hash"));
     assert!(sup.registry().get("web.fetch").is_some());
-    assert!(!sup.surface_has_tool("web.fetch"));
+    assert!(sup.surface_has_tool("web.fetch"));
 
     let report = sup
         .apply_profile(&[row("r-util", "tool.utility", &[])])
@@ -149,7 +151,7 @@ async fn requires_unsatisfied_row_waits_without_error() {
         .await;
     assert!(report.activated.contains(&"r-web".to_owned()));
     assert!(sup.registry().get("web.fetch").is_some());
-    assert!(!sup.surface_has_tool("web.fetch"));
+    assert!(sup.surface_has_tool("web.fetch"));
 }
 
 #[tokio::test]

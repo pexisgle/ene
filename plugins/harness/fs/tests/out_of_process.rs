@@ -24,6 +24,7 @@ async fn fs_write_is_denied_and_absent_from_surface() {
         requires: Vec::new(),
         capabilities: vec!["fs.read".to_owned()],
         sandbox_required: ene_sandbox::supported(),
+        config: serde_json::Value::Null,
     };
     sup.activate_process(&row, &bin()).await.unwrap();
     let surface = sup.registry().schemas(Layer::Surface);

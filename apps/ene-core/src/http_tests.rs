@@ -1284,3 +1284,122 @@ async fn ws_disconnect_while_holding_mic_drains_speech() {
     assert!(exclusive.mic.is_none());
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
+    let dir = TempDir::new().unwrap();
+    let core = Arc::new(
+        CoreDaemon::boot(BootOptions::new(dir.path()))
+            .await
+            .unwrap(),
+    );
+    let server = core.clone().serve().await.unwrap();
+    let token = std::fs::read_to_string(core.data_dir().join("api.token")).unwrap();
+    let client = ApiClient::new(format!("http://{}", server.addr), token.trim(), "desktop");
+    let soul_id = first_soul_id(&client).await;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id,
+            title: None,
+        })
+        .await
+        .unwrap();
+    client
+        .send_message(
+            &session.id,
+            &MessageRequest {
+                text: "ping".into(),
+                mode: MessageMode::Prompt,
+                input_modality: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let history = wait_assistant(&client, &session.id).await;
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|message| message.text.contains("ack: ping"))
+    );
+
+    let patched = client
+        .patch_settings(&serde_json::json!({
+            "ai": {
+                "tasks": {
+                    "chat": {
+                        "plugin": "echo",
+                        "model": "echo",
+                        "api_key": "sk-must-not-persist"
+                    }
+                }
+            }
+        }))
+        .await
+        .unwrap();
+    assert!(patched.pointer("/ai/tasks/chat/api_key").is_none());
+    let saved = std::fs::read_to_string(core.data_dir().join("settings.json")).unwrap();
+    assert!(
+        !saved.contains("sk-must-not-persist"),
+        "vault-bound keys must not land in settings.json"
+    );
+    let settings = client.settings().await.unwrap();
+    assert_eq!(
+        settings.pointer("/effective/ai/tasks/chat/plugin"),
+        Some(&serde_json::json!("echo"))
+    );
+    assert_eq!(settings.get("ai_chat_key_set"), None);
+    assert_eq!(
+        settings.pointer("/effective/ai_chat_key_set"),
+        Some(&serde_json::json!(true))
+    );
+
+    let tools = client.list_tools().await.unwrap();
+    let names: Vec<&str> = tools.items.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        names.contains(&"utility.hash"),
+        "harness tools must load with the plugin profile: {names:?}"
+    );
+    assert!(names.contains(&"app.screenshot"));
+
+    let empty = client
+        .listen(
+            &session.id,
+            &ene_api::ListenRequest {
+                pcm: vec![0.0; 16],
+                sample_rate: 16_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(empty.turn_id.is_none());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_document_round_trips_through_http() {
+    let (_dir, client, core, server) = boot_server().await;
+    let empty = client.mcp().await.unwrap();
+    assert!(empty.servers.is_empty());
+    let saved = client
+        .put_mcp(&ene_api::McpDocument {
+            servers: vec![ene_api::McpServerView {
+                id: "fixture".into(),
+                transport: "stdio".into(),
+                command: Some("__ene_missing_mcp__".into()),
+                args: vec!["-c".into(), "pass".into()],
+                url: None,
+                enabled: true,
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(saved.servers.len(), 1);
+    assert_eq!(saved.servers[0].id, "fixture");
+    let disk = std::fs::read_to_string(core.data_dir().join("mcp.json")).unwrap();
+    assert!(disk.contains("fixture"));
+    let listed = core.work().list_mcp().unwrap();
+    assert_eq!(listed[0].command.as_deref(), Some("__ene_missing_mcp__"));
+    server.shutdown().await;
+}

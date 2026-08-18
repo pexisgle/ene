@@ -3,6 +3,7 @@ members = [
     "crates/*",
     "apps/*",
     "plugins/harness/*",
+    "plugins/provider/*",
 ]
 exclude = ["plugins/tool/dummy-py"]
 default-members = [ "apps/ene-ctl" ]

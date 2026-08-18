@@ -1,6 +1,7 @@
 use crate::{
-    CORE_VERSION, HostConn, HostHello, IpcError, ProtoId, ProtocolRanges, ToolCall, ToolHandler,
-    ToolSpecWire, VersionRange, serve_plugin,
+    CORE_VERSION, HostConn, HostHello, IpcError, LlmGenerateRequest, LlmGeneration, LlmHandler,
+    LlmMessage, LlmRole, PluginIdentity, ProtoId, ProtocolRanges, ProviderAuth, ProviderHandlers,
+    ToolCall, ToolHandler, ToolSpecWire, VersionRange, serve_plugin, serve_provider,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -222,6 +223,87 @@ async fn ipc_baseline_ping_is_measurable() {
         tool_mean_us < 5_000,
         "ipc tool-call regression tool_mean_us={tool_mean_us}"
     );
+    host.drain().await.unwrap();
+    plugin.await.unwrap().unwrap();
+}
+
+struct FakeLlm;
+
+#[async_trait]
+impl LlmHandler for FakeLlm {
+    async fn generate(&self, request: LlmGenerateRequest) -> Result<LlmGeneration, IpcError> {
+        let last = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == LlmRole::User)
+            .map_or("hello", |message| message.text.as_str());
+        Ok(LlmGeneration {
+            text: format!("llm:{last}"),
+            model_id: request.model,
+            finish_reason: "stop".to_owned(),
+            ..LlmGeneration::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn llm_generate_roundtrip_without_tool_face() {
+    let (host_side, plugin_side) = UnixStream::pair().unwrap();
+    let identity = PluginIdentity {
+        plugin_id: "provider.test".to_owned(),
+        plugin_name: "test".to_owned(),
+        digest: "sha256:test".to_owned(),
+        spawn_token: Some(SPAWN_TOKEN.to_owned()),
+    };
+    let handlers = ProviderHandlers {
+        llm: Some(std::sync::Arc::new(FakeLlm)),
+        ..ProviderHandlers::default()
+    };
+    let plugin = tokio::spawn(async move { serve_provider(plugin_side, identity, handlers).await });
+    let hello = HostHello {
+        host_name: "ene-core".to_owned(),
+        host_version: "0.1.0".to_owned(),
+        protocols: ProtocolRanges::host_supported(),
+        expected_digest: "sha256:test".to_owned(),
+        declared_protocols: vec![ProtoId::Core, ProtoId::Provider],
+    };
+    let mut host = HostConn::handshake(
+        host_side,
+        hello,
+        &[ProtoId::Core, ProtoId::Provider],
+        SPAWN_TOKEN,
+    )
+    .await
+    .unwrap();
+    assert!(host.negotiated().tool.is_none());
+    assert_eq!(
+        host.negotiated()
+            .provider
+            .as_ref()
+            .and_then(|faces| faces.llm),
+        Some(1)
+    );
+    let result = host
+        .generate_llm(LlmGenerateRequest {
+            messages: vec![LlmMessage {
+                role: LlmRole::User,
+                text: "ping".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: None,
+                images: Vec::new(),
+            }],
+            tools: Vec::new(),
+            model: "test-model".to_owned(),
+            max_tokens: None,
+            base_url: String::new(),
+            auth: ProviderAuth::default(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.text, "llm:ping");
+    assert_eq!(result.model_id, "test-model");
     host.drain().await.unwrap();
     plugin.await.unwrap().unwrap();
 }

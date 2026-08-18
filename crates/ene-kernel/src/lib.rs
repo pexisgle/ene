@@ -19,11 +19,12 @@ mod live;
 mod model;
 mod observe;
 mod router;
+mod speech;
 mod waterfall;
 
 pub use config::{
-    BackupSettings, ClientsSettings, CoreSettings, DelegationSettings, HarnessSettings,
-    MindSettings, ServerSettings,
+    AiSettings, AiTasks, BackupSettings, ClientsSettings, CoreSettings, DelegationSettings,
+    HarnessSettings, MindSettings, ServerSettings, TaskBinding,
 };
 pub use context::{ContextRegistry, format_recovery_note};
 pub use error::{CancelQueued, KernelError, RunOutcome};
@@ -33,6 +34,7 @@ pub use live::{LiveBus, LiveEvent, LiveSubscription};
 pub use model::{ConversationModel, EchoModel, ModelGeneration, ModelRequest, ToolCall};
 pub use observe::{ObserveHandle, Span, SpanGuard, SpanRing, spans_leak_content};
 pub use router::{SurfaceRouter, SurfaceToolOutcome};
+pub use speech::{SpeechPresenter, TurnFinalizer, TurnPrefetch};
 pub use waterfall::{EmitBus, HookEvent, LoopHooks, Waterfall, WaterfallNext};
 
 pub use ene_session::{

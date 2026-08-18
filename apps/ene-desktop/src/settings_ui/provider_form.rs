@@ -1,38 +1,46 @@
-//! Provider selector labels for Voice / Engines pages.
-//!
-//! Provider config itself is edited as core JSON (`plugins` / `ai` sections)
-//! rather than through an in-process plugin-host snapshot.
-#![expect(
-    dead_code,
-    reason = "provider form metadata stays so i18n tests can keep covering built-in ids"
-)]
+//! Provider selector labels for AI / Voice pages.
 
 pub(crate) const BUILTIN_PROVIDER_I18N_IDS: &[(&str, &str)] = &[
-    ("kokoro", "kokoro"),
-    ("voicevox", "voicevox"),
-    ("whisper", "whisper"),
-    ("edge-tts", "edge-tts"),
-    ("openai_tts", "openai-tts"),
+    ("echo", "echo"),
+    ("openai_compat", "openai-compat"),
+    ("anthropic", "anthropic"),
     ("elevenlabs", "elevenlabs"),
+    ("voicevox", "voicevox"),
+    ("edge_tts", "edge-tts"),
 ];
 
+pub(crate) const CHAT_PLUGINS: &[&str] = &["echo", "provider.openai_compat", "provider.anthropic"];
+
+pub(crate) const EMBED_PLUGINS: &[&str] = &["echo", "provider.openai_compat"];
+
+pub(crate) const AUDIO_PLUGINS: &[&str] = &[
+    "echo",
+    "provider.voicevox",
+    "provider.openai_compat",
+    "provider.elevenlabs",
+    "provider.edge_tts",
+];
+
+pub(crate) const STT_PLUGINS: &[&str] = &["echo", "provider.openai_compat"];
+
 fn provider_i18n_id(kind: &str) -> Option<&'static str> {
+    let key = kind.strip_prefix("provider.").unwrap_or(kind);
     BUILTIN_PROVIDER_I18N_IDS
         .iter()
-        .find_map(|(provider_kind, i18n_id)| (*provider_kind == kind).then_some(*i18n_id))
+        .find_map(|(provider_kind, i18n_id)| (*provider_kind == key).then_some(*i18n_id))
 }
 
 fn fl(key: &str) -> String {
     crate::i18n::loader().get(key)
 }
 
-/// Localized provider selector label (Voice page combo).
+/// Localized provider selector label.
 #[must_use]
 pub fn provider_display_name(kind: &str) -> String {
     if let Some(i18n_id) = provider_i18n_id(kind) {
         fl(&format!("provider-selector-{i18n_id}-label"))
     } else {
-        kind.to_string()
+        kind.to_owned()
     }
 }
 
@@ -42,26 +50,46 @@ pub fn provider_description(kind: &str) -> Option<String> {
     provider_i18n_id(kind).map(|i18n_id| fl(&format!("provider-selector-{i18n_id}-desc")))
 }
 
-/// Localized provider group (Local / Cloud).
+/// Localized provider group (Host / Local / Cloud).
 #[must_use]
 pub fn provider_display_group(kind: &str) -> Option<String> {
-    const LOCAL: &[&str] = &["kokoro", "voicevox", "whisper"];
-    const CLOUD: &[&str] = &["edge-tts", "openai_tts", "elevenlabs"];
-    if LOCAL.contains(&kind) {
-        Some(fl("provider-selector-group-local"))
-    } else if CLOUD.contains(&kind) {
-        Some(fl("provider-selector-group-cloud"))
-    } else {
-        None
+    let key = kind.strip_prefix("provider.").unwrap_or(kind);
+    match key {
+        "echo" => Some(fl("provider-selector-group-host")),
+        "voicevox" => Some(fl("provider-selector-group-local")),
+        _ => Some(fl("provider-selector-group-cloud")),
     }
 }
 
-/// Maps a provider kind to the plugin list name owning its config.
 #[must_use]
-pub fn plugin_name_for_provider_kind(kind: &str) -> String {
-    if kind == "openai_tts" {
-        "openai-tts".to_string()
-    } else {
-        kind.to_string()
-    }
+pub fn plugin_needs_key(kind: &str) -> bool {
+    matches!(
+        kind.strip_prefix("provider.").unwrap_or(kind),
+        "openai_compat" | "anthropic" | "elevenlabs"
+    )
+}
+
+/// Combo box of bundled provider ids, grouped Host / Local / Cloud.
+pub fn plugin_combo(ui: &mut egui::Ui, id_salt: &str, plugin: &mut String, plugins: &[&str]) {
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(provider_display_name(plugin))
+        .show_ui(ui, |ui| {
+            let mut last_group = String::new();
+            for candidate in plugins {
+                let group = provider_display_group(candidate).unwrap_or_default();
+                if group != last_group {
+                    ui.weak(&group);
+                    last_group.clone_from(&group);
+                }
+                if ui
+                    .selectable_label(
+                        plugin.as_str() == *candidate,
+                        provider_display_name(candidate),
+                    )
+                    .clicked()
+                {
+                    (*candidate).clone_into(plugin);
+                }
+            }
+        });
 }

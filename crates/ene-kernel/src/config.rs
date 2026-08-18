@@ -191,3 +191,64 @@ impl Default for InnerSettings {
         }
     }
 }
+
+ene_config::define_config!(
+    settings,
+    "ai",
+    /// Provider-seam bindings. `plugin = "echo"` is the offline host model.
+    pub struct AiSettings {
+        pub tasks: AiTasks,
+    }
+);
+
+/// Per-task provider binding (`ai.tasks.<name>`).
+#[derive(
+    Debug, Clone, Default, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct AiTasks {
+    pub chat: TaskBinding,
+    pub classifier: TaskBinding,
+    pub embedding: TaskBinding,
+    pub proactive: TaskBinding,
+    pub tts: TaskBinding,
+    pub stt: TaskBinding,
+}
+
+/// One `ai.tasks.*` row. `plugin` is `echo` or a `provider.*` id.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct TaskBinding {
+    pub plugin: String,
+    pub model: String,
+    pub max_tokens: Option<u32>,
+    pub base_url: String,
+    #[serde(default)]
+    pub voice: String,
+}
+
+impl Default for TaskBinding {
+    fn default() -> Self {
+        Self::echo()
+    }
+}
+
+impl TaskBinding {
+    #[must_use]
+    pub fn echo() -> Self {
+        Self {
+            plugin: "echo".to_owned(),
+            model: "echo".to_owned(),
+            max_tokens: None,
+            base_url: String::new(),
+            voice: String::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn uses_echo(&self) -> bool {
+        self.plugin.is_empty() || self.plugin == "echo"
+    }
+}

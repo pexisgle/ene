@@ -128,8 +128,23 @@ impl ToolRegistry {
     pub async fn execute(
         &self,
         name: &str,
+        args: Value,
+        layer: Layer,
+    ) -> Result<Value, PipelineError> {
+        self.execute_inner(name, args, layer, false).await
+    }
+
+    /// Host-initiated call (continuous observation). Enabling the setting is consent.
+    pub async fn execute_host(&self, name: &str, args: Value) -> Result<Value, PipelineError> {
+        self.execute_inner(name, args, Layer::Job, true).await
+    }
+
+    async fn execute_inner(
+        &self,
+        name: &str,
         mut args: Value,
         layer: Layer,
+        host: bool,
     ) -> Result<Value, PipelineError> {
         let (def, invoke) = {
             let tools = self.tools.lock();
@@ -138,55 +153,71 @@ impl ToolRegistry {
                 .ok_or_else(|| PipelineError::Unknown(name.to_owned()))?;
             (row.def.clone(), Arc::clone(&row.invoke))
         };
-        if layer == Layer::Surface && !def.surface_visible() {
+        if !host && layer == Layer::Surface && !def.surface_visible() {
             return Err(PipelineError::NotOnSurface(name.to_owned()));
         }
         let workspace = self.workspace.lock().clone();
         let path = args.get("path").and_then(Value::as_str).unwrap_or("");
         let in_workspace = path_in_workspace(workspace.as_deref(), path);
-        let plane = self.plane.lock().clone();
-        if let Some(plane) = plane {
-            let req = AuthzRequest {
-                tool: name.to_owned(),
-                side_effects: def.side_effects.clone(),
-                sensitivity: def.sensitivity,
-                target: path.to_owned(),
-                in_workspace,
-            };
-            plane.authorize(&req).await?;
-        } else if !def.side_effects.is_empty() {
-            return Err(PipelineError::Denied {
-                name: name.to_owned(),
-                reason: "deny-by-default until approval plane".to_owned(),
-            });
-        }
-        if name == "fs.read" || name == "fs.write" {
-            let Some(root) = workspace else {
+        if !host {
+            let plane = self.plane.lock().clone();
+            if let Some(plane) = plane {
+                let req = AuthzRequest {
+                    tool: name.to_owned(),
+                    side_effects: def.side_effects.clone(),
+                    sensitivity: def.sensitivity,
+                    target: path.to_owned(),
+                    in_workspace,
+                };
+                plane.authorize(&req).await?;
+            } else if !def.side_effects.is_empty() {
                 return Err(PipelineError::Denied {
                     name: name.to_owned(),
-                    reason: "workspace is not configured".to_owned(),
+                    reason: "deny-by-default until approval plane".to_owned(),
                 });
-            };
-            let raw =
-                args.get("path")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| PipelineError::Denied {
-                        name: name.to_owned(),
-                        reason: "missing path".to_owned(),
-                    })?;
-            let confined = confine_tool_path(&root, Path::new(raw), name == "fs.write")?;
-            if let Some(obj) = args.as_object_mut() {
-                obj.insert(
-                    "path".to_owned(),
-                    Value::String(confined.display().to_string()),
-                );
             }
         }
+        confine_fs_args(name, &mut args, workspace.as_deref())?;
         invoke
             .invoke(name, args)
             .await
             .map_err(PipelineError::Execute)
     }
+}
+
+fn confine_fs_args(
+    name: &str,
+    args: &mut Value,
+    workspace: Option<&Path>,
+) -> Result<(), PipelineError> {
+    if !matches!(
+        name,
+        "fs.read" | "fs.write" | "fs.edit" | "fs.list" | "fs.search" | "fs.patch"
+    ) {
+        return Ok(());
+    }
+    let Some(root) = workspace else {
+        return Err(PipelineError::Denied {
+            name: name.to_owned(),
+            reason: "workspace is not configured".to_owned(),
+        });
+    };
+    let raw = args.get("path").and_then(Value::as_str).unwrap_or("");
+    if raw.is_empty() && (name == "fs.list" || name == "fs.search") {
+        if let Some(obj) = args.as_object_mut() {
+            obj.insert("path".to_owned(), Value::String(root.display().to_string()));
+        }
+        return Ok(());
+    }
+    let create_parent = name == "fs.write" || name == "fs.edit" || name == "fs.patch";
+    let confined = confine_tool_path(root, Path::new(raw), create_parent)?;
+    if let Some(obj) = args.as_object_mut() {
+        obj.insert(
+            "path".to_owned(),
+            Value::String(confined.display().to_string()),
+        );
+    }
+    Ok(())
 }
 
 impl Default for ToolRegistry {

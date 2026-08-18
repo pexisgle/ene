@@ -1,0 +1,26 @@
+[package]
+name = "ene-provider-openai-compat"
+version.workspace = true
+edition.workspace = true
+description = "OpenAI-compatible provider plugin (chat, embeddings, TTS, STT)"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ene-provider-openai-compat"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+ene-plugin-ipc = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls", "multipart"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[lints]
+workspace = true
