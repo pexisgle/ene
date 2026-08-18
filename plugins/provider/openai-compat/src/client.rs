@@ -162,7 +162,7 @@ impl OpenAiCompat {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(IpcError::Call(format!("{status}: {body}")));
+            return Err(IpcError::Call(format_http_error(status, &body)));
         }
         response
             .json()
@@ -178,13 +178,33 @@ impl OpenAiCompat {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(IpcError::Call(format!("{status}: {body}")));
+            return Err(IpcError::Call(format_http_error(status, &body)));
         }
         response
             .bytes()
             .await
             .map(|bytes| bytes.to_vec())
             .map_err(|err| IpcError::Call(err.to_string()))
+    }
+}
+
+fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        let message = value
+            .pointer("/error/message")
+            .or_else(|| value.get("message"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        if let Some(message) = message {
+            return format!("{status}: {message}");
+        }
+    }
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        status.to_string()
+    } else {
+        format!("{status}: {trimmed}")
     }
 }
 
@@ -415,6 +435,16 @@ fn encode_wav(pcm: &[f32], sample_rate: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_openrouter_error_message() {
+        let body = r#"{"error":{"message":"Invalid 'tools[0].function.name'","code":400}}"#;
+        let formatted = format_http_error(reqwest::StatusCode::BAD_REQUEST, body);
+        assert_eq!(
+            formatted,
+            "400 Bad Request: Invalid 'tools[0].function.name'"
+        );
+    }
 
     #[test]
     fn maps_user_message_role() {
