@@ -129,6 +129,57 @@ async fn open_lane() -> (TempDir, Arc<SessionStore>, LaneHandle, Arc<RecordingMo
 }
 
 #[tokio::test]
+async fn provider_failure_writes_assistant_error() {
+    struct FailingModel;
+    #[async_trait]
+    impl ConversationModel for FailingModel {
+        async fn generate(&self, _: ModelRequest) -> Result<ModelGeneration, KernelError> {
+            Err(KernelError::Model("401 unauthorized".to_owned()))
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        SessionStore::open(dir.path().join("sessions.db"), "NORMAL")
+            .await
+            .unwrap(),
+    );
+    let soul = SoulId::new();
+    let session = store
+        .create_session(NewSession {
+            soul_id: soul,
+            body_id: None,
+            kind: SessionKind::Conversation,
+            delegation_id: None,
+            created_by: SessionCreatedBy::Client,
+        })
+        .await
+        .unwrap();
+    let lane = LaneHandle::spawn(LaneOptions {
+        store: Arc::clone(&store),
+        session,
+        soul,
+        model: Arc::new(FailingModel) as Arc<dyn ConversationModel>,
+        harness: HarnessSettings::default(),
+        mind: MindSettings::default(),
+        recovery: Vec::new(),
+        speech: None,
+        finalizer: None,
+        prefetch: None,
+        router: None,
+    });
+    lane.prompt("hello").await.unwrap();
+    lane.wait_for_idle().await.unwrap();
+    let history = lane.project(DisplayDepth::Surface).unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|message| message.text().contains("401 unauthorized")),
+        "failed turns must surface the provider error, got {history:?}"
+    );
+}
+
+#[tokio::test]
 async fn text_turn_is_logged_and_projected() {
     let (_dir, store, lane, _model) = open_lane().await;
     let mut surface = lane.subscribe(DisplayDepth::Surface);

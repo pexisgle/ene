@@ -977,6 +977,9 @@ struct TurnFinish {
 async fn run_turn(ctx: TurnCtx) {
     let turn = ctx.turn;
     let done = ctx.done.clone();
+    let store = Arc::clone(&ctx.store);
+    let live = ctx.live.clone();
+    let session = ctx.session;
     let result = run_turn_inner(ctx).await;
     match result {
         Ok(()) => {
@@ -984,6 +987,7 @@ async fn run_turn(ctx: TurnCtx) {
         }
         Err(err) => {
             warn!(error = %err, %turn, "turn failed");
+            drop(commit_turn_failure(&store, &live, session, turn, &err).await);
             drop(done.send(TurnFinish { turn }));
         }
     }
@@ -1419,6 +1423,74 @@ async fn finish_interrupted(ctx: &TurnCtx, step_index: u32) -> Result<(), Kernel
         LiveEvent::TurnEnded {
             turn_id: ctx.turn,
             outcome: "interrupted".to_owned(),
+        },
+    );
+    Ok(())
+}
+
+async fn commit_turn_failure(
+    store: &SessionStore,
+    live: &LiveBus,
+    session: SessionId,
+    turn: TurnId,
+    err: &KernelError,
+) -> Result<(), KernelError> {
+    let speech = format!(
+        "The chat provider failed: {}",
+        truncate_chars(&err.to_string(), 400)
+    );
+    store
+        .commit(Transaction {
+            entries: vec![
+                NewEvent::new(
+                    session,
+                    EventKind::AssistantMessage,
+                    EventPayload::AssistantMessage {
+                        v: v1(),
+                        turn_id: turn,
+                        step_index: 0,
+                        blocks: vec![Block::text(&speech)],
+                        finish_reason: "error".to_owned(),
+                        token_count: None,
+                    },
+                ),
+                NewEvent::new(
+                    session,
+                    EventKind::StepEnd,
+                    EventPayload::StepEnd {
+                        v: v1(),
+                        turn_id: turn,
+                        step_index: 0,
+                        outcome: StepOutcome::Error,
+                        finish_reason: Some("error".to_owned()),
+                    },
+                ),
+                NewEvent::new(
+                    session,
+                    EventKind::TurnEnd,
+                    EventPayload::TurnEnd {
+                        v: v1(),
+                        turn_id: turn,
+                        outcome: TurnOutcome::Failed,
+                        error_class: Some(err.error_class().to_owned()),
+                    },
+                ),
+            ],
+            usage: Vec::new(),
+        })
+        .await?;
+    live.emit(
+        DisplayDepth::Surface,
+        LiveEvent::TextDelta {
+            turn_id: turn,
+            text: speech,
+        },
+    );
+    live.emit(
+        DisplayDepth::Surface,
+        LiveEvent::TurnEnded {
+            turn_id: turn,
+            outcome: "failed".to_owned(),
         },
     );
     Ok(())
