@@ -1212,9 +1212,9 @@ pub async fn patch_settings(
         state.core.replace_ai(ai, secrets);
         state.core.apply_plugin_profile().await;
     } else {
-        state
-            .core
-            .replace_ai(state.core.ai().lock().clone(), secrets);
+        // `replace_ai` locks this mutex; clone first so the guard is not held.
+        let ai = state.core.ai().lock().clone();
+        state.core.replace_ai(ai, secrets);
     }
     if let Some(mind_value) = current.get("mind")
         && let Ok(mind) = serde_json::from_value::<ene_companion::MindSettings>(mind_value.clone())
