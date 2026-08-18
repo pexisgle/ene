@@ -122,7 +122,8 @@ pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 53] = [
     ("memory-config", "memory-config-storage"),
     ("memory-approval", "memory-config-approval"),
     ("memory-limits", "memory-config-limits"),
-    ("plugins-list", "tools-and-plugins"),
+    ("plugins-profile", "plugins-profile"),
+    ("plugins-list", "plugins-running"),
     ("advanced-sections", "advanced-sections"),
 ];
 

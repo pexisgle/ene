@@ -374,7 +374,7 @@ impl SettingsDraft {
     #[must_use]
     pub fn default_impact_for(section_key: &str) -> FieldImpact {
         match section_key {
-            "plugins" => FieldImpact::RuntimeReload,
+            "plugins" => FieldImpact::PluginRestart,
             "ai" | "mind" | "store" | "rag" => FieldImpact::RuntimeReload,
             _ => FieldImpact::Immediate,
         }
@@ -846,7 +846,7 @@ mod tests {
         );
         assert_eq!(
             SettingsDraft::default_impact_for("plugins"),
-            FieldImpact::RuntimeReload
+            FieldImpact::PluginRestart
         );
     }
 

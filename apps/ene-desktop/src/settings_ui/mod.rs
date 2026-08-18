@@ -67,10 +67,9 @@ pub enum PageKind {
     Sessions,
     /// Scheduled tool runs: CRUD, next run, history, pending confirmations.
     Schedules,
-    /// Plugin center: detected / configured / MCP.
+    /// Plugin center: launch profile and running fibers.
     Plugins,
-    /// Local inference engines: sidecars, binaries, models, and catalog
-    /// management in one place.
+    /// Local inference engines: sidecars and provider bindings.
     Engines,
     /// Generic schema leaf editor for everything without a dedicated page.
     Advanced,
@@ -349,7 +348,9 @@ impl PageKind {
                 category: PageCategory::Management,
                 title_key: "connectors",
                 description_key: "page-connectors-description",
-                aliases: &["accounts", "service", "oauth"],
+                aliases: &[
+                    "accounts", "service", "oauth", "mcp", "git", "browser", "calendar",
+                ],
                 sections: &["connectors-list", "connectors-detail"],
                 section_aliases: &[],
             },
@@ -378,17 +379,15 @@ impl PageKind {
                 category: PageCategory::Settings,
                 title_key: "tools-and-plugins",
                 description_key: "page-tools-and-plugins-description",
-                aliases: &[
-                    "mcp", "tool", "provider", "tools", "sandbox", "plugin", "actions",
-                ],
-                sections: &["plugins-list"],
+                aliases: &["tool", "provider", "tools", "sandbox", "plugin", "profile"],
+                sections: &["plugins-profile", "plugins-list"],
                 section_aliases: &[],
             },
             PageKind::Engines => &PageMeta {
                 category: PageCategory::Management,
                 title_key: "engines",
                 description_key: "page-engines-description",
-                aliases: &["sidecar", "engine", "inference", "llama-server", "catalog"],
+                aliases: &["sidecar", "engine", "inference", "llama-server"],
                 sections: &["engines-plugins", "engines-list"],
                 section_aliases: &[],
             },
@@ -624,23 +623,11 @@ fn memory_mode_for_section(section: &str) -> Option<crate::settings::MemoryPageM
     }
 }
 
-fn plugin_mode_for_section(section: &str) -> Option<crate::settings::PluginPageMode> {
-    match section {
-        "plugins-list" => Some(crate::settings::PluginPageMode::Tools),
-        _ => None,
-    }
-}
-
 fn prepare_section_focus(world: &mut World, ui_entity: Entity, section: &str) {
     if let Some(mode) = memory_mode_for_section(section)
         && let Some(mut state) = world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
     {
         state.0.memory_journal_mode = mode;
-    }
-    if let Some(mode) = plugin_mode_for_section(section)
-        && let Some(mut state) = world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
-    {
-        state.0.plugin_page_mode = mode;
     }
 }
 

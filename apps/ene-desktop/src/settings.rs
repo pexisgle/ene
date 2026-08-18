@@ -362,9 +362,6 @@ pub struct UiState {
     /// from `AiPermissionRequested` messages; a request is removed
     /// once the user answers it from the Permission Center page.
     pub permission_requests: Vec<PendingPermission>,
-    pub connector_selected: Option<String>,
-    pub plugin_page_mode: PluginPageMode,
-    pub plugin_selected: Option<String>,
     pub session_search_query: String,
     pub session_import_path: String,
     /// Whether archived sessions are included in the list.
@@ -612,14 +609,6 @@ pub enum MemoryPageMode {
     RecallSearch,
     PendingApproval,
     Commitments,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PluginPageMode {
-    #[default]
-    Tools,
-    Providers,
-    Mcp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
