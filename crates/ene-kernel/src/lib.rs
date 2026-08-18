@@ -24,7 +24,8 @@ mod waterfall;
 
 pub use config::{
     AiSettings, AiTasks, BackupSettings, ClientsSettings, CoreSettings, DelegationSettings,
-    HarnessSettings, MindSettings, ServerSettings, TaskBinding,
+    HarnessSettings, MindSettings, PluginIpcSettings, PluginPolicySettings, PluginProfileKind,
+    PluginSettings, ServerSettings, TaskBinding,
 };
 pub use context::{ContextRegistry, format_recovery_note};
 pub use error::{CancelQueued, KernelError, RunOutcome};

@@ -272,3 +272,113 @@ impl TaskBinding {
         self.plugin.is_empty() || self.plugin == "echo"
     }
 }
+
+ene_config::define_config!(
+    settings,
+    "plugins",
+    /// Launch profile, install home, and IPC limits.
+    pub struct PluginSettings {
+        pub profile: String = "desktop".to_owned(),
+        pub home_dir: String,
+        pub policy: PluginPolicySettings,
+        pub ipc: PluginIpcSettings,
+    }
+);
+
+/// `plugins.policy.*`
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct PluginPolicySettings {
+    pub approval_mode: String,
+    pub allow_unverified: bool,
+}
+
+impl Default for PluginPolicySettings {
+    fn default() -> Self {
+        Self {
+            approval_mode: "policy".to_owned(),
+            allow_unverified: false,
+        }
+    }
+}
+
+/// `plugins.ipc.*`
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct PluginIpcSettings {
+    pub max_frame_bytes: u32,
+}
+
+impl Default for PluginIpcSettings {
+    fn default() -> Self {
+        Self {
+            max_frame_bytes: 1_048_576,
+        }
+    }
+}
+
+impl PluginSettings {
+    #[must_use]
+    pub fn kind(&self) -> PluginProfileKind {
+        PluginProfileKind::parse(&self.profile)
+    }
+
+    #[must_use]
+    pub fn resolved_home(&self, data_dir: &std::path::Path) -> std::path::PathBuf {
+        if self.home_dir.is_empty() {
+            data_dir.join("plugins")
+        } else {
+            std::path::PathBuf::from(&self.home_dir)
+        }
+    }
+}
+
+/// Shipped launch profiles (P-1002).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginProfileKind {
+    Desktop,
+    Minimal,
+    Headless,
+}
+
+impl PluginProfileKind {
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "minimal" => Self::Minimal,
+            "headless" => Self::Headless,
+            _ => Self::Desktop,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Minimal => "minimal",
+            Self::Headless => "headless",
+        }
+    }
+
+    #[must_use]
+    pub const fn harness_plugins(self) -> &'static [&'static str] {
+        match self {
+            Self::Desktop => &[
+                "tool.utility",
+                "tool.fs",
+                "tool.exec",
+                "tool.web",
+                "tool.app",
+            ],
+            Self::Minimal => &["tool.utility"],
+            Self::Headless => &["tool.utility", "tool.fs", "tool.exec", "tool.web"],
+        }
+    }
+
+    #[must_use]
+    pub const fn includes_mcp(self) -> bool {
+        !matches!(self, Self::Minimal)
+    }
+}

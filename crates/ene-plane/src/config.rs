@@ -34,6 +34,19 @@ pub enum ApprovalMode {
     Auto,
 }
 
+impl ApprovalMode {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "ask_all" => Some(Self::AskAll),
+            "policy" => Some(Self::Policy),
+            "ai_auto" => Some(Self::AiAuto),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+}
+
 /// Popup delivery timeout.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]

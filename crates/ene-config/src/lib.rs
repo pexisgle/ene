@@ -35,8 +35,8 @@ pub mod user_persona;
 pub use config::{
     ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_schema_json,
     get_global_config, get_global_section, load_config, load_config_from, load_full_config,
-    load_full_config_from, register_config_schema, register_runtime_schema, register_tool_schema,
-    save_full_config, update_global_config, update_section, write_schemas,
+    load_full_config_from, register_config_schema, register_runtime_schema, save_full_config,
+    update_global_config, update_section, write_schemas,
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;
@@ -58,9 +58,9 @@ pub use user_persona::UserPersona;
 
 pub use ctor::ctor;
 // The `ctor` proc-macro emits `<crate_path>::__support::ctor_parse!`, so the
-// `define_config!`/`define_tool_config!` macros can redirect their generated
-// constructor at this crate (via `crate_path = $crate`) instead of leaking a
-// hard `::ctor` dependency into every downstream caller.
+// `define_config!` macro can redirect its generated constructor at this crate
+// (via `crate_path = $crate`) instead of leaking a hard `::ctor` dependency
+// into every downstream caller.
 #[doc(hidden)]
 pub use ctor::__support;
 pub use schemars;
@@ -241,52 +241,6 @@ macro_rules! define_config {
                     <$parent as $crate::HasConfigKey>::TARGET,
                     Some(<$parent as $crate::HasConfigKey>::KEY),
                 );
-            }
-        };
-    };
-}
-
-#[macro_export]
-macro_rules! define_tool_config {
-    (
-        $tool_name:expr,
-        $(#[$meta:meta])*
-        pub struct $name:ident {
-            $(
-                $(#[$field_meta:meta])*
-                pub $field:ident : $type:ty $( = $default:expr )?
-            ),* $(,)?
-        }
-    ) => {
-        #[derive(Debug, Clone, $crate::serde::Serialize, $crate::serde::Deserialize, $crate::schemars::JsonSchema)]
-        #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
-        #[schemars(crate = "::ene_config::schemars")]
-        $(#[$meta])*
-        pub struct $name {
-            $(
-                $(#[$field_meta])*
-                pub $field : $type,
-            )*
-        }
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self {
-                    $(
-                        $field : $crate::__field_default!($type $(, $default)?),
-                    )*
-                }
-            }
-        }
-
-        const _: () = {
-            /// # Safety
-            ///
-            /// Called by `ctor` before `main`. Only safe registration code
-            /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
-            #[$crate::ctor(unsafe, crate_path = $crate)]
-            fn register() {
-                $crate::register_tool_schema::<$name>($tool_name);
             }
         };
     };
