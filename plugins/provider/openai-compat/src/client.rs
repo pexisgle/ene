@@ -129,11 +129,7 @@ impl SttHandler for OpenAiCompat {
         if let Some(language) = request.language.clone() {
             form = form.text("language", language);
         }
-        let mut http = self.http.post(&url);
-        if !request.auth.api_key.is_empty() {
-            http = http.bearer_auth(&request.auth.api_key);
-        }
-        let response = http
+        let response = attach_vendor_headers(self.http.post(&url), &request.auth.api_key)
             .multipart(form)
             .send()
             .await
@@ -159,11 +155,7 @@ impl SttHandler for OpenAiCompat {
 
 impl OpenAiCompat {
     async fn post_json(&self, url: &str, api_key: &str, body: Value) -> Result<Value, IpcError> {
-        let mut http = self.http.post(url).json(&body);
-        if !api_key.is_empty() {
-            http = http.bearer_auth(api_key);
-        }
-        let response = http
+        let response = attach_vendor_headers(self.http.post(url).json(&body), api_key)
             .send()
             .await
             .map_err(|err| IpcError::Call(err.to_string()))?;
@@ -179,11 +171,7 @@ impl OpenAiCompat {
     }
 
     async fn post_bytes(&self, url: &str, api_key: &str, body: Value) -> Result<Vec<u8>, IpcError> {
-        let mut http = self.http.post(url).json(&body);
-        if !api_key.is_empty() {
-            http = http.bearer_auth(api_key);
-        }
-        let response = http
+        let response = attach_vendor_headers(self.http.post(url).json(&body), api_key)
             .send()
             .await
             .map_err(|err| IpcError::Call(err.to_string()))?;
@@ -198,6 +186,17 @@ impl OpenAiCompat {
             .map(|bytes| bytes.to_vec())
             .map_err(|err| IpcError::Call(err.to_string()))
     }
+}
+
+fn attach_vendor_headers(
+    mut http: reqwest::RequestBuilder,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    if !api_key.is_empty() {
+        http = http.bearer_auth(api_key);
+    }
+    http.header(reqwest::header::REFERER, "https://ene.local")
+        .header("X-Title", "ene")
 }
 
 fn effective_base(request: &str) -> String {
