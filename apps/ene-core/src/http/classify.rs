@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use ene_companion::{ArbitrateOutcome, ClassifyModel, ClassifyTask, CompanionError};
@@ -10,17 +10,25 @@ use crate::CoreDaemon;
 
 /// Classifier that maps `ai.tasks.classifier` / `proactive` (falling back to chat).
 pub struct SeamedClassify {
-    core: Arc<CoreDaemon>,
+    core: Weak<CoreDaemon>,
 }
 
 impl SeamedClassify {
     #[must_use]
-    pub fn new(core: Arc<CoreDaemon>) -> Self {
-        Self { core }
+    pub fn new(core: &Arc<CoreDaemon>) -> Self {
+        Self {
+            core: Arc::downgrade(core),
+        }
     }
 
-    fn binding_for(&self, task: ClassifyTask) -> TaskBinding {
-        let guard = self.core.ai();
+    fn core(&self) -> Result<Arc<CoreDaemon>, CompanionError> {
+        self.core
+            .upgrade()
+            .ok_or_else(|| CompanionError::Classify("core stopped".to_owned()))
+    }
+
+    fn binding_for(core: &CoreDaemon, task: ClassifyTask) -> TaskBinding {
+        let guard = core.ai();
         let ai = guard.lock();
         let specific = match task {
             ClassifyTask::ProactiveDecision | ClassifyTask::ScreenSummary => &ai.tasks.proactive,
@@ -35,12 +43,12 @@ impl SeamedClassify {
         ai.tasks.chat.clone()
     }
 
-    fn secret_for(&self, task: ClassifyTask) -> String {
+    fn secret_for(core: &CoreDaemon, task: ClassifyTask) -> String {
         match task {
             ClassifyTask::ProactiveDecision | ClassifyTask::ScreenSummary => {
-                self.core.secret_for("proactive")
+                core.secret_for("proactive")
             }
-            _ => self.core.secret_for("classifier"),
+            _ => core.secret_for("classifier"),
         }
     }
 }
@@ -52,7 +60,8 @@ impl ClassifyModel for SeamedClassify {
         task: ClassifyTask,
         input: &str,
     ) -> Result<String, CompanionError> {
-        let binding = self.binding_for(task);
+        let core = self.core()?;
+        let binding = Self::binding_for(&core, task);
         if binding.uses_echo() {
             return Err(CompanionError::Classify("classifier is echo".to_owned()));
         }
@@ -83,11 +92,10 @@ impl ClassifyModel for SeamedClassify {
             max_tokens: binding.max_tokens.or(Some(512)),
             base_url: binding.base_url,
             auth: ProviderAuth {
-                api_key: self.secret_for(task),
+                api_key: Self::secret_for(&core, task),
             },
         };
-        let generation = self
-            .core
+        let generation = core
             .supervisor()
             .generate_llm(&binding.plugin, request)
             .await
@@ -111,8 +119,9 @@ impl SeamedClassify {
         png: &[u8],
         window_label: &str,
     ) -> Result<String, CompanionError> {
+        let core = self.core()?;
         let task = ClassifyTask::ScreenSummary;
-        let binding = self.binding_for(task);
+        let binding = Self::binding_for(&core, task);
         if binding.uses_echo() {
             return Err(CompanionError::Classify("classifier is echo".to_owned()));
         }
@@ -146,11 +155,10 @@ impl SeamedClassify {
             max_tokens: binding.max_tokens.or(Some(256)),
             base_url: binding.base_url,
             auth: ProviderAuth {
-                api_key: self.secret_for(task),
+                api_key: Self::secret_for(&core, task),
             },
         };
-        let generation = self
-            .core
+        let generation = core
             .supervisor()
             .generate_llm(&binding.plugin, request)
             .await
@@ -168,14 +176,17 @@ impl SeamedClassify {
 
 /// Runs companion memory extract after a surface turn and stores embeddings.
 pub struct MemoryFinalizer {
-    core: Arc<CoreDaemon>,
+    core: Weak<CoreDaemon>,
     classify: Arc<SeamedClassify>,
 }
 
 impl MemoryFinalizer {
     #[must_use]
-    pub fn new(core: Arc<CoreDaemon>, classify: Arc<SeamedClassify>) -> Self {
-        Self { core, classify }
+    pub fn new(core: &Arc<CoreDaemon>, classify: Arc<SeamedClassify>) -> Self {
+        Self {
+            core: Arc::downgrade(core),
+            classify,
+        }
     }
 }
 
@@ -185,8 +196,10 @@ impl TurnFinalizer for MemoryFinalizer {
         if user_text.is_empty() && assistant_text.is_empty() {
             return;
         }
-        let outcomes = match self
-            .core
+        let Some(core) = self.core.upgrade() else {
+            return;
+        };
+        let outcomes = match core
             .companion()
             .after_turn(
                 soul,
@@ -208,7 +221,7 @@ impl TurnFinalizer for MemoryFinalizer {
                 ArbitrateOutcome::Queued(_) | ArbitrateOutcome::Rejected(_) => continue,
             };
             if let Err(err) = embed_memory(
-                &self.core,
+                &core,
                 record.id,
                 &format!("{}\n{}", record.title, record.content),
             )

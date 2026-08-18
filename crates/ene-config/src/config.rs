@@ -65,6 +65,7 @@ pub enum ConfigTarget {
     Character,
 }
 
+#[derive(Clone)]
 pub struct SchemaEntry {
     pub schema: schemars::Schema,
     pub target: ConfigTarget,
@@ -691,16 +692,25 @@ fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String
     Ok(serde_json::to_string_pretty(&merged)?)
 }
 
+fn snapshot_schema_registry() -> Vec<(String, SchemaEntry)> {
+    let Some(registry) = SCHEMA_REGISTRY.get() else {
+        return Vec::new();
+    };
+    registry
+        .lock()
+        .iter()
+        .map(|(key, entry)| (key.clone(), entry.clone()))
+        .collect()
+}
+
 pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
     let root_schema = schema_gen.into_root_schema_for::<EneConfig>();
     let mut root_val = serde_json::to_value(&root_schema)?;
+    let entries = snapshot_schema_registry();
 
-    if let Some(registry) = SCHEMA_REGISTRY.get()
-        && let Some(root_obj) = root_val.as_object_mut()
-    {
-        let reg = registry.lock();
-        for entry in reg.values() {
+    if let Some(root_obj) = root_val.as_object_mut() {
+        for (_, entry) in &entries {
             if entry.target != ConfigTarget::Settings {
                 continue;
             }
@@ -725,7 +735,7 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
             }
         }
 
-        for (key, entry) in reg.iter() {
+        for (key, entry) in &entries {
             if entry.target != ConfigTarget::Settings {
                 continue;
             }

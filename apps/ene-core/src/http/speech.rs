@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use ene_kernel::{DisplayDepth, SpeechPresenter, TaskBinding};
@@ -12,25 +12,31 @@ const AUDIO_CHUNK: usize = 4_096;
 
 /// Speaks assistant text through `ai.tasks.tts` and emits `audio.chunk` on the core bus.
 pub struct PluginSpeech {
-    core: Arc<CoreDaemon>,
+    core: Weak<CoreDaemon>,
     events: CoreBus,
 }
 
 impl PluginSpeech {
     #[must_use]
-    pub fn new(core: Arc<CoreDaemon>, events: CoreBus) -> Self {
-        Self { core, events }
+    pub fn new(core: &Arc<CoreDaemon>, events: CoreBus) -> Self {
+        Self {
+            core: Arc::downgrade(core),
+            events,
+        }
     }
 
-    fn tts_binding(&self) -> TaskBinding {
-        self.core.ai().lock().tasks.tts.clone()
+    fn tts_binding(core: &CoreDaemon) -> TaskBinding {
+        core.ai().lock().tasks.tts.clone()
     }
 }
 
 #[async_trait]
 impl SpeechPresenter for PluginSpeech {
     async fn present_speech(&self, text: &str) {
-        let binding = self.tts_binding();
+        let Some(core) = self.core.upgrade() else {
+            return;
+        };
+        let binding = Self::tts_binding(&core);
         if binding.uses_echo() {
             return;
         }
@@ -40,11 +46,10 @@ impl SpeechPresenter for PluginSpeech {
             model: binding.model.clone(),
             base_url: binding.base_url.clone(),
             auth: ProviderAuth {
-                api_key: self.core.secret_for("tts"),
+                api_key: core.secret_for("tts"),
             },
         };
-        match self
-            .core
+        match core
             .supervisor()
             .synthesize_tts(&binding.plugin, request)
             .await

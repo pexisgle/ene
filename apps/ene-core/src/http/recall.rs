@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use ene_kernel::{SessionId, SoulId, TaskBinding, TurnPrefetch};
@@ -8,17 +8,19 @@ use crate::CoreDaemon;
 
 /// Logs recalled memories as `context/system_message` before generation.
 pub struct RecallPrefetch {
-    core: Arc<CoreDaemon>,
+    core: Weak<CoreDaemon>,
 }
 
 impl RecallPrefetch {
     #[must_use]
-    pub fn new(core: Arc<CoreDaemon>) -> Self {
-        Self { core }
+    pub fn new(core: &Arc<CoreDaemon>) -> Self {
+        Self {
+            core: Arc::downgrade(core),
+        }
     }
 
-    fn embed_binding(&self) -> TaskBinding {
-        let guard = self.core.ai();
+    fn embed_binding(core: &CoreDaemon) -> TaskBinding {
+        let guard = core.ai();
         let ai = guard.lock();
         if ai.tasks.embedding.uses_echo() {
             ai.tasks.chat.clone()
@@ -36,13 +38,15 @@ impl TurnPrefetch for RecallPrefetch {
         _session: SessionId,
         user_text: &str,
     ) -> Vec<(String, String)> {
-        let mut out = mcp_context_lines(&self.core.workspace_dir());
+        let Some(core) = self.core.upgrade() else {
+            return Vec::new();
+        };
+        let mut out = mcp_context_lines(&core.workspace_dir());
         if user_text.trim().is_empty() {
             return out;
         }
-        let query_vec = embed_query(self, user_text).await;
-        let hits = match self
-            .core
+        let query_vec = embed_query(&core, user_text).await;
+        let hits = match core
             .companion()
             .recall_ranked(soul, user_text, query_vec.as_deref())
         {
@@ -92,13 +96,12 @@ fn mcp_context_lines(workspace: &std::path::Path) -> Vec<(String, String)> {
     )]
 }
 
-async fn embed_query(prefetch: &RecallPrefetch, text: &str) -> Option<Vec<f32>> {
-    let binding = prefetch.embed_binding();
+async fn embed_query(core: &CoreDaemon, text: &str) -> Option<Vec<f32>> {
+    let binding = RecallPrefetch::embed_binding(core);
     if binding.uses_echo() {
         return None;
     }
-    let result = prefetch
-        .core
+    let result = core
         .supervisor()
         .embed(
             &binding.plugin,
@@ -107,7 +110,7 @@ async fn embed_query(prefetch: &RecallPrefetch, text: &str) -> Option<Vec<f32>> 
                 model: binding.model,
                 base_url: binding.base_url,
                 auth: ProviderAuth {
-                    api_key: prefetch.core.secret_for("embedding"),
+                    api_key: core.secret_for("embedding"),
                 },
             },
         )

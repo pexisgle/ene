@@ -2,7 +2,11 @@ use super::{arg_str, spec};
 use base64::Engine;
 use ene_plugin_ipc::ToolSpecWire;
 use serde_json::{Value, json};
-use std::process::Command;
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const HOST_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(super) fn specs() -> Vec<ToolSpecWire> {
     vec![
@@ -176,47 +180,70 @@ fn stdout_text(bin: &str, args: &[&str]) -> Result<String, String> {
 }
 
 fn stdout_bytes(bin: &str, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = Command::new(bin)
+    let mut child = Command::new(bin)
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|err| err.to_string())?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(format!("{bin} failed"))
-    }
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{bin} has no stdout"))?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).map(|_| buf)
+    });
+    let waited = wait_child(&mut child, bin);
+    let buf = reader
+        .join()
+        .map_err(|_| format!("{bin} stdout reader panicked"))?
+        .map_err(|err| err.to_string())?;
+    waited?;
+    Ok(buf)
 }
 
 fn stdin_text(bin: &str, args: &[&str], text: &str) -> Result<(), String> {
     let mut child = Command::new(bin)
         .args(args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|err| err.to_string())?;
     if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
         stdin
             .write_all(text.as_bytes())
             .map_err(|err| err.to_string())?;
     }
-    let status = child.wait().map_err(|err| err.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{bin} failed"))
-    }
+    wait_child(&mut child, bin)
 }
 
 fn run(bin: &str, args: &[&str]) -> Result<(), String> {
-    let status = Command::new(bin)
+    let mut child = Command::new(bin)
         .args(args)
-        .status()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|err| err.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{bin} failed"))
+    wait_child(&mut child, bin)
+}
+
+fn wait_child(child: &mut std::process::Child, bin: &str) -> Result<(), String> {
+    let deadline = Instant::now() + HOST_COMMAND_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => return Err(format!("{bin} failed")),
+            Ok(None) if Instant::now() >= deadline => {
+                drop(child.kill());
+                drop(child.wait());
+                return Err(format!("{bin} timed out"));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(err) => return Err(err.to_string()),
+        }
     }
 }

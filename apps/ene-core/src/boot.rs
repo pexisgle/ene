@@ -282,6 +282,12 @@ impl CoreDaemon {
         *self.prefetch.lock() = Some(prefetch);
     }
 
+    pub fn clear_turn_seams(&self) {
+        *self.speech.lock() = None;
+        *self.finalizer.lock() = None;
+        *self.prefetch.lock() = None;
+    }
+
     #[must_use]
     pub fn mind(&self) -> CompanionMind {
         self.mind.lock().clone()

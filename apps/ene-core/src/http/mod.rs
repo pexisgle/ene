@@ -59,6 +59,7 @@ pub struct ServerHandle {
     background: Vec<tokio::task::JoinHandle<()>>,
     supervisor: Arc<ene_fiber::Supervisor>,
     host: Arc<ene_work::DelegationHost>,
+    core: Arc<CoreDaemon>,
 }
 
 impl ServerHandle {
@@ -72,6 +73,7 @@ impl ServerHandle {
     /// Ask the server to stop, unload plugins, and wait for the accept loop.
     pub async fn shutdown(mut self) {
         self.abort_background();
+        self.core.clear_turn_seams();
         self.supervisor.shutdown().await;
         for handle in self.background.drain(..) {
             drop(handle.await);
@@ -90,6 +92,7 @@ impl ServerHandle {
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         self.abort_background();
+        self.core.clear_turn_seams();
         self.supervisor.kill_all_children();
         for handle in self.background.drain(..) {
             handle.abort();
@@ -142,14 +145,11 @@ impl CoreDaemon {
         let (report_tx, mut report_rx) = mpsc::unbounded_channel();
         self.host().set_report_sink(report_tx);
         let events = CoreBus::new(self.settings().server.ws_send_buffer);
-        self.set_speech(Arc::new(speech::PluginSpeech::new(
-            Arc::clone(&self),
-            events.clone(),
-        )));
-        let classify = Arc::new(classify::SeamedClassify::new(Arc::clone(&self)));
-        self.set_prefetch(Arc::new(recall::RecallPrefetch::new(Arc::clone(&self))));
+        self.set_speech(Arc::new(speech::PluginSpeech::new(&self, events.clone())));
+        let classify = Arc::new(classify::SeamedClassify::new(&self));
+        self.set_prefetch(Arc::new(recall::RecallPrefetch::new(&self)));
         self.set_finalizer(Arc::new(classify::MemoryFinalizer::new(
-            Arc::clone(&self),
+            &self,
             Arc::clone(&classify),
         )));
         let state = AppState {
@@ -189,6 +189,7 @@ impl CoreDaemon {
             background: vec![report_task, proactive_task],
             supervisor: self.supervisor(),
             host: self.host(),
+            core: Arc::clone(&self),
         })
     }
 }

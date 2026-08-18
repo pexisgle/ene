@@ -1226,7 +1226,10 @@ pub async fn patch_settings(
 }
 
 pub async fn settings_schema() -> Json<Value> {
-    let raw = ene_config::generate_schema_json().unwrap_or_else(|_| "{}".to_owned());
+    let raw = match tokio::task::spawn_blocking(ene_config::generate_schema_json).await {
+        Ok(Ok(raw)) => raw,
+        Ok(Err(_)) | Err(_) => "{}".to_owned(),
+    };
     Json(serde_json::from_str(&raw).unwrap_or_else(|_| json!({})))
 }
 
