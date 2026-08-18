@@ -8,7 +8,7 @@ TTS and ASR are traits (`TtsEngine` / `AsrEngine`). Provider plugins for
 those engines are not in this tree yet, so conversation is Echo-only until
 they are rewritten onto `ene-plugin-ipc`.
 
-Stage owns the microphone and playback devices. The daemon still owns
+Desktop owns the microphone and playback devices. The daemon still owns
 policy and the live bus; exclusive resources (mic) are claimed through the
 API.
 
@@ -18,7 +18,7 @@ performance commands.
 
 ## Performance commands
 
-`ene-body::PerformanceCommand` is what stage consumes:
+`ene-body::PerformanceCommand` is what desktop consumes:
 
 | Command | Meaning |
 |---|---|
@@ -32,7 +32,8 @@ Cues are rate-limited so the avatar does not flicker.
 
 ## The avatar (VRM)
 
-`ene-stage` renders **VRM 1.0** with `ene-vrm` (wgpu):
+`ene-desktop` (and the optional `ene-stage` debug client) render **VRM 1.0**
+with `ene-vrm` (wgpu):
 
 - **Model loading** — `.vrm` from the character package
 - **Motions** — VRMA clips with blending layers

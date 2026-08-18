@@ -17,7 +17,7 @@
 # アプリ
 
 - [CLI ユーザーガイド](apps/cli.md)
-- [Stage ユーザーガイド](apps/desktop.md)
+- [Desktop ユーザーガイド](apps/desktop.md)
 
 # ガイド
 

@@ -1,7 +1,7 @@
 # ene-vrm API
 
 `ene-vrm` is a platform-agnostic VRM 1.0 loader and renderer built on
-`wgpu` 29 and `gltf` 1.4. It is used by `ene-stage`; this page names the
+`wgpu` 29 and `gltf` 1.4. It is used by `ene-desktop` and `ene-stage`; this page names the
 **intentionally supported API** (other `pub` items are callable but not
 part of the supported surface).
 

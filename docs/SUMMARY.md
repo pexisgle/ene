@@ -17,7 +17,7 @@
 # Apps
 
 - [CLI user guide](apps/cli.md)
-- [Stage user guide](apps/desktop.md)
+- [Desktop user guide](apps/desktop.md)
 
 # Guides
 

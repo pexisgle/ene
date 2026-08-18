@@ -34,18 +34,20 @@ cargo run -p ene-ctl -- core start
 cargo run -p ene-ctl -- --help
 ```
 
-`ene-ctl` uses the same HTTP/WS API as stage and Web. Point `--url` and
-`--token` (or `ENE_API_URL` / `ENE_API_TOKEN`) at an already-running
+`ene-ctl` uses the same HTTP/WS API as desktop, stage, and Web. Point `--url`
+and `--token` (or `ENE_API_URL` / `ENE_API_TOKEN`) at an already-running
 `ene-core` if you started it yourself.
 
-## 4. Run stage
+## 4. Run the desktop client
 
 ```sh
-cargo run -p ene-stage
+cargo run -p ene-desktop
 ```
 
-Stage starts `ene-core` as a child when needed, shows companions on a native
-window, and opens a separate detail window for logs and internals.
+Desktop starts `ene-core` as a child when needed, shows the character overlay
+and chat on the surface depth, and opens a separate detail window (F4 / tray)
+for logs and internals. `ene-stage` is an optional debug client for the same
+API.
 
 Without a conversation provider plugin, replies are Echo-only.
 

@@ -9,8 +9,11 @@
 
 デーモンはデータディレクトリの `settings.json` を読み、その後
 `ENE_CORE__SERVER__*` などの環境変数を重ねます。`ene-ctl` と `ene-stage` は
-第二の設定スタックを持たず、起動済みコアへは `--url` / `--token`
-（または `ENE_API_URL` / `ENE_API_TOKEN`）で接続します。
+`--url` / `--token`（または `ENE_API_URL` / `ENE_API_TOKEN`）で起動済みコアへ
+接続します。`ene-desktop` も同じ環境変数があれば接続し、無いときは
+`ene-core` を起動します。加えてローカルの `desktop.*`（グラフィックス、
+テーマ、言語、マイク、オーバーレイ、コア寿命）はデスクトップ自身の
+`settings.json` に保存します。
 
 デバッグビルドの同梱アセットはリポジトリの `assets/` から解決します。
 実行時データ（`sessions.db`、`api.token`、`vault.bin`、workspace）は

@@ -10,13 +10,14 @@ Ene は **コンパニオン型ハーネス**です。コアデーモンは1プ�
 ## プロセスモデル
 
 ```text
-ene-stage  ─┐
-ene-ctl    ─┼── HTTP/WS (ene-api) ──► ene-core (ene-daemon)
-Web        ─┘                              │
-                                           ├── ene-session / ene-kernel
-                                           ├── ene-companion / ene-body / ene-work
-                                           ├── ene-plane (承認 + 監査 + ボールト)
-                                           └── ene-fiber ──► plugins/harness/*
+ene-desktop ─┐
+ene-stage   ─┤
+ene-ctl     ─┼── HTTP/WS (ene-api) ──► ene-core (ene-daemon)
+Web         ─┘                              │
+                                            ├── ene-session / ene-kernel
+                                            ├── ene-companion / ene-body / ene-work
+                                            ├── ene-plane (承認 + 監査 + ボールト)
+                                            └── ene-fiber ──► plugins/harness/*
 ```
 
 - **ホストは1つ。** 本体の状態は `ene-core` が持ちます。クライアントはカーネルを埋め込みません。
@@ -32,7 +33,8 @@ Web        ─┘                              │
 進捗はコンパニオンの発話として返ります。
 
 表示の深さは `surface` か `detail` です。何を送るかはサーバが決めます。
-stage の主画面は surface、別窓の詳細画面は detail です。
+desktop のキャラクターとチャットは surface、別窓の詳細画面は detail です。
+`ene-stage` は同じ分割のデバッグクライアントです。
 
 ## 次に読むもの
 

@@ -1,19 +1,30 @@
-# Stage user guide
+# Desktop user guide
 
-`ene-stage` is the native client. It starts `ene-core` when needed, draws
-companions with `ene-vrm`, and keeps a **separate detail window**.
+`ene-desktop` is the product GUI. It starts `ene-core` when needed, draws
+the character overlay with `ene-vrm`, keeps chat on the **surface** depth,
+and opens a **separate detail window**.
 
 ```sh
-cargo run -p ene-stage
+cargo run -p ene-desktop
 ```
 
 | Window | Depth | Contents |
 |---|---|---|
-| Main (stage) | `surface` | Companions and speech. No inner / thinking / tool args |
-| Detail | `detail` | Session log (including inner), thinking, tools, PAD, tasks |
+| Character overlay + chat | `surface` | Companion and speech. No inner / thinking / tool args |
+| Detail (F4 / tray) | `detail` | Session log (including inner), thinking, tools, PAD, tasks |
+| Settings | local + API | `desktop.*` stays in the desktop process; other sections PATCH `/api/v1/settings` |
 
-Stage does not use a WebView. UI is egui; VRM is wgpu.
+Desktop does not use a WebView. UI is egui; VRM is wgpu. The process talks to
+the daemon only through `ene-api` (`client_id = desktop`). It does not link
+`ene-daemon`, `ene-companion`, or the old runtime/mind/store crates.
+
+Local `desktop.*` (graphics, theme, language, mic, captions, beat sync, core
+lifetime) is persisted by the desktop process. Daemon settings live in the
+data-dir `settings.json`. Attach to an already-running core with `ENE_API_URL`
+/ `ENE_API_TOKEN`.
+
+`ene-stage` remains an optional debug client for the same API.
 
 Without a conversation provider plugin, replies are Echo-only. Audio device
-relay and approval popups are stage's client-side jobs; the daemon still owns
-policy and the live bus.
+relay and approval popups are the desktop's client-side jobs; the daemon still
+owns policy and the live bus.

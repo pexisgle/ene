@@ -10,7 +10,8 @@
 |---|---|---|
 | `ene-daemon` | `apps/ene-core`（バイナリ `ene-core`） | コアデーモン: データディレクトリのロック、HTTP/WS API、session + kernel + companion + work + plane + fiber |
 | `ene-ctl` | `apps/ene-ctl` | 同一 HTTP/WS API の CLI クライアント |
-| `ene-stage` | `apps/ene-stage` | ネイティブ stage クライアント（egui + wgpu）。表層ウィンドウと別窓の詳細画面 |
+| `ene-desktop` | `apps/ene-desktop` | 製品 GUI: キャラクターオーバーレイ、チャット、設定、トレイ。表層 + 別窓の詳細画面 |
+| `ene-stage` | `apps/ene-stage` | 任意のデバッグクライアント（egui + wgpu）。表層ウィンドウと別窓の詳細画面 |
 
 ## ライブラリクレート
 
@@ -43,8 +44,9 @@ ene-vrm         ↛ kernel, companion, work, session
 ene-api         ↛ daemon types
 ```
 
-クライアントは `ene-api` 経由でのみデーモンと話します。`ene-stage` の本番コードから
-`ene-daemon` をリンクしないでください（`ene-ctl` のテストはデーモンを spawn してよい）。
+クライアントは `ene-api` 経由でのみデーモンと話します。`ene-desktop` と
+`ene-stage` の本番コードから `ene-daemon` をリンクしないでください
+（`ene-ctl` のテストはデーモンを spawn してよい）。
 
 ## プラグインバイナリ
 

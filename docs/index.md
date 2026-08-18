@@ -2,8 +2,8 @@
 
 Ene is a **local AI companion harness** written in Rust. Companions live on
 your device, speak and listen, remember, and run tools under an approval
-plane. A core daemon (`ene-core`) owns that state; stage, CLI, and Web are
-clients of the same API.
+plane. A core daemon (`ene-core`) owns that state; desktop, CLI, stage, and Web
+are clients of the same API.
 
 The finished-product definition is
 [`plans/harness-redesign/`](../plans/harness-redesign/README.md).
@@ -21,10 +21,10 @@ The finished-product definition is
 
 | Section | What it covers |
 |---|---|
-| [Quickstart](quickstart.md) | Build, configure, and run `ene-ctl` / `ene-stage` |
+| [Quickstart](quickstart.md) | Build, configure, and run `ene-ctl` / `ene-desktop` |
 | [Configuration](configuration.md) | `settings.json`, environment variables, file locations |
 | [Concepts](concepts/architecture.md) | How Ene works: process model, cards, memory, plugins |
-| [Apps](apps/cli.md) | User guides for the CLI and stage |
+| [Apps](apps/cli.md) | User guides for the CLI and desktop |
 | [Guides](guides/character-editor.md) | Task-oriented how-tos |
 | [Reference](reference/crates.md) | Crate map and rendering API |
 

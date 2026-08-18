@@ -31,18 +31,19 @@ cargo run -p ene-ctl -- core start
 cargo run -p ene-ctl -- --help
 ```
 
-`ene-ctl` は stage / Web と同じ HTTP/WS API を使います。自分で `ene-core` を
-起動した場合は `--url` と `--token`（または `ENE_API_URL` / `ENE_API_TOKEN`）
-を合わせてください。
+`ene-ctl` は desktop / stage / Web と同じ HTTP/WS API を使います。自分で
+`ene-core` を起動した場合は `--url` と `--token`（または `ENE_API_URL` /
+`ENE_API_TOKEN`）を合わせてください。
 
-## 4. stage を動かす
+## 4. desktop を動かす
 
 ```sh
-cargo run -p ene-stage
+cargo run -p ene-desktop
 ```
 
-stage は必要なら `ene-core` を子プロセスとして起動し、ネイティブウィンドウに
-コンパニオンを出し、詳細は別窓です。
+desktop は必要なら `ene-core` を子プロセスとして起動し、表層にキャラクターと
+チャットを出し、詳細は別窓（F4 / トレイ）です。`ene-stage` は同一 API の
+任意のデバッグクライアントです。
 
 会話プロバイダプラグインが無い間、応答は Echo のみです。
 

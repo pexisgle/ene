@@ -11,7 +11,8 @@ Signatures live in rustdoc (`cargo doc -p <crate> --open`), not here.
 |---|---|---|
 | `ene-daemon` | `apps/ene-core` (binary `ene-core`) | Core daemon: data-dir lock, HTTP/WS API, session + kernel + companion + work + plane + fiber |
 | `ene-ctl` | `apps/ene-ctl` | CLI client for the same HTTP/WS API |
-| `ene-stage` | `apps/ene-stage` | Native stage client (egui + wgpu): surface window plus a separate detail window |
+| `ene-desktop` | `apps/ene-desktop` | Product GUI: character overlay, chat, settings, tray; surface + separate detail window |
+| `ene-stage` | `apps/ene-stage` | Optional debug client (egui + wgpu): surface window plus a separate detail window |
 
 ## Library crates
 
@@ -45,7 +46,8 @@ ene-api         ↛ daemon types
 ```
 
 Clients talk to the daemon only through `ene-api`. Do not link `ene-daemon`
-from `ene-stage` production code (`ene-ctl` tests may spawn the daemon).
+from `ene-desktop` or `ene-stage` production code (`ene-ctl` tests may spawn
+the daemon).
 
 ## Plugin binaries
 
