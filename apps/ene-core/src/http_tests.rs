@@ -116,7 +116,7 @@ fn record_metric(name: &str, body: impl AsRef<[u8]>) {
     std::fs::write(dir.join(name), body).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn three_clients_share_one_core() {
     let (_dir, stage, _core, server) = boot_server().await;
     let cli = ApiClient::new(stage.base(), stage.token(), "cli");
@@ -129,7 +129,7 @@ async fn three_clients_share_one_core() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn surface_ws_never_sees_inner() {
     let (_dir, client, _core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;
@@ -198,7 +198,7 @@ impl ConversationModel for SlowModel {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_prompt_returns_lane_busy() {
     let dir = TempDir::new().unwrap();
     let core = Arc::new(
@@ -246,7 +246,7 @@ async fn concurrent_prompt_returns_lane_busy() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn idempotency_key_dedupes_prompt() {
     let (_dir, client, _core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;
@@ -274,7 +274,7 @@ async fn idempotency_key_dedupes_prompt() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn exclusive_mic_is_first_writer() {
     let (_dir, stage, _core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");
@@ -301,7 +301,7 @@ async fn exclusive_mic_is_first_writer() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn exclusive_mic_second_claims_after_release() {
     let (_dir, stage, _core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");
@@ -349,7 +349,7 @@ async fn exclusive_mic_second_claims_after_release() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn barge_in_aborts_busy_lane() {
     let dir = TempDir::new().unwrap();
     let core = Arc::new(
@@ -419,7 +419,7 @@ async fn barge_in_aborts_busy_lane() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn approval_first_writer_wins() {
     let (_dir, stage, core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");
@@ -457,7 +457,7 @@ async fn approval_first_writer_wins() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn backup_copies_stores() {
     let (_dir, client, core, server) = boot_server().await;
     let backup = client.backup().await.unwrap();
@@ -475,7 +475,7 @@ async fn backup_copies_stores() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn backup_restore_roundtrip_and_unknown_id() {
     let (_dir, client, core, server) = boot_server().await;
     let missing = client
@@ -495,7 +495,7 @@ async fn backup_restore_roundtrip_and_unknown_id() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn restore_rejects_active_jobs() {
     let (_dir, client, core, server) = boot_server().await;
     let soul = core.occupants()[0].0;
@@ -525,7 +525,7 @@ async fn restore_rejects_active_jobs() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn boot_loads_settings_json_token_file() {
     let dir = TempDir::new().unwrap();
     std::fs::write(
@@ -554,7 +554,7 @@ async fn boot_loads_settings_json_token_file() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn http_forget_memory_is_audited() {
     let (_dir, client, core, server) = boot_server().await;
     let souls = client.list_souls().await.unwrap();
@@ -604,7 +604,7 @@ async fn http_forget_memory_is_audited() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn export_default_omits_inner() {
     let (_dir, client, _core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;
@@ -652,7 +652,7 @@ async fn export_default_omits_inner() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn fork_leaves_original_session_intact() {
     let (_dir, client, _core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;
@@ -690,7 +690,7 @@ async fn fork_leaves_original_session_intact() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn web_client_cannot_mutate_memory_or_settings() {
     let (_dir, stage, _core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");
@@ -734,7 +734,7 @@ fn web_ui_is_read_only_in_source() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn http_spans_and_schema_and_anon_health() {
     let (_dir, client, core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;
@@ -797,7 +797,7 @@ async fn http_spans_and_schema_and_anon_health() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn usage_ledger_records_completed_turn() {
     let (_dir, client, _core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;
@@ -827,7 +827,7 @@ async fn usage_ledger_records_completed_turn() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn minimal_http_baselines_are_measurable() {
     let started = Instant::now();
     let (_dir, client, core, server) = boot_server().await;
@@ -876,7 +876,7 @@ async fn minimal_http_baselines_are_measurable() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn boot_seeds_two_souls_and_session_ops() {
     let (_dir, client, core, server) = boot_server().await;
     let souls = client.list_souls().await.unwrap();
@@ -1009,7 +1009,7 @@ fn stamp_digest(mut files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8
     files
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn import_rejects_path_outside_import_dirs() {
     let (_dir, client, _core, server) = boot_server().await;
     let err = client.import_character("/etc/passwd").await.unwrap_err();
@@ -1021,7 +1021,7 @@ async fn import_rejects_path_outside_import_dirs() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn restore_keeps_backed_up_session_readable() {
     let (_dir, client, _core, server) = boot_server().await;
     let soul_id = first_soul_id(&client).await;
@@ -1049,7 +1049,7 @@ async fn restore_keeps_backed_up_session_readable() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn web_cannot_release_stage_mic_via_body_spoof() {
     let (_dir, stage, _core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");
@@ -1067,7 +1067,7 @@ async fn web_cannot_release_stage_mic_via_body_spoof() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn create_session_rejects_unknown_soul() {
     let (_dir, client, _core, server) = boot_server().await;
     let err = client
@@ -1081,7 +1081,7 @@ async fn create_session_rejects_unknown_soul() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn http_character_import_list_export_roundtrip() {
     let (_dir, client, _core, server) = boot_server().await;
     let zip = pack_archive(&stamp_digest(sample_char_files())).unwrap();
@@ -1129,7 +1129,7 @@ async fn http_character_import_list_export_roundtrip() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn web_client_cannot_patch_settings() {
     let (_dir, stage, _core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");
@@ -1141,7 +1141,7 @@ async fn web_client_cannot_patch_settings() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn web_cannot_resolve_approval() {
     let (_dir, stage, core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");
@@ -1179,7 +1179,7 @@ async fn web_cannot_resolve_approval() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn job_report_lands_only_in_owning_soul_session() {
     let (_dir, client, core, server) = boot_server().await;
     let occupants = core.occupants();
@@ -1214,7 +1214,7 @@ async fn job_report_lands_only_in_owning_soul_session() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn web_release_does_not_drain_stage_speech_gate() {
     let (_dir, stage, core, server) = boot_server().await;
     let web = ApiClient::new(stage.base(), stage.token(), "web");
@@ -1254,7 +1254,7 @@ async fn web_release_does_not_drain_stage_speech_gate() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn ws_disconnect_while_holding_mic_drains_speech() {
     let (_dir, client, core, server) = boot_server().await;
     let soul = core.occupants()[0].0;
@@ -1285,7 +1285,7 @@ async fn ws_disconnect_while_holding_mic_drains_speech() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
     let dir = TempDir::new().unwrap();
     let core = Arc::new(
@@ -1377,7 +1377,7 @@ async fn serve_echo_chat_and_strip_api_key_from_saved_settings() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn mcp_document_round_trips_through_http() {
     let (_dir, client, core, server) = boot_server().await;
     let empty = client.mcp().await.unwrap();
