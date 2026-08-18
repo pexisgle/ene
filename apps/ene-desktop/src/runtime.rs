@@ -145,11 +145,14 @@ impl Runtime {
     }
 
     fn create_ui_window(&mut self, event_loop: &ActiveEventLoop) {
+        // Character overlay is AlwaysOnTop; without this, F1 shows a window
+        // the compositor paints but mouse hits never reach.
         let ui_attrs = WindowAttributes::default()
             .with_title("ene UI")
             .with_inner_size(LogicalSize::new(900.0, 700.0))
             .with_min_inner_size(LogicalSize::new(520.0, 560.0))
-            .with_resizable(true);
+            .with_resizable(true)
+            .with_window_level(WindowLevel::AlwaysOnTop);
         let ui_w = match event_loop.create_window(ui_attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -259,7 +262,8 @@ impl Runtime {
                 "chat-window-title"
             ))
             .with_inner_size(LogicalSize::new(400.0, 600.0))
-            .with_resizable(true);
+            .with_resizable(true)
+            .with_window_level(WindowLevel::AlwaysOnTop);
         if let Some(monitor) = event_loop.primary_monitor() {
             let monitor_size = monitor.size();
             let width = 400.0;
