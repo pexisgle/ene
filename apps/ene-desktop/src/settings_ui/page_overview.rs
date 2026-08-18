@@ -29,69 +29,76 @@ pub fn render(
     }
 
     let mut navigate: Option<PageKind> = None;
+    let chat = input
+        .core_settings
+        .data
+        .as_ref()
+        .and_then(|result| result.as_ref().ok());
+    let plugin = chat
+        .and_then(|settings| settings.pointer("/effective/ai/tasks/chat/plugin"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let model = chat
+        .and_then(|settings| settings.pointer("/effective/ai/tasks/chat/model"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let echo = plugin.is_empty() || plugin == "echo";
+    let chat_title = if echo {
+        i18n_embed_fl::fl!(crate::i18n::loader(), "overview-needs-config")
+    } else {
+        i18n_embed_fl::fl!(crate::i18n::loader(), "overview-chat-provider")
+    };
+    let health_ok = matches!(&input.health.data, Some(Ok(status)) if status.starts_with("ok"));
+    let health_title = if health_ok {
+        i18n_embed_fl::fl!(crate::i18n::loader(), "overview-health")
+    } else {
+        i18n_embed_fl::fl!(crate::i18n::loader(), "overview-issues")
+    };
 
-    components::section_card(
-        ui,
-        "overview-needs-config",
-        &i18n_embed_fl::fl!(crate::i18n::loader(), "overview-needs-config"),
-        |ui| {
-            match &input.core_settings.data {
-                Some(Ok(settings)) => {
-                    let plugin = settings
-                        .pointer("/effective/ai/tasks/chat/plugin")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("echo");
-                    if plugin == "echo" || plugin.is_empty() {
-                        ui.weak(i18n_embed_fl::fl!(
-                            crate::i18n::loader(),
-                            "overview-echo-hint"
-                        ));
-                    } else {
-                        ui.label(plugin);
-                    }
-                }
-                _ => {
-                    ui.weak(i18n_embed_fl::fl!(
-                        crate::i18n::loader(),
-                        "overview-echo-hint"
-                    ));
-                }
-            }
-            if ui
-                .button(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-models"))
-                .clicked()
-            {
-                navigate = Some(PageKind::Ai);
-            }
-        },
-    );
-
-    components::section_card(
-        ui,
-        "overview-issues",
-        &i18n_embed_fl::fl!(crate::i18n::loader(), "overview-issues"),
-        |ui| {
-            match &input.health.data {
-                Some(Ok(status)) => {
-                    ui.label(status);
-                }
-                Some(Err(err)) => {
-                    ui.colored_label(egui::Color32::from_rgb(0xff, 0x8a, 0x65), err);
-                }
-                None if input.health.loading() => {
-                    ui.weak("…");
-                }
-                None => {
-                    ui.weak(ai.bind_label());
-                }
-            }
-            let plugins = input.plugins.data.as_ref().map_or(0, Vec::len);
-            ui.label(format!(
-                "{}: {plugins}",
-                i18n_embed_fl::fl!(crate::i18n::loader(), "tools-and-plugins")
+    components::section_card(ui, "overview-needs-config", &chat_title, |ui| {
+        if echo {
+            ui.weak(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "overview-echo-hint"
             ));
-        },
-    );
+        } else {
+            let model = if model.is_empty() { "—" } else { model };
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "chat-provider-caption",
+                plugin = plugin,
+                model = model
+            ));
+        }
+        if ui
+            .button(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-models"))
+            .clicked()
+        {
+            navigate = Some(PageKind::Ai);
+        }
+    });
+
+    components::section_card(ui, "overview-issues", &health_title, |ui| {
+        match &input.health.data {
+            Some(Ok(status)) => {
+                ui.label(status);
+            }
+            Some(Err(err)) => {
+                ui.colored_label(egui::Color32::from_rgb(0xff, 0x8a, 0x65), err);
+            }
+            None if input.health.loading() => {
+                ui.weak("…");
+            }
+            None => {
+                ui.weak(ai.bind_label());
+            }
+        }
+        let plugins = input.plugins.data.as_ref().map_or(0, Vec::len);
+        ui.label(format!(
+            "{}: {plugins}",
+            i18n_embed_fl::fl!(crate::i18n::loader(), "tools-and-plugins")
+        ));
+    });
 
     components::section_card(
         ui,
