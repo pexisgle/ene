@@ -792,17 +792,17 @@ pub(crate) fn overlay_ai(live: &mut AiSettings, incoming: &serde_json::Value) {
 
 pub(crate) fn overlay_plugins(live: &mut PluginSettings, incoming: &serde_json::Value) {
     if let Some(profile) = incoming.get("profile").and_then(serde_json::Value::as_str) {
-        live.profile = profile.to_owned();
+        profile.clone_into(&mut live.profile);
     }
     if let Some(home) = incoming.get("home_dir").and_then(serde_json::Value::as_str) {
-        live.home_dir = home.to_owned();
+        home.clone_into(&mut live.home_dir);
     }
     if let Some(policy) = incoming.get("policy") {
         if let Some(mode) = policy
             .get("approval_mode")
             .and_then(serde_json::Value::as_str)
         {
-            live.policy.approval_mode = mode.to_owned();
+            mode.clone_into(&mut live.policy.approval_mode);
         }
         if let Some(flag) = policy
             .get("allow_unverified")

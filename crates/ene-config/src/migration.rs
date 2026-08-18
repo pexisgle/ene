@@ -255,6 +255,10 @@ pub fn apply_migrations(mut doc: serde_json::Value) -> Result<serde_json::Value,
 
 /// Drops retired plugin-list and in-process engine keys. Does not map them
 /// onto `ai.tasks.*` or profile rows.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "MigrationFn is Result so every step shares the same signature"
+)]
 pub(crate) fn migrate_drop_legacy_plugin_list(
     doc: &mut serde_json::Value,
 ) -> Result<(), EneConfigError> {

@@ -218,9 +218,14 @@ mod tests {
         assert!(!PluginProfileKind::Minimal.includes_mcp());
         let rows = harness_rows(PluginSettings::default().kind(), Path::new(""));
         assert!(rows.iter().any(|row| row.plugin == "tool.app"));
-        let mut minimal = PluginSettings::default();
-        minimal.profile = "minimal".to_owned();
-        let rows = harness_rows(minimal.kind(), Path::new(""));
+        let rows = harness_rows(
+            PluginSettings {
+                profile: "minimal".to_owned(),
+                ..PluginSettings::default()
+            }
+            .kind(),
+            Path::new(""),
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].plugin, "tool.utility");
     }
@@ -240,8 +245,10 @@ mod tests {
             settings.resolved_home(Path::new("/tmp/ene-data")),
             Path::new("/tmp/ene-data/plugins")
         );
-        let mut custom = PluginSettings::default();
-        custom.home_dir = "/opt/ene-plugins".to_owned();
+        let custom = PluginSettings {
+            home_dir: "/opt/ene-plugins".to_owned(),
+            ..PluginSettings::default()
+        };
         assert_eq!(
             custom.resolved_home(Path::new("/tmp/ene-data")),
             Path::new("/opt/ene-plugins")

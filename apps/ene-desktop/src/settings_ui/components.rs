@@ -67,7 +67,7 @@ fn focus_accent(ui: &Ui) -> Color32 {
     }
 }
 
-pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 53] = [
+pub(super) const SECTION_TITLE_KEYS: [(&str, &str); 54] = [
     ("character-model", "section-character-model"),
     ("character-transform", "section-character-transform"),
     ("character-expressions", "section-character-expressions"),
