@@ -258,6 +258,8 @@ pub struct PluginView {
     pub row_id: String,
     pub plugin: String,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

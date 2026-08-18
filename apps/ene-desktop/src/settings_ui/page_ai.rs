@@ -146,6 +146,12 @@ fn render_binding(
         binding["base_url"] = json!(base_url);
         write_binding(draft, task, binding.clone());
     }
+    if plugin.contains("openai_compat") && base_url.trim().is_empty() {
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "ai-openai-compat-base-url-hint"
+        ));
+    }
 
     let mut max_tokens = binding
         .get("max_tokens")

@@ -863,6 +863,7 @@ pub async fn list_plugins(State(state): State<AppState>) -> Json<Page<PluginView
             row_id: fiber.row_id,
             plugin: fiber.plugin,
             state: fiber.state.as_str().to_owned(),
+            wait_reason: fiber.wait_reason,
         })
         .collect();
     Json(Page::of(items))
@@ -898,6 +899,7 @@ pub async fn restart_plugin(
         row_id: updated.row_id,
         plugin: updated.plugin,
         state: updated.state.as_str().to_owned(),
+        wait_reason: updated.wait_reason,
     }))
 }
 

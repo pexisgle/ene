@@ -86,35 +86,41 @@ pub fn sidecar_fields(ui: &mut egui::Ui, binding: &mut Value) -> bool {
         return false;
     }
     let mut changed = false;
-    ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-sidecar-hint"));
-    changed |= text_field(ui, "ai-server-path-label", binding, "server_path");
-    changed |= text_field(ui, "ai-cas-path-label", binding, "cas_path");
-    changed |= text_field(ui, "ai-model-path-label", binding, "model_path");
-    let mut args = binding
-        .get("server_args")
-        .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .unwrap_or_default();
-    ui.label(i18n_embed_fl::fl!(
-        crate::i18n::loader(),
-        "ai-server-args-label"
-    ));
-    if ui
-        .add(egui::TextEdit::singleline(&mut args).desired_width(f32::INFINITY))
-        .changed()
-    {
-        binding["server_args"] = json!(
-            args.split_whitespace()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        );
-        changed = true;
-    }
+    let heading = i18n_embed_fl::fl!(crate::i18n::loader(), "ai-sidecar-heading");
+    egui::CollapsingHeader::new(heading)
+        .id_salt(("ai-sidecar", plugin))
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "ai-sidecar-hint"));
+            changed |= text_field(ui, "ai-server-path-label", binding, "server_path");
+            changed |= text_field(ui, "ai-cas-path-label", binding, "cas_path");
+            changed |= text_field(ui, "ai-model-path-label", binding, "model_path");
+            let mut args = binding
+                .get("server_args")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "ai-server-args-label"
+            ));
+            if ui
+                .add(egui::TextEdit::singleline(&mut args).desired_width(f32::INFINITY))
+                .changed()
+            {
+                binding["server_args"] = json!(
+                    args.split_whitespace()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                );
+                changed = true;
+            }
+        });
     changed
 }
 

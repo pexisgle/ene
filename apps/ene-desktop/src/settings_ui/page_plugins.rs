@@ -96,6 +96,9 @@ pub fn render(
                 };
                 ui.strong(heading);
                 ui.label(&plugin.row_id);
+                if let Some(reason) = &plugin.wait_reason {
+                    ui.weak(reason);
+                }
                 if ui
                     .button(i18n_embed_fl::fl!(crate::i18n::loader(), "plugins-restart"))
                     .clicked()
