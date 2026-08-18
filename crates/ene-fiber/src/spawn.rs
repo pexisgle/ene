@@ -252,8 +252,12 @@ fn sandbox_for(opts: &SpawnOpts<'_>) -> Result<Option<SandboxSpec>, SupervisorEr
         opts.socket_dir,
         opts.temp_dir,
         opts.workspace,
-        opts.sandbox_required,
+        opts.sandbox_required && plugin_isolates_network(opts.plugin_id),
     )))
+}
+
+fn plugin_isolates_network(plugin_id: &str) -> bool {
+    plugin_id != "tool.web"
 }
 
 fn build_spec(
@@ -390,4 +394,16 @@ fn plugin_candidates(stem: &str, home: Option<&Path>) -> Vec<PathBuf> {
 #[must_use]
 pub(crate) fn exe_plugin_candidates(dir: &Path, stem: &str) -> Vec<PathBuf> {
     vec![dir.join(stem), dir.join("plugins").join(stem)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plugin_isolates_network;
+
+    #[test]
+    fn web_plugin_keeps_host_network() {
+        assert!(!plugin_isolates_network("tool.web"));
+        assert!(plugin_isolates_network("tool.fs"));
+        assert!(plugin_isolates_network("tool.exec"));
+    }
 }

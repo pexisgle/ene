@@ -196,6 +196,18 @@ async fn circuit_breaker_opens_after_spawn_failures() {
     ));
 }
 
+#[tokio::test]
+async fn apply_profile_keeps_failed_spawn_visible() {
+    let (_dir, sup) = supervisor();
+    let report = sup
+        .apply_profile(&[row("r-missing", "provider.no_such_vendor", &[])])
+        .await;
+    assert!(report.waiting.contains(&"r-missing".to_owned()));
+    let fiber = sup.fiber("r-missing").expect("waiting fiber");
+    assert_eq!(fiber.state, FiberState::Waiting);
+    assert!(fiber.wait_reason.is_some());
+}
+
 #[test]
 fn manifest_digest_matches_python_plugin_contract() {
     let path = dummy_plugin_path();

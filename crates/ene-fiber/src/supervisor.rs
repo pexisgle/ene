@@ -96,11 +96,7 @@ impl ToolInvoke for PluginInvoker {
             .await;
         match result {
             Ok(value) if value.status == "ok" => Ok(value.value),
-            Ok(value) => {
-                self.inner
-                    .record_failure(&self.row_id, &self.plugin, self.inner.circuit_breaker);
-                Err(value.value.to_string())
-            }
+            Ok(value) => Err(value.value.to_string()),
             Err(err) => {
                 self.inner
                     .record_failure(&self.row_id, &self.plugin, self.inner.circuit_breaker);
@@ -353,7 +349,19 @@ impl Supervisor {
             self.inner.missing_requires.lock().remove(&row.row_id);
             match self.try_activate_row(row).await {
                 Ok(()) => activated.push(row.row_id.clone()),
-                Err(_) => waiting.push(row.row_id.clone()),
+                Err(err) => {
+                    self.inner
+                        .profile_rows
+                        .lock()
+                        .insert(row.row_id.clone(), row.clone());
+                    if !self.circuit_open(&row.row_id) {
+                        self.inner
+                            .fibers
+                            .lock()
+                            .insert(row.row_id.clone(), waiting_fiber(row, err.to_string()));
+                    }
+                    waiting.push(row.row_id.clone());
+                }
             }
         }
 
