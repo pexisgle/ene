@@ -56,11 +56,26 @@ pub struct ServerHandle {
     pub addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
+    background: Vec<tokio::task::JoinHandle<()>>,
+    supervisor: Arc<ene_fiber::Supervisor>,
+    host: Arc<ene_work::DelegationHost>,
 }
 
 impl ServerHandle {
-    /// Ask the server to stop and wait for the accept loop to exit.
+    fn abort_background(&mut self) {
+        for handle in &self.background {
+            handle.abort();
+        }
+        self.host.clear_report_sink();
+    }
+
+    /// Ask the server to stop, unload plugins, and wait for the accept loop.
     pub async fn shutdown(mut self) {
+        self.abort_background();
+        self.supervisor.shutdown().await;
+        for handle in self.background.drain(..) {
+            drop(handle.await);
+        }
         if let Some(tx) = self.shutdown.take()
             && tx.send(()).is_err()
         {
@@ -68,6 +83,21 @@ impl ServerHandle {
         }
         if let Some(join) = self.join.take() {
             drop(join.await);
+        }
+    }
+}
+
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        self.abort_background();
+        self.supervisor.kill_all_children();
+        for handle in self.background.drain(..) {
+            handle.abort();
+        }
+        if let Some(tx) = self.shutdown.take()
+            && tx.send(()).is_err()
+        {
+            // Server task already exited.
         }
     }
 }
@@ -133,16 +163,16 @@ impl CoreDaemon {
             bind: addr,
         };
         let report_state = state.clone();
-        drop(tokio::spawn(async move {
+        let report_task = tokio::spawn(async move {
             while let Some(report) = report_rx.recv().await {
                 routes::emit_job_reports(&report_state, std::slice::from_ref(&report));
                 routes::persist_job_report(&report_state, &report).await;
             }
-        }));
+        });
         let proactive_state = state.clone();
-        drop(tokio::spawn(async move {
+        let proactive_task = tokio::spawn(async move {
             proactive::run_loop(proactive_state, classify).await;
-        }));
+        });
         let app = router(state.clone());
         let (tx, rx) = oneshot::channel::<()>();
         let join = tokio::spawn(async move {
@@ -156,6 +186,9 @@ impl CoreDaemon {
             addr,
             shutdown: Some(tx),
             join: Some(join),
+            background: vec![report_task, proactive_task],
+            supervisor: self.supervisor(),
+            host: self.host(),
         })
     }
 }

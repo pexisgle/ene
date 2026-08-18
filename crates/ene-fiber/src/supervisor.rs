@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -59,6 +60,7 @@ struct SupervisorInner {
     failure_counts: Mutex<HashMap<String, u32>>,
     cycle_report: Mutex<Option<String>>,
     missing_requires: Mutex<HashMap<String, Vec<String>>>,
+    prefer_in_process: AtomicBool,
 }
 
 /// Fiber supervisor. Reconcile is per-row; the core process is not restarted.
@@ -198,8 +200,14 @@ impl Supervisor {
                 failure_counts: Mutex::new(HashMap::new()),
                 cycle_report: Mutex::new(None),
                 missing_requires: Mutex::new(HashMap::new()),
+                prefer_in_process: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Use in-process builtin handlers instead of spawning harness binaries.
+    pub fn set_prefer_in_process_builtins(&self, yes: bool) {
+        self.inner.prefer_in_process.store(yes, Ordering::Relaxed);
     }
 
     #[must_use]
@@ -337,6 +345,18 @@ impl Supervisor {
         if self.circuit_open(&row.row_id) {
             return Err(SupervisorError::CircuitOpen(row.row_id.clone()));
         }
+        if self.inner.prefer_in_process.load(Ordering::Relaxed)
+            && plugin_kind(&row.plugin).is_some()
+        {
+            let result = self.activate(row).map(|_| ());
+            if result.is_err() {
+                self.inner
+                    .record_failure(&row.row_id, &row.plugin, self.inner.circuit_breaker);
+            } else {
+                self.inner.reset_failures(&row.row_id);
+            }
+            return result;
+        }
         let result = if let Some(path) = discover_plugin_executable(&row.plugin) {
             self.activate_process(row, &path).await.map(|_| ())
         } else if row.sandbox_required {
@@ -453,15 +473,17 @@ impl Supervisor {
         row: &ProfileRow,
         plugin_id: &str,
         fiber: &mut Fiber,
-        spawned: SpawnedPlugin,
+        mut spawned: SpawnedPlugin,
     ) -> Result<(), SupervisorError> {
-        let SpawnedPlugin { child, mut conn } = spawned;
+        let (child, mut conn) = spawned.take()?;
         let pid = child.id();
         fiber.push_effect(Effect::SpawnProcess { pid });
         self.inner.children.lock().insert(row.row_id.clone(), child);
         let faces = conn.negotiated().provider.clone();
         let tools = if conn.negotiated().tool.is_some() {
-            conn.list_tools().await?
+            timeout(Duration::from_secs(5), conn.list_tools())
+                .await
+                .map_err(|_| SupervisorError::Spawn("tool list timeout".to_owned()))??
         } else {
             Vec::new()
         };
@@ -500,7 +522,7 @@ impl Supervisor {
                 });
                 self.inner.registry.register_with(def, Arc::clone(&invoke));
             }
-        } else if row.plugin.starts_with("mcp.") {
+        } else if !row.plugin.starts_with("provider.") {
             for spec in tools {
                 let def = ToolDefinition::from_wire(spec, source.clone());
                 fiber.push_effect(Effect::RegisterTool {
@@ -540,6 +562,23 @@ impl Supervisor {
         }
         finish_active(fiber);
         Ok(())
+    }
+
+    /// Drain every fiber and kill leftover children. Used when HTTP stops.
+    pub async fn shutdown(&self) {
+        let ids: Vec<String> = self.inner.fibers.lock().keys().cloned().collect();
+        for row_id in ids {
+            self.unload(&row_id).await;
+        }
+        self.kill_all_children();
+    }
+
+    /// Kill remaining plugin processes without waiting for `DrainAck`.
+    pub fn kill_all_children(&self) {
+        for (_, mut child) in self.inner.children.lock().drain() {
+            terminate_child(&mut child);
+        }
+        self.inner.sessions.lock().clear();
     }
 
     /// Unload a row: stop providing, then apply dispose LIFO (I-46).
@@ -685,9 +724,7 @@ impl Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        for (_, mut child) in self.inner.children.lock().drain() {
-            terminate_child(&mut child);
-        }
+        self.kill_all_children();
     }
 }
 
@@ -695,10 +732,11 @@ fn resolve_plugin_id(plugin: &str) -> Option<String> {
     if let Some(kind) = plugin_kind(plugin) {
         return Some(kind.plugin_id().to_owned());
     }
-    if plugin == "tool.dummy" {
-        return Some(plugin.to_owned());
-    }
-    if plugin.starts_with("provider.") || plugin.starts_with("mcp.") {
+    if plugin == "tool.dummy"
+        || plugin.starts_with("tool.")
+        || plugin.starts_with("provider.")
+        || plugin.starts_with("mcp.")
+    {
         return Some(plugin.to_owned());
     }
     None

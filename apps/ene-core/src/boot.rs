@@ -172,6 +172,8 @@ impl CoreDaemon {
             BodySettings::default(),
         ));
         let supervisor = Arc::new(Supervisor::new(workspace, registry));
+        #[cfg(test)]
+        supervisor.set_prefer_in_process_builtins(true);
         seed_default_occupants(&companions, &stage)?;
         let chat_secret = load_named_secret(&vault, "ENE_AI__TASKS__CHAT__API_KEY", "ai.chat");
         let classifier_secret = load_named_secret(

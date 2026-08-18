@@ -76,6 +76,11 @@ impl DelegationHost {
         *self.report_tx.lock() = Some(tx);
     }
 
+    /// Close the live-bus channel so the HTTP report task can exit.
+    pub fn clear_report_sink(&self) {
+        self.report_tx.lock().take();
+    }
+
     #[must_use]
     pub fn settings(&self) -> WorkDelegationSettings {
         self.settings

@@ -14,8 +14,32 @@ use crate::supervisor::SupervisorError;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct SpawnedPlugin {
-    pub child: Child,
-    pub conn: HostConn<tokio::net::UnixStream>,
+    child: Option<Child>,
+    conn: Option<HostConn<tokio::net::UnixStream>>,
+}
+
+impl SpawnedPlugin {
+    pub(crate) fn take(
+        &mut self,
+    ) -> Result<(Child, HostConn<tokio::net::UnixStream>), SupervisorError> {
+        let child = self
+            .child
+            .take()
+            .ok_or_else(|| SupervisorError::Spawn("plugin child already taken".to_owned()))?;
+        let conn = self
+            .conn
+            .take()
+            .ok_or_else(|| SupervisorError::Spawn("plugin connection already taken".to_owned()))?;
+        Ok((child, conn))
+    }
+}
+
+impl Drop for SpawnedPlugin {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            terminate_child(&mut child);
+        }
+    }
 }
 
 pub(crate) struct SpawnOpts<'a> {
@@ -116,7 +140,10 @@ pub(crate) async fn spawn_plugin(opts: SpawnOpts<'_>) -> Result<SpawnedPlugin, S
         ));
     }
     tracing::debug!(plugin = opts.plugin_id, "plugin hello completed");
-    Ok(SpawnedPlugin { child, conn })
+    Ok(SpawnedPlugin {
+        child: Some(child),
+        conn: Some(conn),
+    })
 }
 
 fn plugin_command(

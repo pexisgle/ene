@@ -1,6 +1,6 @@
 use crate::{
-    Broker, BrokerError, CircuitBreakerConfig, FiberState, FiberUid, ProfileRow, SidecarRequest,
-    Supervisor, confine_path, discover_plugin_script, manifest_digest,
+    Broker, BrokerError, CircuitBreakerConfig, Effect, FiberState, FiberUid, ProfileRow,
+    SidecarRequest, Supervisor, confine_path, discover_plugin_script, manifest_digest,
 };
 use ene_registry::{Layer, ToolRegistry};
 use serde_json::json;
@@ -248,6 +248,44 @@ async fn dummy_plugin_handshake_without_provider_subprotocol() {
         .await
         .expect("core+tool handshake must succeed without provider");
     assert!(sup.surface_has_tool("dummy.ping"));
+}
+
+#[tokio::test]
+async fn dropping_supervisor_kills_spawned_plugin() {
+    if python3_bin().is_none() {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let sup = Supervisor::new(dir.path().to_path_buf(), Arc::new(ToolRegistry::new()));
+    let path = dummy_plugin_path();
+    let row = row("r-dummy", "tool.dummy", &[]);
+    sup.activate_process(&row, &path).await.unwrap();
+    let pid = sup
+        .fiber("r-dummy")
+        .unwrap()
+        .dispose
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::SpawnProcess { pid } => Some(*pid),
+            _ => None,
+        })
+        .expect("spawn pid");
+    assert!(
+        std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "plugin child {pid} should be running"
+    );
+    drop(sup);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "plugin child {pid} still alive after Supervisor drop"
+    );
 }
 
 #[test]
