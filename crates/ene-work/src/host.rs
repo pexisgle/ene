@@ -10,9 +10,12 @@ use crate::types::{
 use chrono::{DateTime, Utc};
 use ene_registry::{Layer, ToolDefinition, ToolRegistry};
 use ene_session::{DelegationId, SoulId};
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
+use uuid::Uuid;
 
 /// Tool-confine and job-artifact root (`<data>/workspace`), kept off secrets.
 #[must_use]
@@ -26,6 +29,7 @@ pub struct DelegationHost {
     data_dir: PathBuf,
     settings: WorkDelegationSettings,
     speech_gate: Arc<SpeechGate>,
+    report_tx: Mutex<Option<mpsc::UnboundedSender<CompanionReport>>>,
 }
 
 impl DelegationHost {
@@ -63,7 +67,13 @@ impl DelegationHost {
             data_dir,
             settings,
             speech_gate: Arc::new(SpeechGate::new()),
+            report_tx: Mutex::new(None),
         }
+    }
+
+    /// Deliver companion speech to the HTTP live bus and session log.
+    pub fn set_report_sink(&self, tx: mpsc::UnboundedSender<CompanionReport>) {
+        *self.report_tx.lock() = Some(tx);
     }
 
     #[must_use]
@@ -92,7 +102,56 @@ impl DelegationHost {
         if speaking {
             Vec::new()
         } else {
-            self.speech_gate.drain_when_gap()
+            let drained = self.speech_gate.drain_when_gap();
+            for report in &drained {
+                self.publish_report(report);
+            }
+            drained
+        }
+    }
+
+    fn soul_id_of(&self, id: DelegationId) -> Result<SoulId, WorkError> {
+        Ok(self
+            .store
+            .get_job(id)?
+            .map_or_else(|| SoulId::from_uuid(Uuid::nil()), |job| job.soul_id))
+    }
+
+    fn publish_report(&self, report: &CompanionReport) {
+        if report.speech.is_empty() {
+            return;
+        }
+        if let Some(tx) = self.report_tx.lock().as_ref() {
+            drop(tx.send(report.clone()));
+        }
+    }
+
+    fn deliver_or_queue(&self, report: CompanionReport, queued_intent: &str) -> CompanionReport {
+        let soul_id = report.soul_id;
+        if let Some(delivered) = self.speech_gate.offer(report) {
+            self.publish_report(&delivered);
+            delivered
+        } else {
+            CompanionReport {
+                soul_id,
+                speech: String::new(),
+                inner_intent: Some(queued_intent.to_owned()),
+                starts_conversation: false,
+            }
+        }
+    }
+
+    fn speak(
+        soul_id: SoulId,
+        speech: String,
+        intent: &str,
+        starts_conversation: bool,
+    ) -> CompanionReport {
+        CompanionReport {
+            soul_id,
+            speech,
+            inner_intent: Some(intent.to_owned()),
+            starts_conversation,
         }
     }
 
@@ -201,11 +260,12 @@ impl DelegationHost {
         self.store.set_plan(id, plan)?;
         self.store
             .mailbox_push(id, "child_to_parent", "question", &format!("plan:\n{plan}"))?;
-        Ok(CompanionReport {
-            speech: format!("here's the plan: {plan}"),
-            inner_intent: Some("ask_plan".into()),
-            starts_conversation: true,
-        })
+        Ok(Self::speak(
+            self.soul_id_of(id)?,
+            format!("here's the plan: {plan}"),
+            "ask_plan",
+            true,
+        ))
     }
 
     pub fn approve_plan(&self, id: DelegationId) -> Result<(), WorkError> {
@@ -274,11 +334,12 @@ impl DelegationHost {
         }
         self.store
             .mailbox_push(id, "child_to_parent", "progress", note)?;
-        Ok(CompanionReport {
-            speech: format!("still working: {note}"),
-            inner_intent: Some("progress".into()),
-            starts_conversation: false,
-        })
+        Ok(Self::speak(
+            self.soul_id_of(id)?,
+            format!("still working: {note}"),
+            "progress",
+            false,
+        ))
     }
 
     pub fn complete(&self, id: DelegationId, summary: &str) -> Result<CompanionReport, WorkError> {
@@ -294,20 +355,15 @@ impl DelegationHost {
         }
         self.store
             .mailbox_push(id, "child_to_parent", "complete", summary)?;
-        let report = CompanionReport {
-            speech: format!("done — {summary}"),
-            inner_intent: Some("complete".into()),
-            starts_conversation: true,
-        };
-        if let Some(delivered) = self.speech_gate.offer(report) {
-            Ok(delivered)
-        } else {
-            Ok(CompanionReport {
-                speech: String::new(),
-                inner_intent: Some("complete_queued".into()),
-                starts_conversation: false,
-            })
-        }
+        Ok(self.deliver_or_queue(
+            Self::speak(
+                self.soul_id_of(id)?,
+                format!("done — {summary}"),
+                "complete",
+                true,
+            ),
+            "complete_queued",
+        ))
     }
 
     pub fn fail(&self, id: DelegationId, summary: &str) -> Result<CompanionReport, WorkError> {
@@ -318,20 +374,15 @@ impl DelegationHost {
         }
         self.store
             .mailbox_push(id, "child_to_parent", "failed", summary)?;
-        let report = CompanionReport {
-            speech: format!("the task failed: {summary}"),
-            inner_intent: Some("failed".into()),
-            starts_conversation: true,
-        };
-        if let Some(delivered) = self.speech_gate.offer(report) {
-            Ok(delivered)
-        } else {
-            Ok(CompanionReport {
-                speech: String::new(),
-                inner_intent: Some("failed_queued".into()),
-                starts_conversation: false,
-            })
-        }
+        Ok(self.deliver_or_queue(
+            Self::speak(
+                self.soul_id_of(id)?,
+                format!("the task failed: {summary}"),
+                "failed",
+                true,
+            ),
+            "failed_queued",
+        ))
     }
 
     pub fn cancel(&self, id: DelegationId) -> Result<JobStatus, WorkError> {
@@ -367,6 +418,7 @@ impl DelegationHost {
                     ),
                 };
                 CompanionReport {
+                    soul_id: job.soul_id,
                     speech,
                     inner_intent: Some("interrupted".into()),
                     starts_conversation: true,
@@ -379,11 +431,12 @@ impl DelegationHost {
         self.require_known(id)?;
         self.store
             .mailbox_push(id, "child_to_parent", "question", prompt)?;
-        Ok(CompanionReport {
-            speech: prompt.to_owned(),
-            inner_intent: Some("ask_user".into()),
-            starts_conversation: true,
-        })
+        Ok(Self::speak(
+            self.soul_id_of(id)?,
+            prompt.to_owned(),
+            "ask_user",
+            true,
+        ))
     }
 
     pub fn open_questions(&self, id: DelegationId) -> Result<Vec<OpenQuestion>, WorkError> {

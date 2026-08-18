@@ -276,9 +276,9 @@ fn plugin_candidates(stem: &str) -> Vec<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        candidates.push(dir.join(stem));
+        candidates.extend(exe_plugin_candidates(dir, stem));
         if let Some(parent) = dir.parent() {
-            candidates.push(parent.join(stem));
+            candidates.extend(exe_plugin_candidates(parent, stem));
         }
     }
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
@@ -299,4 +299,9 @@ fn plugin_candidates(stem: &str) -> Vec<PathBuf> {
         }
     }
     candidates
+}
+
+#[must_use]
+pub(crate) fn exe_plugin_candidates(dir: &Path, stem: &str) -> Vec<PathBuf> {
+    vec![dir.join(stem), dir.join("plugins").join(stem)]
 }

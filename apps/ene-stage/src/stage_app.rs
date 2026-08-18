@@ -10,7 +10,8 @@ use serde_json::Value;
 
 use crate::core_spawn::{CoreChild, resolve_connection};
 use crate::filter::{
-    format_event_line, merge_soul_ids, surface_event_allowed, surface_history_line,
+    format_event_line, job_report_matches_soul, live_surface_line, merge_soul_ids,
+    surface_event_allowed, surface_history_line,
 };
 use crate::vrm;
 
@@ -293,7 +294,9 @@ impl StageApp {
         for msg in batch {
             match msg {
                 LiveEventMsg::Surface { pane, value } => {
-                    if !surface_event_allowed(&value) {
+                    if !surface_event_allowed(&value)
+                        || !job_report_matches_soul(&value, &self.companions[pane].soul_id)
+                    {
                         continue;
                     }
                     self.apply_live_value(pane, &value, false);
@@ -695,19 +698,6 @@ fn fmt_pad(value: Option<f32>) -> String {
     match value {
         Some(v) => format!("{v:.2}"),
         None => "—".to_owned(),
-    }
-}
-
-fn live_surface_line(value: &Value) -> Option<String> {
-    let event_type = value.get("type").and_then(Value::as_str)?;
-    match event_type {
-        "text.delta" => value
-            .get("text")
-            .and_then(Value::as_str)
-            .map(|t| format!("assistant: {t}")),
-        "session.event" => Some(format_event_line(value)),
-        _ if event_type.starts_with("body.") => None,
-        _ => None,
     }
 }
 

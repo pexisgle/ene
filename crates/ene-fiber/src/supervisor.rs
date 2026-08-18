@@ -333,6 +333,8 @@ impl Supervisor {
         }
         let result = if let Some(path) = discover_plugin_executable(&row.plugin) {
             self.activate_process(row, &path).await.map(|_| ())
+        } else if row.sandbox_required {
+            Err(SupervisorError::UnknownPlugin(row.plugin.clone()))
         } else if plugin_kind(&row.plugin).is_some() {
             self.activate(row).map(|_| ())
         } else {

@@ -220,6 +220,7 @@ impl UpgradeReason {
 /// Report the companion should speak (D-13). Never a status bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompanionReport {
+    pub soul_id: SoulId,
     pub speech: String,
     pub inner_intent: Option<String>,
     /// Progress companion speech does not open a surface conversation turn.

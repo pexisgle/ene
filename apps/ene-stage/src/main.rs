@@ -58,7 +58,10 @@ mod tests {
     use super::core_spawn::{
         connection_from_ready, env_api_config, health_reachable, spawn_core, wait_for_api_json,
     };
-    use super::filter::{merge_soul_ids, surface_event_allowed, surface_history_line};
+    use super::filter::{
+        job_report_matches_soul, live_surface_line, merge_soul_ids, surface_event_allowed,
+        surface_history_line,
+    };
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -81,6 +84,18 @@ mod tests {
         ));
         assert!(surface_event_allowed(
             &json!({"type": "session.event", "kind": "turn/end"})
+        ));
+        assert_eq!(
+            live_surface_line(&json!({"type": "job.report", "speech": "done — notes"})).as_deref(),
+            Some("assistant: done — notes")
+        );
+        assert!(job_report_matches_soul(
+            &json!({"type": "job.report", "soul_id": "a", "speech": "x"}),
+            "a"
+        ));
+        assert!(!job_report_matches_soul(
+            &json!({"type": "job.report", "soul_id": "a", "speech": "x"}),
+            "b"
         ));
     }
 

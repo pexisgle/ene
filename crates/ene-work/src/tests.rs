@@ -36,10 +36,22 @@ struct SpyInvoke {
     hit: Arc<AtomicBool>,
 }
 
+struct CaptureInvoke {
+    last: parking_lot::Mutex<Option<Value>>,
+}
+
 #[async_trait]
 impl ToolInvoke for SpyInvoke {
     async fn invoke(&self, _name: &str, _args: Value) -> Result<Value, String> {
         self.hit.store(true, Ordering::SeqCst);
+        Ok(json!({ "ok": true }))
+    }
+}
+
+#[async_trait]
+impl ToolInvoke for CaptureInvoke {
+    async fn invoke(&self, _name: &str, args: Value) -> Result<Value, String> {
+        *self.last.lock() = Some(args);
         Ok(json!({ "ok": true }))
     }
 }
@@ -1060,6 +1072,59 @@ fn completion_waits_for_user_speech_gap() {
     let drained = host.mark_user_speaking(false);
     assert_eq!(drained.len(), 1);
     assert!(drained[0].speech.contains("all findings collected"));
+}
+
+#[tokio::test]
+async fn complete_publishes_when_user_is_not_speaking() {
+    let (_dir, _store, host, soul) = open_work();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    host.set_report_sink(tx);
+    let job = public_start(&host, soul, "report");
+    let report = host.complete(job.id, "all findings collected").unwrap();
+    assert!(report.speech.contains("all findings collected"));
+    let published = rx.recv().await.unwrap();
+    assert_eq!(published.soul_id, soul);
+    assert!(published.speech.contains("all findings collected"));
+}
+
+#[tokio::test]
+async fn queued_complete_publishes_on_speech_gap() {
+    let (_dir, _store, host, soul) = open_work();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    host.set_report_sink(tx);
+    drop(host.mark_user_speaking(true));
+    let job = public_start(&host, soul, "report");
+    let queued = host.complete(job.id, "all findings collected").unwrap();
+    assert_eq!(queued.inner_intent.as_deref(), Some("complete_queued"));
+    assert!(
+        rx.try_recv().is_err(),
+        "queued complete must not publish yet"
+    );
+    drop(host.mark_user_speaking(false));
+    let published = rx.recv().await.unwrap();
+    assert_eq!(published.soul_id, soul);
+    assert!(published.speech.contains("all findings collected"));
+}
+
+#[tokio::test]
+async fn surface_router_overwrites_foreign_soul_id() {
+    let (_dir, _store, host, soul) = open_work();
+    let foreign = SoulId::new();
+    let registry = Arc::new(ToolRegistry::new());
+    let capture = Arc::new(CaptureInvoke {
+        last: parking_lot::Mutex::new(None),
+    });
+    registry.register_with(
+        utility_time_def(),
+        Arc::clone(&capture) as Arc<dyn ToolInvoke>,
+    );
+    let router = WorkSurfaceRouter::new(host, registry, soul, 4);
+    router
+        .on_tool("utility.time", json!({ "soul_id": foreign.to_string() }), 0)
+        .await
+        .unwrap();
+    let args = capture.last.lock().clone().unwrap();
+    assert_eq!(args["soul_id"], json!(soul.to_string()));
 }
 
 #[test]

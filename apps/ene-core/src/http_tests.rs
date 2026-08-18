@@ -73,6 +73,41 @@ async fn wait_assistant(client: &ApiClient, session: &str) -> HistoryResponse {
     }
 }
 
+async fn wait_history_contains(client: &ApiClient, session: &str, needle: &str) -> HistoryResponse {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let history = client.history(session, "surface").await.unwrap();
+        if history
+            .messages
+            .iter()
+            .any(|message| message.text.contains(needle))
+        {
+            return history;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "history did not contain {needle:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn start_job(core: &CoreDaemon, soul: ene_session::SoulId, goal: &str) -> ene_work::Job {
+    core.host()
+        .start(ene_work::StartDelegation {
+            soul_id: soul,
+            goal: goal.into(),
+            mode: ene_work::DelegationMode::Public,
+            title: Some(goal.into()),
+            brief: None,
+            plan: None,
+            created_from_turn: None,
+            depth: 0,
+            parent_id: None,
+        })
+        .unwrap()
+}
+
 fn record_metric(name: &str, body: impl AsRef<[u8]>) {
     let dir = std::path::Path::new("/opt/cursor/artifacts");
     if std::fs::create_dir_all(dir).is_err() {
@@ -413,6 +448,9 @@ async fn approval_first_writer_wins() {
     let pending = pending.expect("popup should be listed");
     stage.respond_approval(&pending.id, "allow").await.unwrap();
     let err = web.respond_approval(&pending.id, "deny").await.unwrap_err();
+    assert_eq!(err.error_class(), "forbidden");
+    let cli = ApiClient::new(stage.base(), stage.token(), "cli");
+    let err = cli.respond_approval(&pending.id, "deny").await.unwrap_err();
     assert_eq!(err.error_class(), "already_resolved");
     let outcome = task.await.unwrap().unwrap();
     assert_eq!(outcome, ene_plane::Decision::Allow);
@@ -1100,5 +1138,149 @@ async fn web_client_cannot_patch_settings() {
         .await
         .unwrap_err();
     assert_eq!(err.error_class(), "forbidden");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn web_cannot_resolve_approval() {
+    let (_dir, stage, core, server) = boot_server().await;
+    let web = ApiClient::new(stage.base(), stage.token(), "web");
+    core.plane().set_mode(ApprovalMode::AskAll).unwrap();
+    let plane = core.plane();
+    let task = tokio::spawn(async move {
+        plane
+            .authorize(&AuthzRequest {
+                tool: "fs.write".into(),
+                side_effects: vec!["fs.write".into()],
+                sensitivity: Sensitivity::High,
+                target: "notes.md".into(),
+                in_workspace: false,
+            })
+            .await
+    });
+    let mut pending = None;
+    for _ in 0..50 {
+        let page = stage.list_approvals().await.unwrap();
+        if let Some(item) = page.items.into_iter().next() {
+            pending = Some(item);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pending = pending.expect("popup should be listed");
+    let err = web
+        .respond_approval(&pending.id, "allow")
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_class(), "forbidden");
+    stage.respond_approval(&pending.id, "allow").await.unwrap();
+    let outcome = task.await.unwrap().unwrap();
+    assert_eq!(outcome, ene_plane::Decision::Allow);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn job_report_lands_only_in_owning_soul_session() {
+    let (_dir, client, core, server) = boot_server().await;
+    let occupants = core.occupants();
+    assert!(occupants.len() >= 2, "boot seeds two occupants");
+    let soul_a = occupants[0].0;
+    let soul_b = occupants[1].0;
+    let session_a = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_a.to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let session_b = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul_b.to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let job = start_job(&core, soul_a, "alpha notes");
+    core.host().complete(job.id, "alpha done").unwrap();
+    wait_history_contains(&client, &session_a.id, "alpha done").await;
+    let other = client.history(&session_b.id, "surface").await.unwrap();
+    assert!(
+        !other
+            .messages
+            .iter()
+            .any(|message| message.text.contains("alpha done")),
+        "job speech must not fan out to another soul's session"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn web_release_does_not_drain_stage_speech_gate() {
+    let (_dir, stage, core, server) = boot_server().await;
+    let web = ApiClient::new(stage.base(), stage.token(), "web");
+    let soul = core.occupants()[0].0;
+    let session = stage
+        .create_session(&CreateSessionRequest {
+            soul_id: soul.to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    stage
+        .claim_resource(
+            ResourceKind::Mic,
+            &ClaimResourceRequest {
+                client_id: "ignored".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let job = start_job(&core, soul, "queued speech");
+    let queued = core.host().complete(job.id, "held until gap").unwrap();
+    assert_eq!(queued.inner_intent.as_deref(), Some("complete_queued"));
+    let released = web.release_resource(ResourceKind::Mic).await.unwrap();
+    assert_eq!(released.mic.as_deref(), Some("stage"));
+    assert!(core.host().speech_gate().user_speaking());
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let history = stage.history(&session.id, "surface").await.unwrap();
+    assert!(
+        !history
+            .messages
+            .iter()
+            .any(|message| message.text.contains("held until gap"))
+    );
+    stage.release_resource(ResourceKind::Mic).await.unwrap();
+    wait_history_contains(&stage, &session.id, "held until gap").await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn ws_disconnect_while_holding_mic_drains_speech() {
+    let (_dir, client, core, server) = boot_server().await;
+    let soul = core.occupants()[0].0;
+    let session = client
+        .create_session(&CreateSessionRequest {
+            soul_id: soul.to_string(),
+            title: None,
+        })
+        .await
+        .unwrap();
+    let socket = client.events("surface", Some(&session.id)).await.unwrap();
+    client
+        .claim_resource(
+            ResourceKind::Mic,
+            &ClaimResourceRequest {
+                client_id: "ignored".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let job = start_job(&core, soul, "ws drain");
+    let queued = core.host().complete(job.id, "after hangup").unwrap();
+    assert_eq!(queued.inner_intent.as_deref(), Some("complete_queued"));
+    drop(socket);
+    wait_history_contains(&client, &session.id, "after hangup").await;
+    let exclusive = client.exclusive().await.unwrap();
+    assert!(exclusive.mic.is_none());
     server.shutdown().await;
 }

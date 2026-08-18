@@ -427,3 +427,16 @@ fn sidecar_spawn_health_and_kill_on_loopback() {
         Err(BrokerError::UnknownSidecar(_))
     ));
 }
+
+#[test]
+fn exe_plugin_candidates_include_plugins_dir() {
+    let dir = PathBuf::from("/opt/ene");
+    let found = crate::spawn::exe_plugin_candidates(&dir, "ene-harness-fs");
+    assert_eq!(
+        found,
+        vec![
+            dir.join("ene-harness-fs"),
+            dir.join("plugins").join("ene-harness-fs"),
+        ]
+    );
+}

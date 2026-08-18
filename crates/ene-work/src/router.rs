@@ -8,7 +8,7 @@ use ene_kernel::{KernelError, SurfaceRouter, SurfaceToolOutcome};
 use ene_registry::{Layer, ToolRegistry};
 use ene_session::SoulId;
 use parking_lot::Mutex;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Dialogue-lane router: empty-`side_effects` tools run; anything else upgrades.
@@ -80,7 +80,7 @@ impl SurfaceRouter for WorkSurfaceRouter {
             SurfaceCallKind::Run => {
                 let value = self
                     .registry
-                    .execute(name, args, Layer::Surface)
+                    .execute(name, bind_soul_arg(args, self.soul), Layer::Surface)
                     .await
                     .map_err(|err| KernelError::Tool(err.to_string()))?;
                 self.learned.lock().push(name.to_owned());
@@ -92,4 +92,11 @@ impl SurfaceRouter for WorkSurfaceRouter {
             ))),
         }
     }
+}
+
+fn bind_soul_arg(mut args: Value, soul: SoulId) -> Value {
+    if let Some(object) = args.as_object_mut() {
+        object.insert("soul_id".to_owned(), json!(soul.to_string()));
+    }
+    args
 }

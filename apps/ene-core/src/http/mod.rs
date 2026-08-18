@@ -24,7 +24,7 @@ use ene_kernel::{ConversationModel, EchoModel};
 use ene_plane::PendingPopup;
 use parking_lot::Mutex;
 use serde_json::json;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{CoreDaemon, CoreError};
 use error::{ApiReject, unauthorized};
@@ -103,6 +103,8 @@ impl CoreDaemon {
         let token = load_or_create_token(self.data_dir(), &self.settings().server.token_file)?;
         write_ready_file(self.data_dir(), addr, &self.settings().server.token_file)?;
         let last_used = self.settings().clients.audio_active_policy == "last_used";
+        let (report_tx, mut report_rx) = mpsc::unbounded_channel();
+        self.host().set_report_sink(report_tx);
         let state = AppState {
             popup: Arc::clone(self.popup()),
             core: Arc::clone(&self),
@@ -113,6 +115,13 @@ impl CoreDaemon {
             events: CoreBus::new(self.settings().server.ws_send_buffer),
             bind: addr,
         };
+        let report_state = state.clone();
+        drop(tokio::spawn(async move {
+            while let Some(report) = report_rx.recv().await {
+                routes::emit_job_reports(&report_state, std::slice::from_ref(&report));
+                routes::persist_job_report(&report_state, &report).await;
+            }
+        }));
         let app = router(state.clone());
         let (tx, rx) = oneshot::channel::<()>();
         let join = tokio::spawn(async move {

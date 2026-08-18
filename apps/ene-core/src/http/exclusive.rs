@@ -54,6 +54,20 @@ impl ExclusiveHub {
         Ok(self.snapshot())
     }
 
+    #[must_use]
+    pub fn is_holder(&self, kind: ResourceKind, client_id: &str) -> bool {
+        self.holder(kind).as_deref() == Some(client_id)
+    }
+
+    #[must_use]
+    fn holder(&self, kind: ResourceKind) -> Option<String> {
+        match kind {
+            ResourceKind::Mic => self.mic.lock().clone(),
+            ResourceKind::Speaker => self.speaker.lock().clone(),
+            ResourceKind::Notify => self.notify.lock().clone(),
+        }
+    }
+
     pub fn release(&self, kind: ResourceKind, client_id: &str) -> ExclusiveSnapshot {
         let mut slot = match kind {
             ResourceKind::Mic => self.mic.lock(),

@@ -2,6 +2,7 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
+use ene_api::ResourceKind;
 use ene_kernel::{DisplayDepth, LiveEvent};
 use ene_session::{EventKind, SessionId};
 use serde::Deserialize;
@@ -10,6 +11,7 @@ use tokio::sync::broadcast;
 
 use super::AppState;
 use super::error::{ApiReject, bad_request};
+use super::routes;
 
 /// Core-level events (approvals, exclusive, jobs) with server-side depth.
 #[derive(Clone)]
@@ -129,7 +131,7 @@ async fn socket_loop(
                     .await
                     .is_err()
                 {
-                    state.exclusive.release_client(&client_id);
+                    release_client_resources(&state, &client_id);
                     return;
                 }
             }
@@ -168,7 +170,15 @@ async fn socket_loop(
             }
         }
     }
-    state.exclusive.release_client(&client_id);
+    release_client_resources(&state, &client_id);
+}
+
+fn release_client_resources(state: &AppState, client_id: &str) {
+    let held_mic = state.exclusive.is_holder(ResourceKind::Mic, client_id);
+    state.exclusive.release_client(client_id);
+    if held_mic {
+        routes::deliver_speech_gap(state);
+    }
 }
 
 async fn recv_live(live: &mut Option<ene_kernel::LiveSubscription>) -> Option<LiveEvent> {

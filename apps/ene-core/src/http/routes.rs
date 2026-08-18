@@ -409,7 +409,7 @@ async fn dispatch_message(
         .map_err(map_core)?;
     match req.mode {
         MessageMode::Prompt => {
-            deliver_speech_gap(state).await;
+            deliver_speech_gap(state);
             let turn = lane
                 .prompt_with_modality(&req.text, req.input_modality.as_deref().unwrap_or("text"))
                 .await
@@ -866,8 +866,10 @@ pub async fn list_approvals(State(state): State<AppState>) -> Json<Page<Approval
 pub async fn respond_approval(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
     let decision = body
         .get("decision")
         .and_then(Value::as_str)
@@ -1152,10 +1154,10 @@ pub async fn exclusive_claim(
             "resource must be mic, speaker, or notify",
         )
     })?;
+    let snap = state.exclusive.claim(kind, &client_id)?;
     if kind == ResourceKind::Mic {
         drop(state.core.host().mark_user_speaking(true));
     }
-    let snap = state.exclusive.claim(kind, &client_id)?;
     state.events.emit(
         DisplayDepth::Surface,
         json!({ "type": "notify.hint", "resource": resource, "client_id": client_id }),
@@ -1175,10 +1177,12 @@ pub async fn exclusive_release(
             "resource must be mic, speaker, or notify",
         )
     })?;
-    if kind == ResourceKind::Mic {
-        deliver_speech_gap(&state).await;
+    let held_mic = kind == ResourceKind::Mic && state.exclusive.is_holder(kind, &client_id);
+    let snap = state.exclusive.release(kind, &client_id);
+    if held_mic {
+        deliver_speech_gap(&state);
     }
-    Ok(Json(state.exclusive.release(kind, &client_id)))
+    Ok(Json(snap))
 }
 
 pub async fn list_pending_memories(
@@ -1459,15 +1463,11 @@ fn map_core(err: CoreError) -> ApiReject {
     }
 }
 
-async fn deliver_speech_gap(state: &AppState) {
-    let reports = state.core.host().mark_user_speaking(false);
-    emit_job_reports(state, &reports);
-    for report in reports.iter().filter(|report| !report.speech.is_empty()) {
-        persist_job_report(state, report).await;
-    }
+pub(crate) fn deliver_speech_gap(state: &AppState) {
+    drop(state.core.host().mark_user_speaking(false));
 }
 
-fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
+pub(crate) fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
     for report in reports {
         if report.speech.is_empty() {
             continue;
@@ -1476,6 +1476,7 @@ fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
             DisplayDepth::Surface,
             json!({
                 "type": "job.report",
+                "soul_id": report.soul_id.to_string(),
                 "speech": report.speech,
                 "inner_intent": report.inner_intent,
                 "starts_conversation": report.starts_conversation,
@@ -1484,25 +1485,32 @@ fn emit_job_reports(state: &AppState, reports: &[CompanionReport]) {
     }
 }
 
-async fn persist_job_report(state: &AppState, report: &CompanionReport) {
-    for lane in state.lanes.all() {
-        drop(
-            state
-                .core
-                .store()
-                .commit(Transaction {
-                    entries: vec![NewEvent::new(
-                        lane.session_id(),
-                        EventKind::ContextSystemMessage,
-                        EventPayload::ContextSystemMessage {
-                            v: v1(),
-                            blocks: vec![Block::text(report.speech.clone())],
-                            source_key: "job.report".to_owned(),
-                        },
-                    )],
-                    usage: Vec::new(),
-                })
-                .await,
-        );
+pub(crate) async fn persist_job_report(state: &AppState, report: &CompanionReport) {
+    if report.speech.is_empty() {
+        return;
     }
+    let Ok(sessions) = state.core.store().list_sessions(Some(report.soul_id)) else {
+        return;
+    };
+    let Some(session) = sessions.iter().find(|meta| meta.ended_at.is_none()) else {
+        return;
+    };
+    drop(
+        state
+            .core
+            .store()
+            .commit(Transaction {
+                entries: vec![NewEvent::new(
+                    session.id,
+                    EventKind::ContextSystemMessage,
+                    EventPayload::ContextSystemMessage {
+                        v: v1(),
+                        blocks: vec![Block::text(report.speech.clone())],
+                        source_key: "job.report".to_owned(),
+                    },
+                )],
+                usage: Vec::new(),
+            })
+            .await,
+    );
 }
