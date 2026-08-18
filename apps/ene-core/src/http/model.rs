@@ -80,6 +80,16 @@ fn map_request(
     }
 }
 
+// OpenAI/Anthropic function names must match ^[a-zA-Z0-9_-]+$.
+// Host tools are namespaced with `.` (`utility.hash`); the vendor wire uses `__`.
+fn to_vendor_tool_name(name: &str) -> String {
+    name.replace('.', "__")
+}
+
+fn from_vendor_tool_name(name: &str) -> String {
+    name.replace("__", ".")
+}
+
 fn tool_schemas(core: &CoreDaemon) -> Vec<LlmToolSchema> {
     core.supervisor()
         .registry()
@@ -87,7 +97,7 @@ fn tool_schemas(core: &CoreDaemon) -> Vec<LlmToolSchema> {
         .into_iter()
         .filter_map(|schema| {
             Some(LlmToolSchema {
-                name: schema.get("name")?.as_str()?.to_owned(),
+                name: to_vendor_tool_name(schema.get("name")?.as_str()?),
                 description: schema
                     .get("description")
                     .and_then(serde_json::Value::as_str)
@@ -114,7 +124,7 @@ fn fold_messages(history: &[ProjectedMessage]) -> Vec<LlmMessage> {
                         .tool_call_id
                         .clone()
                         .unwrap_or_else(|| format!("call_{}", item.seq)),
-                    name: item.tool_name.clone().unwrap_or_default(),
+                    name: to_vendor_tool_name(item.tool_name.as_deref().unwrap_or_default()),
                     arguments: item.tool_args.clone().unwrap_or(serde_json::Value::Null),
                 });
             }
@@ -125,7 +135,7 @@ fn fold_messages(history: &[ProjectedMessage]) -> Vec<LlmMessage> {
                     text: item.text(),
                     tool_calls: Vec::new(),
                     tool_call_id: item.tool_call_id.clone(),
-                    tool_name: item.tool_name.clone(),
+                    tool_name: item.tool_name.as_deref().map(to_vendor_tool_name),
                     images: Vec::new(),
                 });
             }
@@ -185,7 +195,7 @@ fn map_generation(generation: ene_plugin_ipc::LlmGeneration) -> ModelGeneration 
             .tool_calls
             .into_iter()
             .map(|call| ToolCall {
-                name: call.name,
+                name: from_vendor_tool_name(&call.name),
                 arguments: call.arguments,
             })
             .collect(),
@@ -248,9 +258,47 @@ mod tests {
         assert_eq!(mapped[0].role, LlmRole::User);
         assert_eq!(mapped[1].role, LlmRole::Assistant);
         assert_eq!(mapped[1].tool_calls.len(), 1);
-        assert_eq!(mapped[1].tool_calls[0].name, "fs.read");
+        assert_eq!(mapped[1].tool_calls[0].name, "fs__read");
         assert_eq!(mapped[2].role, LlmRole::Tool);
         assert_eq!(mapped[2].tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(mapped[2].text, "file body");
+    }
+
+    #[test]
+    fn vendor_tool_name_roundtrip() {
+        assert_eq!(to_vendor_tool_name("utility.hash"), "utility__hash");
+        assert_eq!(
+            to_vendor_tool_name("app.active_window"),
+            "app__active_window"
+        );
+        assert_eq!(from_vendor_tool_name("utility__hash"), "utility.hash");
+        assert_eq!(
+            from_vendor_tool_name("app__active_window"),
+            "app.active_window"
+        );
+        assert_eq!(
+            from_vendor_tool_name(&to_vendor_tool_name("fs.read")),
+            "fs.read"
+        );
+    }
+
+    #[test]
+    fn map_generation_decodes_vendor_tool_name() {
+        let generation = ene_plugin_ipc::LlmGeneration {
+            text: String::new(),
+            thinking: None,
+            inner: Vec::new(),
+            tool_calls: vec![ene_plugin_ipc::LlmToolCall {
+                id: "c1".to_owned(),
+                name: "utility__calc".to_owned(),
+                arguments: serde_json::json!({"expr": "1+1"}),
+            }],
+            finish_reason: "tool_calls".to_owned(),
+            model_id: "test".to_owned(),
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        let mapped = map_generation(generation);
+        assert_eq!(mapped.tool_calls[0].name, "utility.calc");
     }
 }
