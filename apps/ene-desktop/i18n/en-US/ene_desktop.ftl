@@ -26,6 +26,8 @@ chat-waiting = waiting for AI…
 chat-empty-history = No messages yet. Say hello!
 chat-greeting-prompt = Choose an opening greeting
 chat-greeting-failed = Failed to set greeting: { $error }
+chat-provider-caption = Chat: { $plugin } · { $model }
+chat-provider-echo = Chat is Echo (offline). Bind a live model on AI & Models.
 
 # Graphics
 graphics = Graphics

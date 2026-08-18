@@ -26,6 +26,8 @@ chat-waiting = AIの応答を待っています…
 chat-empty-history = まだメッセージがありません。話しかけてみてください。
 chat-greeting-prompt = 開始の挨拶を選んでください
 chat-greeting-failed = 挨拶を設定できませんでした: { $error }
+chat-provider-caption = チャット: { $plugin } · { $model }
+chat-provider-echo = Echo（オフライン）が応答します。ライブモデルは AI ページで結んでください。
 
 # Graphics
 graphics = グラフィックス

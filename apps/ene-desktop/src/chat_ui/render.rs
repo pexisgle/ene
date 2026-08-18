@@ -11,7 +11,11 @@ use crate::core_session::CoreSession;
 use super::dialogs::{render_permission_dialog, render_user_input_dialog};
 
 #[derive(Default)]
-pub struct ChatUi {}
+pub struct ChatUi {
+    settings_rx: Option<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>>,
+    chat_plugin: String,
+    chat_model: String,
+}
 
 impl ChatUi {
     pub fn render(
@@ -34,6 +38,7 @@ impl ChatUi {
         let Some(mut chat_state) = world.get_mut::<ChatStateComponent>(chat_entity) else {
             return;
         };
+        self.poll_chat_binding(ai);
         let processing = ai.is_processing();
         let can_cancel = processing || ai.has_active_turn();
         let scroll_to_bottom = chat_state.0.scroll_to_bottom;
@@ -52,6 +57,11 @@ impl ChatUi {
 
         let available = ui.available_size();
         let input_height = 88.0;
+        let caption = chat_binding_caption(&self.chat_plugin, &self.chat_model);
+        if !caption.is_empty() {
+            ui.weak(&caption);
+            ui.add_space(4.0);
+        }
         let message_area_height = (available.y - input_height - 12.0).max(120.0);
 
         egui::ScrollArea::vertical()
@@ -190,6 +200,54 @@ impl ChatUi {
         render_permission_dialog(ui, world, chat_entity, ai);
         render_user_input_dialog(ui, world, chat_entity, ai);
     }
+
+    fn poll_chat_binding(&mut self, ai: &Arc<CoreSession>) {
+        if self.settings_rx.is_none() && self.chat_plugin.is_empty() {
+            self.settings_rx = Some(ai.fetch_core_settings());
+        }
+        let Some(receiver) = self.settings_rx.as_mut() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(settings)) => {
+                self.chat_plugin.clear();
+                if let Some(plugin) = settings
+                    .pointer("/effective/ai/tasks/chat/plugin")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    plugin.clone_into(&mut self.chat_plugin);
+                }
+                self.chat_model.clear();
+                if let Some(model) = settings
+                    .pointer("/effective/ai/tasks/chat/model")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    model.clone_into(&mut self.chat_model);
+                }
+                self.settings_rx = None;
+            }
+            Ok(Err(_)) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                self.settings_rx = None;
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+        }
+    }
+}
+
+fn chat_binding_caption(plugin: &str, model: &str) -> String {
+    if plugin.is_empty() {
+        return String::new();
+    }
+    if plugin == "echo" {
+        return i18n_embed_fl::fl!(crate::i18n::loader(), "chat-provider-echo");
+    }
+    let model = if model.is_empty() { "—" } else { model };
+    i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "chat-provider-caption",
+        plugin = plugin,
+        model = model
+    )
 }
 
 fn render_greeting_picker(
@@ -317,4 +375,27 @@ pub fn send_chat(ai: &Arc<CoreSession>, chat: &mut ChatState) {
         return;
     }
     ai.run(trimmed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chat_binding_caption;
+
+    #[test]
+    fn caption_is_empty_until_settings_arrive() {
+        assert!(chat_binding_caption("", "gpt").is_empty());
+    }
+
+    #[test]
+    fn caption_warns_when_chat_is_echo() {
+        let caption = chat_binding_caption("echo", "echo");
+        assert!(caption.contains("Echo"));
+    }
+
+    #[test]
+    fn caption_shows_plugin_and_model() {
+        let caption = chat_binding_caption("provider.openai_compat", "openai/gpt-4o-mini");
+        assert!(caption.contains("provider.openai_compat"));
+        assert!(caption.contains("openai/gpt-4o-mini"));
+    }
 }
