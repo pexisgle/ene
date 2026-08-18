@@ -33,15 +33,20 @@ pub(super) fn execute(name: &str, args: &Value) -> Result<Value, String> {
 
 fn fetch(raw: &str) -> Result<Value, String> {
     let url = deny_ssrf(raw)?;
-    let response = off_runtime(move || http().get(url).send().map_err(|err| err.to_string()))?;
-    let status = response.status().as_u16();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_owned();
-    let body = response.text().map_err(|err| err.to_string())?;
+    // reqwest::blocking owns a tokio runtime; construct, send, and drop it off
+    // the plugin's async thread or Drop panics and kills the fiber.
+    let (status, content_type, body) = off_runtime(move || {
+        let response = http().get(url).send().map_err(|err| err.to_string())?;
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        let body = response.text().map_err(|err| err.to_string())?;
+        Ok((status, content_type, body))
+    })?;
     let text = if content_type.contains("html") {
         strip_tags(&body)
     } else {
@@ -60,8 +65,10 @@ fn search(query: &str) -> Result<Value, String> {
         .append_pair("format", "json")
         .append_pair("no_html", "1")
         .append_pair("skip_disambig", "1");
-    let response = off_runtime(move || http().get(url).send().map_err(|err| err.to_string()))?;
-    let payload: Value = response.json().map_err(|err| err.to_string())?;
+    let payload: Value = off_runtime(move || {
+        let response = http().get(url).send().map_err(|err| err.to_string())?;
+        response.json().map_err(|err| err.to_string())
+    })?;
     let heading = payload
         .get("Heading")
         .and_then(Value::as_str)
