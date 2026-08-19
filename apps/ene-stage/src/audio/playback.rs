@@ -19,6 +19,12 @@ pub struct AudioPlayback {
     sample_rate: u32,
 }
 
+impl Default for AudioPlayback {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioPlayback {
     pub fn new() -> Self {
         let recent_pcm = Arc::new(Mutex::new(Vec::with_capacity(RECENT_PCM_CAP)));

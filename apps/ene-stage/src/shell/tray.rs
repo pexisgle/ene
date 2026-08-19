@@ -12,7 +12,7 @@
 //! }
 //! ```
 
-use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use thiserror::Error;
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -58,7 +58,7 @@ impl TrayManager {
             .build()
             .map_err(|err| TrayError::Build(err.to_string()))?;
 
-        std::thread::spawn(move || poll_tray_events(action_tx));
+        std::thread::spawn(move || poll_tray_events(&action_tx));
 
         Ok(Self {
             _icon: tray,
@@ -67,11 +67,7 @@ impl TrayManager {
     }
 
     pub fn try_recv(&self) -> Option<TrayAction> {
-        match self.action_rx.try_recv() {
-            Ok(action) => Some(action),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => None,
-        }
+        self.action_rx.try_recv().ok()
     }
 }
 
@@ -106,23 +102,25 @@ fn build_icon() -> Result<Icon, TrayError> {
     Icon::from_rgba(rgba, size, size).map_err(|err| TrayError::Icon(err.to_string()))
 }
 
-fn poll_tray_events(action_tx: Sender<TrayAction>) {
+fn poll_tray_events(action_tx: &Sender<TrayAction>) {
     loop {
-        if let Ok(event) = MenuEvent::receiver().try_recv() {
-            if let Some(action) = map_menu_id(event.id) {
-                let _ = action_tx.send(action);
-            }
+        if let Ok(event) = MenuEvent::receiver().try_recv()
+            && let Some(action) = map_menu_id(&event.id)
+            && action_tx.send(action).is_err()
+        {
+            return;
         }
-        if let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            if matches!(event, TrayIconEvent::DoubleClick { .. }) {
-                let _ = action_tx.send(TrayAction::OpenDetail);
-            }
+        if let Ok(event) = TrayIconEvent::receiver().try_recv()
+            && matches!(event, TrayIconEvent::DoubleClick { .. })
+            && action_tx.send(TrayAction::OpenDetail).is_err()
+        {
+            return;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
-fn map_menu_id(id: MenuId) -> Option<TrayAction> {
+fn map_menu_id(id: &MenuId) -> Option<TrayAction> {
     let raw = id.0.as_str();
     match raw {
         DETAIL_ID => Some(TrayAction::OpenDetail),

@@ -1,5 +1,7 @@
 //! VRM companion avatar rendering for the stage overlay.
 
+pub mod look_at;
+
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -118,7 +120,7 @@ impl VrmPane {
     ) -> Result<Option<VrmPaintInfo>, AvatarError> {
         self.avatar.tick(dt);
         self.frame_counter = self.frame_counter.wrapping_add(1);
-        if self.frame_counter % self.update_every_n != 0 {
+        if !self.frame_counter.is_multiple_of(self.update_every_n) {
             return Ok(self.paint_info());
         }
         self.render_and_upload(ctx, device, queue)?;
@@ -315,6 +317,15 @@ impl CompanionAvatar {
         &self.model_uniform
     }
 
+    #[must_use]
+    pub fn head_world(&mut self) -> Vec3 {
+        if let Some(model) = self.model.as_mut() {
+            head_world_position(model, &self.model_uniform)
+        } else {
+            Vec3::new(0.0, 1.4, 0.0)
+        }
+    }
+
     pub fn set_model_uniform(&mut self, uniform: ModelUniform) {
         self.model_uniform = uniform;
     }
@@ -375,8 +386,7 @@ impl CompanionAvatar {
         let head_rest = model
             .humanoid
             .head()
-            .map(|entry| entry.rest.rotation)
-            .unwrap_or(glam::Quat::IDENTITY);
+            .map_or(glam::Quat::IDENTITY, |entry| entry.rest.rotation);
         match eval.evaluate(head_world, world, head_rest) {
             LookAtOutput::Bone(output) => {
                 self.look_at_bone = Some(output);
@@ -524,10 +534,14 @@ fn read_rgba8(
     let (tx, rx) = mpsc::channel();
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
+        if tx.send(result).is_err() {
+            // Readback receiver dropped.
+        }
     });
     loop {
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+            return Err(AvatarError::Map);
+        }
         if let Ok(result) = rx.try_recv() {
             if result.is_err() {
                 return Err(AvatarError::Map);

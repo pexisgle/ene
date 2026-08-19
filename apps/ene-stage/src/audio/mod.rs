@@ -34,7 +34,7 @@ impl AudioHub {
             while let Some(chunk) = self.capture.try_recv() {
                 out.push(chunk);
             }
-            return out;
+            out
         }
         #[cfg(not(feature = "voice"))]
         {
@@ -99,7 +99,7 @@ impl AudioHub {
         {
             let pcm = self.playback.recent_pcm();
             analyzer.push_pcm(&pcm);
-            return analyzer.analyze();
+            analyzer.analyze()
         }
         #[cfg(not(feature = "voice"))]
         {

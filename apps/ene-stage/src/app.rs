@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::runtime::{Handle, Runtime};
 
 use crate::audio::AudioHub;
-use crate::avatar::{AvatarError, VrmPane};
+use crate::avatar::{look_at, AvatarError, VrmPane};
 use crate::core::events::{spawn_event_listeners, LiveEvent};
 use crate::core::session::StageSession;
 use crate::core::spawn::{attach_or_spawn_core, StageCore, StageSpawnError};
@@ -89,6 +89,7 @@ pub fn run() -> Result<(), AppError> {
         audio: AudioHub::new(),
         vrm: None,
         vrm_path: None,
+        look_at_state: look_at::LookAtState::default(),
         viseme: VisemeAnalyzer::new(AudioHub::new().sample_rate()),
         tray,
         hotkeys,
@@ -131,15 +132,18 @@ pub fn run() -> Result<(), AppError> {
 struct StageApp {
     settings: DesktopSettings,
     local_settings: DesktopSettings,
+    #[expect(dead_code, reason = "StageCore kills spawned ene-core on drop when lifetime is app")]
     core: StageCore,
     session: StageSession,
     client: Arc<ApiClient>,
+    #[expect(dead_code, reason = "Tokio runtime must outlive the UI loop")]
     runtime: Runtime,
     rt_handle: Handle,
     events: Receiver<LiveEvent>,
     audio: AudioHub,
     vrm: Option<VrmPane>,
     vrm_path: Option<PathBuf>,
+    look_at_state: look_at::LookAtState,
     viseme: VisemeAnalyzer,
     tray: Option<TrayManager>,
     hotkeys: Option<HotkeyManager>,
@@ -187,6 +191,7 @@ impl StageApp {
                 } else {
                     self.surface.chat_draft.clear();
                     self.surface.streaming_text.clear();
+                    self.request_history_refresh();
                 }
             }
             AsyncOutcome::BargeIn(result) | AsyncOutcome::CancelTurn(result) => {
@@ -206,12 +211,13 @@ impl StageApp {
                     tracing::debug!(error = %err, "listen failed");
                 }
             }
-            AsyncOutcome::RefreshHistory(result) => {
-                if let Ok(()) = result {
-                    self.surface.history = self.session.history();
-                } else if let Err(err) = result {
-                    self.surface.status = err;
+            AsyncOutcome::RefreshHistory(result) => match result {
+                Ok(history) => {
+                    self.session.replace_history(history.clone());
+                    self.surface.history = history;
+                    self.surface.streaming_text.clear();
                 }
+                Err(err) => self.surface.status = err,
             }
             AsyncOutcome::SaveLocalSettings(result) => {
                 self.detail.core_status = match result {
@@ -221,7 +227,7 @@ impl StageApp {
             }
             AsyncOutcome::LoadCoreSettings(result) => match result {
                 Ok(json) => {
-                    self.detail.core_settings_text = json.clone();
+                    self.detail.core_settings_text.clone_from(&json);
                     self.detail.core_patch_text.clear();
                     detail::parse_core_fields(&json, &mut self.detail);
                     self.detail.core_status = i18n::fl("settings-loaded");
@@ -238,8 +244,9 @@ impl StageApp {
                 Ok(items) => self.detail.memories = items,
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::DeleteMemory { result, .. } => {
+            AsyncOutcome::DeleteMemory { id, result } => {
                 if result.is_ok() {
+                    tracing::debug!(memory_id = %id, "memory deleted");
                     self.request_memories();
                 } else if let Err(err) = result {
                     self.detail.core_status = err;
@@ -280,8 +287,17 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::CancelJob { result, .. } | AsyncOutcome::ToggleSchedule { result, .. } => {
+            AsyncOutcome::CancelJob { id, result } => {
                 if result.is_ok() {
+                    tracing::debug!(job_id = %id, "job cancelled");
+                    self.request_jobs();
+                } else if let Err(err) = result {
+                    self.detail.core_status = err;
+                }
+            }
+            AsyncOutcome::ToggleSchedule { id, enabled, result } => {
+                if result.is_ok() {
+                    tracing::debug!(schedule_id = %id, enabled, "schedule toggled");
                     self.request_jobs();
                 } else if let Err(err) = result {
                     self.detail.core_status = err;
@@ -291,9 +307,45 @@ impl StageApp {
                 Ok(items) => self.detail.plugins = items,
                 Err(err) => self.detail.core_status = err,
             }
-            AsyncOutcome::RestartPlugin { result, .. } => {
+            AsyncOutcome::RestartPlugin { id, result } => {
                 if result.is_ok() {
+                    tracing::debug!(plugin_id = %id, "plugin restarted");
                     self.request_plugins();
+                } else if let Err(err) = result {
+                    self.detail.core_status = err;
+                }
+            }
+            AsyncOutcome::ListProviderAssets(result) => match result {
+                Ok(items) => self.detail.provider_assets = items,
+                Err(err) => self.detail.core_status = err,
+            }
+            AsyncOutcome::InstallProviderAsset { asset_id, result } => match result {
+                Ok(job_id) => {
+                    self.detail
+                        .provider_install_jobs
+                        .insert(asset_id, job_id);
+                    self.detail.core_status = i18n::fl("plugins-asset-install-started");
+                }
+                Err(err) => self.detail.core_status = err,
+            }
+            AsyncOutcome::ProviderAssetInstallStatus { asset_id, result } => match result {
+                Ok(status) => {
+                    if status.phase == Some(ene_api::ProviderAssetInstallPhase::Done) {
+                        self.detail.provider_install_jobs.remove(&asset_id);
+                        self.request_provider_assets();
+                    } else if status.phase == Some(ene_api::ProviderAssetInstallPhase::Failed) {
+                        self.detail.provider_install_jobs.remove(&asset_id);
+                        self.detail.core_status = status
+                            .error
+                            .unwrap_or_else(|| i18n::fl("plugins-asset-install-failed"));
+                    }
+                }
+                Err(err) => self.detail.core_status = err,
+            }
+            AsyncOutcome::SetActiveProviderAsset { asset_id, result } => {
+                if result.is_ok() {
+                    tracing::debug!(asset_id = %asset_id, "provider asset activated");
+                    self.request_provider_assets();
                 } else if let Err(err) = result {
                     self.detail.core_status = err;
                 }
@@ -368,6 +420,33 @@ impl StageApp {
                 .map(|page| page.items)
                 .map_err(|err| err.to_string());
             AsyncOutcome::ListPlugins(result)
+        });
+    }
+
+    fn request_provider_assets(&self) {
+        let plugin = self.detail.provider_assets_plugin.clone();
+        if plugin.is_empty() {
+            return;
+        }
+        let client = Arc::clone(&self.client);
+        self.spawn(async move {
+            let result = client
+                .list_provider_assets(&ene_api::ListProviderAssetsRequest { plugin })
+                .await
+                .map(|response| response.assets)
+                .map_err(|err| err.to_string());
+            AsyncOutcome::ListProviderAssets(result)
+        });
+    }
+
+    fn request_history_refresh(&self) {
+        let session = self.session.clone_handle();
+        self.spawn(async move {
+            let result = session
+                .refresh_history()
+                .await
+                .map_err(|err| err.to_string());
+            AsyncOutcome::RefreshHistory(result)
         });
     }
 
@@ -475,19 +554,19 @@ impl StageApp {
                 TrayAction::Quit => self.surface.quit = true,
             }
         }
-        if let Some(hotkeys) = self.hotkeys.as_ref() {
-            if let Some(action) = hotkeys.poll() {
-                match action {
-                    ShellAction::OpenSpotlight => {
-                        if self.settings.spotlight_enabled {
-                            self.surface.spotlight_open = true;
-                        }
+        if let Some(hotkeys) = self.hotkeys.as_ref()
+            && let Some(action) = hotkeys.poll()
+        {
+            match action {
+                ShellAction::OpenSpotlight => {
+                    if self.settings.spotlight_enabled {
+                        self.surface.spotlight_open = true;
                     }
-                    ShellAction::OpenDetail => self.detail.visible = true,
-                    ShellAction::FocusChat => self.surface.focus_chat = true,
-                    ShellAction::ToggleMic => self.toggle_mic(),
-                    ShellAction::Quit => self.surface.quit = true,
                 }
+                ShellAction::OpenDetail => self.detail.visible = true,
+                ShellAction::FocusChat => self.surface.focus_chat = true,
+                ShellAction::ToggleMic => self.toggle_mic(),
+                ShellAction::Quit => self.surface.quit = true,
             }
         }
         if self.surface.quit {
@@ -536,6 +615,13 @@ impl StageApp {
                 LiveEvent::SessionEvent { kind, text } => {
                     self.detail
                         .push_log(detail::LogKind::Session, format!("{kind}: {text}"));
+                    if kind == "turn/end" {
+                        self.request_history_refresh();
+                        self.surface.streaming_text.clear();
+                        if self.settings.caption_enabled {
+                            self.surface.caption.clear();
+                        }
+                    }
                 }
                 LiveEvent::ApprovalAsked { id, tool, target } => {
                     self.surface.pending_approval = Some(surface::PendingApproval { id, tool, target });
@@ -600,7 +686,9 @@ impl StageApp {
         let session = self.session.clone_handle();
         self.notify_claimed = true;
         self.spawn(async move {
-            let _ = session.claim_notify().await;
+            if let Err(err) = session.claim_notify().await {
+                tracing::debug!(error = %err, "notify claim failed");
+            }
             AsyncOutcome::MicClaim(Ok(false))
         });
     }
@@ -658,6 +746,39 @@ impl StageApp {
         };
         let weights = self.audio.analyze_visemes(&mut self.viseme);
         vrm.avatar_mut().apply_viseme(weights);
+
+        let pointer = ctx.input(|i| i.pointer.interact_pos());
+        let screen = ctx.content_rect();
+        let viewport = (
+            screen.width().max(1.0) as u32,
+            screen.height().max(1.0) as u32,
+        );
+        if let Some(cursor) = pointer {
+            let avatar = vrm.avatar_mut();
+            let (eye, target) = {
+                let cam = avatar.camera();
+                (
+                    glam::Vec3::from(cam.eye()),
+                    glam::Vec3::from(cam.target()),
+                )
+            };
+            let head = avatar.head_world();
+            let up = glam::Vec3::from(ene_vrm::camera::DEFAULT_UP);
+            let cursor_logical = glam::Vec2::new(cursor.x, cursor.y);
+            let world = look_at::compute_world_target(
+                cursor_logical,
+                viewport,
+                eye,
+                target,
+                up,
+                head,
+                self.local_settings.look_at_strength,
+                &mut self.look_at_state,
+                dt,
+            );
+            avatar.set_look_at_target(world);
+        }
+
         if let Err(err) =
             vrm.tick_ui_frame(ctx, &render_state.device, &render_state.queue, dt)
         {
@@ -707,6 +828,10 @@ impl StageApp {
         detail.visible = open;
         self.detail = detail;
         self.local_settings = local_settings;
+        if self.detail.save_local_pending {
+            self.detail.save_local_pending = false;
+            self.save_local_settings();
+        }
     }
 }
 
@@ -750,21 +875,23 @@ impl eframe::App for StageApp {
 }
 
 async fn resolve_vrm_path(client: &ApiClient, soul_id: &str) -> PathBuf {
-    if let Ok(soul) = client.get_soul(soul_id).await {
-        if let Some(body_ref) = soul.body_ref.filter(|p| !p.is_empty()) {
-            let path = PathBuf::from(body_ref);
-            if path.is_file() {
-                return path;
-            }
+    if let Ok(soul) = client.get_soul(soul_id).await
+        && let Some(body_ref) = soul.body_ref.filter(|p| !p.is_empty())
+    {
+        let path = PathBuf::from(body_ref);
+        if path.is_file() {
+            return path;
         }
     }
     let dir = crate::platform::preferred_data_dir();
-    let _ = std::fs::create_dir_all(&dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        tracing::warn!(dir = %dir.display(), "failed to create avatar data dir");
+    }
     let path = dir.join("default.vrm");
-    if !path.is_file() {
-        if let Err(err) = crate::avatar::CompanionAvatar::write_default_minimal_vrm(&path) {
-            tracing::warn!(error = %err, "failed to write default VRM");
-        }
+    if !path.is_file()
+        && let Err(err) = crate::avatar::CompanionAvatar::write_default_minimal_vrm(&path)
+    {
+        tracing::warn!(error = %err, "failed to write default VRM");
     }
     path
 }
@@ -788,13 +915,13 @@ fn theme_visuals(theme: &str) -> egui::Visuals {
     }
 }
 
-pub(crate) enum AsyncOutcome {
+pub enum AsyncOutcome {
     SendMessage(Result<(), String>),
     BargeIn(Result<(), String>),
     CancelTurn(Result<(), String>),
     Approval(Result<(), String>),
     Listen(Result<(), String>),
-    RefreshHistory(Result<(), String>),
+    RefreshHistory(Result<HistoryResponse, String>),
     SaveLocalSettings(Result<(), String>),
     LoadCoreSettings(Result<String, String>),
     ApplyCoreSettings(Result<(), String>),
@@ -820,6 +947,19 @@ pub(crate) enum AsyncOutcome {
     ListPlugins(Result<Vec<ene_api::PluginView>, String>),
     RestartPlugin {
         id: String,
+        result: Result<(), String>,
+    },
+    ListProviderAssets(Result<Vec<ene_api::ProviderAssetView>, String>),
+    InstallProviderAsset {
+        asset_id: String,
+        result: Result<String, String>,
+    },
+    ProviderAssetInstallStatus {
+        asset_id: String,
+        result: Result<ene_api::ProviderAssetInstallStatusResponse, String>,
+    },
+    SetActiveProviderAsset {
+        asset_id: String,
         result: Result<(), String>,
     },
     LoadMcp(Result<String, String>),
@@ -850,6 +990,13 @@ struct SessionHandle {
 }
 
 impl SessionHandle {
+    async fn refresh_history(&self) -> Result<HistoryResponse, ene_api::ApiError> {
+        tracing::trace!(soul_id = %self.soul_id, "refresh surface history");
+        let history = self.client.history(&self.session_id, "surface").await?;
+        *self.history.lock() = history.clone();
+        Ok(history)
+    }
+
     async fn send_prompt(&self, text: &str) -> Result<SendMessageResponse, ene_api::ApiError> {
         let response = self
             .client

@@ -93,15 +93,16 @@ pub fn show(ui: &mut Ui, state: &mut SurfaceUiState, settings: &DesktopSettings,
         approvals::show(&ctx, state);
     }
 
-    if state.spotlight_open && settings.spotlight_enabled {
-        if let Some(action) = spotlight::show(&ctx) {
-            state.spotlight_open = false;
-            match action {
-                SpotlightAction::OpenDetail(tab) => state.push_action(SurfaceAction::OpenDetail(tab)),
-                SpotlightAction::ToggleMic => state.push_action(SurfaceAction::ToggleMic),
-                SpotlightAction::Quit => state.push_action(SurfaceAction::Quit),
-                SpotlightAction::Close => {}
-            }
+    if state.spotlight_open
+        && settings.spotlight_enabled
+        && let Some(action) = spotlight::show(&ctx)
+    {
+        state.spotlight_open = false;
+        match action {
+            SpotlightAction::OpenDetail(tab) => state.push_action(SurfaceAction::OpenDetail(tab)),
+            SpotlightAction::ToggleMic => state.push_action(SurfaceAction::ToggleMic),
+            SpotlightAction::Quit => state.push_action(SurfaceAction::Quit),
+            SpotlightAction::Close => {}
         }
     }
 

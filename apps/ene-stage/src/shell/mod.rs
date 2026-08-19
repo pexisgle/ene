@@ -12,9 +12,13 @@ pub use tray::{TrayAction, TrayManager};
 
 /// Initialize tracing for the stage binary.
 pub fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
+    if tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
+        .try_init()
+        .is_err()
+    {
+        // Subscriber already registered in this process.
+    }
 }
 
 /// Errors from shell subsystems.

@@ -42,6 +42,10 @@ impl StageSession {
         self.history.lock().clone()
     }
 
+    pub fn replace_history(&self, history: HistoryResponse) {
+        *self.history.lock() = history;
+    }
+
     /// Resolve a soul, open or create a session, and load surface history.
     ///
     /// Prefers stage occupants, then the first listed soul. This blocks the

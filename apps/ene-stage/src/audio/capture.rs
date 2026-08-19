@@ -113,7 +113,9 @@ where
                     .collect();
                 let energy = rms(&mono);
                 *barge_in.lock() = energy >= threshold;
-                let _ = tx.send(mono);
+                if tx.send(mono).is_err() {
+                    // Mic consumer dropped.
+                }
             },
             move |err| tracing::warn!(?err, "mic input stream error"),
             None,

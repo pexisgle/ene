@@ -1,17 +1,19 @@
 //! Detail viewport with log, settings, memory, character, jobs, and plugins tabs.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use eframe::egui::{self, ScrollArea, TextEdit};
 use ene_api::{
-    ApiClient, CharacterView, JobView, MemoryView, PluginView, ScheduleView, SoulView,
+    ApiClient, CharacterView, JobView, MemoryView, PluginView, ProviderAssetView, ScheduleView,
+    SoulView,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::runtime::Handle;
 
 use crate::i18n;
-use crate::settings::{save_desktop_settings, DesktopSettings};
+use crate::settings::DesktopSettings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailTab {
@@ -79,7 +81,11 @@ pub struct DetailUiState {
     pub jobs: Vec<JobView>,
     pub schedules: Vec<ScheduleView>,
     pub plugins: Vec<PluginView>,
+    pub provider_assets_plugin: String,
+    pub provider_assets: Vec<ProviderAssetView>,
+    pub provider_install_jobs: HashMap<String, String>,
     pub mcp_json: String,
+    pub save_local_pending: bool,
     loaded: DetailLoaded,
 }
 
@@ -90,6 +96,7 @@ struct DetailLoaded {
     character: bool,
     jobs: bool,
     plugins: bool,
+    provider_assets: bool,
 }
 
 impl DetailUiState {
@@ -126,7 +133,6 @@ fn nested_string(value: &Value, path: &[&str]) -> String {
     current.as_str().unwrap_or("").to_owned()
 }
 
-#[expect(clippy::too_many_arguments, reason = "detail UI coordinates async actions")]
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut DetailUiState,
@@ -245,14 +251,14 @@ fn show_settings(
         ui.label(i18n::fl("settings-look-at"));
         ui.add(egui::Slider::new(&mut local_settings.look_at_strength, 0.0..=1.0));
         ui.end_row();
+
+        ui.label(i18n::fl("settings-beat-sync"));
+        ui.checkbox(&mut local_settings.beat_sync, "");
+        ui.end_row();
     });
 
     if ui.button(i18n::fl("settings-save-local")).clicked() {
-        let settings = local_settings.clone();
-        spawn_async(rt, async_results, async move {
-            let result = save_desktop_settings(&settings).map_err(|e| e.to_string());
-            crate::app::AsyncOutcome::SaveLocalSettings(result)
-        });
+        state.save_local_pending = true;
     }
 
     ui.separator();
@@ -431,7 +437,7 @@ fn show_character(
         if ui.button(i18n::fl("character-apply-body")).clicked() {
             let body_ref = state.body_ref_draft.clone();
             let soul_id = soul_id.to_owned();
-            let client = Arc::clone(&client);
+            let client = Arc::clone(client);
             spawn_async(rt, async_results, async move {
                 let result = client
                     .patch_soul_body(
@@ -447,15 +453,15 @@ fn show_character(
         }
     });
 
-    if ui.button(i18n::fl("character-import")).clicked() {
-        if let Some(path) = rfd::FileDialog::new().pick_file() {
-            let path = path.display().to_string();
-            let client = Arc::clone(&client);
-            spawn_async(rt, async_results, async move {
-                let result = client.import_character(&path).await.map_err(|e| e.to_string());
-                crate::app::AsyncOutcome::ImportCharacter(result)
-            });
-        }
+    if ui.button(i18n::fl("character-import")).clicked()
+        && let Some(path) = rfd::FileDialog::new().pick_file()
+    {
+        let path = path.display().to_string();
+        let client = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            let result = client.import_character(&path).await.map_err(|e| e.to_string());
+            crate::app::AsyncOutcome::ImportCharacter(result)
+        });
     }
 
     ui.separator();
@@ -574,6 +580,7 @@ fn show_plugins(
     }
     if ui.button(i18n::fl("plugins-refresh")).clicked() {
         state.loaded.plugins = false;
+        state.loaded.provider_assets = false;
     }
 
     ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
@@ -593,6 +600,121 @@ fn show_plugins(
                             .map(|_| ())
                             .map_err(|e| e.to_string());
                         crate::app::AsyncOutcome::RestartPlugin { id, result }
+                    });
+                }
+            });
+        }
+    });
+
+    if state.provider_assets_plugin.is_empty() {
+        if let Some(plugin) = state.plugins.first() {
+            state.provider_assets_plugin = plugin.plugin.clone();
+        } else if !state.chat_plugin.is_empty() {
+            state.provider_assets_plugin = state.chat_plugin.clone();
+        }
+    }
+
+    if !state.provider_assets_plugin.is_empty() && !state.loaded.provider_assets {
+        state.loaded.provider_assets = true;
+        let plugin = state.provider_assets_plugin.clone();
+        let client_assets = Arc::clone(client);
+        spawn_async(rt, async_results, async move {
+            let result = client_assets
+                .list_provider_assets(&ene_api::ListProviderAssetsRequest { plugin })
+                .await
+                .map(|response| response.assets)
+                .map_err(|e| e.to_string());
+            crate::app::AsyncOutcome::ListProviderAssets(result)
+        });
+    }
+
+    ui.separator();
+    ui.heading(i18n::fl("plugins-assets"));
+    ui.horizontal(|ui| {
+        ui.label(i18n::fl("plugins-assets-plugin"));
+        ui.text_edit_singleline(&mut state.provider_assets_plugin);
+        if ui.button(i18n::fl("plugins-assets-load")).clicked() {
+            state.loaded.provider_assets = false;
+        }
+    });
+
+    ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+        for asset in &state.provider_assets {
+            ui.horizontal(|ui| {
+                let active = if asset.active {
+                    i18n::fl("plugins-assets-active")
+                } else {
+                    i18n::fl("plugins-assets-inactive")
+                };
+                ui.label(format!(
+                    "{} ({}) — {}",
+                    asset.label, asset.kind, active
+                ));
+                if !asset.active
+                    && ui.button(i18n::fl("plugins-assets-activate")).clicked()
+                {
+                    let plugin = state.provider_assets_plugin.clone();
+                    let asset_id = asset.id.clone();
+                    let version = asset.active_version.clone();
+                    let outcome_id = asset_id.clone();
+                    let client = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        let result = client
+                            .set_active_provider_asset(&ene_api::SetActiveProviderAssetRequest {
+                                plugin,
+                                asset_id,
+                                version,
+                            })
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| e.to_string());
+                        crate::app::AsyncOutcome::SetActiveProviderAsset {
+                            asset_id: outcome_id,
+                            result,
+                        }
+                    });
+                }
+                if ui.button(i18n::fl("plugins-assets-install")).clicked() {
+                    let plugin = state.provider_assets_plugin.clone();
+                    let asset_id = asset.id.clone();
+                    let client = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        let result = client
+                            .install_provider_asset(&ene_api::InstallProviderAssetRequest {
+                                plugin,
+                                asset_id: asset_id.clone(),
+                                version: None,
+                                variant: None,
+                            })
+                            .await
+                            .map(|response| response.job_id)
+                            .map_err(|e| e.to_string());
+                        crate::app::AsyncOutcome::InstallProviderAsset {
+                            asset_id,
+                            result,
+                        }
+                    });
+                }
+                if let Some(job_id) = state.provider_install_jobs.get(&asset.id) {
+                    ui.label(format!("{}: {}", i18n::fl("plugins-assets-installing"), job_id));
+                    let plugin = state.provider_assets_plugin.clone();
+                    let asset_id = asset.id.clone();
+                    let job_id = job_id.clone();
+                    let client = Arc::clone(client);
+                    spawn_async(rt, async_results, async move {
+                        let result = client
+                            .provider_asset_install_status(
+                                &ene_api::ProviderAssetInstallStatusRequest {
+                                    plugin,
+                                    job_id,
+                                },
+                            )
+                            .await
+                            .map_err(|e| e.to_string());
+                        crate::app::AsyncOutcome::ProviderAssetInstallStatus {
+                            asset_id,
+                            result,
+                        }
                     });
                 }
             });

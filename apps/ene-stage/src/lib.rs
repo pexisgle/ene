@@ -1,3 +1,5 @@
+#![cfg_attr(test, expect(clippy::expect_used, reason = "tests"))]
+
 //! Product stage client library.
 
 pub mod app;
