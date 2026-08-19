@@ -63,6 +63,12 @@ pub struct SoulView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_ref: Option<String>,
     pub mood_label: String,
+    /// Installed package id@version when the soul is bound to a package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_id: Option<String>,
+    /// Absolute path to a VRM (or other avatar file) inside the package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -300,6 +306,9 @@ pub struct CharacterView {
     pub version: String,
     pub kind: String,
     pub path: String,
+    /// Soul created or reused when this package was activated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soul_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -384,6 +393,10 @@ pub struct OccupantView {
     pub soul_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

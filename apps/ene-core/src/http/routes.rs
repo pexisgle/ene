@@ -16,7 +16,10 @@ use ene_api::{
     SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView, ToolTestRequest, ToolView,
     UsageView,
 };
-use ene_companion::{JournalAction, MemoryId, MemoryScope, export_dir, install_archive};
+use ene_companion::{
+    JournalAction, MemoryId, MemoryScope, avatar_path_for_install, export_dir, import_v3,
+    install_archive, looks_like_package_zip, soul_from_install,
+};
 use ene_kernel::{DisplayDepth, HarnessSettings};
 use ene_plane::PopupDecision;
 use ene_registry::Layer;
@@ -134,9 +137,21 @@ pub async fn get_stage(State(state): State<AppState>) -> Json<StageView> {
             .core
             .occupants()
             .into_iter()
-            .map(|(soul, body)| OccupantView {
-                soul_id: soul.to_string(),
-                body_id: body.map(|id| id.to_string()),
+            .map(|(soul, body)| {
+                let package = state
+                    .core
+                    .companions()
+                    .get_soul(soul)
+                    .ok()
+                    .flatten()
+                    .map(|row| package_fields(&state.core.companions(), &row.character_ref));
+                let (package_id, avatar_path) = package.unwrap_or((None, None));
+                OccupantView {
+                    soul_id: soul.to_string(),
+                    body_id: body.map(|id| id.to_string()),
+                    package_id,
+                    avatar_path,
+                }
             })
             .collect(),
     })
@@ -1260,17 +1275,25 @@ pub async fn respond_approval(
 pub async fn list_characters(
     State(state): State<AppState>,
 ) -> Result<Json<Page<CharacterView>>, ApiReject> {
-    let items = state
-        .core
-        .companions()
+    let store = state.core.companions();
+    let souls = store.list_souls().map_err(map_companion)?;
+    let items = store
         .list_packages()
         .map_err(map_companion)?
         .into_iter()
-        .map(|(id, version, kind, path)| CharacterView {
-            id,
-            version,
-            kind,
-            path,
+        .map(|(id, version, kind, path)| {
+            let character_ref = format!("{id}@{version}");
+            let soul_id = souls
+                .iter()
+                .find(|soul| soul.character_ref == character_ref)
+                .map(|soul| soul.id.to_string());
+            CharacterView {
+                id,
+                version,
+                kind,
+                path,
+                soul_id,
+            }
         })
         .collect();
     Ok(Json(Page::of(items)))
@@ -1284,18 +1307,58 @@ pub async fn import_character(
     web_mutate_forbidden(&client_id_from_headers(&headers))?;
     let bytes = read_import_bytes(&body, state.core.data_dir())?;
     let home = state.core.data_dir().join("characters");
-    let installed = install_archive(
-        state.core.companions().as_ref(),
-        &home,
-        &bytes,
-        32 * 1024 * 1024,
-    )
-    .map_err(map_companion)?;
+    let store = state.core.companions();
+    let installed = if looks_like_package_zip(&bytes) {
+        install_archive(store.as_ref(), &home, &bytes, 32 * 1024 * 1024).map_err(map_companion)?
+    } else {
+        import_v3(store.as_ref(), &home, &bytes, 32 * 1024 * 1024).map_err(map_companion)?
+    };
+    let soul_id = activate_installed_package(&state, &installed)?;
     Ok(Json(CharacterView {
         id: installed.id,
         version: installed.version,
         kind: installed.kind.as_str().to_owned(),
         path: installed.path.display().to_string(),
+        soul_id,
+    }))
+}
+
+pub async fn activate_character(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<CharacterView>, ApiReject> {
+    web_mutate_forbidden(&client_id_from_headers(&headers))?;
+    let packages = state
+        .core
+        .companions()
+        .list_packages()
+        .map_err(map_companion)?;
+    let found = packages
+        .into_iter()
+        .rev()
+        .find(|(pkg, _, _, _)| pkg == &id)
+        .ok_or_else(|| not_found("character not found"))?;
+    let installed = ene_companion::InstalledPackage {
+        id: found.0.clone(),
+        version: found.1.clone(),
+        kind: match found.2.as_str() {
+            "soul" => ene_companion::PackageKind::Soul,
+            "body" => ene_companion::PackageKind::Body,
+            _ => ene_companion::PackageKind::Character,
+        },
+        path: std::path::PathBuf::from(&found.3),
+        digest: String::new(),
+        origin_unverified: true,
+        warnings: Vec::new(),
+    };
+    let soul_id = activate_installed_package(&state, &installed)?;
+    Ok(Json(CharacterView {
+        id: found.0,
+        version: found.1,
+        kind: found.2,
+        path: found.3,
+        soul_id,
     }))
 }
 
@@ -1724,6 +1787,7 @@ pub async fn web_index() -> axum::response::Html<&'static str> {
 fn soul_view(store: &ene_companion::CompanionStore, soul: ene_companion::Soul) -> SoulView {
     let display_name = resolve_display_name(store, &soul.character_ref)
         .unwrap_or_else(|| soul.character_ref.clone());
+    let (package_id, avatar_path) = package_fields(store, &soul.character_ref);
     SoulView {
         id: soul.id.to_string(),
         character_ref: soul.character_ref,
@@ -1731,7 +1795,64 @@ fn soul_view(store: &ene_companion::CompanionStore, soul: ene_companion::Soul) -
         body_ref: soul.body_ref.map(|id| id.to_string()),
         voice_ref: soul.voice_ref,
         mood_label: soul.affect.mood_label,
+        package_id,
+        avatar_path,
     }
+}
+
+fn package_fields(
+    store: &ene_companion::CompanionStore,
+    character_ref: &str,
+) -> (Option<String>, Option<String>) {
+    let Some((id, version)) = character_ref.split_once('@') else {
+        return (None, None);
+    };
+    let Ok(Some(path)) = store.package_path(id, version) else {
+        return (None, None);
+    };
+    let avatar =
+        avatar_path_for_install(std::path::Path::new(&path)).map(|path| path.display().to_string());
+    (Some(character_ref.to_owned()), avatar)
+}
+
+fn activate_installed_package(
+    state: &AppState,
+    installed: &ene_companion::InstalledPackage,
+) -> Result<Option<String>, ApiReject> {
+    use ene_companion::PackageKind;
+    if installed.kind == PackageKind::Body {
+        return Ok(None);
+    }
+    let character_ref = format!("{}@{}", installed.id, installed.version);
+    let store = state.core.companions();
+    let existing = store
+        .list_souls()
+        .map_err(map_companion)?
+        .into_iter()
+        .find(|soul| soul.character_ref == character_ref);
+    let mut soul = if let Some(soul) = existing {
+        soul
+    } else {
+        soul_from_install(store.as_ref(), installed).map_err(map_companion)?
+    };
+    let has_avatar = avatar_path_for_install(&installed.path).is_some();
+    if has_avatar && soul.body_ref.is_none() {
+        let body = ene_session::BodyId::new();
+        store
+            .set_body_ref(soul.id, Some(body))
+            .map_err(map_companion)?;
+        soul.body_ref = Some(body);
+    }
+    let catalog = if has_avatar {
+        ene_body::BodyCatalog::vrm_default()
+    } else {
+        ene_body::BodyCatalog::text_default()
+    };
+    state
+        .core
+        .present_companion(soul.id, soul.body_ref, catalog)
+        .map_err(map_core)?;
+    Ok(Some(soul.id.to_string()))
 }
 
 fn resolve_display_name(

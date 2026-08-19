@@ -585,20 +585,41 @@ impl CoreDaemon {
 }
 
 fn seed_default_occupants(companions: &CompanionStore, stage: &Stage) -> Result<(), CoreError> {
-    if !companions.list_souls()?.is_empty() {
+    let souls = companions.list_souls()?;
+    if souls.is_empty() {
+        for character_ref in ["char.alpha@1", "char.beta@1"] {
+            let soul = companions.create_soul(&NewSoul {
+                character_ref: character_ref.to_owned(),
+                body_ref: None,
+                voice_ref: None,
+                skill_refs: Vec::new(),
+                affect_baseline: ene_companion::AffectBaseline::default(),
+            })?;
+            stage.present(soul.id, None, BodyCatalog::text_default())?;
+        }
         return Ok(());
     }
-    for character_ref in ["char.alpha@1", "char.beta@1"] {
-        let soul = companions.create_soul(&NewSoul {
-            character_ref: character_ref.to_owned(),
-            body_ref: Some(BodyId::new()),
-            voice_ref: None,
-            skill_refs: Vec::new(),
-            affect_baseline: ene_companion::AffectBaseline::default(),
-        })?;
-        stage.present(soul.id, soul.body_ref, BodyCatalog::vrm_default())?;
+    let mut ranked = souls;
+    ranked.sort_by_key(|soul| usize::from(!package_has_avatar(companions, &soul.character_ref)));
+    for soul in ranked.into_iter().take(2) {
+        let catalog = if package_has_avatar(companions, &soul.character_ref) {
+            BodyCatalog::vrm_default()
+        } else {
+            BodyCatalog::text_default()
+        };
+        stage.present(soul.id, soul.body_ref, catalog)?;
     }
     Ok(())
+}
+
+fn package_has_avatar(companions: &CompanionStore, character_ref: &str) -> bool {
+    let Some((id, version)) = character_ref.split_once('@') else {
+        return false;
+    };
+    let Ok(Some(path)) = companions.package_path(id, version) else {
+        return false;
+    };
+    ene_companion::avatar_path_for_install(std::path::Path::new(&path)).is_some()
 }
 
 fn lock_data_dir(data_dir: &Path) -> Result<File, CoreError> {

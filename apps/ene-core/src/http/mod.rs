@@ -307,6 +307,10 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/characters", get(routes::list_characters))
         .route("/api/v1/characters/import", post(routes::import_character))
         .route(
+            "/api/v1/characters/{id}/activate",
+            post(routes::activate_character),
+        )
+        .route(
             "/api/v1/characters/{id}/export",
             get(routes::export_character),
         )

@@ -11,8 +11,9 @@ use crate::memory::{
     extract_turn,
 };
 use crate::package::{
-    compose_soul_and_body, content_digest, export_dir, import_v3, install_archive,
-    localized_display_name, pack_archive, soul_from_install,
+    avatar_path_for_install, compose_soul_and_body, content_digest, export_dir, import_v3,
+    install_archive, localized_display_name, looks_like_package_zip, looks_like_zip, pack_archive,
+    soul_from_install,
 };
 use crate::proactive::{
     ActivitySnapshot, GateRejectReason, ProactiveConfirmation, ProactiveObservation,
@@ -829,4 +830,31 @@ fn tendency_does_not_pierce_gates() {
 fn projection_helper_flags_inner_roles() {
     let history = derive_messages(&[], ProjectOptions::for_depth(DisplayDepth::Surface, 8));
     assert!(!surface_leaks_inner(&history));
+}
+
+#[test]
+fn zip_magic_and_package_manifest_detection() {
+    assert!(!looks_like_zip(b"not a zip"));
+    assert!(!looks_like_package_zip(b"not a zip"));
+    let zip = pack_archive(&stamp_digest(sample_char_files())).unwrap();
+    assert!(looks_like_zip(&zip));
+    assert!(looks_like_package_zip(&zip));
+}
+
+#[test]
+fn avatar_path_reads_body_toml_and_vrm_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let body = dir.path().join("body");
+    std::fs::create_dir_all(body.join("avatar")).unwrap();
+    std::fs::write(
+        body.join("body.toml"),
+        "[body]\nkind = \"vrm\"\navatar = \"avatar/model.vrm\"\n",
+    )
+    .unwrap();
+    let vrm = body.join("avatar/model.vrm");
+    std::fs::write(&vrm, b"vrm-bytes").unwrap();
+    assert_eq!(
+        avatar_path_for_install(dir.path()).as_deref(),
+        Some(vrm.as_path())
+    );
 }

@@ -146,6 +146,78 @@ struct ProactiveFile {
     tendency: String,
 }
 
+/// ZIP local-file magic (`PK\x03\x04`) or empty-archive magic (`PK\x05\x06`).
+#[must_use]
+pub fn looks_like_zip(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x50, 0x4b, 0x03, 0x04]) || bytes.starts_with(&[0x50, 0x4b, 0x05, 0x06])
+}
+
+/// True when `bytes` is a zip that contains `manifest.toml` (Ene package).
+#[must_use]
+pub fn looks_like_package_zip(bytes: &[u8]) -> bool {
+    if !looks_like_zip(bytes) {
+        return false;
+    }
+    ZipArchive::new(Cursor::new(bytes))
+        .ok()
+        .is_some_and(|mut archive| archive.by_name("manifest.toml").is_ok())
+}
+
+/// Avatar file inside an installed package (`body.toml` `avatar`, else first `.vrm`).
+#[must_use]
+pub fn avatar_path_for_install(dir: &Path) -> Option<PathBuf> {
+    let body_dir = dir.join("body");
+    let toml_path = body_dir.join("body.toml");
+    if let Ok(text) = fs::read_to_string(&toml_path)
+        && let Some(rel) = parse_avatar_field(&text)
+    {
+        let candidates = [body_dir.join(&rel), dir.join(&rel)];
+        if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+            return Some(path);
+        }
+    }
+    let avatar_dir = body_dir.join("avatar");
+    let Ok(entries) = fs::read_dir(&avatar_dir) else {
+        return None;
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_vrm = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("vrm"));
+        if is_vrm {
+            found.push(path);
+        }
+    }
+    found.sort();
+    found.into_iter().next()
+}
+
+fn parse_avatar_field(toml_text: &str) -> Option<String> {
+    for line in toml_text.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("avatar") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim();
+        let quote = rest.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            continue;
+        }
+        let inner = rest.trim_start_matches(quote).trim_end_matches(quote);
+        if !inner.is_empty() {
+            return Some(inner.to_owned());
+        }
+    }
+    None
+}
+
 /// Build a `.enechar` / `.enesoul` / `.enebody` zip from in-memory files.
 pub fn pack_archive(files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, CompanionError> {
     let mut buf = Vec::new();

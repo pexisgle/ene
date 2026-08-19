@@ -362,6 +362,29 @@ impl ApiClient {
             .await
     }
 
+    pub async fn list_pending_memories(&self, soul_id: &str) -> Result<Page<MemoryView>, ApiError> {
+        self.send_json(self.request(
+            Method::GET,
+            &format!("/api/v1/memories/pending?soul_id={soul_id}"),
+        ))
+        .await
+    }
+
+    pub async fn resolve_memory_candidate(
+        &self,
+        id: &str,
+        accept: bool,
+    ) -> Result<Value, ApiError> {
+        self.send_json(
+            self.request(
+                Method::POST,
+                &format!("/api/v1/memories/candidates/{id}/resolve"),
+            )
+            .json(&serde_json::json!({ "accept": accept })),
+        )
+        .await
+    }
+
     pub async fn list_tools(&self) -> Result<Page<ToolView>, ApiError> {
         self.send_json(self.request(Method::GET, "/api/v1/tools"))
             .await
@@ -500,6 +523,11 @@ impl ApiClient {
 
     pub async fn export_character(&self, id: &str) -> Result<Value, ApiError> {
         self.send_json(self.request(Method::GET, &format!("/api/v1/characters/{id}/export")))
+            .await
+    }
+
+    pub async fn activate_character(&self, id: &str) -> Result<CharacterView, ApiError> {
+        self.send_json(self.request(Method::POST, &format!("/api/v1/characters/{id}/activate")))
             .await
     }
 

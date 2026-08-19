@@ -1092,6 +1092,10 @@ async fn http_character_import_list_export_roundtrip() {
     assert_eq!(imported.id, "char.mychar");
     assert_eq!(imported.version, "1.0.0");
     assert_eq!(imported.kind, "character");
+    assert!(
+        imported.soul_id.is_some(),
+        "import of a character package must activate a soul"
+    );
 
     let listed = client.list_characters().await.unwrap();
     assert!(
@@ -1126,6 +1130,54 @@ async fn http_character_import_list_export_roundtrip() {
     .unwrap();
     assert_eq!(installed.id, "char.mychar");
     assert_eq!(installed.version, "1.0.0");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn import_vrm_package_exposes_avatar_path_on_soul_and_stage() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let mut files = sample_char_files();
+    files.insert(
+        "body/body.toml".into(),
+        b"[body]\nkind = \"vrm\"\navatar = \"avatar/model.vrm\"\n".to_vec(),
+    );
+    files.insert("body/avatar/model.vrm".into(), b"not-a-real-vrm".to_vec());
+    let zip = pack_archive(&stamp_digest(files)).unwrap();
+    let imported = client
+        .import_character_archive_b64(&base64::engine::general_purpose::STANDARD.encode(&zip))
+        .await
+        .unwrap();
+    let soul_id = imported.soul_id.expect("soul");
+    let soul = client.get_soul(&soul_id).await.unwrap();
+    assert_eq!(soul.package_id.as_deref(), Some("char.mychar@1.0.0"));
+    let avatar = soul.avatar_path.expect("avatar_path");
+    assert!(
+        avatar.ends_with("avatar/model.vrm"),
+        "unexpected avatar_path: {avatar}"
+    );
+    let stage = client.stage().await.unwrap();
+    assert!(
+        stage
+            .occupants
+            .iter()
+            .any(|occupant| occupant.soul_id == soul_id && occupant.avatar_path.is_some()),
+        "stage occupants: {:?}",
+        stage.occupants
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn activate_character_is_idempotent() {
+    let (_dir, client, _core, server) = boot_server().await;
+    let zip = pack_archive(&stamp_digest(sample_char_files())).unwrap();
+    let imported = client
+        .import_character_archive_b64(&base64::engine::general_purpose::STANDARD.encode(&zip))
+        .await
+        .unwrap();
+    let first = imported.soul_id.expect("soul from import");
+    let again = client.activate_character(&imported.id).await.unwrap();
+    assert_eq!(again.soul_id.as_deref(), Some(first.as_str()));
     server.shutdown().await;
 }
 

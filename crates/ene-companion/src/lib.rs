@@ -46,9 +46,9 @@ pub use memory::{
     deterministic_extract, extract_turn,
 };
 pub use package::{
-    InstalledPackage, PackageKind, compose_soul_and_body, content_digest, display_name_for_install,
-    export_dir, import_v3, install_archive, localized_display_name, pack_archive,
-    soul_from_install,
+    InstalledPackage, PackageKind, avatar_path_for_install, compose_soul_and_body, content_digest,
+    display_name_for_install, export_dir, import_v3, install_archive, localized_display_name,
+    looks_like_package_zip, looks_like_zip, pack_archive, soul_from_install,
 };
 pub use proactive::{
     ActivitySnapshot, GateRejectReason, ProactiveConfirmation, ProactiveContext, ProactiveDecision,
