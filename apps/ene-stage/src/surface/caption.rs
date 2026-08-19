@@ -1,6 +1,5 @@
 //! Caption overlay for streamed assistant text.
 
-use eframe::egui::{self, Align2, Color32, FontId, RichText};
 use crate::surface::SurfaceUiState;
 
 pub fn show(ctx: &egui::Context, state: &SurfaceUiState, font_size: f32) {
@@ -13,12 +12,12 @@ pub fn show(ctx: &egui::Context, state: &SurfaceUiState, font_size: f32) {
         state.caption.as_str()
     };
     egui::Area::new(egui::Id::new("stage-caption"))
-        .anchor(Align2::CENTER_BOTTOM, [0.0, -48.0])
+        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0])
         .show(ctx, |ui| {
             ui.label(
-                RichText::new(text)
-                    .font(FontId::proportional(font_size))
-                    .color(Color32::WHITE)
+                egui::RichText::new(text)
+                    .font(egui::FontId::proportional(font_size))
+                    .color(egui::Color32::WHITE)
                     .strong(),
             );
         });

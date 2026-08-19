@@ -1,9 +1,8 @@
 //! Chat panel for the surface viewport.
 
-use eframe::egui::{self, ScrollArea, TextEdit};
-
 use crate::i18n;
 use crate::surface::{SurfaceAction, SurfaceUiState};
+use ene_api::MessageMode;
 
 pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -27,16 +26,44 @@ pub fn show(ui: &mut egui::Ui, state: &mut SurfaceUiState, mic_active: bool) {
             }
             ui.label(&state.status);
         });
+        ui.horizontal(|ui| {
+            ui.label(i18n::fl("chat-mode"));
+            for (mode, label) in [
+                (MessageMode::Prompt, i18n::fl("chat-mode-prompt")),
+                (MessageMode::Steer, i18n::fl("chat-mode-steer")),
+                (MessageMode::FollowUp, i18n::fl("chat-mode-follow-up")),
+            ] {
+                if ui
+                    .selectable_label(state.message_mode == mode, label)
+                    .clicked()
+                {
+                    state.message_mode = mode;
+                }
+            }
+            if !state.voice_state.is_empty() {
+                ui.label(format!(
+                    "{}: {}",
+                    i18n::fl("voice-state"),
+                    state.voice_state
+                ));
+            }
+        });
+        if !state.exclusive_notice.is_empty() {
+            ui.colored_label(egui::Color32::YELLOW, &state.exclusive_notice);
+        }
 
-        ui.add(
-            TextEdit::singleline(&mut state.chat_draft)
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut state.chat_draft)
                 .id_salt("stage-chat-input")
                 .hint_text(i18n::fl("chat-placeholder"))
                 .desired_width(ui.available_width()),
         );
+        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            state.push_action(SurfaceAction::SendChat);
+        }
 
         ui.add_space(4.0);
-        ScrollArea::vertical()
+        egui::ScrollArea::vertical()
             .max_height(ui.available_height() - 8.0)
             .stick_to_bottom(true)
             .show(ui, |ui| {

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use ene_api::ApiClient;
 use ene_ctl::core::{
-    find_ene_core_binary, pid_file_path, read_api_ready, wait_for_api_json, CtlError,
+    CtlError, find_ene_core_binary, pid_file_path, read_api_ready, wait_for_api_json,
 };
 use thiserror::Error;
 

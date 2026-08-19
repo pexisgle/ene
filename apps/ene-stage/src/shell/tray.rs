@@ -72,10 +72,25 @@ impl TrayManager {
 }
 
 fn build_menu() -> Result<Menu, TrayError> {
-    let detail = MenuItem::with_id(MenuId::new(DETAIL_ID), "Open Detail", true, None);
-    let chat = MenuItem::with_id(MenuId::new(CHAT_ID), "Open Chat", true, None);
-    let mic = MenuItem::with_id(MenuId::new(MIC_ID), "Toggle Mic", true, None);
-    let quit = MenuItem::with_id(MenuId::new(QUIT_ID), "Quit", true, None);
+    let detail = MenuItem::with_id(
+        MenuId::new(DETAIL_ID),
+        crate::i18n::fl("tray-detail"),
+        true,
+        None,
+    );
+    let chat = MenuItem::with_id(
+        MenuId::new(CHAT_ID),
+        crate::i18n::fl("tray-chat"),
+        true,
+        None,
+    );
+    let mic = MenuItem::with_id(MenuId::new(MIC_ID), crate::i18n::fl("mic-on"), true, None);
+    let quit = MenuItem::with_id(
+        MenuId::new(QUIT_ID),
+        crate::i18n::fl("tray-quit"),
+        true,
+        None,
+    );
     Menu::with_items(&[
         &detail,
         &chat,
@@ -110,11 +125,18 @@ fn poll_tray_events(action_tx: &Sender<TrayAction>) {
         {
             return;
         }
-        if let Ok(event) = TrayIconEvent::receiver().try_recv()
-            && matches!(event, TrayIconEvent::DoubleClick { .. })
-            && action_tx.send(TrayAction::OpenDetail).is_err()
-        {
-            return;
+        if let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            let open_detail = matches!(
+                event,
+                TrayIconEvent::DoubleClick { .. }
+                    | TrayIconEvent::Click {
+                        button: tray_icon::MouseButton::Left,
+                        ..
+                    }
+            );
+            if open_detail && action_tx.send(TrayAction::OpenDetail).is_err() {
+                return;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }

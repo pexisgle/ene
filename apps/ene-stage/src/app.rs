@@ -1,30 +1,38 @@
-//! eframe application shell for the stage product client.
+//! winit application handler for the product stage client.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
-use crossbeam_channel::Receiver;
-use eframe::egui::{self, ViewportClass, ViewportId};
-use ene_api::{ApiClient, HistoryResponse, SendMessageResponse};
-use ene_config::EneConfigError;
+use ene_api::MessageMode;
 use ene_vrm::viseme::VisemeAnalyzer;
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::runtime::{Handle, Runtime};
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalPosition, PhysicalSize};
+use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::audio::AudioHub;
-use crate::avatar::{look_at, AvatarError, VrmPane};
-use crate::core::events::{spawn_event_listeners, LiveEvent};
+use crate::avatar::look_at;
+use crate::chrome::{ChromeKind, ChromeWindow};
+use crate::core::events::{EventFeeds, LiveEvent, spawn_event_feeds};
 use crate::core::session::StageSession;
-use crate::core::spawn::{attach_or_spawn_core, StageCore, StageSpawnError};
-use crate::detail::{self, DetailUiState};
+use crate::core::spawn::{StageCore, StageSpawnError, attach_or_spawn_core};
+use crate::detail::{self, DetailTab, DetailUiState, LogKind};
+use crate::gpu::{GpuContext, GpuError};
 use crate::i18n;
-use crate::settings::{load_desktop_settings, save_desktop_settings, DesktopSettings};
+use crate::overlay::{OverlayError, OverlayWindow};
+use crate::settings::{DesktopSettings, load_desktop_settings, save_desktop_settings};
 use crate::shell::tray::TrayError;
-use crate::shell::{show_notification, HotkeyManager, ShellAction, ShellError, TrayAction, TrayManager};
-use crate::surface::{self, SurfaceAction, SurfaceUiState};
-
-const DETAIL_VIEWPORT: &str = "ene-stage-detail";
+use crate::shell::{
+    HotkeyManager, ShellAction, ShellError, TrayAction, TrayManager, show_notification,
+};
+use crate::surface::{self, SpotlightAction, SurfaceAction, SurfaceUiState};
+use crate::tasks::AsyncOutcome;
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -32,27 +40,26 @@ pub enum AppError {
     Spawn(#[from] StageSpawnError),
     #[error("runtime: {0}")]
     Runtime(String),
-    #[error("eframe: {0}")]
-    Eframe(String),
+    #[error("window: {0}")]
+    Window(String),
+    #[error("gpu: {0}")]
+    Gpu(#[from] GpuError),
     #[error("shell: {0}")]
     Shell(#[from] ShellError),
-    #[error("config: {0}")]
-    Config(#[from] EneConfigError),
-    #[error("avatar: {0}")]
-    Avatar(#[from] AvatarError),
 }
 
 pub fn run() -> Result<(), AppError> {
     let settings = load_desktop_settings();
+    i18n::select_language(&settings.language);
     let runtime = Runtime::new().map_err(|err| AppError::Runtime(err.to_string()))?;
     let rt_handle = runtime.handle().clone();
 
-    let (client, core, session, events) = runtime.block_on(async {
+    let (client, core, session, feeds) = runtime.block_on(async {
         let (client, core) = attach_or_spawn_core(&settings).await?;
         let client = Arc::new(client);
         let session = StageSession::bootstrap(Arc::clone(&client)).await?;
-        let events = spawn_event_listeners(&client, session.session_id());
-        Ok::<_, StageSpawnError>((client, core, session, events))
+        let feeds = spawn_event_feeds(&client, session.session_id());
+        Ok::<_, StageSpawnError>((client, core, session, feeds))
     })?;
 
     let tray = match TrayManager::new() {
@@ -63,7 +70,6 @@ pub fn run() -> Result<(), AppError> {
         }
         Err(err) => return Err(ShellError::Tray(err).into()),
     };
-
     let hotkeys = match HotkeyManager::new() {
         Ok(hotkeys) => Some(hotkeys),
         Err(err) => {
@@ -72,23 +78,18 @@ pub fn run() -> Result<(), AppError> {
         }
     };
 
-    let local_settings = settings.clone();
-    apply_theme_from_settings(&local_settings.theme);
-
-    let app = StageApp {
-        settings,
-        local_settings,
+    let mut app = StageApp {
+        settings: settings.clone(),
+        local_settings: settings,
         core,
         session,
         client,
         runtime,
         rt_handle,
-        events,
+        feeds,
         audio: AudioHub::new(),
-        vrm: None,
-        vrm_path: None,
-        look_at_state: look_at::LookAtState::default(),
         viseme: VisemeAnalyzer::new(AudioHub::new().sample_rate()),
+        look_at_state: look_at::LookAtState::default(),
         tray,
         hotkeys,
         surface: SurfaceUiState::default(),
@@ -96,77 +97,44 @@ pub fn run() -> Result<(), AppError> {
         async_results: Arc::new(Mutex::new(Vec::new())),
         mic_active: false,
         notify_claimed: false,
-        vrm_load_requested: true,
+        speaker_claimed: false,
+        gpu: None,
+        overlay: None,
+        chat: None,
+        detail_win: None,
+        caption: None,
+        spotlight: None,
+        last_cursor: None,
+        last_tick: Instant::now(),
     };
+    app.surface.character_pos = [app.settings.character_x, app.settings.character_y];
+    app.surface.history = app.session.history();
+    app.claim_speaker_notify();
 
-    let title = i18n::fl("app-title");
-    let transparent = app.settings.transparent_overlay;
-    let always_on_top = app.settings.always_on_top;
-
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_title(title)
-        .with_transparent(transparent)
-        .with_decorations(!transparent)
-        .with_inner_size([480.0, 720.0]);
-    if always_on_top {
-        viewport = viewport.with_always_on_top();
-    }
-
-    let mut create_new = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
-    create_new.device_descriptor = std::sync::Arc::new(|adapter| {
-        let mut base = if adapter.get_info().backend == wgpu::Backend::Gl {
-            wgpu::Limits::downlevel_webgl2_defaults()
-        } else {
-            wgpu::Limits::default()
-        };
-        // VRM MToon pipelines need five bind groups; lavapipe/Vulkan usually allow ≥8.
-        base.max_bind_groups = adapter.limits().max_bind_groups.max(5);
-        base.max_texture_dimension_2d = base.max_texture_dimension_2d.max(8192);
-        wgpu::DeviceDescriptor {
-            label: Some("ene-stage"),
-            required_limits: base,
-            ..Default::default()
-        }
-    });
-
-    let wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
-        wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(create_new),
-        ..Default::default()
-    };
-
-    let native_options = eframe::NativeOptions {
-        viewport,
-        wgpu_options,
-        depth_buffer: 32,
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "ene-stage",
-        native_options,
-        Box::new(move |cc| Ok(Box::new(app.with_creation_context(cc)))),
-    )
-    .map_err(|err| AppError::Eframe(err.to_string()))?;
-
+    let event_loop = EventLoop::new().map_err(|err| AppError::Window(err.to_string()))?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop
+        .run_app(&mut app)
+        .map_err(|err| AppError::Window(err.to_string()))?;
     Ok(())
 }
 
 struct StageApp {
     settings: DesktopSettings,
     local_settings: DesktopSettings,
-    #[expect(dead_code, reason = "StageCore kills spawned ene-core on drop when lifetime is app")]
+    #[expect(
+        dead_code,
+        reason = "StageCore kills spawned ene-core on drop when lifetime is app"
+    )]
     core: StageCore,
     session: StageSession,
-    client: Arc<ApiClient>,
-    #[expect(dead_code, reason = "Tokio runtime must outlive the UI loop")]
+    client: Arc<ene_api::ApiClient>,
     runtime: Runtime,
     rt_handle: Handle,
-    events: Receiver<LiveEvent>,
+    feeds: EventFeeds,
     audio: AudioHub,
-    vrm: Option<VrmPane>,
-    vrm_path: Option<PathBuf>,
-    look_at_state: look_at::LookAtState,
     viseme: VisemeAnalyzer,
+    look_at_state: look_at::LookAtState,
     tray: Option<TrayManager>,
     hotkeys: Option<HotkeyManager>,
     surface: SurfaceUiState,
@@ -174,16 +142,18 @@ struct StageApp {
     async_results: Arc<Mutex<Vec<AsyncOutcome>>>,
     mic_active: bool,
     notify_claimed: bool,
-    vrm_load_requested: bool,
+    speaker_claimed: bool,
+    gpu: Option<GpuContext>,
+    overlay: Option<OverlayWindow>,
+    chat: Option<ChromeWindow>,
+    detail_win: Option<ChromeWindow>,
+    caption: Option<ChromeWindow>,
+    spotlight: Option<ChromeWindow>,
+    last_cursor: Option<LogicalPosition<f32>>,
+    last_tick: Instant,
 }
 
 impl StageApp {
-    fn with_creation_context(self, cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx
-            .set_visuals(theme_visuals(&self.local_settings.theme));
-        self
-    }
-
     fn spawn<F>(&self, task: F)
     where
         F: std::future::Future<Output = AsyncOutcome> + Send + 'static,
@@ -193,6 +163,33 @@ impl StageApp {
             let outcome = task.await;
             results.lock().push(outcome);
         });
+    }
+
+    fn claim_speaker_notify(&mut self) {
+        if !self.speaker_claimed {
+            self.speaker_claimed = true;
+            let session = self.session.clone_handle();
+            self.spawn(async move {
+                let result = session
+                    .claim_speaker()
+                    .await
+                    .map(|snap| snap.speaker.unwrap_or_default())
+                    .map_err(|e| e.to_string());
+                AsyncOutcome::SpeakerClaim(result)
+            });
+        }
+        if !self.notify_claimed {
+            self.notify_claimed = true;
+            let session = self.session.clone_handle();
+            self.spawn(async move {
+                let result = session
+                    .claim_notify()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                AsyncOutcome::NotifyClaim(result)
+            });
+        }
     }
 
     fn drain_async_results(&mut self) {
@@ -205,6 +202,7 @@ impl StageApp {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "outcome dispatch is a flat match")]
     fn apply_async_outcome(&mut self, outcome: AsyncOutcome) {
         match outcome {
             AsyncOutcome::SendMessage(result) => {
@@ -240,7 +238,7 @@ impl StageApp {
                     self.surface.streaming_text.clear();
                 }
                 Err(err) => self.surface.status = err,
-            }
+            },
             AsyncOutcome::SaveLocalSettings(result) => {
                 self.detail.core_status = match result {
                     Ok(()) => i18n::fl("settings-saved"),
@@ -266,9 +264,13 @@ impl StageApp {
                 Ok(items) => self.detail.memories = items,
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::DeleteMemory { id, result } => {
+            AsyncOutcome::ListPendingMemories(result) => match result {
+                Ok(items) => self.detail.pending_memories = items,
+                Err(err) => self.detail.core_status = err,
+            },
+            AsyncOutcome::ResolveMemory { result, .. }
+            | AsyncOutcome::DeleteMemory { result, .. } => {
                 if result.is_ok() {
-                    tracing::debug!(memory_id = %id, "memory deleted");
                     self.request_memories();
                 } else if let Err(err) = result {
                     self.detail.core_status = err;
@@ -286,20 +288,27 @@ impl StageApp {
                     self.detail.soul = Some(soul.clone());
                     self.detail.body_ref_draft = soul.body_ref.clone().unwrap_or_default();
                     self.detail.core_status = i18n::fl("character-body-updated");
-                    self.vrm = None;
-                    self.vrm_load_requested = true;
+                    self.reload_avatar();
                 }
                 Err(err) => self.detail.core_status = err,
-            }
-            AsyncOutcome::ImportCharacter(result) => match result {
-                Ok(character) => {
-                    self.detail.core_status = format!("{}: {}", i18n::fl("character-imported"), character.id);
-                    self.request_characters();
+            },
+            AsyncOutcome::ImportCharacter(result) | AsyncOutcome::ActivateCharacter(result) => {
+                match result {
+                    Ok(character) => {
+                        self.detail.core_status =
+                            format!("{}: {}", i18n::fl("character-imported"), character.id);
+                        self.request_characters();
+                        self.reload_avatar();
+                    }
+                    Err(err) => self.detail.core_status = err,
                 }
-                Err(err) => self.detail.core_status = err,
             }
             AsyncOutcome::ListCharacters(result) => match result {
                 Ok(items) => self.detail.characters = items,
+                Err(err) => self.detail.core_status = err,
+            },
+            AsyncOutcome::ListOccupants(result) => match result {
+                Ok(items) => self.detail.occupants = items,
                 Err(err) => self.detail.core_status = err,
             },
             AsyncOutcome::ListJobs(result) => match result {
@@ -309,17 +318,9 @@ impl StageApp {
                 }
                 Err(err) => self.detail.core_status = err,
             },
-            AsyncOutcome::CancelJob { id, result } => {
+            AsyncOutcome::CancelJob { result, .. }
+            | AsyncOutcome::ToggleSchedule { result, .. } => {
                 if result.is_ok() {
-                    tracing::debug!(job_id = %id, "job cancelled");
-                    self.request_jobs();
-                } else if let Err(err) = result {
-                    self.detail.core_status = err;
-                }
-            }
-            AsyncOutcome::ToggleSchedule { id, enabled, result } => {
-                if result.is_ok() {
-                    tracing::debug!(schedule_id = %id, enabled, "schedule toggled");
                     self.request_jobs();
                 } else if let Err(err) = result {
                     self.detail.core_status = err;
@@ -328,33 +329,28 @@ impl StageApp {
             AsyncOutcome::ListPlugins(result) => match result {
                 Ok(items) => self.detail.plugins = items,
                 Err(err) => self.detail.core_status = err,
-            }
-            AsyncOutcome::RestartPlugin { id, result } => {
-                if result.is_ok() {
-                    tracing::debug!(plugin_id = %id, "plugin restarted");
-                    self.request_plugins();
-                } else if let Err(err) = result {
+            },
+            AsyncOutcome::RestartPlugin { result, .. }
+            | AsyncOutcome::SetActiveProviderAsset { result, .. } => {
+                if let Err(err) = result {
                     self.detail.core_status = err;
                 }
             }
             AsyncOutcome::ListProviderAssets(result) => match result {
                 Ok(items) => self.detail.provider_assets = items,
                 Err(err) => self.detail.core_status = err,
-            }
+            },
             AsyncOutcome::InstallProviderAsset { asset_id, result } => match result {
                 Ok(job_id) => {
-                    self.detail
-                        .provider_install_jobs
-                        .insert(asset_id, job_id);
+                    self.detail.provider_install_jobs.insert(asset_id, job_id);
                     self.detail.core_status = i18n::fl("plugins-asset-install-started");
                 }
                 Err(err) => self.detail.core_status = err,
-            }
+            },
             AsyncOutcome::ProviderAssetInstallStatus { asset_id, result } => match result {
                 Ok(status) => {
                     if status.phase == Some(ene_api::ProviderAssetInstallPhase::Done) {
                         self.detail.provider_install_jobs.remove(&asset_id);
-                        self.request_provider_assets();
                     } else if status.phase == Some(ene_api::ProviderAssetInstallPhase::Failed) {
                         self.detail.provider_install_jobs.remove(&asset_id);
                         self.detail.core_status = status
@@ -363,15 +359,11 @@ impl StageApp {
                     }
                 }
                 Err(err) => self.detail.core_status = err,
-            }
-            AsyncOutcome::SetActiveProviderAsset { asset_id, result } => {
-                if result.is_ok() {
-                    tracing::debug!(asset_id = %asset_id, "provider asset activated");
-                    self.request_provider_assets();
-                } else if let Err(err) = result {
-                    self.detail.core_status = err;
-                }
-            }
+            },
+            AsyncOutcome::ListProviderModels(result) => match result {
+                Ok(items) => self.detail.provider_models = items,
+                Err(err) => self.detail.core_status = err,
+            },
             AsyncOutcome::LoadMcp(result) => match result {
                 Ok(json) => self.detail.mcp_json = json,
                 Err(err) => self.detail.core_status = err,
@@ -385,11 +377,64 @@ impl StageApp {
             AsyncOutcome::MicClaim(result) => match result {
                 Ok(active) => self.mic_active = active,
                 Err(err) => self.surface.status = err,
+            },
+            AsyncOutcome::SpeakerClaim(result) => match result {
+                Ok(holder) if !holder.is_empty() && holder != "stage" => {
+                    self.surface.exclusive_notice =
+                        format!("{}: {holder}", i18n::fl("exclusive-speaker"));
+                }
+                Err(err) => self.surface.exclusive_notice = err,
+                Ok(_) => self.surface.exclusive_notice.clear(),
+            },
+            AsyncOutcome::NotifyClaim(result) => {
+                if let Err(err) = result {
+                    tracing::debug!(error = %err, "notify claim failed");
+                }
             }
-            AsyncOutcome::VrmPath(path) => {
-                self.vrm_path = Some(path);
-                self.vrm_load_requested = true;
+            AsyncOutcome::Health(result) => match result {
+                Ok(health) => self.detail.health = format!("{} ({})", health.status, health.bind),
+                Err(err) => self.detail.health = err,
+            },
+            AsyncOutcome::Usage(result) => match result {
+                Ok(usage) => {
+                    self.detail.usage_text = format!(
+                        "in={} out={} cache_r={} cache_w={} rows={}",
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_read_tokens,
+                        usage.cache_write_tokens,
+                        usage.rows
+                    );
+                }
+                Err(err) => self.detail.core_status = err,
+            },
+            AsyncOutcome::Backup(result) => {
+                self.detail.core_status = match result {
+                    Ok(path) => format!("{}: {path}", i18n::fl("system-backup")),
+                    Err(err) => err,
+                };
             }
+            AsyncOutcome::Restore(result) => {
+                self.detail.core_status = match result {
+                    Ok(()) => i18n::fl("system-restore-done"),
+                    Err(err) => err,
+                };
+            }
+            AsyncOutcome::DiagSpans(result) => match result {
+                Ok(spans) => {
+                    self.detail.spans_text = spans
+                        .into_iter()
+                        .map(|span| format!("{} {}ms", span.name, span.duration_ms.unwrap_or(0)))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                }
+                Err(err) => self.detail.core_status = err,
+            },
+            AsyncOutcome::LoadSchema(result) => match result {
+                Ok(json) => self.detail.schema_json = json,
+                Err(err) => self.detail.core_status = err,
+            },
+            AsyncOutcome::ReloadAvatar => self.reload_avatar(),
         }
     }
 
@@ -397,24 +442,26 @@ impl StageApp {
         let soul_id = self.session.soul_id().to_owned();
         let client = Arc::clone(&self.client);
         self.spawn(async move {
-            let result = client
-                .list_memories(&soul_id, None)
-                .await
-                .map(|page| page.items)
-                .map_err(|err| err.to_string());
-            AsyncOutcome::ListMemories(result)
+            AsyncOutcome::ListMemories(
+                client
+                    .list_memories(&soul_id, None)
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            )
         });
     }
 
     fn request_characters(&self) {
         let client = Arc::clone(&self.client);
         self.spawn(async move {
-            let result = client
-                .list_characters()
-                .await
-                .map(|page| page.items)
-                .map_err(|err| err.to_string());
-            AsyncOutcome::ListCharacters(result)
+            AsyncOutcome::ListCharacters(
+                client
+                    .list_characters()
+                    .await
+                    .map(|page| page.items)
+                    .map_err(|err| err.to_string()),
+            )
         });
     }
 
@@ -433,42 +480,15 @@ impl StageApp {
         });
     }
 
-    fn request_plugins(&self) {
-        let client = Arc::clone(&self.client);
-        self.spawn(async move {
-            let result = client
-                .list_plugins()
-                .await
-                .map(|page| page.items)
-                .map_err(|err| err.to_string());
-            AsyncOutcome::ListPlugins(result)
-        });
-    }
-
-    fn request_provider_assets(&self) {
-        let plugin = self.detail.provider_assets_plugin.clone();
-        if plugin.is_empty() {
-            return;
-        }
-        let client = Arc::clone(&self.client);
-        self.spawn(async move {
-            let result = client
-                .list_provider_assets(&ene_api::ListProviderAssetsRequest { plugin })
-                .await
-                .map(|response| response.assets)
-                .map_err(|err| err.to_string());
-            AsyncOutcome::ListProviderAssets(result)
-        });
-    }
-
     fn request_history_refresh(&self) {
         let session = self.session.clone_handle();
         self.spawn(async move {
-            let result = session
-                .refresh_history()
-                .await
-                .map_err(|err| err.to_string());
-            AsyncOutcome::RefreshHistory(result)
+            AsyncOutcome::RefreshHistory(
+                session
+                    .refresh_history()
+                    .await
+                    .map_err(|err| err.to_string()),
+            )
         });
     }
 
@@ -477,9 +497,17 @@ impl StageApp {
         let enable = !self.mic_active;
         self.spawn(async move {
             let result = if enable {
-                session.claim_mic().await.map(|_| true).map_err(|e| e.to_string())
+                session
+                    .claim_mic()
+                    .await
+                    .map(|_| true)
+                    .map_err(|e| e.to_string())
             } else {
-                session.release_mic().await.map(|_| false).map_err(|e| e.to_string())
+                session
+                    .release_mic()
+                    .await
+                    .map(|_| false)
+                    .map_err(|e| e.to_string())
             };
             AsyncOutcome::MicClaim(result)
         });
@@ -491,72 +519,100 @@ impl StageApp {
             return;
         }
         let session = self.session.clone_handle();
+        let mode = self.surface.message_mode;
         self.spawn(async move {
-            let result = session
-                .send_prompt(&text)
-                .await
-                .map(|_| ())
-                .map_err(|err| err.to_string());
-            AsyncOutcome::SendMessage(result)
+            AsyncOutcome::SendMessage(
+                session
+                    .send(&text, mode)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| err.to_string()),
+            )
+        });
+    }
+
+    fn answer_question(&mut self) {
+        let Some(question) = self.surface.pending_question.take() else {
+            return;
+        };
+        let text = if self.surface.chat_draft.trim().is_empty() {
+            question.prompt
+        } else {
+            self.surface.chat_draft.trim().to_owned()
+        };
+        let session = self.session.clone_handle();
+        self.spawn(async move {
+            AsyncOutcome::SendMessage(
+                session
+                    .send(&text, MessageMode::FollowUp)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| err.to_string()),
+            )
         });
     }
 
     fn barge_in(&mut self) {
         let session = self.session.clone_handle();
         self.spawn(async move {
-            let result = session.barge_in().await.map(|_| ()).map_err(|e| e.to_string());
-            AsyncOutcome::BargeIn(result)
+            AsyncOutcome::BargeIn(
+                session
+                    .barge_in()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            )
         });
     }
 
     fn cancel_turn(&mut self) {
         let session = self.session.clone_handle();
         self.spawn(async move {
-            let result = session
-                .cancel_turn()
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string());
-            AsyncOutcome::CancelTurn(result)
+            AsyncOutcome::CancelTurn(
+                session
+                    .cancel_turn()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            )
         });
     }
 
-    fn respond_approval(&mut self, id: &str, decision: &str) {
+    fn respond_approval(&mut self, decision: &str) {
+        let Some(pending) = self.surface.pending_approval.clone() else {
+            return;
+        };
         let session = self.session.clone_handle();
-        let id = id.to_owned();
         let decision = decision.to_owned();
         self.spawn(async move {
-            let result = session
-                .respond_approval(&id, &decision)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string());
-            AsyncOutcome::Approval(result)
+            AsyncOutcome::Approval(
+                session
+                    .respond_approval(&pending.id, &decision)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            )
         });
     }
 
     fn save_local_settings(&mut self) {
         let settings = self.local_settings.clone();
         self.settings = settings.clone();
-        apply_theme_from_settings(&settings.theme);
+        i18n::select_language(&settings.language);
         self.spawn(async move {
-            let result = save_desktop_settings(&settings).map_err(|err| err.to_string());
-            AsyncOutcome::SaveLocalSettings(result)
+            AsyncOutcome::SaveLocalSettings(
+                save_desktop_settings(&settings).map_err(|err| err.to_string()),
+            )
         });
     }
 
-    fn persist_character_position(&mut self) {
-        self.local_settings.character_x = self.surface.character_pos[0];
-        self.local_settings.character_y = self.surface.character_pos[1];
-        let settings = self.local_settings.clone();
-        self.settings = settings.clone();
-        self.spawn(async move {
-            let result = save_desktop_settings(&settings).map_err(|err| err.to_string());
-            AsyncOutcome::SaveLocalSettings(result)
-        });
-    }
-
-    fn poll_shell(&mut self, ctx: &egui::Context) {
+    fn poll_shell(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "linux")]
+        {
+            while gtk::events_pending() {
+                let _ = gtk::main_iteration_do(false);
+            }
+        }
         let tray_actions: Vec<TrayAction> = self
             .tray
             .as_ref()
@@ -570,8 +626,12 @@ impl StageApp {
             .unwrap_or_default();
         for action in tray_actions {
             match action {
-                TrayAction::OpenDetail => self.detail.visible = true,
-                TrayAction::OpenChatFocus => self.surface.focus_chat = true,
+                TrayAction::OpenDetail => self.open_detail(event_loop, DetailTab::Home),
+                TrayAction::OpenChatFocus => {
+                    self.surface.chat_open = true;
+                    self.surface.focus_chat = true;
+                    self.ensure_chat(event_loop);
+                }
                 TrayAction::ToggleMic => self.toggle_mic(),
                 TrayAction::Quit => self.surface.quit = true,
             }
@@ -583,20 +643,26 @@ impl StageApp {
                 ShellAction::OpenSpotlight => {
                     if self.settings.spotlight_enabled {
                         self.surface.spotlight_open = true;
+                        self.ensure_spotlight(event_loop);
                     }
                 }
-                ShellAction::OpenDetail => self.detail.visible = true,
-                ShellAction::FocusChat => self.surface.focus_chat = true,
+                ShellAction::OpenDetail => self.open_detail(event_loop, DetailTab::Home),
+                ShellAction::OpenLog => self.open_detail(event_loop, DetailTab::Log),
+                ShellAction::FocusChat => {
+                    self.surface.chat_open = true;
+                    self.surface.focus_chat = true;
+                    self.ensure_chat(event_loop);
+                }
                 ShellAction::ToggleMic => self.toggle_mic(),
                 ShellAction::Quit => self.surface.quit = true,
             }
         }
         if self.surface.quit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            event_loop.exit();
         }
     }
 
-    fn process_surface_actions(&mut self) {
+    fn process_surface_actions(&mut self, event_loop: &ActiveEventLoop) {
         let actions = std::mem::take(&mut self.surface.pending_actions);
         for action in actions {
             match action {
@@ -604,52 +670,51 @@ impl StageApp {
                 SurfaceAction::BargeIn => self.barge_in(),
                 SurfaceAction::CancelTurn => self.cancel_turn(),
                 SurfaceAction::ToggleMic => self.toggle_mic(),
-                SurfaceAction::Approval { decision } => {
-                    if let Some(pending) = self.surface.pending_approval.clone() {
-                        self.respond_approval(&pending.id, &decision);
-                    }
-                }
-                SurfaceAction::OpenDetail(tab) => {
-                    self.detail.visible = true;
-                    self.detail.tab = tab;
-                }
+                SurfaceAction::Approval { decision } => self.respond_approval(&decision),
+                SurfaceAction::AnswerQuestion => self.answer_question(),
+                SurfaceAction::OpenDetail(tab) => self.open_detail(event_loop, tab),
                 SurfaceAction::Quit => self.surface.quit = true,
-                SurfaceAction::PersistCharacterPos => self.persist_character_position(),
+                SurfaceAction::PersistCharacterPos => {
+                    self.local_settings.character_x = self.surface.character_pos[0];
+                    self.local_settings.character_y = self.surface.character_pos[1];
+                    self.save_local_settings();
+                }
             }
+        }
+        if self.detail.save_local_pending {
+            self.detail.save_local_pending = false;
+            self.save_local_settings();
         }
     }
 
-    fn drain_events(&mut self, ctx: &egui::Context) {
-        while let Ok(event) = self.events.try_recv() {
+    fn drain_surface_events(&mut self) {
+        while let Ok(event) = self.feeds.surface.try_recv() {
             match event {
                 LiveEvent::TextDelta { text, .. } => {
                     self.surface.streaming_text.push_str(&text);
                     if self.settings.caption_enabled {
-                        self.surface.caption = self.surface.streaming_text.clone();
+                        self.surface
+                            .caption
+                            .clone_from(&self.surface.streaming_text);
+                        self.surface.caption_open = true;
                     }
-                }
-                LiveEvent::ThinkingDelta { text } | LiveEvent::InnerMessage { text } => {
-                    self.detail.push_log(detail::LogKind::Thinking, text);
-                }
-                LiveEvent::ToolCall { summary } => {
-                    self.detail.push_log(detail::LogKind::Tool, summary);
                 }
                 LiveEvent::SessionEvent { kind, text } => {
-                    self.detail
-                        .push_log(detail::LogKind::Session, format!("{kind}: {text}"));
-                    if kind == "turn/end" {
+                    if kind == "turn/end" || kind.ends_with("/end") {
                         self.request_history_refresh();
                         self.surface.streaming_text.clear();
-                        if self.settings.caption_enabled {
-                            self.surface.caption.clear();
-                        }
                     }
+                    tracing::debug!(kind, text, "surface session event");
                 }
                 LiveEvent::ApprovalAsked { id, tool, target } => {
-                    self.surface.pending_approval = Some(surface::PendingApproval { id, tool, target });
+                    self.surface.pending_approval =
+                        Some(surface::PendingApproval { id, tool, target });
+                    self.surface.chat_open = true;
                 }
-                LiveEvent::ApprovalResolved { .. } => {
-                    self.surface.pending_approval = None;
+                LiveEvent::ApprovalResolved { .. } => self.surface.pending_approval = None,
+                LiveEvent::QuestionAsked { id, prompt } => {
+                    self.surface.pending_question = Some(surface::PendingQuestion { id, prompt });
+                    self.surface.chat_open = true;
                 }
                 LiveEvent::NotifyHint { title, body } => {
                     if let Err(err) = show_notification(&title, &body, "ene-stage") {
@@ -657,8 +722,10 @@ impl StageApp {
                     }
                 }
                 LiveEvent::BodyCommand { value } => {
-                    if let Some(vrm) = self.vrm.as_mut() {
-                        vrm.avatar_mut().apply_body_event(&value);
+                    if let Some(overlay) = self.overlay.as_mut()
+                        && let Some(avatar) = overlay.avatar.as_mut()
+                    {
+                        avatar.apply_body_event(&value);
                     }
                 }
                 LiveEvent::AudioChunk { pcm, sample_rate } => {
@@ -666,24 +733,62 @@ impl StageApp {
                         tracing::debug!(error = %err, "audio playback failed");
                     }
                 }
-                LiveEvent::AffectState { mood_label, .. } => {
-                    self.surface.status = mood_label;
+                LiveEvent::VoiceState { state, barge_in } => {
+                    self.surface.voice_state.clone_from(&state);
+                    if barge_in {
+                        tracing::debug!("core barge-in (voice.state)");
+                    }
                 }
-                LiveEvent::JobReport { text } => {
-                    self.detail.push_log(detail::LogKind::Job, text);
+                LiveEvent::ExclusiveHeld {
+                    resource,
+                    client_id,
+                } => {
+                    if client_id != "stage" && !client_id.is_empty() {
+                        self.surface.exclusive_notice = format!("{resource}: {client_id}");
+                    }
                 }
                 LiveEvent::Disconnected => {
                     self.surface.status = i18n::fl("status-disconnected");
                 }
+                LiveEvent::ThinkingDelta { .. }
+                | LiveEvent::InnerMessage { .. }
+                | LiveEvent::ToolCall { .. }
+                | LiveEvent::AffectState { .. }
+                | LiveEvent::JobReport { .. } => {}
             }
-            ctx.request_repaint();
+        }
+    }
+
+    fn drain_detail_events(&mut self) {
+        while let Ok(event) = self.feeds.detail.try_recv() {
+            match event {
+                LiveEvent::ThinkingDelta { text } => self.detail.push_log(LogKind::Thinking, text),
+                LiveEvent::InnerMessage { text } => self.detail.push_log(LogKind::Inner, text),
+                LiveEvent::ToolCall { summary } => self.detail.push_log(LogKind::Tool, summary),
+                LiveEvent::SessionEvent { kind, text } => {
+                    self.detail
+                        .push_log(LogKind::Session, format!("{kind}: {text}"));
+                }
+                LiveEvent::AffectState {
+                    mood_label,
+                    valence,
+                    arousal,
+                } => {
+                    self.detail.push_log(
+                        LogKind::Affect,
+                        format!("{mood_label} v={valence:.2} a={arousal:.2}"),
+                    );
+                }
+                LiveEvent::JobReport { text } => self.detail.push_log(LogKind::Job, text),
+                LiveEvent::Disconnected => self
+                    .detail
+                    .push_log(LogKind::Session, "detail disconnected".into()),
+                _ => {}
+            }
         }
     }
 
     fn poll_audio(&mut self) {
-        if self.audio.mic_barge_in() {
-            self.barge_in();
-        }
         if !self.mic_active {
             return;
         }
@@ -691,236 +796,480 @@ impl StageApp {
         for chunk in self.audio.poll_mic_chunks() {
             let session = self.session.clone_handle();
             self.spawn(async move {
-                let result = session
-                    .listen_pcm(chunk, sample_rate)
-                    .await
-                    .map(|_| ())
-                    .map_err(|err| err.to_string());
-                AsyncOutcome::Listen(result)
+                AsyncOutcome::Listen(
+                    session
+                        .listen_pcm(chunk, sample_rate)
+                        .await
+                        .map(|_| ())
+                        .map_err(|err| err.to_string()),
+                )
             });
         }
     }
 
-    fn ensure_notify(&mut self) {
-        if self.notify_claimed {
+    fn reload_avatar(&mut self) {
+        let Some(gpu) = self.gpu.as_ref() else {
             return;
-        }
-        let session = self.session.clone_handle();
-        self.notify_claimed = true;
-        self.spawn(async move {
-            if let Err(err) = session.claim_notify().await {
-                tracing::debug!(error = %err, "notify claim failed");
-            }
-            AsyncOutcome::MicClaim(Ok(false))
-        });
-    }
-
-    fn ensure_vrm(&mut self) {
-        if self.vrm.is_some() || !self.vrm_load_requested {
+        };
+        let Some(overlay) = self.overlay.as_mut() else {
             return;
-        }
-        self.vrm_load_requested = false;
-        let client = Arc::clone(&self.client);
-        let soul_id = self.session.soul_id().to_owned();
-        let rt = self.rt_handle.clone();
-        let results = Arc::clone(&self.async_results);
-        rt.spawn(async move {
-            let path = resolve_vrm_path(&client, &soul_id).await;
-            results.lock().push(AsyncOutcome::VrmPath(path));
-        });
-    }
-
-    fn try_load_vrm(
-        &mut self,
-        ctx: &egui::Context,
-        render_state: &eframe::egui_wgpu::RenderState,
-        path: &std::path::Path,
-    ) {
-        let width = 512;
-        let height = 768;
-        match VrmPane::load(
-            path,
-            &render_state.device,
-            &render_state.queue,
-            render_state.target_format,
-            width,
-            height,
-        ) {
-            Ok(pane) => {
-                self.vrm = Some(pane);
-                tracing::info!(path = %path.display(), "loaded VRM avatar");
+        };
+        let Some(path) = self.session.avatar_path().cloned() else {
+            tracing::info!("no avatar_path; overlay stays empty (text-only)");
+            return;
+        };
+        match overlay.load_avatar(gpu, &path, self.session.motions_dir().map(PathBuf::as_path)) {
+            Ok(()) => {
+                if let Some(avatar) = overlay.avatar.as_mut() {
+                    avatar.model_scale = self.local_settings.model_scale;
+                    avatar.world_offset = [
+                        (self.local_settings.character_x - 0.5) * 2.0,
+                        (0.5 - self.local_settings.character_y) * 2.0,
+                        0.0,
+                    ];
+                }
+                self.surface.status = format!("{} ({})", i18n::fl("status-ready"), path.display());
+                tracing::info!(path = %path.display(), "loaded overlay VRM");
             }
             Err(err) => {
+                self.surface.status = format!("{}: {err}", i18n::fl("status-error"));
                 tracing::warn!(error = %err, path = %path.display(), "VRM load failed");
             }
         }
-        ctx.request_repaint();
     }
 
-    fn tick_avatar(
-        &mut self,
-        ctx: &egui::Context,
-        render_state: &eframe::egui_wgpu::RenderState,
-        dt: f32,
-    ) {
-        let Some(vrm) = self.vrm.as_mut() else {
+    fn cycle_occupant(&mut self, delta: i32) {
+        let occupants = self.session.occupants();
+        if occupants.is_empty() {
+            return;
+        }
+        let current = occupants
+            .iter()
+            .position(|item| item.soul_id == self.session.soul_id())
+            .unwrap_or(0);
+        let len = i32::try_from(occupants.len()).unwrap_or(1);
+        let next = (i32::try_from(current).unwrap_or(0) + delta).rem_euclid(len);
+        let Some(occupant) = occupants.get(usize::try_from(next).unwrap_or(0)).cloned() else {
             return;
         };
-        let weights = self.audio.analyze_visemes(&mut self.viseme);
-        vrm.avatar_mut().apply_viseme(weights);
-
-        let pointer = ctx.input(|i| i.pointer.interact_pos());
-        let screen = ctx.content_rect();
-        let viewport = (
-            screen.width().max(1.0) as u32,
-            screen.height().max(1.0) as u32,
-        );
-        if let Some(cursor) = pointer {
-            let avatar = vrm.avatar_mut();
-            let (eye, target) = {
-                let cam = avatar.camera();
-                (
-                    glam::Vec3::from(cam.eye()),
-                    glam::Vec3::from(cam.target()),
-                )
-            };
-            let head = avatar.head_world();
-            let up = glam::Vec3::from(ene_vrm::camera::DEFAULT_UP);
-            let cursor_logical = glam::Vec2::new(cursor.x, cursor.y);
-            let world = look_at::compute_world_target(
-                cursor_logical,
-                viewport,
-                eye,
-                target,
-                up,
-                head,
-                self.local_settings.look_at_strength,
-                &mut self.look_at_state,
-                dt,
-            );
-            avatar.set_look_at_target(world);
-        }
-
-        if let Err(err) =
-            vrm.tick_ui_frame(ctx, &render_state.device, &render_state.queue, dt)
+        if let Err(err) = self
+            .runtime
+            .block_on(self.session.retarget_soul(&occupant.soul_id))
         {
-            tracing::debug!(error = %err, "avatar tick failed");
+            self.surface.status = err.to_string();
+            return;
+        }
+        self.feeds = spawn_event_feeds(&self.client, self.session.session_id());
+        self.surface.history = self.session.history();
+        self.reload_avatar();
+    }
+
+    fn open_detail(&mut self, event_loop: &ActiveEventLoop, tab: DetailTab) {
+        self.detail.visible = true;
+        self.detail.tab = tab;
+        if self.detail_win.is_none()
+            && let Some(gpu) = self.gpu.as_ref()
+        {
+            match ChromeWindow::create(
+                event_loop,
+                gpu,
+                ChromeKind::Detail,
+                PhysicalSize::new(960, 680),
+                true,
+            ) {
+                Ok(win) => self.detail_win = Some(win),
+                Err(err) => tracing::warn!(error = %err, "detail window failed"),
+            }
         }
     }
 
-    fn show_detail_viewport(&mut self, ctx: &egui::Context) {
-        if !self.detail.visible {
+    fn ensure_chat(&mut self, event_loop: &ActiveEventLoop) {
+        if self.chat.is_some() {
             return;
         }
-        let mut open = self.detail.visible;
-        let title = i18n::fl("detail-title");
-        let visible = self.detail.visible;
-        let mut detail = std::mem::take(&mut self.detail);
-        detail.visible = visible;
-        let mut local_settings = self.local_settings.clone();
-        let client = Arc::clone(&self.client);
-        let rt = self.rt_handle.clone();
-        let results = Arc::clone(&self.async_results);
-        let soul_id = self.session.soul_id().to_owned();
-        ctx.show_viewport_immediate(
-            ViewportId::from_hash_of(DETAIL_VIEWPORT),
-            egui::ViewportBuilder::default()
-                .with_title(title)
-                .with_inner_size([900.0, 640.0]),
-            |ui, class| {
-                if !matches!(class, ViewportClass::Immediate | ViewportClass::EmbeddedWindow) {
-                    return;
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        match ChromeWindow::create(
+            event_loop,
+            gpu,
+            ChromeKind::Chat,
+            PhysicalSize::new(420, 560),
+            true,
+        ) {
+            Ok(win) => self.chat = Some(win),
+            Err(err) => tracing::warn!(error = %err, "chat window failed"),
+        }
+    }
+
+    fn ensure_caption(&mut self, event_loop: &ActiveEventLoop) {
+        if self.caption.is_some() || !self.settings.caption_enabled {
+            return;
+        }
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        match ChromeWindow::create(
+            event_loop,
+            gpu,
+            ChromeKind::Caption,
+            PhysicalSize::new(640, 120),
+            false,
+        ) {
+            Ok(win) => self.caption = Some(win),
+            Err(err) => tracing::warn!(error = %err, "caption window failed"),
+        }
+    }
+
+    fn ensure_spotlight(&mut self, event_loop: &ActiveEventLoop) {
+        if self.spotlight.is_some() {
+            return;
+        }
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        match ChromeWindow::create(
+            event_loop,
+            gpu,
+            ChromeKind::Spotlight,
+            PhysicalSize::new(420, 480),
+            true,
+        ) {
+            Ok(win) => self.spotlight = Some(win),
+            Err(err) => tracing::warn!(error = %err, "spotlight window failed"),
+        }
+    }
+
+    fn handle_overlay_key(&mut self, event_loop: &ActiveEventLoop, key: &Key) {
+        match key {
+            Key::Named(NamedKey::Escape) => self.surface.quit = true,
+            Key::Named(NamedKey::Space) => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.toggle_chrome();
                 }
-                egui::CentralPanel::default().show(ui, |ui| {
-                    detail::show(
-                        ui,
-                        &mut detail,
-                        &mut local_settings,
-                        &soul_id,
-                        &client,
-                        &rt,
-                        &results,
-                    );
-                });
-                if ui.ctx().input(|i| i.viewport().close_requested()) {
-                    open = false;
+            }
+            Key::Named(NamedKey::F1) => self.open_detail(event_loop, DetailTab::Companion),
+            Key::Named(NamedKey::F2) => {
+                self.surface.chat_open = true;
+                self.ensure_chat(event_loop);
+            }
+            Key::Named(NamedKey::F3) => {
+                tracing::info!("collider overlay is a stub in this client");
+            }
+            Key::Named(NamedKey::F4) => self.open_detail(event_loop, DetailTab::Log),
+            Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("a") => self.cycle_occupant(-1),
+            Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("d") => self.cycle_occupant(1),
+            Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("w") => {
+                if let Some(overlay) = self.overlay.as_mut()
+                    && let Some(avatar) = overlay.avatar.as_mut()
+                {
+                    avatar.cycle_motion(-1);
                 }
-            },
-        );
-        detail.visible = open;
-        self.detail = detail;
-        self.local_settings = local_settings;
-        if self.detail.save_local_pending {
-            self.detail.save_local_pending = false;
-            self.save_local_settings();
+            }
+            Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("s") => {
+                if let Some(overlay) = self.overlay.as_mut()
+                    && let Some(avatar) = overlay.avatar.as_mut()
+                {
+                    avatar.cycle_motion(1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn tick_overlay(&mut self) {
+        let dt = self.last_tick.elapsed().as_secs_f32();
+        self.last_tick = Instant::now();
+        let cursor = self.last_cursor;
+        let strength = self.local_settings.look_at_strength;
+        let visemes = self.audio.analyze_visemes(&mut self.viseme);
+        let look_input = self.overlay.as_ref().and_then(|overlay| {
+            overlay.avatar.as_ref().map(|avatar| {
+                (
+                    overlay.window.inner_size(),
+                    avatar.camera().eye(),
+                    avatar.camera().target(),
+                    avatar.head_world(),
+                )
+            })
+        });
+        let look = if let (Some(cursor), Some((size, eye, target, head))) = (cursor, look_input) {
+            let viewport = (size.width.max(1), size.height.max(1));
+            Some(look_at::compute_world_target(
+                glam::Vec2::new(cursor.x, cursor.y),
+                viewport,
+                glam::Vec3::from(eye),
+                glam::Vec3::from(target),
+                glam::Vec3::from(ene_vrm::camera::DEFAULT_UP),
+                head,
+                strength,
+                &mut self.look_at_state,
+                dt,
+            ))
+        } else {
+            None
+        };
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        if let Err(err) = overlay.tick_and_render(gpu, look, Some(visemes)) {
+            match err {
+                OverlayError::Surface(_) => {
+                    tracing::debug!(error = %err, "overlay surface skipped");
+                }
+                OverlayError::Avatar(inner) => tracing::debug!(error = %inner, "overlay avatar"),
+            }
+        }
+        overlay.window.request_redraw();
+    }
+
+    fn paint_chrome(&mut self, event_loop: &ActiveEventLoop) {
+        if self.surface.chat_open {
+            self.ensure_chat(event_loop);
+        }
+        if self.settings.caption_enabled
+            && (self.surface.caption_open || !self.surface.caption.is_empty())
+        {
+            self.ensure_caption(event_loop);
+        }
+        if self.surface.spotlight_open {
+            self.ensure_spotlight(event_loop);
+        }
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+
+        if let Some(chat) = self.chat.as_mut() {
+            let surface = &mut self.surface;
+            let mic = self.mic_active;
+            let theme = self.local_settings.theme.clone();
+            if let Err(err) = chat.paint(gpu, |ui| {
+                ui.ctx().set_visuals(theme_visuals(&theme));
+                surface::show_chat(ui, surface, mic);
+            }) {
+                tracing::debug!(error = %err, "chat paint failed");
+            }
+        }
+        if let Some(detail_win) = self.detail_win.as_mut() {
+            let mut detail = std::mem::take(&mut self.detail);
+            let mut local = self.local_settings.clone();
+            let client = Arc::clone(&self.client);
+            let rt = self.rt_handle.clone();
+            let results = Arc::clone(&self.async_results);
+            let soul_id = self.session.soul_id().to_owned();
+            let paint = detail_win.paint(gpu, |ui| {
+                ui.ctx().set_visuals(theme_visuals(&local.theme));
+                detail::show(
+                    ui,
+                    &mut detail,
+                    &mut local,
+                    &soul_id,
+                    &client,
+                    &rt,
+                    &results,
+                );
+            });
+            self.detail = detail;
+            self.local_settings = local;
+            if let Err(err) = paint {
+                tracing::debug!(error = %err, "detail paint failed");
+            }
+        }
+        if let Some(caption) = self.caption.as_mut() {
+            let surface = &self.surface;
+            let font = self.settings.caption_font_size;
+            if let Err(err) = caption.paint(gpu, |ui| {
+                surface::show_caption(ui.ctx(), surface, font);
+            }) {
+                tracing::debug!(error = %err, "caption paint failed");
+            }
+        }
+        if let Some(spotlight) = self.spotlight.as_mut() {
+            let mut action = None;
+            if let Err(err) = spotlight.paint(gpu, |ui| {
+                action = surface::show_spotlight(ui.ctx(), &mut self.surface);
+            }) {
+                tracing::debug!(error = %err, "spotlight paint failed");
+            }
+            if let Some(action) = action {
+                match action {
+                    SpotlightAction::OpenDetail(tab) => self.open_detail(event_loop, tab),
+                    SpotlightAction::ToggleMic => self.toggle_mic(),
+                    SpotlightAction::Quit => self.surface.quit = true,
+                    SpotlightAction::Close => {
+                        self.surface.spotlight_open = false;
+                        self.spotlight = None;
+                    }
+                }
+            }
         }
     }
 }
 
-impl eframe::App for StageApp {
-    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        ctx.set_visuals(theme_visuals(&self.local_settings.theme));
+impl ApplicationHandler for StageApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.gpu.is_some() {
+            return;
+        }
+        let monitor = event_loop.primary_monitor();
+        let size = monitor.as_ref().map_or(
+            PhysicalSize::new(1280, 720),
+            winit::monitor::MonitorHandle::size,
+        );
+        let mut attrs = Window::default_attributes()
+            .with_title(i18n::fl("app-title"))
+            .with_inner_size(size)
+            .with_transparent(self.settings.transparent_overlay)
+            .with_decorations(!self.settings.transparent_overlay)
+            .with_visible(true);
+        if self.settings.always_on_top {
+            attrs = attrs.with_window_level(WindowLevel::AlwaysOnTop);
+        }
+        if let Some(monitor) = monitor.as_ref() {
+            attrs = attrs.with_position(monitor.position());
+        }
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => Arc::new(window),
+            Err(err) => {
+                tracing::error!(error = %err, "overlay window failed");
+                event_loop.exit();
+                return;
+            }
+        };
+        crate::platform::apply_overlay_hints(window.as_ref());
+        let gpu = match self.runtime.block_on(GpuContext::create()) {
+            Ok(gpu) => gpu,
+            Err(err) => {
+                tracing::error!(error = %err, "gpu init failed");
+                event_loop.exit();
+                return;
+            }
+        };
+        match OverlayWindow::create(window, &gpu, self.settings.transparent_overlay) {
+            Ok(mut overlay) => {
+                overlay.set_click_through(overlay.click_through);
+                self.overlay = Some(overlay);
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "overlay surface failed");
+                event_loop.exit();
+                return;
+            }
+        }
+        self.gpu = Some(gpu);
+        self.reload_avatar();
+        if self.surface.chat_open {
+            self.ensure_chat(event_loop);
+        }
+    }
 
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let overlay_id = self.overlay.as_ref().map(OverlayWindow::id);
+        if overlay_id == Some(id) {
+            match event {
+                WindowEvent::CloseRequested => self.surface.quit = true,
+                WindowEvent::Resized(size) => {
+                    if let (Some(gpu), Some(overlay)) = (self.gpu.as_ref(), self.overlay.as_mut()) {
+                        overlay.resize(gpu, size);
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    if let Some(overlay) = self.overlay.as_ref() {
+                        self.last_cursor = Some(position.to_logical(overlay.window.scale_factor()));
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    self.surface.push_action(SurfaceAction::PersistCharacterPos);
+                }
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
+                    self.handle_overlay_key(event_loop, &event.logical_key);
+                }
+                WindowEvent::RedrawRequested => self.tick_overlay(),
+                _ => {}
+            }
+            return;
+        }
+        let mut close_chat = false;
+        let mut close_detail = false;
+        let mut close_caption = false;
+        let mut close_spotlight = false;
+        if let Some(chat) = self.chat.as_mut()
+            && chat.id() == id
+        {
+            chat.on_window_event(&event);
+            if let Some(gpu) = self.gpu.as_ref()
+                && let WindowEvent::Resized(size) = &event
+            {
+                chat.resize(gpu, *size);
+            }
+            close_chat = matches!(event, WindowEvent::CloseRequested);
+        }
+        if let Some(detail) = self.detail_win.as_mut()
+            && detail.id() == id
+        {
+            detail.on_window_event(&event);
+            if let Some(gpu) = self.gpu.as_ref()
+                && let WindowEvent::Resized(size) = &event
+            {
+                detail.resize(gpu, *size);
+            }
+            close_detail = matches!(event, WindowEvent::CloseRequested);
+        }
+        if let Some(caption) = self.caption.as_mut()
+            && caption.id() == id
+        {
+            caption.on_window_event(&event);
+            close_caption = matches!(event, WindowEvent::CloseRequested);
+        }
+        if let Some(spotlight) = self.spotlight.as_mut()
+            && spotlight.id() == id
+        {
+            spotlight.on_window_event(&event);
+            close_spotlight = matches!(event, WindowEvent::CloseRequested);
+        }
+        if close_chat {
+            self.chat = None;
+            self.surface.chat_open = false;
+        }
+        if close_detail {
+            self.detail_win = None;
+            self.detail.visible = false;
+        }
+        if close_caption {
+            self.caption = None;
+        }
+        if close_spotlight {
+            self.spotlight = None;
+            self.surface.spotlight_open = false;
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(ControlFlow::Poll);
         self.drain_async_results();
-        self.drain_events(ctx);
-        self.poll_shell(ctx);
+        self.drain_surface_events();
+        self.drain_detail_events();
+        self.poll_shell(event_loop);
         self.poll_audio();
-        self.ensure_notify();
-        self.process_surface_actions();
-
+        self.process_surface_actions(event_loop);
         if self.surface.history.messages.is_empty() {
             self.surface.history = self.session.history();
         }
-
-        if let Some(render_state) = frame.wgpu_render_state() {
-            self.ensure_vrm();
-            if let Some(path) = self.vrm_path.take() {
-                self.try_load_vrm(ctx, render_state, &path);
-            }
-            let dt = ctx.input(|i| i.stable_dt);
-            self.tick_avatar(ctx, render_state, dt);
+        self.tick_overlay();
+        self.paint_chrome(event_loop);
+        if self.surface.quit {
+            event_loop.exit();
         }
     }
-
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        surface::show(
-            ui,
-            &mut self.surface,
-            &self.settings,
-            self.vrm.as_ref(),
-            self.mic_active,
-        );
-        self.process_surface_actions();
-        self.show_detail_viewport(ui.ctx());
-        let _ = frame;
-    }
-}
-
-async fn resolve_vrm_path(client: &ApiClient, soul_id: &str) -> PathBuf {
-    if let Ok(soul) = client.get_soul(soul_id).await
-        && let Some(body_ref) = soul.body_ref.filter(|p| !p.is_empty())
-    {
-        let path = PathBuf::from(body_ref);
-        if path.is_file() {
-            return path;
-        }
-    }
-    let dir = crate::platform::preferred_data_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        tracing::warn!(dir = %dir.display(), "failed to create avatar data dir");
-    }
-    let path = dir.join("default.vrm");
-    if !path.is_file()
-        && let Err(err) = crate::avatar::CompanionAvatar::write_default_minimal_vrm(&path)
-    {
-        tracing::warn!(error = %err, "failed to write default VRM");
-    }
-    path
-}
-
-fn apply_theme_from_settings(theme: &str) {
-    // egui theme is applied each frame from local settings
-    let _ = theme;
 }
 
 fn theme_visuals(theme: &str) -> egui::Visuals {
@@ -936,167 +1285,3 @@ fn theme_visuals(theme: &str) -> egui::Visuals {
         }
     }
 }
-
-pub enum AsyncOutcome {
-    SendMessage(Result<(), String>),
-    BargeIn(Result<(), String>),
-    CancelTurn(Result<(), String>),
-    Approval(Result<(), String>),
-    Listen(Result<(), String>),
-    RefreshHistory(Result<HistoryResponse, String>),
-    SaveLocalSettings(Result<(), String>),
-    LoadCoreSettings(Result<String, String>),
-    ApplyCoreSettings(Result<(), String>),
-    ListMemories(Result<Vec<ene_api::MemoryView>, String>),
-    DeleteMemory {
-        id: String,
-        result: Result<(), String>,
-    },
-    LoadSoul(Result<ene_api::SoulView, String>),
-    PatchBody(Result<ene_api::SoulView, String>),
-    ImportCharacter(Result<ene_api::CharacterView, String>),
-    ListCharacters(Result<Vec<ene_api::CharacterView>, String>),
-    ListJobs(Result<(Vec<ene_api::JobView>, Vec<ene_api::ScheduleView>), String>),
-    CancelJob {
-        id: String,
-        result: Result<(), String>,
-    },
-    ToggleSchedule {
-        id: String,
-        enabled: bool,
-        result: Result<(), String>,
-    },
-    ListPlugins(Result<Vec<ene_api::PluginView>, String>),
-    RestartPlugin {
-        id: String,
-        result: Result<(), String>,
-    },
-    ListProviderAssets(Result<Vec<ene_api::ProviderAssetView>, String>),
-    InstallProviderAsset {
-        asset_id: String,
-        result: Result<String, String>,
-    },
-    ProviderAssetInstallStatus {
-        asset_id: String,
-        result: Result<ene_api::ProviderAssetInstallStatusResponse, String>,
-    },
-    SetActiveProviderAsset {
-        asset_id: String,
-        result: Result<(), String>,
-    },
-    LoadMcp(Result<String, String>),
-    SaveMcp(Result<(), String>),
-    MicClaim(Result<bool, String>),
-    VrmPath(PathBuf),
-}
-
-impl StageSession {
-    fn clone_handle(&self) -> SessionHandle {
-        SessionHandle {
-            client: Arc::clone(self.client()),
-            soul_id: self.soul_id().to_owned(),
-            session_id: self.session_id().to_owned(),
-            turn_id: Arc::new(Mutex::new(self.turn_id())),
-            history: Arc::new(Mutex::new(self.history())),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct SessionHandle {
-    client: Arc<ApiClient>,
-    soul_id: String,
-    session_id: String,
-    turn_id: Arc<Mutex<Option<String>>>,
-    history: Arc<Mutex<HistoryResponse>>,
-}
-
-impl SessionHandle {
-    async fn refresh_history(&self) -> Result<HistoryResponse, ene_api::ApiError> {
-        tracing::trace!(soul_id = %self.soul_id, "refresh surface history");
-        let history = self.client.history(&self.session_id, "surface").await?;
-        *self.history.lock() = history.clone();
-        Ok(history)
-    }
-
-    async fn send_prompt(&self, text: &str) -> Result<SendMessageResponse, ene_api::ApiError> {
-        let response = self
-            .client
-            .send_message(
-                &self.session_id,
-                &ene_api::MessageRequest {
-                    text: text.to_owned(),
-                    mode: ene_api::MessageMode::Prompt,
-                    input_modality: None,
-                },
-                None,
-            )
-            .await?;
-        if let Some(turn_id) = response.turn_id.clone() {
-            *self.turn_id.lock() = Some(turn_id);
-        }
-        Ok(response)
-    }
-
-    async fn barge_in(&self) -> Result<serde_json::Value, ene_api::ApiError> {
-        self.client.barge_in(&self.session_id).await
-    }
-
-    async fn cancel_turn(&self) -> Result<serde_json::Value, ene_api::ApiError> {
-        let turn_id = self
-            .turn_id
-            .lock()
-            .clone()
-            .ok_or_else(|| ene_api::ApiError::Transport("no active turn".to_owned()))?;
-        self.client.cancel_turn(&turn_id).await
-    }
-
-    async fn respond_approval(&self, id: &str, decision: &str) -> Result<serde_json::Value, ene_api::ApiError> {
-        self.client.respond_approval(id, decision).await
-    }
-
-    async fn listen_pcm(
-        &self,
-        pcm: Vec<f32>,
-        sample_rate: u32,
-    ) -> Result<SendMessageResponse, ene_api::ApiError> {
-        let response = self
-            .client
-            .listen(
-                &self.session_id,
-                &ene_api::ListenRequest { pcm, sample_rate },
-            )
-            .await?;
-        if let Some(turn_id) = response.turn_id.clone() {
-            *self.turn_id.lock() = Some(turn_id);
-        }
-        Ok(response)
-    }
-
-    async fn claim_mic(&self) -> Result<ene_api::ExclusiveSnapshot, ene_api::ApiError> {
-        self.client
-            .claim_resource(
-                ene_api::ResourceKind::Mic,
-                &ene_api::ClaimResourceRequest {
-                    client_id: self.client.client_id().to_owned(),
-                },
-            )
-            .await
-    }
-
-    async fn release_mic(&self) -> Result<ene_api::ExclusiveSnapshot, ene_api::ApiError> {
-        self.client.release_resource(ene_api::ResourceKind::Mic).await
-    }
-
-    async fn claim_notify(&self) -> Result<ene_api::ExclusiveSnapshot, ene_api::ApiError> {
-        self.client
-            .claim_resource(
-                ene_api::ResourceKind::Notify,
-                &ene_api::ClaimResourceRequest {
-                    client_id: self.client.client_id().to_owned(),
-                },
-            )
-            .await
-    }
-}
-

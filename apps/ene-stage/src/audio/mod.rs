@@ -68,7 +68,7 @@ impl AudioHub {
         }
     }
 
-  #[must_use]
+    #[must_use]
     pub fn sample_rate(&self) -> u32 {
         #[cfg(feature = "voice")]
         {
@@ -94,7 +94,10 @@ impl AudioHub {
     }
 
     /// Analyze playback audio into viseme weights (no-op without `voice`).
-    pub fn analyze_visemes(&mut self, analyzer: &mut ene_vrm::viseme::VisemeAnalyzer) -> VisemeWeights {
+    pub fn analyze_visemes(
+        &mut self,
+        analyzer: &mut ene_vrm::viseme::VisemeAnalyzer,
+    ) -> VisemeWeights {
         #[cfg(feature = "voice")]
         {
             let pcm = self.playback.recent_pcm();

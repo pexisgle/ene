@@ -20,12 +20,12 @@ default = ["voice"]
 voice = ["dep:cpal", "dep:rodio", "dep:rustfft"]
 
 [dependencies]
-eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "x11"] }
 egui = "0.35"
 egui-wgpu = "0.35"
+egui-winit = "0.35"
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11"] }
 ene-api = { workspace = true }
 ene-config = { workspace = true }
-ene-card = { workspace = true }
 ene-ctl = { path = "../ene-ctl" }
 ene-vrm = { workspace = true }
 serde = { workspace = true }
@@ -50,10 +50,13 @@ rust-embed = "8.11"
 fluent-bundle = { workspace = true }
 i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
 i18n-embed-fl = "0.10"
+unic-langid = "0.9"
 cpal = { workspace = true, optional = true }
 rodio = { workspace = true, optional = true, features = ["playback"] }
 rustfft = { workspace = true, optional = true }
 notify-rust = "4"
+zip = { workspace = true, features = ["deflate"] }
+base64 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18.2"

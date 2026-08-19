@@ -64,12 +64,10 @@ impl AudioPlayback {
         let Some(player) = self.player.as_ref() else {
             return Ok(());
         };
-        let channels = NonZero::new(1).ok_or_else(|| {
-            AudioError::Playback("invalid channel count".to_owned())
-        })?;
-        let rate = NonZero::new(self.sample_rate).ok_or_else(|| {
-            AudioError::Playback("invalid sample rate".to_owned())
-        })?;
+        let channels = NonZero::new(1)
+            .ok_or_else(|| AudioError::Playback("invalid channel count".to_owned()))?;
+        let rate = NonZero::new(self.sample_rate)
+            .ok_or_else(|| AudioError::Playback("invalid sample rate".to_owned()))?;
         let buffer = SamplesBuffer::new(channels, rate, samples.to_vec());
         player.append(buffer);
         Ok(())

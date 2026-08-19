@@ -9,18 +9,20 @@ use thiserror::Error;
 pub enum ShellAction {
     OpenSpotlight,
     OpenDetail,
+    OpenLog,
     FocusChat,
     ToggleMic,
     Quit,
 }
 
-/// Registers Alt+Space, F1, and F2 and polls for events.
+/// Registers Alt+Space, F1, F2, F4 and polls for events.
 pub struct HotkeyManager {
     #[expect(dead_code, reason = "must outlive registered hotkeys")]
     manager: GlobalHotKeyManager,
     spotlight_id: u32,
     detail_id: u32,
     chat_id: u32,
+    log_id: u32,
 }
 
 #[derive(Debug, Error)]
@@ -39,9 +41,11 @@ impl HotkeyManager {
         let spotlight = HotKey::new(Some(Modifiers::ALT), Code::Space);
         let detail = HotKey::new(None, Code::F1);
         let chat = HotKey::new(None, Code::F2);
+        let log = HotKey::new(None, Code::F4);
         let spotlight_id = spotlight.id();
         let detail_id = detail.id();
         let chat_id = chat.id();
+        let log_id = log.id();
         if let Err(err) = manager.register(spotlight) {
             tracing::warn!(error = %err, "could not register Alt+Space hotkey");
         }
@@ -51,11 +55,15 @@ impl HotkeyManager {
         if let Err(err) = manager.register(chat) {
             tracing::warn!(error = %err, "could not register F2 hotkey");
         }
+        if let Err(err) = manager.register(log) {
+            tracing::warn!(error = %err, "could not register F4 hotkey");
+        }
         Ok(Self {
             manager,
             spotlight_id,
             detail_id,
             chat_id,
+            log_id,
         })
     }
 
@@ -72,6 +80,9 @@ impl HotkeyManager {
             }
             if event.id == self.chat_id {
                 return Some(ShellAction::FocusChat);
+            }
+            if event.id == self.log_id {
+                return Some(ShellAction::OpenLog);
             }
         }
         None

@@ -1,7 +1,5 @@
 //! Alt+Space command palette.
 
-use eframe::egui;
-
 use crate::detail::DetailTab;
 use crate::i18n;
 
@@ -22,23 +20,10 @@ pub fn show(ctx: &egui::Context) -> Option<SpotlightAction> {
         .show(ctx, |ui| {
             ui.label(i18n::fl("spotlight-hint"));
             ui.separator();
-            if ui.button(i18n::fl("detail-tab-log")).clicked() {
-                action = Some(SpotlightAction::OpenDetail(DetailTab::Log));
-            }
-            if ui.button(i18n::fl("detail-tab-settings")).clicked() {
-                action = Some(SpotlightAction::OpenDetail(DetailTab::Settings));
-            }
-            if ui.button(i18n::fl("detail-tab-memory")).clicked() {
-                action = Some(SpotlightAction::OpenDetail(DetailTab::Memory));
-            }
-            if ui.button(i18n::fl("detail-tab-character")).clicked() {
-                action = Some(SpotlightAction::OpenDetail(DetailTab::Character));
-            }
-            if ui.button(i18n::fl("detail-tab-jobs")).clicked() {
-                action = Some(SpotlightAction::OpenDetail(DetailTab::Jobs));
-            }
-            if ui.button(i18n::fl("detail-tab-plugins")).clicked() {
-                action = Some(SpotlightAction::OpenDetail(DetailTab::Plugins));
+            for tab in DetailTab::ALL {
+                if ui.button(tab.label()).clicked() {
+                    action = Some(SpotlightAction::OpenDetail(tab));
+                }
             }
             if ui.button(i18n::fl("spotlight-toggle-mic")).clicked() {
                 action = Some(SpotlightAction::ToggleMic);

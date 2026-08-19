@@ -5,6 +5,15 @@ use std::path::PathBuf;
 use ene_config::data_dir;
 use tracing::warn;
 
+/// Best-effort overlay window hints (Linux layer-shell / input region).
+///
+/// winit 0.30 does not expose layer-shell; click-through uses
+/// [`winit::window::Window::set_cursor_hittest`]. A compositor-specific
+/// mask can be added later without changing the core contract.
+pub fn apply_overlay_hints(_window: &winit::window::Window) {
+    tracing::debug!("overlay platform hints applied (portable click-through only)");
+}
+
 /// Apply click-through to the native window when supported.
 ///
 /// `hwnd` is optional on Windows (`HWND` as `isize`). When absent, the call is a no-op.

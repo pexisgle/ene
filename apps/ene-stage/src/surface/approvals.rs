@@ -1,7 +1,5 @@
 //! Tool approval modal.
 
-use eframe::egui;
-
 use crate::i18n;
 use crate::surface::{SurfaceAction, SurfaceUiState};
 
@@ -15,11 +13,20 @@ pub fn show(ctx: &egui::Context, state: &mut SurfaceUiState) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label(format!("{}: {}", i18n::fl("approval-tool"), pending.tool));
-            ui.label(format!("{}: {}", i18n::fl("approval-target"), pending.target));
+            ui.label(format!(
+                "{}: {}",
+                i18n::fl("approval-target"),
+                pending.target
+            ));
             ui.horizontal(|ui| {
                 if ui.button(i18n::fl("approval-allow")).clicked() {
                     state.push_action(SurfaceAction::Approval {
                         decision: "allow".to_owned(),
+                    });
+                }
+                if ui.button(i18n::fl("approval-always")).clicked() {
+                    state.push_action(SurfaceAction::Approval {
+                        decision: "allow_and_remember".to_owned(),
                     });
                 }
                 if ui.button(i18n::fl("approval-deny")).clicked() {
