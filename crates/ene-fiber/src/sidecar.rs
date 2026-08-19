@@ -110,6 +110,11 @@ pub(crate) fn spawn_child(
 
 fn sidecar_command(binary: &Path, args: &[String]) -> Command {
     let mut cmd = Command::new(binary);
+    if let Some(parent) = binary.parent() {
+        if !parent.as_os_str().is_empty() {
+            cmd.current_dir(parent);
+        }
+    }
     cmd.args(args);
     cmd.env_clear();
     for key in ["PATH", "HOME", "LANG", "TMPDIR"] {

@@ -170,12 +170,16 @@ plugins, or unset).
 Sidecar pattern: provider plugins that run a local engine as a child process follow
 `templates/sidecar` — the host spawns the sidecar on a loopback port via
 `ene-fiber` (`broker.spawn_sidecar`), health-polls with a timeout, and kills on
-fiber unload. Provider plugins declare sidecar and weight catalogs via the
-`provider.assets` IPC face (`list` / `install` / `install_status` / `set_active`);
-`ene-provider-assets` stores verified artifacts under
-`data_dir/plugins/<plugin_id>/assets/`. The desktop and `ene-core` HTTP API proxy
-those calls — they do not hard-code per-plugin catalogs. Plugins must never
-download from arbitrary URLs (catalog URLs only).
+fiber unload. **Sidecar engines** (`llama-server`, VOICEVOX Engine) use a
+**host-managed runtime catalog**: `ene-provider-assets` fetches GitHub Releases
+at startup (6h TTL disk cache under `data_dir/catalog-cache/`), installs
+verified artifacts under `data_dir/plugins/<plugin_id>/assets/`, and exposes
+`list` / `install` / `install_status` / `set_active` via `ene-fiber` and
+`ene-core` HTTP (`refresh_catalog` forces a refetch). Install keys are
+`{release_tag}/{variant_id}`. **GGUF weights** stay in each plugin's static
+catalog; the host merges probe `assets.list` with runtime sidecar rows. Plugins
+must never download from arbitrary URLs — only host-allowlisted GitHub and
+Hugging Face prefixes.
 
 IPC lives in `crates/ene-plugin-ipc` (split `core` / `tool` subprotocols, length-prefixed
 MessagePack frames). `id` is required on every request/response. Prefer adding

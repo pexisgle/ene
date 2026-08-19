@@ -27,17 +27,18 @@ MCP サーバーはベンダーしません。手書きの `mcp.json` の各行�
 
 | プラグイン | モダリティ |
 |---|---|
-| `provider.gguf` | ローカル GGUF の LLM と埋め込み（`plugins/provider/gguf`）。重みと `llama-server` は `provider.assets`（AI / Engines）からインストール。任意で `server_path` / `model_path` で上書き。 |
+| `provider.gguf` | ローカル GGUF の LLM と埋め込み（`plugins/provider/gguf`）。GGUF 重みはプラグインの静的カタログ、`llama-server` はホストの GitHub カタログ（`provider.assets`、Engines ページ）からインストール。任意で `server_path` / `model_path` で上書き。 |
 | `provider.openai_compat` | クラウドの LLM、埋め込み、TTS、STT（`/v1` chat+audio）。OpenRouter などは任意の `base_url`。 |
 | `provider.anthropic` | LLM（Messages API） |
 | `provider.elevenlabs` | TTS |
-| `provider.voicevox` | TTS。ユーザー起動エンジン、または `server_path` サイドカー |
+| `provider.voicevox` | TTS。ホスト管理の VOICEVOX Engine（VVPP CPU、`provider.assets`）、またはユーザー起動エンジン / `server_path` |
 | `provider.edge_tts` | TTS（Edge Neural Voice） |
 
 API キーは vault に置き、`settings.json` には書きません。ネイティブの
 プロセス内エンジン（llama.cpp、whisper.cpp、Kokoro ONNX）はこのツリーには
 ありません。ローカル GGUF の会話と埋め込みは `provider.gguf`
-（`ene-provider-gguf`）です。プラグインが静的カタログを所有し、ホストが
+（`ene-provider-gguf`）です。プラグインが GGUF 重みの静的カタログを所有し、ホストが
+GitHub から `llama-server` リリースを取得し、
 `data_dir/plugins/provider.gguf/assets/` に検証済みアーティファクトを置き、
 `ene-fiber` 経由で `llama-server` をループバック起動します。Sidecar 補助は
 `templates/sidecar` にもあります。
@@ -83,6 +84,28 @@ MCP の `resources/list` は `<workspace>/mcp-context/` にスナップショッ
 | `assets.set_active` | 使用中バージョンの切替（サイドカー） |
 
 種別は拡張可能な文字列（`sidecar`、`weight` など）。`assets` を交渉した
-プラグインはデスクトップが同じ UI を描画し、`ene-core` が HTTP で中継します。
-カタログ URL はプラグイン内で許可リスト化され、`ene-provider-assets` が
-SHA-256 で検証します。
+プラグインはデスクトップが同じ UI を描画し、`ene-core` が HTTP で中継します
+（`POST /api/v1/providers/assets/*`、`refresh_catalog` で手動更新）。
+
+**ホスト管理カタログ。** `provider.gguf` の `llama-server` と
+`provider.voicevox` の `voicevox-engine` は、プラグインの静的ソースではなく
+ホスト（`ene-fiber` + `ene-provider-assets`）が一覧・インストールします。起動時
+（および手動更新時）に `ggml-org/llama.cpp` と `VOICEVOX/voicevox_engine` の
+GitHub Releases を取得し、`data_dir/catalog-cache/` に JSON をキャッシュ、各
+プラグインの `manifest.json` とマージします。インストールキーは
+`{release_tag}/{variant_id}`（例: `b4282/avx2`、`0.25.2/cpu`、`0.25.2/directml`）。Engines UI で
+リリースとバックエンドバリアントを選んでからダウンロードします。VOICEVOX の
+CUDA/NVIDIA 向け `.vvppp` / `.7z.001` 分割パッケージは現状ホストでは未対応です。
+
+**プラグイン所有カタログ。** GGUF 重みは `provider.gguf` 内の静的 Hugging Face
+URL のままです。重みはプラグイン probe の `assets.list`、サイドカー行はホストが
+上書きします。
+
+**ダウンロード。** ホストが GitHub（重みは Hugging Face）の固定プレフィックスで
+URL を検証し、ディスクへストリーミング、GitHub が digest を返せば SHA-256 検証、
+初回インストール後はローカル digest を記録します。VVPP CPU は zip ツリー全体を展開、
+llama-server は zip 全体を展開（Windows では `ggml.dll` 等が実行ファイルと同じ
+ディレクトリに必要）。CUDA は `cudart-*` コンパニオン zip も同ディレクトリに展開します。
+
+**サイドカー注入。** インストール後、設定に未設定なら `ene-fiber` が
+`provider.gguf` に `sidecar_base_url`、`provider.voicevox` に `cas_path` を注入します。

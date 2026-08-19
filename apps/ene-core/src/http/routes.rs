@@ -951,7 +951,8 @@ pub async fn list_provider_assets(
     if ene_fiber::provider_plugin(&body.plugin).is_none() {
         return Err(bad_request("invalid_message", "unknown plugin"));
     }
-    match state.core.supervisor().list_assets(&body.plugin).await {
+    let result = state.core.supervisor().list_assets(&body.plugin).await;
+    match result {
         Ok(result) => Ok(Json(map_assets_list(result))),
         Err(ene_fiber::SupervisorError::UnknownPlugin(_)) => {
             Err(bad_request("invalid_message", "unknown plugin"))
@@ -973,6 +974,7 @@ pub async fn install_provider_asset(
     let request = ene_plugin_ipc::InstallAssetRequest {
         asset_id: body.asset_id,
         version: body.version,
+        variant: body.variant,
     };
     match state
         .core
@@ -1002,7 +1004,7 @@ pub async fn provider_asset_install_status(
         return Err(bad_request("invalid_message", "unknown plugin"));
     }
     let request = ene_plugin_ipc::InstallStatusRequest {
-        job_id: body.job_id,
+        job_id: body.job_id.clone(),
     };
     match state
         .core
@@ -1050,6 +1052,30 @@ pub async fn set_active_provider_asset(
     }
 }
 
+pub async fn refresh_provider_assets_catalog(
+    State(state): State<AppState>,
+    Json(body): Json<ene_api::RefreshProviderAssetsCatalogRequest>,
+) -> Result<Json<ene_api::RefreshProviderAssetsCatalogResponse>, ApiReject> {
+    if ene_fiber::provider_plugin(&body.plugin).is_none() {
+        return Err(bad_request("invalid_message", "unknown plugin"));
+    }
+    match state
+        .core
+        .supervisor()
+        .refresh_asset_catalog(&body.plugin)
+        .await
+    {
+        Ok(_) => Ok(Json(ene_api::RefreshProviderAssetsCatalogResponse {
+            refreshed: true,
+            error: None,
+        })),
+        Err(err) => Ok(Json(ene_api::RefreshProviderAssetsCatalogResponse {
+            refreshed: false,
+            error: Some(err.to_string()),
+        })),
+    }
+}
+
 fn map_assets_list(
     result: ene_plugin_ipc::ListAssetsResult,
 ) -> ene_api::ListProviderAssetsResponse {
@@ -1075,6 +1101,10 @@ fn map_assets_list(
                         size_bytes: version.size_bytes,
                         recommended: version.recommended,
                         installed: version.installed,
+                        variant_id: version.variant_id,
+                        label: version.label,
+                        backend: version.backend,
+                        release_tag: version.release_tag,
                     })
                     .collect(),
                 seams: asset.seams,

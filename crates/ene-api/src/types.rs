@@ -449,6 +449,27 @@ pub struct ProviderAssetVersionView {
     pub recommended: bool,
     #[serde(default)]
     pub installed: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub variant_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub release_tag: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RefreshProviderAssetsCatalogRequest {
+    pub plugin: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RefreshProviderAssetsCatalogResponse {
+    #[serde(default)]
+    pub refreshed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One catalog row from `provider.assets`.
@@ -489,6 +510,8 @@ pub struct InstallProviderAssetRequest {
     pub asset_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

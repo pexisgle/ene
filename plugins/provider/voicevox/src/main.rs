@@ -5,6 +5,7 @@
 
 #![cfg_attr(test, expect(clippy::expect_used, reason = "tests fail fast"))]
 
+mod assets;
 mod client;
 mod sidecar;
 
@@ -29,8 +30,10 @@ async fn main() {
         }
     };
     let provider = Arc::new(Voicevox::new());
+    let assets = Arc::new(assets::VoicevoxAssets);
     let handlers = ProviderHandlers {
         tts: Some(provider),
+        assets: Some(assets),
         ..ProviderHandlers::default()
     };
     if let Err(err) = serve_provider_from_env(identity(), handlers).await {

@@ -10,6 +10,8 @@ pub struct InstallRecord {
     pub sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_binary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -86,6 +88,7 @@ mod tests {
                 relative_path: "llama-server/b1/engine".into(),
                 sha256: "abc".into(),
                 version: Some("b1".into()),
+                entry_binary: None,
             },
         );
         let raw = serde_json::to_string_pretty(&manifest).expect("json");

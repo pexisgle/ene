@@ -13,6 +13,7 @@ fn supervisor() -> (TempDir, Supervisor) {
     let dir = TempDir::new().unwrap();
     let registry = Arc::new(ToolRegistry::new());
     let sup = Supervisor::new(dir.path().to_path_buf(), registry);
+    sup.set_prefer_in_process_builtins(true);
     (dir, sup)
 }
 
@@ -433,19 +434,22 @@ time.sleep(3600)
 ";
 
 fn python3_bin() -> Option<PathBuf> {
-    let output = std::process::Command::new("sh")
-        .args(["-c", "command -v python3"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    for candidate in ["python3", "python"] {
+        let Ok(output) = std::process::Command::new(candidate)
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
+    None
 }
 
 #[test]
@@ -487,6 +491,17 @@ fn sidecar_spawn_health_and_kill_on_loopback() {
 fn exe_plugin_candidates_include_plugins_dir() {
     let dir = PathBuf::from("/opt/ene");
     let found = crate::spawn::exe_plugin_candidates(&dir, "ene-harness-fs");
+    #[cfg(windows)]
+    assert_eq!(
+        found,
+        vec![
+            dir.join("ene-harness-fs"),
+            dir.join("ene-harness-fs.exe"),
+            dir.join("plugins").join("ene-harness-fs"),
+            dir.join("plugins").join("ene-harness-fs.exe"),
+        ]
+    );
+    #[cfg(not(windows))]
     assert_eq!(
         found,
         vec![

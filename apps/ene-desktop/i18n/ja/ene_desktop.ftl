@@ -854,6 +854,10 @@ theme-dark = ダーク
 engines = エンジン
 page-engines-description = 同梱プロバイダプラグインと稼働中のファイバー。ローカル GGUF は「このパソコン」プラグイン（`provider.gguf`）です。
 engines-list = 同梱プロバイダ
+engines-assets = ローカルエンジン
+engines-assets-hint = ローカルモデルを使う前に、サイドカー（GGUF 用の llama-server など）をインストールしてください。
+engines-assets-empty = ホストカタログにローカルプロバイダがありません。
+provider-assets-installed = インストール済み
 engines-live-empty = 稼働中のプロバイダファイバーはありません。AI または音声ページでバインドしてください。
 
 # Core client (desktop talks to ene-core over ene-api)
@@ -892,6 +896,8 @@ provider-assets-install = インストール
 provider-assets-update = 更新
 provider-assets-downloading = ダウンロード中…
 provider-assets-loading = プロバイダーアセットを読み込み中…
+provider-assets-refresh-catalog = GitHub からカタログを更新
+provider-assets-no-sidecars = このプロバイダーには管理対象のエンジンダウンロードがありません。VOICEVOX を別途起動する（ポート 50021）か、設定で server_path を指定してください。
 provider-assets-sidecar-missing = ローカルモデルを動かす前に、Engines から llama-server をインストールしてください。
 provider-assets-weight-missing = 利用前にモデル重みをインストールしてください。
 ai-openai-advanced = 詳しく

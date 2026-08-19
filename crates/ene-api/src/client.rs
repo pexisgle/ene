@@ -6,7 +6,8 @@ use crate::types::{
     InstallProviderAssetResponse, JobView, ListProviderAssetsRequest, ListProviderAssetsResponse,
     ListProviderModelsRequest, ListProviderModelsResponse, ListenRequest, McpDocument, MemoryPatch,
     MemoryView, MessageRequest, Page, PluginView, Problem, ProviderAssetInstallStatusRequest,
-    ProviderAssetInstallStatusResponse, QueuedCancel, ResourceKind, RestoreRequest, ScheduleView,
+    ProviderAssetInstallStatusResponse, QueuedCancel, RefreshProviderAssetsCatalogRequest,
+    RefreshProviderAssetsCatalogResponse, ResourceKind, RestoreRequest, ScheduleView,
     SendMessageResponse, SessionPatch, SessionView, SetActiveProviderAssetRequest,
     SetActiveProviderAssetResponse, SoulPatch, SoulView, SpanView, SplitSessionResponse, StageView,
     ToolTestRequest, ToolView, UsageView,
@@ -418,6 +419,17 @@ impl ApiClient {
     ) -> Result<ProviderAssetInstallStatusResponse, ApiError> {
         self.send_json(
             self.request(Method::POST, "/api/v1/providers/assets/install/status")
+                .json(req),
+        )
+        .await
+    }
+
+    pub async fn refresh_provider_assets_catalog(
+        &self,
+        req: &RefreshProviderAssetsCatalogRequest,
+    ) -> Result<RefreshProviderAssetsCatalogResponse, ApiError> {
+        self.send_json(
+            self.request(Method::POST, "/api/v1/providers/assets/refresh_catalog")
                 .json(req),
         )
         .await

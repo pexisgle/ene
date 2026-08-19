@@ -854,6 +854,10 @@ theme-dark = Dark
 engines = Engines
 page-engines-description = Bundled provider plugins and live fibers. Local GGUF is the This computer plugin (`provider.gguf`).
 engines-list = Bundled providers
+engines-assets = Local engines
+engines-assets-hint = Install sidecar binaries (llama-server for GGUF) before binding local models on the AI page.
+engines-assets-empty = No local provider plugins are available in the host catalog.
+provider-assets-installed = Installed
 engines-live-empty = No provider fibers are running. Bind a provider on the AI or Voice page.
 
 # Core client (desktop talks to ene-core over ene-api)
@@ -892,6 +896,8 @@ provider-assets-install = Install
 provider-assets-update = Update
 provider-assets-downloading = Downloading…
 provider-assets-loading = Loading provider assets…
+provider-assets-refresh-catalog = Refresh catalog from GitHub
+provider-assets-no-sidecars = No managed engine download for this provider. Run VOICEVOX separately (port 50021) or set server_path in settings.
 provider-assets-sidecar-missing = Install llama-server from Engines before running local models.
 provider-assets-weight-missing = Install a model weight before use.
 ai-openai-advanced = Advanced

@@ -271,6 +271,14 @@ pub struct AssetVersionView {
     pub recommended: bool,
     #[serde(default)]
     pub installed: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub variant_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub release_tag: String,
 }
 
 /// One catalog row on `assets.list`.
@@ -312,6 +320,8 @@ pub struct InstallAssetRequest {
     pub asset_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
 }
 
 /// `assets.install` acknowledgement.

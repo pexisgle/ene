@@ -425,6 +425,65 @@ impl CoreSession {
         })
     }
 
+    pub fn begin_provider_asset_install(
+        &self,
+        plugin: String,
+        asset_id: String,
+        version: Option<String>,
+        variant: Option<String>,
+    ) -> oneshot::Receiver<Result<String, String>> {
+        let client = self.client.clone();
+        self.spawn_fetch(async move {
+            let started = client
+                .install_provider_asset(&ene_api::InstallProviderAssetRequest {
+                    plugin,
+                    asset_id,
+                    version,
+                    variant,
+                })
+                .await
+                .map_err(|err| err.to_string())?;
+            if let Some(error) = started.error.filter(|_| started.job_id.is_empty()) {
+                return Err(error);
+            }
+            Ok(started.job_id)
+        })
+    }
+
+    pub fn refresh_provider_asset_catalogs(&self) -> oneshot::Receiver<Result<(), String>> {
+        let client = self.client.clone();
+        self.spawn_fetch(async move {
+            for plugin in ["provider.gguf", "provider.voicevox"] {
+                client
+                    .refresh_provider_assets_catalog(
+                        &ene_api::RefreshProviderAssetsCatalogRequest {
+                            plugin: plugin.to_owned(),
+                        },
+                    )
+                    .await
+                    .map_err(|err| err.to_string())?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn poll_provider_asset_install_status(
+        &self,
+        plugin: String,
+        job_id: String,
+    ) -> oneshot::Receiver<Result<ene_api::ProviderAssetInstallStatusResponse, String>> {
+        let client = self.client.clone();
+        self.spawn_fetch(async move {
+            client
+                .provider_asset_install_status(&ene_api::ProviderAssetInstallStatusRequest {
+                    plugin,
+                    job_id,
+                })
+                .await
+                .map_err(|err| err.to_string())
+        })
+    }
+
     pub fn install_provider_asset(
         &self,
         plugin: String,
@@ -438,10 +497,11 @@ impl CoreSession {
                     plugin: plugin.clone(),
                     asset_id,
                     version,
+                    variant: None,
                 })
                 .await
                 .map_err(|err| err.to_string())?;
-            if let Some(error) = started.error.filter(|_| started.job_id.is_empty()) {
+            if let Some(error) = started.error.clone().filter(|_| started.job_id.is_empty()) {
                 return Err(error);
             }
             for _ in 0..600 {
@@ -454,8 +514,10 @@ impl CoreSession {
                     .map_err(|err| err.to_string())?;
                 if matches!(
                     status.phase,
-                    Some(ene_api::ProviderAssetInstallPhase::Done)
-                        | Some(ene_api::ProviderAssetInstallPhase::Failed)
+                    Some(
+                        ene_api::ProviderAssetInstallPhase::Done
+                            | ene_api::ProviderAssetInstallPhase::Failed,
+                    )
                 ) {
                     return Ok(status);
                 }

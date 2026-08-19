@@ -56,14 +56,20 @@ pub fn render(
             .and_then(|result| result.as_ref().ok()),
     );
 
-    input.provider_assets.poll();
+    input.provider_assets.poll(ai);
     input.cloud_models.poll();
-    if let Some((id, path, task)) = input.provider_assets.completed_path.take() {
-        apply_local(draft, &task, gguf_plugin(&catalog), &id, &path);
-        if task == "embedding" {
-            id.clone_into(&mut input.embed_catalog_id);
-        } else {
-            id.clone_into(&mut input.local_catalog_id);
+    if let Some((plugin, id, path, task)) = input.provider_assets.completed_path.take() {
+        match task.as_str() {
+            "tts" if plugin == "provider.voicevox" => apply_tts_cas_path(draft, &path),
+            "sidecar" => {}
+            _ => {
+                apply_local(draft, &task, gguf_plugin(&catalog), &id, &path);
+                if task == "embedding" {
+                    id.clone_into(&mut input.embed_catalog_id);
+                } else {
+                    id.clone_into(&mut input.local_catalog_id);
+                }
+            }
         }
     }
 
@@ -457,7 +463,7 @@ fn render_gguf(
     kind: WeightKind,
     plugin: &str,
 ) {
-    render_sidecar_hint(ui, &input.provider_assets);
+    render_sidecar_hint(ui, &input.provider_assets, plugin);
 
     ui.label(i18n_embed_fl::fl!(
         crate::i18n::loader(),
@@ -568,6 +574,17 @@ fn render_remote(
         binding["model"] = json!(model);
         write_binding(draft, task, binding.clone());
     }
+}
+
+fn apply_tts_cas_path(draft: &mut SettingsDraft, cas_path: &str) {
+    let mut binding = draft
+        .editing()
+        .section_value("ai")
+        .and_then(|ai| ai.pointer("/tasks/tts").cloned())
+        .unwrap_or_else(|| json!({}));
+    binding["plugin"] = json!("provider.voicevox");
+    binding["cas_path"] = json!(cas_path);
+    write_binding(draft, "tts", binding);
 }
 
 fn apply_local(draft: &mut SettingsDraft, task: &str, plugin: &str, model: &str, model_path: &str) {

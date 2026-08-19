@@ -8,10 +8,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ene_plugin_ipc::{
     BuiltinKind, EmbedRequest, EmbedResult, HostConn, InstallAssetRequest, InstallAssetResult,
-    InstallStatusRequest, InstallStatusResult, ListAssetsResult, ListModelsRequest,
+    InstallPhase, InstallStatusRequest, InstallStatusResult, ListAssetsResult, ListModelsRequest,
     ListModelsResult, LlmGenerateRequest, LlmGeneration, ProviderFaces, SetActiveAssetRequest,
     SetActiveAssetResult, SttRequest, SttResult, ToolCall, TtsAudio, TtsRequest,
 };
+use ene_provider_assets::CatalogRegistry;
 use ene_registry::{Layer, ToolDefinition, ToolInvoke, ToolRegistry, ToolSource, definitions_for};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -19,6 +20,7 @@ use thiserror::Error;
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::assets_host::HostAssets;
 use crate::broker::Broker;
 use crate::fiber::{Effect, Fiber, FiberState, FiberUid};
 use crate::profile::{
@@ -58,11 +60,19 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
+struct AssetInstallJob {
+    plugin: String,
+    child: Child,
+    conn: HostConn<PluginStream>,
+}
+
 struct SupervisorInner {
     fibers: Mutex<HashMap<String, Fiber>>,
     profile_rows: Mutex<HashMap<String, ProfileRow>>,
     children: Mutex<HashMap<String, Child>>,
     sessions: Mutex<HashMap<String, Arc<PluginSession>>>,
+    asset_install_jobs: tokio::sync::Mutex<HashMap<String, AssetInstallJob>>,
+    host_assets: Arc<HostAssets>,
     registry: Arc<ToolRegistry>,
     broker: Mutex<Broker>,
     workspace: PathBuf,
@@ -196,12 +206,16 @@ impl Supervisor {
         circuit_breaker: CircuitBreakerConfig,
     ) -> Self {
         registry.set_workspace(workspace.clone());
+        let catalog = Arc::new(CatalogRegistry::new());
+        let host_assets = Arc::new(HostAssets::new(Arc::clone(&catalog)));
         Self {
             inner: Arc::new(SupervisorInner {
                 fibers: Mutex::new(HashMap::new()),
                 profile_rows: Mutex::new(HashMap::new()),
                 children: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
+                asset_install_jobs: tokio::sync::Mutex::new(HashMap::new()),
+                host_assets,
                 broker: Mutex::new(Broker::new(workspace.clone())),
                 registry,
                 workspace,
@@ -477,7 +491,7 @@ impl Supervisor {
         let mut config = row.config.clone();
         {
             let mut broker = self.inner.broker.lock();
-            config = crate::gguf_sidecar::inject_gguf_sidecar(
+            config = crate::managed_sidecar::inject_managed_sidecar(
                 &row.plugin,
                 &config,
                 fiber.uid,
@@ -744,9 +758,17 @@ impl Supervisor {
     }
 
     pub async fn list_assets(&self, plugin: &str) -> Result<ListAssetsResult, SupervisorError> {
-        let (mut child, mut conn) = self.spawn_probe(plugin, &json!({})).await?;
-        let listed = timeout(Duration::from_secs(30), conn.list_assets()).await;
-        self.finish_probe(&mut child, &mut conn, listed).await
+        self.inner
+            .host_assets
+            .list_assets(plugin, self.probe_list_assets(plugin))
+            .await
+    }
+
+    pub async fn refresh_asset_catalog(
+        &self,
+        plugin: &str,
+    ) -> Result<ene_provider_assets::RuntimeCatalog, SupervisorError> {
+        self.inner.host_assets.refresh_catalog(plugin).await
     }
 
     pub async fn install_asset(
@@ -754,9 +776,50 @@ impl Supervisor {
         plugin: &str,
         request: InstallAssetRequest,
     ) -> Result<InstallAssetResult, SupervisorError> {
+        self.inner
+            .host_assets
+            .install_asset(
+                plugin,
+                request.clone(),
+                self.probe_install_asset(plugin, request),
+            )
+            .await
+    }
+
+    async fn probe_install_asset(
+        &self,
+        plugin: &str,
+        request: InstallAssetRequest,
+    ) -> Result<InstallAssetResult, SupervisorError> {
         let (mut child, mut conn) = self.spawn_probe(plugin, &json!({})).await?;
         let listed = timeout(Duration::from_secs(30), conn.install_asset(request)).await;
-        self.finish_probe(&mut child, &mut conn, listed).await
+        let result = match listed {
+            Ok(Ok(result)) => result,
+            Ok(Err(err)) => {
+                drop(timeout(Duration::from_secs(2), conn.drain()).await);
+                terminate_child(&mut child);
+                return Err(err.into());
+            }
+            Err(_) => {
+                drop(timeout(Duration::from_secs(2), conn.drain()).await);
+                terminate_child(&mut child);
+                return Err(SupervisorError::Spawn("provider probe timeout".to_owned()));
+            }
+        };
+        if result.job_id.is_empty() || result.error.is_some() {
+            drop(timeout(Duration::from_secs(2), conn.drain()).await);
+            terminate_child(&mut child);
+            return Ok(result);
+        }
+        self.inner.asset_install_jobs.lock().await.insert(
+            result.job_id.clone(),
+            AssetInstallJob {
+                plugin: plugin.to_owned(),
+                child,
+                conn,
+            },
+        );
+        Ok(result)
     }
 
     pub async fn install_asset_status(
@@ -764,9 +827,49 @@ impl Supervisor {
         plugin: &str,
         request: InstallStatusRequest,
     ) -> Result<InstallStatusResult, SupervisorError> {
-        let (mut child, mut conn) = self.spawn_probe(plugin, &json!({})).await?;
-        let listed = timeout(Duration::from_secs(30), conn.install_status(request)).await;
-        self.finish_probe(&mut child, &mut conn, listed).await
+        if let Ok(status) = self.inner.host_assets.install_status(request.clone()).await
+            && status.error.as_deref() != Some("job not found")
+        {
+            return Ok(status);
+        }
+        let job_id = request.job_id.clone();
+        let mut jobs = self.inner.asset_install_jobs.lock().await;
+        let Some(job) = jobs.get_mut(&job_id) else {
+            return Ok(InstallStatusResult {
+                error: Some("job not found".to_owned()),
+                ..InstallStatusResult::default()
+            });
+        };
+        if job.plugin != plugin {
+            return Ok(InstallStatusResult {
+                error: Some("job not found".to_owned()),
+                ..InstallStatusResult::default()
+            });
+        }
+        let listed = timeout(Duration::from_secs(30), job.conn.install_status(request)).await;
+        let status = match listed {
+            Ok(Ok(status)) => status,
+            Ok(Err(err)) => {
+                if let Some(mut job) = jobs.remove(&job_id) {
+                    finish_asset_install_job(&mut job).await;
+                }
+                return Err(err.into());
+            }
+            Err(_) => {
+                if let Some(mut job) = jobs.remove(&job_id) {
+                    finish_asset_install_job(&mut job).await;
+                }
+                return Err(SupervisorError::Spawn("provider probe timeout".to_owned()));
+            }
+        };
+        if matches!(
+            status.phase,
+            Some(InstallPhase::Done | InstallPhase::Failed)
+        ) && let Some(mut job) = jobs.remove(&job_id)
+        {
+            finish_asset_install_job(&mut job).await;
+        }
+        Ok(status)
     }
 
     pub async fn set_active_asset(
@@ -774,8 +877,29 @@ impl Supervisor {
         plugin: &str,
         request: SetActiveAssetRequest,
     ) -> Result<SetActiveAssetResult, SupervisorError> {
+        self.inner
+            .host_assets
+            .set_active_asset(
+                plugin,
+                request.clone(),
+                self.probe_set_active_asset(plugin, request),
+            )
+            .await
+    }
+
+    async fn probe_set_active_asset(
+        &self,
+        plugin: &str,
+        request: SetActiveAssetRequest,
+    ) -> Result<SetActiveAssetResult, SupervisorError> {
         let (mut child, mut conn) = self.spawn_probe(plugin, &json!({})).await?;
         let listed = timeout(Duration::from_secs(30), conn.set_active_asset(request)).await;
+        self.finish_probe(&mut child, &mut conn, listed).await
+    }
+
+    async fn probe_list_assets(&self, plugin: &str) -> Result<ListAssetsResult, SupervisorError> {
+        let (mut child, mut conn) = self.spawn_probe(plugin, &json!({})).await?;
+        let listed = timeout(Duration::from_secs(30), conn.list_assets()).await;
         self.finish_probe(&mut child, &mut conn, listed).await
     }
 
@@ -925,6 +1049,11 @@ fn bind_negotiated_seams(fiber: &mut Fiber, faces: &ProviderFaces, allowed: &[St
             name: "stt".to_owned(),
         });
     }
+}
+
+async fn finish_asset_install_job(job: &mut AssetInstallJob) {
+    drop(timeout(Duration::from_secs(2), job.conn.drain()).await);
+    terminate_child(&mut job.child);
 }
 
 fn terminate_child(child: &mut Child) {

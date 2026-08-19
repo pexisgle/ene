@@ -1,49 +1,10 @@
-//! Static catalog for `provider.gguf` (weights + llama-server sidecar).
+//! Static catalog for `provider.gguf` (weights only; llama-server from GitHub).
 
-use ene_provider_assets::{AssetCatalog, AssetKind, CatalogAsset, CatalogVersion, PlatformTarget};
+use ene_provider_assets::{AssetCatalog, AssetKind, CatalogAsset, CatalogVersion};
 
 pub const PLUGIN_ID: &str = "provider.gguf";
 
-const LLAMA_WINDOWS: CatalogVersion = CatalogVersion {
-    version: "b4282",
-    url: "https://github.com/ggml-org/llama.cpp/releases/download/b4282/llama-b4282-bin-win-cpu-x64.zip",
-    sha256: "",
-    size_bytes: None,
-    filename: "llama-server.exe",
-    platform: Some(PlatformTarget {
-        os: "windows",
-        arch: "x86_64",
-    }),
-    recommended: true,
-    archive_member: Some("llama-server.exe"),
-};
-
-const LLAMA_LINUX: CatalogVersion = CatalogVersion {
-    version: "b4282",
-    url: "https://github.com/ggml-org/llama.cpp/releases/download/b4282/llama-b4282-bin-ubuntu-x64.zip",
-    sha256: "",
-    size_bytes: None,
-    filename: "llama-server",
-    platform: Some(PlatformTarget {
-        os: "linux",
-        arch: "x86_64",
-    }),
-    recommended: true,
-    archive_member: Some("llama-server"),
-};
-
-const SIDECAR_VERSIONS: &[CatalogVersion] = &[LLAMA_WINDOWS, LLAMA_LINUX];
-
 const CATALOG_ROWS: &[CatalogAsset] = &[
-    CatalogAsset {
-        id: "llama-server",
-        kind: AssetKind::Sidecar,
-        label: "llama-server",
-        description: "Local GGUF inference engine",
-        recommended: true,
-        seams: &[],
-        versions: SIDECAR_VERSIONS,
-    },
     CatalogAsset {
         id: "gemma-4-e2b",
         kind: AssetKind::Weight,

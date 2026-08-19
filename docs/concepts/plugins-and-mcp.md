@@ -27,17 +27,18 @@ plugin binary with different GGUFs.
 
 | Plugin | Modalities |
 |---|---|
-| `provider.gguf` | Local GGUF LLM and embeddings (`plugins/provider/gguf`). Weights and `llama-server` are installed via `provider.assets` (AI / Engines pages). Optional `server_path` / `model_path` override catalog installs. |
+| `provider.gguf` | Local GGUF LLM and embeddings (`plugins/provider/gguf`). GGUF weights use the plugin catalog; `llama-server` is installed from the host GitHub catalog (`provider.assets`, Engines page). Optional `server_path` / `model_path` override installs. |
 | `provider.openai_compat` | Cloud LLM, embeddings, TTS, STT (`/v1` chat+audio). Optional `base_url` for OpenRouter and other hosts. |
 | `provider.anthropic` | LLM (Messages API) |
 | `provider.elevenlabs` | TTS |
-| `provider.voicevox` | TTS. User-run engine, or `server_path` sidecar |
+| `provider.voicevox` | TTS. Host-managed VOICEVOX Engine (VVPP CPU) via `provider.assets`, or user-run engine / `server_path` |
 | `provider.edge_tts` | TTS (Edge Neural Voice) |
 
 Native in-process engines (llama.cpp, whisper.cpp, Kokoro ONNX) are not in this
 tree. Local GGUF chat and embeddings use `provider.gguf` (`ene-provider-gguf`).
-The plugin owns the static catalog; the host stores verified artifacts under
-`data_dir/plugins/provider.gguf/assets/` and spawns `llama-server` on loopback
+The plugin owns the static weight catalog; the host fetches `llama-server`
+releases from GitHub, stores verified artifacts under
+`data_dir/plugins/provider.gguf/assets/`, and spawns `llama-server` on loopback
 via `ene-fiber`. Sidecar helpers also live in `templates/sidecar`.
 
 MCP `resources/list` snapshots land in `<workspace>/mcp-context/` and are
@@ -79,6 +80,31 @@ Provider plugins may expose an `assets` face (`PROVIDER_ASSETS_VERSION = 1`):
 | `assets.set_active` | Switch the active version (sidecars) |
 
 Kinds are extensible strings (`sidecar`, `weight`, …). Desktop renders any
-plugin that negotiates `assets`; `ene-core` proxies the same contract over HTTP.
-Catalog URLs are allowlisted inside the plugin; downloads are verified with
-SHA-256 via `ene-provider-assets`.
+plugin that negotiates `assets`; `ene-core` proxies the same contract over HTTP
+(`POST /api/v1/providers/assets/*`, including `refresh_catalog`).
+
+**Host-managed catalogs.** Sidecar engines for `provider.gguf` (`llama-server`)
+and `provider.voicevox` (`voicevox-engine`) are listed and installed by the host
+(`ene-fiber` + `ene-provider-assets`), not from static plugin source. At startup
+(and on manual refresh) the host fetches GitHub Releases for
+`ggml-org/llama.cpp` and `VOICEVOX/voicevox_engine`, caches JSON under
+`data_dir/catalog-cache/`, and merges install state from each plugin's
+`manifest.json`. Install keys are `{release_tag}/{variant_id}` (for example
+`b4282/avx2`, `0.25.2/cpu`, `0.25.2/directml`). The Engines UI picks release and
+backend variant before download. VOICEVOX CUDA/NVIDIA packages split across
+`.vvppp` / `.7z.001` multipart archives are not installed by the host yet.
+
+**Plugin-owned catalogs.** GGUF weight files remain static Hugging Face URLs
+inside `provider.gguf`; the plugin probe still serves `assets.list` for weights
+while the host overrides sidecar rows.
+
+**Downloads.** The host validates URLs against fixed GitHub (and Hugging Face for
+weights) prefixes, streams artifacts to disk, verifies SHA-256 when GitHub
+provides a digest, and records local digests after first install. VVPP CPU
+packages extract as a full zip tree; llama-server zips extract the full archive
+(Windows bundles ship `ggml.dll` and related libraries beside the executable).
+CUDA builds also pull matching `cudart-*` companion zips into the same directory.
+
+**Sidecar injection.** After install, `ene-fiber` injects `sidecar_base_url` for
+`provider.gguf` and `cas_path` for `provider.voicevox` when those fields are not
+already set in settings.

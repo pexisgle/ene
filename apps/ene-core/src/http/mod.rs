@@ -294,6 +294,10 @@ fn router(state: AppState) -> Router {
             "/api/v1/providers/assets/set_active",
             post(routes::set_active_provider_asset),
         )
+        .route(
+            "/api/v1/providers/assets/refresh_catalog",
+            post(routes::refresh_provider_assets_catalog),
+        )
         .route("/api/v1/mcp", get(routes::get_mcp).put(routes::put_mcp))
         .route("/api/v1/approvals", get(routes::list_approvals))
         .route(

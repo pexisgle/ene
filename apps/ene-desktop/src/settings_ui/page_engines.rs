@@ -5,7 +5,7 @@ use crate::core_session::CoreSession;
 use super::components::section_card;
 use super::draft::SettingsDraft;
 use super::input::SettingsInputState;
-use super::provider_assets::render_sidecar_section;
+use super::provider_assets::render_engines_assets;
 use super::provider_form::{
     catalog_from_settings, provider_description, provider_display_group, provider_display_name,
 };
@@ -28,7 +28,7 @@ pub fn render(
     if !input.core_settings.started() {
         input.core_settings.start(ai.fetch_core_settings());
     }
-    input.provider_assets.poll();
+    input.provider_assets.poll(ai);
     let catalog = catalog_from_settings(
         input
             .core_settings
@@ -36,6 +36,16 @@ pub fn render(
             .as_ref()
             .and_then(|result| result.as_ref().ok()),
     );
+
+    section_card(
+        ui,
+        "engines-assets",
+        &i18n_embed_fl::fl!(crate::i18n::loader(), "engines-assets"),
+        |ui| {
+            render_engines_assets(ui, &mut input.provider_assets, ai, &catalog);
+        },
+    );
+
     section_card(
         ui,
         "engines-list",
@@ -51,9 +61,6 @@ pub fn render(
                     ui.label(desc);
                 }
                 ui.weak(plugin.seams.join(" · "));
-                if plugin.local {
-                    render_sidecar_section(ui, &mut input.provider_assets, ai, &plugin.id);
-                }
             }
         },
     );

@@ -9,8 +9,10 @@ publish.workspace = true
 
 [dependencies]
 ene-config = { workspace = true }
+ene-plugin-ipc = { workspace = true }
 hex = { workspace = true }
-reqwest = { workspace = true, features = ["json", "rustls"] }
+futures = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls", "stream"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

@@ -89,6 +89,10 @@ impl GgufAssets {
                                 && manifest
                                     .active_version(row.id)
                                     .is_some_and(|active| active == version.version),
+                            variant_id: String::new(),
+                            label: String::new(),
+                            backend: String::new(),
+                            release_tag: String::new(),
                         })
                         .collect(),
                     seams: row.seams.iter().map(|seam| (*seam).to_owned()).collect(),

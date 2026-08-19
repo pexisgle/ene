@@ -606,16 +606,22 @@ fn lock_data_dir(data_dir: &Path) -> Result<File, CoreError> {
     let file = OpenOptions::new()
         .create(true)
         .write(true)
-        .truncate(true)
-        .open(&path)?;
-    file.try_lock_exclusive().map_err(|err| {
-        if err.kind() == std::io::ErrorKind::WouldBlock {
-            CoreError::AlreadyRunning(path.display().to_string())
-        } else {
-            CoreError::Io(err)
-        }
-    })?;
+        .truncate(false)
+        .open(&path)
+        .map_err(|err| lock_error(&path, err))?;
+    file.try_lock_exclusive()
+        .map_err(|err| lock_error(&path, err))?;
     Ok(file)
+}
+
+fn lock_error(path: &Path, err: std::io::Error) -> CoreError {
+    if err.kind() == std::io::ErrorKind::WouldBlock
+        || cfg!(windows) && matches!(err.raw_os_error(), Some(32 | 33))
+    {
+        CoreError::AlreadyRunning(path.display().to_string())
+    } else {
+        CoreError::Io(err)
+    }
 }
 
 fn load_core_settings(data_dir: &Path) -> CoreSettings {

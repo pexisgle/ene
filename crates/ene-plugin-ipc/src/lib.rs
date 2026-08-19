@@ -3,7 +3,10 @@
 //! Frames are 32-bit big-endian length + `MessagePack`. `id` is required on
 //! every request/response (never defaulted).
 
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "tests fail fast"))]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, clippy::expect_used, reason = "tests fail fast")
+)]
 #![deny(unsafe_code)]
 
 mod dispatch;
@@ -38,3 +41,5 @@ pub use provider::{
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_asset_version;

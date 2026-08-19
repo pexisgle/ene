@@ -392,7 +392,7 @@ impl PageKind {
                 title_key: "engines",
                 description_key: "page-engines-description",
                 aliases: &["sidecar", "engine", "inference", "llama-server"],
-                sections: &["engines-plugins", "engines-list"],
+                sections: &["engines-assets", "engines-plugins", "engines-list"],
                 section_aliases: &[],
             },
             PageKind::Advanced => &PageMeta {

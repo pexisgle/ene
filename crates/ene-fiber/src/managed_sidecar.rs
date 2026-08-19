@@ -1,5 +1,5 @@
 use crate::SidecarRequest;
-use ene_provider_assets::resolve_active_path;
+use ene_provider_assets::resolve_active_binary;
 use serde_json::{Value, json};
 
 use crate::broker::{Broker, BrokerError};
@@ -8,9 +8,12 @@ use crate::sidecar::SidecarId;
 use crate::supervisor::SupervisorError;
 
 const GGUF_PLUGIN: &str = "provider.gguf";
+const VOICEVOX_PLUGIN: &str = "provider.voicevox";
 const LLAMA_ASSET: &str = "llama-server";
+const VOICEVOX_ASSET: &str = "voicevox-engine";
 
 #[must_use]
+#[expect(dead_code, reason = "reserved for manifest fallback naming")]
 pub fn sidecar_binary_name() -> &'static str {
     if cfg!(windows) {
         "llama-server.exe"
@@ -19,20 +22,39 @@ pub fn sidecar_binary_name() -> &'static str {
     }
 }
 
-/// Inject `sidecar_base_url` when a managed `llama-server` binary is installed.
+#[must_use]
+#[expect(dead_code, reason = "reserved for manifest fallback naming")]
+pub fn voicevox_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "run.exe"
+    } else {
+        "run"
+    }
+}
+
+/// Inject managed sidecar config for host-catalog provider plugins.
 ///
 /// # Errors
 ///
-/// Returns when the broker cannot spawn or health-check the sidecar.
-pub fn inject_gguf_sidecar(
+/// Returns when the broker cannot spawn or health-check a managed sidecar.
+pub fn inject_managed_sidecar(
     plugin: &str,
     config: &Value,
     uid: FiberUid,
     broker: &mut Broker,
 ) -> Result<Value, SupervisorError> {
-    if plugin != GGUF_PLUGIN {
-        return Ok(config.clone());
+    match plugin {
+        GGUF_PLUGIN => inject_gguf_sidecar(config, uid, broker),
+        VOICEVOX_PLUGIN => Ok(inject_voicevox_sidecar(config)),
+        _ => Ok(config.clone()),
     }
+}
+
+fn inject_gguf_sidecar(
+    config: &Value,
+    uid: FiberUid,
+    broker: &mut Broker,
+) -> Result<Value, SupervisorError> {
     let mut out = config.clone();
     if out
         .get("sidecar_base_url")
@@ -41,7 +63,10 @@ pub fn inject_gguf_sidecar(
     {
         return Ok(out);
     }
-    let binary = resolve_sidecar_binary(config)?;
+    let binary = match resolve_sidecar_override(config)? {
+        Some(path) => Some(path),
+        None => resolve_active_binary(GGUF_PLUGIN, LLAMA_ASSET),
+    };
     let Some(binary) = binary else {
         return Ok(out);
     };
@@ -62,14 +87,14 @@ pub fn inject_gguf_sidecar(
         args.push("-m".to_owned());
         args.push(model_path);
     }
-    if let Some(custom) = out.get("server_args").and_then(Value::as_array) {
-        if !custom.is_empty() {
-            args = custom
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect();
-        }
+    if let Some(custom) = out.get("server_args").and_then(Value::as_array)
+        && !custom.is_empty()
+    {
+        args = custom
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
     }
     let request = SidecarRequest {
         config_path: Some(binary),
@@ -79,8 +104,8 @@ pub fn inject_gguf_sidecar(
     };
     let id = broker
         .spawn_sidecar(uid, &request)
-        .map_err(map_broker_err)?;
-    let health = broker.sidecar_health(uid, id).map_err(map_broker_err)?;
+        .map_err(|err| map_broker_err(&err))?;
+    let health = broker.sidecar_health(uid, id).map_err(|err| map_broker_err(&err))?;
     if !health.alive {
         let _ignored = broker.kill_sidecar(uid, id);
         return Err(SupervisorError::Spawn(
@@ -92,7 +117,29 @@ pub fn inject_gguf_sidecar(
     Ok(out)
 }
 
-fn resolve_sidecar_binary(config: &Value) -> Result<Option<std::path::PathBuf>, SupervisorError> {
+fn inject_voicevox_sidecar(config: &Value) -> Value {
+    let mut out = config.clone();
+    if out
+        .get("server_path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| !path.trim().is_empty())
+    {
+        return out;
+    }
+    if out
+        .get("cas_path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| !path.trim().is_empty())
+    {
+        return out;
+    }
+    if let Some(path) = resolve_active_binary(VOICEVOX_PLUGIN, VOICEVOX_ASSET) {
+        out["cas_path"] = json!(path.display().to_string());
+    }
+    out
+}
+
+fn resolve_sidecar_override(config: &Value) -> Result<Option<std::path::PathBuf>, SupervisorError> {
     for key in ["server_path", "cas_path"] {
         if let Some(raw) = config.get(key).and_then(Value::as_str) {
             let trimmed = raw.trim();
@@ -108,16 +155,12 @@ fn resolve_sidecar_binary(config: &Value) -> Result<Option<std::path::PathBuf>, 
             )));
         }
     }
-    Ok(resolve_active_path(
-        GGUF_PLUGIN,
-        LLAMA_ASSET,
-        sidecar_binary_name(),
-    ))
+    Ok(None)
 }
 
-fn map_broker_err(err: BrokerError) -> SupervisorError {
+fn map_broker_err(err: &BrokerError) -> SupervisorError {
     SupervisorError::Spawn(err.to_string())
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "legacy type alias for fiber sidecar ids")]
 pub type GgufSidecarId = SidecarId;

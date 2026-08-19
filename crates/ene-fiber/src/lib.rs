@@ -6,9 +6,10 @@
 )]
 #![deny(unsafe_code)]
 
+mod assets_host;
 mod broker;
 mod fiber;
-mod gguf_sidecar;
+mod managed_sidecar;
 mod profile;
 mod providers;
 mod sidecar;

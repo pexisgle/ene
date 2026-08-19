@@ -17,8 +17,9 @@ pub use types::{
     McpServerView, MemoryPatch, MemoryView, MessageMode, MessageRequest, MessageResponse,
     OccupantView, Page, PluginView, Problem, ProviderAssetInstallPhase,
     ProviderAssetInstallStatusRequest, ProviderAssetInstallStatusResponse,
-    ProviderAssetVersionView, ProviderAssetView, QueuedCancel, ResourceKind, RestoreRequest,
-    ScheduleView, SendMessageResponse, SessionPatch, SessionView, SetActiveProviderAssetRequest,
+    ProviderAssetVersionView, ProviderAssetView, QueuedCancel, RefreshProviderAssetsCatalogRequest,
+    RefreshProviderAssetsCatalogResponse, ResourceKind, RestoreRequest, ScheduleView,
+    SendMessageResponse, SessionPatch, SessionView, SetActiveProviderAssetRequest,
     SetActiveProviderAssetResponse, SettingsPatch, SoulPatch, SoulView, SpanView,
     SplitSessionResponse, StageView, ToolTestRequest, ToolView, UsageView,
 };
