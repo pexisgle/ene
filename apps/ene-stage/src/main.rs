@@ -1,8 +1,13 @@
-mod core;
-mod i18n;
-mod settings;
-
 fn main() {
-    tracing_subscriber::fmt::init();
-    tracing::info!(title = %i18n::fl("app-title"), "ene-stage");
+    ene_stage::shell::init_tracing();
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(err) = gtk::init() {
+            tracing::warn!(error = %err, "gtk init failed; tray may be unavailable");
+        }
+    }
+    if let Err(err) = ene_stage::app::run() {
+        tracing::error!(error = %err, "ene-stage exited");
+        std::process::exit(1);
+    }
 }

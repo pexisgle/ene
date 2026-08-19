@@ -2587,7 +2587,6 @@ dependencies = [
  "indexmap",
  "notify-rust",
  "parking_lot",
- "pollster 1.0.1",
  "rfd",
  "rodio",
  "rust-embed",

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use ene_api::{
     ApiClient, ApiError, ClaimResourceRequest, CreateSessionRequest, HistoryResponse,
-    MessageMode, MessageRequest, ResourceKind, SendMessageResponse,
+    ListenRequest, MessageMode, MessageRequest, ResourceKind, SendMessageResponse, SoulPatch,
+    SoulView,
 };
 use parking_lot::Mutex;
 
@@ -119,6 +120,47 @@ impl StageSession {
         let history = self.client.history(&self.session_id, "surface").await?;
         *self.history.lock() = history;
         Ok(())
+    }
+
+    pub async fn respond_approval(&self, id: &str, decision: &str) -> Result<serde_json::Value, ApiError> {
+        self.client.respond_approval(id, decision).await
+    }
+
+    pub async fn listen_pcm(
+        &self,
+        pcm: Vec<f32>,
+        sample_rate: u32,
+    ) -> Result<SendMessageResponse, ApiError> {
+        let response = self
+            .client
+            .listen(
+                &self.session_id,
+                &ListenRequest { pcm, sample_rate },
+            )
+            .await?;
+        if let Some(turn_id) = response.turn_id.clone() {
+            *self.turn_id.lock() = Some(turn_id);
+        }
+        Ok(response)
+    }
+
+    pub async fn get_soul(&self) -> Result<SoulView, ApiError> {
+        self.client.get_soul(&self.soul_id).await
+    }
+
+    pub async fn patch_soul_body(&self, body_ref: &str) -> Result<SoulView, ApiError> {
+        self.client
+            .patch_soul_body(
+                &self.soul_id,
+                &SoulPatch {
+                    body_ref: Some(body_ref.to_owned()),
+                },
+            )
+            .await
+    }
+
+    pub async fn delete_memory(&self, memory_id: &str) -> Result<(), ApiError> {
+        self.client.delete_memory(memory_id).await
     }
 
     async fn claim(&self, kind: ResourceKind) -> Result<ene_api::ExclusiveSnapshot, ApiError> {

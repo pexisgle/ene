@@ -273,6 +273,7 @@ pub struct CompanionAvatar {
     idle_time: f32,
     blink_timer: f32,
     blinking: bool,
+    #[expect(dead_code, reason = "retained for future hot-reload of renderer targets")]
     surface_format: wgpu::TextureFormat,
 }
 
